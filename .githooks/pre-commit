@@ -1,0 +1,47 @@
+#!/usr/bin/env sh
+#
+# Git pre-commit hook that runs bundled fixers on staged files.
+# Fixes are applied to the working tree and re-staged automatically.
+#
+# Bundled checks (from pre-commit/pre-commit-hooks, MIT licensed):
+#   1. trailing-whitespace  — strip trailing whitespace (markdown-aware)
+#   2. end-of-file-fixer    — ensure exactly one final newline
+#   3. check-merge-conflict — reject merge conflict markers
+
+set -e
+
+hooks_dir="$(cd "$(dirname "$0")" && pwd)"
+export PYTHONPATH="$hooks_dir"
+
+# Collect staged, non-deleted files, skipping binary files.
+# git diff --numstat prints "-\t-\t<path>" for binary files.
+staged_text_files() {
+    git diff --cached --numstat --diff-filter=ACM -z \
+        | tr '\0' '\n' \
+        | awk -F'\t' 'NF==3 && $1 != "-" { print $3 }'
+}
+
+files="$(staged_text_files)"
+if [ -z "$files" ]; then
+    exit 0
+fi
+
+status=0
+
+# 1. Fix trailing whitespace (with markdown linebreak preservation)
+echo "$files" | xargs python3 -m pre_commit_hooks.trailing_whitespace_fixer \
+    --markdown-linebreak-ext=md,mdx || status=1
+
+# 2. Fix missing/extra final newlines
+echo "$files" | xargs python3 -m pre_commit_hooks.end_of_file_fixer || status=1
+
+# 3. Check for merge conflict markers
+echo "$files" | xargs python3 -m pre_commit_hooks.check_merge_conflict \
+    --assume-in-merge || status=1
+
+# Re-stage any files that were fixed
+if [ "$status" -ne 0 ]; then
+    echo "$files" | xargs git add
+fi
+
+exit $status

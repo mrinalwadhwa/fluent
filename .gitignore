@@ -1,0 +1,13 @@
+# OS
+.DS_Store
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+
+# Dependencies
+node_modules/
