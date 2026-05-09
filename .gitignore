@@ -9,5 +9,11 @@
 # Python
 __pycache__/
 
+# Scratch
+.scratch/
+
 # Dependencies
 node_modules/
+
+# Factory
+.factory

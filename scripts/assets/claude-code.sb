@@ -1,0 +1,15 @@
+;; ==========================================================================
+;; Claude Code CLI -- profile-specific Seatbelt rules
+;; ==========================================================================
+;; Concatenated after common.sb by the sandboxed-claude-code wrapper script.
+;;
+;; NOTE: No (allow iokit*) -- Claude Code is a CLI tool, not a GUI app.
+;; It does not need Metal GPU enumeration or any IOKit services.
+;;
+;; All rules Claude Code needs are in common.sb. This file exists for
+;; any future Claude Code-specific additions.
+;; ==========================================================================
+
+;; Skills repository -- read+write access for skill development.
+(allow file-read*  (subpath "_HOME_/Workspace/skills"))
+(allow file-write* (subpath "_HOME_/Workspace/skills"))

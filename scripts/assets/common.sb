@@ -1,0 +1,513 @@
+;; ==========================================================================
+;; Common Seatbelt sandbox rules -- shared by zed.sb and claude-code.sb
+;; ==========================================================================
+;;
+;; This file is concatenated with a profile-specific file by the wrapper
+;; script before rendering.  Do not use directly with sandbox-exec.
+;;
+;; Placeholders substituted by the wrapper:
+;;   _HOME_         -> user's home directory
+;;   _SANDBOX_ROOT_ -> sandboxed file-system scope root
+;;
+;; ==========================================================================
+
+(version 1)
+(deny default)
+
+;; -------------------------------------------------------------------------
+;; 1. Process operations
+;; -------------------------------------------------------------------------
+;; IMPORTANT: deny rules MUST come before the allow -- Seatbelt evaluates
+;; rules in order and the FIRST match wins.  If (allow process-exec*) came
+;; first, every deny below would be dead code.
+
+;; NOTE: /usr/bin/security is allowed -- it probes Keychain at startup but
+;; Mach IPC is denied (section 2a), so SecItemCopyMatching returns an error.
+;; Harmless no-op.
+
+;; AppleScript -- can control other apps via Apple Events.
+(deny process-exec (literal "/usr/bin/osascript"))
+(deny process-exec (literal "/usr/bin/osacompile"))
+
+;; Privilege escalation.
+(deny process-exec (literal "/usr/bin/sudo"))
+(deny process-exec (literal "/usr/bin/su"))
+
+;; System management.
+(deny process-exec (literal "/bin/launchctl"))
+(deny process-exec (literal "/usr/bin/dscl"))
+
+;; Launch Services -- opens apps/URLs outside the sandbox.
+(deny process-exec (literal "/usr/bin/open"))
+
+;; System configuration.
+(deny process-exec (literal "/usr/sbin/networksetup"))
+(deny process-exec (literal "/usr/sbin/systemsetup"))
+
+;; Now allow everything else.
+(allow process-exec*)                       ; execute programs
+(allow process-fork)                        ; fork children
+(allow process-info* (target same-sandbox)) ; inspect self + sandbox children
+
+;; -------------------------------------------------------------------------
+;; 2. System operations
+;; -------------------------------------------------------------------------
+(allow sysctl-read                          ; kernel parameter reads -- explicit allowlist
+  (sysctl-name "kern.bootargs")
+  (sysctl-name "kern.ostype")
+  (sysctl-name "kern.osrelease")
+  (sysctl-name "kern.osversion")
+  (sysctl-name "kern.version")
+  (sysctl-name "kern.boottime")
+  (sysctl-name "kern.hostname")
+  (sysctl-name "kern.maxfilesperproc")
+  (sysctl-name "kern.maxprocperuid")
+  (sysctl-name "kern.argmax")
+  (sysctl-name "kern.osproductversion")
+  (sysctl-name "hw.ncpu")
+  (sysctl-name "hw.activecpu")
+  (sysctl-name "hw.physicalcpu")
+  (sysctl-name "hw.physicalcpu_max")
+  (sysctl-name "hw.logicalcpu")
+  (sysctl-name "hw.logicalcpu_max")
+  (sysctl-name "hw.memsize")
+  (sysctl-name "hw.pagesize")
+  (sysctl-name "hw.cachelinesize")
+  (sysctl-name "hw.l1icachesize")
+  (sysctl-name "hw.l1dcachesize")
+  (sysctl-name "hw.l2cachesize")
+  (sysctl-name "hw.tbfrequency")
+  (sysctl-name "hw.machine")
+  (sysctl-name "machdep.cpu.brand_string")
+  (sysctl-name-prefix "hw.")
+  (sysctl-name-prefix "sysctl.")
+  (sysctl-name-prefix "kern.ipc.")
+  (sysctl-name-prefix "kern.tcsm"))
+(allow signal (target same-sandbox))        ; POSIX signals to sandbox children
+(allow system-socket)                       ; system-level sockets
+(allow system-fsctl)                        ; filesystem control calls
+(allow system-info)                         ; host_info, etc.
+(allow pseudo-tty)                          ; pty allocation for terminal and child processes
+
+;; -------------------------------------------------------------------------
+;; 2a. Mach services -- prefix-allow for all Apple services
+;; -------------------------------------------------------------------------
+;; Allow all com.apple.* services by prefix.  This covers TLS (trustd),
+;; DNS (configd, dnssd), fonts, FSEvents, logging, XPC helpers
+;; (cfprefsd, runningboard, etc.).
+;;
+;; Keychain (SecurityServer/securityd) is DENIED below -- the exact-name
+;; deny rules override this prefix-allow.  Credentials are injected via
+;; environment variables by the wrapper script.
+
+;; Allow mach-register and mach-task-name for self (required for IPC)
+(allow mach-register (local-name-prefix ""))
+(allow mach-task-name)
+
+;; All Apple system services (Keychain denied separately below).
+(allow mach-lookup (global-name-prefix "com.apple."))
+
+;; DENY Keychain credential services (SecurityServer, securityd).
+;; Credentials are injected via environment variables by the wrapper script.
+;; These exact-name rules take precedence over the prefix-allow above.
+(deny mach-lookup (global-name "com.apple.SecurityServer"))
+(deny mach-lookup (global-name "com.apple.securityd"))
+(deny mach-lookup (global-name "com.apple.securityd.xpc"))
+
+;; Block Authorization Services -- potential alternative Keychain path.
+(deny mach-lookup (global-name "com.apple.authd"))
+
+;; -------------------------------------------------------------------------
+;; 2b. IPC -- POSIX shared memory, semaphores, System V IPC
+;; -------------------------------------------------------------------------
+;; TODO: Scoping to POSIX-only (ipc-posix-shm-*, ipc-posix-sem*) with
+;; System V denied broke the Zed agent panel.  Needs admin tracing to
+;; discover which IPC operations are required.  Blanket for now.
+(allow ipc*)
+
+;; -------------------------------------------------------------------------
+;; 3. Dyld / executables / path resolution
+;; -------------------------------------------------------------------------
+(allow file-read* (literal "/"))            ; root dir -- needed for path resolution
+;; dyld shared library mapping -- explicit path allowlist instead of blanket allow.
+(allow file-map-executable
+  (subpath "/System/Library")
+  (subpath "/System/Cryptexes")
+  (subpath "/System/Volumes/Preboot/Cryptexes")
+  (subpath "/Library")
+  (subpath "/usr/lib")
+  (subpath "/opt/homebrew")
+  (subpath "/nix")
+  (subpath "/Applications")
+  (subpath "_HOME_/Applications")
+  (subpath "_HOME_/.cargo")
+  (subpath "_HOME_/.rustup")
+  (subpath "_HOME_/.npm-packages")
+  (subpath "_HOME_/.local/share/uv")
+  (subpath "_HOME_/.local/bin")
+  (subpath "/private/var/db/oah")
+  (subpath "/private/var/db/CVMS")
+  (subpath "/private/var/db/dyld"))
+
+;; Path resolution chain -- lstat on each component so the kernel can
+;; traverse /Users -> _HOME_ -> subdirectories.  Without these, any
+;; operation on a user path fails with EPERM before it even reaches the
+;; subpath rules below.
+(allow file-read-metadata (literal "/Users"))
+(allow file-read-metadata (literal "_HOME_"))
+(allow file-read-metadata (subpath  "_HOME_"))
+
+;; FSEvents needs to read parent directories of watched paths.
+;; Allow listing (readdir) on the home dir and key parent directories
+;; so file-watching and path resolution work.
+(allow file-read* (literal "_HOME_"))
+(allow file-read* (literal "_HOME_/Library"))
+(allow file-read* (literal "_HOME_/Library/Application Support"))
+(allow file-read* (literal "_HOME_/Library/Caches"))
+(allow file-read* (literal "_HOME_/Library/Logs"))
+
+;; -------------------------------------------------------------------------
+;; 4. System read paths (macOS)
+;; -------------------------------------------------------------------------
+
+;; Core OS frameworks and libraries
+(allow file-read* (subpath "/System/Library"))
+(allow file-read* (subpath "/Library"))
+(allow file-read* (subpath "/Library/Frameworks"))
+
+;; UNIX toolchain
+(allow file-read* (subpath "/usr/lib"))
+(allow file-read* (subpath "/usr/bin"))
+(allow file-read* (subpath "/usr/sbin"))
+(allow file-read* (subpath "/usr/share"))
+(allow file-read* (subpath "/usr/local/bin"))
+
+;; Git core libraries
+(allow file-read* (subpath "/usr/libexec/git-core"))
+(allow file-read* (subpath "/bin"))
+(allow file-read* (subpath "/sbin"))
+
+;; Private system directories (read)
+(allow file-read* (subpath "/private/etc"))
+(allow file-read* (subpath "/private/var"))
+(allow file-read* (subpath "/private/tmp"))
+
+;; macOS symlinks: /etc -> /private/etc, /var -> /private/var
+;; The DNS resolver reads /etc/resolv.conf via the symlink path.
+;; Without these, getaddrinfo() fails with ENOENT.
+(allow file-read* (subpath "/etc"))
+(allow file-read* (subpath "/var"))
+(allow file-read* (subpath "/tmp"))
+
+;; APFS / Cryptex volumes
+(allow file-read* (subpath "/System/Volumes"))
+(allow file-read* (subpath "/System/Cryptexes"))
+
+;; Application bundles
+(allow file-read* (subpath "/Applications"))
+
+;; Device files (read+write+ioctl -- ttys, ptys, urandom, null, etc.)
+;; file-ioctl is required for pseudo-terminal allocation (TIOCPTYGRANT,
+;; TIOCPTYUNLK, TIOCSCTTY) used by the integrated terminal and any
+;; child processes that need a pty.
+(allow file-read*  (subpath "/dev"))
+(allow file-write*
+  (literal "/dev/ptmx")
+  (regex #"^/dev/pty")
+  (regex #"^/dev/tty")
+  (literal "/dev/null")
+  (literal "/dev/zero")
+  (literal "/dev/random")
+  (literal "/dev/urandom")
+  (literal "/dev/fd/0")
+  (literal "/dev/fd/1")
+  (literal "/dev/fd/2"))
+(allow file-ioctl
+  (literal "/dev/ptmx")
+  (regex #"^/dev/pty")
+  (regex #"^/dev/tty")
+  (literal "/dev/null"))
+
+;; Homebrew on ARM
+(allow file-read* (subpath "/opt"))
+
+;; Nix package manager
+(allow file-read* (subpath "/nix"))
+
+;; Core dumps
+(allow file-read* (subpath "/cores"))
+
+;; Mounted volumes
+(allow file-read* (subpath "/Volumes"))
+
+;; -------------------------------------------------------------------------
+;; 5. System write paths
+;; -------------------------------------------------------------------------
+
+;; macOS per-user temp directories (created under /private/var/folders)
+(allow file-read*  (subpath "/private/var/folders"))
+(allow file-write* (subpath "/private/var/folders"))
+
+;; /private/tmp -- general temp (read+write)
+(allow file-write* (subpath "/private/tmp"))
+
+;; /dev already granted read+write above
+
+;; -------------------------------------------------------------------------
+;; 6. User paths -- read + write
+;; -------------------------------------------------------------------------
+
+;; Sandbox root -- project file access boundary (+ parent for FSEvents watcher)
+(allow file-read-metadata (regex #"^_HOME_(/[^/]+)*$"))  ; metadata on ancestors
+(allow file-read*  (subpath "_SANDBOX_ROOT_"))
+(allow file-write* (subpath "_SANDBOX_ROOT_"))
+
+;; Claude configuration, sessions, and cache
+(allow file-read*  (subpath "_HOME_/.claude"))
+(allow file-write* (subpath "_HOME_/.claude"))
+
+;; agent-browser daemon socket directory
+(allow file-read*  (subpath "_HOME_/.agent-browser"))
+(allow file-write* (subpath "_HOME_/.agent-browser"))
+(allow network-bind    (local unix-socket (path-prefix "_HOME_/.agent-browser")))
+(allow network-inbound (local unix-socket (path-prefix "_HOME_/.agent-browser")))
+(allow network-outbound (local unix-socket (path-prefix "_HOME_/.agent-browser")))
+
+;; Local state (mise, etc.)
+(allow file-read*  (subpath "_HOME_/.local/state"))
+(allow file-write* (subpath "_HOME_/.local/state"))
+
+;; -------------------------------------------------------------------------
+;; 7. User paths -- read-only
+;; -------------------------------------------------------------------------
+
+;; General config directory (git config, tool configs, etc.)
+(allow file-read* (subpath "_HOME_/.config"))
+
+;; Language toolchains and package managers
+(allow file-read* (subpath "_HOME_/.cargo/bin"))
+(allow file-read* (subpath "_HOME_/.asdf/shims"))
+(allow file-read* (subpath "_HOME_/.npm-packages"))
+(allow file-read* (subpath "_HOME_/.npm"))
+(allow file-read* (subpath "_HOME_/.rustup"))
+(allow file-read* (subpath "_HOME_/.local/share/uv"))
+(allow file-read* (subpath "_HOME_/.local/bin"))
+(allow file-read* (subpath "_HOME_/Library/pnpm"))
+
+;; Xcode Command Line Tools
+(allow file-read* (subpath "/Library/Developer/CommandLineTools"))
+
+;; Xcode developer tools
+(allow file-read* (subpath "/Applications/Xcode.app/Contents/Developer/usr"))
+
+;; Homebrew on ARM (explicit)
+(allow file-read* (subpath "/opt/homebrew"))
+
+;; -------------------------------------------------------------------------
+;; 8. User files -- read + write (individual files)
+;; -------------------------------------------------------------------------
+
+(allow file-read*  (literal "_HOME_/.claude.json"))
+(allow file-write* (literal "_HOME_/.claude.json"))
+(allow file-read*  (literal "_HOME_/.claude.json.lock"))
+(allow file-write* (literal "_HOME_/.claude.json.lock"))
+
+(allow file-read*  (literal "_HOME_/.gitconfig"))
+;; .gitconfig is read-only -- git config is injected via GIT_CONFIG_COUNT
+;; env vars by the wrapper script.  (deny is implicit from deny default.)
+(allow file-read*  (literal "_HOME_/.gitignore"))
+
+;; -------------------------------------------------------------------------
+;; 9. Sensitive path denials
+;; -------------------------------------------------------------------------
+;; Allow metadata discovery (ls, stat) but deny reading file contents.
+;; This lets tools detect the presence of config without leaking secrets.
+;; -------------------------------------------------------------------------
+
+;; SSH -- allow FIDO2 key handle + public files for git commit signing.
+;; The id_ed25519_sk file is a FIDO2 key handle -- useless without the
+;; YubiKey hardware.  Actual signing goes through ssh-agent (which runs
+;; outside the sandbox and talks to the YubiKey directly).
+;; Traditional private keys (id_rsa, id_ed25519, etc.) remain denied.
+;;
+;; NOTE: SBPL deny always beats allow for the same operation.  We need
+;; BOTH explicit allows (to override deny-default) AND require-not in
+;; the deny (to prevent the explicit deny from trumping the allows).
+(allow file-read-data     (literal "_HOME_/.ssh/id_ed25519_sk"))
+(allow file-read-data     (literal "_HOME_/.ssh/id_ed25519_sk.pub"))
+(allow file-read-data     (literal "_HOME_/.ssh/allowed_signers"))
+(allow file-read-data     (literal "_HOME_/.ssh/known_hosts"))
+(allow file-read-metadata (subpath "_HOME_/.ssh"))
+(deny  file-read-data
+  (require-all
+    (subpath "_HOME_/.ssh")
+    (require-not (literal "_HOME_/.ssh/id_ed25519_sk"))
+    (require-not (literal "_HOME_/.ssh/id_ed25519_sk.pub"))
+    (require-not (literal "_HOME_/.ssh/allowed_signers"))
+    (require-not (literal "_HOME_/.ssh/known_hosts"))))
+
+;; Cloud credentials -- AWS
+(allow file-read-metadata (subpath "_HOME_/.aws"))
+(deny  file-read-data     (subpath "_HOME_/.aws"))
+
+;; Cloud credentials -- Azure CLI
+(allow file-read-metadata (subpath "_HOME_/.azure"))
+(deny  file-read-data     (subpath "_HOME_/.azure"))
+
+;; Cloud credentials -- Google Cloud
+(allow file-read-metadata (subpath "_HOME_/.config/gcloud"))
+(deny  file-read-data     (subpath "_HOME_/.config/gcloud"))
+
+;; GitHub CLI auth tokens
+(allow file-read-metadata (subpath "_HOME_/.config/gh"))
+(deny  file-read-data     (subpath "_HOME_/.config/gh"))
+
+;; 1Password config
+(allow file-read-metadata (subpath "_HOME_/.config/op"))
+(deny  file-read-data     (subpath "_HOME_/.config/op"))
+(allow file-read-metadata (subpath "_HOME_/.config/1Password"))
+(deny  file-read-data     (subpath "_HOME_/.config/1Password"))
+
+;; pass password-store
+(allow file-read-metadata (subpath "_HOME_/.password-store"))
+(deny  file-read-data     (subpath "_HOME_/.password-store"))
+
+;; Common token/secret dotfiles
+(allow file-read-metadata (literal "_HOME_/.vault-token"))
+(deny  file-read-data     (literal "_HOME_/.vault-token"))
+(allow file-read-metadata (literal "_HOME_/.credentials"))
+(deny  file-read-data     (literal "_HOME_/.credentials"))
+(allow file-read-metadata (literal "_HOME_/.secrets"))
+(deny  file-read-data     (literal "_HOME_/.secrets"))
+(allow file-read-metadata (literal "_HOME_/.keys"))
+(deny  file-read-data     (literal "_HOME_/.keys"))
+
+;; Terraform credentials
+(allow file-read-metadata (subpath "_HOME_/.terraform.d"))
+(deny  file-read-data     (subpath "_HOME_/.terraform.d"))
+
+;; Package registry credentials -- crates.io
+(allow file-read-metadata (literal "_HOME_/.cargo/credentials.toml"))
+(deny  file-read-data     (literal "_HOME_/.cargo/credentials.toml"))
+
+;; Package registry credentials -- RubyGems
+(allow file-read-metadata (subpath "_HOME_/.gem/credentials"))
+(deny  file-read-data     (subpath "_HOME_/.gem/credentials"))
+
+;; Package registry credentials -- PyPI
+(allow file-read-metadata (literal "_HOME_/.pypirc"))
+(deny  file-read-data     (literal "_HOME_/.pypirc"))
+
+;; dotenv secrets
+(allow file-read-metadata (literal "_HOME_/.env"))
+(deny  file-read-data     (literal "_HOME_/.env"))
+(allow file-read-metadata (literal "_HOME_/.envrc"))
+(deny  file-read-data     (literal "_HOME_/.envrc"))
+
+;; Keychain DB files on disk (in addition to Mach IPC denial above)
+(allow file-read-metadata (subpath "_HOME_/Library/Keychains"))
+(deny  file-read-data     (subpath "_HOME_/Library/Keychains"))
+
+;; Browser profiles (passwords/cookies/history)
+;; Allow Chrome for Testing (bundled with agent-browser) -- must come before the deny below.
+(allow file-read*  (subpath "_HOME_/Library/Application Support/Google/Chrome for Testing"))
+(allow file-write* (subpath "_HOME_/Library/Application Support/Google/Chrome for Testing"))
+(allow file-read-metadata (subpath "_HOME_/Library/Application Support/Google"))
+(deny  file-read-data     (subpath "_HOME_/Library/Application Support/Google"))
+(allow file-read-metadata (subpath "_HOME_/Library/Application Support/Chromium"))
+(deny  file-read-data     (subpath "_HOME_/Library/Application Support/Chromium"))
+(allow file-read-metadata (subpath "_HOME_/Library/Application Support/BraveSoftware"))
+(deny  file-read-data     (subpath "_HOME_/Library/Application Support/BraveSoftware"))
+(allow file-read-metadata (subpath "_HOME_/Library/Application Support/Firefox"))
+(deny  file-read-data     (subpath "_HOME_/Library/Application Support/Firefox"))
+(allow file-read-metadata (subpath "_HOME_/Library/Application Support/Safari"))
+(deny  file-read-data     (subpath "_HOME_/Library/Application Support/Safari"))
+(allow file-read-metadata (subpath "_HOME_/Library/Safari"))
+(deny  file-read-data     (subpath "_HOME_/Library/Safari"))
+(allow file-read-metadata (subpath "_HOME_/Library/Application Support/Arc"))
+(deny  file-read-data     (subpath "_HOME_/Library/Application Support/Arc"))
+(allow file-read-metadata (subpath "_HOME_/Library/Application Support/Microsoft Edge"))
+(deny  file-read-data     (subpath "_HOME_/Library/Application Support/Microsoft Edge"))
+
+;; npm configstore tokens
+(allow file-read-metadata (subpath "_HOME_/.config/configstore"))
+(deny  file-read-data     (subpath "_HOME_/.config/configstore"))
+
+;; Cloud service CLIs -- Heroku, Stripe, Vercel, Netlify, Firebase
+(allow file-read-metadata (subpath "_HOME_/.config/heroku"))
+(deny  file-read-data     (subpath "_HOME_/.config/heroku"))
+(allow file-read-metadata (subpath "_HOME_/.config/stripe"))
+(deny  file-read-data     (subpath "_HOME_/.config/stripe"))
+(allow file-read-metadata (subpath "_HOME_/.config/vercel"))
+(deny  file-read-data     (subpath "_HOME_/.config/vercel"))
+(allow file-read-metadata (subpath "_HOME_/.config/netlify"))
+(deny  file-read-data     (subpath "_HOME_/.config/netlify"))
+(allow file-read-metadata (subpath "_HOME_/.config/firebase"))
+(deny  file-read-data     (subpath "_HOME_/.config/firebase"))
+
+;; GnuPG
+(allow file-read-metadata (subpath "_HOME_/.gnupg"))
+(deny  file-read-data     (subpath "_HOME_/.gnupg"))
+
+;; Kubernetes
+(allow file-read-metadata (subpath "_HOME_/.kube"))
+(deny  file-read-data     (subpath "_HOME_/.kube"))
+
+;; Docker
+(allow file-read-metadata (subpath "_HOME_/.docker"))
+(deny  file-read-data     (subpath "_HOME_/.docker"))
+
+;; Messages / Mail / Cookies -- personal data
+(allow file-read-metadata (subpath "_HOME_/Library/Messages"))
+(deny  file-read-data     (subpath "_HOME_/Library/Messages"))
+
+(allow file-read-metadata (subpath "_HOME_/Library/Mail"))
+(deny  file-read-data     (subpath "_HOME_/Library/Mail"))
+
+(allow file-read-metadata (subpath "_HOME_/Library/Cookies"))
+(deny  file-read-data     (subpath "_HOME_/Library/Cookies"))
+
+;; Shell history files
+(allow file-read-metadata (literal "_HOME_/.zsh_history"))
+(deny  file-read-data     (literal "_HOME_/.zsh_history"))
+
+(allow file-read-metadata (literal "_HOME_/.bash_history"))
+(deny  file-read-data     (literal "_HOME_/.bash_history"))
+
+;; Credential / auth files
+(allow file-read-metadata (literal "_HOME_/.git-credentials"))
+(deny  file-read-data     (literal "_HOME_/.git-credentials"))
+
+(allow file-read-metadata (literal "_HOME_/.netrc"))
+(deny  file-read-data     (literal "_HOME_/.netrc"))
+
+(allow file-read-metadata (literal "_HOME_/.npmrc"))
+(deny  file-read-data     (literal "_HOME_/.npmrc"))
+
+;; Shell configs (often contain secrets, tokens, PATH tweaks)
+(allow file-read-metadata (literal "_HOME_/.zshrc"))
+(deny  file-read-data     (literal "_HOME_/.zshrc"))
+(allow file-read-metadata (literal "_HOME_/.bashrc"))
+(deny  file-read-data     (literal "_HOME_/.bashrc"))
+(allow file-read-metadata (literal "_HOME_/.profile"))
+(deny  file-read-data     (literal "_HOME_/.profile"))
+(allow file-read-metadata (literal "_HOME_/.zprofile"))
+(deny  file-read-data     (literal "_HOME_/.zprofile"))
+(allow file-read-metadata (literal "_HOME_/.zshenv"))
+(deny  file-read-data     (literal "_HOME_/.zshenv"))
+(allow file-read-metadata (subpath "_HOME_/.config/fish"))
+(deny  file-read-data     (subpath "_HOME_/.config/fish"))
+
+;; -------------------------------------------------------------------------
+;; 10. Network
+;; -------------------------------------------------------------------------
+
+;; Outbound -- all destinations allowed.
+;; NOTE: SBPL cannot filter by IP range (only "*" or "localhost" are valid
+;; hosts in network address filters).  RFC 1918 / link-local blocking would
+;; require an external mechanism (pf firewall, proxy, network extension).
+(allow network-outbound)
+
+;; Inbound + bind -- localhost only (LSPs, MCP servers, credential proxy).
+(allow network-inbound (local ip "localhost:*"))
+(allow network-bind    (local ip "localhost:*"))

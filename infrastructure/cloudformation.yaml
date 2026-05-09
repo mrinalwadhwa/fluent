@@ -1,0 +1,208 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Factory Fargate backend — single-container model
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC for Fargate tasks
+
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets for Fargate tasks (must have internet access for ECR pull)
+
+  ProjectName:
+    Type: String
+    Default: factory
+    Description: Prefix for resource names
+
+Resources:
+
+  # --------------------------------------------------------------------------
+  # ECR repository
+  # --------------------------------------------------------------------------
+
+  Repo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub '${ProjectName}/run'
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 5 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 5
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  # --------------------------------------------------------------------------
+  # S3 bucket — workspace transfer
+  # --------------------------------------------------------------------------
+
+  WorkspaceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-workspaces-${AWS::AccountId}'
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldWorkspaces
+            Status: Enabled
+            ExpirationInDays: 30
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # --------------------------------------------------------------------------
+  # ECS cluster
+  # --------------------------------------------------------------------------
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${ProjectName}-cluster'
+      Configuration:
+        ExecuteCommandConfiguration:
+          Logging: NONE
+
+  # --------------------------------------------------------------------------
+  # Security group for Fargate tasks
+  # --------------------------------------------------------------------------
+
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Factory Fargate tasks
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+
+  # --------------------------------------------------------------------------
+  # IAM roles
+  # --------------------------------------------------------------------------
+
+  # Execution role — used by ECS agent to pull images and write logs
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-task-execution'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  # Run task role — minimal permissions for workspace transfer + ECS Exec
+  RunTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-run'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: run-permissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # S3 — workspace transfer, restricted to runs/ prefix
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub '${WorkspaceBucket.Arn}/runs/*'
+              # Deny access to anything outside runs/ prefix
+              - Effect: Deny
+                Action: 's3:*'
+                NotResource: !Sub '${WorkspaceBucket.Arn}/runs/*'
+              # ECS Exec — accept incoming sessions only
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: '*'
+
+  # --------------------------------------------------------------------------
+  # Task definition
+  # --------------------------------------------------------------------------
+
+  RunTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ProjectName}-run'
+      RequiresCompatibilities:
+        - FARGATE
+      NetworkMode: awsvpc
+      Cpu: '1024'
+      Memory: '2048'
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt RunTaskRole.Arn
+      EphemeralStorage:
+        SizeInGiB: 30
+      ContainerDefinitions:
+        - Name: run
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${Repo}:latest'
+          Essential: true
+          WorkingDirectory: /workspace
+          LinuxParameters:
+            InitProcessEnabled: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: run
+
+  # --------------------------------------------------------------------------
+  # CloudWatch log group (optional — infrastructure debugging)
+  # --------------------------------------------------------------------------
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ProjectName}'
+      RetentionInDays: 7
+
+Outputs:
+  ClusterArn:
+    Value: !GetAtt Cluster.Arn
+
+  RunTaskDefArn:
+    Value: !Ref RunTaskDef
+
+  RepoUri:
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${Repo}'
+
+  WorkspaceBucketName:
+    Value: !Ref WorkspaceBucket
+
+  TaskSecurityGroupId:
+    Value: !Ref TaskSecurityGroup
+
+  SubnetIds:
+    Value: !Join [',', !Ref SubnetIds]

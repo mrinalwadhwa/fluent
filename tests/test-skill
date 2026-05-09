@@ -1,0 +1,343 @@
+#!/usr/bin/env bash
+# test-skill — Simulate a skill conversation between two Claude sessions.
+#
+# Tests a skill by mediating a conversation between two independent Claude
+# sessions: one follows the skill (the agent), one plays a synthetic user.
+# Neither session can see the other's system prompt.
+#
+# The skill agent receives the full SKILL.md and is told to follow it.
+# The user agent receives a scenario card with an opening statement and
+# hidden context (what they know but haven't said yet, how they'd respond
+# to various questions). The user agent responds naturally — it can push
+# back, give unexpected answers, or say "I don't know."
+#
+# Each turn is a separate stateless `claude -p` call with the full
+# conversation history passed in the prompt. Tools are disabled — this is
+# a text-only simulation that tests conversation flow and skill structure,
+# not codebase research quality.
+#
+# The conversation runs until the skill agent produces an artifact (marked
+# with ARTIFACT START/END), says the skill is complete, or max turns is
+# reached. When an artifact is produced, the user gets one confirmation
+# turn before the simulation ends.
+#
+# Scenario cards are markdown files with three sections:
+#   ## Opening statement  — what the user says first
+#   ## Hidden context     — what the user knows but hasn't said
+#   ## Evaluation criteria — rubric for scoring the transcript
+#
+# Output goes to a temp directory (printed at start). Each run produces:
+#   transcript.md  — full conversation with evaluation criteria appended
+#   brief.md       — extracted artifact (if the skill produced one)
+#   verdict.md     — judge scoring (if --judge was passed)
+#
+# With --judge, a third Claude session reads the transcript and evaluation
+# criteria, then scores each criterion as PASS/FAIL with an explanation
+# and gives an overall verdict.
+#
+# Usage:
+#   tests/test-skill <scenario-card> <skill-path> [--max-turns N] [--judge]
+#
+# Examples:
+#   tests/test-skill tests/behaviors/skills/timeout-flag.md skills/capture-brief/SKILL.md
+#   tests/test-skill tests/behaviors/skills/fix-status-bug.md skills/capture-brief/SKILL.md --judge
+#   tests/test-skill tests/behaviors/skills/parallel-runs.md skills/capture-brief/SKILL.md --max-turns 16 --judge
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+MAX_TURNS=20
+JUDGE=0
+
+# Parse args
+SCENARIO="${1:-}"
+SKILL_PATH="${2:-}"
+
+while [ $# -gt 2 ]; do
+  case "$3" in
+    --max-turns) MAX_TURNS="$4"; shift 2 ;;
+    --judge) JUDGE=1; shift ;;
+    *) shift ;;
+  esac
+done
+
+[ -n "$SCENARIO" ] || { echo "Usage: test-skill <scenario-card> <skill-path> [--max-turns N]" >&2; exit 1; }
+[ -n "$SKILL_PATH" ] || { echo "Usage: test-skill <scenario-card> <skill-path> [--max-turns N]" >&2; exit 1; }
+[ -f "$SCENARIO" ] || { echo "Scenario not found: $SCENARIO" >&2; exit 1; }
+[ -f "$SKILL_PATH" ] || { echo "Skill not found: $SKILL_PATH" >&2; exit 1; }
+
+command -v claude >/dev/null 2>&1 || { echo "claude not found in PATH" >&2; exit 1; }
+
+# -------------------------------------------------------------------------
+# Setup
+# -------------------------------------------------------------------------
+
+SCENARIO_NAME="$(basename "$SCENARIO" .md)"
+SKILL_NAME="$(basename "$(dirname "$SKILL_PATH")")"
+RUN_DIR="$(mktemp -d -t "factory-test-skill-${SCENARIO_NAME}-XXXXXX")"
+
+SCENARIO_CONTENT="$(cat "$SCENARIO")"
+SKILL_CONTENT="$(cat "$SKILL_PATH")"
+
+TRANSCRIPT="${RUN_DIR}/transcript.md"
+BRIEF_OUTPUT="${RUN_DIR}/brief.md"
+
+# Initialize transcript
+cat > "$TRANSCRIPT" <<EOF
+# Test: ${SCENARIO_NAME} × ${SKILL_NAME}
+Date: $(date '+%Y-%m-%d %H:%M:%S')
+Max turns: ${MAX_TURNS}
+
+---
+
+EOF
+
+printf 'Test: %s × %s\n' "$SCENARIO_NAME" "$SKILL_NAME"
+printf 'Output: %s\n\n' "$RUN_DIR"
+
+# -------------------------------------------------------------------------
+# System prompts
+# -------------------------------------------------------------------------
+
+SKILL_SYSTEM="You are an AI agent running a skill in a conversation with a user.
+
+## Your skill
+${SKILL_CONTENT}
+
+## Instructions
+Follow the skill exactly. You are in a live conversation with a user.
+Respond with your next message only — do not simulate the user's response.
+Keep responses focused and concise. Ask one question at a time.
+
+When the skill is complete and you have produced the final artifact,
+output it between markers:
+---ARTIFACT START---
+(the artifact content)
+---ARTIFACT END---
+
+Then say the skill is complete.
+
+## Important: this is a simulation
+You are in a text-only simulation. Do NOT attempt to read files, run
+commands, or use any tools. Respond with conversational text only.
+When the skill says to read code, describe what you would look for
+based on your knowledge of the project structure at ${PROJECT_DIR}.
+When the skill says to write files, produce the content inline."
+
+USER_SYSTEM="You are playing the role of a user in a skill evaluation.
+Respond naturally and concisely based on your scenario. Do not explain
+your reasoning or mention the scenario card. Just be the user.
+
+Keep responses short — 1-3 sentences typically. Answer what's asked.
+Volunteer information only when it's natural to do so. If the agent asks
+something your scenario doesn't cover, give a plausible brief answer.
+
+Do not be overly cooperative. If something is unclear, say so. If you
+disagree, say so. Be realistic.
+
+## Your scenario
+${SCENARIO_CONTENT}"
+
+# -------------------------------------------------------------------------
+# Extract opening statement from scenario
+# -------------------------------------------------------------------------
+
+OPENING="$(awk '/^## Opening statement/{found=1; next} /^## /{found=0} found{print}' "$SCENARIO" | sed '/^$/d' | head -5)"
+
+if [ -z "$OPENING" ]; then
+  echo "Could not extract opening statement from scenario" >&2
+  exit 1
+fi
+
+# -------------------------------------------------------------------------
+# Conversation loop
+# -------------------------------------------------------------------------
+
+CONVERSATION=""
+TURN=0
+LAST_SPEAKER="user"
+CURRENT_MESSAGE="$OPENING"
+
+printf '  User: %s\n\n' "$OPENING"
+printf "## User (turn 0)\n\n%s\n\n" "$OPENING" >> "$TRANSCRIPT"
+
+while [ "$TURN" -lt "$MAX_TURNS" ]; do
+  TURN=$((TURN + 1))
+
+  if [ "$LAST_SPEAKER" = "user" ]; then
+    # Skill agent's turn
+    PROMPT="Conversation so far:
+${CONVERSATION}
+User: ${CURRENT_MESSAGE}
+
+Respond with your next message as the agent following the skill."
+
+    RESPONSE="$(claude -p "$PROMPT" \
+      --append-system-prompt "$SKILL_SYSTEM" \
+      --tools "" \
+      2>/dev/null)" || true
+
+    if [ -z "$RESPONSE" ]; then
+      printf '  [Agent produced empty response, ending]\n'
+      break
+    fi
+
+    printf '  Agent (turn %d):\n' "$TURN"
+    printf '%s\n\n' "$RESPONSE" | sed 's/^/    /'
+
+    printf "## Agent (turn %d)\n\n%s\n\n" "$TURN" "$RESPONSE" >> "$TRANSCRIPT"
+
+    CONVERSATION="${CONVERSATION}
+User: ${CURRENT_MESSAGE}
+Agent: ${RESPONSE}"
+
+    # Check if artifact was produced
+    ARTIFACT_FOUND=0
+    if printf '%s' "$RESPONSE" | grep -qF 'ARTIFACT START'; then
+      printf '%s' "$RESPONSE" | sed -n '/ARTIFACT START/,/ARTIFACT END/p' | \
+        grep -vF 'ARTIFACT' > "$BRIEF_OUTPUT"
+      printf '  [Artifact captured to %s]\n' "$BRIEF_OUTPUT"
+      ARTIFACT_FOUND=1
+    fi
+
+    # Check if skill is complete
+    if printf '%s' "$RESPONSE" | grep -qiE 'skill is (complete|done)|brief is done'; then
+      printf '\n  [Skill completed at turn %d]\n' "$TURN"
+      break
+    fi
+
+    # If artifact was produced, give user one more turn to confirm, then stop
+    if [ "$ARTIFACT_FOUND" = 1 ]; then
+      TURN=$((TURN + 1))
+      CONFIRM_PROMPT="Conversation so far:
+${CONVERSATION}
+Agent: ${CURRENT_MESSAGE}
+
+The agent just showed you a brief. Respond as the user — confirm, request changes, or react naturally."
+
+      CONFIRM="$(claude -p "$CONFIRM_PROMPT" \
+        --append-system-prompt "$USER_SYSTEM" \
+        --tools "" \
+        2>/dev/null)" || true
+
+      printf '  User (turn %d):\n' "$TURN"
+      printf '%s\n\n' "$CONFIRM" | sed 's/^/    /'
+      printf "## User (turn %d)\n\n%s\n\n" "$TURN" "$CONFIRM" >> "$TRANSCRIPT"
+
+      printf '\n  [Artifact produced, ending after confirmation turn]\n'
+      break
+    fi
+
+    LAST_SPEAKER="agent"
+    CURRENT_MESSAGE="$RESPONSE"
+  else
+    # User agent's turn
+    PROMPT="Conversation so far:
+${CONVERSATION}
+Agent: ${CURRENT_MESSAGE}
+
+Respond as the user. Keep it short and natural."
+
+    RESPONSE="$(claude -p "$PROMPT" \
+      --append-system-prompt "$USER_SYSTEM" \
+      --tools "" \
+      2>/dev/null)" || true
+
+    if [ -z "$RESPONSE" ]; then
+      printf '  [User produced empty response, ending]\n'
+      break
+    fi
+
+    printf '  User (turn %d):\n' "$TURN"
+    printf '%s\n\n' "$RESPONSE" | sed 's/^/    /'
+
+    printf "## User (turn %d)\n\n%s\n\n" "$TURN" "$RESPONSE" >> "$TRANSCRIPT"
+
+    CONVERSATION="${CONVERSATION}
+Agent: ${CURRENT_MESSAGE}
+User: ${RESPONSE}"
+
+    LAST_SPEAKER="user"
+    CURRENT_MESSAGE="$RESPONSE"
+  fi
+done
+
+if [ "$TURN" -ge "$MAX_TURNS" ]; then
+  printf '\n  [Max turns (%d) reached]\n' "$MAX_TURNS"
+fi
+
+# -------------------------------------------------------------------------
+# Append evaluation criteria to transcript
+# -------------------------------------------------------------------------
+
+CRITERIA="$(awk '/^## Evaluation criteria/{found=1; next} /^## /{found=0} found{print}' "$SCENARIO")"
+
+if [ -n "$CRITERIA" ]; then
+  cat >> "$TRANSCRIPT" <<EOF
+---
+
+## Evaluation criteria
+
+${CRITERIA}
+
+## Score
+
+(Fill in after reviewing the transcript)
+
+EOF
+fi
+
+# -------------------------------------------------------------------------
+# Judge (optional — automated scoring)
+# -------------------------------------------------------------------------
+
+if [ "$JUDGE" = 1 ] && [ -n "$CRITERIA" ]; then
+  printf '\nJudging transcript...\n'
+
+  JUDGE_PROMPT="You are a judge evaluating whether an AI agent followed a skill correctly.
+
+Read the transcript below, then score each evaluation criterion as PASS or FAIL
+with a one-sentence explanation.
+
+After scoring each criterion, give an overall verdict: PASS (all criteria met),
+PARTIAL (some met), or FAIL (most not met). End with one paragraph of specific
+observations about what went well and what could improve.
+
+## Transcript
+
+$(cat "$TRANSCRIPT")
+
+## Evaluation criteria
+
+${CRITERIA}
+
+Score each criterion and give your overall verdict."
+
+  JUDGMENT="$(claude -p "$JUDGE_PROMPT" \
+    --tools "" \
+    2>/dev/null)" || true
+
+  if [ -n "$JUDGMENT" ]; then
+    cat >> "$TRANSCRIPT" <<EOF
+
+## Judge verdict
+
+${JUDGMENT}
+EOF
+
+    printf '\n  Judge:\n'
+    printf '%s\n' "$JUDGMENT" | sed 's/^/    /'
+
+    # Write standalone verdict file
+    printf '%s\n' "$JUDGMENT" > "${RUN_DIR}/verdict.md"
+  else
+    printf '  [Judge produced empty response]\n'
+  fi
+fi
+
+printf '\nDone. Results in %s\n' "$RUN_DIR"
+printf '  transcript.md  — full conversation\n'
+[ -f "$BRIEF_OUTPUT" ] && printf '  brief.md       — captured artifact\n'
+[ -f "${RUN_DIR}/verdict.md" ] && printf '  verdict.md     — judge scoring\n'
