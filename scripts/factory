@@ -365,6 +365,68 @@ setup_run_worktree() {
 }
 
 # ---------------------------------------------------------------------------
+# Review phase — runs after author completes
+# ---------------------------------------------------------------------------
+
+REVIEW_SYSTEM_PROMPT='You are a documentation reviewer operating inside the Factory.
+
+Follow the review-documentation skill at skills/review-documentation/SKILL.md.
+Read the code and documentation, check accuracy, writing quality, and
+completeness, and produce a review artifact.
+
+Write your review to .factory/runs/[run-id]/reviews/documentation.md with
+a verdict (pass, fail, or uncertain) and findings.'
+
+# Run the review phase. Returns 0 if pass, 1 if fail/uncertain.
+run_review() {
+  REVIEW_RUN_DIR="$1"
+  REVIEW_RUN_ID="$2"
+  REVIEW_ROOT="$3"
+
+  mkdir -p "${REVIEW_RUN_DIR}/reviews"
+
+  printf '\n  === Review phase (run: %s) ===\n\n' "$REVIEW_RUN_ID"
+
+  REVIEW_PROMPT="Review the documentation for run ${REVIEW_RUN_ID}. The run artifacts are in .factory/runs/${REVIEW_RUN_ID}/. Read the brief, behaviors.diff.md, and approach.md to understand the run's intent, then review all documentation affected by the run."
+
+  set +e
+  claude \
+    --dangerously-skip-permissions \
+    --append-system-prompt "$REVIEW_SYSTEM_PROMPT" \
+    -p "$REVIEW_PROMPT"
+  REVIEW_EXIT=$?
+  set -e
+
+  if [ "$REVIEW_EXIT" -ne 0 ]; then
+    printf '  Review session failed (exit %d), skipping\n' "$REVIEW_EXIT"
+    return 0
+  fi
+
+  # Check verdict
+  REVIEW_FILE="${REVIEW_RUN_DIR}/reviews/documentation.md"
+  if [ ! -f "$REVIEW_FILE" ]; then
+    printf '  No review artifact produced, skipping\n'
+    return 0
+  fi
+
+  VERDICT="$(grep -i '^Verdict:' "$REVIEW_FILE" | head -1 | sed 's/.*: *//' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  printf '  Review verdict: %s\n' "$VERDICT"
+
+  case "$VERDICT" in
+    pass)
+      return 0
+      ;;
+    fail|uncertain)
+      return 1
+      ;;
+    *)
+      printf '  Unrecognized verdict "%s", treating as pass\n' "$VERDICT"
+      return 0
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
 # Subcommand: run — autonomous session loop
 # ---------------------------------------------------------------------------
 
@@ -538,8 +600,16 @@ cmd_run_local() {
 
     case "$STATUS" in
       complete)
-        printf '\n  Run %s completed.\n' "$RUN_ID"
-        break
+        # Run review phase before accepting completion
+        if run_review "$RUN_DIR" "$RUN_ID" "$SANDBOX_ROOT"; then
+          printf '\n  Run %s completed.\n' "$RUN_ID"
+          break
+        else
+          printf '  Review returned findings — restarting author...\n'
+          printf 'executing' > "${RUN_DIR}/status"
+          PROMPT="The documentation reviewer found issues. Read the review at .factory/runs/${RUN_ID}/reviews/documentation.md and address the findings."
+          sleep 2
+        fi
         ;;
       needs-user)
         printf '\n  Run %s needs your input.\n' "$RUN_ID"
@@ -671,8 +741,16 @@ cmd_run_bare() {
 
     case "$STATUS" in
       complete)
-        printf '\n  Run %s completed.\n' "$RUN_ID"
-        break
+        # Run review phase before accepting completion
+        if run_review "$RUN_DIR" "$RUN_ID" "$SEARCH_ROOT"; then
+          printf '\n  Run %s completed.\n' "$RUN_ID"
+          break
+        else
+          printf '  Review returned findings — restarting author...\n'
+          printf 'executing' > "${RUN_DIR}/status"
+          PROMPT="The documentation reviewer found issues. Read the review at .factory/runs/${RUN_ID}/reviews/documentation.md and address the findings."
+          sleep 2
+        fi
         ;;
       needs-user)
         printf '\n  Run %s needs user input.\n' "$RUN_ID"

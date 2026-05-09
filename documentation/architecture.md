@@ -152,14 +152,19 @@ than drifting.
 
 Evaluate the author's output. Two categories:
 
-**White-box** (see code): code reviewer, architecture reviewer, security
-reviewer.
+**Code-aware** (read code + docs): documentation reviewer, architecture
+reviewer, code reviewer, security reviewer.
 
-**Black-box** (observe behavior only): behavior reviewer, pen test
-reviewer, UX reviewer. Cannot see code — cannot rationalize away problems
-by reading the implementation.
+**User-facing** (observe behavior only): behavior reviewer, UX reviewer.
+Cannot see code — evaluate the system from the outside, as a user would.
 
-Review verdicts: **pass** / **uncertain** (ask user) / **fail** (send back).
+Review verdicts: **pass** / **uncertain** (ask user) / **fail** (send
+back to author with findings).
+
+When the author receives findings from multiple reviewers, it weighs
+each finding according to the reviewer's domain expertise. When reviewers
+disagree, the one with relevant expertise for that finding takes priority.
+The author escalates to `needs-user` only when genuinely stuck.
 
 ## Backends
 
