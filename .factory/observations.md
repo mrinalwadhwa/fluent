@@ -25,6 +25,16 @@ because the tool and the thing being built are the same. Consider
 whether there's a way to use the factory to modify itself, or whether
 self-modification is always manual.
 
+2026-05-10 — Need a run report mechanism. After a run completes, the
+user has no visibility into what happened without manually reading
+review artifacts and git diffs. The build-in-the-factory skill should
+present a conversational digest at the end of a run: what reviewers
+found, what the author changed, what passed, what's still open. The
+user can ask follow-up questions. Commit messages also need guidance
+in the factory — the author agent's commit messages during the review
+run were action-focused ("Run X and fix Y") rather than change-focused
+("Improve X and add Y"). Body should use bullet points.
+
 2026-05-10 — First full-codebase review run worked end-to-end. Two issues:
 (1) The author agent added a Co-Authored-By line despite CLAUDE.md
 prohibiting it. The system prompt or skill needs to reinforce this.
