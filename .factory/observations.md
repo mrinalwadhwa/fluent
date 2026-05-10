@@ -25,6 +25,13 @@ because the tool and the thing being built are the same. Consider
 whether there's a way to use the factory to modify itself, or whether
 self-modification is always manual.
 
+2026-05-10 — First full-codebase review run worked end-to-end. Two issues:
+(1) The author agent added a Co-Authored-By line despite CLAUDE.md
+prohibiting it. The system prompt or skill needs to reinforce this.
+(2) The author committed directly to main because cmd_run_bare doesn't
+create a worktree. Review runs via --no-sandbox skip worktree creation.
+Need to ensure review runs still get worktree isolation.
+
 2026-05-10 — Full-codebase reviews should be runs, not a separate
 command. The worktree isolation and history are valuable. But the
 full brief → behaviors → approach → plan ceremony is heavy for what's

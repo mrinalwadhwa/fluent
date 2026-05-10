@@ -70,14 +70,23 @@ tests/test-run
 | Break approach into steps, write plan.md | (needs plan-execution scenarios) |
 | Set status to `planned` | (needs plan-execution scenarios) |
 
-### Operational (tested by test-run)
+### Operational (tested by test-run and test-run-state)
 
 | Behavior | Test |
 |---|---|
 | Create worktree from current HEAD | `test-run` |
 | Branch from non-main branch | `test-run` |
 | Run-id resolution priority chain | `test-run` |
-| Session loop restarts on `executing` | `test-run` |
-| Session loop stops on terminal status | `test-run` |
-| Consecutive failure guard (3 strikes) | `test-run` |
-| Max session limit (50) | `test-run` |
+| Worktree copies all run state files | `test-run-state` |
+| Worktree records source-branch and worktree path | `test-run-state` |
+| Run-id scan ignores completed runs | `test-run-state` |
+| Status display includes backend and brief | `test-run-state` |
+
+### Operational (not yet tested)
+
+| Behavior | Reason |
+|---|---|
+| Session loop restarts on `executing` | Requires Claude API |
+| Session loop stops on terminal status | Requires Claude API |
+| Consecutive failure guard (3 strikes) | Requires Claude API |
+| Max session limit (50) | Requires Claude API |

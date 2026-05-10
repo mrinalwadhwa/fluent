@@ -10,6 +10,8 @@ from intent capture through execution and review across multiple sessions.
 │  Skills                                         │
 │  capture-brief, define-behaviors,               │
 │  design-approach, plan-execution                │
+│  review-documentation, review-behaviors,        │
+│  write-documentation                            │
 │  Portable procedures any agent follows          │
 ├─────────────────────────────────────────────────┤
 │  build-in-the-factory skill                     │
@@ -17,6 +19,7 @@ from intent capture through execution and review across multiple sessions.
 ├─────────────────────────────────────────────────┤
 │  Factory command                                │
 │  factory run / status / pull / shell / watch    │
+│  factory resume                                 │
 │  Deterministic, operational                     │
 └─────────────────────────────────────────────────┘
 ```
@@ -98,6 +101,10 @@ branch, and removes the worktree.
 | `worktree` | Path to the run's worktree |
 | `backend` | `local` or `fargate` |
 | `handle` | Backend-specific identifier |
+| `mode` | `build` (default) or `review` |
+| `reviewers` | Comma-separated reviewer filter (optional) |
+| `scope` | Review focus targeting (optional) |
+| `reviews/` | Directory for review artifacts |
 
 ### Run-id resolution
 
@@ -135,6 +142,8 @@ Captured at each session boundary:
   session-1/
     transcript.jsonl
     memory/
+    todos/
+    plans/
   session-2/
     ...
 ```
@@ -152,11 +161,12 @@ than drifting.
 
 Evaluate the author's output. Two categories:
 
-**Code-aware** (read code + docs): documentation reviewer, architecture
-reviewer, code reviewer, security reviewer.
+**Code-aware** (read code + docs): documentation reviewer
+(`skills/review-documentation/SKILL.md`).
 
-**User-facing** (observe behavior only): behavior reviewer, UX reviewer.
-Cannot see code — evaluate the system from the outside, as a user would.
+**User-facing** (observe behavior only): behavior reviewer
+(`skills/review-behaviors/SKILL.md`). Cannot see code — evaluates the
+system from the outside, as a user would.
 
 Review verdicts: **pass** / **uncertain** (ask user) / **fail** (send
 back to author with findings).
@@ -165,6 +175,28 @@ When the author receives findings from multiple reviewers, it weighs
 each finding according to the reviewer's domain expertise. When reviewers
 disagree, the one with relevant expertise for that finding takes priority.
 The author escalates to `needs-user` only when genuinely stuck.
+
+### Review phase
+
+The session loop triggers a review phase when the author sets status to
+`complete`. Reviewers run in parallel, each producing an artifact in
+`.factory/runs/[run-id]/reviews/`. The loop parses each reviewer's
+verdict:
+
+- All pass: the run completes.
+- Any fail or uncertain: status resets to `executing`, the author
+  restarts with instructions to read and address the review findings.
+
+**Review runs** (mode=review) invert the entry point. Reviewers run
+first with full-codebase scope. If they find issues, the author starts
+with the findings. If all reviewers pass, the run completes without
+launching the author.
+
+### Resume
+
+`factory resume` finds a run with status `needs-user` or `failed` and
+launches an interactive agent session so the user can provide input or
+unblock the run.
 
 ## Backends
 
@@ -257,6 +289,9 @@ factory/main/
     define-behaviors/SKILL.md
     design-approach/SKILL.md
     plan-execution/SKILL.md
+    review-behaviors/SKILL.md
+    review-documentation/SKILL.md
+    write-documentation/SKILL.md
   infrastructure/
     cloudformation.yaml
     run/

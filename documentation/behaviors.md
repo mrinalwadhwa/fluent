@@ -105,6 +105,7 @@ THE SYSTEM SHALL upload the workspace to S3.
 WHEN `factory status` is invoked,
 THE SYSTEM SHALL display all runs with their status, backend, and brief
 summary.
+Test: tests/test-run (test_status_display), tests/behaviors/operations/test-run-state.sh
 
 WHEN `factory status` is invoked and a Fargate run exists,
 THE SYSTEM SHALL check S3 for a completed workspace and query the ECS API
@@ -136,6 +137,34 @@ WHEN a factory command needs the run-id,
 THE SYSTEM SHALL check in order: `--run-id` flag, `FACTORY_RUN_ID` env
 var, `.factory/active-run` file, then scan for active runs.
 Test: tests/test-run (resolve run-id tests)
+
+## Review phase
+
+WHEN the author sets status to `complete`,
+THE SYSTEM SHALL run all reviewers in parallel before accepting completion.
+
+WHEN all reviewers return verdict `pass`,
+THE SYSTEM SHALL accept the run as complete and stop the loop.
+
+WHEN any reviewer returns verdict `fail` or `uncertain`,
+THE SYSTEM SHALL set status back to `executing` and restart the author
+with the review findings.
+
+## Review runs
+
+WHEN `factory run` is invoked and the run's mode is `review`,
+THE SYSTEM SHALL run reviewers first (before the author) with full-codebase
+scope, then pass findings to the author.
+
+WHEN reviewers all pass on a review run's initial review,
+THE SYSTEM SHALL set status to `complete` and stop the loop without
+launching the author.
+
+## Resume
+
+WHEN `factory resume` is invoked,
+THE SYSTEM SHALL find a run with status `needs-user` or `failed` and
+launch an interactive agent session for that run.
 
 ## Sandbox (local)
 
