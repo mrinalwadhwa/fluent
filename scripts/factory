@@ -417,6 +417,13 @@ run_reviews() {
 
   mkdir -p "${REVIEW_RUN_DIR}/reviews"
 
+  # Read scope if specified
+  REVIEW_SCOPE_DETAIL="$(cat "${REVIEW_RUN_DIR}/scope" 2>/dev/null || true)"
+  SCOPE_INSTRUCTION=""
+  if [ -n "$REVIEW_SCOPE_DETAIL" ]; then
+    SCOPE_INSTRUCTION=" Focus your review on: ${REVIEW_SCOPE_DETAIL}. Read surrounding context as needed, but concentrate your findings on these areas."
+  fi
+
   printf '\n  === Review phase (run: %s, mode: %s) ===\n\n' "$REVIEW_RUN_ID" "$REVIEW_MODE"
 
   REVIEW_TMP="$(mktemp -d -t factory-review-XXXXXX)"
@@ -437,6 +444,7 @@ with a verdict (pass, fail, or uncertain) and findings.'
       DOC_PROMPT="Review the documentation for run ${REVIEW_RUN_ID}. The run artifacts are in .factory/runs/${REVIEW_RUN_ID}/. Read the brief and behaviors.diff.md to understand the run's intent, then review all documentation affected by the run."
     fi
 
+    DOC_PROMPT="${DOC_PROMPT}${SCOPE_INSTRUCTION}"
     run_single_reviewer "documentation" "$DOC_SYSTEM" "$DOC_PROMPT" "$REVIEW_RUN_DIR" "${REVIEW_TMP}/documentation" &
     REVIEW_PIDS="$REVIEW_PIDS $!"
   fi
@@ -457,6 +465,7 @@ with a verdict (pass, fail, or uncertain) and findings.'
       BEH_PROMPT="Review the behaviors for run ${REVIEW_RUN_ID}. The run artifacts are in .factory/runs/${REVIEW_RUN_ID}/. Read behaviors.diff.md and the brief, then write and run tests to verify each behavior from the user's perspective."
     fi
 
+    BEH_PROMPT="${BEH_PROMPT}${SCOPE_INSTRUCTION}"
     run_single_reviewer "behaviors" "$BEH_SYSTEM" "$BEH_PROMPT" "$REVIEW_RUN_DIR" "${REVIEW_TMP}/behaviors" &
     REVIEW_PIDS="$REVIEW_PIDS $!"
   fi
