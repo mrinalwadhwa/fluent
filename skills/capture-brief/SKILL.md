@@ -207,6 +207,21 @@ Create the run directory and write the brief:
 
 Write `.factory/active-run` containing the run-id.
 
+**Review runs:** If the brief is a full-codebase review request (the
+user wants to run reviewers against the existing codebase, not build
+something new), this is a lightweight run:
+
+- Write the brief as usual
+- Write `.factory/runs/[run-id]/mode` containing `review`
+- If the user wants specific reviewers, write
+  `.factory/runs/[run-id]/reviewers` containing a comma-separated
+  list (e.g., `documentation,behaviors`)
+- Set status directly to `planned` — skip define-behaviors,
+  design-approach, and plan-execution (there are no new behaviors
+  to define or approaches to design)
+
+The brief for a review run is short: what to review and why.
+
 ### Phase 7 — Confirm
 
 Show the brief to the user:

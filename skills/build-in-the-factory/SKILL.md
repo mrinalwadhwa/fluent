@@ -70,6 +70,11 @@ Follow the `capture-brief` skill. Interview the user to capture their
 intent. Read the codebase for context. Write `brief.md`. Set status to
 `briefed`.
 
+**Review runs:** If the user wants a full-codebase review (not building
+something new), this is a lightweight run. Write the brief, set the
+mode to `review`, and skip directly to `planned`. See the capture-brief
+skill for details.
+
 ### 2. Define behaviors
 
 Follow the `define-behaviors` skill. Read the brief and existing

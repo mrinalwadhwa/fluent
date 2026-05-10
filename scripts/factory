@@ -405,48 +405,66 @@ run_single_reviewer() {
   printf '%s' "$VERDICT" > "$REVIEWER_RESULT_FILE"
 }
 
-# Run all reviewers in parallel. Returns 0 if all pass, 1 if any fail.
+# Run reviewers in parallel. Returns 0 if all pass, 1 if any fail.
+# Args: run-dir run-id [reviewer-filter] [mode]
+# reviewer-filter: comma-separated names, or empty for all
+# mode: "run-scoped" (default) or "full-codebase"
 run_reviews() {
   REVIEW_RUN_DIR="$1"
   REVIEW_RUN_ID="$2"
+  REVIEWER_FILTER="${3:-}"
+  REVIEW_MODE="${4:-run-scoped}"
 
   mkdir -p "${REVIEW_RUN_DIR}/reviews"
 
-  printf '\n  === Review phase (run: %s) ===\n\n' "$REVIEW_RUN_ID"
+  printf '\n  === Review phase (run: %s, mode: %s) ===\n\n' "$REVIEW_RUN_ID" "$REVIEW_MODE"
 
   REVIEW_TMP="$(mktemp -d -t factory-review-XXXXXX)"
+  REVIEW_PIDS=""
 
-  # Documentation reviewer
-  DOC_SYSTEM='You are a documentation reviewer operating inside the Factory.
+  # --- Documentation reviewer ---
+  if [ -z "$REVIEWER_FILTER" ] || echo "$REVIEWER_FILTER" | grep -q "documentation"; then
+    DOC_SYSTEM='You are a documentation reviewer operating inside the Factory.
 Follow the review-documentation skill at skills/review-documentation/SKILL.md.
 Read the code and documentation, check accuracy, writing quality, and
 completeness, and produce a review artifact.
 Write your review to .factory/runs/'"${REVIEW_RUN_ID}"'/reviews/review-documentation.md
 with a verdict (pass, fail, or uncertain) and findings.'
 
-  DOC_PROMPT="Review the documentation for run ${REVIEW_RUN_ID}. The run artifacts are in .factory/runs/${REVIEW_RUN_ID}/. Read the brief and behaviors.diff.md to understand the run's intent, then review all documentation affected by the run."
+    if [ "$REVIEW_MODE" = "full-codebase" ]; then
+      DOC_PROMPT="Perform a full-codebase documentation review. Review all documentation files against the source code. Check accuracy, writing quality, and completeness. The review output goes to .factory/runs/${REVIEW_RUN_ID}/reviews/review-documentation.md."
+    else
+      DOC_PROMPT="Review the documentation for run ${REVIEW_RUN_ID}. The run artifacts are in .factory/runs/${REVIEW_RUN_ID}/. Read the brief and behaviors.diff.md to understand the run's intent, then review all documentation affected by the run."
+    fi
 
-  # Behavior reviewer
-  BEH_SYSTEM='You are a behavior reviewer operating inside the Factory.
+    run_single_reviewer "documentation" "$DOC_SYSTEM" "$DOC_PROMPT" "$REVIEW_RUN_DIR" "${REVIEW_TMP}/documentation" &
+    REVIEW_PIDS="$REVIEW_PIDS $!"
+  fi
+
+  # --- Behavior reviewer ---
+  if [ -z "$REVIEWER_FILTER" ] || echo "$REVIEWER_FILTER" | grep -q "behaviors"; then
+    BEH_SYSTEM='You are a behavior reviewer operating inside the Factory.
 Follow the review-behaviors skill at skills/review-behaviors/SKILL.md.
-Read behaviors.diff.md and user-facing documentation. Write tests that
-verify each behavior from the user perspective, run them, and check for
-regressions. Do NOT read source code or implementation files.
+Read behaviors and user-facing documentation. Write tests that verify
+behavior from the user perspective, run them, and check for regressions.
+Do NOT read source code or implementation files.
 Write your review to .factory/runs/'"${REVIEW_RUN_ID}"'/reviews/review-behaviors.md
 with a verdict (pass, fail, or uncertain) and findings.'
 
-  BEH_PROMPT="Review the behaviors for run ${REVIEW_RUN_ID}. The run artifacts are in .factory/runs/${REVIEW_RUN_ID}/. Read behaviors.diff.md and the brief, then write and run tests to verify each behavior from the user's perspective."
+    if [ "$REVIEW_MODE" = "full-codebase" ]; then
+      BEH_PROMPT="Perform a full-codebase behavior review. Read documentation/behaviors.md and run all existing behavior tests. Report any failures as regressions. Report any behaviors without test references as gaps. Write tests for untested behaviors where possible. The review output goes to .factory/runs/${REVIEW_RUN_ID}/reviews/review-behaviors.md."
+    else
+      BEH_PROMPT="Review the behaviors for run ${REVIEW_RUN_ID}. The run artifacts are in .factory/runs/${REVIEW_RUN_ID}/. Read behaviors.diff.md and the brief, then write and run tests to verify each behavior from the user's perspective."
+    fi
 
-  # Launch reviewers in parallel
-  run_single_reviewer "documentation" "$DOC_SYSTEM" "$DOC_PROMPT" "$REVIEW_RUN_DIR" "${REVIEW_TMP}/documentation" &
-  DOC_PID=$!
+    run_single_reviewer "behaviors" "$BEH_SYSTEM" "$BEH_PROMPT" "$REVIEW_RUN_DIR" "${REVIEW_TMP}/behaviors" &
+    REVIEW_PIDS="$REVIEW_PIDS $!"
+  fi
 
-  run_single_reviewer "behaviors" "$BEH_SYSTEM" "$BEH_PROMPT" "$REVIEW_RUN_DIR" "${REVIEW_TMP}/behaviors" &
-  BEH_PID=$!
-
-  # Wait for both
-  wait "$DOC_PID" 2>/dev/null || true
-  wait "$BEH_PID" 2>/dev/null || true
+  # Wait for all
+  for pid in $REVIEW_PIDS; do
+    wait "$pid" 2>/dev/null || true
+  done
 
   # Check results
   REVIEW_FAILED=0
@@ -546,16 +564,34 @@ cmd_run_local() {
 
   MAX_SESSIONS=50
 
+  # Detect run mode
+  RUN_MODE="$(cat "${RUN_DIR}/mode" 2>/dev/null || echo "build")"
+  REVIEWER_FILTER="$(cat "${RUN_DIR}/reviewers" 2>/dev/null || true)"
+
   # Set status to executing if starting fresh
   CURRENT_STATUS="$(cat "${RUN_DIR}/status" 2>/dev/null || true)"
   if [ "$CURRENT_STATUS" = "planned" ]; then
     printf 'executing' > "${RUN_DIR}/status"
   fi
 
-  # Build initial prompt from brief/handoff
-  INITIAL_PROMPT="Read the brief at .factory/runs/${RUN_ID}/brief.md and begin working."
-  if [ -f "${RUN_DIR}/handoff.md" ]; then
-    INITIAL_PROMPT="Read the handoff at .factory/runs/${RUN_ID}/handoff.md and continue working."
+  # For review runs, start by running reviewers to get initial findings
+  if [ "$RUN_MODE" = "review" ]; then
+    printf '  Mode: review (reviewers run first)\n'
+    REVIEW_SCOPE="full-codebase"
+    if ! run_reviews "$RUN_DIR" "$RUN_ID" "$REVIEWER_FILTER" "$REVIEW_SCOPE"; then
+      INITIAL_PROMPT="This is a review run. Reviewers have produced findings. Read the review artifacts at .factory/runs/${RUN_ID}/reviews/ and address the findings. When done, write status 'complete'."
+    else
+      printf '\n  All reviewers passed — nothing to fix.\n'
+      printf 'complete' > "${RUN_DIR}/status"
+      printf '\n  Run %s completed.\n' "$RUN_ID"
+      break
+    fi
+  else
+    # Build initial prompt from brief/handoff
+    INITIAL_PROMPT="Read the brief at .factory/runs/${RUN_ID}/brief.md and begin working."
+    if [ -f "${RUN_DIR}/handoff.md" ]; then
+      INITIAL_PROMPT="Read the handoff at .factory/runs/${RUN_ID}/handoff.md and continue working."
+    fi
   fi
 
   # Session loop
@@ -638,7 +674,9 @@ cmd_run_local() {
     case "$STATUS" in
       complete)
         # Run review phase before accepting completion
-        if run_reviews "$RUN_DIR" "$RUN_ID"; then
+        REVIEW_SCOPE="run-scoped"
+        [ "$RUN_MODE" = "review" ] && REVIEW_SCOPE="full-codebase"
+        if run_reviews "$RUN_DIR" "$RUN_ID" "$REVIEWER_FILTER" "$REVIEW_SCOPE"; then
           printf '\n  Run %s completed.\n' "$RUN_ID"
           break
         else
@@ -695,16 +733,34 @@ cmd_run_bare() {
 
   MAX_SESSIONS=50
 
+  # Detect run mode
+  RUN_MODE="$(cat "${RUN_DIR}/mode" 2>/dev/null || echo "build")"
+  REVIEWER_FILTER="$(cat "${RUN_DIR}/reviewers" 2>/dev/null || true)"
+
   # Set status to executing if starting fresh
   CURRENT_STATUS="$(cat "${RUN_DIR}/status" 2>/dev/null || true)"
   if [ "$CURRENT_STATUS" = "planned" ]; then
     printf 'executing' > "${RUN_DIR}/status"
   fi
 
-  # Build initial prompt from brief
-  INITIAL_PROMPT="Read the brief at .factory/runs/${RUN_ID}/brief.md and begin working."
-  if [ -f "${RUN_DIR}/handoff.md" ]; then
-    INITIAL_PROMPT="Read the handoff at .factory/runs/${RUN_ID}/handoff.md and continue working."
+  # For review runs, start by running reviewers to get initial findings
+  if [ "$RUN_MODE" = "review" ]; then
+    printf '  Mode: review (reviewers run first)\n'
+    REVIEW_SCOPE="full-codebase"
+    if ! run_reviews "$RUN_DIR" "$RUN_ID" "$REVIEWER_FILTER" "$REVIEW_SCOPE"; then
+      INITIAL_PROMPT="This is a review run. Reviewers have produced findings. Read the review artifacts at .factory/runs/${RUN_ID}/reviews/ and address the findings. When done, write status 'complete'."
+    else
+      printf '\n  All reviewers passed — nothing to fix.\n'
+      printf 'complete' > "${RUN_DIR}/status"
+      printf '\n  Run %s completed.\n' "$RUN_ID"
+      return
+    fi
+  else
+    # Build initial prompt from brief
+    INITIAL_PROMPT="Read the brief at .factory/runs/${RUN_ID}/brief.md and begin working."
+    if [ -f "${RUN_DIR}/handoff.md" ]; then
+      INITIAL_PROMPT="Read the handoff at .factory/runs/${RUN_ID}/handoff.md and continue working."
+    fi
   fi
 
   # Session loop — no sandbox, no credential refresh, no proxy
@@ -779,7 +835,9 @@ cmd_run_bare() {
     case "$STATUS" in
       complete)
         # Run review phase before accepting completion
-        if run_reviews "$RUN_DIR" "$RUN_ID"; then
+        REVIEW_SCOPE="run-scoped"
+        [ "$RUN_MODE" = "review" ] && REVIEW_SCOPE="full-codebase"
+        if run_reviews "$RUN_DIR" "$RUN_ID" "$REVIEWER_FILTER" "$REVIEW_SCOPE"; then
           printf '\n  Run %s completed.\n' "$RUN_ID"
           break
         else

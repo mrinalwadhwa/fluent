@@ -25,6 +25,14 @@ because the tool and the thing being built are the same. Consider
 whether there's a way to use the factory to modify itself, or whether
 self-modification is always manual.
 
+2026-05-10 — Full-codebase reviews should be runs, not a separate
+command. The worktree isolation and history are valuable. But the
+full brief → behaviors → approach → plan ceremony is heavy for what's
+essentially "run all reviewers." Need a lightweight run path — a brief
+that says "full review" should skip empty stages and go straight to
+execution. Resolve this in the capture-brief or build-in-the-factory
+skill.
+
 2026-05-10 — Need a test quality reviewer and a corresponding
 write-tests skill. Similar pattern to write-documentation /
 review-documentation: the skill guides test authoring, the reviewer
