@@ -368,62 +368,99 @@ setup_run_worktree() {
 # Review phase — runs after author completes
 # ---------------------------------------------------------------------------
 
-REVIEW_SYSTEM_PROMPT='You are a documentation reviewer operating inside the Factory.
+# Run a single reviewer. Args: skill-name system-prompt review-prompt run-dir run-id
+# Writes result to a temp file for the caller to check.
+run_single_reviewer() {
+  REVIEWER_NAME="$1"
+  REVIEWER_SYSTEM="$2"
+  REVIEWER_PROMPT="$3"
+  REVIEWER_RUN_DIR="$4"
+  REVIEWER_RESULT_FILE="$5"
 
-Follow the review-documentation skill at skills/review-documentation/SKILL.md.
-Read the code and documentation, check accuracy, writing quality, and
-completeness, and produce a review artifact.
+  printf '  [%s] starting...\n' "$REVIEWER_NAME"
 
-Write your review to .factory/runs/[run-id]/reviews/documentation.md with
-a verdict (pass, fail, or uncertain) and findings.'
+  set +e
+  claude \
+    --dangerously-skip-permissions \
+    --append-system-prompt "$REVIEWER_SYSTEM" \
+    -p "$REVIEWER_PROMPT"
+  REVIEWER_EXIT=$?
+  set -e
 
-# Run the review phase. Returns 0 if pass, 1 if fail/uncertain.
-run_review() {
+  if [ "$REVIEWER_EXIT" -ne 0 ]; then
+    printf '  [%s] session failed (exit %d), skipping\n' "$REVIEWER_NAME" "$REVIEWER_EXIT"
+    printf 'pass' > "$REVIEWER_RESULT_FILE"
+    return
+  fi
+
+  REVIEW_FILE="${REVIEWER_RUN_DIR}/reviews/review-${REVIEWER_NAME}.md"
+  if [ ! -f "$REVIEW_FILE" ]; then
+    printf '  [%s] no review artifact produced, skipping\n' "$REVIEWER_NAME"
+    printf 'pass' > "$REVIEWER_RESULT_FILE"
+    return
+  fi
+
+  VERDICT="$(grep -i '^Verdict:' "$REVIEW_FILE" | head -1 | sed 's/.*: *//' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  printf '  [%s] verdict: %s\n' "$REVIEWER_NAME" "$VERDICT"
+  printf '%s' "$VERDICT" > "$REVIEWER_RESULT_FILE"
+}
+
+# Run all reviewers in parallel. Returns 0 if all pass, 1 if any fail.
+run_reviews() {
   REVIEW_RUN_DIR="$1"
   REVIEW_RUN_ID="$2"
-  REVIEW_ROOT="$3"
 
   mkdir -p "${REVIEW_RUN_DIR}/reviews"
 
   printf '\n  === Review phase (run: %s) ===\n\n' "$REVIEW_RUN_ID"
 
-  REVIEW_PROMPT="Review the documentation for run ${REVIEW_RUN_ID}. The run artifacts are in .factory/runs/${REVIEW_RUN_ID}/. Read the brief, behaviors.diff.md, and approach.md to understand the run's intent, then review all documentation affected by the run."
+  REVIEW_TMP="$(mktemp -d -t factory-review-XXXXXX)"
 
-  set +e
-  claude \
-    --dangerously-skip-permissions \
-    --append-system-prompt "$REVIEW_SYSTEM_PROMPT" \
-    -p "$REVIEW_PROMPT"
-  REVIEW_EXIT=$?
-  set -e
+  # Documentation reviewer
+  DOC_SYSTEM='You are a documentation reviewer operating inside the Factory.
+Follow the review-documentation skill at skills/review-documentation/SKILL.md.
+Read the code and documentation, check accuracy, writing quality, and
+completeness, and produce a review artifact.
+Write your review to .factory/runs/'"${REVIEW_RUN_ID}"'/reviews/review-documentation.md
+with a verdict (pass, fail, or uncertain) and findings.'
 
-  if [ "$REVIEW_EXIT" -ne 0 ]; then
-    printf '  Review session failed (exit %d), skipping\n' "$REVIEW_EXIT"
-    return 0
-  fi
+  DOC_PROMPT="Review the documentation for run ${REVIEW_RUN_ID}. The run artifacts are in .factory/runs/${REVIEW_RUN_ID}/. Read the brief and behaviors.diff.md to understand the run's intent, then review all documentation affected by the run."
 
-  # Check verdict
-  REVIEW_FILE="${REVIEW_RUN_DIR}/reviews/documentation.md"
-  if [ ! -f "$REVIEW_FILE" ]; then
-    printf '  No review artifact produced, skipping\n'
-    return 0
-  fi
+  # Behavior reviewer
+  BEH_SYSTEM='You are a behavior reviewer operating inside the Factory.
+Follow the review-behaviors skill at skills/review-behaviors/SKILL.md.
+Read behaviors.diff.md and user-facing documentation. Write tests that
+verify each behavior from the user perspective, run them, and check for
+regressions. Do NOT read source code or implementation files.
+Write your review to .factory/runs/'"${REVIEW_RUN_ID}"'/reviews/review-behaviors.md
+with a verdict (pass, fail, or uncertain) and findings.'
 
-  VERDICT="$(grep -i '^Verdict:' "$REVIEW_FILE" | head -1 | sed 's/.*: *//' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
-  printf '  Review verdict: %s\n' "$VERDICT"
+  BEH_PROMPT="Review the behaviors for run ${REVIEW_RUN_ID}. The run artifacts are in .factory/runs/${REVIEW_RUN_ID}/. Read behaviors.diff.md and the brief, then write and run tests to verify each behavior from the user's perspective."
 
-  case "$VERDICT" in
-    pass)
-      return 0
-      ;;
-    fail|uncertain)
-      return 1
-      ;;
-    *)
-      printf '  Unrecognized verdict "%s", treating as pass\n' "$VERDICT"
-      return 0
-      ;;
-  esac
+  # Launch reviewers in parallel
+  run_single_reviewer "documentation" "$DOC_SYSTEM" "$DOC_PROMPT" "$REVIEW_RUN_DIR" "${REVIEW_TMP}/documentation" &
+  DOC_PID=$!
+
+  run_single_reviewer "behaviors" "$BEH_SYSTEM" "$BEH_PROMPT" "$REVIEW_RUN_DIR" "${REVIEW_TMP}/behaviors" &
+  BEH_PID=$!
+
+  # Wait for both
+  wait "$DOC_PID" 2>/dev/null || true
+  wait "$BEH_PID" 2>/dev/null || true
+
+  # Check results
+  REVIEW_FAILED=0
+  for result_file in "${REVIEW_TMP}"/*; do
+    [ -f "$result_file" ] || continue
+    RESULT="$(cat "$result_file")"
+    case "$RESULT" in
+      pass) ;;
+      fail|uncertain) REVIEW_FAILED=1 ;;
+    esac
+  done
+
+  rm -rf "$REVIEW_TMP"
+  return "$REVIEW_FAILED"
 }
 
 # ---------------------------------------------------------------------------
@@ -601,13 +638,13 @@ cmd_run_local() {
     case "$STATUS" in
       complete)
         # Run review phase before accepting completion
-        if run_review "$RUN_DIR" "$RUN_ID" "$SANDBOX_ROOT"; then
+        if run_reviews "$RUN_DIR" "$RUN_ID"; then
           printf '\n  Run %s completed.\n' "$RUN_ID"
           break
         else
           printf '  Review returned findings — restarting author...\n'
           printf 'executing' > "${RUN_DIR}/status"
-          PROMPT="The documentation reviewer found issues. Read the review at .factory/runs/${RUN_ID}/reviews/documentation.md and address the findings."
+          PROMPT="Reviewers found issues. Read the review artifacts at .factory/runs/${RUN_ID}/reviews/ and address the findings."
           sleep 2
         fi
         ;;
@@ -742,13 +779,13 @@ cmd_run_bare() {
     case "$STATUS" in
       complete)
         # Run review phase before accepting completion
-        if run_review "$RUN_DIR" "$RUN_ID" "$SEARCH_ROOT"; then
+        if run_reviews "$RUN_DIR" "$RUN_ID"; then
           printf '\n  Run %s completed.\n' "$RUN_ID"
           break
         else
           printf '  Review returned findings — restarting author...\n'
           printf 'executing' > "${RUN_DIR}/status"
-          PROMPT="The documentation reviewer found issues. Read the review at .factory/runs/${RUN_ID}/reviews/documentation.md and address the findings."
+          PROMPT="Reviewers found issues. Read the review artifacts at .factory/runs/${RUN_ID}/reviews/ and address the findings."
           sleep 2
         fi
         ;;

@@ -3,11 +3,21 @@
 Observable behaviors of the factory system. Each statement describes what
 the system does, not how. EARS format.
 
+## Test harnesses
+
+| Harness | Runs | Usage |
+|---|---|---|
+| `tests/test-skill` | Skill conversation simulations | `tests/test-skill <scenario> <skill> [--judge]` |
+| `tests/test-run` | Operational assertions | `tests/test-run` |
+
+---
+
 ## Brief capture
 
 WHEN the user invokes the capture-brief skill,
 THE SYSTEM SHALL interview the user, research the codebase, and write
 a brief.md to `.factory/runs/[run-id]/`.
+Test: tests/behaviors/skills/code-reviewer.md (test-skill)
 
 WHEN the brief is confirmed by the user,
 THE SYSTEM SHALL set status to `briefed` and write `.factory/active-run`
@@ -45,10 +55,12 @@ THE SYSTEM SHALL set status to `planned`.
 WHEN `factory run` is invoked,
 THE SYSTEM SHALL create a git worktree branched from the current HEAD,
 copy the run's state into it, and execute within the worktree.
+Test: tests/test-run (setup_run_worktree creates worktree with state)
 
 WHEN `factory run` is invoked from a non-main branch,
 THE SYSTEM SHALL branch the worktree from that branch and record it as
 the source-branch.
+Test: tests/test-run (setup_run_worktree from non-main branch)
 
 ## Session loop (local)
 
@@ -123,6 +135,7 @@ THE SYSTEM SHALL fire a macOS notification.
 WHEN a factory command needs the run-id,
 THE SYSTEM SHALL check in order: `--run-id` flag, `FACTORY_RUN_ID` env
 var, `.factory/active-run` file, then scan for active runs.
+Test: tests/test-run (resolve run-id tests)
 
 ## Sandbox (local)
 

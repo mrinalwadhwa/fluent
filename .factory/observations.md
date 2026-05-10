@@ -25,6 +25,12 @@ because the tool and the thing being built are the same. Consider
 whether there's a way to use the factory to modify itself, or whether
 self-modification is always manual.
 
+2026-05-10 — Need a test quality reviewer and a corresponding
+write-tests skill. Similar pattern to write-documentation /
+review-documentation: the skill guides test authoring, the reviewer
+checks test quality. The author would reference the write-tests skill
+when writing tests, and the reviewer would check against it.
+
 2026-05-09 — The refine-writing skill at ~/Workspace/skills has
 reference files (ai_tells.md, benchmarks.md, sentence_corrections.md,
 structural_guidance.md) with much more detail than what was captured
