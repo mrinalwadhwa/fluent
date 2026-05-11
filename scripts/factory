@@ -570,6 +570,72 @@ cmd_run() {
 }
 
 # ---------------------------------------------------------------------------
+# Run report — generated at completion
+# ---------------------------------------------------------------------------
+
+generate_report() {
+  REPORT_FILE="${RUN_DIR}/report.md"
+  BRIEF_SUMMARY=""
+  if [ -f "${RUN_DIR}/brief.md" ]; then
+    BRIEF_SUMMARY="$(grep -v '^#' "${RUN_DIR}/brief.md" | grep -v '^$' | head -3)"
+  fi
+
+  {
+    printf '# Run Report\n\n'
+    printf 'Run: %s\n' "$RUN_ID"
+    printf 'Status: %s\n' "$(cat "${RUN_DIR}/status" 2>/dev/null || echo "unknown")"
+    printf 'Mode: %s\n' "$(cat "${RUN_DIR}/mode" 2>/dev/null || echo "build")"
+    printf 'Sessions: %d\n\n' "${SESSION_COUNT:-0}"
+
+    printf '## Brief\n\n'
+    if [ -n "$BRIEF_SUMMARY" ]; then
+      printf '%s\n\n' "$BRIEF_SUMMARY"
+    else
+      printf '(no brief)\n\n'
+    fi
+
+    printf '## Reviewer verdicts\n\n'
+    if [ -d "${RUN_DIR}/reviews" ]; then
+      for review in "${RUN_DIR}/reviews"/review-*.md; do
+        [ -f "$review" ] || continue
+        REVIEWER_NAME="$(basename "$review" .md | sed 's/^review-//')"
+        VERDICT="$(grep -i '^Verdict:' "$review" | head -1 | sed 's/.*: *//')"
+        printf '- **%s**: %s\n' "$REVIEWER_NAME" "${VERDICT:-no verdict}"
+      done
+      printf '\n'
+    else
+      printf '(no reviews)\n\n'
+    fi
+
+    printf '## Key findings\n\n'
+    if [ -d "${RUN_DIR}/reviews" ]; then
+      FINDING_COUNT=0
+      for review in "${RUN_DIR}/reviews"/review-*.md; do
+        [ -f "$review" ] || continue
+        # Count numbered findings
+        COUNT="$(grep -c '^[0-9]' "$review" 2>/dev/null || echo "0")"
+        FINDING_COUNT=$((FINDING_COUNT + COUNT))
+      done
+      if [ "$FINDING_COUNT" -gt 0 ]; then
+        printf 'Reviewers produced findings. See reviews/ for details.\n\n'
+      else
+        printf 'No findings.\n\n'
+      fi
+    else
+      printf '(no reviews)\n\n'
+    fi
+
+    printf '## Artifacts\n\n'
+    for artifact in brief.md behaviors.diff.md approach.md plan.md; do
+      [ -f "${RUN_DIR}/${artifact}" ] && printf '- %s\n' "$artifact"
+    done
+    printf '\n'
+  } > "$REPORT_FILE"
+
+  printf '  Report written to %s\n' "$REPORT_FILE"
+}
+
+# ---------------------------------------------------------------------------
 # Session loop (shared across backends)
 # ---------------------------------------------------------------------------
 
@@ -619,6 +685,7 @@ run_session_loop() {
     else
       printf '\n  All reviewers passed — nothing to fix.\n'
       printf 'complete' > "${RUN_DIR}/status"
+      generate_report
       printf '\n  Run %s completed.\n' "$RUN_ID"
       return
     fi
@@ -684,6 +751,7 @@ run_session_loop() {
         REVIEW_SCOPE="run-scoped"
         [ "$RUN_MODE" = "review" ] && REVIEW_SCOPE="full-codebase"
         if run_reviews "$RUN_DIR" "$RUN_ID" "$REVIEWER_FILTER" "$REVIEW_SCOPE"; then
+          generate_report
           printf '\n  Run %s completed.\n' "$RUN_ID"
           break
         else

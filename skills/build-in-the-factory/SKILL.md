@@ -48,14 +48,33 @@ sessions.
 
 ## On session start
 
-Read `.factory/active-run` for the current run-id. Then check the run's
-status:
+Check `.factory/runs/` for runs that need attention:
+
+**Completed runs with reports:** Scan for runs with status `complete`
+that have a `report.md` but no `reported` marker. These completed
+while the user was away. Offer to walk through them:
+
+> "Run [id] completed ([brief summary]). Want me to walk through
+> what happened?"
+
+If the user says yes, read `report.md` for the summary, then drill
+into the underlying artifacts as needed — review findings, git diff,
+session transcripts. Present the key points in small pieces. When
+the user is satisfied, write a `reported` marker to the run directory
+so it's not offered again.
+
+If multiple runs completed, list them and let the user pick which to
+review first.
+
+**Active run:** Read `.factory/active-run` for the current run-id.
+Check the status:
 
 - `executing` — read `handoff.md` and continue from where the previous
   session left off. Do not re-read the full history.
 - `needs-user` — present the question from `handoff.md` and wait for the
   user's answer.
-- No active run — ask the user what they want to build.
+
+**No runs needing attention** — ask the user what they want to build.
 
 ---
 

@@ -5,6 +5,12 @@ potential brief. Promote to a run when ready to act on it.
 
 ---
 
+2026-05-11 — The Fargate entrypoint duplicates the session loop,
+review functions, and now the report generator from the factory script.
+The entrypoint should source the factory script in library mode
+(FACTORY_LIB=1) and reuse the same functions. This is the same
+structural problem that was fixed between cmd_run_local and cmd_run_bare.
+
 2026-05-09 — Building the factory itself doesn't use `factory run`
 because the tool and the thing being built are the same. Consider
 whether there's a way to use the factory to modify itself, or whether

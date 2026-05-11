@@ -19,6 +19,39 @@ MAX_SESSIONS=50
 die() { printf 'factory-run: %s\n' "$1" >&2; exit 1; }
 
 # --------------------------------------------------------------------------
+# Run report
+# --------------------------------------------------------------------------
+
+generate_report() {
+  REPORT_FILE="${RUN_DIR}/report.md"
+  BRIEF_SUMMARY=""
+  if [ -f "${RUN_DIR}/brief.md" ]; then
+    BRIEF_SUMMARY="$(grep -v '^#' "${RUN_DIR}/brief.md" | grep -v '^$' | head -3)"
+  fi
+  {
+    printf '# Run Report\n\nRun: %s\nStatus: %s\nMode: %s\nSessions: %d\n\n' \
+      "$FACTORY_RUN_ID" \
+      "$(cat "${RUN_DIR}/status" 2>/dev/null || echo "unknown")" \
+      "$(cat "${RUN_DIR}/mode" 2>/dev/null || echo "build")" \
+      "${SESSION:-0}"
+    printf '## Brief\n\n%s\n\n' "${BRIEF_SUMMARY:-(no brief)}"
+    printf '## Reviewer verdicts\n\n'
+    if [ -d "${RUN_DIR}/reviews" ]; then
+      for review in "${RUN_DIR}/reviews"/review-*.md; do
+        [ -f "$review" ] || continue
+        rname="$(basename "$review" .md | sed 's/^review-//')"
+        rverdict="$(grep -i '^Verdict:' "$review" | head -1 | sed 's/.*: *//')"
+        printf '- **%s**: %s\n' "$rname" "${rverdict:-no verdict}"
+      done
+    else
+      printf '(no reviews)\n'
+    fi
+    printf '\n'
+  } > "$REPORT_FILE"
+  printf 'factory-run: report written\n'
+}
+
+# --------------------------------------------------------------------------
 # Review functions
 # --------------------------------------------------------------------------
 
@@ -263,6 +296,7 @@ if [ "$RUN_MODE" = "review" ]; then
   else
     printf '\nfactory-run: all reviewers passed — nothing to fix\n'
     printf 'complete' > "${RUN_DIR}/status"
+    generate_report
     printf 'factory-run: run %s completed\n' "$FACTORY_RUN_ID"
     # Skip session loop — jump to S3 upload
     SESSION=0
@@ -347,6 +381,7 @@ while true; do
       REVIEW_SCOPE="run-scoped"
       [ "$RUN_MODE" = "review" ] && REVIEW_SCOPE="full-codebase"
       if run_reviews "$RUN_DIR" "$FACTORY_RUN_ID" "$REVIEWER_FILTER" "$REVIEW_SCOPE"; then
+        generate_report
         printf 'factory-run: run %s completed\n' "$FACTORY_RUN_ID"
         break
       else
