@@ -470,6 +470,26 @@ with a verdict (pass, fail, or uncertain) and findings.'
     REVIEW_PIDS="$REVIEW_PIDS $!"
   fi
 
+  # --- Architecture reviewer ---
+  if [ -z "$REVIEWER_FILTER" ] || echo "$REVIEWER_FILTER" | grep -q "architecture"; then
+    ARCH_SYSTEM='You are an architecture reviewer operating inside the Factory.
+Follow the review-architecture skill at skills/review-architecture/SKILL.md.
+Read the code and architectural expertise. Evaluate structural decisions
+against the principles. Check at whatever scale is relevant.
+Write your review to .factory/runs/'"${REVIEW_RUN_ID}"'/reviews/review-architecture.md
+with a verdict (pass, fail, or uncertain) and findings.'
+
+    if [ "$REVIEW_MODE" = "full-codebase" ]; then
+      ARCH_PROMPT="Perform a full-codebase architecture review. Read expertise/architecture/principles.md and documentation/architecture.md. Evaluate the overall system structure against the architectural principles. Check all viewpoints. The review output goes to .factory/runs/${REVIEW_RUN_ID}/reviews/review-architecture.md."
+    else
+      ARCH_PROMPT="Review the architecture for run ${REVIEW_RUN_ID}. The run artifacts are in .factory/runs/${REVIEW_RUN_ID}/. Read the brief and approach.md to understand the run's intent. Read expertise/architecture/principles.md. Evaluate the code changes against the architectural principles."
+    fi
+
+    ARCH_PROMPT="${ARCH_PROMPT}${SCOPE_INSTRUCTION}"
+    run_single_reviewer "architecture" "$ARCH_SYSTEM" "$ARCH_PROMPT" "$REVIEW_RUN_DIR" "${REVIEW_TMP}/architecture" &
+    REVIEW_PIDS="$REVIEW_PIDS $!"
+  fi
+
   # Wait for all
   for pid in $REVIEW_PIDS; do
     wait "$pid" 2>/dev/null || true

@@ -30,6 +30,12 @@ what goes in SKILL.md vs references, how to follow the Agent Skills
 spec. Currently looking up agentskills.io each time. Should be
 captured as a skill or reference in the factory.
 
+2026-05-10 — Skills that should reference expertise: design-approach
+(structural decisions), plan-execution (step ordering, slicing),
+define-behaviors (domain vocabulary only). Update these skills to
+point to relevant expertise files once the architecture expertise
+is populated.
+
 2026-05-10 — The expertise layer has been designed. Two layers:
 factory-level (expertise/ in the factory repo) and project-level
 (expertise/ in the project repo). Skills reference expertise files
