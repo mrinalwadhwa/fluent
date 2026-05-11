@@ -5,11 +5,6 @@ potential brief. Promote to a run when ready to act on it.
 
 ---
 
-2026-05-09 — cmd_run_local and cmd_run_bare have duplicated session loop
-logic (snapshot capture, status checking, review phase). The differences
-are small (sandbox + credential refresh vs --dangerously-skip-permissions).
-Extract the loop body into a shared function.
-
 2026-05-09 — define-behaviors skill broke its own rule during the
 documentation reviewer run. It walked through accuracy, writing quality,
 and completeness one at a time (good), then dumped review output,
@@ -60,14 +55,6 @@ prohibiting it. The system prompt or skill needs to reinforce this.
 (2) The author committed directly to main because cmd_run_bare doesn't
 create a worktree. Review runs via --no-sandbox skip worktree creation.
 Need to ensure review runs still get worktree isolation.
-
-2026-05-10 — Full-codebase reviews should be runs, not a separate
-command. The worktree isolation and history are valuable. But the
-full brief → behaviors → approach → plan ceremony is heavy for what's
-essentially "run all reviewers." Need a lightweight run path — a brief
-that says "full review" should skip empty stages and go straight to
-execution. Resolve this in the capture-brief or build-in-the-factory
-skill.
 
 2026-05-10 — Need a test quality reviewer and a corresponding
 write-tests skill. Similar pattern to write-documentation /
