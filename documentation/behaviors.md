@@ -55,7 +55,7 @@ THE SYSTEM SHALL set status to `planned`.
 WHEN `factory run` is invoked,
 THE SYSTEM SHALL create a git worktree branched from the current HEAD,
 copy the run's state into it, and execute within the worktree.
-Test: tests/test-run (setup_run_worktree creates worktree with state)
+Test: tests/test-run (setup_run_worktree creates worktree with state), tests/behaviors/operations/test-scope-and-edges.sh
 
 WHEN `factory run` is invoked from a non-main branch,
 THE SYSTEM SHALL branch the worktree from that branch and record it as
@@ -127,6 +127,7 @@ container via ECS Exec.
 
 WHEN `factory watch` is invoked,
 THE SYSTEM SHALL poll run status at the specified interval.
+Test: tests/behaviors/operations/test-watch-and-status-edges.sh
 
 WHEN a run's status changes to `complete`, `needs-user`, or `failed`,
 THE SYSTEM SHALL fire a macOS notification.
@@ -135,8 +136,9 @@ THE SYSTEM SHALL fire a macOS notification.
 
 WHEN a factory command needs the run-id,
 THE SYSTEM SHALL check in order: `--run-id` flag, `FACTORY_RUN_ID` env
-var, `.factory/active-run` file, then scan for active runs.
-Test: tests/test-run (resolve run-id tests)
+var, `.factory/active-run` file, then scan for active runs. The scan
+considers a run active if its status is `planned` or `executing`.
+Test: tests/test-run (resolve run-id tests), tests/behaviors/operations/test-scope-and-edges.sh
 
 ## Review phase
 
@@ -155,6 +157,11 @@ with the review findings.
 WHEN `factory run` is invoked and the run's mode is `review`,
 THE SYSTEM SHALL run reviewers first (before the author) with full-codebase
 scope, then pass findings to the author.
+Test: tests/behaviors/operations/test-review-mode.sh
+
+WHEN `factory run` is invoked and the run has a `scope` file,
+THE SYSTEM SHALL copy the scope file into the worktree.
+Test: tests/behaviors/operations/test-scope-and-edges.sh
 
 WHEN reviewers all pass on a review run's initial review,
 THE SYSTEM SHALL set status to `complete` and stop the loop without
@@ -165,6 +172,7 @@ launching the author.
 WHEN `factory resume` is invoked,
 THE SYSTEM SHALL find a run with status `needs-user` or `failed` and
 launch an interactive agent session for that run.
+Test: tests/behaviors/operations/test-resume-resolve.sh
 
 ## Sandbox (local)
 

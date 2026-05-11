@@ -588,6 +588,13 @@ cmd_run_local() {
   SANDBOX_ROOT="$WORKTREE_DIR"
   RUN_DIR="${WORKTREE_DIR}/.factory/runs/${RUN_ID}"
 
+  # Re-render sandbox profile for the worktree path so the agent is
+  # sandboxed to the run worktree, not the source worktree.
+  cat "$COMMON_PROFILE" "$PROFILE_TEMPLATE" | sed \
+    -e "s|_HOME_|$HOME|g" \
+    -e "s|_SANDBOX_ROOT_|$SANDBOX_ROOT|g" \
+    > "$RENDERED_PROFILE"
+
   printf '  Factory           session loop (run: %s)\n' "$RUN_ID"
   printf '  Worktree          %s\n' "$WORKTREE_DIR"
 
@@ -613,7 +620,7 @@ cmd_run_local() {
       printf '\n  All reviewers passed — nothing to fix.\n'
       printf 'complete' > "${RUN_DIR}/status"
       printf '\n  Run %s completed.\n' "$RUN_ID"
-      break
+      return
     fi
   else
     # Build initial prompt from brief/handoff

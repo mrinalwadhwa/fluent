@@ -70,7 +70,7 @@ tests/test-run
 | Break approach into steps, write plan.md | (needs plan-execution scenarios) |
 | Set status to `planned` | (needs plan-execution scenarios) |
 
-### Operational (tested by test-run and test-run-state)
+### Operational (tested by test-run, test-run-state, and others)
 
 | Behavior | Test |
 |---|---|
@@ -81,6 +81,17 @@ tests/test-run
 | Worktree records source-branch and worktree path | `test-run-state` |
 | Run-id scan ignores completed runs | `test-run-state` |
 | Status display includes backend and brief | `test-run-state` |
+| Worktree copies scope file | `test-scope-and-edges` |
+| Run-id scan treats `executing` as active | `test-scope-and-edges` |
+| Run-id scan skips `needs-user` and `failed` | `test-scope-and-edges` |
+| Status display works with no runs | `test-scope-and-edges` |
+| Review mode copies mode/reviewers to worktree | `test-review-mode` |
+| Resume finds `needs-user` or `failed` runs | `test-resume-resolve` |
+| Status displays fargate backend | `test-watch-and-status-edges` |
+| Status displays mixed backends | `test-watch-and-status-edges` |
+| Watch polls at default interval | `test-watch-and-status-edges` |
+| Watch accepts custom interval | `test-watch-and-status-edges` |
+| Watch displays run status | `test-watch-and-status-edges` |
 
 ### Operational (not yet tested)
 

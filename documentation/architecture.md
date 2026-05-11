@@ -11,7 +11,7 @@ from intent capture through execution and review across multiple sessions.
 │  capture-brief, define-behaviors,               │
 │  design-approach, plan-execution                │
 │  review-documentation, review-behaviors,        │
-│  write-documentation                            │
+│  review-architecture, write-documentation       │
 │  Portable procedures any agent follows          │
 ├─────────────────────────────────────────────────┤
 │  build-in-the-factory skill                     │
@@ -159,14 +159,19 @@ than drifting.
 
 ### Reviewers
 
-Evaluate the author's output. Two categories:
+Evaluate the author's output. Three reviewers:
 
-**Code-aware** (read code + docs): documentation reviewer
+**Documentation reviewer** (code-aware): reads code and docs, checks
+accuracy, writing quality, and completeness
 (`skills/review-documentation/SKILL.md`).
 
-**User-facing** (observe behavior only): behavior reviewer
-(`skills/review-behaviors/SKILL.md`). Cannot see code — evaluates the
-system from the outside, as a user would.
+**Behavior reviewer** (user-facing): observes behavior only, cannot see
+code — evaluates the system from the outside, as a user would
+(`skills/review-behaviors/SKILL.md`).
+
+**Architecture reviewer** (code-aware): reads code and architectural
+expertise, evaluates structural decisions against principles
+(`skills/review-architecture/SKILL.md`).
 
 Review verdicts: **pass** / **uncertain** (ask user) / **fail** (send
 back to author with findings).
@@ -205,6 +210,14 @@ unblock the run.
 macOS Seatbelt sandbox. The factory command runs the session loop on the
 local machine. Credential injection from Keychain (OAuth token, AWS STS,
 Brave Search key). Token refresh at session boundaries.
+
+### Local (bare)
+
+`factory run --no-sandbox` runs the session loop without Seatbelt
+sandboxing, worktree creation, or credential refresh. Used on platforms
+without macOS sandbox support or when the agent is already isolated by
+other means. The agent runs with `--dangerously-skip-permissions` in the
+current directory.
 
 ### Fargate
 
@@ -278,10 +291,9 @@ factory/main/
   documentation/
     architecture.md          ← this file
     behaviors.md             ← behavioral statements (EARS)
-    conventions.md           ← confirmed project conventions
   expertise/                 ← factory-level (applies to all projects)
     architecture/
-    writing/
+    languages/
   .factory/
     observations.md          ← feedback log (tracked)
     expertise/               ← project-level learnings (tracked)
@@ -297,6 +309,7 @@ factory/main/
     define-behaviors/SKILL.md
     design-approach/SKILL.md
     plan-execution/SKILL.md
+    review-architecture/SKILL.md
     review-behaviors/SKILL.md
     review-documentation/SKILL.md
     write-documentation/SKILL.md
@@ -329,11 +342,9 @@ expertise accumulates in `.factory/expertise/` as patterns are observed
 across runs.
 
 **Documentation** describes the system as-built — what it does, how it's
-structured, what conventions have been confirmed. `architecture.md` and
-`behaviors.md` describe what IS. `conventions.md` captures confirmed
-project decisions that started as accumulated expertise.
+structured, what behaviors are specified. `architecture.md` and
+`behaviors.md` describe what IS.
 
 The lifecycle: observations are captured during usage. Some become runs
 that build or improve things. Patterns observed across runs accumulate
-as project expertise. When confirmed, expertise graduates to
-`documentation/conventions.md`.
+as project expertise in `.factory/expertise/`.

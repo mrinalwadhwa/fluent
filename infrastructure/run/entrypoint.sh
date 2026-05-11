@@ -18,6 +18,147 @@ MAX_SESSIONS=50
 
 die() { printf 'factory-run: %s\n' "$1" >&2; exit 1; }
 
+# --------------------------------------------------------------------------
+# Review functions
+# --------------------------------------------------------------------------
+
+run_single_reviewer() {
+  local reviewer_name="$1" reviewer_system="$2" reviewer_prompt="$3"
+  local reviewer_run_dir="$4" reviewer_result_file="$5"
+
+  printf '  [%s] starting...\n' "$reviewer_name"
+
+  set +e
+  claude \
+    --dangerously-skip-permissions \
+    --append-system-prompt "$reviewer_system" \
+    -p "$reviewer_prompt"
+  local reviewer_exit=$?
+  set -e
+
+  if [ "$reviewer_exit" -ne 0 ]; then
+    printf '  [%s] session failed (exit %d), skipping\n' "$reviewer_name" "$reviewer_exit"
+    printf 'pass' > "$reviewer_result_file"
+    return
+  fi
+
+  local review_file="${reviewer_run_dir}/reviews/review-${reviewer_name}.md"
+  if [ ! -f "$review_file" ]; then
+    printf '  [%s] no review artifact produced, skipping\n' "$reviewer_name"
+    printf 'pass' > "$reviewer_result_file"
+    return
+  fi
+
+  local verdict
+  verdict="$(grep -i '^Verdict:' "$review_file" | head -1 | sed 's/.*: *//' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  printf '  [%s] verdict: %s\n' "$reviewer_name" "$verdict"
+  printf '%s' "$verdict" > "$reviewer_result_file"
+}
+
+# Run reviewers in parallel. Returns 0 if all pass, 1 if any fail.
+# Args: run-dir run-id [reviewer-filter] [mode]
+run_reviews() {
+  local review_run_dir="$1" review_run_id="$2"
+  local reviewer_filter="${3:-}" review_mode="${4:-run-scoped}"
+
+  mkdir -p "${review_run_dir}/reviews"
+
+  local scope_detail scope_instruction=""
+  scope_detail="$(cat "${review_run_dir}/scope" 2>/dev/null || true)"
+  if [ -n "$scope_detail" ]; then
+    scope_instruction=" Focus your review on: ${scope_detail}. Read surrounding context as needed, but concentrate your findings on these areas."
+  fi
+
+  printf '\nfactory-run: === review phase (run: %s, mode: %s) ===\n\n' "$review_run_id" "$review_mode"
+
+  local review_tmp pids=""
+  review_tmp="$(mktemp -d -t factory-review-XXXXXX)"
+
+  # --- Documentation reviewer ---
+  if [ -z "$reviewer_filter" ] || echo "$reviewer_filter" | grep -q "documentation"; then
+    local doc_system doc_prompt
+    doc_system='You are a documentation reviewer operating inside the Factory.
+Follow the review-documentation skill at skills/review-documentation/SKILL.md.
+Read the code and documentation, check accuracy, writing quality, and
+completeness, and produce a review artifact.
+Write your review to .factory/runs/'"${review_run_id}"'/reviews/review-documentation.md
+with a verdict (pass, fail, or uncertain) and findings.'
+
+    if [ "$review_mode" = "full-codebase" ]; then
+      doc_prompt="Perform a full-codebase documentation review. Review all documentation files against the source code. Check accuracy, writing quality, and completeness. The review output goes to .factory/runs/${review_run_id}/reviews/review-documentation.md."
+    else
+      doc_prompt="Review the documentation for run ${review_run_id}. The run artifacts are in .factory/runs/${review_run_id}/. Read the brief and behaviors.diff.md to understand the run's intent, then review all documentation affected by the run."
+    fi
+
+    doc_prompt="${doc_prompt}${scope_instruction}"
+    run_single_reviewer "documentation" "$doc_system" "$doc_prompt" "$review_run_dir" "${review_tmp}/documentation" &
+    pids="$pids $!"
+  fi
+
+  # --- Behavior reviewer ---
+  if [ -z "$reviewer_filter" ] || echo "$reviewer_filter" | grep -q "behaviors"; then
+    local beh_system beh_prompt
+    beh_system='You are a behavior reviewer operating inside the Factory.
+Follow the review-behaviors skill at skills/review-behaviors/SKILL.md.
+Read behaviors and user-facing documentation. Write tests that verify
+behavior from the user perspective, run them, and check for regressions.
+Do NOT read source code or implementation files.
+Write your review to .factory/runs/'"${review_run_id}"'/reviews/review-behaviors.md
+with a verdict (pass, fail, or uncertain) and findings.'
+
+    if [ "$review_mode" = "full-codebase" ]; then
+      beh_prompt="Perform a full-codebase behavior review. Read documentation/behaviors.md and run all existing behavior tests. Report any failures as regressions. Report any behaviors without test references as gaps. Write tests for untested behaviors where possible. The review output goes to .factory/runs/${review_run_id}/reviews/review-behaviors.md."
+    else
+      beh_prompt="Review the behaviors for run ${review_run_id}. The run artifacts are in .factory/runs/${review_run_id}/. Read behaviors.diff.md and the brief, then write and run tests to verify each behavior from the user's perspective."
+    fi
+
+    beh_prompt="${beh_prompt}${scope_instruction}"
+    run_single_reviewer "behaviors" "$beh_system" "$beh_prompt" "$review_run_dir" "${review_tmp}/behaviors" &
+    pids="$pids $!"
+  fi
+
+  # --- Architecture reviewer ---
+  if [ -z "$reviewer_filter" ] || echo "$reviewer_filter" | grep -q "architecture"; then
+    local arch_system arch_prompt
+    arch_system='You are an architecture reviewer operating inside the Factory.
+Follow the review-architecture skill at skills/review-architecture/SKILL.md.
+Read the code and architectural expertise. Evaluate structural decisions
+against the principles. Check at whatever scale is relevant.
+Write your review to .factory/runs/'"${review_run_id}"'/reviews/review-architecture.md
+with a verdict (pass, fail, or uncertain) and findings.'
+
+    if [ "$review_mode" = "full-codebase" ]; then
+      arch_prompt="Perform a full-codebase architecture review. Read expertise/architecture/principles.md and documentation/architecture.md. Evaluate the overall system structure against the architectural principles. Check all viewpoints. The review output goes to .factory/runs/${review_run_id}/reviews/review-architecture.md."
+    else
+      arch_prompt="Review the architecture for run ${review_run_id}. The run artifacts are in .factory/runs/${review_run_id}/. Read the brief and approach.md to understand the run's intent. Read expertise/architecture/principles.md. Evaluate the code changes against the architectural principles."
+    fi
+
+    arch_prompt="${arch_prompt}${scope_instruction}"
+    run_single_reviewer "architecture" "$arch_system" "$arch_prompt" "$review_run_dir" "${review_tmp}/architecture" &
+    pids="$pids $!"
+  fi
+
+  # Wait for all
+  local pid
+  for pid in $pids; do
+    wait "$pid" 2>/dev/null || true
+  done
+
+  # Check results
+  local review_failed=0 result_file result
+  for result_file in "${review_tmp}"/*; do
+    [ -f "$result_file" ] || continue
+    result="$(cat "$result_file")"
+    case "$result" in
+      pass) ;;
+      fail|uncertain) review_failed=1 ;;
+    esac
+  done
+
+  rm -rf "$review_tmp"
+  return "$review_failed"
+}
+
 [ -n "${FACTORY_RUN_ID:-}" ] || die "FACTORY_RUN_ID not set"
 [ -n "${FACTORY_S3_BUCKET:-}" ] || die "FACTORY_S3_BUCKET not set"
 [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || die "No Claude auth token"
@@ -48,6 +189,13 @@ done
 
 # Write active-run pointer
 printf '%s' "$FACTORY_RUN_ID" > "${WORKSPACE}/.factory/active-run"
+
+# --------------------------------------------------------------------------
+# Detect run mode
+# --------------------------------------------------------------------------
+
+RUN_MODE="$(cat "${RUN_DIR}/mode" 2>/dev/null || echo "build")"
+REVIEWER_FILTER="$(cat "${RUN_DIR}/reviewers" 2>/dev/null || true)"
 
 # --------------------------------------------------------------------------
 # Build initial prompt
@@ -106,9 +254,29 @@ if [ "$CURRENT_STATUS" = "planned" ]; then
   printf 'executing' > "${RUN_DIR}/status"
 fi
 
+# For review runs, start by running reviewers to get initial findings
+if [ "$RUN_MODE" = "review" ]; then
+  printf 'factory-run: mode: review (reviewers run first)\n'
+  REVIEW_SCOPE="full-codebase"
+  if ! run_reviews "$RUN_DIR" "$FACTORY_RUN_ID" "$REVIEWER_FILTER" "$REVIEW_SCOPE"; then
+    INITIAL_PROMPT="This is a review run. Reviewers have produced findings. Read the review artifacts at .factory/runs/${FACTORY_RUN_ID}/reviews/ and address the findings. When done, write status 'complete'."
+  else
+    printf '\nfactory-run: all reviewers passed — nothing to fix\n'
+    printf 'complete' > "${RUN_DIR}/status"
+    printf 'factory-run: run %s completed\n' "$FACTORY_RUN_ID"
+    # Skip session loop — jump to S3 upload
+    SESSION=0
+    SKIP_SESSION_LOOP=1
+  fi
+fi
+
 # --------------------------------------------------------------------------
 # Session loop
 # --------------------------------------------------------------------------
+
+SKIP_SESSION_LOOP=${SKIP_SESSION_LOOP:-0}
+
+if [ "$SKIP_SESSION_LOOP" -eq 0 ]; then
 
 SESSION=0
 CONSECUTIVE_FAILURES=0
@@ -174,6 +342,20 @@ while true; do
   printf 'factory-run: status: %s\n' "$STATUS"
 
   case "$STATUS" in
+    complete)
+      # Run review phase before accepting completion
+      REVIEW_SCOPE="run-scoped"
+      [ "$RUN_MODE" = "review" ] && REVIEW_SCOPE="full-codebase"
+      if run_reviews "$RUN_DIR" "$FACTORY_RUN_ID" "$REVIEWER_FILTER" "$REVIEW_SCOPE"; then
+        printf 'factory-run: run %s completed\n' "$FACTORY_RUN_ID"
+        break
+      else
+        printf 'factory-run: review returned findings — restarting author\n'
+        printf 'executing' > "${RUN_DIR}/status"
+        PROMPT="Reviewers found issues. Read the review artifacts at .factory/runs/${FACTORY_RUN_ID}/reviews/ and address the findings."
+        sleep 2
+      fi
+      ;;
     executing)
       printf 'factory-run: restarting session...\n'
       sleep 5
@@ -182,7 +364,7 @@ while true; do
       printf 'factory-run: rate limited — waiting 5 minutes\n'
       sleep 300
       ;;
-    complete|needs-user|failed)
+    needs-user|failed)
       printf 'factory-run: terminal status (%s)\n' "$STATUS"
       break
       ;;
@@ -192,6 +374,8 @@ while true; do
       ;;
   esac
 done
+
+fi  # SKIP_SESSION_LOOP
 
 # --------------------------------------------------------------------------
 # Upload workspace to S3
@@ -205,4 +389,4 @@ tar cf - -C "$WORKSPACE" . | \
 
 printf 'factory-run: uploaded to s3://%s/runs/%s/workspace.tar\n' \
   "$FACTORY_S3_BUCKET" "$FACTORY_RUN_ID"
-printf 'factory-run: done (sessions: %d)\n' "$SESSION"
+printf 'factory-run: done (sessions: %d)\n' "${SESSION:-0}"
