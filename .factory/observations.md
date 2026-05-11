@@ -25,6 +25,19 @@ because the tool and the thing being built are the same. Consider
 whether there's a way to use the factory to modify itself, or whether
 self-modification is always manual.
 
+2026-05-10 — Need guidance on writing skills — how to structure them,
+what goes in SKILL.md vs references, how to follow the Agent Skills
+spec. Currently looking up agentskills.io each time. Should be
+captured as a skill or reference in the factory.
+
+2026-05-10 — The expertise layer has been designed. Two layers:
+factory-level (expertise/ in the factory repo) and project-level
+(expertise/ in the project repo). Skills reference expertise files
+for decision-making context. Expertise is what you know; skills are
+what you do. Still need to build it and migrate existing embedded
+guidance (writing quality from write-documentation, thinking
+frameworks from capture-brief) into expertise files.
+
 2026-05-10 — Need a run report mechanism. After a run completes, the
 user has no visibility into what happened without manually reading
 review artifacts and git diffs. The build-in-the-factory skill should

@@ -278,6 +278,14 @@ factory/main/
   documentation/
     architecture.md          ← this file
     behaviors.md             ← behavioral statements (EARS)
+    conventions.md           ← confirmed project conventions
+  expertise/                 ← factory-level (applies to all projects)
+    architecture/
+    writing/
+  .factory/
+    observations.md          ← feedback log (tracked)
+    expertise/               ← project-level learnings (tracked)
+    runs/                    ← working state (not tracked)
   scripts/
     factory                  ← the factory command
     assets/
@@ -306,3 +314,26 @@ factory/main/
       skills/                ← scenario cards for test-skill
       README.md              ← behavior-to-test mapping
 ```
+
+## Skills, expertise, and documentation
+
+Three types of content, each with a different purpose:
+
+**Skills** are procedures — step-by-step instructions an agent follows.
+They live in `skills/` and follow the Agent Skills spec.
+
+**Expertise** is reference material for decision-making — principles,
+patterns, conventions that inform choices within a procedure. Factory-level
+expertise lives in `expertise/` and applies to all projects. Project-level
+expertise accumulates in `.factory/expertise/` as patterns are observed
+across runs.
+
+**Documentation** describes the system as-built — what it does, how it's
+structured, what conventions have been confirmed. `architecture.md` and
+`behaviors.md` describe what IS. `conventions.md` captures confirmed
+project decisions that started as accumulated expertise.
+
+The lifecycle: observations are captured during usage. Some become runs
+that build or improve things. Patterns observed across runs accumulate
+as project expertise. When confirmed, expertise graduates to
+`documentation/conventions.md`.

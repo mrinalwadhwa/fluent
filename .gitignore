@@ -15,6 +15,7 @@ __pycache__/
 # Dependencies
 node_modules/
 
-# Factory — working state, except observations
+# Factory — working state, except observations and expertise
 .factory/*
 !.factory/observations.md
+!.factory/expertise/
