@@ -5,16 +5,6 @@ potential brief. Promote to a run when ready to act on it.
 
 ---
 
-2026-05-09 — define-behaviors skill broke its own rule during the
-documentation reviewer run. It walked through accuracy, writing quality,
-and completeness one at a time (good), then dumped review output,
-triggering, and loop behaviors all at once (bad). The skill should
-maintain the one-area-at-a-time pace through to the end.
-
-2026-05-09 — design-approach skill had the same problem. Walked through
-decisions one at a time (good), then dumped the full approach document
-instead of discussing solution outline and risks incrementally (bad).
-
 2026-05-09 — Building the factory itself doesn't use `factory run`
 because the tool and the thing being built are the same. Consider
 whether there's a way to use the factory to modify itself, or whether
@@ -25,19 +15,6 @@ what goes in SKILL.md vs references, how to follow the Agent Skills
 spec. Currently looking up agentskills.io each time. Should be
 captured as a skill or reference in the factory.
 
-2026-05-10 — Skills that should reference expertise: design-approach
-(structural decisions), plan-execution (step ordering, slicing),
-define-behaviors (domain vocabulary only). Update these skills to
-point to relevant expertise files once the architecture expertise
-is populated.
-
-2026-05-10 — The expertise layer has been designed. Two layers:
-factory-level (expertise/ in the factory repo) and project-level
-(expertise/ in the project repo). Skills reference expertise files
-for decision-making context. Expertise is what you know; skills are
-what you do. Still need to build it and migrate existing embedded
-guidance (writing quality from write-documentation, thinking
-frameworks from capture-brief) into expertise files.
 
 2026-05-10 — Need a run report mechanism. After a run completes, the
 user has no visibility into what happened without manually reading

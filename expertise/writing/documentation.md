@@ -1,13 +1,4 @@
----
-name: write-documentation
-description: >
-  Guidance for writing clear, accurate documentation that serves both
-  humans and coding agents. Covers substance, structure, and the specific
-  failure modes of AI-generated documentation. Use when writing or
-  reviewing documentation files.
----
-
-# Write Documentation
+# Writing Documentation
 
 Documentation exists to help someone understand and use the system. The
 reader is either a human or a coding agent. Both need the same thing:

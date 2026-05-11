@@ -11,7 +11,7 @@ from intent capture through execution and review across multiple sessions.
 │  capture-brief, define-behaviors,               │
 │  design-approach, plan-execution                │
 │  review-documentation, review-behaviors,        │
-│  review-architecture, write-documentation       │
+│  review-architecture                            │
 │  Portable procedures any agent follows          │
 ├─────────────────────────────────────────────────┤
 │  build-in-the-factory skill                     │
@@ -312,7 +312,6 @@ factory/main/
     review-architecture/SKILL.md
     review-behaviors/SKILL.md
     review-documentation/SKILL.md
-    write-documentation/SKILL.md
   infrastructure/
     cloudformation.yaml
     run/

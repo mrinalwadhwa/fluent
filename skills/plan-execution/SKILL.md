@@ -24,6 +24,9 @@ Read:
 - `.factory/runs/[run-id]/brief.md` — the intent
 - `.factory/runs/[run-id]/behaviors.diff.md` — what the system must do
 - `.factory/runs/[run-id]/approach.md` — how the system should do it
+- `expertise/architecture/principles.md` — architectural principles,
+  especially the sections on simplicity and viewpoints, to inform
+  step ordering and verification
 
 Check: does this need a plan at all? A single-step bug fix or a
 straightforward change that maps directly to one behavior doesn't need

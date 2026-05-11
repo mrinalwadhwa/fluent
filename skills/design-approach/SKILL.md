@@ -29,6 +29,8 @@ Read:
 - `.factory/runs/[run-id]/brief.md` — the intent
 - `.factory/runs/[run-id]/behaviors.diff.md` — what the system must do
 - `documentation/architecture.md` — how the system is built today
+- `expertise/architecture/principles.md` — architectural principles for
+  evaluating structural decisions
 - Open questions deferred from define-behaviors
 
 Understand the gap between the current architecture and what the new
@@ -186,7 +188,10 @@ boundaries — enough to guide execution. Not a detailed design.]
 ## Rules
 
 - **Interview, don't present.** Walk through decisions one at a time.
-  Don't produce a document and ask for approval.
+  Don't produce a document and ask for approval. This applies to the
+  full conversation — decisions, solution outline, and risks each get
+  their own discussion. Don't walk through decisions carefully and
+  then dump the rest as one block.
 - **Direction, not commitment.** approach.md is a hypothesis. The
   executing agent can adapt it. The real architecture lands in
   architecture.md after implementation.

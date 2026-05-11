@@ -184,9 +184,11 @@ THE SYSTEM SHALL [observable behavior]
 
 - **Interview, don't present.** Work through behaviors with the user
   in small pieces. Don't produce a complete document and ask for
-  approval.
+  approval. This applies through the entire conversation — including
+  review output, triggering mechanics, and final assembly. Don't
+  start with small pieces and then dump the rest at the end.
 - **One area at a time.** Don't overwhelm with the full picture until
-  the pieces are agreed.
+  the pieces are agreed. Each area gets its own discussion turn.
 - **Observable, not internal.** Every behavior describes something a
   user or external system can observe.
 - **No implementation.** Do not specify technologies, libraries, or

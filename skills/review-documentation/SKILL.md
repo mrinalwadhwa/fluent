@@ -3,8 +3,8 @@ name: review-documentation
 description: >
   Code-aware documentation reviewer. Reads the codebase alongside
   documentation, checks accuracy, writing quality, and completeness.
-  Produces a verdict and findings artifact. Uses the write-documentation
-  skill as its quality reference.
+  Produces a verdict and findings artifact. Uses
+  expertise/writing/documentation.md as its quality reference.
 ---
 
 # Review Documentation
@@ -61,7 +61,7 @@ For each mismatch, record a finding with:
 ### Phase 3 — Check writing quality
 
 Read each documentation file in scope. Check against the guidance in
-the `write-documentation` skill:
+the writing expertise at `expertise/writing/documentation.md`:
 
 **Substance:**
 - Does each paragraph teach the reader something? Flag empty paragraphs
@@ -153,9 +153,9 @@ without re-reading the entire review.
   not sure, don't report it as a finding.
 - **Findings, not rewrites.** Report what's wrong and where. The author
   determines the fix.
-- **Use write-documentation as the reference.** The write-documentation
-  skill defines what good documentation looks like. Check against it.
-  Don't invent new rules.
+- **Use the writing expertise as the reference.** The expertise at
+  `expertise/writing/documentation.md` defines what good documentation
+  looks like. Check against it. Don't invent new rules.
 - **Severity matters.** An inaccurate file path that would break
   someone's workflow is more important than a slightly AI-sounding
   sentence. Lead with the findings that matter most.

@@ -13,6 +13,7 @@ Skills are procedures (what to do). Expertise is reference material
 expertise/
   architecture/          ← structural decision principles
   languages/             ← language-specific conventions
+  writing/               ← documentation quality standards
 ```
 
 ## Usage
