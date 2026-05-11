@@ -1,4 +1,4 @@
-# Writing Documentation
+# How to write documentation
 
 Documentation exists to help someone understand and use the system. The
 reader is either a human or a coding agent. Both need the same thing:

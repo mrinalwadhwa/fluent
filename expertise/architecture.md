@@ -1,4 +1,4 @@
-# Architectural Principles
+# Architectural principles
 
 Principles for structural decisions at any scale. Consult when making
 design choices or reviewing code structure.

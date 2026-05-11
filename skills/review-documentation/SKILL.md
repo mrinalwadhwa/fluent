@@ -4,7 +4,7 @@ description: >
   Code-aware documentation reviewer. Reads the codebase alongside
   documentation, checks accuracy, writing quality, and completeness.
   Produces a verdict and findings artifact. Uses
-  expertise/writing/documentation.md as its quality reference.
+  expertise/documentation.md as its quality reference.
 ---
 
 # Review Documentation
@@ -61,7 +61,7 @@ For each mismatch, record a finding with:
 ### Phase 3 — Check writing quality
 
 Read each documentation file in scope. Check against the guidance in
-the writing expertise at `expertise/writing/documentation.md`:
+the writing expertise at `expertise/documentation.md`:
 
 **Substance:**
 - Does each paragraph teach the reader something? Flag empty paragraphs
@@ -154,7 +154,7 @@ without re-reading the entire review.
 - **Findings, not rewrites.** Report what's wrong and where. The author
   determines the fix.
 - **Use the writing expertise as the reference.** The expertise at
-  `expertise/writing/documentation.md` defines what good documentation
+  `expertise/documentation.md` defines what good documentation
   looks like. Check against it. Don't invent new rules.
 - **Severity matters.** An inaccurate file path that would break
   someone's workflow is more important than a slightly AI-sounding

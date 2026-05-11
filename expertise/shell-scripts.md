@@ -1,4 +1,4 @@
-# Shell Script Quality
+# How to write shell scripts
 
 Guidelines for writing clear, reliable shell scripts. Drawn from
 Google's Shell Style Guide, MIT SIPB safe shell practices, and

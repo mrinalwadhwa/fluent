@@ -37,12 +37,6 @@ because the tool and the thing being built are the same. Consider
 whether there's a way to use the factory to modify itself, or whether
 self-modification is always manual.
 
-2026-05-10 — Need guidance on writing skills — how to structure them,
-what goes in SKILL.md vs references, how to follow the Agent Skills
-spec. Currently looking up agentskills.io each time. Should be
-captured as a skill or reference in the factory.
-
-
 2026-05-10 — Need a test quality reviewer and a corresponding
 write-tests skill. Similar pattern to write-documentation /
 review-documentation: the skill guides test authoring, the reviewer

@@ -292,8 +292,10 @@ factory/main/
     architecture.md          ← this file
     behaviors.md             ← behavioral statements (EARS)
   expertise/                 ← factory-level (applies to all projects)
-    architecture/
-    languages/
+    architecture.md
+    documentation.md
+    shell-scripts.md
+    skills.md
   .factory/
     observations.md          ← feedback log (tracked)
     expertise/               ← project-level learnings (tracked)

@@ -29,7 +29,7 @@ Read:
 - `.factory/runs/[run-id]/brief.md` — the intent
 - `.factory/runs/[run-id]/behaviors.diff.md` — what the system must do
 - `documentation/architecture.md` — how the system is built today
-- `expertise/architecture/principles.md` — architectural principles for
+- `expertise/architecture.md` — architectural principles for
   evaluating structural decisions
 - Open questions deferred from define-behaviors
 

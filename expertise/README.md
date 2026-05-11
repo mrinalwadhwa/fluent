@@ -7,22 +7,12 @@ need principles, patterns, or conventions to inform their choices.
 Skills are procedures (what to do). Expertise is reference material
 (what to consider when deciding).
 
-## Structure
-
-```
-expertise/
-  architecture/          ← structural decision principles
-  languages/             ← language-specific conventions
-  writing/               ← documentation quality standards
-```
-
 ## Usage
 
 Skills reference expertise files with explicit paths:
 
 ```markdown
-Read expertise/architecture/principles.md when evaluating
-structural decisions.
+Read expertise/architecture.md when evaluating structural decisions.
 ```
 
 Agents load expertise on demand — not all at once.

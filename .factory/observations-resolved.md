@@ -38,7 +38,12 @@ expertise/writing/documentation.md.
 2026-05-11 — Fargate entrypoint duplicated session loop, review
 functions, report generator, and system prompt from factory script.
 → Resolved: entrypoint sources factory script via FACTORY_LIB=1.
-Reduced from 428 lines to 90.
+
+2026-05-10 — Need guidance on writing skills. Keep looking up
+agentskills.io each time.
+→ Resolved: added expertise/skills/writing-skills.md with Agent Skills
+spec patterns, interview-driven design, pacing rules, gotchas, and
+lessons learned from building factory skills.
 
 2026-05-10 — Author agent added Co-Authored-By despite CLAUDE.md and
 wrote process-focused commit messages.
