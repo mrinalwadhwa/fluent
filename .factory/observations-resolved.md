@@ -35,6 +35,11 @@ plan-execution). Expertise layer needed for writing quality guidance.
 expertise/architecture/principles.md. write-documentation moved to
 expertise/writing/documentation.md.
 
+2026-05-11 — Fargate entrypoint duplicated session loop, review
+functions, report generator, and system prompt from factory script.
+→ Resolved: entrypoint sources factory script via FACTORY_LIB=1.
+Reduced from 428 lines to 90.
+
 2026-05-10 — Author agent added Co-Authored-By despite CLAUDE.md and
 wrote process-focused commit messages.
 → Resolved: expanded CLAUDE.md commit guidance with examples, added
