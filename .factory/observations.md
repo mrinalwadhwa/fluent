@@ -5,6 +5,33 @@ potential brief. Promote to a run when ready to act on it.
 
 ---
 
+2026-05-11 — The author agent's skill is mostly about referencing
+expertise: writing code, documentation, architecture, tests. It
+should be written in a way that it knows about expertise and draws
+on it to build whatever it's building. This may be a skill or a
+prompt — unclear which is the right form.
+
+2026-05-11 — During the interactive stages, there were loops where
+the user just typed "yes, keep going" repeatedly. These indicate
+steps that are potentially automatable and may not need a human in
+the loop. The factory should learn from these patterns to reduce
+unnecessary pauses.
+
+2026-05-11 — For the last several iterations, we stopped using the
+brief-based full factory workflow. This might be because we're deep
+into a long session (700k+ tokens of 1M window) and the flow is
+affected by context pressure. Or it might be that these small changes
+genuinely didn't need the full workflow. Worth distinguishing between
+the two causes.
+
+2026-05-11 — To distribute the factory, we need a binary (the shell
+script isn't sufficient) and a way to distribute factory-level skills
+and expertise. This is a big change. Prerequisites: good testing
+setup to guard against regression, skill writing guidance/expertise
+and a skill reviewer, test writing guidance/expertise and a test
+reviewer. All of these improve coverage before we risk breaking core
+functionality with a major structural change.
+
 2026-05-09 — Building the factory itself doesn't use `factory run`
 because the tool and the thing being built are the same. Consider
 whether there's a way to use the factory to modify itself, or whether
