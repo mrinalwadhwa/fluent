@@ -564,40 +564,34 @@ cmd_run() {
 }
 
 # ---------------------------------------------------------------------------
-# Run: local backend
+# Session loop (shared across backends)
 # ---------------------------------------------------------------------------
 
-cmd_run_local() {
-  SOURCE_ROOT="${SANDBOX_ROOT:-$(pwd)}"
+# Capture a session snapshot from ~/.claude into the run's sessions dir.
+capture_snapshot() {
+  SESSION_DIR="${RUN_DIR}/sessions/session-${SESSION_COUNT}"
+  mkdir -p "$SESSION_DIR"
+  CLAUDE_DIR="${HOME}/.claude"
+  if [ -d "$CLAUDE_DIR" ]; then
+    [ -f "${CLAUDE_DIR}/history.jsonl" ] && \
+      cp "${CLAUDE_DIR}/history.jsonl" "${SESSION_DIR}/transcript.jsonl" 2>/dev/null || true
+    PROJ_MEMORY="$(find "${CLAUDE_DIR}/projects" -path "*/memory" -type d 2>/dev/null | head -1 || true)"
+    if [ -n "$PROJ_MEMORY" ] && [ -d "$PROJ_MEMORY" ]; then
+      cp -r "$PROJ_MEMORY" "${SESSION_DIR}/memory" 2>/dev/null || true
+    fi
+    [ -d "${CLAUDE_DIR}/todos" ] && \
+      cp -r "${CLAUDE_DIR}/todos" "${SESSION_DIR}/todos" 2>/dev/null || true
+    [ -d "${CLAUDE_DIR}/plans" ] && \
+      cp -r "${CLAUDE_DIR}/plans" "${SESSION_DIR}/plans" 2>/dev/null || true
+    printf '  Session %d snapshot captured\n' "$SESSION_COUNT"
+  fi
+}
 
-  setup_sandbox
-  inject_credentials
-  setup_git_signing
-  setup_proxy
-  setup_agent_browser
-
-  # Resolve run and create worktree
-  resolve_run_id "$SOURCE_ROOT"
-  setup_run_worktree "$SOURCE_ROOT"
-
-  # Record backend in source run dir
-  printf 'local' > "${RUN_DIR}/backend"
-  printf '%s' "$$" > "${RUN_DIR}/handle"
-
-  # Switch to worktree for execution
-  SANDBOX_ROOT="$WORKTREE_DIR"
-  RUN_DIR="${WORKTREE_DIR}/.factory/runs/${RUN_ID}"
-
-  # Re-render sandbox profile for the worktree path so the agent is
-  # sandboxed to the run worktree, not the source worktree.
-  cat "$COMMON_PROFILE" "$PROFILE_TEMPLATE" | sed \
-    -e "s|_HOME_|$HOME|g" \
-    -e "s|_SANDBOX_ROOT_|$SANDBOX_ROOT|g" \
-    > "$RENDERED_PROFILE"
-
-  printf '  Factory           session loop (run: %s)\n' "$RUN_ID"
-  printf '  Worktree          %s\n' "$WORKTREE_DIR"
-
+# Run the session loop. The caller sets RUN_DIR, RUN_ID, and defines
+# a launch_agent function that takes a prompt and runs the agent.
+# The caller also sets PRE_SESSION_HOOK (optional) for per-session
+# setup like credential refresh.
+run_session_loop() {
   MAX_SESSIONS=50
 
   # Detect run mode
@@ -623,14 +617,12 @@ cmd_run_local() {
       return
     fi
   else
-    # Build initial prompt from brief/handoff
     INITIAL_PROMPT="Read the brief at .factory/runs/${RUN_ID}/brief.md and begin working."
     if [ -f "${RUN_DIR}/handoff.md" ]; then
       INITIAL_PROMPT="Read the handoff at .factory/runs/${RUN_ID}/handoff.md and continue working."
     fi
   fi
 
-  # Session loop
   SESSION_COUNT=0
   CONSECUTIVE_FAILURES=0
   while true; do
@@ -643,33 +635,27 @@ cmd_run_local() {
       break
     fi
 
-    # Refresh OAuth token if needed: run an unsandboxed Claude command to
-    # trigger token refresh (writes back to Keychain), then re-inject.
-    printf '  Refreshing credentials...\n'
-    claude -p "ok" --max-turns 1 > /dev/null 2>&1 || true
-    inject_credentials
+    # Per-session hook (credential refresh for local backend)
+    if [ -n "${PRE_SESSION_HOOK:-}" ]; then
+      eval "$PRE_SESSION_HOOK"
+    fi
 
-    # Build Claude args — first session gets the initial prompt,
-    # subsequent sessions continue from previous conversation
-    CLAUDE_ARGS="-p"
+    # Build prompt
     if [ "$SESSION_COUNT" -eq 1 ]; then
       PROMPT="$INITIAL_PROMPT"
     else
       PROMPT="Continue from the handoff at .factory/runs/${RUN_ID}/handoff.md"
     fi
 
-    # Run the agent. Exit code 0 = normal exit, non-zero = crash/error
+    # Launch agent via caller-defined function
     set +e
-    sandbox-exec -f "$RENDERED_PROFILE" claude \
-      --append-system-prompt "$FACTORY_SYSTEM_PROMPT" \
-      $CLAUDE_ARGS "$PROMPT" \
-      "$@"
+    launch_agent "$PROMPT" "$@"
     AGENT_EXIT=$?
     set -e
 
     printf '\n  Agent exited (code: %d)\n' "$AGENT_EXIT"
 
-    # Track consecutive failures to prevent infinite loops
+    # Track consecutive failures
     if [ "$AGENT_EXIT" -ne 0 ]; then
       CONSECUTIVE_FAILURES=$((CONSECUTIVE_FAILURES + 1))
       if [ "$CONSECUTIVE_FAILURES" -ge 3 ]; then
@@ -681,35 +667,14 @@ cmd_run_local() {
       CONSECUTIVE_FAILURES=0
     fi
 
-    # Capture session snapshot
-    SESSION_DIR="${RUN_DIR}/sessions/session-${SESSION_COUNT}"
-    mkdir -p "$SESSION_DIR"
-    CLAUDE_DIR="${HOME}/.claude"
-    if [ -d "$CLAUDE_DIR" ]; then
-      # Transcript
-      [ -f "${CLAUDE_DIR}/history.jsonl" ] && \
-        cp "${CLAUDE_DIR}/history.jsonl" "${SESSION_DIR}/transcript.jsonl" 2>/dev/null || true
-      # Memory
-      PROJ_MEMORY="$(find "${CLAUDE_DIR}/projects" -path "*/memory" -type d 2>/dev/null | head -1 || true)"
-      if [ -n "$PROJ_MEMORY" ] && [ -d "$PROJ_MEMORY" ]; then
-        cp -r "$PROJ_MEMORY" "${SESSION_DIR}/memory" 2>/dev/null || true
-      fi
-      # Todos
-      [ -d "${CLAUDE_DIR}/todos" ] && \
-        cp -r "${CLAUDE_DIR}/todos" "${SESSION_DIR}/todos" 2>/dev/null || true
-      # Plans
-      [ -d "${CLAUDE_DIR}/plans" ] && \
-        cp -r "${CLAUDE_DIR}/plans" "${SESSION_DIR}/plans" 2>/dev/null || true
-      printf '  Session %d snapshot captured\n' "$SESSION_COUNT"
-    fi
+    capture_snapshot
 
-    # Read status file
+    # Read status and decide
     STATUS="$(cat "${RUN_DIR}/status" 2>/dev/null || echo "unknown")"
     printf '  Run status: %s\n' "$STATUS"
 
     case "$STATUS" in
       complete)
-        # Run review phase before accepting completion
         REVIEW_SCOPE="run-scoped"
         [ "$RUN_MODE" = "review" ] && REVIEW_SCOPE="full-codebase"
         if run_reviews "$RUN_DIR" "$RUN_ID" "$REVIEWER_FILTER" "$REVIEW_SCOPE"; then
@@ -737,161 +702,6 @@ cmd_run_local() {
         break
         ;;
       executing)
-        printf '  Handoff written — restarting session...\n'
-        sleep 2
-        ;;
-      rate-limited)
-        printf '  Rate limited — waiting 5 minutes before retry...\n'
-        sleep 300
-        ;;
-      *)
-        printf '  Unexpected status "%s" — stopping.\n' "$STATUS"
-        break
-        ;;
-    esac
-  done
-
-  printf '\n  Total sessions: %d\n' "$SESSION_COUNT"
-}
-
-# ---------------------------------------------------------------------------
-# Run: bare (no sandbox, for Fargate or Linux)
-# ---------------------------------------------------------------------------
-
-cmd_run_bare() {
-  SEARCH_ROOT="${SANDBOX_ROOT:-$(pwd)}"
-
-  # No worktree creation in bare mode — we're already in the worktree
-  # (on Fargate, the entrypoint writes active-run; locally, cmd_run_local did)
-  resolve_run_id "$SEARCH_ROOT"
-
-  printf 'factory: bare session loop (run: %s)\n' "$RUN_ID"
-
-  MAX_SESSIONS=50
-
-  # Detect run mode
-  RUN_MODE="$(cat "${RUN_DIR}/mode" 2>/dev/null || echo "build")"
-  REVIEWER_FILTER="$(cat "${RUN_DIR}/reviewers" 2>/dev/null || true)"
-
-  # Set status to executing if starting fresh
-  CURRENT_STATUS="$(cat "${RUN_DIR}/status" 2>/dev/null || true)"
-  if [ "$CURRENT_STATUS" = "planned" ]; then
-    printf 'executing' > "${RUN_DIR}/status"
-  fi
-
-  # For review runs, start by running reviewers to get initial findings
-  if [ "$RUN_MODE" = "review" ]; then
-    printf '  Mode: review (reviewers run first)\n'
-    REVIEW_SCOPE="full-codebase"
-    if ! run_reviews "$RUN_DIR" "$RUN_ID" "$REVIEWER_FILTER" "$REVIEW_SCOPE"; then
-      INITIAL_PROMPT="This is a review run. Reviewers have produced findings. Read the review artifacts at .factory/runs/${RUN_ID}/reviews/ and address the findings. When done, write status 'complete'."
-    else
-      printf '\n  All reviewers passed — nothing to fix.\n'
-      printf 'complete' > "${RUN_DIR}/status"
-      printf '\n  Run %s completed.\n' "$RUN_ID"
-      return
-    fi
-  else
-    # Build initial prompt from brief
-    INITIAL_PROMPT="Read the brief at .factory/runs/${RUN_ID}/brief.md and begin working."
-    if [ -f "${RUN_DIR}/handoff.md" ]; then
-      INITIAL_PROMPT="Read the handoff at .factory/runs/${RUN_ID}/handoff.md and continue working."
-    fi
-  fi
-
-  # Session loop — no sandbox, no credential refresh, no proxy
-  SESSION_COUNT=0
-  CONSECUTIVE_FAILURES=0
-  while true; do
-    SESSION_COUNT=$((SESSION_COUNT + 1))
-    printf '\n  === Session %d (run: %s) ===\n\n' "$SESSION_COUNT" "$RUN_ID"
-
-    if [ "$SESSION_COUNT" -gt "$MAX_SESSIONS" ]; then
-      printf '  Max sessions (%d) reached — stopping.\n' "$MAX_SESSIONS"
-      printf 'failed' > "${RUN_DIR}/status"
-      break
-    fi
-
-    CLAUDE_ARGS="-p"
-    if [ "$SESSION_COUNT" -eq 1 ]; then
-      PROMPT="$INITIAL_PROMPT"
-    else
-      PROMPT="Continue from the handoff at .factory/runs/${RUN_ID}/handoff.md"
-    fi
-
-    set +e
-    claude \
-      --dangerously-skip-permissions \
-      --append-system-prompt "$FACTORY_SYSTEM_PROMPT" \
-      $CLAUDE_ARGS "$PROMPT" \
-      "$@"
-    AGENT_EXIT=$?
-    set -e
-
-    printf '\n  Agent exited (code: %d)\n' "$AGENT_EXIT"
-
-    # Track consecutive failures to prevent infinite loops
-    if [ "$AGENT_EXIT" -ne 0 ]; then
-      CONSECUTIVE_FAILURES=$((CONSECUTIVE_FAILURES + 1))
-      if [ "$CONSECUTIVE_FAILURES" -ge 3 ]; then
-        printf '  %d consecutive failures — stopping.\n' "$CONSECUTIVE_FAILURES"
-        printf 'failed' > "${RUN_DIR}/status"
-        break
-      fi
-    else
-      CONSECUTIVE_FAILURES=0
-    fi
-
-    # Capture session snapshot
-    SESSION_DIR="${RUN_DIR}/sessions/session-${SESSION_COUNT}"
-    mkdir -p "$SESSION_DIR"
-
-    # Copy Claude state if available (EFS shared path on Fargate)
-    CLAUDE_DIR="${HOME}/.claude"
-    CLAUDE_STATE="${SEARCH_ROOT}/.claude-state"
-    SRC="${CLAUDE_DIR}"
-    [ -d "$CLAUDE_STATE" ] && SRC="$CLAUDE_STATE"
-
-    if [ -d "$SRC" ]; then
-      [ -f "${SRC}/history.jsonl" ] && \
-        cp "${SRC}/history.jsonl" "${SESSION_DIR}/transcript.jsonl" 2>/dev/null || true
-      PROJ_MEMORY="$(find "${SRC}" -path "*/memory" -type d 2>/dev/null | head -1 || true)"
-      if [ -n "$PROJ_MEMORY" ] && [ -d "$PROJ_MEMORY" ]; then
-        cp -r "$PROJ_MEMORY" "${SESSION_DIR}/memory" 2>/dev/null || true
-      fi
-      [ -d "${SRC}/todos" ] && cp -r "${SRC}/todos" "${SESSION_DIR}/todos" 2>/dev/null || true
-      [ -d "${SRC}/plans" ] && cp -r "${SRC}/plans" "${SESSION_DIR}/plans" 2>/dev/null || true
-      printf '  Session %d snapshot captured\n' "$SESSION_COUNT"
-    fi
-
-    # Read status and decide
-    STATUS="$(cat "${RUN_DIR}/status" 2>/dev/null || echo "unknown")"
-    printf '  Run status: %s\n' "$STATUS"
-
-    case "$STATUS" in
-      complete)
-        # Run review phase before accepting completion
-        REVIEW_SCOPE="run-scoped"
-        [ "$RUN_MODE" = "review" ] && REVIEW_SCOPE="full-codebase"
-        if run_reviews "$RUN_DIR" "$RUN_ID" "$REVIEWER_FILTER" "$REVIEW_SCOPE"; then
-          printf '\n  Run %s completed.\n' "$RUN_ID"
-          break
-        else
-          printf '  Review returned findings — restarting author...\n'
-          printf 'executing' > "${RUN_DIR}/status"
-          PROMPT="Reviewers found issues. Read the review artifacts at .factory/runs/${RUN_ID}/reviews/ and address the findings."
-          sleep 2
-        fi
-        ;;
-      needs-user)
-        printf '\n  Run %s needs user input.\n' "$RUN_ID"
-        break
-        ;;
-      failed)
-        printf '\n  Run %s failed.\n' "$RUN_ID"
-        break
-        ;;
-      executing)
         printf '  Restarting session...\n'
         sleep 2
         ;;
@@ -907,6 +717,83 @@ cmd_run_bare() {
   done
 
   printf '\n  Total sessions: %d\n' "$SESSION_COUNT"
+}
+
+# ---------------------------------------------------------------------------
+# Run: local backend
+# ---------------------------------------------------------------------------
+
+cmd_run_local() {
+  SOURCE_ROOT="${SANDBOX_ROOT:-$(pwd)}"
+
+  setup_sandbox
+  inject_credentials
+  setup_git_signing
+  setup_proxy
+  setup_agent_browser
+
+  # Resolve run and create worktree
+  resolve_run_id "$SOURCE_ROOT"
+  setup_run_worktree "$SOURCE_ROOT"
+
+  # Record backend in source run dir
+  printf 'local' > "${RUN_DIR}/backend"
+  printf '%s' "$$" > "${RUN_DIR}/handle"
+
+  # Switch to worktree for execution
+  SANDBOX_ROOT="$WORKTREE_DIR"
+  RUN_DIR="${WORKTREE_DIR}/.factory/runs/${RUN_ID}"
+
+  # Re-render sandbox profile for the worktree path
+  cat "$COMMON_PROFILE" "$PROFILE_TEMPLATE" | sed \
+    -e "s|_HOME_|$HOME|g" \
+    -e "s|_SANDBOX_ROOT_|$SANDBOX_ROOT|g" \
+    > "$RENDERED_PROFILE"
+
+  printf '  Factory           session loop (run: %s)\n' "$RUN_ID"
+  printf '  Worktree          %s\n' "$WORKTREE_DIR"
+
+  # Define how this backend launches the agent
+  launch_agent() {
+    LAUNCH_PROMPT="$1"; shift
+    sandbox-exec -f "$RENDERED_PROFILE" claude \
+      --append-system-prompt "$FACTORY_SYSTEM_PROMPT" \
+      -p "$LAUNCH_PROMPT" \
+      "$@"
+  }
+
+  # Refresh credentials before each session
+  PRE_SESSION_HOOK='printf "  Refreshing credentials...\n"; claude -p "ok" --max-turns 1 > /dev/null 2>&1 || true; inject_credentials'
+
+  run_session_loop "$@"
+}
+
+# ---------------------------------------------------------------------------
+# Run: bare (no sandbox, for Fargate or Linux)
+# ---------------------------------------------------------------------------
+
+cmd_run_bare() {
+  SEARCH_ROOT="${SANDBOX_ROOT:-$(pwd)}"
+
+  # No worktree creation — already in the worktree
+  resolve_run_id "$SEARCH_ROOT"
+
+  printf 'factory: bare session loop (run: %s)\n' "$RUN_ID"
+
+  # Define how this backend launches the agent
+  launch_agent() {
+    LAUNCH_PROMPT="$1"; shift
+    claude \
+      --dangerously-skip-permissions \
+      --append-system-prompt "$FACTORY_SYSTEM_PROMPT" \
+      -p "$LAUNCH_PROMPT" \
+      "$@"
+  }
+
+  # No per-session hook in bare mode
+  PRE_SESSION_HOOK=""
+
+  run_session_loop "$@"
 }
 
 # ---------------------------------------------------------------------------
