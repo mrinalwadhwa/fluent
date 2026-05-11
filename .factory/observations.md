@@ -20,18 +20,7 @@ captured as a skill or reference in the factory.
 user has no visibility into what happened without manually reading
 review artifacts and git diffs. The build-in-the-factory skill should
 present a conversational digest at the end of a run: what reviewers
-found, what the author changed, what passed, what's still open. The
-user can ask follow-up questions. Commit messages also need guidance
-in the factory — the author agent's commit messages during the review
-run were action-focused ("Run X and fix Y") rather than change-focused
-("Improve X and add Y"). Body should use bullet points.
-
-2026-05-10 — First full-codebase review run worked end-to-end. Two issues:
-(1) The author agent added a Co-Authored-By line despite CLAUDE.md
-prohibiting it. The system prompt or skill needs to reinforce this.
-(2) The author committed directly to main because cmd_run_bare doesn't
-create a worktree. Review runs via --no-sandbox skip worktree creation.
-Need to ensure review runs still get worktree isolation.
+found, what the author changed, what passed, what's still open.
 
 2026-05-10 — Need a test quality reviewer and a corresponding
 write-tests skill. Similar pattern to write-documentation /

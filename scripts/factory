@@ -89,7 +89,13 @@ Status: [current stage]
 
 ## Session start
 
-On session start, check .factory/runs/ for active runs. If a handoff.md exists, read it and continue from where the previous session left off. Do not re-read the full history — the handoff is your starting context.'
+## Session start
+
+On session start, check .factory/runs/ for active runs. If a handoff.md exists, read it and continue from where the previous session left off. Do not re-read the full history — the handoff is your starting context.
+
+## Commit rules
+
+Read CLAUDE.md for commit message conventions. Key rules: describe the change not the process, use bullet points in the body, never add Co-Authored-By trailers, never reference run IDs or review artifacts in commit messages.'
 
 # ---------------------------------------------------------------------------
 # Sandbox setup (shared across subcommands)
@@ -775,10 +781,19 @@ cmd_run_local() {
 cmd_run_bare() {
   SEARCH_ROOT="${SANDBOX_ROOT:-$(pwd)}"
 
-  # No worktree creation — already in the worktree
   resolve_run_id "$SEARCH_ROOT"
 
-  printf 'factory: bare session loop (run: %s)\n' "$RUN_ID"
+  # Create worktree if we're in a git repo (local --no-sandbox).
+  # On Fargate, there's no git repo — the entrypoint handles workspace setup.
+  if git -C "$SEARCH_ROOT" rev-parse --git-dir > /dev/null 2>&1; then
+    setup_run_worktree "$SEARCH_ROOT"
+    RUN_DIR="${WORKTREE_DIR}/.factory/runs/${RUN_ID}"
+    SEARCH_ROOT="$WORKTREE_DIR"
+    printf 'factory: bare session loop (run: %s)\n' "$RUN_ID"
+    printf '  Worktree          %s\n' "$WORKTREE_DIR"
+  else
+    printf 'factory: bare session loop (run: %s)\n' "$RUN_ID"
+  fi
 
   # Define how this backend launches the agent
   launch_agent() {

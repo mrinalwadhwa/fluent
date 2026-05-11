@@ -34,3 +34,13 @@ plan-execution). Expertise layer needed for writing quality guidance.
 → Resolved: design-approach and plan-execution reference
 expertise/architecture/principles.md. write-documentation moved to
 expertise/writing/documentation.md.
+
+2026-05-10 — Author agent added Co-Authored-By despite CLAUDE.md and
+wrote process-focused commit messages.
+→ Resolved: expanded CLAUDE.md commit guidance with examples, added
+commit rules to factory system prompt.
+
+2026-05-10 — Review runs via --no-sandbox skip worktree creation.
+Author commits directly to main.
+→ Resolved: cmd_run_bare creates worktree when in a git repo (local).
+Skips on Fargate where there's no git repo.

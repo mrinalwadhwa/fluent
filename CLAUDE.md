@@ -4,17 +4,33 @@ These instructions define how Coding Agents should assist with this project.
 
 ## Commit messages
 
+### Subject line
 - Use imperative mood and active voice
-- Start the subject line with a verb: "Add", "Fix", "Update", "Remove", "Refactor"
-- Keep the subject line under 50 characters
-- Capitalize the first letter of the subject line
-- Do not end the subject line with a period
-- Separate the subject from the body with a blank line
-- Wrap the body at 72 characters
-- Use the body to explain what and why, not how
-- Focus on the change itself, not the process of making it
-- Write as if completing the sentence: "If applied, this commit will..."
-- Do not add yourself as a co-author using Co-Authored-By trailers
+- Start with a verb: "Add", "Fix", "Update", "Remove", "Refactor"
+- Keep under 50 characters
+- Capitalize the first letter
+- Do not end with a period
+- Describe the change, not the process that led to it
+  - Good: "Fix sandbox worktree binding"
+  - Bad: "Run review and fix issues found"
+  - Bad: "Address reviewer findings"
+- Use "Improve" over "Fix" when the change enhances something
+  that was working but could be better. "Fix" implies it was broken.
+
+### Body
+- Separate from the subject with a blank line
+- Use bullet points (- prefix) for listing changes
+- Wrap at 72 characters
+- Explain what changed and why, not how
+- Do not reference the process: no "from review run," "based on
+  reviewer feedback," or "as part of run X"
+
+### Prohibited
+- Do not add Co-Authored-By trailers
+- Do not reference run IDs, review artifacts, or factory internals
+- Do not include counts or statistics: "fix 12 issues," "remove
+  3,000 lines," "update 47 files." The diff shows the numbers.
+  The message describes the change.
 
 ## Linear history
 
