@@ -11,7 +11,7 @@ from intent capture through execution and review across multiple sessions.
 │  capture-brief, define-behaviors,               │
 │  design-approach, plan-execution                │
 │  review-documentation, review-behaviors,        │
-│  review-architecture                            │
+│  review-architecture, review-skills              │
 │  Portable procedures any agent follows          │
 ├─────────────────────────────────────────────────┤
 │  build-in-the-factory skill                     │
@@ -159,7 +159,7 @@ than drifting.
 
 ### Reviewers
 
-Evaluate the author's output. Three reviewers:
+Evaluate the author's output. Four reviewers:
 
 **Documentation reviewer** (code-aware): reads code and docs, checks
 accuracy, writing quality, and completeness
@@ -172,6 +172,10 @@ code — evaluates the system from the outside, as a user would
 **Architecture reviewer** (code-aware): reads code and architectural
 expertise, evaluates structural decisions against principles
 (`skills/review-architecture/SKILL.md`).
+
+**Skill reviewer** (code-aware): reads skill files and checks them
+against `expertise/skills.md` for structure, quality, spec compliance,
+and writing quality (`skills/review-skills/SKILL.md`).
 
 Review verdicts: **pass** / **uncertain** (ask user) / **fail** (send
 back to author with findings).
@@ -314,6 +318,7 @@ factory/main/
     review-architecture/SKILL.md
     review-behaviors/SKILL.md
     review-documentation/SKILL.md
+    review-skills/SKILL.md
   infrastructure/
     cloudformation.yaml
     run/

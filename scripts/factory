@@ -647,7 +647,7 @@ generate_report() {
 
     printf '## Artifacts\n\n'
     for artifact in brief.md behaviors.diff.md approach.md plan.md; do
-      [ -f "${RUN_DIR}/${artifact}" ] && printf '- %s\n' "$artifact"
+      [ -f "${RUN_DIR}/${artifact}" ] && printf '%s\n' "- ${artifact}"
     done
     printf '\n'
   } > "$REPORT_FILE"
