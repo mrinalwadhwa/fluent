@@ -67,21 +67,27 @@ Test: tests/test-run (setup_run_worktree from non-main branch)
 WHEN `factory run` is invoked with the local backend,
 THE SYSTEM SHALL launch Claude in print mode with the brief or handoff
 as the initial prompt.
+Test: tests/behaviors/operations/test-session-loop.sh (initial prompt uses brief, initial prompt uses handoff)
 
 WHEN the agent exits with status `executing`,
 THE SYSTEM SHALL capture a session snapshot and restart the agent.
+Test: tests/behaviors/operations/test-session-loop.sh (loop restarts on executing)
 
 WHEN the agent exits with status `needs-user`, `complete`, or `failed`,
 THE SYSTEM SHALL capture a session snapshot and stop the loop.
+Test: tests/behaviors/operations/test-session-loop.sh (loop stops on needs-user, loop stops on failed), tests/behaviors/operations/test-review-phase.sh (complete with passing reviews stops loop)
 
 WHEN the agent exits with status `rate-limited`,
 THE SYSTEM SHALL wait 5 minutes and restart the agent.
+Test: tests/behaviors/operations/test-session-loop.sh (loop restarts on rate-limited)
 
 IF the agent exits with a non-zero exit code 3 consecutive times,
 THEN THE SYSTEM SHALL set status to `failed` and stop the loop.
+Test: tests/behaviors/operations/test-session-loop.sh (consecutive failures set failed, success resets failure counter)
 
 IF the session count exceeds 50,
 THEN THE SYSTEM SHALL set status to `failed` and stop the loop.
+Test: tests/behaviors/operations/test-session-loop.sh (max sessions sets failed)
 
 ## Session loop (local) — credential refresh
 
@@ -144,20 +150,23 @@ Test: tests/test-run (resolve run-id tests), tests/behaviors/operations/test-sco
 
 WHEN the author sets status to `complete`,
 THE SYSTEM SHALL run all reviewers in parallel before accepting completion.
+Test: tests/behaviors/operations/test-review-phase.sh (complete with passing reviews stops loop, review failure restarts author)
 
 WHEN all reviewers return verdict `pass`,
 THE SYSTEM SHALL accept the run as complete and stop the loop.
+Test: tests/behaviors/operations/test-review-phase.sh (all reviewers pass returns zero, complete with passing reviews stops loop)
 
 WHEN any reviewer returns verdict `fail` or `uncertain`,
 THE SYSTEM SHALL set status back to `executing` and restart the author
 with the review findings.
+Test: tests/behaviors/operations/test-review-phase.sh (reviewer fail returns non-zero, reviewer uncertain returns non-zero, review failure restarts author)
 
 ## Review runs
 
 WHEN `factory run` is invoked and the run's mode is `review`,
 THE SYSTEM SHALL run reviewers first (before the author) with full-codebase
 scope, then pass findings to the author.
-Test: tests/behaviors/operations/test-review-mode.sh
+Test: tests/behaviors/operations/test-review-mode.sh, tests/behaviors/operations/test-review-phase.sh (review run findings launch author)
 
 WHEN `factory run` is invoked and the run has a `scope` file,
 THE SYSTEM SHALL copy the scope file into the worktree.
@@ -166,6 +175,7 @@ Test: tests/behaviors/operations/test-scope-and-edges.sh
 WHEN reviewers all pass on a review run's initial review,
 THE SYSTEM SHALL set status to `complete` and stop the loop without
 launching the author.
+Test: tests/behaviors/operations/test-review-phase.sh (review run all pass completes without author)
 
 ## Resume
 
