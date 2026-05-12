@@ -544,7 +544,7 @@ generate_report() {
         [ -f "$review" ] || continue
         REVIEWER_NAME="$(basename "$review" .md | sed 's/^review-//')"
         VERDICT="$(grep -i '^Verdict:' "$review" | head -1 | sed 's/.*: *//')"
-        printf '- **%s**: %s\n' "$REVIEWER_NAME" "${VERDICT:-no verdict}"
+        printf '%s\n' "- **${REVIEWER_NAME}**: ${VERDICT:-no verdict}"
       done
       printf '\n'
     else
