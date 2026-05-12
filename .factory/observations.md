@@ -83,6 +83,15 @@ point instead of current HEAD. This means retries don't pick up fixes
 made to main between attempts. The worktree should rebase or reset to
 current HEAD on reuse, or the run-id should be unique per attempt.
 
+2026-05-12 — The factory's interface should be richer than a
+traditional CLI. The interactive phases drive conversations, autonomous
+phases show parallel progress, and the factory mediates between user
+and agent. A TUI is the natural fit — ratatui + crossterm in Rust.
+Start minimal (status bar, session indicators, reviewer progress),
+evolve toward split panes (conversation + status + progress). Web UI
+is future but don't over-engineer for it now. This should be its own
+run after the Rust port.
+
 2026-05-09 — The refine-writing skill at ~/Workspace/skills has
 reference files (ai_tells.md, benchmarks.md, sentence_corrections.md,
 structural_guidance.md) with much more detail than what was captured
