@@ -37,12 +37,6 @@ The factory script should clean up worktrees for completed review
 runs, or factory status should show orphaned worktrees so the user
 knows to clean them up.
 
-2026-05-11 — Three of four reviewers printed results to stdout but
-didn't write the review artifact file during the latest review run.
-The verdict check defaulted to pass. Need to investigate why
-artifact files aren't being written — the reviewers may be working
-in the worktree but writing to a path that doesn't resolve correctly.
-
 2026-05-09 — Building the factory itself doesn't use `factory run`
 because the tool and the thing being built are the same. Consider
 whether there's a way to use the factory to modify itself, or whether

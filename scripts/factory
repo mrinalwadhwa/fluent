@@ -383,6 +383,10 @@ run_single_reviewer() {
   REVIEWER_RUN_DIR="$4"
   REVIEWER_RESULT_FILE="$5"
 
+  # Run from the project root so relative paths in prompts resolve correctly.
+  # Each reviewer runs in a background subshell, so cd is isolated.
+  cd "${REVIEWER_RUN_DIR%/.factory/runs/*}"
+
   printf '  [%s] starting...\n' "$REVIEWER_NAME"
 
   set +e

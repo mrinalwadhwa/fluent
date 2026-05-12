@@ -233,6 +233,41 @@ test_setup_run_worktree_from_branch() {
   return $RESULT
 }
 
+test_reviewer_artifact_resolves_to_worktree() {
+  setup_test_project
+  ORIGINAL_ROOT="$(pwd)"
+
+  RUN_ID="test-review-path"
+  mkdir -p ".factory/runs/${RUN_ID}"
+  printf 'Brief' > ".factory/runs/${RUN_ID}/brief.md"
+  printf 'planned' > ".factory/runs/${RUN_ID}/status"
+  RUN_DIR="${ORIGINAL_ROOT}/.factory/runs/${RUN_ID}"
+
+  setup_run_worktree "$ORIGINAL_ROOT"
+  WORKTREE_RUN_DIR="${WORKTREE_DIR}/.factory/runs/${RUN_ID}"
+  mkdir -p "${WORKTREE_RUN_DIR}/reviews"
+
+  # Mock claude: writes review file at relative path (simulates agent behavior).
+  # The real agent is told to write to .factory/runs/RUN_ID/reviews/review-NAME.md.
+  # Without the cd fix in run_single_reviewer, this resolves to the original
+  # project root instead of the worktree, and the artifact check fails.
+  claude() {
+    mkdir -p ".factory/runs/test-review-path/reviews"
+    printf 'Verdict: pass\n\nLooks good.' > ".factory/runs/test-review-path/reviews/review-mock.md"
+  }
+
+  RESULT_FILE="$(mktemp)"
+  run_single_reviewer "mock" "system" "prompt" "$WORKTREE_RUN_DIR" "$RESULT_FILE"
+
+  RESULT=0
+  assert_file_exists "${WORKTREE_RUN_DIR}/reviews/review-mock.md" || RESULT=1
+  [ "$(cat "$RESULT_FILE")" = "pass" ] || { printf '    FAIL: verdict not extracted\n'; RESULT=1; }
+
+  rm -f "$RESULT_FILE"
+  cleanup_test_project
+  return $RESULT
+}
+
 test_status_display() {
   setup_test_project
 
@@ -268,6 +303,7 @@ run_test "resolve run-id via scan" test_resolve_run_id_via_scan
 run_test "resolve run-id flag overrides active-run" test_resolve_run_id_flag_overrides_active_run
 run_test "setup_run_worktree creates worktree with state" test_setup_run_worktree
 run_test "setup_run_worktree from non-main branch" test_setup_run_worktree_from_branch
+run_test "reviewer artifact resolves to worktree" test_reviewer_artifact_resolves_to_worktree
 run_test "status display shows all runs" test_status_display
 
 printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
