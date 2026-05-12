@@ -1,0 +1,568 @@
+use anyhow::{bail, Context, Result};
+use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// Status values a run can have.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunStatus {
+    Briefed,
+    BehaviorsDefined,
+    ApproachDesigned,
+    Planned,
+    Executing,
+    RateLimited,
+    NeedsUser,
+    Complete,
+    Failed,
+    Unknown(String),
+}
+
+impl RunStatus {
+    pub fn parse(s: &str) -> Self {
+        match s.trim() {
+            "briefed" => Self::Briefed,
+            "behaviors-defined" => Self::BehaviorsDefined,
+            "approach-designed" => Self::ApproachDesigned,
+            "planned" => Self::Planned,
+            "executing" => Self::Executing,
+            "rate-limited" => Self::RateLimited,
+            "needs-user" => Self::NeedsUser,
+            "complete" => Self::Complete,
+            "failed" => Self::Failed,
+            other => Self::Unknown(other.to_string()),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Briefed => "briefed",
+            Self::BehaviorsDefined => "behaviors-defined",
+            Self::ApproachDesigned => "approach-designed",
+            Self::Planned => "planned",
+            Self::Executing => "executing",
+            Self::RateLimited => "rate-limited",
+            Self::NeedsUser => "needs-user",
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+            Self::Unknown(s) => s.as_str(),
+        }
+    }
+
+    /// Whether this status means the run is active and eligible for scanning.
+    pub fn is_active(&self) -> bool {
+        matches!(self, Self::Planned | Self::Executing)
+    }
+
+    /// Whether this status is terminal.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Complete | Self::Failed | Self::NeedsUser)
+    }
+
+    /// Whether this status is resumable (needs-user or failed).
+    pub fn is_resumable(&self) -> bool {
+        matches!(self, Self::NeedsUser | Self::Failed)
+    }
+}
+
+impl fmt::Display for RunStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A resolved run with its ID, directory, and metadata.
+#[derive(Debug, Clone)]
+pub struct Run {
+    pub id: String,
+    pub dir: PathBuf,
+}
+
+impl Run {
+    pub fn status(&self) -> Result<RunStatus> {
+        let path = self.dir.join("status");
+        match fs::read_to_string(&path) {
+            Ok(s) => Ok(RunStatus::parse(&s)),
+            Err(_) => Ok(RunStatus::Unknown("-".into())),
+        }
+    }
+
+    pub fn set_status(&self, status: &RunStatus) -> Result<()> {
+        fs::write(self.dir.join("status"), status.as_str())
+            .context("Failed to write run status")
+    }
+
+    pub fn backend(&self) -> String {
+        fs::read_to_string(self.dir.join("backend")).unwrap_or_else(|_| "-".into())
+    }
+
+    pub fn brief_summary(&self) -> String {
+        let path = self.dir.join("brief.md");
+        match fs::read_to_string(&path) {
+            Ok(content) => {
+                content
+                    .lines()
+                    .filter(|l| !l.starts_with('#') && !l.is_empty())
+                    .next()
+                    .map(|l| {
+                        if l.len() > 50 {
+                            format!("{}...", &l[..47])
+                        } else {
+                            l.to_string()
+                        }
+                    })
+                    .unwrap_or_else(|| "(brief exists)".into())
+            }
+            Err(_) => "-".into(),
+        }
+    }
+
+    pub fn mode(&self) -> String {
+        fs::read_to_string(self.dir.join("mode")).unwrap_or_else(|_| "build".into())
+    }
+
+    pub fn reviewer_filter(&self) -> String {
+        fs::read_to_string(self.dir.join("reviewers")).unwrap_or_default()
+    }
+
+    pub fn scope(&self) -> Option<String> {
+        fs::read_to_string(self.dir.join("scope")).ok()
+    }
+
+    pub fn has_handoff(&self) -> bool {
+        self.dir.join("handoff.md").exists()
+    }
+
+    pub fn handle(&self) -> Option<String> {
+        fs::read_to_string(self.dir.join("handle")).ok()
+    }
+}
+
+/// Resolve a run ID from the given search root.
+///
+/// Priority chain:
+/// 1. Explicit run_id (from --run-id flag)
+/// 2. FACTORY_RUN_ID env var
+/// 3. .factory/active-run file
+/// 4. Scan .factory/runs/ for active runs
+pub fn resolve_run(search_root: &Path, explicit_id: Option<&str>) -> Result<Run> {
+    let runs_dir = search_root.join(".factory/runs");
+
+    // 1. Explicit run ID
+    if let Some(id) = explicit_id {
+        let dir = runs_dir.join(id);
+        if !dir.is_dir() {
+            bail!("Run directory not found: {}", dir.display());
+        }
+        return Ok(Run {
+            id: id.to_string(),
+            dir,
+        });
+    }
+
+    // 2. FACTORY_RUN_ID env var
+    if let Ok(id) = std::env::var("FACTORY_RUN_ID") {
+        if !id.is_empty() {
+            let dir = runs_dir.join(&id);
+            if !dir.is_dir() {
+                bail!("Run directory not found: {}", dir.display());
+            }
+            return Ok(Run { id, dir });
+        }
+    }
+
+    // 3. active-run pointer
+    let active_run_path = search_root.join(".factory/active-run");
+    if active_run_path.exists() {
+        let id = fs::read_to_string(&active_run_path)
+            .context("Failed to read active-run")?
+            .trim()
+            .to_string();
+        let dir = runs_dir.join(&id);
+        if dir.is_dir() {
+            return Ok(Run { id, dir });
+        }
+        // Stale pointer — fall through to scan
+    }
+
+    // 4. Scan for active run
+    if runs_dir.is_dir() {
+        if let Some(run) = scan_active_run(&runs_dir)? {
+            return Ok(run);
+        }
+    }
+
+    bail!("No active run found. Create a brief and plan first.")
+}
+
+/// Resolve a run that is resumable (needs-user or failed).
+pub fn resolve_resumable_run(search_root: &Path, explicit_id: Option<&str>) -> Result<Run> {
+    let runs_dir = search_root.join(".factory/runs");
+
+    if let Some(id) = explicit_id {
+        let dir = runs_dir.join(id);
+        if !dir.is_dir() {
+            bail!("Run directory not found: {}", dir.display());
+        }
+        return Ok(Run {
+            id: id.to_string(),
+            dir,
+        });
+    }
+
+    if runs_dir.is_dir() {
+        for entry in fs::read_dir(&runs_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let status_path = path.join("status");
+            if status_path.exists() {
+                let s = fs::read_to_string(&status_path).unwrap_or_default();
+                let status = RunStatus::parse(&s);
+                if status.is_resumable() {
+                    let id = entry.file_name().to_string_lossy().to_string();
+                    return Ok(Run { id, dir: path });
+                }
+            }
+        }
+    }
+
+    bail!("No run found needing resume.")
+}
+
+/// Scan .factory/runs/ for an active run (planned or executing).
+fn scan_active_run(runs_dir: &Path) -> Result<Option<Run>> {
+    let mut found: Option<Run> = None;
+
+    for entry in fs::read_dir(runs_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let status_path = path.join("status");
+        if status_path.exists() {
+            let s = fs::read_to_string(&status_path).unwrap_or_default();
+            let status = RunStatus::parse(&s);
+            if status.is_active() {
+                let id = entry.file_name().to_string_lossy().to_string();
+                found = Some(Run { id, dir: path });
+            }
+        }
+    }
+
+    Ok(found)
+}
+
+/// List all runs in a search root.
+pub fn list_runs(search_root: &Path) -> Result<Vec<Run>> {
+    let runs_dir = search_root.join(".factory/runs");
+    let mut runs = Vec::new();
+
+    if !runs_dir.is_dir() {
+        return Ok(runs);
+    }
+
+    for entry in fs::read_dir(&runs_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().to_string();
+        runs.push(Run { id, dir: path });
+    }
+
+    runs.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(runs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn setup_test_project() -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join(".factory/runs")).unwrap();
+        tmp
+    }
+
+    fn create_run(root: &Path, id: &str, status: &str) {
+        let run_dir = root.join(format!(".factory/runs/{id}"));
+        fs::create_dir_all(&run_dir).unwrap();
+        fs::write(run_dir.join("status"), status).unwrap();
+        fs::write(run_dir.join("brief.md"), format!("Brief for {id}")).unwrap();
+    }
+
+    #[test]
+    fn test_run_status_parse() {
+        assert_eq!(RunStatus::parse("planned"), RunStatus::Planned);
+        assert_eq!(RunStatus::parse("executing"), RunStatus::Executing);
+        assert_eq!(RunStatus::parse("complete"), RunStatus::Complete);
+        assert_eq!(RunStatus::parse("needs-user"), RunStatus::NeedsUser);
+        assert_eq!(RunStatus::parse("failed"), RunStatus::Failed);
+        assert_eq!(RunStatus::parse("rate-limited"), RunStatus::RateLimited);
+        assert_eq!(
+            RunStatus::parse("briefed"),
+            RunStatus::Briefed
+        );
+        assert_eq!(
+            RunStatus::parse("behaviors-defined"),
+            RunStatus::BehaviorsDefined
+        );
+        assert_eq!(
+            RunStatus::parse("approach-designed"),
+            RunStatus::ApproachDesigned
+        );
+    }
+
+    #[test]
+    fn test_status_is_active() {
+        assert!(RunStatus::Planned.is_active());
+        assert!(RunStatus::Executing.is_active());
+        assert!(!RunStatus::Complete.is_active());
+        assert!(!RunStatus::NeedsUser.is_active());
+        assert!(!RunStatus::Failed.is_active());
+    }
+
+    #[test]
+    fn test_status_is_resumable() {
+        assert!(RunStatus::NeedsUser.is_resumable());
+        assert!(RunStatus::Failed.is_resumable());
+        assert!(!RunStatus::Planned.is_resumable());
+        assert!(!RunStatus::Executing.is_resumable());
+        assert!(!RunStatus::Complete.is_resumable());
+    }
+
+    #[test]
+    fn test_resolve_explicit_id() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "test-run", "planned");
+
+        let run = resolve_run(tmp.path(), Some("test-run")).unwrap();
+        assert_eq!(run.id, "test-run");
+    }
+
+    #[test]
+    fn test_resolve_explicit_id_missing() {
+        let tmp = setup_test_project();
+        let result = resolve_run(tmp.path(), Some("nonexistent"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_active_run_pointer() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-from-pointer", "planned");
+        fs::write(
+            tmp.path().join(".factory/active-run"),
+            "run-from-pointer",
+        )
+        .unwrap();
+
+        let run = resolve_run(tmp.path(), None).unwrap();
+        assert_eq!(run.id, "run-from-pointer");
+    }
+
+    #[test]
+    fn test_resolve_scan_ignores_complete() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-done", "complete");
+        create_run(tmp.path(), "run-active", "planned");
+
+        let run = resolve_run(tmp.path(), None).unwrap();
+        assert_eq!(run.id, "run-active");
+    }
+
+    #[test]
+    fn test_resolve_scan_finds_executing() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-exec", "executing");
+
+        let run = resolve_run(tmp.path(), None).unwrap();
+        assert_eq!(run.id, "run-exec");
+    }
+
+    #[test]
+    fn test_resolve_scan_skips_needs_user() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-nu", "needs-user");
+        create_run(tmp.path(), "run-plan", "planned");
+
+        let run = resolve_run(tmp.path(), None).unwrap();
+        assert_eq!(run.id, "run-plan");
+    }
+
+    #[test]
+    fn test_resolve_scan_skips_failed() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-fail", "failed");
+        create_run(tmp.path(), "run-plan", "planned");
+
+        let run = resolve_run(tmp.path(), None).unwrap();
+        assert_eq!(run.id, "run-plan");
+    }
+
+    #[test]
+    fn test_resolve_scan_mixed_statuses() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-complete", "complete");
+        create_run(tmp.path(), "run-failed", "failed");
+        create_run(tmp.path(), "run-needs-user", "needs-user");
+        create_run(tmp.path(), "run-active", "executing");
+
+        let run = resolve_run(tmp.path(), None).unwrap();
+        assert_eq!(run.id, "run-active");
+    }
+
+    #[test]
+    fn test_resolve_no_active_run() {
+        let tmp = setup_test_project();
+        let result = resolve_run(tmp.path(), None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_stale_active_run_pointer() {
+        let tmp = setup_test_project();
+        // Pointer points to non-existent run, but there's an active one
+        fs::write(tmp.path().join(".factory/active-run"), "nonexistent").unwrap();
+        create_run(tmp.path(), "run-active", "planned");
+
+        let run = resolve_run(tmp.path(), None).unwrap();
+        assert_eq!(run.id, "run-active");
+    }
+
+    #[test]
+    fn test_env_overrides_active_run() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-file", "planned");
+        create_run(tmp.path(), "run-env", "planned");
+        fs::write(tmp.path().join(".factory/active-run"), "run-file").unwrap();
+
+        // Set env var
+        // SAFETY: Test runs serially via cargo test default.
+        unsafe { std::env::set_var("FACTORY_RUN_ID", "run-env") };
+        let run = resolve_run(tmp.path(), None).unwrap();
+        assert_eq!(run.id, "run-env");
+        unsafe { std::env::remove_var("FACTORY_RUN_ID") };
+    }
+
+    #[test]
+    fn test_resolve_resumable_finds_needs_user() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-paused", "needs-user");
+        create_run(tmp.path(), "run-active", "executing");
+
+        let run = resolve_resumable_run(tmp.path(), None).unwrap();
+        assert_eq!(run.id, "run-paused");
+    }
+
+    #[test]
+    fn test_resolve_resumable_finds_failed() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-broken", "failed");
+
+        let run = resolve_resumable_run(tmp.path(), None).unwrap();
+        assert_eq!(run.id, "run-broken");
+    }
+
+    #[test]
+    fn test_resolve_resumable_skips_planned() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-planned", "planned");
+
+        let result = resolve_resumable_run(tmp.path(), None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_list_runs() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-a", "planned");
+        create_run(tmp.path(), "run-b", "complete");
+
+        let runs = list_runs(tmp.path()).unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].id, "run-a");
+        assert_eq!(runs[1].id, "run-b");
+    }
+
+    #[test]
+    fn test_list_runs_empty() {
+        let tmp = setup_test_project();
+        let runs = list_runs(tmp.path()).unwrap();
+        assert!(runs.is_empty());
+    }
+
+    #[test]
+    fn test_run_brief_summary() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "test-run", "planned");
+        let run = Run {
+            id: "test-run".into(),
+            dir: tmp.path().join(".factory/runs/test-run"),
+        };
+        assert!(run.brief_summary().contains("Brief for test-run"));
+    }
+
+    #[test]
+    fn test_run_brief_summary_missing() {
+        let tmp = setup_test_project();
+        let run_dir = tmp.path().join(".factory/runs/no-brief");
+        fs::create_dir_all(&run_dir).unwrap();
+        fs::write(run_dir.join("status"), "planned").unwrap();
+        let run = Run {
+            id: "no-brief".into(),
+            dir: run_dir,
+        };
+        assert_eq!(run.brief_summary(), "-");
+    }
+
+    #[test]
+    fn test_status_display_includes_backend() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-backend-test", "executing");
+        let run_dir = tmp.path().join(".factory/runs/run-backend-test");
+        fs::write(run_dir.join("backend"), "local").unwrap();
+
+        let run = Run {
+            id: "run-backend-test".into(),
+            dir: run_dir,
+        };
+        assert_eq!(run.backend(), "local");
+    }
+
+    #[test]
+    fn test_status_display_missing_backend() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-no-backend", "planned");
+
+        let run = Run {
+            id: "run-no-backend".into(),
+            dir: tmp.path().join(".factory/runs/run-no-backend"),
+        };
+        assert_eq!(run.backend(), "-");
+    }
+
+    #[test]
+    fn test_all_known_statuses_roundtrip() {
+        for s in &[
+            "briefed",
+            "behaviors-defined",
+            "approach-designed",
+            "planned",
+            "executing",
+            "rate-limited",
+            "needs-user",
+            "complete",
+            "failed",
+        ] {
+            let status = RunStatus::parse(s);
+            assert_eq!(status.as_str(), *s);
+        }
+    }
+}

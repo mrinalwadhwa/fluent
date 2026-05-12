@@ -1,0 +1,16 @@
+[package]
+name = "factory"
+version = "0.1.0"
+edition = "2024"
+description = "Run coding agents inside a macOS Seatbelt sandbox with session continuity"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = "2"
