@@ -66,3 +66,9 @@ The verdict check defaulted to pass.
 from the run dir before launching claude. Reviewers were writing
 artifacts at relative paths that resolved to the original project
 root instead of the worktree.
+
+2026-05-11 — The author agent's skill is mostly about referencing
+expertise. It should know about expertise and draw on it.
+→ Resolved: added expertise section to FACTORY_SYSTEM_PROMPT listing
+factory-level (expertise/) and project-level (.factory/expertise/)
+reference material. Also fixed duplicate Session start heading.

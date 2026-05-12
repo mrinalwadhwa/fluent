@@ -5,12 +5,6 @@ potential brief. Promote to a run when ready to act on it.
 
 ---
 
-2026-05-11 — The author agent's skill is mostly about referencing
-expertise: writing code, documentation, architecture, tests. It
-should be written in a way that it knows about expertise and draws
-on it to build whatever it's building. This may be a skill or a
-prompt — unclear which is the right form.
-
 2026-05-11 — During the interactive stages, there were loops where
 the user just typed "yes, keep going" repeatedly. These indicate
 steps that are potentially automatable and may not need a human in
@@ -58,6 +52,11 @@ should live where the factory can consume it. Claude memory is for
 user preferences and session continuity. Design decisions, architecture,
 and conventions belong in the project (observations → expertise →
 documentation lifecycle).
+
+2026-05-12 — The system prompts (FACTORY_SYSTEM_PROMPT, reviewer prompts)
+are embedded in the factory shell script. They should be separated so
+they can be studied, reviewed, and iterated on independently of the
+script logic.
 
 2026-05-09 — Building the factory itself doesn't use `factory run`
 because the tool and the thing being built are the same. Consider
