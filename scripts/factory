@@ -496,6 +496,26 @@ with a verdict (pass, fail, or uncertain) and findings.'
     REVIEW_PIDS="$REVIEW_PIDS $!"
   fi
 
+  # --- Skill reviewer ---
+  if [ -z "$REVIEWER_FILTER" ] || echo "$REVIEWER_FILTER" | grep -q "skills"; then
+    SKILL_SYSTEM='You are a skill reviewer operating inside the Factory.
+Follow the review-skills skill at skills/review-skills/SKILL.md.
+Read skill files and check them against expertise/skills.md for structure,
+quality, and spec compliance.
+Write your review to .factory/runs/'"${REVIEW_RUN_ID}"'/reviews/review-skills.md
+with a verdict (pass, fail, or uncertain) and findings.'
+
+    if [ "$REVIEW_MODE" = "full-codebase" ]; then
+      SKILL_PROMPT="Perform a full-codebase skill review. Read expertise/skills.md, then review all skills in skills/. Check spec compliance, content quality, pacing, and references. The review output goes to .factory/runs/${REVIEW_RUN_ID}/reviews/review-skills.md."
+    else
+      SKILL_PROMPT="Review the skills changed in run ${REVIEW_RUN_ID}. The run artifacts are in .factory/runs/${REVIEW_RUN_ID}/. Read expertise/skills.md, then review any skill files that were modified. The review output goes to .factory/runs/${REVIEW_RUN_ID}/reviews/review-skills.md."
+    fi
+
+    SKILL_PROMPT="${SKILL_PROMPT}${SCOPE_INSTRUCTION}"
+    run_single_reviewer "skills" "$SKILL_SYSTEM" "$SKILL_PROMPT" "$REVIEW_RUN_DIR" "${REVIEW_TMP}/skills" &
+    REVIEW_PIDS="$REVIEW_PIDS $!"
+  fi
+
   # Wait for all
   for pid in $REVIEW_PIDS; do
     wait "$pid" 2>/dev/null || true
