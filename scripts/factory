@@ -771,6 +771,12 @@ cmd_run_local() {
   printf '  Factory           session loop (run: %s)\n' "$RUN_ID"
   printf '  Worktree          %s\n' "$WORKTREE_DIR"
 
+  # Disable commit signing in worktree so agents can commit without hardware key
+  git -C "$WORKTREE_DIR" config commit.gpgsign false
+
+  # Run from worktree so relative paths in agent prompts resolve correctly
+  cd "$WORKTREE_DIR"
+
   # Define how this backend launches the agent
   launch_agent() {
     LAUNCH_PROMPT="$1"; shift
@@ -801,6 +807,12 @@ cmd_run_bare() {
     setup_run_worktree "$SEARCH_ROOT"
     RUN_DIR="${WORKTREE_DIR}/.factory/runs/${RUN_ID}"
     SEARCH_ROOT="$WORKTREE_DIR"
+    # Disable commit signing in worktree so agents can commit without hardware key
+    git -C "$WORKTREE_DIR" config commit.gpgsign false
+
+    # Run from worktree so relative paths in agent prompts resolve correctly
+    cd "$WORKTREE_DIR"
+
     printf 'factory: bare session loop (run: %s)\n' "$RUN_ID"
     printf '  Worktree          %s\n' "$WORKTREE_DIR"
   else
