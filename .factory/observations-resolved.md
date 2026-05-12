@@ -80,3 +80,14 @@ prompts/author.md. Reviewer prompts in prompts/review-{name}.md with
 [system], [full-codebase], [run-scoped] sections. Reviewer loop in
 run_reviews collapsed from 5 blocks to a single loop. PROMPTS_DIR
 overridable for FACTORY_LIB sourcing.
+
+2026-05-12 — Author agent had the same working directory bug as
+reviewers — running from main/ instead of the worktree.
+→ Resolved: cd to worktree in cmd_run_bare and cmd_run_local before
+run_session_loop. Also disable commit.gpgsign in worktree git config
+so agents can commit without hardware key interaction.
+
+2026-05-09 — Building the factory itself doesn't use factory run.
+→ Resolved: first successful self-build run (test-coverage-20260512).
+The factory built its own test coverage — 16 tests across 2 files,
+all 5 reviewers passed, single session completion.

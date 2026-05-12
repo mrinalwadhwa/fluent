@@ -66,11 +66,22 @@ what's too abstract) and avoid duplicating behaviors that already exist.
 Currently the skill only reads the brief and codebase, not the existing
 behavioral contract.
 
-2026-05-09 — Building the factory itself doesn't use `factory run`
-because the tool and the thing being built are the same. Consider
-whether there's a way to use the factory to modify itself, or whether
-self-modification is always manual.
+2026-05-12 — Consider whether there are other interactive git operations
+that could block headless agents beyond commit signing (merge conflict
+resolution, gpg passphrase prompts, interactive rebase).
 
+2026-05-12 — The run was initially launched with `| head -20` which
+SIGPIPE'd the factory process. Factory output (session banners, status
+updates) goes to stdout, same as the agent's print-mode output. Piping
+factory run output is destructive. The factory should either write its
+own output to stderr, or log to a file by default so stdout is safe
+to pipe or discard.
+
+2026-05-12 — setup_run_worktree reuses an existing branch if one exists
+with the same run-id. On retry, the worktree checked out the old branch
+point instead of current HEAD. This means retries don't pick up fixes
+made to main between attempts. The worktree should rebase or reset to
+current HEAD on reuse, or the run-id should be unique per attempt.
 
 2026-05-09 — The refine-writing skill at ~/Workspace/skills has
 reference files (ai_tells.md, benchmarks.md, sentence_corrections.md,
