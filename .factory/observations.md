@@ -37,6 +37,28 @@ The factory script should clean up worktrees for completed review
 runs, or factory status should show orphaned worktrees so the user
 knows to clean them up.
 
+2026-05-12 — The run lifecycle has six stages: isolate → execute →
+review → land → capture → cleanup. The current factory stops at
+review — landing (merge), capture (sync metadata for learning), and
+cleanup (remove worktree) are missing. The lifecycle splits at
+"planned" into two phases: local/interactive (brief through plan,
+needs real-time conversation) and remote/autonomous (execute through
+cleanup, can run on Fargate or GitHub). In a future GitHub-driven
+workflow, branch = isolation, PR = landing + capture (not for
+discussion — too slow), branch deletion = cleanup. A PR-based
+discussion loop is too slow for interactive skills. Cleanup should
+only happen after landing, not just after completion — a completed
+run still has unmerged changes. Failed runs keep their worktree for
+debugging.
+
+2026-05-12 — Design knowledge and project-level learnings stored in
+Claude Code's memory (~/.claude/projects/.../memory/) are opaque to
+the factory and coupled to Claude Code's design. Project knowledge
+should live where the factory can consume it. Claude memory is for
+user preferences and session continuity. Design decisions, architecture,
+and conventions belong in the project (observations → expertise →
+documentation lifecycle).
+
 2026-05-09 — Building the factory itself doesn't use `factory run`
 because the tool and the thing being built are the same. Consider
 whether there's a way to use the factory to modify itself, or whether
