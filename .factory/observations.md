@@ -53,11 +53,6 @@ user preferences and session continuity. Design decisions, architecture,
 and conventions belong in the project (observations → expertise →
 documentation lifecycle).
 
-2026-05-12 — The system prompts (FACTORY_SYSTEM_PROMPT, reviewer prompts)
-are embedded in the factory shell script. They should be separated so
-they can be studied, reviewed, and iterated on independently of the
-script logic.
-
 2026-05-09 — Building the factory itself doesn't use `factory run`
 because the tool and the thing being built are the same. Consider
 whether there's a way to use the factory to modify itself, or whether

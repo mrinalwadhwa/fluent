@@ -27,6 +27,7 @@ FAIL=0
 ERRORS=""
 
 # Source factory functions (library mode — no dispatch)
+PROMPTS_DIR="${PROJECT_DIR}/prompts"
 FACTORY_LIB=1 . "$FACTORY"
 
 # -------------------------------------------------------------------------

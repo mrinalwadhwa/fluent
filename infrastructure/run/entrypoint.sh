@@ -55,6 +55,7 @@ printf '%s' "$FACTORY_RUN_ID" > "${WORKSPACE}/.factory/active-run"
 FACTORY_SCRIPT="${WORKSPACE}/scripts/factory"
 [ -f "$FACTORY_SCRIPT" ] || die "Factory script not found: $FACTORY_SCRIPT"
 
+PROMPTS_DIR="${WORKSPACE}/prompts"
 FACTORY_LIB=1 . "$FACTORY_SCRIPT"
 
 # Set variables the shared functions expect

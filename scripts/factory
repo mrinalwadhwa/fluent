@@ -53,61 +53,24 @@ cleanup() {
 }
 
 # ---------------------------------------------------------------------------
-# System prompt injected into every agent session
+# Prompts — loaded from prompts/ directory
 # ---------------------------------------------------------------------------
 
-FACTORY_SYSTEM_PROMPT='You are operating inside the Factory — a system for extended autonomous coding work.
+if [ -z "${PROMPTS_DIR:-}" ]; then
+  PROMPTS_DIR="$(cd "$(dirname "$0")/../prompts" && pwd)"
+fi
 
-## Status file contract
+FACTORY_SYSTEM_PROMPT="$(cat "${PROMPTS_DIR}/author.md")"
 
-Before exiting a session, you MUST write a status file at .factory/runs/[run-id]/status containing exactly one of:
-- executing    — context running low, handoff written, session loop will restart you
-- rate-limited — API rate limit hit, session loop will wait and restart you
-- needs-user   — blocked on a question only the user can answer
-- complete     — work is done
-- failed       — unrecoverable error
-
-## Handoff file
-
-When writing status "executing" or "needs-user", also write .factory/runs/[run-id]/handoff.md:
-
-## Run [run-id]
-Brief: [one-line summary]
-Status: [current stage]
-
-### Completed
-- [what is done]
-
-### In progress
-- [what was happening]
-
-### Open questions
-- [anything blocking or unclear]
-
-### Next steps
-- [what the next session should do first]
-
-## Session start
-
-On session start, check .factory/runs/ for active runs. If a handoff.md exists, read it and continue from where the previous session left off. Do not re-read the full history — the handoff is your starting context.
-
-## Expertise
-
-The expertise/ directory contains project standards and principles.
-Consult the relevant file before making decisions in that area:
-- expertise/architecture.md — architectural principles
-- expertise/documentation.md — writing standards
-- expertise/shell-scripts.md — shell script quality
-- expertise/skills.md — skill design
-- expertise/tests.md — testing principles
-
-The .factory/expertise/ directory contains project-specific learnings
-accumulated from past runs. Check it for patterns and conventions
-specific to this codebase.
-
-## Commit rules
-
-Read CLAUDE.md for commit message conventions. Key rules: describe the change not the process, use bullet points in the body, never add Co-Authored-By trailers, never reference run IDs or review artifacts in commit messages.'
+# Extract a named section from a prompt file.
+# Usage: prompt_section <file> <section-name>
+# Sections are delimited by [section-name] markers.
+prompt_section() {
+  awk -v section="$2" '
+    /^\[.*\]$/ { in_section = ($0 == "[" section "]"); next }
+    in_section
+  ' "$1"
+}
 
 # ---------------------------------------------------------------------------
 # Sandbox setup (shared across subcommands)
@@ -451,106 +414,31 @@ run_reviews() {
   REVIEW_TMP="$(mktemp -d -t factory-review-XXXXXX)"
   REVIEW_PIDS=""
 
-  # --- Documentation reviewer ---
-  if [ -z "$REVIEWER_FILTER" ] || echo "$REVIEWER_FILTER" | grep -q "documentation"; then
-    DOC_SYSTEM='You are a documentation reviewer operating inside the Factory.
-Follow the review-documentation skill at skills/review-documentation/SKILL.md.
-Read the code and documentation, check accuracy, writing quality, and
-completeness, and produce a review artifact.
-Write your review to .factory/runs/'"${REVIEW_RUN_ID}"'/reviews/review-documentation.md
-with a verdict (pass, fail, or uncertain) and findings.'
-
-    if [ "$REVIEW_MODE" = "full-codebase" ]; then
-      DOC_PROMPT="Perform a full-codebase documentation review. Review all documentation files against the source code. Check accuracy, writing quality, and completeness. The review output goes to .factory/runs/${REVIEW_RUN_ID}/reviews/review-documentation.md."
-    else
-      DOC_PROMPT="Review the documentation for run ${REVIEW_RUN_ID}. The run artifacts are in .factory/runs/${REVIEW_RUN_ID}/. Read the brief and behaviors.diff.md to understand the run's intent, then review all documentation affected by the run."
+  for REVIEWER in documentation behaviors architecture skills tests; do
+    # Apply filter
+    if [ -n "$REVIEWER_FILTER" ] && ! echo "$REVIEWER_FILTER" | grep -q "$REVIEWER"; then
+      continue
     fi
 
-    DOC_PROMPT="${DOC_PROMPT}${SCOPE_INSTRUCTION}"
-    run_single_reviewer "documentation" "$DOC_SYSTEM" "$DOC_PROMPT" "$REVIEW_RUN_DIR" "${REVIEW_TMP}/documentation" &
-    REVIEW_PIDS="$REVIEW_PIDS $!"
-  fi
-
-  # --- Behavior reviewer ---
-  if [ -z "$REVIEWER_FILTER" ] || echo "$REVIEWER_FILTER" | grep -q "behaviors"; then
-    BEH_SYSTEM='You are a behavior reviewer operating inside the Factory.
-Follow the review-behaviors skill at skills/review-behaviors/SKILL.md.
-Read behaviors and user-facing documentation. Write tests that verify
-behavior from the user perspective, run them, and check for regressions.
-Do NOT read source code or implementation files.
-Write your review to .factory/runs/'"${REVIEW_RUN_ID}"'/reviews/review-behaviors.md
-with a verdict (pass, fail, or uncertain) and findings.'
-
-    if [ "$REVIEW_MODE" = "full-codebase" ]; then
-      BEH_PROMPT="Perform a full-codebase behavior review. Read documentation/behaviors.md and run all existing behavior tests. Report any failures as regressions. Report any behaviors without test references as gaps. Write tests for untested behaviors where possible. The review output goes to .factory/runs/${REVIEW_RUN_ID}/reviews/review-behaviors.md."
-    else
-      BEH_PROMPT="Review the behaviors for run ${REVIEW_RUN_ID}. The run artifacts are in .factory/runs/${REVIEW_RUN_ID}/. Read behaviors.diff.md and the brief, then write and run tests to verify each behavior from the user's perspective."
+    # Load prompts from file
+    PROMPT_FILE="${PROMPTS_DIR}/review-${REVIEWER}.md"
+    if [ ! -f "$PROMPT_FILE" ]; then
+      printf '  [%s] prompt file missing, skipping\n' "$REVIEWER"
+      continue
     fi
 
-    BEH_PROMPT="${BEH_PROMPT}${SCOPE_INSTRUCTION}"
-    run_single_reviewer "behaviors" "$BEH_SYSTEM" "$BEH_PROMPT" "$REVIEW_RUN_DIR" "${REVIEW_TMP}/behaviors" &
-    REVIEW_PIDS="$REVIEW_PIDS $!"
-  fi
-
-  # --- Architecture reviewer ---
-  if [ -z "$REVIEWER_FILTER" ] || echo "$REVIEWER_FILTER" | grep -q "architecture"; then
-    ARCH_SYSTEM='You are an architecture reviewer operating inside the Factory.
-Follow the review-architecture skill at skills/review-architecture/SKILL.md.
-Read the code and architectural expertise. Evaluate structural decisions
-against the principles. Check at whatever scale is relevant.
-Write your review to .factory/runs/'"${REVIEW_RUN_ID}"'/reviews/review-architecture.md
-with a verdict (pass, fail, or uncertain) and findings.'
+    R_SYSTEM="$(prompt_section "$PROMPT_FILE" "system" | sed "s/{{RUN_ID}}/${REVIEW_RUN_ID}/g")"
 
     if [ "$REVIEW_MODE" = "full-codebase" ]; then
-      ARCH_PROMPT="Perform a full-codebase architecture review. Read expertise/architecture.md and documentation/architecture.md. Evaluate the overall system structure against the architectural principles. Check all viewpoints. The review output goes to .factory/runs/${REVIEW_RUN_ID}/reviews/review-architecture.md."
+      R_PROMPT="$(prompt_section "$PROMPT_FILE" "full-codebase" | sed "s/{{RUN_ID}}/${REVIEW_RUN_ID}/g")"
     else
-      ARCH_PROMPT="Review the architecture for run ${REVIEW_RUN_ID}. The run artifacts are in .factory/runs/${REVIEW_RUN_ID}/. Read the brief and approach.md to understand the run's intent. Read expertise/architecture.md. Evaluate the code changes against the architectural principles."
+      R_PROMPT="$(prompt_section "$PROMPT_FILE" "run-scoped" | sed "s/{{RUN_ID}}/${REVIEW_RUN_ID}/g")"
     fi
 
-    ARCH_PROMPT="${ARCH_PROMPT}${SCOPE_INSTRUCTION}"
-    run_single_reviewer "architecture" "$ARCH_SYSTEM" "$ARCH_PROMPT" "$REVIEW_RUN_DIR" "${REVIEW_TMP}/architecture" &
+    R_PROMPT="${R_PROMPT}${SCOPE_INSTRUCTION}"
+    run_single_reviewer "$REVIEWER" "$R_SYSTEM" "$R_PROMPT" "$REVIEW_RUN_DIR" "${REVIEW_TMP}/${REVIEWER}" &
     REVIEW_PIDS="$REVIEW_PIDS $!"
-  fi
-
-  # --- Skill reviewer ---
-  if [ -z "$REVIEWER_FILTER" ] || echo "$REVIEWER_FILTER" | grep -q "skills"; then
-    SKILL_SYSTEM='You are a skill reviewer operating inside the Factory.
-Follow the review-skills skill at skills/review-skills/SKILL.md.
-Read skill files and check them against expertise/skills.md for structure,
-quality, and spec compliance.
-Write your review to .factory/runs/'"${REVIEW_RUN_ID}"'/reviews/review-skills.md
-with a verdict (pass, fail, or uncertain) and findings.'
-
-    if [ "$REVIEW_MODE" = "full-codebase" ]; then
-      SKILL_PROMPT="Perform a full-codebase skill review. Read expertise/skills.md, then review all skills in skills/. Check spec compliance, content quality, pacing, and references. The review output goes to .factory/runs/${REVIEW_RUN_ID}/reviews/review-skills.md."
-    else
-      SKILL_PROMPT="Review the skills changed in run ${REVIEW_RUN_ID}. The run artifacts are in .factory/runs/${REVIEW_RUN_ID}/. Read expertise/skills.md, then review any skill files that were modified. The review output goes to .factory/runs/${REVIEW_RUN_ID}/reviews/review-skills.md."
-    fi
-
-    SKILL_PROMPT="${SKILL_PROMPT}${SCOPE_INSTRUCTION}"
-    run_single_reviewer "skills" "$SKILL_SYSTEM" "$SKILL_PROMPT" "$REVIEW_RUN_DIR" "${REVIEW_TMP}/skills" &
-    REVIEW_PIDS="$REVIEW_PIDS $!"
-  fi
-
-  # --- Test reviewer ---
-  if [ -z "$REVIEWER_FILTER" ] || echo "$REVIEWER_FILTER" | grep -q "tests"; then
-    TEST_SYSTEM='You are a test reviewer operating inside the Factory.
-Follow the review-tests skill at skills/review-tests/SKILL.md.
-Read test files and the code they test. Check test quality against
-expertise/tests.md.
-Write your review to .factory/runs/'"${REVIEW_RUN_ID}"'/reviews/review-tests.md
-with a verdict (pass, fail, or uncertain) and findings.'
-
-    if [ "$REVIEW_MODE" = "full-codebase" ]; then
-      TEST_PROMPT="Perform a full-codebase test review. Read expertise/tests.md, then review all test files. Check test quality, coverage, design, and maintenance. The review output goes to .factory/runs/${REVIEW_RUN_ID}/reviews/review-tests.md."
-    else
-      TEST_PROMPT="Review the tests for run ${REVIEW_RUN_ID}. The run artifacts are in .factory/runs/${REVIEW_RUN_ID}/. Read expertise/tests.md, then review test files that were added or modified and check for missing test coverage on changed code. The review output goes to .factory/runs/${REVIEW_RUN_ID}/reviews/review-tests.md."
-    fi
-
-    TEST_PROMPT="${TEST_PROMPT}${SCOPE_INSTRUCTION}"
-    run_single_reviewer "tests" "$TEST_SYSTEM" "$TEST_PROMPT" "$REVIEW_RUN_DIR" "${REVIEW_TMP}/tests" &
-    REVIEW_PIDS="$REVIEW_PIDS $!"
-  fi
+  done
 
   # Wait for all
   for pid in $REVIEW_PIDS; do
