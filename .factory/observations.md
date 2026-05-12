@@ -53,6 +53,19 @@ user preferences and session continuity. Design decisions, architecture,
 and conventions belong in the project (observations → expertise →
 documentation lifecycle).
 
+2026-05-12 — The launch_agent function only launches the author agent,
+never reviewers (those go through run_single_reviewer). The name
+"agent" is vague — should be launch_author to make clear which agent
+is being launched. Apply the same naming clarity to other places where
+"agent" is used generically.
+
+2026-05-12 — The define-behaviors skill should read existing behaviors
+from documentation/behaviors.md before writing new ones. This would
+calibrate the level of behavioral definition (what's too detailed,
+what's too abstract) and avoid duplicating behaviors that already exist.
+Currently the skill only reads the brief and codebase, not the existing
+behavioral contract.
+
 2026-05-09 — Building the factory itself doesn't use `factory run`
 because the tool and the thing being built are the same. Consider
 whether there's a way to use the factory to modify itself, or whether
