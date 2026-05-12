@@ -517,6 +517,10 @@ fn cmd_resume(
 
 fn cmd_init(cwd: &Path) -> Result<()> {
     let factory_dir = cwd.join(".factory");
+    if factory_dir.exists() {
+        eprintln!("  Already initialized: .factory/ exists in {}", cwd.display());
+        return Ok(());
+    }
     fs::create_dir_all(factory_dir.join("runs"))?;
     fs::create_dir_all(factory_dir.join("expertise"))?;
     eprintln!("  Initialized .factory/ in {}", cwd.display());

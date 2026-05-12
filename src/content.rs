@@ -164,6 +164,43 @@ Review run {{RUN_ID}}.
     }
 
     #[test]
+    fn test_content_resolver_user_config() {
+        let tmp = TempDir::new().unwrap();
+        let user_config = tmp.path().join("config");
+        std::fs::create_dir_all(user_config.join("prompts")).unwrap();
+        std::fs::write(user_config.join("prompts/author.md"), "user prompt").unwrap();
+
+        let resolver = ContentResolver {
+            project_root: None,
+            user_config: user_config.clone(),
+        };
+        let path = resolver.resolve_path("prompts/author.md");
+        assert!(path.is_some());
+        let content = std::fs::read_to_string(path.unwrap()).unwrap();
+        assert_eq!(content, "user prompt");
+    }
+
+    #[test]
+    fn test_content_resolver_project_overrides_user_config() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        let user_config = tmp.path().join("config");
+
+        // Set up both project-local and user-config files
+        std::fs::create_dir_all(project.join(".factory/prompts")).unwrap();
+        std::fs::write(project.join(".factory/prompts/author.md"), "project prompt").unwrap();
+        std::fs::create_dir_all(user_config.join("prompts")).unwrap();
+        std::fs::write(user_config.join("prompts/author.md"), "user prompt").unwrap();
+
+        let resolver = ContentResolver {
+            project_root: Some(project),
+            user_config,
+        };
+        let content = resolver.resolve_content("prompts/author.md").unwrap();
+        assert_eq!(content, "project prompt");
+    }
+
+    #[test]
     fn test_content_resolver_bundled_fallback() {
         let resolver = ContentResolver::new(None);
         let content = resolver.resolve_content("prompts/author.md");

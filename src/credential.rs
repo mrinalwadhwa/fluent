@@ -174,3 +174,48 @@ fn which(name: &str) -> Option<String> {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_oauth_token_valid() {
+        let json = r#"{"claudeAiOauth":{"accessToken":"sk-ant-abc123"}}"#;
+        assert_eq!(extract_oauth_token(json), Some("sk-ant-abc123".to_string()));
+    }
+
+    #[test]
+    fn test_extract_oauth_token_missing_outer_key() {
+        let json = r#"{"otherKey":{"accessToken":"sk-ant-abc123"}}"#;
+        assert_eq!(extract_oauth_token(json), None);
+    }
+
+    #[test]
+    fn test_extract_oauth_token_missing_inner_key() {
+        let json = r#"{"claudeAiOauth":{"refreshToken":"rt-abc123"}}"#;
+        assert_eq!(extract_oauth_token(json), None);
+    }
+
+    #[test]
+    fn test_extract_oauth_token_invalid_json() {
+        assert_eq!(extract_oauth_token("not json"), None);
+    }
+
+    #[test]
+    fn test_extract_oauth_token_empty_string() {
+        assert_eq!(extract_oauth_token(""), None);
+    }
+
+    #[test]
+    fn test_extract_oauth_token_nested_structure() {
+        let json = r#"{"claudeAiOauth":{"accessToken":"tok-123","refreshToken":"rt-456","expiresAt":1234567890}}"#;
+        assert_eq!(extract_oauth_token(json), Some("tok-123".to_string()));
+    }
+
+    #[test]
+    fn test_extract_oauth_token_non_string_value() {
+        let json = r#"{"claudeAiOauth":{"accessToken":12345}}"#;
+        assert_eq!(extract_oauth_token(json), None);
+    }
+}

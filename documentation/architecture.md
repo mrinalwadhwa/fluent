@@ -159,7 +159,7 @@ than drifting.
 
 ### Reviewers
 
-Evaluate the author's output. Four reviewers:
+Evaluate the author's output. Five reviewers:
 
 **Documentation reviewer** (code-aware): reads code and docs, checks
 accuracy, writing quality, and completeness
@@ -176,6 +176,10 @@ expertise, evaluates structural decisions against principles
 **Skill reviewer** (code-aware): reads skill files and checks them
 against `expertise/skills.md` for structure, quality, spec compliance,
 and writing quality (`skills/review-skills/SKILL.md`).
+
+**Test reviewer** (code-aware): reads tests and evaluates coverage,
+isolation, structure, and adherence to testing principles
+(`skills/review-tests/SKILL.md`).
 
 Review verdicts: **pass** / **uncertain** (ask user) / **fail** (send
 back to author with findings).
@@ -292,6 +296,21 @@ automatic token refresh using the task's IAM identity.
 ```
 factory/main/
   CLAUDE.md
+  Cargo.toml                 ← Rust crate definition
+  Cargo.lock
+  src/
+    main.rs                  ← CLI dispatch (clap)
+    lib.rs                   ← public API for tests
+    agent.rs                 ← Agent trait + implementations
+    cli.rs                   ← CLI argument types
+    content.rs               ← Content resolution (project → user → bundled)
+    credential.rs            ← Keychain credential injection
+    run.rs                   ← Run state, resolution, status
+    session.rs               ← Session loop orchestration
+    review.rs                ← Review loop, verdict parsing
+    sandbox.rs               ← Seatbelt sandbox rendering
+    worktree.rs              ← Git worktree operations
+    report.rs                ← Report generation
   documentation/
     architecture.md          ← this file
     behaviors.md             ← behavioral statements (EARS)
@@ -300,15 +319,23 @@ factory/main/
     documentation.md
     shell-scripts.md
     skills.md
+    tests.md
   .factory/
     observations.md          ← feedback log (tracked)
     expertise/               ← project-level learnings (tracked)
     runs/                    ← working state (not tracked)
+  prompts/                   ← agent system prompts
+    author.md
+    review-architecture.md
+    review-behaviors.md
+    review-documentation.md
+    review-skills.md
+    review-tests.md
   scripts/
-    factory                  ← the factory command
+    factory                  ← shell script (legacy, used by Fargate entrypoint)
     assets/
-      common.sb              ← Seatbelt profile
-      claude-code.sb         ← Seatbelt profile
+      common.sb              ← Seatbelt profile template
+      claude-code.sb         ← Seatbelt profile template
   skills/
     build-in-the-factory/SKILL.md
     capture-brief/SKILL.md
@@ -319,6 +346,7 @@ factory/main/
     review-behaviors/SKILL.md
     review-documentation/SKILL.md
     review-skills/SKILL.md
+    review-tests/SKILL.md
   infrastructure/
     cloudformation.yaml
     run/
@@ -327,9 +355,8 @@ factory/main/
     setup.sh
     teardown.sh
   tests/
-    test-skill               ← skill conversation simulation
-    test-run                 ← operational behavior assertions
     behaviors/
+      operations/            ← behavioral tests for the Rust binary
       skills/                ← scenario cards for test-skill
       README.md              ← behavior-to-test mapping
 ```
@@ -354,3 +381,15 @@ structured, what behaviors are specified. `architecture.md` and
 The lifecycle: observations are captured during usage. Some become runs
 that build or improve things. Patterns observed across runs accumulate
 as project expertise in `.factory/expertise/`.
+
+## Content resolution
+
+The factory resolves prompts, sandbox profiles, skills, and expertise
+files through a three-tier search chain. First match wins, no merging:
+
+1. **Project-local**: `<project>/.factory/<relative_path>`
+2. **User config**: `~/.config/factory/<relative_path>`
+3. **Bundled defaults**: compiled into the binary at build time
+
+This lets projects override any default content without modifying the
+binary, and lets users set personal defaults across projects.

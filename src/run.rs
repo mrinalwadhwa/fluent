@@ -282,6 +282,7 @@ pub fn list_runs(search_root: &Path) -> Result<Vec<Run>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use tempfile::TempDir;
 
     fn setup_test_project() -> TempDir {
@@ -354,6 +355,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_resolve_active_run_pointer() {
         let tmp = setup_test_project();
         create_run(tmp.path(), "run-from-pointer", "planned");
@@ -368,6 +370,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_resolve_scan_ignores_complete() {
         let tmp = setup_test_project();
         create_run(tmp.path(), "run-done", "complete");
@@ -378,6 +381,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_resolve_scan_finds_executing() {
         let tmp = setup_test_project();
         create_run(tmp.path(), "run-exec", "executing");
@@ -387,6 +391,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_resolve_scan_skips_needs_user() {
         let tmp = setup_test_project();
         create_run(tmp.path(), "run-nu", "needs-user");
@@ -397,6 +402,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_resolve_scan_skips_failed() {
         let tmp = setup_test_project();
         create_run(tmp.path(), "run-fail", "failed");
@@ -407,6 +413,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_resolve_scan_mixed_statuses() {
         let tmp = setup_test_project();
         create_run(tmp.path(), "run-complete", "complete");
@@ -419,6 +426,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_resolve_no_active_run() {
         let tmp = setup_test_project();
         let result = resolve_run(tmp.path(), None);
@@ -426,6 +434,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_resolve_stale_active_run_pointer() {
         let tmp = setup_test_project();
         // Pointer points to non-existent run, but there's an active one
@@ -437,14 +446,14 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_env_overrides_active_run() {
         let tmp = setup_test_project();
         create_run(tmp.path(), "run-file", "planned");
         create_run(tmp.path(), "run-env", "planned");
         fs::write(tmp.path().join(".factory/active-run"), "run-file").unwrap();
 
-        // Set env var
-        // SAFETY: Test runs serially via cargo test default.
+        // SAFETY: Guarded by #[serial] — no other test runs concurrently.
         unsafe { std::env::set_var("FACTORY_RUN_ID", "run-env") };
         let run = resolve_run(tmp.path(), None).unwrap();
         assert_eq!(run.id, "run-env");
@@ -452,6 +461,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_resolve_resumable_finds_needs_user() {
         let tmp = setup_test_project();
         create_run(tmp.path(), "run-paused", "needs-user");
@@ -462,6 +472,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_resolve_resumable_finds_failed() {
         let tmp = setup_test_project();
         create_run(tmp.path(), "run-broken", "failed");
@@ -471,6 +482,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_resolve_resumable_skips_planned() {
         let tmp = setup_test_project();
         create_run(tmp.path(), "run-planned", "planned");
@@ -546,6 +558,27 @@ mod tests {
             dir: tmp.path().join(".factory/runs/run-no-backend"),
         };
         assert_eq!(run.backend(), "-");
+    }
+
+    #[test]
+    fn test_status_unknown_parse() {
+        let status = RunStatus::parse("something-new");
+        assert_eq!(status, RunStatus::Unknown("something-new".to_string()));
+        assert_eq!(status.as_str(), "something-new");
+        assert!(!status.is_active());
+        assert!(!status.is_terminal());
+        assert!(!status.is_resumable());
+    }
+
+    #[test]
+    fn test_status_is_terminal() {
+        assert!(RunStatus::Complete.is_terminal());
+        assert!(RunStatus::Failed.is_terminal());
+        assert!(RunStatus::NeedsUser.is_terminal());
+        assert!(!RunStatus::Planned.is_terminal());
+        assert!(!RunStatus::Executing.is_terminal());
+        assert!(!RunStatus::Briefed.is_terminal());
+        assert!(!RunStatus::Unknown("x".into()).is_terminal());
     }
 
     #[test]
