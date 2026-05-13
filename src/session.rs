@@ -64,7 +64,7 @@ pub fn run_session_loop(
     }
 
     // For review runs, start by running reviewers
-    let initial_prompt = if run_mode.trim() == "review" {
+    let initial_prompt = if run_mode == "review" {
         eprintln!("  Mode: review (reviewers run first)");
         let review_scope = "full-codebase";
         if !review::run_reviews(
@@ -153,7 +153,7 @@ pub fn run_session_loop(
 
         match status {
             RunStatus::Complete => {
-                let review_scope = if run_mode.trim() == "review" {
+                let review_scope = if run_mode == "review" {
                     "full-codebase"
                 } else {
                     "run-scoped"

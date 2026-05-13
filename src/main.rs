@@ -188,6 +188,10 @@ fn cmd_run_bare(
 ) -> Result<()> {
     let run = run::resolve_run(search_root, run_id)?;
 
+    // Record runtime and handle
+    fs::write(run.dir.join("runtime"), "local")?;
+    fs::write(run.dir.join("handle"), std::process::id().to_string())?;
+
     let (working_dir, wt_run) = if worktree::is_git_repo(search_root) {
         let wt_result = worktree::setup_run_worktree(search_root, &run.id, &run.dir)?;
         let worktree_dir = wt_result.worktree_dir;

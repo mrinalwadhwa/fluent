@@ -93,7 +93,9 @@ impl Run {
     }
 
     pub fn runtime(&self) -> String {
-        fs::read_to_string(self.dir.join("runtime")).unwrap_or_else(|_| "-".into())
+        fs::read_to_string(self.dir.join("runtime"))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "-".into())
     }
 
     pub fn brief_summary(&self) -> String {
@@ -118,15 +120,21 @@ impl Run {
     }
 
     pub fn mode(&self) -> String {
-        fs::read_to_string(self.dir.join("mode")).unwrap_or_else(|_| "build".into())
+        fs::read_to_string(self.dir.join("mode"))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "build".into())
     }
 
     pub fn reviewer_filter(&self) -> String {
-        fs::read_to_string(self.dir.join("reviewers")).unwrap_or_default()
+        fs::read_to_string(self.dir.join("reviewers"))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
     }
 
     pub fn scope(&self) -> Option<String> {
-        fs::read_to_string(self.dir.join("scope")).ok()
+        fs::read_to_string(self.dir.join("scope"))
+            .ok()
+            .map(|s| s.trim().to_string())
     }
 
     pub fn has_handoff(&self) -> bool {
@@ -134,7 +142,9 @@ impl Run {
     }
 
     pub fn handle(&self) -> Option<String> {
-        fs::read_to_string(self.dir.join("handle")).ok()
+        fs::read_to_string(self.dir.join("handle"))
+            .ok()
+            .map(|s| s.trim().to_string())
     }
 }
 
