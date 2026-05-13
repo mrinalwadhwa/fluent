@@ -77,12 +77,6 @@ factory run output is destructive. The factory should either write its
 own output to stderr, or log to a file by default so stdout is safe
 to pipe or discard.
 
-2026-05-12 — setup_run_worktree reuses an existing branch if one exists
-with the same run-id. On retry, the worktree checked out the old branch
-point instead of current HEAD. This means retries don't pick up fixes
-made to main between attempts. The worktree should rebase or reset to
-current HEAD on reuse, or the run-id should be unique per attempt.
-
 2026-05-12 — The factory's interface should be richer than a
 traditional CLI. The interactive phases drive conversations, autonomous
 phases show parallel progress, and the factory mediates between user
@@ -116,12 +110,6 @@ time it happens.
 that just writes complete) still find issues with the broader codebase.
 The scope should be narrower — if the run produced no code changes,
 reviewers should pass immediately or be skipped.
-
-2026-05-13 — The worktree reuse bug bit us again during Fargate
-testing. A retry uploaded a workspace from the old branch point instead
-of current HEAD. This is the second time this caused wasted effort.
-Priority fix: either rebase/reset on reuse, or fail if the branch
-already exists and force unique run-ids.
 
 2026-05-13 — capture_snapshot copies from ~/.claude/ which is the
 global Claude Code state, not the run's session. It captures history
