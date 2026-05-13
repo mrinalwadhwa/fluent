@@ -25,7 +25,7 @@ from intent capture through execution and review across multiple sessions.
 ```
 
 **Skills** describe procedures. They don't know about sandboxes, sessions,
-or backends.
+or runtimes.
 
 **The factory command** handles the operational envelope: sandbox setup,
 credential injection, session continuity, worktree creation, and remote
@@ -99,8 +99,8 @@ branch, and removes the worktree.
 | `active-run` | Current run-id (in `.factory/`) |
 | `source-branch` | Branch the run forked from |
 | `worktree` | Path to the run's worktree |
-| `backend` | `local` or `fargate` |
-| `handle` | Backend-specific identifier |
+| `runtime` | `local` or `fargate` |
+| `handle` | Runtime-specific identifier |
 | `mode` | `build` (default) or `review` |
 | `reviewers` | Comma-separated reviewer filter (optional) |
 | `scope` | Review focus targeting (optional) |
@@ -211,7 +211,7 @@ launching the author.
 launches an interactive agent session so the user can provide input or
 unblock the run.
 
-## Backends
+## Runtimes
 
 ### Local
 
@@ -274,7 +274,7 @@ No EFS. Fargate ephemeral storage is sufficient for a single container.
 
 ## Credential management
 
-### Local backend
+### Local runtime
 
 | Credential | Source | Method |
 |---|---|---|
@@ -285,7 +285,7 @@ No EFS. Fargate ephemeral storage is sufficient for a single container.
 Sandbox profile unchanged — credentials injected via env vars, never by
 opening filesystem access.
 
-### Fargate backend
+### Fargate runtime
 
 Claude OAuth token passed as env var at task launch. Short-lived; multi-hour
 runs will outlive it. Future: WIF (Workload Identity Federation) for
@@ -301,14 +301,14 @@ factory/main/
   src/
     main.rs                  ← CLI dispatch (clap)
     lib.rs                   ← public API for tests
-    agent.rs                 ← Agent trait + implementations
+    coder.rs                 ← Coder trait + implementations
     cli.rs                   ← CLI argument types
     content.rs               ← Content resolution (project → user → bundled)
     credential.rs            ← Keychain credential injection
     run.rs                   ← Run state, resolution, status
     session.rs               ← Session loop orchestration
     review.rs                ← Review loop, verdict parsing
-    sandbox.rs               ← Seatbelt sandbox rendering
+    os.rs                    ← Os trait, Seatbelt sandbox rendering
     worktree.rs              ← Git worktree operations
     report.rs                ← Report generation
   documentation/

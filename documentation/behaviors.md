@@ -64,7 +64,7 @@ Test: tests/test-run (setup_run_worktree from non-main branch)
 
 ## Session loop (local)
 
-WHEN `factory run` is invoked with the local backend,
+WHEN `factory run` is invoked with the local runtime,
 THE SYSTEM SHALL launch Claude in print mode with the brief or handoff
 as the initial prompt.
 Test: tests/behaviors/operations/test-session-loop.sh (initial prompt uses brief, initial prompt uses handoff)
@@ -91,13 +91,13 @@ Test: tests/behaviors/operations/test-session-loop.sh (max sessions sets failed)
 
 ## Session loop (local) — credential refresh
 
-WHEN a new session starts on the local backend,
+WHEN a new session starts on the local runtime,
 THE SYSTEM SHALL run an unsandboxed Claude invocation to refresh the
 OAuth token, then re-inject credentials from Keychain.
 
 ## Fargate execution
 
-WHEN `factory run --backend fargate` is invoked,
+WHEN `factory run --runtime fargate` is invoked,
 THE SYSTEM SHALL upload the worktree to S3 and start an ECS Fargate task.
 
 WHEN the Fargate task starts,
@@ -109,7 +109,7 @@ THE SYSTEM SHALL upload the workspace to S3.
 ## Status reporting
 
 WHEN `factory status` is invoked,
-THE SYSTEM SHALL display all runs with their status, backend, and brief
+THE SYSTEM SHALL display all runs with their status, runtime, and brief
 summary.
 Test: tests/test-run (test_status_display), tests/behaviors/operations/test-run-state.sh
 
@@ -186,7 +186,7 @@ Test: tests/behaviors/operations/test-resume-resolve.sh
 
 ## Sandbox (local)
 
-WHILE running on the local backend,
+WHILE running on the local runtime,
 THE SYSTEM SHALL execute the agent inside a macOS Seatbelt sandbox with
 filesystem access restricted to the workspace root.
 
