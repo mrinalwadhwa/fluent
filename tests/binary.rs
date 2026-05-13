@@ -733,3 +733,283 @@ exit 0
         "should resolve via active-run pointer"
     );
 }
+
+// -------------------------------------------------------------------------
+// Watch
+// -------------------------------------------------------------------------
+
+#[test]
+fn watch_outputs_status_table() {
+    let tmp = TempDir::new().unwrap();
+    let run_dir = tmp.path().join(".factory/runs/watch-test");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "executing").unwrap();
+    fs::write(run_dir.join("runtime"), "local").unwrap();
+    fs::write(run_dir.join("brief.md"), "# Brief\n\nWatch me\n").unwrap();
+
+    // Watch runs an infinite loop, so we use a short timeout and expect it to
+    // produce at least one status table before we kill it.
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["watch", "1"])
+        .timeout(std::time::Duration::from_secs(3))
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("RUN"), "should print header");
+    assert!(stdout.contains("watch-test"), "should list the run");
+    assert!(stdout.contains("executing"), "should show status");
+}
+
+#[test]
+fn watch_detects_status_change_and_notifies() {
+    let tmp = TempDir::new().unwrap();
+    let run_dir = tmp.path().join(".factory/runs/notify-test");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "executing").unwrap();
+    fs::write(run_dir.join("brief.md"), "Brief\n").unwrap();
+
+    // Start watch in background, then change status after a moment
+    let run_dir_clone = run_dir.clone();
+    let handle = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        fs::write(run_dir_clone.join("status"), "complete").unwrap();
+    });
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["watch", "1"])
+        .timeout(std::time::Duration::from_secs(5))
+        .output()
+        .unwrap();
+
+    handle.join().unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("[NOTIFY]") || stderr.contains("complete"),
+        "should notify on status change: stderr={stderr}"
+    );
+}
+
+// -------------------------------------------------------------------------
+// Resume
+// -------------------------------------------------------------------------
+
+#[test]
+fn resume_finds_needs_user_run() {
+    let tmp = TempDir::new().unwrap();
+    let run_dir = tmp.path().join(".factory/runs/resume-target");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "needs-user").unwrap();
+    fs::write(run_dir.join("brief.md"), "Brief\n").unwrap();
+
+    // Resume requires sandbox-exec and claude — it will fail on
+    // prerequisites, but the error message tells us it resolved the run.
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .arg("resume")
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Resuming run resume-target")
+            || stderr.contains("resume-target"),
+        "should resolve the needs-user run: stderr={stderr}"
+    );
+}
+
+#[test]
+fn resume_finds_failed_run() {
+    let tmp = TempDir::new().unwrap();
+    let run_dir = tmp.path().join(".factory/runs/failed-run");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "failed").unwrap();
+    fs::write(run_dir.join("brief.md"), "Brief\n").unwrap();
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .arg("resume")
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Resuming run failed-run"),
+        "should resolve the failed run: stderr={stderr}"
+    );
+}
+
+#[test]
+fn resume_with_explicit_run_id() {
+    let tmp = TempDir::new().unwrap();
+    let run_dir = tmp.path().join(".factory/runs/specific-resume");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "needs-user").unwrap();
+    fs::write(run_dir.join("brief.md"), "Brief\n").unwrap();
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["resume", "specific-resume"])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Resuming run specific-resume"),
+        "should resume the specified run: stderr={stderr}"
+    );
+}
+
+#[test]
+fn resume_skips_executing_run() {
+    let tmp = TempDir::new().unwrap();
+    let run_dir = tmp.path().join(".factory/runs/active-run");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "executing").unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .arg("resume")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("No run found needing resume"));
+}
+
+// -------------------------------------------------------------------------
+// Pull (Fargate)
+// -------------------------------------------------------------------------
+
+#[test]
+fn pull_fails_without_fargate_config() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join(".factory/runs/pull-run")).unwrap();
+    fs::write(
+        tmp.path().join(".factory/runs/pull-run/runtime"),
+        "fargate",
+    )
+    .unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .arg("pull")
+        .env("HOME", tmp.path().to_str().unwrap())
+        .env_remove("FACTORY_CLUSTER")
+        .env_remove("FACTORY_S3_BUCKET")
+        .env_remove("FACTORY_SUBNETS")
+        .env_remove("FACTORY_SECURITY_GROUP")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("FACTORY_CLUSTER not set"));
+}
+
+#[test]
+fn pull_no_fargate_run() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join(".factory/runs/local-run")).unwrap();
+    fs::write(
+        tmp.path().join(".factory/runs/local-run/runtime"),
+        "local",
+    )
+    .unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .arg("pull")
+        .env("HOME", tmp.path().to_str().unwrap())
+        .env_remove("FACTORY_CLUSTER")
+        .env_remove("FACTORY_S3_BUCKET")
+        .env_remove("FACTORY_SUBNETS")
+        .env_remove("FACTORY_SECURITY_GROUP")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("No fargate run found"));
+}
+
+// -------------------------------------------------------------------------
+// Shell (Fargate)
+// -------------------------------------------------------------------------
+
+#[test]
+fn shell_fails_without_fargate_config() {
+    let tmp = TempDir::new().unwrap();
+    let run_dir = tmp.path().join(".factory/runs/shell-run");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "executing").unwrap();
+    fs::write(run_dir.join("handle"), "arn:aws:ecs:us-west-1:123:task/abc").unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["shell", "shell-run"])
+        .env("HOME", tmp.path().to_str().unwrap())
+        .env_remove("FACTORY_CLUSTER")
+        .env_remove("FACTORY_S3_BUCKET")
+        .env_remove("FACTORY_SUBNETS")
+        .env_remove("FACTORY_SECURITY_GROUP")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("FACTORY_CLUSTER not set"));
+}
+
+#[test]
+fn shell_fails_without_handle() {
+    let tmp = TempDir::new().unwrap();
+    let run_dir = tmp.path().join(".factory/runs/no-handle-run");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "executing").unwrap();
+    // No handle file
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["shell", "no-handle-run"])
+        .env("HOME", tmp.path().to_str().unwrap())
+        .env_remove("FACTORY_CLUSTER")
+        .env_remove("FACTORY_S3_BUCKET")
+        .env_remove("FACTORY_SUBNETS")
+        .env_remove("FACTORY_SECURITY_GROUP")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("No task handle found"));
+}
+
+// -------------------------------------------------------------------------
+// Run: Fargate backend
+// -------------------------------------------------------------------------
+
+#[test]
+fn run_fargate_fails_without_config() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let run_id = "20260513-fargate-noconfig";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("brief.md"), "Brief\n").unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["run", "--runtime", "fargate", "--run-id", run_id])
+        .env("HOME", tmp.path().to_str().unwrap())
+        .env_remove("FACTORY_CLUSTER")
+        .env_remove("FACTORY_S3_BUCKET")
+        .env_remove("FACTORY_SUBNETS")
+        .env_remove("FACTORY_SECURITY_GROUP")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("FACTORY_CLUSTER not set"));
+}
+
+#[test]
+fn run_unknown_runtime_fails() {
+    let tmp = TempDir::new().unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["run", "--runtime", "kubernetes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Unknown runtime"));
+}

@@ -405,7 +405,6 @@ fn cmd_watch(search_root: &Path, interval: u64) -> Result<()> {
 }
 
 fn cmd_pull(search_root: &Path, run_id: Option<&str>) -> Result<()> {
-    let config = load_fargate_config()?;
     let runs_dir = search_root.join(".factory/runs");
 
     let run_id = if let Some(id) = run_id {
@@ -425,6 +424,8 @@ fn cmd_pull(search_root: &Path, run_id: Option<&str>) -> Result<()> {
         }
         found.ok_or_else(|| anyhow::anyhow!("No fargate run found."))?
     };
+
+    let config = load_fargate_config()?;
 
     let run_dir = runs_dir.join(&run_id);
     let worktree_path =
@@ -463,12 +464,13 @@ fn cmd_pull(search_root: &Path, run_id: Option<&str>) -> Result<()> {
 }
 
 fn cmd_shell(search_root: &Path, run_id: Option<&str>) -> Result<()> {
-    let config = load_fargate_config()?;
     let run = run::resolve_run(search_root, run_id)?;
 
     let task_arn = run
         .handle()
         .ok_or_else(|| anyhow::anyhow!("No task handle found for run {}", run.id))?;
+
+    let config = load_fargate_config()?;
 
     eprintln!("  Connecting to run {}...", run.id);
     let status = Command::new("aws")
