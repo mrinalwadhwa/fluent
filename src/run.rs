@@ -92,8 +92,8 @@ impl Run {
             .context("Failed to write run status")
     }
 
-    pub fn backend(&self) -> String {
-        fs::read_to_string(self.dir.join("backend")).unwrap_or_else(|_| "-".into())
+    pub fn runtime(&self) -> String {
+        fs::read_to_string(self.dir.join("runtime")).unwrap_or_else(|_| "-".into())
     }
 
     pub fn brief_summary(&self) -> String {
@@ -535,29 +535,29 @@ mod tests {
     }
 
     #[test]
-    fn test_status_display_includes_backend() {
+    fn test_status_display_includes_runtime() {
         let tmp = setup_test_project();
-        create_run(tmp.path(), "run-backend-test", "executing");
-        let run_dir = tmp.path().join(".factory/runs/run-backend-test");
-        fs::write(run_dir.join("backend"), "local").unwrap();
+        create_run(tmp.path(), "run-runtime-test", "executing");
+        let run_dir = tmp.path().join(".factory/runs/run-runtime-test");
+        fs::write(run_dir.join("runtime"), "local").unwrap();
 
         let run = Run {
-            id: "run-backend-test".into(),
+            id: "run-runtime-test".into(),
             dir: run_dir,
         };
-        assert_eq!(run.backend(), "local");
+        assert_eq!(run.runtime(), "local");
     }
 
     #[test]
-    fn test_status_display_missing_backend() {
+    fn test_status_display_missing_runtime() {
         let tmp = setup_test_project();
-        create_run(tmp.path(), "run-no-backend", "planned");
+        create_run(tmp.path(), "run-no-runtime", "planned");
 
         let run = Run {
-            id: "run-no-backend".into(),
-            dir: tmp.path().join(".factory/runs/run-no-backend"),
+            id: "run-no-runtime".into(),
+            dir: tmp.path().join(".factory/runs/run-no-runtime"),
         };
-        assert_eq!(run.backend(), "-");
+        assert_eq!(run.runtime(), "-");
     }
 
     #[test]

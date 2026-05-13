@@ -2,10 +2,9 @@ use anyhow::Result;
 use std::path::Path;
 use std::process::Command;
 
-/// Trait abstracting the coding agent. Currently Claude Code, but
-/// designed for future alternate agent support.
-pub trait Agent {
-    /// Launch the agent with a prompt, system prompt, and working directory.
+/// Trait abstracting the coding agent (currently Claude Code).
+pub trait Coder {
+    /// Launch the coder with a prompt, system prompt, and working directory.
     /// Returns the exit code.
     fn run(
         &self,
@@ -24,12 +23,12 @@ pub trait Agent {
     ) -> Result<i32>;
 }
 
-/// Claude Code agent invoked via sandbox-exec.
+/// Claude Code invoked via sandbox-exec.
 pub struct SandboxedClaudeCode {
     pub sandbox_profile: Option<String>,
 }
 
-impl Agent for SandboxedClaudeCode {
+impl Coder for SandboxedClaudeCode {
     fn run(
         &self,
         prompt: &str,
@@ -77,10 +76,10 @@ impl SandboxedClaudeCode {
     }
 }
 
-/// Bare Claude Code agent (no sandbox, for Fargate/Linux/--no-sandbox).
+/// Bare Claude Code (no sandbox, for Fargate/Linux/--no-sandbox).
 pub struct BareClaudeCode;
 
-impl Agent for BareClaudeCode {
+impl Coder for BareClaudeCode {
     fn run(
         &self,
         prompt: &str,
@@ -116,9 +115,9 @@ impl Agent for BareClaudeCode {
     }
 }
 
-/// Mock agent for testing. Calls a closure to determine behavior.
+/// Mock coder for testing. Calls a closure to determine behavior.
 #[cfg(test)]
-pub struct MockAgent<F>
+pub struct MockCoder<F>
 where
     F: Fn(&str, u32) -> (i32, Option<String>),
 {
@@ -127,7 +126,7 @@ where
 }
 
 #[cfg(test)]
-impl<F> Agent for MockAgent<F>
+impl<F> Coder for MockCoder<F>
 where
     F: Fn(&str, u32) -> (i32, Option<String>),
 {

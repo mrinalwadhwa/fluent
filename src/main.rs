@@ -6,12 +6,12 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-use factory::agent::{BareClaudeCode, SandboxedClaudeCode};
+use factory::coder::{BareClaudeCode, Coder, SandboxedClaudeCode};
 use factory::cli::{Cli, Commands};
 use factory::content::ContentResolver;
 use factory::credential;
 use factory::run::{self, Run};
-use factory::sandbox;
+use factory::os;
 use factory::session::{self, DefaultHooks, SessionConfig};
 use factory::worktree;
 
@@ -47,10 +47,10 @@ fn main() -> Result<()> {
 
     // --dry-run: render sandbox profile and exit
     if cli.dry_run {
-        sandbox::check_prerequisites()?;
+        os::check_prerequisites()?;
         let home = std::env::var("HOME").unwrap_or_default();
         let profile =
-            sandbox::render_profile(&resolver, &home, &sandbox_root.to_string_lossy())?;
+            os::render_profile(&resolver, &home, &sandbox_root.to_string_lossy())?;
         println!("--- Rendered Seatbelt profile ---");
         println!("HOME         = {home}");
         println!("SANDBOX_ROOT = {}", sandbox_root.display());
@@ -62,10 +62,10 @@ fn main() -> Result<()> {
     match cli.command {
         Some(Commands::Run {
             run_id,
-            backend,
+            runtime,
             no_sandbox,
             extra_args,
-        }) => match backend.as_str() {
+        }) => match runtime.as_str() {
             "local" => {
                 if no_sandbox || cli.no_sandbox {
                     cmd_run_bare(&sandbox_root, run_id.as_deref(), &resolver, &extra_args)?;
@@ -76,7 +76,7 @@ fn main() -> Result<()> {
             "fargate" => {
                 cmd_run_fargate(&sandbox_root, run_id.as_deref())?;
             }
-            other => bail!("Unknown backend '{other}'. Available: local, fargate."),
+            other => bail!("Unknown runtime '{other}'. Available: local, fargate."),
         },
         Some(Commands::Status { path }) => {
             let search_root = path.map(PathBuf::from).unwrap_or(cwd);
@@ -110,12 +110,12 @@ fn cmd_interactive(
     resolver: &ContentResolver,
     extra_args: &[String],
 ) -> Result<()> {
-    sandbox::check_prerequisites()?;
+    os::check_prerequisites()?;
     credential::inject_credentials()?;
     credential::setup_git_signing();
 
     let home = std::env::var("HOME").unwrap_or_default();
-    let profile = sandbox::render_profile(resolver, &home, &sandbox_root.to_string_lossy())?;
+    let profile = os::render_profile(resolver, &home, &sandbox_root.to_string_lossy())?;
     let system_prompt = resolver
         .resolve_content("prompts/author.md")
         .unwrap_or_default();
@@ -126,7 +126,6 @@ fn cmd_interactive(
     let agent = SandboxedClaudeCode {
         sandbox_profile: Some(profile.path.to_string_lossy().to_string()),
     };
-    use factory::agent::Agent;
     agent.run_interactive(&system_prompt, sandbox_root, extra_args)?;
     Ok(())
 }
@@ -137,22 +136,22 @@ fn cmd_run_local(
     resolver: &ContentResolver,
     extra_args: &[String],
 ) -> Result<()> {
-    sandbox::check_prerequisites()?;
+    os::check_prerequisites()?;
     credential::inject_credentials()?;
     credential::setup_git_signing();
 
     let run = run::resolve_run(source_root, run_id)?;
     let wt_result = worktree::setup_run_worktree(source_root, &run.id, &run.dir)?;
 
-    // Record backend
-    fs::write(run.dir.join("backend"), "local")?;
+    // Record runtime
+    fs::write(run.dir.join("runtime"), "local")?;
     fs::write(run.dir.join("handle"), std::process::id().to_string())?;
 
     let worktree_dir = &wt_result.worktree_dir;
     worktree::disable_commit_signing(worktree_dir)?;
 
     let home = std::env::var("HOME").unwrap_or_default();
-    let profile = sandbox::render_profile(resolver, &home, &worktree_dir.to_string_lossy())?;
+    let profile = os::render_profile(resolver, &home, &worktree_dir.to_string_lossy())?;
     let system_prompt = resolver
         .resolve_content("prompts/author.md")
         .unwrap_or_default();
@@ -297,7 +296,7 @@ fn cmd_run_fargate(source_root: &Path, run_id: Option<&str>) -> Result<()> {
     let task_arn = String::from_utf8_lossy(&output.stdout).trim().to_string();
     eprintln!("  Task: {task_arn}");
 
-    fs::write(run.dir.join("backend"), "fargate")?;
+    fs::write(run.dir.join("runtime"), "fargate")?;
     fs::write(run.dir.join("handle"), &task_arn)?;
 
     eprintln!("  Run is executing on Fargate.");
@@ -324,7 +323,7 @@ fn cmd_status(search_root: &Path) -> Result<()> {
 
     println!(
         "{:<20} {:<16} {:<10} {}",
-        "RUN", "STATUS", "BACKEND", "BRIEF"
+        "RUN", "STATUS", "RUNTIME", "BRIEF"
     );
     println!(
         "{:<20} {:<16} {:<10} {}",
@@ -336,10 +335,10 @@ fn cmd_status(search_root: &Path) -> Result<()> {
             .status()
             .map(|s| s.to_string())
             .unwrap_or_else(|_| "-".into());
-        let backend = run.backend();
+        let runtime = run.runtime();
         let brief = run.brief_summary();
 
-        println!("{:<20} {:<16} {:<10} {}", run.id, status, backend, brief);
+        println!("{:<20} {:<16} {:<10} {}", run.id, status, runtime, brief);
     }
 
     Ok(())
@@ -357,7 +356,7 @@ fn cmd_watch(search_root: &Path, interval: u64) -> Result<()> {
 
         current_output.push_str(&format!(
             "{:<20} {:<16} {:<10} {}\n",
-            "RUN", "STATUS", "BACKEND", "BRIEF"
+            "RUN", "STATUS", "RUNTIME", "BRIEF"
         ));
         current_output.push_str(&format!(
             "{:<20} {:<16} {:<10} {}\n",
@@ -369,11 +368,11 @@ fn cmd_watch(search_root: &Path, interval: u64) -> Result<()> {
                 .status()
                 .map(|s| s.to_string())
                 .unwrap_or_else(|_| "-".into());
-            let backend = run.backend();
+            let runtime = run.runtime();
             let brief = run.brief_summary();
             current_output.push_str(&format!(
                 "{:<20} {:<16} {:<10} {}\n",
-                run.id, status, backend, brief
+                run.id, status, runtime, brief
             ));
         }
 
@@ -412,9 +411,9 @@ fn cmd_pull(search_root: &Path, run_id: Option<&str>) -> Result<()> {
         if runs_dir.is_dir() {
             for entry in fs::read_dir(&runs_dir)? {
                 let entry = entry?;
-                let backend =
-                    fs::read_to_string(entry.path().join("backend")).unwrap_or_default();
-                if backend.trim() == "fargate" {
+                let runtime =
+                    fs::read_to_string(entry.path().join("runtime")).unwrap_or_default();
+                if runtime.trim() == "fargate" {
                     found = Some(entry.file_name().to_string_lossy().to_string());
                     break;
                 }
@@ -491,13 +490,13 @@ fn cmd_resume(
 
     eprintln!("  Resuming run {}", run.id);
 
-    sandbox::check_prerequisites()?;
+    os::check_prerequisites()?;
     credential::inject_credentials()?;
     credential::setup_git_signing();
 
     let home = std::env::var("HOME").unwrap_or_default();
     let profile =
-        sandbox::render_profile(resolver, &home, &search_root.to_string_lossy())?;
+        os::render_profile(resolver, &home, &search_root.to_string_lossy())?;
     let system_prompt = resolver
         .resolve_content("prompts/author.md")
         .unwrap_or_default();
@@ -510,7 +509,6 @@ fn cmd_resume(
     let agent = SandboxedClaudeCode {
         sandbox_profile: Some(profile.path.to_string_lossy().to_string()),
     };
-    use factory::agent::Agent;
     agent.run_interactive(&system_prompt, search_root, extra_args)?;
     Ok(())
 }

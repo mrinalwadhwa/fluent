@@ -60,8 +60,8 @@ fn command_exists(name: &str) -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-/// Trait abstracting OS-specific sandbox operations for future Linux support.
-pub trait Sandbox {
+/// Trait abstracting OS-specific sandbox operations.
+pub trait Os {
     /// Render a sandbox profile for the given root directory.
     fn render(&self, sandbox_root: &Path) -> Result<SandboxProfile>;
 
@@ -70,19 +70,19 @@ pub trait Sandbox {
 }
 
 /// macOS Seatbelt sandbox implementation.
-pub struct SeatbeltSandbox {
+pub struct MacOs {
     resolver: ContentResolver,
     home: String,
 }
 
-impl SeatbeltSandbox {
+impl MacOs {
     pub fn new(resolver: ContentResolver) -> Self {
         let home = std::env::var("HOME").unwrap_or_default();
         Self { resolver, home }
     }
 }
 
-impl Sandbox for SeatbeltSandbox {
+impl Os for MacOs {
     fn render(&self, sandbox_root: &Path) -> Result<SandboxProfile> {
         render_profile(
             &self.resolver,

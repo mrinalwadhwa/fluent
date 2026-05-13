@@ -42,9 +42,9 @@ pub enum Commands {
         #[arg(long)]
         run_id: Option<String>,
 
-        /// Execution backend: local (default), fargate
+        /// Execution runtime: local (default), fargate
         #[arg(long, default_value = "local")]
-        backend: String,
+        runtime: String,
 
         /// Disable sandbox
         #[arg(long)]

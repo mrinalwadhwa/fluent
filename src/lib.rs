@@ -1,10 +1,10 @@
-pub mod agent;
+pub mod coder;
 pub mod cli;
 pub mod content;
 pub mod credential;
 pub mod report;
 pub mod review;
 pub mod run;
-pub mod sandbox;
+pub mod os;
 pub mod session;
 pub mod worktree;

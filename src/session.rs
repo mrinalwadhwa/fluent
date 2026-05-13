@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
-use crate::agent::Agent;
+use crate::coder::Coder;
 use crate::content::ContentResolver;
 use crate::report;
 use crate::review;
@@ -46,7 +46,7 @@ impl SessionHooks for DefaultHooks {
 
 /// Run the session loop.
 pub fn run_session_loop(
-    agent: &dyn Agent,
+    agent: &dyn Coder,
     config: &SessionConfig,
     hooks: &dyn SessionHooks,
 ) -> Result<()> {
@@ -301,7 +301,7 @@ mod tests {
         call_count: AtomicU32,
     }
 
-    impl<F> Agent for TestAgent<F>
+    impl<F> Coder for TestAgent<F>
     where
         F: Fn(&str, u32, &Path) -> i32 + Send + Sync,
     {
