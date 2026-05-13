@@ -369,7 +369,7 @@ run_single_reviewer() {
   set +e
   claude \
     --dangerously-skip-permissions \
-    --output-format stream-json \
+    --verbose --output-format stream-json \
     --append-system-prompt "$REVIEWER_SYSTEM" \
     -p "$REVIEWER_PROMPT" > "$REVIEWER_TRANSCRIPT"
   REVIEWER_EXIT=$?
@@ -848,7 +848,7 @@ cmd_run_local() {
   launch_agent() {
     LAUNCH_PROMPT="$1"; shift
     sandbox-exec -f "$RENDERED_PROFILE" claude \
-      --output-format stream-json \
+      --verbose --output-format stream-json \
       --append-system-prompt "$FACTORY_SYSTEM_PROMPT" \
       -p "$LAUNCH_PROMPT" \
       "$@" | tee "$FACTORY_TRANSCRIPT_FILE"
@@ -892,7 +892,7 @@ cmd_run_bare() {
     LAUNCH_PROMPT="$1"; shift
     claude \
       --dangerously-skip-permissions \
-      --output-format stream-json \
+      --verbose --output-format stream-json \
       --append-system-prompt "$FACTORY_SYSTEM_PROMPT" \
       -p "$LAUNCH_PROMPT" \
       "$@" | tee "$FACTORY_TRANSCRIPT_FILE"
