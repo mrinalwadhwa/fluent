@@ -440,9 +440,24 @@ run_reviews() {
     REVIEW_PIDS="$REVIEW_PIDS $!"
   done
 
-  # Wait for all
-  for pid in $REVIEW_PIDS; do
-    wait "$pid" 2>/dev/null || true
+  # Wait for all, with timeout
+  REVIEWER_TIMEOUT="${REVIEWER_TIMEOUT:-1800}" # 30 minutes
+  REVIEW_START="$(date +%s)"
+  while true; do
+    REVIEW_ALL_DONE=1
+    for pid in $REVIEW_PIDS; do
+      kill -0 "$pid" 2>/dev/null && REVIEW_ALL_DONE=0
+    done
+    [ "$REVIEW_ALL_DONE" = 1 ] && break
+    REVIEW_ELAPSED="$(( $(date +%s) - REVIEW_START ))"
+    if [ "$REVIEW_ELAPSED" -ge "$REVIEWER_TIMEOUT" ]; then
+      for pid in $REVIEW_PIDS; do
+        kill "$pid" 2>/dev/null || true
+      done
+      printf '  Reviewers timed out after %ds\n' "$REVIEW_ELAPSED"
+      break
+    fi
+    sleep 2
   done
 
   # Check results

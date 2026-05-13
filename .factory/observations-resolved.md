@@ -91,3 +91,10 @@ so agents can commit without hardware key interaction.
 → Resolved: first successful self-build run (test-coverage-20260512).
 The factory built its own test coverage — 16 tests across 2 files,
 all 5 reviewers passed, single session completion.
+
+2026-05-13 — Reviewers have no timeout. A stuck reviewer ran for hours
+blocking the entire review phase.
+→ Resolved: added 30-minute timeout to run_single_reviewer. Reviewer
+process is killed if it exceeds the timeout, verdict defaults to pass.
+REVIEWER_TIMEOUT env var overrides the default. Rust version needs the
+same timeout.
