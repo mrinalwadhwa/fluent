@@ -362,13 +362,16 @@ run_single_reviewer() {
   # Each reviewer runs in a background subshell, so cd is isolated.
   cd "${REVIEWER_RUN_DIR%/.factory/runs/*}"
 
+  REVIEWER_TRANSCRIPT="${REVIEWER_RUN_DIR}/reviews/transcript-${REVIEWER_NAME}.jsonl"
+
   printf '  [%s] starting...\n' "$REVIEWER_NAME"
 
   set +e
   claude \
     --dangerously-skip-permissions \
+    --output-format stream-json \
     --append-system-prompt "$REVIEWER_SYSTEM" \
-    -p "$REVIEWER_PROMPT"
+    -p "$REVIEWER_PROMPT" > "$REVIEWER_TRANSCRIPT"
   REVIEWER_EXIT=$?
   set -e
 
@@ -401,6 +404,20 @@ run_reviews() {
   REVIEW_MODE="${4:-run-scoped}"
 
   mkdir -p "${REVIEW_RUN_DIR}/reviews"
+
+  # Archive previous round's reviews if they exist
+  REVIEW_ROUND=$((${REVIEW_ROUND:-0} + 1))
+  if [ "$REVIEW_ROUND" -gt 1 ]; then
+    PREV_ROUND=$((REVIEW_ROUND - 1))
+    ARCHIVE_DIR="${REVIEW_RUN_DIR}/reviews/round-${PREV_ROUND}"
+    mkdir -p "$ARCHIVE_DIR"
+    for prev_review in "${REVIEW_RUN_DIR}/reviews"/review-*.md; do
+      [ -f "$prev_review" ] && cp "$prev_review" "$ARCHIVE_DIR/"
+    done
+    for prev_transcript in "${REVIEW_RUN_DIR}/reviews"/transcript-*.jsonl; do
+      [ -f "$prev_transcript" ] && mv "$prev_transcript" "$ARCHIVE_DIR/"
+    done
+  fi
 
   # Read scope if specified
   REVIEW_SCOPE_DETAIL="$(cat "${REVIEW_RUN_DIR}/scope" 2>/dev/null || true)"
@@ -589,6 +606,25 @@ generate_report() {
       [ -f "${RUN_DIR}/${artifact}" ] && printf '%s\n' "- ${artifact}"
     done
     printf '\n'
+
+    printf '## Commits\n\n'
+    WORKTREE_ROOT="${RUN_DIR%/.factory/runs/*}"
+    if git -C "$WORKTREE_ROOT" rev-parse --git-dir > /dev/null 2>&1; then
+      SOURCE_BR="$(cat "${RUN_DIR}/source-branch" 2>/dev/null || echo "main")"
+      git -C "$WORKTREE_ROOT" log --oneline "${SOURCE_BR}..HEAD" 2>/dev/null | \
+        while IFS= read -r line; do printf '%s\n' "- ${line}"; done
+      printf '\n'
+    else
+      printf '(no git repo)\n\n'
+    fi
+
+    printf '## Sessions\n\n'
+    if [ -f "${RUN_DIR}/sessions.log" ]; then
+      cat "${RUN_DIR}/sessions.log"
+      printf '\n'
+    else
+      printf '(no session log)\n\n'
+    fi
   } > "$REPORT_FILE"
 
   printf '  Report written to %s\n' "$REPORT_FILE"
@@ -656,7 +692,9 @@ run_session_loop() {
   fi
 
   SESSION_COUNT=0
+  REVIEW_ROUND=0
   CONSECUTIVE_FAILURES=0
+  SESSION_LOG="${RUN_DIR}/sessions.log"
   while true; do
     SESSION_COUNT=$((SESSION_COUNT + 1))
     printf '\n  === Session %d (run: %s) ===\n\n' "$SESSION_COUNT" "$RUN_ID"
@@ -679,13 +717,28 @@ run_session_loop() {
       PROMPT="Continue from the handoff at .factory/runs/${RUN_ID}/handoff.md"
     fi
 
+    # Set up transcript capture
+    SESSION_DIR="${RUN_DIR}/sessions/session-${SESSION_COUNT}"
+    mkdir -p "$SESSION_DIR"
+    TRANSCRIPT_FILE="${SESSION_DIR}/transcript.jsonl"
+    export FACTORY_TRANSCRIPT_FILE="$TRANSCRIPT_FILE"
+
+    SESSION_START="$(date +%s)"
+
     # Launch agent via caller-defined function
     set +e
     launch_agent "$PROMPT" "$@"
     AGENT_EXIT=$?
     set -e
 
-    printf '\n  Agent exited (code: %d)\n' "$AGENT_EXIT"
+    SESSION_ELAPSED="$(( $(date +%s) - SESSION_START ))"
+    printf '\n  Agent exited (code: %d, %ds)\n' "$AGENT_EXIT" "$SESSION_ELAPSED"
+
+    # Write session metadata
+    STATUS_AFTER="$(cat "${RUN_DIR}/status" 2>/dev/null || echo "unknown")"
+    printf 'session=%d exit=%d duration=%ds status=%s\n' \
+      "$SESSION_COUNT" "$AGENT_EXIT" "$SESSION_ELAPSED" "$STATUS_AFTER" \
+      >> "$SESSION_LOG"
 
     # Track consecutive failures
     if [ "$AGENT_EXIT" -ne 0 ]; then
@@ -699,7 +752,6 @@ run_session_loop() {
       CONSECUTIVE_FAILURES=0
     fi
 
-    capture_snapshot
 
     # Read status and decide
     STATUS="$(cat "${RUN_DIR}/status" 2>/dev/null || echo "unknown")"
@@ -796,9 +848,10 @@ cmd_run_local() {
   launch_agent() {
     LAUNCH_PROMPT="$1"; shift
     sandbox-exec -f "$RENDERED_PROFILE" claude \
+      --output-format stream-json \
       --append-system-prompt "$FACTORY_SYSTEM_PROMPT" \
       -p "$LAUNCH_PROMPT" \
-      "$@"
+      "$@" | tee "$FACTORY_TRANSCRIPT_FILE"
   }
 
   # Refresh credentials before each session
@@ -839,9 +892,10 @@ cmd_run_bare() {
     LAUNCH_PROMPT="$1"; shift
     claude \
       --dangerously-skip-permissions \
+      --output-format stream-json \
       --append-system-prompt "$FACTORY_SYSTEM_PROMPT" \
       -p "$LAUNCH_PROMPT" \
-      "$@"
+      "$@" | tee "$FACTORY_TRANSCRIPT_FILE"
   }
 
   # No per-session hook in bare mode
