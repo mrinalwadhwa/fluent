@@ -106,6 +106,15 @@ architecture reviewer passed with "advisory" findings. Now that
 verdicts are stricter, this would be caught. The run-local run
 successfully fixed the naming in one session.
 
+2026-05-13 — capture_snapshot copies from ~/.claude/ which is the
+global Claude Code state, not the run's session. It captures history
+from all sessions, memory from the first project found (not
+necessarily this one), and todos/plans from all agents. None of this
+is specific to the factory run. The snapshot should either: capture
+only the run's agent session (requires Claude Code to expose per-
+session state), or filter to relevant content, or be dropped entirely
+until a proper mechanism exists.
+
 2026-05-09 — The refine-writing skill at ~/Workspace/skills has
 reference files (ai_tells.md, benchmarks.md, sentence_corrections.md,
 structural_guidance.md) with much more detail than what was captured
