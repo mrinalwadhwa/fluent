@@ -97,8 +97,8 @@ tests/test-run
 
 | Behavior | Test |
 |---|---|
-| Session loop restarts on `executing` | `binary.rs`, `test-session-loop`, `test-rust-binary` |
-| Session loop stops on terminal status | `binary.rs`, `test-session-loop`, `test-rust-binary` |
-| Consecutive failure guard (3 strikes) | `binary.rs`, `test-rust-binary` |
+| Session loop restarts on `executing` | `binary.rs`, `test-session-loop` |
+| Session loop stops on terminal status | `binary.rs`, `test-session-loop` |
+| Consecutive failure guard (3 strikes) | `binary.rs` |
 | Max session limit (50) | `binary.rs` |
-| Session loop uses handoff prompt | `binary.rs`, `test-rust-binary` |
+| Session loop uses handoff prompt | `binary.rs` |

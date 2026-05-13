@@ -288,19 +288,33 @@ fn write_mock_claude(bin_dir: &Path, script: &str) {
     }
 }
 
-fn cleanup_worktree(main_dir: &Path, run_id: &str) {
-    let worktree_path = fs::read_to_string(
-        main_dir.join(format!(".factory/runs/{run_id}/worktree")),
-    );
-    if let Ok(wt) = worktree_path {
-        let wt = wt.trim();
-        if Path::new(wt).is_dir() {
-            std::process::Command::new("git")
-                .args(["-C", &main_dir.to_string_lossy()])
-                .args(["worktree", "remove", "--force", wt])
-                .output()
-                .ok();
+struct WorktreeGuard {
+    main_dir: std::path::PathBuf,
+    run_id: String,
+}
+
+impl Drop for WorktreeGuard {
+    fn drop(&mut self) {
+        let wt_file = self
+            .main_dir
+            .join(format!(".factory/runs/{}/worktree", self.run_id));
+        if let Ok(wt) = fs::read_to_string(&wt_file) {
+            let wt = wt.trim();
+            if Path::new(wt).is_dir() {
+                std::process::Command::new("git")
+                    .args(["-C", &self.main_dir.to_string_lossy()])
+                    .args(["worktree", "remove", "--force", wt])
+                    .output()
+                    .ok();
+            }
         }
+    }
+}
+
+fn worktree_guard(main_dir: &Path, run_id: &str) -> WorktreeGuard {
+    WorktreeGuard {
+        main_dir: main_dir.to_path_buf(),
+        run_id: run_id.to_string(),
     }
 }
 
@@ -330,6 +344,8 @@ exit 0
 "##,
     );
 
+    let _guard = worktree_guard(&main_dir, run_id);
+
     factory_cmd()
         .current_dir(&main_dir)
         .args(["run", "--no-sandbox", "--run-id", run_id])
@@ -338,8 +354,6 @@ exit 0
         .success()
         .stderr(predicate::str::contains("Session 1"))
         .stderr(predicate::str::contains("Run status: complete"));
-
-    cleanup_worktree(&main_dir, run_id);
 }
 
 #[test]
@@ -366,6 +380,8 @@ exit 0
 "##,
     );
 
+    let _guard = worktree_guard(&main_dir, run_id);
+
     factory_cmd()
         .current_dir(&main_dir)
         .args(["run", "--no-sandbox", "--run-id", run_id])
@@ -374,8 +390,6 @@ exit 0
         .success()
         .stderr(predicate::str::contains("needs your input"))
         .stderr(predicate::str::contains("handoff.md"));
-
-    cleanup_worktree(&main_dir, run_id);
 }
 
 #[test]
@@ -410,6 +424,8 @@ exit 0
 "##,
     );
 
+    let _guard = worktree_guard(&main_dir, run_id);
+
     factory_cmd()
         .current_dir(&main_dir)
         .args(["run", "--no-sandbox", "--run-id", run_id])
@@ -420,8 +436,6 @@ exit 0
         .stderr(predicate::str::contains("Session 2"))
         .stderr(predicate::str::contains("Session 3"))
         .stderr(predicate::str::contains("Restarting session"));
-
-    cleanup_worktree(&main_dir, run_id);
 }
 
 #[test]
@@ -446,6 +460,8 @@ exit 1
 "##,
     );
 
+    let _guard = worktree_guard(&main_dir, run_id);
+
     factory_cmd()
         .current_dir(&main_dir)
         .args(["run", "--no-sandbox", "--run-id", run_id])
@@ -462,8 +478,6 @@ exit 1
     )
     .unwrap();
     assert_eq!(wt_status.trim(), "failed");
-
-    cleanup_worktree(&main_dir, run_id);
 }
 
 #[test]
@@ -498,6 +512,8 @@ exit 0
 "##,
     );
 
+    let _guard = worktree_guard(&main_dir, run_id);
+
     factory_cmd()
         .current_dir(&main_dir)
         .args(["run", "--no-sandbox", "--run-id", run_id])
@@ -515,8 +531,6 @@ exit 0
         prompt.contains("handoff"),
         "prompt should reference handoff: {prompt}"
     );
-
-    cleanup_worktree(&main_dir, run_id);
 }
 
 #[test]
@@ -541,6 +555,8 @@ exit 0
 "##,
     );
 
+    let _guard = worktree_guard(&main_dir, run_id);
+
     factory_cmd()
         .current_dir(&main_dir)
         .args(["run", "--no-sandbox", "--run-id", run_id])
@@ -551,6 +567,169 @@ exit 0
     let runtime = fs::read_to_string(run_dir.join("runtime")).unwrap();
     assert_eq!(runtime.trim(), "local");
     assert!(run_dir.join("handle").exists());
+}
 
-    cleanup_worktree(&main_dir, run_id);
+// -------------------------------------------------------------------------
+// Worktree isolation
+// -------------------------------------------------------------------------
+
+#[test]
+fn worktree_copies_run_state() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let run_id = "20260513-wt-state";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("brief.md"), "# Brief\n\nTest\n").unwrap();
+    fs::write(run_dir.join("plan.md"), "## Plan\n1. Step one\n").unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+WORKING_DIR="$(pwd)"
+RUN_ID=$(ls "$WORKING_DIR/.factory/runs/" 2>/dev/null | head -1)
+echo "needs-user" > "$WORKING_DIR/.factory/runs/$RUN_ID/status"
+exit 0
+"##,
+    );
+
+    let _guard = worktree_guard(&main_dir, run_id);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["run", "--no-sandbox", "--run-id", run_id])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    // Verify worktree was created and state was copied
+    let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
+    let wt_path = Path::new(wt_path_str.trim());
+    let wt_run = wt_path.join(format!(".factory/runs/{run_id}"));
+
+    assert!(wt_run.join("brief.md").exists(), "brief.md should be copied");
+    assert!(wt_run.join("plan.md").exists(), "plan.md should be copied");
+    assert!(wt_run.join("status").exists(), "status should be copied");
+
+    // active-run pointer should exist in worktree
+    let active_run = fs::read_to_string(wt_path.join(".factory/active-run")).unwrap();
+    assert_eq!(active_run.trim(), run_id);
+
+    // source-branch should be recorded
+    assert!(run_dir.join("source-branch").exists(), "source-branch should be written");
+}
+
+#[test]
+fn worktree_branches_from_current_branch() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    // Create and switch to a feature branch
+    std::process::Command::new("git")
+        .args(["checkout", "-b", "feature-test"])
+        .current_dir(&main_dir)
+        .output()
+        .unwrap();
+    fs::write(main_dir.join("feature.txt"), "feature content").unwrap();
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(&main_dir)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "add feature"])
+        .current_dir(&main_dir)
+        .output()
+        .unwrap();
+
+    let run_id = "20260513-wt-branch";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("brief.md"), "Brief\n").unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+WORKING_DIR="$(pwd)"
+RUN_ID=$(ls "$WORKING_DIR/.factory/runs/" 2>/dev/null | head -1)
+echo "needs-user" > "$WORKING_DIR/.factory/runs/$RUN_ID/status"
+exit 0
+"##,
+    );
+
+    let _guard = worktree_guard(&main_dir, run_id);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["run", "--no-sandbox", "--run-id", run_id])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    // source-branch should record the feature branch
+    let source_branch = fs::read_to_string(run_dir.join("source-branch")).unwrap();
+    assert_eq!(source_branch.trim(), "feature-test");
+
+    // Worktree should contain the feature branch file
+    let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
+    let wt_path = Path::new(wt_path_str.trim());
+    assert!(
+        wt_path.join("feature.txt").exists(),
+        "worktree should contain feature branch file"
+    );
+}
+
+// -------------------------------------------------------------------------
+// Run-id resolution via active-run pointer
+// -------------------------------------------------------------------------
+
+#[test]
+fn run_resolves_via_active_run_pointer() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    // Create two runs, point active-run at one
+    let run_id = "20260513-active-ptr";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("brief.md"), "Brief\n").unwrap();
+
+    let other_dir = main_dir.join(".factory/runs/20260513-other-run");
+    fs::create_dir_all(&other_dir).unwrap();
+    fs::write(other_dir.join("status"), "planned").unwrap();
+    fs::write(other_dir.join("brief.md"), "Other\n").unwrap();
+
+    fs::write(main_dir.join(".factory/active-run"), run_id).unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+WORKING_DIR="$(pwd)"
+RUN_ID=$(ls "$WORKING_DIR/.factory/runs/" 2>/dev/null | head -1)
+echo "needs-user" > "$WORKING_DIR/.factory/runs/$RUN_ID/status"
+exit 0
+"##,
+    );
+
+    let _guard = worktree_guard(&main_dir, run_id);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["run", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    // The active-run pointer should have been used — worktree file for our run should exist
+    assert!(
+        run_dir.join("worktree").exists(),
+        "should resolve via active-run pointer"
+    );
 }

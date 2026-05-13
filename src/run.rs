@@ -571,6 +571,29 @@ mod tests {
     }
 
     #[test]
+    fn test_accessors_trim_trailing_newlines() {
+        let tmp = setup_test_project();
+        let run_dir = tmp.path().join(".factory/runs/trim-test");
+        fs::create_dir_all(&run_dir).unwrap();
+        fs::write(run_dir.join("status"), "planned").unwrap();
+        fs::write(run_dir.join("runtime"), "fargate\n").unwrap();
+        fs::write(run_dir.join("mode"), "review\n").unwrap();
+        fs::write(run_dir.join("reviewers"), "review-tests\n").unwrap();
+        fs::write(run_dir.join("scope"), "src/\n").unwrap();
+        fs::write(run_dir.join("handle"), "abc123\n").unwrap();
+
+        let run = Run {
+            id: "trim-test".into(),
+            dir: run_dir,
+        };
+        assert_eq!(run.runtime(), "fargate");
+        assert_eq!(run.mode(), "review");
+        assert_eq!(run.reviewer_filter(), "review-tests");
+        assert_eq!(run.scope(), Some("src/".into()));
+        assert_eq!(run.handle(), Some("abc123".into()));
+    }
+
+    #[test]
     fn test_status_unknown_parse() {
         let status = RunStatus::parse("something-new");
         assert_eq!(status, RunStatus::Unknown("something-new".to_string()));
