@@ -108,9 +108,8 @@ Write the review artifact to
 `.factory/runs/[run-id]/reviews/review-architecture.md`.
 
 Determine the verdict:
-- **pass** — no structural concerns, or only minor advisory findings
-- **fail** — significant structural problems that should be addressed
-  before the code ships
+- **pass** — no findings that warrant changes
+- **fail** — findings the author should address before completion
 - **uncertain** — findings that could go either way, need the user's
   judgment
 

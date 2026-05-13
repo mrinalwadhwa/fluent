@@ -110,10 +110,8 @@ Write the review artifact to
 `.factory/runs/[run-id]/reviews/review-skills.md`.
 
 Determine the verdict:
-- **pass** — skills are well-structured and follow the guidance
-- **fail** — significant issues (non-procedural content as a skill,
-  missing frontmatter, broken references, no pacing in interactive
-  skills)
+- **pass** — no findings that warrant changes
+- **fail** — findings the author should address before completion
 - **uncertain** — findings that need the user's judgment
 
 Format:

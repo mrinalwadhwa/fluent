@@ -111,9 +111,8 @@ For each gap, record:
 Write the review artifact to `.factory/runs/[run-id]/reviews/documentation.md`.
 
 Determine the verdict:
-- **pass** — no findings, or only minor style suggestions
-- **fail** — accuracy errors, significant AI tells, or missing
-  documentation for new components
+- **pass** — no findings that warrant changes
+- **fail** — findings the author should address before completion
 - **uncertain** — findings that could go either way, or conflicts
   with other reviewer findings that need the user's judgment
 

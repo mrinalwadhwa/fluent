@@ -105,10 +105,8 @@ Write the review artifact to
 `.factory/runs/[run-id]/reviews/review-tests.md`.
 
 Determine the verdict:
-- **pass** — tests are well-structured and provide confidence
-- **fail** — significant issues (testing implementation not
-  behavior, flaky tests, missing coverage for critical code,
-  broken test isolation)
+- **pass** — no findings that warrant changes
+- **fail** — findings the author should address before completion
 - **uncertain** — findings that need the user's judgment
 
 Format:
