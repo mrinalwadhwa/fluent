@@ -106,6 +106,23 @@ architecture reviewer passed with "advisory" findings. Now that
 verdicts are stricter, this would be caught. The run-local run
 successfully fixed the naming in one session.
 
+2026-05-13 — On the Fargate test, round 2 reviewers all crashed
+(exit 1) after round 1 had 5 reviewers + author session 2. Cause
+unknown — could be rate limits, container resource exhaustion, or
+something else. Needs investigation with reviewer transcripts next
+time it happens.
+
+2026-05-13 — Run-scoped reviewers on trivial runs (e.g. a test brief
+that just writes complete) still find issues with the broader codebase.
+The scope should be narrower — if the run produced no code changes,
+reviewers should pass immediately or be skipped.
+
+2026-05-13 — The worktree reuse bug bit us again during Fargate
+testing. A retry uploaded a workspace from the old branch point instead
+of current HEAD. This is the second time this caused wasted effort.
+Priority fix: either rebase/reset on reuse, or fail if the branch
+already exists and force unique run-ids.
+
 2026-05-13 — capture_snapshot copies from ~/.claude/ which is the
 global Claude Code state, not the run's session. It captures history
 from all sessions, memory from the first project found (not
