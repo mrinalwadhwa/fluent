@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 /// Generate a run report at `<run_dir>/report.md`.
 pub fn generate_report(run_dir: &Path, run_id: &str, session_count: u32) -> Result<()> {
@@ -112,6 +113,60 @@ pub fn generate_report(run_dir: &Path, run_id: &str, session_count: u32) -> Resu
     }
     report.push('\n');
 
+    // Commit log — git log from source branch to HEAD
+    report.push_str("## Commits\n\n");
+    let worktree_root = run_dir
+        .to_string_lossy()
+        .split("/.factory/runs/")
+        .next()
+        .unwrap_or(".")
+        .to_string();
+    if Path::new(&worktree_root).join(".git").exists()
+        || Command::new("git")
+            .args(["-C", &worktree_root, "rev-parse", "--git-dir"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    {
+        let source_branch = fs::read_to_string(run_dir.join("source-branch"))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "main".into());
+        let range = format!("{source_branch}..HEAD");
+        if let Ok(output) = Command::new("git")
+            .args(["-C", &worktree_root, "log", "--oneline", &range])
+            .output()
+        {
+            let log = String::from_utf8_lossy(&output.stdout);
+            if log.trim().is_empty() {
+                report.push_str("(no commits)\n");
+            } else {
+                for line in log.lines() {
+                    report.push_str(&format!("- {line}\n"));
+                }
+            }
+        } else {
+            report.push_str("(no git repo)\n");
+        }
+    } else {
+        report.push_str("(no git repo)\n");
+    }
+    report.push('\n');
+
+    // Session summary from sessions.log
+    report.push_str("## Sessions\n\n");
+    match fs::read_to_string(run_dir.join("sessions.log")) {
+        Ok(log) if !log.trim().is_empty() => {
+            report.push_str(&log);
+            if !log.ends_with('\n') {
+                report.push('\n');
+            }
+        }
+        _ => {
+            report.push_str("(no session log)\n");
+        }
+    }
+    report.push('\n');
+
     fs::write(&report_path, &report)?;
     eprintln!("  Report written to {}", report_path.display());
 
@@ -155,5 +210,48 @@ mod tests {
 
         let report = fs::read_to_string(run_dir.join("report.md")).unwrap();
         assert!(report.contains("(no brief)"));
+    }
+
+    #[test]
+    fn test_generate_report_includes_sessions_log() {
+        let tmp = TempDir::new().unwrap();
+        let run_dir = tmp.path();
+        fs::write(run_dir.join("status"), "complete").unwrap();
+        fs::write(
+            run_dir.join("sessions.log"),
+            "session=1 exit=0 duration=42s status=complete\n",
+        )
+        .unwrap();
+
+        generate_report(run_dir, "test-run", 1).unwrap();
+
+        let report = fs::read_to_string(run_dir.join("report.md")).unwrap();
+        assert!(report.contains("## Sessions"));
+        assert!(report.contains("session=1 exit=0 duration=42s status=complete"));
+    }
+
+    #[test]
+    fn test_generate_report_no_sessions_log() {
+        let tmp = TempDir::new().unwrap();
+        let run_dir = tmp.path();
+        fs::write(run_dir.join("status"), "complete").unwrap();
+
+        generate_report(run_dir, "test-run", 1).unwrap();
+
+        let report = fs::read_to_string(run_dir.join("report.md")).unwrap();
+        assert!(report.contains("## Sessions"));
+        assert!(report.contains("(no session log)"));
+    }
+
+    #[test]
+    fn test_generate_report_includes_commits_section() {
+        let tmp = TempDir::new().unwrap();
+        let run_dir = tmp.path();
+        fs::write(run_dir.join("status"), "complete").unwrap();
+
+        generate_report(run_dir, "test-run", 1).unwrap();
+
+        let report = fs::read_to_string(run_dir.join("report.md")).unwrap();
+        assert!(report.contains("## Commits"));
     }
 }

@@ -64,15 +64,18 @@ pub fn run_session_loop(
     }
 
     // For review runs, start by running reviewers
+    let mut review_round: u32 = 0;
     let initial_prompt = if run_mode == "review" {
         eprintln!("  Mode: review (reviewers run first)");
         let review_scope = "full-codebase";
+        review_round += 1;
         if !review::run_reviews(
             run_dir,
             &run.id,
             &reviewer_filter,
             review_scope,
             &config.resolver,
+            review_round,
         )? {
             format!(
                 "This is a review run. Reviewers have produced findings. Read the review artifacts at .factory/runs/{}/reviews/ and address the findings. When done, write status 'complete'.",
@@ -120,15 +123,38 @@ pub fn run_session_loop(
         // Per-session hook
         hooks.pre_session()?;
 
+        // Set up transcript capture
+        let session_dir = run_dir.join(format!("sessions/session-{session_count}"));
+        fs::create_dir_all(&session_dir)?;
+        let transcript_file = session_dir.join("transcript.jsonl");
+
+        let session_start = std::time::Instant::now();
+
         // Launch agent
         let exit_code = agent.run(
             &prompt,
             &config.system_prompt,
             &config.working_dir,
             &config.extra_args,
+            Some(&transcript_file),
         )?;
 
-        eprintln!("\n  Agent exited (code: {exit_code})");
+        let session_elapsed = session_start.elapsed().as_secs();
+        eprintln!("\n  Agent exited (code: {exit_code}, {session_elapsed}s)");
+
+        // Write session metadata to sessions.log
+        {
+            let status_after = run.status().map(|s| s.to_string()).unwrap_or_else(|_| "unknown".into());
+            let mut log_file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(run_dir.join("sessions.log"))?;
+            use std::io::Write;
+            writeln!(
+                log_file,
+                "session={session_count} exit={exit_code} duration={session_elapsed}s status={status_after}"
+            )?;
+        }
 
         // Track consecutive failures
         if exit_code != 0 {
@@ -158,12 +184,14 @@ pub fn run_session_loop(
                 } else {
                     "run-scoped"
                 };
+                review_round += 1;
                 if review::run_reviews(
                     run_dir,
                     &run.id,
                     &reviewer_filter,
                     review_scope,
                     &config.resolver,
+                    review_round,
                 )? {
                     report::generate_report(run_dir, &run.id, session_count)?;
                     eprintln!("\n  Run {} completed.", run.id);
@@ -311,6 +339,7 @@ mod tests {
             _system_prompt: &str,
             _working_dir: &Path,
             _extra_args: &[String],
+            _transcript_file: Option<&Path>,
         ) -> Result<i32> {
             let n = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
             // The run_dir is embedded in the prompt — extract it for the handler
@@ -562,5 +591,54 @@ mod tests {
 
         assert_eq!(agent.call_count.load(Ordering::SeqCst), MAX_SESSIONS);
         assert_eq!(run.status().unwrap(), RunStatus::Failed);
+    }
+
+    #[test]
+    fn test_loop_writes_sessions_log() {
+        let (_tmp, run) = setup_test_run();
+        let run_dir = run.dir.clone();
+
+        let agent = TestAgent {
+            handler: move |_prompt: &str, n: u32, _: &Path| {
+                if n < 3 {
+                    fs::write(run_dir.join("status"), "executing").unwrap();
+                } else {
+                    fs::write(run_dir.join("status"), "needs-user").unwrap();
+                }
+                0
+            },
+            call_count: AtomicU32::new(0),
+        };
+
+        let config = make_config(&run);
+        run_session_loop(&agent, &config, &NoopHooks).unwrap();
+
+        let log = fs::read_to_string(run.dir.join("sessions.log")).unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with("session=1 exit=0 duration="));
+        assert!(lines[0].contains("status=executing"));
+        assert!(lines[2].starts_with("session=3 exit=0 duration="));
+        assert!(lines[2].contains("status=needs-user"));
+    }
+
+    #[test]
+    fn test_loop_creates_session_transcript_dir() {
+        let (_tmp, run) = setup_test_run();
+        let run_dir = run.dir.clone();
+
+        let agent = TestAgent {
+            handler: move |_prompt: &str, _n: u32, _: &Path| {
+                fs::write(run_dir.join("status"), "needs-user").unwrap();
+                0
+            },
+            call_count: AtomicU32::new(0),
+        };
+
+        let config = make_config(&run);
+        run_session_loop(&agent, &config, &NoopHooks).unwrap();
+
+        // Session directory should exist
+        assert!(run.dir.join("sessions/session-1").is_dir());
     }
 }

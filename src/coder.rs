@@ -1,10 +1,14 @@
 use anyhow::Result;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// Trait abstracting the coding agent (currently Claude Code).
 pub trait Coder {
     /// Launch the coder with a prompt, system prompt, and working directory.
+    /// When `transcript_file` is provided, add `--verbose --output-format
+    /// stream-json` and pipe stdout to the file (like `tee`).
     /// Returns the exit code.
     fn run(
         &self,
@@ -12,6 +16,7 @@ pub trait Coder {
         system_prompt: &str,
         working_dir: &Path,
         extra_args: &[String],
+        transcript_file: Option<&Path>,
     ) -> Result<i32>;
 
     /// Launch an interactive session (no -p flag).
@@ -35,14 +40,17 @@ impl Coder for SandboxedClaudeCode {
         system_prompt: &str,
         working_dir: &Path,
         extra_args: &[String],
+        transcript_file: Option<&Path>,
     ) -> Result<i32> {
         let mut cmd = self.build_command(working_dir);
+        if transcript_file.is_some() {
+            cmd.args(["--verbose", "--output-format", "stream-json"]);
+        }
         cmd.args(["--append-system-prompt", system_prompt]);
         cmd.args(["-p", prompt]);
         cmd.args(extra_args);
 
-        let status = cmd.status()?;
-        Ok(status.code().unwrap_or(1))
+        run_with_transcript(cmd, transcript_file)
     }
 
     fn run_interactive(
@@ -86,16 +94,19 @@ impl Coder for BareClaudeCode {
         system_prompt: &str,
         working_dir: &Path,
         extra_args: &[String],
+        transcript_file: Option<&Path>,
     ) -> Result<i32> {
         let mut cmd = Command::new("claude");
         cmd.current_dir(working_dir);
         cmd.args(["--dangerously-skip-permissions"]);
+        if transcript_file.is_some() {
+            cmd.args(["--verbose", "--output-format", "stream-json"]);
+        }
         cmd.args(["--append-system-prompt", system_prompt]);
         cmd.args(["-p", prompt]);
         cmd.args(extra_args);
 
-        let status = cmd.status()?;
-        Ok(status.code().unwrap_or(1))
+        run_with_transcript(cmd, transcript_file)
     }
 
     fn run_interactive(
@@ -112,6 +123,31 @@ impl Coder for BareClaudeCode {
 
         let status = cmd.status()?;
         Ok(status.code().unwrap_or(1))
+    }
+}
+
+/// Run a command, optionally piping stdout to a transcript file (like `tee`).
+/// When `transcript_file` is `None`, stdout inherits from the parent process.
+fn run_with_transcript(mut cmd: Command, transcript_file: Option<&Path>) -> Result<i32> {
+    match transcript_file {
+        Some(path) => {
+            cmd.stdout(Stdio::piped());
+            let mut child = cmd.spawn()?;
+            let stdout = child.stdout.take().expect("stdout was piped");
+            let mut file = File::create(path)?;
+            let reader = BufReader::new(stdout);
+            for line in reader.lines() {
+                let line = line?;
+                writeln!(file, "{}", line)?;
+                eprintln!("{}", line);
+            }
+            let status = child.wait()?;
+            Ok(status.code().unwrap_or(1))
+        }
+        None => {
+            let status = cmd.status()?;
+            Ok(status.code().unwrap_or(1))
+        }
     }
 }
 
@@ -136,6 +172,7 @@ where
         _system_prompt: &str,
         _working_dir: &Path,
         _extra_args: &[String],
+        _transcript_file: Option<&Path>,
     ) -> Result<i32> {
         let n = self.call_count.get() + 1;
         self.call_count.set(n);

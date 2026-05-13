@@ -53,11 +53,19 @@ pub fn run_single_reviewer(
 
     eprintln!("  [{reviewer_name}] starting...");
 
+    let transcript_path = run_dir.join(format!("reviews/transcript-{reviewer_name}.jsonl"));
+
     let status = Command::new("claude")
         .current_dir(&project_root)
         .args(["--dangerously-skip-permissions"])
+        .args(["--verbose", "--output-format", "stream-json"])
         .args(["--append-system-prompt", system_prompt])
         .args(["-p", review_prompt])
+        .stdout(
+            std::fs::File::create(&transcript_path)
+                .map(std::process::Stdio::from)
+                .unwrap_or_else(|_| std::process::Stdio::null()),
+        )
         .status();
 
     match status {
@@ -89,16 +97,49 @@ pub fn run_single_reviewer(
     Ok(verdict)
 }
 
+/// Archive previous round's review artifacts before running a new round.
+fn archive_previous_round(run_dir: &Path, review_round: u32) {
+    if review_round <= 1 {
+        return;
+    }
+    let prev_round = review_round - 1;
+    let archive_dir = run_dir.join(format!("reviews/round-{prev_round}"));
+    let reviews_dir = run_dir.join("reviews");
+
+    if fs::create_dir_all(&archive_dir).is_err() {
+        return;
+    }
+
+    // Copy review-*.md files to archive
+    if let Ok(entries) = fs::read_dir(&reviews_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("review-") && name_str.ends_with(".md") {
+                let _ = fs::copy(entry.path(), archive_dir.join(&name));
+            } else if name_str.starts_with("transcript-") && name_str.ends_with(".jsonl") {
+                // Move transcript files to archive
+                let _ = fs::rename(entry.path(), archive_dir.join(&name));
+            }
+        }
+    }
+}
+
 /// Run all reviewers (or a filtered set) in parallel.
 /// Returns true if all pass, false if any fail.
+/// `review_round` tracks how many times reviews have been run (1-based).
 pub fn run_reviews(
     run_dir: &Path,
     run_id: &str,
     reviewer_filter: &str,
     review_mode: &str,
     resolver: &ContentResolver,
+    review_round: u32,
 ) -> Result<bool> {
     fs::create_dir_all(run_dir.join("reviews"))?;
+
+    // Archive previous round's reviews if this isn't the first round
+    archive_previous_round(run_dir, review_round);
 
     let scope_detail = fs::read_to_string(run_dir.join("scope")).unwrap_or_default();
     let scope_instruction = if scope_detail.is_empty() {
@@ -251,5 +292,47 @@ mod tests {
         assert!(Verdict::Pass.is_passing());
         assert!(!Verdict::Fail.is_passing());
         assert!(!Verdict::Uncertain.is_passing());
+    }
+
+    #[test]
+    fn test_archive_previous_round_noop_for_first_round() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let run_dir = tmp.path();
+        let reviews = run_dir.join("reviews");
+        fs::create_dir_all(&reviews).unwrap();
+        fs::write(reviews.join("review-tests.md"), "Verdict: pass").unwrap();
+
+        archive_previous_round(run_dir, 1);
+
+        // No archive should be created for round 1
+        assert!(!run_dir.join("reviews/round-0").exists());
+        // Original file still exists
+        assert!(reviews.join("review-tests.md").exists());
+    }
+
+    #[test]
+    fn test_archive_previous_round_copies_reviews() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let run_dir = tmp.path();
+        let reviews = run_dir.join("reviews");
+        fs::create_dir_all(&reviews).unwrap();
+        fs::write(reviews.join("review-tests.md"), "Verdict: pass").unwrap();
+        fs::write(
+            reviews.join("transcript-tests.jsonl"),
+            "{\"type\":\"test\"}",
+        )
+        .unwrap();
+
+        archive_previous_round(run_dir, 2);
+
+        // Archive directory should exist with copies
+        let archive = reviews.join("round-1");
+        assert!(archive.join("review-tests.md").exists());
+        assert!(archive.join("transcript-tests.jsonl").exists());
+
+        // Review file should still exist (copied, not moved)
+        assert!(reviews.join("review-tests.md").exists());
+        // Transcript should be moved (not just copied)
+        assert!(!reviews.join("transcript-tests.jsonl").exists());
     }
 }
