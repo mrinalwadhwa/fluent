@@ -92,6 +92,32 @@ evolve toward split panes (conversation + status + progress). Web UI
 is future but don't over-engineer for it now. This should be its own
 run after the Rust port.
 
+2026-05-13 — The run-local author treated step 1 (trait renaming) as
+the entire run, ignoring steps 2-12 in the plan. The plan had session
+loop, review loop, worktree management, credential injection — none
+were attempted. The author may not be reading the full plan, or may be
+treating each commit as a completion point. The plan needs to be
+clearer that all steps are required, or the system prompt needs to
+emphasize reading and following the plan through all steps.
+
+2026-05-13 — Reviewers have no timeout. A stuck reviewer ran for hours
+blocking the entire review phase. The factory should set a per-reviewer
+timeout (e.g. 10 minutes) and treat timeout as a pass to avoid blocking
+the loop indefinitely.
+
+2026-05-13 — The documentation reviewer failed twice on vocabulary
+consistency, creating a loop: author fixes → reviewer finds more →
+restart. This is the tighter verdict criteria working as intended, but
+it can cause extended loops on large renames that touch many files.
+The author should read all review findings carefully and fix everything
+in one pass rather than incrementally.
+
+2026-05-13 — The scaffolding run produced code that used Agent/Sandbox/
+Backend despite the approach explicitly specifying Coder/Os/Runtime.
+The author agent doesn't reliably follow vocabulary from the approach
+document. This could be reinforced in the system prompt or the approach
+format.
+
 2026-05-09 — The refine-writing skill at ~/Workspace/skills has
 reference files (ai_tells.md, benchmarks.md, sentence_corrections.md,
 structural_guidance.md) with much more detail than what was captured
