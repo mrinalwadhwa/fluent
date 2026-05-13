@@ -572,8 +572,8 @@ generate_report() {
       for review in "${RUN_DIR}/reviews"/review-*.md; do
         [ -f "$review" ] || continue
         # Count numbered findings
-        COUNT="$(grep -c '^[0-9]' "$review" 2>/dev/null || echo "0")"
-        FINDING_COUNT=$((FINDING_COUNT + COUNT))
+        COUNT="$(grep -c '^[0-9]' "$review" 2>/dev/null || true)"
+        FINDING_COUNT=$((FINDING_COUNT + ${COUNT:-0}))
       done
       if [ "$FINDING_COUNT" -gt 0 ]; then
         printf 'Reviewers produced findings. See reviews/ for details.\n\n'
