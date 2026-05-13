@@ -55,7 +55,7 @@ THE SYSTEM SHALL set status to `planned`.
 WHEN `factory run` is invoked,
 THE SYSTEM SHALL create a git worktree branched from the current HEAD,
 copy the run's state into it, and execute within the worktree.
-Test: tests/test-run (setup_run_worktree creates worktree with state), tests/behaviors/operations/test-scope-and-edges.sh
+Test: src/worktree.rs (setup_run_worktree tests), tests/binary.rs (worktree creates and copies state), tests/behaviors/operations/test-run-state.sh
 
 WHEN `factory run` is invoked from a non-main branch,
 THE SYSTEM SHALL branch the worktree from that branch and record it as
@@ -144,7 +144,7 @@ WHEN a factory command needs the run-id,
 THE SYSTEM SHALL check in order: `--run-id` flag, `FACTORY_RUN_ID` env
 var, `.factory/active-run` file, then scan for active runs. The scan
 considers a run active if its status is `planned` or `executing`.
-Test: tests/test-run (resolve run-id tests), tests/behaviors/operations/test-scope-and-edges.sh
+Test: src/run.rs (resolve run-id tests), tests/binary.rs (run-id resolution tests)
 
 ## Review phase
 
@@ -166,11 +166,11 @@ Test: tests/behaviors/operations/test-review-phase.sh (reviewer fail returns non
 WHEN `factory run` is invoked and the run's mode is `review`,
 THE SYSTEM SHALL run reviewers first (before the author) with full-codebase
 scope, then pass findings to the author.
-Test: tests/behaviors/operations/test-review-mode.sh, tests/behaviors/operations/test-review-phase.sh (review run findings launch author)
+Test: tests/behaviors/operations/test-review-phase.sh (review run findings launch author)
 
 WHEN `factory run` is invoked and the run has a `scope` file,
 THE SYSTEM SHALL copy the scope file into the worktree.
-Test: tests/behaviors/operations/test-scope-and-edges.sh
+Test: src/worktree.rs (test_worktree_copies_scope_file)
 
 WHEN reviewers all pass on a review run's initial review,
 THE SYSTEM SHALL set status to `complete` and stop the loop without

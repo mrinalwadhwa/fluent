@@ -222,10 +222,10 @@ Brave Search key). Token refresh at session boundaries.
 ### Local (bare)
 
 `factory run --no-sandbox` runs the session loop without Seatbelt
-sandboxing, worktree creation, or credential refresh. Used on platforms
-without macOS sandbox support or when the agent is already isolated by
-other means. The agent runs with `--dangerously-skip-permissions` in the
-current directory.
+sandboxing or credential refresh. A git worktree is still created when
+the directory is a git repo. Used on platforms without macOS sandbox
+support or when the agent is already isolated by other means. The agent
+runs with `--dangerously-skip-permissions`.
 
 ### Fargate
 

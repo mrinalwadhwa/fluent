@@ -80,24 +80,25 @@ tests/test-run
 | Worktree copies all run state files | `test-run-state` |
 | Worktree records source-branch and worktree path | `test-run-state` |
 | Run-id scan ignores completed runs | `test-run-state` |
-| Status display includes backend and brief | `test-run-state` |
-| Worktree copies scope file | `test-scope-and-edges` |
-| Run-id scan treats `executing` as active | `test-scope-and-edges` |
-| Run-id scan skips `needs-user` and `failed` | `test-scope-and-edges` |
-| Status display works with no runs | `test-scope-and-edges` |
-| Review mode copies mode/reviewers to worktree | `test-review-mode` |
-| Resume finds `needs-user` or `failed` runs | `test-resume-resolve` |
-| Status displays fargate backend | `test-watch-and-status-edges` |
-| Status displays mixed backends | `test-watch-and-status-edges` |
+| Status display includes runtime and brief | `test-run-state` |
+| Worktree copies scope file | `test-run-state`, `binary.rs` |
+| Run-id scan treats `executing` as active | `test-run-state`, `binary.rs` |
+| Run-id scan skips `needs-user` and `failed` | `test-run-state`, `binary.rs` |
+| Status display works with no runs | `test-status-edges`, `binary.rs` |
+| Review mode copies mode/reviewers to worktree | `test-review-phase` |
+| Resume finds `needs-user` or `failed` runs | `test-resume-resolve`, `binary.rs` |
+| Status displays fargate runtime | `test-watch-and-status-edges` |
+| Status displays mixed runtimes | `test-watch-and-status-edges` |
 | Watch polls at default interval | `test-watch-and-status-edges` |
 | Watch accepts custom interval | `test-watch-and-status-edges` |
 | Watch displays run status | `test-watch-and-status-edges` |
 
-### Operational (not yet tested)
+### Session loop (tested by binary.rs and test-session-loop.sh)
 
-| Behavior | Reason |
+| Behavior | Test |
 |---|---|
-| Session loop restarts on `executing` | Requires Claude API |
-| Session loop stops on terminal status | Requires Claude API |
-| Consecutive failure guard (3 strikes) | Requires Claude API |
-| Max session limit (50) | Requires Claude API |
+| Session loop restarts on `executing` | `binary.rs`, `test-session-loop`, `test-rust-binary` |
+| Session loop stops on terminal status | `binary.rs`, `test-session-loop`, `test-rust-binary` |
+| Consecutive failure guard (3 strikes) | `binary.rs`, `test-rust-binary` |
+| Max session limit (50) | `binary.rs` |
+| Session loop uses handoff prompt | `binary.rs`, `test-rust-binary` |
