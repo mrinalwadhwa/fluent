@@ -45,6 +45,19 @@ pub fn setup_run_worktree(
             .output()?;
 
         if !result.status.success() {
+            // Branch exists from a previous run — reset it to current HEAD
+            let reset = Command::new("git")
+                .args(["-C", &source_root.to_string_lossy()])
+                .args(["branch", "-f", run_id, "HEAD"])
+                .output()?;
+
+            if !reset.status.success() {
+                bail!(
+                    "Failed to reset branch to HEAD: {}",
+                    String::from_utf8_lossy(&reset.stderr)
+                );
+            }
+
             let result2 = Command::new("git")
                 .args(["-C", &source_root.to_string_lossy()])
                 .args([
@@ -355,6 +368,87 @@ mod tests {
         Command::new("git")
             .args(["-C", &main_dir.to_string_lossy()])
             .args(["worktree", "remove", "--force", &wt.to_string_lossy()])
+            .output()
+            .ok();
+    }
+
+    #[test]
+    fn test_worktree_reuse_gets_current_head() {
+        let tmp = setup_git_project();
+        let main_dir = tmp.path().join("main");
+
+        let run_id = "test-reuse";
+        let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+        fs::create_dir_all(&run_dir).unwrap();
+        fs::write(run_dir.join("brief.md"), "Brief").unwrap();
+        fs::write(run_dir.join("status"), "planned").unwrap();
+
+        // First worktree creation — creates the branch
+        let result1 = setup_run_worktree(&main_dir, run_id, &run_dir).unwrap();
+        let wt1 = result1.worktree_dir;
+        let old_head = String::from_utf8_lossy(
+            &Command::new("git")
+                .args(["-C", &wt1.to_string_lossy()])
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .trim()
+        .to_string();
+
+        // Remove the worktree but keep the branch
+        Command::new("git")
+            .args(["-C", &main_dir.to_string_lossy()])
+            .args(["worktree", "remove", "--force", &wt1.to_string_lossy()])
+            .output()
+            .unwrap();
+
+        // Advance HEAD on main with a new commit
+        fs::write(main_dir.join("new-file.txt"), "new content").unwrap();
+        Command::new("git")
+            .args(["add", "new-file.txt"])
+            .current_dir(&main_dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "second commit"])
+            .current_dir(&main_dir)
+            .output()
+            .unwrap();
+
+        let new_head = String::from_utf8_lossy(
+            &Command::new("git")
+                .args(["-C", &main_dir.to_string_lossy()])
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .trim()
+        .to_string();
+        assert_ne!(old_head, new_head);
+
+        // Re-create worktree with the same run_id — should be at new HEAD
+        let result2 = setup_run_worktree(&main_dir, run_id, &run_dir).unwrap();
+        let wt2 = result2.worktree_dir;
+        let wt_head = String::from_utf8_lossy(
+            &Command::new("git")
+                .args(["-C", &wt2.to_string_lossy()])
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .trim()
+        .to_string();
+
+        assert_eq!(wt_head, new_head, "Reused worktree should be at current HEAD, not old branch point");
+
+        // Cleanup
+        Command::new("git")
+            .args(["-C", &main_dir.to_string_lossy()])
+            .args(["worktree", "remove", "--force", &wt2.to_string_lossy()])
             .output()
             .ok();
     }

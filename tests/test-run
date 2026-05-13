@@ -269,6 +269,39 @@ test_reviewer_artifact_resolves_to_worktree() {
   return $RESULT
 }
 
+test_worktree_reuse_gets_current_head() {
+  setup_test_project
+
+  RUN_ID="test-reuse-run"
+  mkdir -p ".factory/runs/${RUN_ID}"
+  printf 'Brief' > ".factory/runs/${RUN_ID}/brief.md"
+  printf 'planned' > ".factory/runs/${RUN_ID}/status"
+  RUN_DIR="$(pwd)/.factory/runs/${RUN_ID}"
+
+  # First worktree — creates branch
+  setup_run_worktree "$(pwd)"
+  OLD_HEAD="$(git -C "$WORKTREE_DIR" rev-parse HEAD)"
+
+  # Remove the worktree but keep the branch
+  git worktree remove --force "$WORKTREE_DIR"
+
+  # Advance HEAD on main
+  echo "new content" > new-file.txt
+  git add new-file.txt && git commit -m "second commit" > /dev/null 2>&1
+  NEW_HEAD="$(git rev-parse HEAD)"
+
+  # Re-create worktree with same run_id
+  setup_run_worktree "$(pwd)"
+  WT_HEAD="$(git -C "$WORKTREE_DIR" rev-parse HEAD)"
+
+  RESULT=0
+  [ "$OLD_HEAD" != "$NEW_HEAD" ] || { printf '    FAIL: HEAD did not advance\n'; RESULT=1; }
+  [ "$WT_HEAD" = "$NEW_HEAD" ] || { printf '    FAIL: worktree at %s, expected %s\n' "$WT_HEAD" "$NEW_HEAD"; RESULT=1; }
+
+  cleanup_test_project
+  return $RESULT
+}
+
 test_status_display() {
   setup_test_project
 
@@ -305,6 +338,7 @@ run_test "resolve run-id flag overrides active-run" test_resolve_run_id_flag_ove
 run_test "setup_run_worktree creates worktree with state" test_setup_run_worktree
 run_test "setup_run_worktree from non-main branch" test_setup_run_worktree_from_branch
 run_test "reviewer artifact resolves to worktree" test_reviewer_artifact_resolves_to_worktree
+run_test "worktree reuse gets current HEAD" test_worktree_reuse_gets_current_head
 run_test "status display shows all runs" test_status_display
 
 printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"

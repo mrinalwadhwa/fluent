@@ -328,8 +328,11 @@ setup_run_worktree() {
     printf '  Worktree already exists: %s\n' "$WORKTREE_DIR"
   else
     printf '  Creating worktree %s from %s...\n' "$RUN_ID" "$SOURCE_BRANCH"
-    git -C "$SOURCE_ROOT" worktree add "${WORKTREE_DIR}" -b "$RUN_ID" 2>/dev/null || \
+    if ! git -C "$SOURCE_ROOT" worktree add "${WORKTREE_DIR}" -b "$RUN_ID" 2>/dev/null; then
+      # Branch exists from a previous run — reset it to current HEAD before checkout
+      git -C "$SOURCE_ROOT" branch -f "$RUN_ID" HEAD
       git -C "$SOURCE_ROOT" worktree add "${WORKTREE_DIR}" "$RUN_ID"
+    fi
   fi
 
   # Copy run state into worktree
