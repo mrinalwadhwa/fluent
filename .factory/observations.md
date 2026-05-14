@@ -111,6 +111,43 @@ that just writes complete) still find issues with the broader codebase.
 The scope should be narrower — if the run produced no code changes,
 reviewers should pass immediately or be skipped.
 
+2026-05-13 — macOS notifications fire when run status changes but
+have no useful content — you know something happened but not what.
+The notification should include the run ID, new status, and a brief
+summary (e.g. "Run X completed — 2 sessions, all reviewers passed"
+or "Run X needs your input — see handoff").
+
+2026-05-13 — All factory runs so far have used --no-sandbox. The
+sandbox exists to prevent agents from doing destructive things on
+the user's machine (bad dependencies, file deletion outside
+workspace). For autonomous operation on a primary computer, the
+sandbox should be the default, not an opt-in. This means the Rust
+binary's sandbox support needs to work reliably. Getting to
+"always sandboxed" is prerequisite for trust in autonomous runs.
+
+2026-05-13 — Visibility into running sessions is critical for trust.
+Currently a background run is opaque until it finishes. The user
+can tail a log file but that's raw agent output. What's needed is a
+way to see: which step the agent is on, what files it's changing,
+whether tests are passing, how much context is used. This might
+elevate the TUI work from "nice to have" to prerequisite for
+real autonomous use. Alternatively, a simpler mechanism — a live
+status file the factory updates with current activity — could
+provide visibility without a full TUI.
+
+2026-05-13 — The installed factory binary at ~/.local/bin/factory gets
+SIGKILL'd (exit 137) by macOS due to com.apple.provenance extended
+attribute on unsigned binaries. Fix: ad-hoc sign with codesign -s -
+after copying. The install step (cargo build --release + cp) needs to
+include signing. For Homebrew distribution, the formula handles this.
+
+2026-05-13 — The Rust binary's factory watch command spawns background
+processes (polling at 1s, 2s, 10s, 60s intervals) that are never
+cleaned up when the parent run finishes. Every run leaks 3+ watch
+processes. After a session of runs, ~70 orphaned watch processes were
+found running from deleted worktree binaries. These need to be killed
+when the run completes, or watch should not spawn background processes.
+
 2026-05-13 — The Rust binary's observability features were added by
 an autonomous run but don't fully work at runtime despite unit tests
 passing. sessions.log isn't written, transcript.jsonl captures old
