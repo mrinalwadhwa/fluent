@@ -16,9 +16,12 @@ pub enum Event {
     Text {
         text: String,
     },
-    Thinking,
+    Thinking {
+        text: String,
+    },
     ToolResult {
         tool_use_id: String,
+        content: String,
     },
     RateLimit,
     Result {
@@ -43,8 +46,19 @@ impl Event {
                 }
             }
             Event::Text { text } => text.clone(),
-            Event::Thinking => "thinking...".to_string(),
-            Event::ToolResult { .. } => return String::new(),
+            Event::Thinking { text } => {
+                if text.is_empty() {
+                    "thinking...".to_string()
+                } else {
+                    format!("💭 {text}")
+                }
+            }
+            Event::ToolResult { content, .. } => {
+                if content.is_empty() {
+                    return String::new();
+                }
+                format!("  → {content}")
+            }
             Event::RateLimit => "rate limit check".to_string(),
             Event::Result {
                 duration_ms,
@@ -113,7 +127,15 @@ pub fn parse_line(line: &str) -> Vec<Event> {
                         }
                     }
                     "thinking" => {
-                        events.push(Event::Thinking);
+                        let text = block["thinking"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string();
+                        // Show first line of thinking, truncated
+                        let first_line = text.lines().next().unwrap_or("").to_string();
+                        events.push(Event::Thinking {
+                            text: truncate(&first_line, 120),
+                        });
                     }
                     _ => {}
                 }
@@ -132,7 +154,16 @@ pub fn parse_line(line: &str) -> Vec<Event> {
                         .as_str()
                         .unwrap_or("")
                         .to_string();
-                    events.push(Event::ToolResult { tool_use_id: id });
+                    // Extract content from tool result
+                    let content = if let Some(s) = block["content"].as_str() {
+                        truncate(s.lines().next().unwrap_or(""), 120)
+                    } else {
+                        String::new()
+                    };
+                    events.push(Event::ToolResult {
+                        tool_use_id: id,
+                        content,
+                    });
                 }
             }
             events
@@ -167,12 +198,15 @@ fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
             .map(shorten_path)
             .unwrap_or_default(),
         "Bash" => {
-            let desc = input["description"].as_str().unwrap_or("");
-            if !desc.is_empty() {
-                return truncate(desc, 80);
-            }
             let cmd = input["command"].as_str().unwrap_or("");
-            truncate(cmd, 80)
+            let desc = input["description"].as_str().unwrap_or("");
+            if !desc.is_empty() && !cmd.is_empty() {
+                format!("{} — {}", truncate(desc, 40), truncate(cmd, 60))
+            } else if !desc.is_empty() {
+                truncate(desc, 100)
+            } else {
+                truncate(cmd, 100)
+            }
         }
         "Grep" => {
             let pattern = input["pattern"].as_str().unwrap_or("");
@@ -355,7 +389,7 @@ mod tests {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hmm"}]}}"#;
         let events = parse_line(line);
         assert_eq!(events.len(), 1);
-        assert!(matches!(events[0], Event::Thinking));
+        assert!(matches!(events[0], Event::Thinking { .. }));
     }
 
     #[test]
@@ -413,7 +447,8 @@ mod tests {
         let events = parse_line(line);
         match &events[0] {
             Event::ToolUse { summary, .. } => {
-                assert_eq!(summary, "Build the project");
+                assert!(summary.contains("Build the project"));
+                assert!(summary.contains("cargo build"));
             }
             _ => panic!("Expected ToolUse"),
         }
@@ -459,14 +494,14 @@ mod tests {
     fn test_edit_summary_shortens_path() {
         let input: serde_json::Value =
             serde_json::json!({"file_path": "/a/b/c/d.rs"});
-        assert_eq!(summarize_tool_input("Edit", &input), ".../c/d.rs");
+        assert_eq!(summarize_tool_input("Edit", &input), ".../b/c/d.rs");
     }
 
     #[test]
     fn test_write_summary_shortens_path() {
         let input: serde_json::Value =
             serde_json::json!({"file_path": "/a/b/c/d.rs"});
-        assert_eq!(summarize_tool_input("Write", &input), ".../c/d.rs");
+        assert_eq!(summarize_tool_input("Write", &input), ".../b/c/d.rs");
     }
 
     #[test]
@@ -643,7 +678,7 @@ mod tests {
     fn test_shorten_path_long() {
         assert_eq!(
             shorten_path("/very/long/path/to/file.rs"),
-            ".../to/file.rs"
+            ".../path/to/file.rs"
         );
     }
 

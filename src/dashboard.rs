@@ -18,60 +18,156 @@ use crate::transcript::{self, Event, TranscriptReader};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
+/// An agent whose transcript we can display.
+struct AgentView {
+    name: String,
+    events: Vec<Event>,
+    readers: Vec<TranscriptReader>,
+    last_session: u32,
+    status: String, // "running", "pass", "fail", "uncertain", ""
+}
+
+impl AgentView {
+    fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            events: Vec::new(),
+            readers: Vec::new(),
+            last_session: 0,
+            status: String::new(),
+        }
+    }
+
+    fn poll(&mut self) {
+        for reader in &mut self.readers {
+            let new_events = reader.read_new();
+            self.events.extend(new_events);
+        }
+    }
+}
+
 /// State for a single run's dashboard view.
 struct RunView {
     run: Run,
     /// The directory where sessions/transcripts live — the worktree's run dir
     /// if a worktree exists, otherwise the source run dir.
     live_dir: PathBuf,
-    events: Vec<Event>,
-    readers: Vec<TranscriptReader>,
-    last_session: u32,
+    agents: Vec<AgentView>,
+    selected_agent: usize,
     scroll_offset: usize,
     auto_scroll: bool,
 }
 
 impl RunView {
     fn new(run: Run) -> Self {
-        // Resolve worktree path for live session data
         let live_dir = run.worktree_run_dir().unwrap_or_else(|| run.dir.clone());
         let mut view = Self {
             run,
             live_dir,
-            events: Vec::new(),
-            readers: Vec::new(),
-            last_session: 0,
+            agents: vec![AgentView::new("author")],
+            selected_agent: 0,
             scroll_offset: 0,
             auto_scroll: true,
         };
-        view.discover_sessions();
+        view.discover_agents();
         view.poll();
         view
     }
 
-    fn discover_sessions(&mut self) {
+    fn discover_agents(&mut self) {
+        // Discover author session transcripts
+        let author = &mut self.agents[0];
         let transcripts = transcript::list_transcripts(&self.live_dir);
         for (num, path) in transcripts {
-            if num > self.last_session {
-                self.readers.push(TranscriptReader::new(path));
-                self.last_session = num;
+            if num > author.last_session {
+                author.readers.push(TranscriptReader::new(path));
+                author.last_session = num;
+            }
+        }
+
+        // Discover reviewer transcripts
+        let reviews_dir = self.live_dir.join("reviews");
+        if reviews_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&reviews_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with("transcript-") && name.ends_with(".jsonl") {
+                        let reviewer = name
+                            .strip_prefix("transcript-")
+                            .and_then(|s| s.strip_suffix(".jsonl"))
+                            .unwrap_or(&name)
+                            .to_string();
+
+                        // Add reviewer if not already tracked
+                        if !self.agents.iter().any(|a| a.name == reviewer) {
+                            let mut agent = AgentView::new(&reviewer);
+                            agent.readers.push(TranscriptReader::new(entry.path()));
+                            // Check for verdict
+                            let review_file =
+                                reviews_dir.join(format!("review-{reviewer}.md"));
+                            if review_file.exists() {
+                                let verdict = std::fs::read_to_string(&review_file)
+                                    .ok()
+                                    .and_then(|c| {
+                                        c.lines()
+                                            .find(|l| l.to_lowercase().contains("verdict"))
+                                            .map(|l| l.to_string())
+                                    })
+                                    .unwrap_or_default();
+                                if verdict.to_lowercase().contains("pass") {
+                                    agent.status = "pass".into();
+                                } else if verdict.to_lowercase().contains("fail") {
+                                    agent.status = "fail".into();
+                                } else if verdict.to_lowercase().contains("uncertain") {
+                                    agent.status = "uncertain".into();
+                                }
+                            } else {
+                                agent.status = "running".into();
+                            }
+                            self.agents.push(agent);
+                        } else {
+                            // Update status of existing reviewer
+                            if let Some(agent) = self.agents.iter_mut().find(|a| a.name == reviewer)
+                            {
+                                let review_file =
+                                    reviews_dir.join(format!("review-{reviewer}.md"));
+                                if review_file.exists() && agent.status == "running" {
+                                    let verdict = std::fs::read_to_string(&review_file)
+                                        .ok()
+                                        .and_then(|c| {
+                                            c.lines()
+                                                .find(|l| l.to_lowercase().contains("verdict"))
+                                                .map(|l| l.to_string())
+                                        })
+                                        .unwrap_or_default();
+                                    if verdict.to_lowercase().contains("pass") {
+                                        agent.status = "pass".into();
+                                    } else if verdict.to_lowercase().contains("fail") {
+                                        agent.status = "fail".into();
+                                    } else if verdict.to_lowercase().contains("uncertain") {
+                                        agent.status = "uncertain".into();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
     fn poll(&mut self) {
-        // Check for new sessions
-        self.discover_sessions();
-
-        // Read new events from all transcript readers
-        for reader in &mut self.readers {
-            let new_events = reader.read_new();
-            self.events.extend(new_events);
+        self.discover_agents();
+        for agent in &mut self.agents {
+            agent.poll();
         }
-
         if self.auto_scroll {
             self.scroll_to_bottom();
         }
+    }
+
+    fn current_agent(&self) -> &AgentView {
+        &self.agents[self.selected_agent]
     }
 
     fn scroll_to_bottom(&mut self) {
@@ -82,7 +178,8 @@ impl RunView {
     }
 
     fn visible_lines(&self) -> Vec<String> {
-        self.events
+        self.current_agent()
+            .events
             .iter()
             .filter_map(|e| {
                 let s = e.summary();
@@ -208,13 +305,37 @@ fn run_event_loop(
                     | (_, KeyCode::Char('q')) => {
                         app.should_quit = true;
                     }
-                    (_, KeyCode::Tab) | (_, KeyCode::Right) => {
+                    (_, KeyCode::Tab) => {
+                        // Cycle through agents within the current run
+                        let view = app.current_view_mut();
+                        if !view.agents.is_empty() {
+                            view.selected_agent =
+                                (view.selected_agent + 1) % view.agents.len();
+                            view.scroll_offset = 0;
+                            view.auto_scroll = true;
+                            view.scroll_to_bottom();
+                        }
+                    }
+                    (_, KeyCode::BackTab) => {
+                        let view = app.current_view_mut();
+                        if !view.agents.is_empty() {
+                            view.selected_agent = if view.selected_agent == 0 {
+                                view.agents.len() - 1
+                            } else {
+                                view.selected_agent - 1
+                            };
+                            view.scroll_offset = 0;
+                            view.auto_scroll = true;
+                            view.scroll_to_bottom();
+                        }
+                    }
+                    (_, KeyCode::Right) => {
                         if !app.runs.is_empty() {
                             app.selected_run =
                                 (app.selected_run + 1) % app.runs.len();
                         }
                     }
-                    (_, KeyCode::BackTab) | (_, KeyCode::Left) => {
+                    (_, KeyCode::Left) => {
                         if !app.runs.is_empty() {
                             app.selected_run = if app.selected_run == 0 {
                                 app.runs.len() - 1
@@ -278,47 +399,24 @@ fn run_event_loop(
 
 fn draw_ui(f: &mut ratatui::Frame, app: &App) {
     let size = f.area();
-
-    // Check if we need a reviewer panel at the bottom
     let view = app.current_view();
-    let has_reviewers = view.live_dir.join("reviews").is_dir()
-        && std::fs::read_dir(view.live_dir.join("reviews"))
-            .map(|mut e| e.next().is_some())
-            .unwrap_or(false);
 
-    let main_chunks = if has_reviewers {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),  // header
-                Constraint::Length(3),  // run tabs
-                Constraint::Min(10),   // activity feed
-                Constraint::Length(7), // reviewer panel (5 reviewers + border)
-                Constraint::Length(1),  // help bar
-            ])
-            .split(size)
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),  // header
-                Constraint::Length(3),  // run tabs
-                Constraint::Min(10),   // activity feed
-                Constraint::Length(1),  // help bar
-            ])
-            .split(size)
-    };
+    let main_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // header
+            Constraint::Length(3), // run tabs
+            Constraint::Length(3), // agent tabs
+            Constraint::Min(10),  // activity feed
+            Constraint::Length(1), // help bar
+        ])
+        .split(size);
 
     draw_header(f, main_chunks[0], view);
     draw_run_tabs(f, main_chunks[1], app);
-    draw_activity_feed(f, main_chunks[2], view);
-
-    if has_reviewers {
-        draw_reviewer_panel(f, main_chunks[3], view);
-        draw_help_bar(f, main_chunks[4]);
-    } else {
-        draw_help_bar(f, main_chunks[3]);
-    }
+    draw_agent_tabs(f, main_chunks[2], view);
+    draw_activity_feed(f, main_chunks[3], view);
+    draw_help_bar(f, main_chunks[4]);
 }
 
 fn draw_header(f: &mut ratatui::Frame, area: Rect, view: &RunView) {
@@ -338,15 +436,33 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, view: &RunView) {
         _ => Color::White,
     };
 
-    let session_count = view.last_session;
-    let event_count = view.events.len();
+    let session_count = view.agents[0].last_session;
+    let event_count = view.current_agent().events.len();
+
+    // Determine phase
+    let phase = if view.agents.iter().skip(1).any(|a| a.status == "running") {
+        let done = view
+            .agents
+            .iter()
+            .skip(1)
+            .filter(|a| a.status != "running" && !a.status.is_empty())
+            .count();
+        let total = view.agents.len() - 1;
+        if total > 0 {
+            format!("Reviewing ({done}/{total})")
+        } else {
+            status.clone()
+        }
+    } else {
+        status.clone()
+    };
 
     let header = Paragraph::new(Line::from(vec![
         Span::styled("Run: ", Style::default().fg(Color::DarkGray)),
         Span::styled(&view.run.id, Style::default().add_modifier(Modifier::BOLD)),
         Span::raw("  "),
-        Span::styled("Status: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(status, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+        Span::styled("Phase: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(phase, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
         Span::raw("  "),
         Span::styled("Session: ", Style::default().fg(Color::DarkGray)),
         Span::styled(
@@ -402,6 +518,47 @@ fn draw_run_tabs(f: &mut ratatui::Frame, area: Rect, app: &App) {
     f.render_widget(tabs, area);
 }
 
+fn draw_agent_tabs(f: &mut ratatui::Frame, area: Rect, view: &RunView) {
+    let titles: Vec<Line> = view
+        .agents
+        .iter()
+        .map(|a| {
+            let (symbol, color) = match a.status.as_str() {
+                "pass" => ("✓", Color::Green),
+                "fail" => ("✗", Color::Red),
+                "uncertain" => ("?", Color::Yellow),
+                "running" => ("⟳", Color::Cyan),
+                _ => {
+                    if a.name == "author" {
+                        ("●", Color::White)
+                    } else {
+                        ("○", Color::DarkGray)
+                    }
+                }
+            };
+            Line::from(Span::styled(
+                format!(" {symbol} {} ", a.name),
+                Style::default().fg(color),
+            ))
+        })
+        .collect();
+
+    let tabs = Tabs::new(titles)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Agents (Tab to switch) "),
+        )
+        .select(view.selected_agent)
+        .highlight_style(
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::REVERSED),
+        );
+
+    f.render_widget(tabs, area);
+}
+
 fn draw_activity_feed(f: &mut ratatui::Frame, area: Rect, view: &RunView) {
     let lines = view.visible_lines();
     let visible_height = area.height.saturating_sub(2) as usize; // account for borders
@@ -434,8 +591,10 @@ fn draw_activity_feed(f: &mut ratatui::Frame, area: Rect, view: &RunView) {
         String::new()
     };
 
+    let agent_name = &view.current_agent().name;
     let title = format!(
-        " Activity [{}/{}]{} ",
+        " {} [{}/{}]{} ",
+        agent_name,
         end.min(total),
         total,
         if view.auto_scroll {
@@ -484,132 +643,15 @@ fn style_for_line(line: &str) -> Style {
     }
 }
 
-fn draw_reviewer_panel(f: &mut ratatui::Frame, area: Rect, view: &RunView) {
-    let reviews_dir = view.live_dir.join("reviews");
-    let mut reviewer_lines = Vec::new();
-
-    if reviews_dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&reviews_dir) {
-            let mut entries: Vec<_> = entries.flatten().collect();
-            entries.sort_by_key(|e| e.file_name());
-            for entry in entries {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("review-") && name.ends_with(".md") {
-                    let reviewer = name
-                        .strip_prefix("review-")
-                        .and_then(|s| s.strip_suffix(".md"))
-                        .unwrap_or(&name);
-
-                    // Try to read verdict from the file
-                    let verdict = std::fs::read_to_string(entry.path())
-                        .ok()
-                        .and_then(|content| {
-                            content
-                                .lines()
-                                .find(|l| l.to_lowercase().contains("verdict"))
-                                .map(|l| l.to_string())
-                        })
-                        .unwrap_or_else(|| "in progress".to_string());
-
-                    let (symbol, color) = if verdict.to_lowercase().contains("pass") {
-                        ("PASS", Color::Green)
-                    } else if verdict.to_lowercase().contains("fail") {
-                        ("FAIL", Color::Red)
-                    } else {
-                        ("...", Color::Yellow)
-                    };
-
-                    reviewer_lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("  {symbol} "),
-                            Style::default().fg(color).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!("{reviewer:<20}"),
-                            Style::default().fg(Color::White),
-                        ),
-                        Span::styled(
-                            truncate_str(&verdict, 60),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                    ]));
-                }
-
-                // Also check for active transcript
-                if name.starts_with("transcript-") && name.ends_with(".jsonl") {
-                    let reviewer = name
-                        .strip_prefix("transcript-")
-                        .and_then(|s| s.strip_suffix(".jsonl"))
-                        .unwrap_or(&name);
-
-                    // If no review-*.md exists yet, show live activity
-                    let review_file = reviews_dir.join(format!("review-{reviewer}.md"));
-                    if !review_file.exists() {
-                        // Read last meaningful event from transcript
-                        let last_activity = std::fs::read_to_string(entry.path())
-                            .ok()
-                            .and_then(|content| {
-                                content
-                                    .lines()
-                                    .rev()
-                                    .filter_map(|line| {
-                                        let events = crate::transcript::parse_line(line);
-                                        events.into_iter().find_map(|e| {
-                                            let s = e.summary();
-                                            if s.is_empty() || s == "thinking..." || s.starts_with("rate limit") {
-                                                None
-                                            } else {
-                                                Some(s)
-                                            }
-                                        })
-                                    })
-                                    .next()
-                            })
-                            .unwrap_or_else(|| "starting...".to_string());
-
-                        reviewer_lines.push(Line::from(vec![
-                            Span::styled(
-                                "  ... ",
-                                Style::default()
-                                    .fg(Color::Yellow)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(
-                                format!("{reviewer:<16}"),
-                                Style::default().fg(Color::White),
-                            ),
-                            Span::styled(
-                                truncate_str(&last_activity, 70),
-                                Style::default().fg(Color::DarkGray),
-                            ),
-                        ]));
-                    }
-                }
-            }
-        }
-    }
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Reviewers ");
-
-    if reviewer_lines.is_empty() {
-        let p = Paragraph::new("  No reviewer activity yet")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(block);
-        f.render_widget(p, area);
-    } else {
-        let p = Paragraph::new(reviewer_lines).block(block);
-        f.render_widget(p, area);
-    }
-}
 
 fn draw_help_bar(f: &mut ratatui::Frame, area: Rect) {
     let help = Paragraph::new(Line::from(vec![
         Span::styled(" q", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" quit  "),
         Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" switch run  "),
+        Span::raw(" agent  "),
+        Span::styled("←→", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" run  "),
         Span::styled("j/k", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" scroll  "),
         Span::styled("G", Style::default().add_modifier(Modifier::BOLD)),
@@ -620,14 +662,6 @@ fn draw_help_bar(f: &mut ratatui::Frame, area: Rect) {
     .style(Style::default().fg(Color::DarkGray));
 
     f.render_widget(help, area);
-}
-
-fn has_reviewer_activity(run: &Run) -> bool {
-    let reviews_dir = run.dir.join("reviews");
-    reviews_dir.is_dir()
-        && std::fs::read_dir(&reviews_dir)
-            .map(|mut e| e.next().is_some())
-            .unwrap_or(false)
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
@@ -749,40 +783,6 @@ mod tests {
     }
 
     #[test]
-    fn test_has_reviewer_activity_no_dir() {
-        let tmp = TempDir::new().unwrap();
-        let run = Run {
-            id: "test".to_string(),
-            dir: tmp.path().to_path_buf(),
-        };
-        assert!(!has_reviewer_activity(&run));
-    }
-
-    #[test]
-    fn test_has_reviewer_activity_empty_dir() {
-        let tmp = TempDir::new().unwrap();
-        std::fs::create_dir(tmp.path().join("reviews")).unwrap();
-        let run = Run {
-            id: "test".to_string(),
-            dir: tmp.path().to_path_buf(),
-        };
-        assert!(!has_reviewer_activity(&run));
-    }
-
-    #[test]
-    fn test_has_reviewer_activity_with_files() {
-        let tmp = TempDir::new().unwrap();
-        let reviews = tmp.path().join("reviews");
-        std::fs::create_dir(&reviews).unwrap();
-        std::fs::write(reviews.join("review-tests.md"), "Verdict: pass").unwrap();
-        let run = Run {
-            id: "test".to_string(),
-            dir: tmp.path().to_path_buf(),
-        };
-        assert!(has_reviewer_activity(&run));
-    }
-
-    #[test]
     fn test_visible_lines_filters_empty() {
         let events = vec![
             Event::Text {
@@ -790,23 +790,28 @@ mod tests {
             },
             Event::ToolResult {
                 tool_use_id: "123".to_string(),
+                content: String::new(),
             },
-            Event::Thinking,
+            Event::Thinking {
+                text: "pondering".to_string(),
+            },
         ];
+        let mut agent = AgentView::new("author");
+        agent.events = events;
         let view = RunView {
             run: Run {
                 id: "test".to_string(),
                 dir: PathBuf::from("/tmp/test"),
             },
-            events,
-            readers: vec![],
-            last_session: 0,
+            live_dir: PathBuf::from("/tmp/test"),
+            agents: vec![agent],
+            selected_agent: 0,
             scroll_offset: 0,
             auto_scroll: true,
         };
         let lines = view.visible_lines();
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0], "hello");
-        assert_eq!(lines[1], "thinking...");
+        assert!(lines[1].contains("pondering"));
     }
 }
