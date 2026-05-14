@@ -600,9 +600,182 @@ fn has_reviewer_activity(run: &Run) -> bool {
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max - 3])
+    if s.chars().count() > max {
+        let end: String = s.chars().take(max - 3).collect();
+        format!("{end}...")
     } else {
         s.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_truncate_str_short() {
+        assert_eq!(truncate_str("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_str_exact() {
+        assert_eq!(truncate_str("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_str_long() {
+        assert_eq!(truncate_str("hello world!", 10), "hello w...");
+    }
+
+    #[test]
+    fn test_truncate_str_multibyte_utf8() {
+        // Should not panic on multi-byte characters
+        let s = "héllo wörld café";
+        let result = truncate_str(s, 10);
+        assert!(result.ends_with("..."));
+        assert_eq!(result.chars().count(), 10);
+    }
+
+    #[test]
+    fn test_style_for_line_bash() {
+        let style = style_for_line("[Bash] ls -la");
+        assert_eq!(style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn test_style_for_line_read() {
+        let style = style_for_line("[Read] src/main.rs");
+        assert_eq!(style.fg, Some(Color::Cyan));
+    }
+
+    #[test]
+    fn test_style_for_line_edit() {
+        let style = style_for_line("[Edit] src/main.rs");
+        assert_eq!(style.fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn test_style_for_line_write() {
+        let style = style_for_line("[Write] src/main.rs");
+        assert_eq!(style.fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn test_style_for_line_grep() {
+        let style = style_for_line("[Grep] /pattern/");
+        assert_eq!(style.fg, Some(Color::Magenta));
+    }
+
+    #[test]
+    fn test_style_for_line_glob() {
+        let style = style_for_line("[Glob] **/*.rs");
+        assert_eq!(style.fg, Some(Color::Magenta));
+    }
+
+    #[test]
+    fn test_style_for_line_agent() {
+        let style = style_for_line("[Agent] explore codebase");
+        assert_eq!(style.fg, Some(Color::Blue));
+    }
+
+    #[test]
+    fn test_style_for_line_unknown_tool() {
+        let style = style_for_line("[TodoWrite] update tasks");
+        assert_eq!(style.fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn test_style_for_line_session_started() {
+        let style = style_for_line("Session started (model: opus)");
+        assert_eq!(style.fg, Some(Color::White));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn test_style_for_line_session_complete() {
+        let style = style_for_line("Session complete (1.0s, $0.05)");
+        assert_eq!(style.fg, Some(Color::White));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn test_style_for_line_thinking() {
+        let style = style_for_line("thinking...");
+        assert_eq!(style.fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn test_style_for_line_rate_limit() {
+        let style = style_for_line("rate limit check");
+        assert_eq!(style.fg, Some(Color::Magenta));
+    }
+
+    #[test]
+    fn test_style_for_line_plain_text() {
+        let style = style_for_line("some output text");
+        assert_eq!(style.fg, Some(Color::White));
+    }
+
+    #[test]
+    fn test_has_reviewer_activity_no_dir() {
+        let tmp = TempDir::new().unwrap();
+        let run = Run {
+            id: "test".to_string(),
+            dir: tmp.path().to_path_buf(),
+        };
+        assert!(!has_reviewer_activity(&run));
+    }
+
+    #[test]
+    fn test_has_reviewer_activity_empty_dir() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("reviews")).unwrap();
+        let run = Run {
+            id: "test".to_string(),
+            dir: tmp.path().to_path_buf(),
+        };
+        assert!(!has_reviewer_activity(&run));
+    }
+
+    #[test]
+    fn test_has_reviewer_activity_with_files() {
+        let tmp = TempDir::new().unwrap();
+        let reviews = tmp.path().join("reviews");
+        std::fs::create_dir(&reviews).unwrap();
+        std::fs::write(reviews.join("review-tests.md"), "Verdict: pass").unwrap();
+        let run = Run {
+            id: "test".to_string(),
+            dir: tmp.path().to_path_buf(),
+        };
+        assert!(has_reviewer_activity(&run));
+    }
+
+    #[test]
+    fn test_visible_lines_filters_empty() {
+        let events = vec![
+            Event::Text {
+                text: "hello".to_string(),
+            },
+            Event::ToolResult {
+                tool_use_id: "123".to_string(),
+            },
+            Event::Thinking,
+        ];
+        let view = RunView {
+            run: Run {
+                id: "test".to_string(),
+                dir: PathBuf::from("/tmp/test"),
+            },
+            events,
+            readers: vec![],
+            last_session: 0,
+            scroll_offset: 0,
+            auto_scroll: true,
+        };
+        let lines = view.visible_lines();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "hello");
+        assert_eq!(lines[1], "thinking...");
     }
 }

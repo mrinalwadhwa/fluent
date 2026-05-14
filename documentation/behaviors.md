@@ -209,6 +209,29 @@ THE SYSTEM SHALL find a run with status `needs-user` or `failed` and
 launch an interactive agent session for that run.
 Test: tests/behaviors/operations/test-resume-resolve.sh
 
+## Dashboard
+
+WHEN `factory dashboard` is invoked,
+THE SYSTEM SHALL display a TUI listing all runs with their status,
+an activity feed of transcript events, and keyboard navigation.
+Test: tests/behaviors/operations/test-dashboard.sh
+
+WHEN `factory dashboard` is invoked for a project with no runs,
+THE SYSTEM SHALL exit gracefully without crashing.
+Test: tests/behaviors/operations/test-dashboard.sh (dashboard exits gracefully with no runs)
+
+WHEN `factory dashboard --run-id` is invoked with a non-existent run ID,
+THE SYSTEM SHALL exit gracefully without crashing.
+Test: tests/behaviors/operations/test-dashboard.sh (dashboard handles invalid run-id)
+
+WHEN `factory dashboard` is invoked,
+THE SYSTEM SHALL not modify any run state files.
+Test: tests/behaviors/operations/test-dashboard.sh (dashboard does not modify run state)
+
+WHEN a run is in the review phase,
+THE SYSTEM SHALL show a reviewer panel with one line per reviewer
+showing verdict or current activity.
+
 ## Sandbox (local)
 
 WHILE running on the local runtime,

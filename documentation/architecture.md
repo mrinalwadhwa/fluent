@@ -19,7 +19,7 @@ from intent capture through execution and review across multiple sessions.
 ├─────────────────────────────────────────────────┤
 │  Factory command                                │
 │  factory run / status / pull / shell / watch    │
-│  factory resume                                 │
+│  factory resume / init / dashboard              │
 │  Deterministic, operational                     │
 └─────────────────────────────────────────────────┘
 ```
@@ -313,6 +313,8 @@ factory/main/
     os.rs                    ← Os trait, Seatbelt sandbox rendering
     worktree.rs              ← Git worktree operations
     report.rs                ← Report generation
+    dashboard.rs             ← Live TUI for run activity
+    transcript.rs            ← Parse stream-json transcripts incrementally
   documentation/
     architecture.md          ← this file
     behaviors.md             ← behavioral statements (EARS)

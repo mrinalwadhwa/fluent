@@ -203,8 +203,9 @@ fn shorten_path(p: &str) -> String {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max - 3])
+    if s.chars().count() > max {
+        let end: String = s.chars().take(max - 3).collect();
+        format!("{end}...")
     } else {
         s.to_string()
     }
@@ -419,25 +420,177 @@ mod tests {
     }
 
     #[test]
-    fn test_incremental_reader() {
+    fn test_bash_summary_falls_back_to_command() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo build"}}]}}"#;
+        let events = parse_line(line);
+        match &events[0] {
+            Event::ToolUse { summary, .. } => {
+                assert_eq!(summary, "cargo build");
+            }
+            _ => panic!("Expected ToolUse"),
+        }
+    }
+
+    #[test]
+    fn test_grep_summary() {
+        let input: serde_json::Value =
+            serde_json::json!({"pattern": "fn main"});
+        assert_eq!(summarize_tool_input("Grep", &input), "/fn main/");
+    }
+
+    #[test]
+    fn test_glob_summary() {
+        let input: serde_json::Value =
+            serde_json::json!({"pattern": "**/*.rs"});
+        assert_eq!(summarize_tool_input("Glob", &input), "**/*.rs");
+    }
+
+    #[test]
+    fn test_agent_summary_truncates() {
+        let input: serde_json::Value = serde_json::json!({
+            "description": "a]".repeat(40)
+        });
+        let result = summarize_tool_input("Agent", &input);
+        assert!(result.ends_with("..."));
+        assert!(result.chars().count() <= 60);
+    }
+
+    #[test]
+    fn test_edit_summary_shortens_path() {
+        let input: serde_json::Value =
+            serde_json::json!({"file_path": "/a/b/c/d.rs"});
+        assert_eq!(summarize_tool_input("Edit", &input), ".../c/d.rs");
+    }
+
+    #[test]
+    fn test_write_summary_shortens_path() {
+        let input: serde_json::Value =
+            serde_json::json!({"file_path": "/a/b/c/d.rs"});
+        assert_eq!(summarize_tool_input("Write", &input), ".../c/d.rs");
+    }
+
+    #[test]
+    fn test_todowrite_summary() {
+        let input = serde_json::Value::Null;
+        assert_eq!(summarize_tool_input("TodoWrite", &input), "update tasks");
+    }
+
+    #[test]
+    fn test_unknown_tool_summary() {
+        let input = serde_json::Value::Null;
+        assert_eq!(summarize_tool_input("FooBar", &input), "");
+    }
+
+    #[test]
+    fn test_parse_result_cost_usd_field() {
+        let line = r#"{"type":"result","duration_ms":3000,"cost_usd":0.12}"#;
+        let events = parse_line(line);
+        match &events[0] {
+            Event::Result { cost_usd, .. } => {
+                assert!((cost_usd.unwrap() - 0.12).abs() < 0.001);
+            }
+            _ => panic!("Expected Result"),
+        }
+    }
+
+    #[test]
+    fn test_parse_system_non_init() {
+        let line = r#"{"type":"system","subtype":"config"}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::Unknown { event_type } => {
+                assert_eq!(event_type, "system:config");
+            }
+            _ => panic!("Expected Unknown"),
+        }
+    }
+
+    #[test]
+    fn test_parse_assistant_empty_content() {
+        let line = r#"{"type":"assistant","message":{"content":[]}}"#;
+        let events = parse_line(line);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_unknown_event_summary() {
+        let event = Event::Unknown {
+            event_type: "mystery".to_string(),
+        };
+        assert_eq!(event.summary(), "(mystery)");
+    }
+
+    #[test]
+    fn test_truncate_short() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_exact() {
+        assert_eq!(truncate("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_long() {
+        assert_eq!(truncate("hello world!", 10), "hello w...");
+    }
+
+    #[test]
+    fn test_truncate_multibyte_utf8() {
+        let s = "héllo wörld café";
+        let result = truncate(s, 10);
+        assert!(result.ends_with("..."));
+        assert_eq!(result.chars().count(), 10);
+    }
+
+    #[test]
+    fn test_shorten_path_two_components() {
+        assert_eq!(shorten_path("dir/file.rs"), "dir/file.rs");
+    }
+
+    #[test]
+    fn test_incremental_reader_initial_read() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("transcript.jsonl");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, r#"{{"type":"rate_limit_event"}}"#).unwrap();
+        }
 
-        // Write initial data
+        let mut reader = TranscriptReader::new(path);
+        let events = reader.read_new();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], Event::RateLimit));
+    }
+
+    #[test]
+    fn test_incremental_reader_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("transcript.jsonl");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, r#"{{"type":"rate_limit_event"}}"#).unwrap();
+        }
+
+        let mut reader = TranscriptReader::new(path);
+        reader.read_new();
+        let events = reader.read_new();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_incremental_reader_appended_data() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("transcript.jsonl");
         {
             let mut f = std::fs::File::create(&path).unwrap();
             writeln!(f, r#"{{"type":"rate_limit_event"}}"#).unwrap();
         }
 
         let mut reader = TranscriptReader::new(path.clone());
-        let events = reader.read_new();
-        assert_eq!(events.len(), 1);
+        reader.read_new();
 
-        // No new data
-        let events = reader.read_new();
-        assert!(events.is_empty());
-
-        // Append more data
         {
             let mut f = std::fs::OpenOptions::new()
                 .append(true)
