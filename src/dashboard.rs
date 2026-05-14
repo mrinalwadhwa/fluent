@@ -177,10 +177,8 @@ impl RunView {
     }
 
     fn scroll_to_bottom(&mut self) {
-        let visible = self.visible_lines();
-        if visible.len() > 0 {
-            self.scroll_offset = visible.len().saturating_sub(1);
-        }
+        // Set offset beyond the end — draw_activity_feed clamps it
+        self.scroll_offset = self.visible_lines().len();
     }
 
     fn visible_lines(&self) -> &[String] {
@@ -347,7 +345,7 @@ fn run_event_loop(
                     }
                     (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
                         let view = app.current_view_mut();
-                        let max = view.visible_lines().len().saturating_sub(1);
+                        let max = view.visible_lines().len();
                         view.scroll_offset =
                             (view.scroll_offset + 1).min(max);
                     }
@@ -369,7 +367,7 @@ fn run_event_loop(
                     }
                     (_, KeyCode::PageDown) => {
                         let view = app.current_view_mut();
-                        let max = view.visible_lines().len().saturating_sub(1);
+                        let max = view.visible_lines().len();
                         view.scroll_offset =
                             (view.scroll_offset + 20).min(max);
                     }
