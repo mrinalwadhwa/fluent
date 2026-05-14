@@ -180,12 +180,14 @@ impl RunView {
         self.scroll_offset = self.visible_lines().len();
     }
 
-    /// Clamp scroll_offset to the actual max before manual scrolling,
-    /// so the first scroll input has immediate effect.
-    fn clamp_scroll(&mut self) {
+    /// Clamp scroll_offset to the actual displayable max, accounting
+    /// for visible height. Call after disabling auto_scroll so the
+    /// first scroll input has immediate effect.
+    fn clamp_scroll(&mut self, visible_height: usize) {
         let total = self.visible_lines().len();
-        if self.scroll_offset > total {
-            self.scroll_offset = total;
+        let max = total.saturating_sub(visible_height);
+        if self.scroll_offset > max {
+            self.scroll_offset = max;
         }
     }
 
@@ -200,6 +202,8 @@ struct App {
     selected_run: usize,
     search_root: PathBuf,
     should_quit: bool,
+    /// Cached activity feed height for scroll clamping.
+    feed_height: usize,
 }
 
 impl App {
@@ -235,6 +239,7 @@ impl App {
             selected_run: selected,
             search_root: search_root.to_path_buf(),
             should_quit: false,
+            feed_height: 20,
         })
     }
 
@@ -294,25 +299,31 @@ fn run_event_loop(
     loop {
         terminal.draw(|f| draw_ui(f, app))?;
 
+        // Update feed height from terminal size for scroll clamping
+        // Layout: header(3) + runs(3) + agents(3) + feed(rest) + help(1) + borders(2)
+        let term_height = terminal.size()?.height as usize;
+        app.feed_height = term_height.saturating_sub(3 + 3 + 3 + 1 + 2);
+
         // Poll for events with timeout
         let timeout = POLL_INTERVAL
             .checked_sub(last_poll.elapsed())
             .unwrap_or(Duration::ZERO);
 
         if event::poll(timeout)? {
+            let fh = app.feed_height;
             match event::read()? {
             CEvent::Mouse(mouse) => {
                 match mouse.kind {
                     crossterm::event::MouseEventKind::ScrollUp => {
                         let view = app.current_view_mut();
                         view.auto_scroll = false;
-                        view.clamp_scroll();
+                        view.clamp_scroll(fh);
                         view.scroll_offset = view.scroll_offset.saturating_sub(3);
                     }
                     crossterm::event::MouseEventKind::ScrollDown => {
                         let view = app.current_view_mut();
                         view.auto_scroll = false;
-                        view.clamp_scroll();
+                        view.clamp_scroll(fh);
                         let max = view.visible_lines().len();
                         view.scroll_offset = (view.scroll_offset + 3).min(max);
                     }
@@ -367,14 +378,14 @@ fn run_event_loop(
                     (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
                         let view = app.current_view_mut();
                         view.auto_scroll = false;
-                        view.clamp_scroll();
+                        view.clamp_scroll(fh);
                         view.scroll_offset =
                             view.scroll_offset.saturating_sub(1);
                     }
                     (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
                         let view = app.current_view_mut();
                         view.auto_scroll = false;
-                        view.clamp_scroll();
+                        view.clamp_scroll(fh);
                         let max = view.visible_lines().len();
                         view.scroll_offset =
                             (view.scroll_offset + 1).min(max);
@@ -392,14 +403,14 @@ fn run_event_loop(
                     (_, KeyCode::PageUp) => {
                         let view = app.current_view_mut();
                         view.auto_scroll = false;
-                        view.clamp_scroll();
+                        view.clamp_scroll(fh);
                         view.scroll_offset =
                             view.scroll_offset.saturating_sub(20);
                     }
                     (_, KeyCode::PageDown) => {
                         let view = app.current_view_mut();
                         view.auto_scroll = false;
-                        view.clamp_scroll();
+                        view.clamp_scroll(fh);
                         let max = view.visible_lines().len();
                         view.scroll_offset =
                             (view.scroll_offset + 20).min(max);
