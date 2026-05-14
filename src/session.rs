@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
@@ -27,22 +27,15 @@ pub trait SessionHooks {
     fn pre_session(&self) -> Result<()> {
         Ok(())
     }
-    fn capture_snapshot(&self, _run_dir: &Path, _session_count: u32) -> Result<()> {
-        Ok(())
-    }
     fn sleep(&self, duration: Duration) {
         thread::sleep(duration);
     }
 }
 
-/// Default hooks that capture snapshots from ~/.claude.
+/// Default hooks (no-op pre_session, real sleep).
 pub struct DefaultHooks;
 
-impl SessionHooks for DefaultHooks {
-    fn capture_snapshot(&self, run_dir: &Path, session_count: u32) -> Result<()> {
-        capture_session_snapshot(run_dir, session_count)
-    }
-}
+impl SessionHooks for DefaultHooks {}
 
 /// Run the session loop.
 pub fn run_session_loop(
@@ -171,8 +164,6 @@ pub fn run_session_loop(
             consecutive_failures = 0;
         }
 
-        hooks.capture_snapshot(run_dir, session_count)?;
-
         // Read status and decide
         let status = run.status()?;
         eprintln!("  Run status: {status}");
@@ -252,70 +243,11 @@ pub fn run_session_loop(
     Ok(())
 }
 
-/// Capture a session snapshot from ~/.claude into the run's sessions dir.
-fn capture_session_snapshot(run_dir: &Path, session_count: u32) -> Result<()> {
-    let session_dir = run_dir.join(format!("sessions/session-{session_count}"));
-    fs::create_dir_all(&session_dir)?;
-
-    let claude_dir = dirs_home().join(".claude");
-    if claude_dir.is_dir() {
-        let history = claude_dir.join("history.jsonl");
-        if history.exists() {
-            let _ = fs::copy(&history, session_dir.join("history.jsonl"));
-        }
-
-        // Find project memory
-        let projects_dir = claude_dir.join("projects");
-        if projects_dir.is_dir() {
-            if let Ok(entries) = fs::read_dir(&projects_dir) {
-                for entry in entries.flatten() {
-                    let memory = entry.path().join("memory");
-                    if memory.is_dir() {
-                        let _ = copy_dir_recursive(&memory, &session_dir.join("memory"));
-                        break;
-                    }
-                }
-            }
-        }
-
-        let todos = claude_dir.join("todos");
-        if todos.is_dir() {
-            let _ = copy_dir_recursive(&todos, &session_dir.join("todos"));
-        }
-
-        let plans = claude_dir.join("plans");
-        if plans.is_dir() {
-            let _ = copy_dir_recursive(&plans, &session_dir.join("plans"));
-        }
-
-        eprintln!("  Session {session_count} snapshot captured");
-    }
-
-    Ok(())
-}
-
-fn dirs_home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
-}
-
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            fs::copy(&src_path, &dst_path)?;
-        }
-    }
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
     use tempfile::TempDir;

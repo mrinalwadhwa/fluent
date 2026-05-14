@@ -1013,3 +1013,256 @@ fn run_unknown_runtime_fails() {
         .failure()
         .stderr(predicate::str::contains("Unknown runtime"));
 }
+
+// -------------------------------------------------------------------------
+// Observability: sessions.log
+// -------------------------------------------------------------------------
+
+#[test]
+fn run_writes_sessions_log() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let run_id = "20260513-sesslog-test";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("brief.md"), "# Brief\n\nTest sessions.log\n").unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+WORKING_DIR="$(pwd)"
+RUN_ID=$(ls "$WORKING_DIR/.factory/runs/" 2>/dev/null | head -1)
+echo "needs-user" > "$WORKING_DIR/.factory/runs/$RUN_ID/status"
+exit 0
+"##,
+    );
+
+    let _guard = worktree_guard(&main_dir, run_id);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["run", "--no-sandbox", "--run-id", run_id])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    // sessions.log should exist in the worktree's run dir
+    let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
+    let wt_run_dir = Path::new(wt_path_str.trim())
+        .join(format!(".factory/runs/{run_id}"));
+    let log_path = wt_run_dir.join("sessions.log");
+    assert!(log_path.exists(), "sessions.log should exist");
+
+    let log = fs::read_to_string(&log_path).unwrap();
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 1, "should have one session entry");
+    assert!(
+        lines[0].starts_with("session=1 exit=0 duration="),
+        "wrong format: {}",
+        lines[0]
+    );
+    assert!(
+        lines[0].contains("status=needs-user"),
+        "should record status: {}",
+        lines[0]
+    );
+}
+
+// -------------------------------------------------------------------------
+// Observability: transcript.jsonl from stream-json stdout
+// -------------------------------------------------------------------------
+
+#[test]
+fn run_captures_stream_json_transcript() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let run_id = "20260513-transcript-test";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("brief.md"), "# Brief\n\nTest transcript\n").unwrap();
+
+    // Mock claude that outputs stream-json to stdout
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+WORKING_DIR="$(pwd)"
+RUN_ID=$(ls "$WORKING_DIR/.factory/runs/" 2>/dev/null | head -1)
+# Output stream-json format to stdout (this should be captured as transcript)
+echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Working on it"}]}}'
+echo '{"type":"result","result":"done","duration_ms":1234,"cost_usd":0.01}'
+echo "needs-user" > "$WORKING_DIR/.factory/runs/$RUN_ID/status"
+exit 0
+"##,
+    );
+
+    let _guard = worktree_guard(&main_dir, run_id);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["run", "--no-sandbox", "--run-id", run_id])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    // transcript.jsonl should contain stream-json from claude's stdout
+    let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
+    let wt_run_dir = Path::new(wt_path_str.trim())
+        .join(format!(".factory/runs/{run_id}"));
+    let transcript = wt_run_dir.join("sessions/session-1/transcript.jsonl");
+    assert!(transcript.exists(), "transcript.jsonl should exist");
+
+    let content = fs::read_to_string(&transcript).unwrap();
+    assert!(
+        content.contains(r#""type":"result""#),
+        "transcript should contain stream-json result marker, got: {}",
+        content
+    );
+    assert!(
+        content.contains(r#""type":"assistant""#),
+        "transcript should contain stream-json assistant marker, got: {}",
+        content
+    );
+}
+
+#[test]
+fn run_transcript_not_from_history() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let run_id = "20260513-no-history";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("brief.md"), "# Brief\n\nTest\n").unwrap();
+
+    // Create a fake ~/.claude/history.jsonl with a unique marker
+    let fake_home = tmp.path().join("fakehome");
+    let claude_dir = fake_home.join(".claude");
+    fs::create_dir_all(&claude_dir).unwrap();
+    fs::write(
+        claude_dir.join("history.jsonl"),
+        r#"{"MARKER_OLD_HISTORY":"this is the old history format"}"#,
+    )
+    .unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+WORKING_DIR="$(pwd)"
+RUN_ID=$(ls "$WORKING_DIR/.factory/runs/" 2>/dev/null | head -1)
+echo '{"type":"result","stream":"json"}'
+echo "needs-user" > "$WORKING_DIR/.factory/runs/$RUN_ID/status"
+exit 0
+"##,
+    );
+
+    let _guard = worktree_guard(&main_dir, run_id);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["run", "--no-sandbox", "--run-id", run_id])
+        .env("PATH", mock_path(&bin_dir))
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success();
+
+    let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
+    let wt_run_dir = Path::new(wt_path_str.trim())
+        .join(format!(".factory/runs/{run_id}"));
+    let transcript = wt_run_dir.join("sessions/session-1/transcript.jsonl");
+    assert!(transcript.exists(), "transcript.jsonl should exist");
+
+    let content = fs::read_to_string(&transcript).unwrap();
+    assert!(
+        !content.contains("MARKER_OLD_HISTORY"),
+        "transcript should NOT contain old history.jsonl content, got: {}",
+        content
+    );
+    assert!(
+        content.contains(r#""type":"result""#),
+        "transcript should contain stream-json, got: {}",
+        content
+    );
+}
+
+// -------------------------------------------------------------------------
+// Observability: no unrelated global state capture
+// -------------------------------------------------------------------------
+
+#[test]
+fn run_does_not_capture_global_claude_state() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let run_id = "20260513-no-global";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("brief.md"), "# Brief\n\nTest\n").unwrap();
+
+    // Create fake global ~/.claude state
+    let fake_home = tmp.path().join("fakehome");
+    let claude_dir = fake_home.join(".claude");
+    fs::create_dir_all(claude_dir.join("todos")).unwrap();
+    fs::write(claude_dir.join("todos/todo.json"), "{}").unwrap();
+    fs::create_dir_all(claude_dir.join("plans")).unwrap();
+    fs::write(claude_dir.join("plans/plan.json"), "{}").unwrap();
+    fs::create_dir_all(claude_dir.join("projects/test/memory")).unwrap();
+    fs::write(claude_dir.join("projects/test/memory/MEMORY.md"), "test").unwrap();
+    fs::write(
+        claude_dir.join("history.jsonl"),
+        r#"{"old":"history"}"#,
+    )
+    .unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+WORKING_DIR="$(pwd)"
+RUN_ID=$(ls "$WORKING_DIR/.factory/runs/" 2>/dev/null | head -1)
+echo '{"type":"result"}'
+echo "needs-user" > "$WORKING_DIR/.factory/runs/$RUN_ID/status"
+exit 0
+"##,
+    );
+
+    let _guard = worktree_guard(&main_dir, run_id);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["run", "--no-sandbox", "--run-id", run_id])
+        .env("PATH", mock_path(&bin_dir))
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success();
+
+    let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
+    let session_dir = Path::new(wt_path_str.trim())
+        .join(format!(".factory/runs/{run_id}/sessions/session-1"));
+
+    // Should NOT have global state dirs
+    assert!(
+        !session_dir.join("todos").exists(),
+        "should not capture global todos"
+    );
+    assert!(
+        !session_dir.join("plans").exists(),
+        "should not capture global plans"
+    );
+    assert!(
+        !session_dir.join("memory").exists(),
+        "should not capture global memory"
+    );
+    assert!(
+        !session_dir.join("history.jsonl").exists(),
+        "should not capture global history.jsonl"
+    );
+}
