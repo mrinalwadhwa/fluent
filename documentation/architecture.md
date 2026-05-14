@@ -123,10 +123,10 @@ The factory command runs a session loop:
 
 ```
 while run is not complete:
-    launch agent with -p, --verbose --output-format stream-json
+    launch author with -p, --verbose --output-format stream-json
     pipe stdout to sessions/session-N/transcript.jsonl
-    agent works until context exhaustion or completion
-    agent writes handoff.md + status file
+    author works until context exhaustion or completion
+    author writes handoff.md + status file
     write session metadata to sessions.log
     if terminal status: stop
     if executing: restart
