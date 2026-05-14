@@ -1266,3 +1266,96 @@ exit 0
         "should not capture global history.jsonl"
     );
 }
+
+// -------------------------------------------------------------------------
+// Observability: review round archives
+// -------------------------------------------------------------------------
+
+#[test]
+fn run_archives_review_rounds() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let run_id = "20260513-review-archive";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("brief.md"), "# Brief\n\nTest review archiving\n").unwrap();
+
+    // Mock claude that distinguishes author vs reviewer by system prompt.
+    // The reviewer gets "--append-system-prompt" containing "test reviewer"
+    // from the review prompt file's [system] section.
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+WORKING_DIR="$(pwd)"
+RUN_ID=$(ls "$WORKING_DIR/.factory/runs/" 2>/dev/null | head -1)
+RUN_DIR="$WORKING_DIR/.factory/runs/$RUN_ID"
+
+# Detect reviewer vs author by scanning all args for "test reviewer"
+IS_REVIEWER=0
+for arg in "$@"; do
+  case "$arg" in
+    *"test reviewer"*) IS_REVIEWER=1 ;;
+  esac
+done
+
+if [ "$IS_REVIEWER" = 1 ]; then
+  # Reviewer call
+  REVIEWER_ROUND=$(cat "$RUN_DIR/reviewer-round" 2>/dev/null || echo "0")
+  mkdir -p "$RUN_DIR/reviews"
+  if [ "$REVIEWER_ROUND" = "0" ]; then
+    echo "1" > "$RUN_DIR/reviewer-round"
+    printf 'Verdict: fail\n\n1. Missing tests.\n' > "$RUN_DIR/reviews/review-tests.md"
+    echo '{"type":"result"}' > "$RUN_DIR/reviews/transcript-tests.jsonl"
+  else
+    printf 'Verdict: pass\n\nAll good.\n' > "$RUN_DIR/reviews/review-tests.md"
+  fi
+  echo '{"type":"result"}'
+  exit 0
+fi
+
+# Author call
+echo '{"type":"result"}'
+echo "complete" > "$RUN_DIR/status"
+exit 0
+"##,
+    );
+
+    // Only run the "tests" reviewer
+    fs::write(run_dir.join("reviewers"), "tests").unwrap();
+
+    // Create the review prompt file
+    let prompts_dir = main_dir.join("prompts");
+    fs::create_dir_all(&prompts_dir).unwrap();
+    fs::write(
+        prompts_dir.join("review-tests.md"),
+        "[system]\nYou are a test reviewer.\n[run-scoped]\nReview the changes.\n[full-codebase]\nReview everything.\n",
+    )
+    .unwrap();
+
+    let _guard = worktree_guard(&main_dir, run_id);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["run", "--no-sandbox", "--run-id", run_id])
+        .env("PATH", mock_path(&bin_dir))
+        .timeout(std::time::Duration::from_secs(30))
+        .assert()
+        .success();
+
+    // Check that round-1 archive exists
+    let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
+    let wt_run_dir = Path::new(wt_path_str.trim())
+        .join(format!(".factory/runs/{run_id}"));
+    let round1_dir = wt_run_dir.join("reviews/round-1");
+    assert!(
+        round1_dir.exists(),
+        "reviews/round-1/ archive should exist"
+    );
+    assert!(
+        round1_dir.join("review-tests.md").exists(),
+        "round-1 should contain review-tests.md"
+    );
+}
