@@ -128,7 +128,6 @@ while run is not complete:
     agent works until context exhaustion or completion
     agent writes handoff.md + status file
     write session metadata to sessions.log
-    capture session snapshot (history, memory, todos, plans)
     if terminal status: stop
     if executing: restart
     if rate-limited: wait 5 minutes, restart
@@ -137,26 +136,21 @@ while run is not complete:
 The agent writes one word to `status` before exiting. The loop reads that
 word. That's the entire contract.
 
-### Session snapshots
+### Session directories
 
-Captured at each session boundary:
+Each session produces a single artifact:
 
 ```
 .factory/runs/[run-id]/sessions/
   session-1/
     transcript.jsonl     ← stream-json output (piped from agent stdout)
-    history.jsonl        ← Claude's internal history (copied from ~/.claude)
-    memory/
-    todos/
-    plans/
   session-2/
     ...
 ```
 
 The transcript is the stream-json verbose output captured during the
-session. The history is Claude's internal conversation log, copied from
-`~/.claude/history.jsonl` after the session ends. Both are first-class
-learning artifacts, not debug logs.
+session. Global `~/.claude` state (history, memory, todos, plans) is not
+copied into session directories.
 
 ## Agents
 

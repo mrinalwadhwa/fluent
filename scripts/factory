@@ -637,26 +637,6 @@ generate_report() {
 # Session loop (shared across backends)
 # ---------------------------------------------------------------------------
 
-# Capture a session snapshot from ~/.claude into the run's sessions dir.
-capture_snapshot() {
-  SESSION_DIR="${RUN_DIR}/sessions/session-${SESSION_COUNT}"
-  mkdir -p "$SESSION_DIR"
-  CLAUDE_DIR="${HOME}/.claude"
-  if [ -d "$CLAUDE_DIR" ]; then
-    [ -f "${CLAUDE_DIR}/history.jsonl" ] && \
-      cp "${CLAUDE_DIR}/history.jsonl" "${SESSION_DIR}/transcript.jsonl" 2>/dev/null || true
-    PROJ_MEMORY="$(find "${CLAUDE_DIR}/projects" -path "*/memory" -type d 2>/dev/null | head -1 || true)"
-    if [ -n "$PROJ_MEMORY" ] && [ -d "$PROJ_MEMORY" ]; then
-      cp -r "$PROJ_MEMORY" "${SESSION_DIR}/memory" 2>/dev/null || true
-    fi
-    [ -d "${CLAUDE_DIR}/todos" ] && \
-      cp -r "${CLAUDE_DIR}/todos" "${SESSION_DIR}/todos" 2>/dev/null || true
-    [ -d "${CLAUDE_DIR}/plans" ] && \
-      cp -r "${CLAUDE_DIR}/plans" "${SESSION_DIR}/plans" 2>/dev/null || true
-    printf '  Session %d snapshot captured\n' "$SESSION_COUNT"
-  fi
-}
-
 # Run the session loop. The caller sets RUN_DIR, RUN_ID, and defines
 # a launch_agent function that takes a prompt and runs the agent.
 # The caller also sets PRE_SESSION_HOOK (optional) for per-session

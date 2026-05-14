@@ -70,11 +70,11 @@ as the initial prompt.
 Test: tests/behaviors/operations/test-session-loop.sh (initial prompt uses brief, initial prompt uses handoff)
 
 WHEN the agent exits with status `executing`,
-THE SYSTEM SHALL capture a session snapshot and restart the agent.
+THE SYSTEM SHALL restart the agent.
 Test: tests/behaviors/operations/test-session-loop.sh (loop restarts on executing)
 
 WHEN the agent exits with status `needs-user`, `complete`, or `failed`,
-THE SYSTEM SHALL capture a session snapshot and stop the loop.
+THE SYSTEM SHALL stop the loop.
 Test: tests/behaviors/operations/test-session-loop.sh (loop stops on needs-user, loop stops on failed), tests/behaviors/operations/test-review-phase.sh (complete with passing reviews stops loop)
 
 WHEN the agent exits with status `rate-limited`,
@@ -94,12 +94,12 @@ Test: tests/behaviors/operations/test-session-loop.sh (max sessions sets failed)
 WHEN a session completes within the session loop,
 THE SYSTEM SHALL write a line to `sessions.log` containing the session
 number, exit code, duration, and status.
-Test: src/session.rs (test_loop_writes_sessions_log, test_loop_writes_nonzero_exit_to_sessions_log), tests/behaviors/operations/test-observability.sh
+Test: src/session.rs (test_loop_writes_sessions_log, test_loop_writes_nonzero_exit_to_sessions_log), tests/binary.rs (run_writes_sessions_log), tests/behaviors/operations/test-observability.sh
 
 WHEN the session loop launches an agent session,
 THE SYSTEM SHALL pass `--verbose --output-format stream-json` and pipe
 stdout to `sessions/session-N/transcript.jsonl`.
-Test: src/session.rs (test_loop_creates_session_transcript_dir), tests/behaviors/operations/test-observability.sh
+Test: src/session.rs (test_loop_creates_session_transcript_dir), tests/binary.rs (run_captures_stream_json_transcript), tests/behaviors/operations/test-observability.sh
 
 ## Review archiving
 
@@ -107,12 +107,12 @@ WHEN a review round fails and a new round starts,
 THE SYSTEM SHALL archive previous review artifacts to `reviews/round-N/`
 before running new reviews. Review files are copied; transcript files
 are moved.
-Test: src/review.rs (test_archive_previous_round_copies_reviews, test_archive_previous_round_noop_for_first_round), tests/behaviors/operations/test-observability.sh
+Test: src/review.rs (test_archive_previous_round_copies_reviews, test_archive_previous_round_noop_for_first_round), tests/binary.rs (run_archives_review_rounds), tests/behaviors/operations/test-observability.sh
 
 WHEN a reviewer runs,
 THE SYSTEM SHALL capture its stream-json output to
 `reviews/transcript-{name}.jsonl`.
-Test: tests/behaviors/operations/test-observability.sh
+Test: tests/binary.rs (run_archives_review_rounds), tests/behaviors/operations/test-observability.sh
 
 ## Session loop (local) — credential refresh
 
