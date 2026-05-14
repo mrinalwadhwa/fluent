@@ -111,12 +111,6 @@ that just writes complete) still find issues with the broader codebase.
 The scope should be narrower — if the run produced no code changes,
 reviewers should pass immediately or be skipped.
 
-2026-05-13 — macOS notifications fire when run status changes but
-have no useful content — you know something happened but not what.
-The notification should include the run ID, new status, and a brief
-summary (e.g. "Run X completed — 2 sessions, all reviewers passed"
-or "Run X needs your input — see handoff").
-
 2026-05-13 — All factory runs so far have used --no-sandbox. The
 sandbox exists to prevent agents from doing destructive things on
 the user's machine (bad dependencies, file deletion outside

@@ -92,6 +92,9 @@ tests/test-run
 | Watch polls at default interval | `test-watch-and-status-edges` |
 | Watch accepts custom interval | `test-watch-and-status-edges` |
 | Watch displays run status | `test-watch-and-status-edges` |
+| Notification includes run ID, status, and brief | `test-notification-content` |
+| Complete notification includes session count and review verdict | `test-notification-content` |
+| Needs-user notification includes handoff content | `test-notification-content` |
 
 ### Session loop (tested by binary.rs and test-session-loop.sh)
 

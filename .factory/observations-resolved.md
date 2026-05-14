@@ -104,3 +104,8 @@ commit instead of current HEAD, causing stale code on retries.
 → Resolved: when branch exists, reset it to current HEAD with
 git branch -f before checking out. Fixed in both shell script and
 Rust binary. Test added. First run completed using the Rust binary.
+
+2026-05-13 — macOS notifications fire when run status changes but
+have no useful content — you know something happened but not what.
+→ Resolved: 31bf063 (notification now includes run ID, status, brief
+summary, session count, review verdict, and handoff open questions)

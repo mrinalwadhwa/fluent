@@ -158,6 +158,9 @@ impl Run {
     }
 
     /// Check whether all review artifacts have a passing verdict.
+    ///
+    /// Returns `Some(false)` if any review file has a non-pass verdict
+    /// or is missing a verdict line entirely.
     pub fn reviews_passed(&self) -> Option<bool> {
         let reviews_dir = self.dir.join("reviews");
         if !reviews_dir.is_dir() {
@@ -171,9 +174,11 @@ impl Run {
             if name_str.starts_with("review-") && name_str.ends_with(".md") {
                 found_any = true;
                 let content = fs::read_to_string(entry.path()).unwrap_or_default();
+                let mut has_verdict = false;
                 for line in content.lines() {
                     let lower = line.to_lowercase();
                     if lower.starts_with("verdict:") {
+                        has_verdict = true;
                         let value = lower
                             .strip_prefix("verdict:")
                             .unwrap_or("")
@@ -184,6 +189,9 @@ impl Run {
                         }
                     }
                 }
+                if !has_verdict {
+                    return Some(false);
+                }
             }
         }
         if found_any { Some(true) } else { None }
@@ -191,8 +199,9 @@ impl Run {
 
     /// Extract what the agent needs from the handoff file.
     ///
-    /// Looks for "Open questions" section first, then falls back to the
-    /// first non-heading, non-empty line.
+    /// Looks for an "Open questions" section and returns the first
+    /// non-empty item. Returns `None` if the file is missing or has
+    /// no "Open questions" section.
     pub fn handoff_need(&self) -> Option<String> {
         let content = fs::read_to_string(self.dir.join("handoff.md")).ok()?;
         // Look for "Open questions" section
@@ -932,5 +941,95 @@ mod tests {
         let body = run.notification_body();
         assert!(body.contains("run-nf: failed"));
         assert!(body.contains("Brief for run-nf"));
+    }
+
+    #[test]
+    fn test_reviews_passed_no_verdict_line() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-nv", "complete");
+        let run_dir = tmp.path().join(".factory/runs/run-nv");
+        fs::create_dir_all(run_dir.join("reviews")).unwrap();
+        fs::write(
+            run_dir.join("reviews/review-tests.md"),
+            "# Test review\n\nSome content but no verdict line.\n",
+        )
+        .unwrap();
+
+        let run = Run {
+            id: "run-nv".into(),
+            dir: run_dir,
+        };
+        assert_eq!(run.reviews_passed(), Some(false));
+    }
+
+    #[test]
+    fn test_reviews_passed_uncertain_verdict() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-ru", "complete");
+        let run_dir = tmp.path().join(".factory/runs/run-ru");
+        fs::create_dir_all(run_dir.join("reviews")).unwrap();
+        fs::write(run_dir.join("reviews/review-tests.md"), "Verdict: uncertain").unwrap();
+
+        let run = Run {
+            id: "run-ru".into(),
+            dir: run_dir,
+        };
+        assert_eq!(run.reviews_passed(), Some(false));
+    }
+
+    #[test]
+    fn test_handoff_need_truncation() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-ht", "needs-user");
+        let run_dir = tmp.path().join(".factory/runs/run-ht");
+        let long_question = format!(
+            "## Run\n### Open questions\n- {}\n",
+            "A".repeat(100)
+        );
+        fs::write(run_dir.join("handoff.md"), long_question).unwrap();
+
+        let run = Run {
+            id: "run-ht".into(),
+            dir: run_dir,
+        };
+        let need = run.handoff_need().unwrap();
+        assert_eq!(need.len(), 80);
+        assert!(need.ends_with("..."));
+    }
+
+    #[test]
+    fn test_handoff_need_no_open_questions_section() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-hq", "needs-user");
+        let run_dir = tmp.path().join(".factory/runs/run-hq");
+        fs::write(
+            run_dir.join("handoff.md"),
+            "## Run\n### Completed\n- Did stuff\n### Next steps\n- Do more\n",
+        )
+        .unwrap();
+
+        let run = Run {
+            id: "run-hq".into(),
+            dir: run_dir,
+        };
+        assert_eq!(run.handoff_need(), None);
+    }
+
+    #[test]
+    fn test_notification_body_complete_zero_sessions() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-z", "complete");
+        let run_dir = tmp.path().join(".factory/runs/run-z");
+        fs::create_dir_all(run_dir.join("reviews")).unwrap();
+        fs::write(run_dir.join("reviews/review-tests.md"), "Verdict: pass").unwrap();
+
+        let run = Run {
+            id: "run-z".into(),
+            dir: run_dir,
+        };
+        let body = run.notification_body();
+        assert!(body.contains("run-z: complete"));
+        assert!(!body.contains("sessions"));
+        assert!(body.contains("reviews passed"));
     }
 }

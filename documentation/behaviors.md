@@ -163,7 +163,17 @@ THE SYSTEM SHALL poll run status at the specified interval.
 Test: tests/behaviors/operations/test-watch-and-status-edges.sh
 
 WHEN a run's status changes to `complete`, `needs-user`, or `failed`,
-THE SYSTEM SHALL fire a macOS notification.
+THE SYSTEM SHALL fire a macOS notification containing the run ID, status,
+and brief summary.
+Test: tests/behaviors/operations/test-notification-content.sh
+
+WHEN the status is `complete`,
+THE NOTIFICATION SHALL include the session count and review verdict.
+Test: tests/behaviors/operations/test-notification-content.sh
+
+WHEN the status is `needs-user`,
+THE NOTIFICATION SHALL include the first open question from handoff.md.
+Test: tests/behaviors/operations/test-notification-content.sh
 
 ## Run-id resolution
 
