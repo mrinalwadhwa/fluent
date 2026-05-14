@@ -22,6 +22,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 struct AgentView {
     name: String,
     events: Vec<Event>,
+    /// Pre-rendered lines cache — avoids rebuilding on every frame.
+    cached_lines: Vec<String>,
     readers: Vec<TranscriptReader>,
     last_session: u32,
     status: String, // "running", "pass", "fail", "uncertain", ""
@@ -32,6 +34,7 @@ impl AgentView {
         Self {
             name: name.to_string(),
             events: Vec::new(),
+            cached_lines: Vec::new(),
             readers: Vec::new(),
             last_session: 0,
             status: String::new(),
@@ -41,6 +44,9 @@ impl AgentView {
     fn poll(&mut self) {
         for reader in &mut self.readers {
             let new_events = reader.read_new();
+            for event in &new_events {
+                self.cached_lines.extend(event.lines());
+            }
             self.events.extend(new_events);
         }
     }
@@ -177,12 +183,8 @@ impl RunView {
         }
     }
 
-    fn visible_lines(&self) -> Vec<String> {
-        self.current_agent()
-            .events
-            .iter()
-            .flat_map(|e| e.lines())
-            .collect()
+    fn visible_lines(&self) -> &[String] {
+        &self.current_agent().cached_lines
     }
 }
 
@@ -657,43 +659,9 @@ fn draw_help_bar(f: &mut ratatui::Frame, area: Rect) {
     f.render_widget(help, area);
 }
 
-fn truncate_str(s: &str, max: usize) -> String {
-    if s.chars().count() > max {
-        let end: String = s.chars().take(max - 3).collect();
-        format!("{end}...")
-    } else {
-        s.to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
-
-    #[test]
-    fn test_truncate_str_short() {
-        assert_eq!(truncate_str("hello", 10), "hello");
-    }
-
-    #[test]
-    fn test_truncate_str_exact() {
-        assert_eq!(truncate_str("hello", 5), "hello");
-    }
-
-    #[test]
-    fn test_truncate_str_long() {
-        assert_eq!(truncate_str("hello world!", 10), "hello w...");
-    }
-
-    #[test]
-    fn test_truncate_str_multibyte_utf8() {
-        // Should not panic on multi-byte characters
-        let s = "héllo wörld café";
-        let result = truncate_str(s, 10);
-        assert!(result.ends_with("..."));
-        assert_eq!(result.chars().count(), 10);
-    }
 
     #[test]
     fn test_style_for_line_bash() {
@@ -790,6 +758,9 @@ mod tests {
             },
         ];
         let mut agent = AgentView::new("author");
+        for event in &events {
+            agent.cached_lines.extend(event.lines());
+        }
         agent.events = events;
         let view = RunView {
             run: Run {

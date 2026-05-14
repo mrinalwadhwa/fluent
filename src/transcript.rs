@@ -51,7 +51,11 @@ impl Event {
                 } else {
                     format!("[{name}] {summary}")
                 };
-                vec![header]
+                // Add blank line before file operations for visual separation
+                match name.as_str() {
+                    "Read" | "Write" | "Edit" | "Bash" => vec![String::new(), header],
+                    _ => vec![header],
+                }
             }
             Event::Text { text } => {
                 let mut lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
