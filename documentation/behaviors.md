@@ -116,9 +116,11 @@ Test: tests/binary.rs (run_archives_review_rounds), tests/behaviors/operations/t
 
 ## Session loop (local) — credential refresh
 
-WHEN a new session starts on the local runtime,
+WHEN a new session starts on the sandboxed local runtime,
 THE SYSTEM SHALL run an unsandboxed Claude invocation to refresh the
-OAuth token, then re-inject credentials from Keychain.
+OAuth token, then re-read the token from Keychain into the process
+environment.
+Test: src/session.rs (test_loop_calls_pre_session_before_each_session, test_loop_stops_when_pre_session_returns_error), tests/behaviors/operations/test-sandbox.sh (sandboxed run uses sandbox-exec)
 
 ## Fargate execution
 
@@ -237,7 +239,9 @@ showing verdict or current activity.
 WHILE running on the local runtime,
 THE SYSTEM SHALL execute the agent inside a macOS Seatbelt sandbox with
 filesystem access restricted to the workspace root.
+Test: tests/behaviors/operations/test-sandbox.sh (dry-run renders profile with workspace root, sandbox enforces filesystem boundary, sandbox blocks write outside workspace, sandboxed run uses sandbox-exec)
 
 WHILE running inside the sandbox,
 THE SYSTEM SHALL inject credentials via environment variables, never by
 opening filesystem access to credential stores.
+Test: tests/behaviors/operations/test-sandbox.sh (profile denies Keychain Mach services, profile denies credential filesystem access, credentials injected via env vars)

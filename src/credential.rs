@@ -1,10 +1,10 @@
 use anyhow::Result;
 use std::process::Command;
 
-/// Safety: We only call set_env_var from the main thread before spawning
-/// child processes. The factory is single-threaded during credential setup.
+/// Safety: We only call set_env_var from the main thread when no child
+/// processes are running — both during initial setup and between sessions.
 fn set_env_var(key: &str, value: &str) {
-    // SAFETY: Called during single-threaded initialization before spawning agents.
+    // SAFETY: Called from the main thread when no child processes are running.
     unsafe { std::env::set_var(key, value) };
 }
 
@@ -39,27 +39,35 @@ pub fn refresh_credentials() -> Result<()> {
     Ok(())
 }
 
+/// Read the OAuth token from Keychain via `security find-generic-password`.
+fn read_oauth_from_keychain() -> Option<String> {
+    let output = Command::new("security")
+        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let cred_json = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if cred_json.is_empty() {
+        return None;
+    }
+
+    extract_oauth_token(&cred_json)
+}
+
 /// Inject OAuth token from Keychain if not already set.
 fn inject_oauth_token() -> Result<()> {
     if std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_ok() {
         return Ok(());
     }
 
-    let output = Command::new("security")
-        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
-        .output();
-
-    if let Ok(output) = output {
-        if output.status.success() {
-            let cred_json = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !cred_json.is_empty() {
-                if let Some(token) = extract_oauth_token(&cred_json) {
-                    set_env_var("CLAUDE_CODE_OAUTH_TOKEN", &token);
-                    eprintln!("  OAuth token injected from Keychain");
-                    return Ok(());
-                }
-            }
-        }
+    if let Some(token) = read_oauth_from_keychain() {
+        set_env_var("CLAUDE_CODE_OAUTH_TOKEN", &token);
+        eprintln!("  OAuth token injected from Keychain");
+        return Ok(());
     }
 
     // API key fallback (skip if OAuth available)
@@ -93,21 +101,9 @@ fn inject_oauth_token() -> Result<()> {
 
 /// Re-read the OAuth token from Keychain, replacing any existing value.
 fn refresh_oauth_token() -> Result<()> {
-    let output = Command::new("security")
-        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
-        .output();
-
-    if let Ok(output) = output {
-        if output.status.success() {
-            let cred_json = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !cred_json.is_empty() {
-                if let Some(token) = extract_oauth_token(&cred_json) {
-                    set_env_var("CLAUDE_CODE_OAUTH_TOKEN", &token);
-                }
-            }
-        }
+    if let Some(token) = read_oauth_from_keychain() {
+        set_env_var("CLAUDE_CODE_OAUTH_TOKEN", &token);
     }
-
     Ok(())
 }
 

@@ -603,4 +603,74 @@ mod tests {
         assert_eq!(lines.len(), 3);
         assert!(lines[0].starts_with("session=1 exit=1 duration="));
     }
+
+    /// Hooks that record pre_session calls for testing.
+    struct RecordingHooks {
+        call_count: AtomicU32,
+    }
+
+    impl RecordingHooks {
+        fn new() -> Self {
+            Self { call_count: AtomicU32::new(0) }
+        }
+
+        fn calls(&self) -> u32 {
+            self.call_count.load(Ordering::SeqCst)
+        }
+    }
+
+    impl SessionHooks for RecordingHooks {
+        fn pre_session(&self) -> Result<()> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn sleep(&self, _duration: Duration) {}
+    }
+
+    #[test]
+    fn test_loop_calls_pre_session_before_each_session() {
+        let (_tmp, run) = setup_test_run();
+        let run_dir = run.dir.clone();
+
+        let agent = TestAgent::new(move |_prompt: &str, n: u32, _: &Path| {
+            if n < 3 {
+                fs::write(run_dir.join("status"), "executing").unwrap();
+            } else {
+                fs::write(run_dir.join("status"), "needs-user").unwrap();
+            }
+            0
+        });
+
+        let hooks = RecordingHooks::new();
+        let config = make_config(&run);
+        run_session_loop(&agent, &config, &hooks).unwrap();
+
+        assert_eq!(agent.call_count.load(Ordering::SeqCst), 3);
+        assert_eq!(hooks.calls(), 3);
+    }
+
+    /// Hooks that fail on pre_session to test error propagation.
+    struct FailingHooks;
+
+    impl SessionHooks for FailingHooks {
+        fn pre_session(&self) -> Result<()> {
+            anyhow::bail!("credential refresh failed")
+        }
+        fn sleep(&self, _duration: Duration) {}
+    }
+
+    #[test]
+    fn test_loop_stops_when_pre_session_returns_error() {
+        let (_tmp, run) = setup_test_run();
+
+        let agent = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
+            0
+        });
+
+        let config = make_config(&run);
+        let result = run_session_loop(&agent, &config, &FailingHooks);
+
+        assert!(result.is_err());
+        assert_eq!(agent.call_count.load(Ordering::SeqCst), 0);
+    }
 }

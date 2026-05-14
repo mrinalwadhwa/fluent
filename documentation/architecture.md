@@ -280,7 +280,7 @@ No EFS. Fargate ephemeral storage is sufficient for a single container.
 
 | Credential | Source | Method |
 |---|---|---|
-| Claude OAuth | macOS Keychain | Extract, pass as env var. Refresh via unsandboxed `claude -p "ok"` at session boundaries. |
+| Claude OAuth | macOS Keychain | Extract, pass as env var. Refresh via unsandboxed `claude -p "ok" --max-turns 1` at session boundaries. |
 | AWS | SSO profile | `aws configure export-credentials` resolves to STS temps, passed as env vars. |
 | Brave Search | macOS Keychain | Extract, pass as env var. |
 
