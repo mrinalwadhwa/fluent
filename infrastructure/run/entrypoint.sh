@@ -62,10 +62,10 @@ FACTORY_LIB=1 . "$FACTORY_SCRIPT"
 RUN_ID="$FACTORY_RUN_ID"
 
 # --------------------------------------------------------------------------
-# Define how this backend launches the agent
+# Define how this backend launches the author
 # --------------------------------------------------------------------------
 
-launch_agent() {
+launch_author() {
   LAUNCH_PROMPT="$1"; shift
   claude \
     --dangerously-skip-permissions \

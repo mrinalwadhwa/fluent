@@ -5,7 +5,7 @@
 # tracking, and session limit enforcement.
 #
 # Sources the factory script in library mode to call run_session_loop
-# directly. Mocks launch_agent to write controlled status files.
+# directly. Mocks launch_author to write controlled status files.
 # Overrides sleep, capture_snapshot, and generate_report as no-ops.
 #
 # Covers:
@@ -104,7 +104,7 @@ run_test() {
 test_loop_initial_prompt_uses_brief() {
   setup_test_run
 
-  launch_agent() {
+  launch_author() {
     record_call "$1"
     printf 'needs-user' > "${RUN_DIR}/status"
   }
@@ -123,7 +123,7 @@ test_loop_initial_prompt_uses_handoff() {
   setup_test_run
   printf 'Previous work handoff' > "${RUN_DIR}/handoff.md"
 
-  launch_agent() {
+  launch_author() {
     record_call "$1"
     printf 'needs-user' > "${RUN_DIR}/status"
   }
@@ -140,7 +140,7 @@ test_loop_initial_prompt_uses_handoff() {
 test_loop_stops_on_needs_user() {
   setup_test_run
 
-  launch_agent() {
+  launch_author() {
     record_call "$1"
     printf 'needs-user' > "${RUN_DIR}/status"
   }
@@ -158,7 +158,7 @@ test_loop_stops_on_needs_user() {
 test_loop_stops_on_failed() {
   setup_test_run
 
-  launch_agent() {
+  launch_author() {
     record_call "$1"
     printf 'failed' > "${RUN_DIR}/status"
   }
@@ -176,7 +176,7 @@ test_loop_stops_on_failed() {
 test_loop_restarts_on_executing() {
   setup_test_run
 
-  launch_agent() {
+  launch_author() {
     record_call "$1"
     N="$(call_count)"
     if [ "$N" -lt 3 ]; then
@@ -199,7 +199,7 @@ test_loop_restarts_on_executing() {
 test_loop_restarts_on_rate_limited() {
   setup_test_run
 
-  launch_agent() {
+  launch_author() {
     record_call "$1"
     N="$(call_count)"
     if [ "$N" -eq 1 ]; then
@@ -222,7 +222,7 @@ test_loop_consecutive_failures_set_failed() {
   setup_test_run
   printf 'executing' > "${RUN_DIR}/status"
 
-  launch_agent() {
+  launch_author() {
     record_call "$1"
     return 1
   }
@@ -241,7 +241,7 @@ test_loop_success_resets_failure_counter() {
   setup_test_run
   printf 'executing' > "${RUN_DIR}/status"
 
-  launch_agent() {
+  launch_author() {
     record_call "$1"
     N="$(call_count)"
     case "$N" in
@@ -268,7 +268,7 @@ test_loop_success_resets_failure_counter() {
 test_loop_max_sessions_sets_failed() {
   setup_test_run
 
-  launch_agent() {
+  launch_author() {
     record_call "$1"
     printf 'executing' > "${RUN_DIR}/status"
   }

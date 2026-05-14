@@ -128,10 +128,10 @@ fn cmd_interactive(
     eprintln!("  Factory           interactive session");
     eprintln!("  Sandbox root      {}", sandbox_root.display());
 
-    let agent = SandboxedClaudeCode {
+    let author = SandboxedClaudeCode {
         sandbox_profile: Some(profile.path.to_string_lossy().to_string()),
     };
-    agent.run_interactive(&system_prompt, sandbox_root, extra_args)?;
+    author.run_interactive(&system_prompt, sandbox_root, extra_args)?;
     Ok(())
 }
 
@@ -177,11 +177,11 @@ fn cmd_run_local(
         resolver: ContentResolver::new(Some(worktree_dir)),
     };
 
-    let agent = SandboxedClaudeCode {
+    let author = SandboxedClaudeCode {
         sandbox_profile: Some(profile.path.to_string_lossy().to_string()),
     };
 
-    session::run_session_loop(&agent, &config, &SandboxedHooks)?;
+    session::run_session_loop(&author, &config, &SandboxedHooks)?;
     Ok(())
 }
 
@@ -227,8 +227,8 @@ fn cmd_run_bare(
         resolver: ContentResolver::new(Some(&working_dir)),
     };
 
-    let agent = BareClaudeCode;
-    session::run_session_loop(&agent, &config, &DefaultHooks)?;
+    let author = BareClaudeCode;
+    session::run_session_loop(&author, &config, &DefaultHooks)?;
     Ok(())
 }
 
@@ -518,10 +518,10 @@ fn cmd_resume(
         run.id
     );
 
-    let agent = SandboxedClaudeCode {
+    let author = SandboxedClaudeCode {
         sandbox_profile: Some(profile.path.to_string_lossy().to_string()),
     };
-    agent.run_interactive(&system_prompt, search_root, extra_args)?;
+    author.run_interactive(&system_prompt, search_root, extra_args)?;
     Ok(())
 }
 

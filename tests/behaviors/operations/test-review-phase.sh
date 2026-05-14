@@ -6,7 +6,7 @@
 # review-mode runs execute reviewers before the author.
 #
 # Sources the factory script in library mode. Mocks claude to write
-# review artifacts with controlled verdicts. Mocks launch_agent for
+# review artifacts with controlled verdicts. Mocks launch_author for
 # session loop integration tests.
 #
 # Covers:
@@ -175,7 +175,7 @@ test_complete_with_passing_reviews_stops() {
     printf 'Verdict: pass\n\nLooks good.' > "${REVIEWER_RUN_DIR}/reviews/review-${REVIEWER_NAME}.md"
   }
 
-  launch_agent() {
+  launch_author() {
     record_call "$1"
     printf 'complete' > "${RUN_DIR}/status"
   }
@@ -202,7 +202,7 @@ test_review_failure_restarts_author() {
     fi
   }
 
-  launch_agent() {
+  launch_author() {
     record_call "$1"
     N="$(call_count)"
     if [ "$N" -eq 1 ]; then
@@ -231,7 +231,7 @@ test_review_run_all_pass_completes_without_author() {
     printf 'Verdict: pass\n\nLooks good.' > "${REVIEWER_RUN_DIR}/reviews/review-${REVIEWER_NAME}.md"
   }
 
-  launch_agent() {
+  launch_author() {
     record_call "$1"
     printf 'needs-user' > "${RUN_DIR}/status"
   }
@@ -259,7 +259,7 @@ test_review_run_findings_launch_author() {
     fi
   }
 
-  launch_agent() {
+  launch_author() {
     record_call "$1"
     printf 'needs-user' > "${RUN_DIR}/status"
   }
@@ -269,7 +269,7 @@ test_review_run_findings_launch_author() {
   RESULT=0
   N="$(call_count)"
   if [ "$N" -lt 1 ]; then
-    printf '    FAIL: expected launch_agent to be called, got 0 calls\n'
+    printf '    FAIL: expected launch_author to be called, got 0 calls\n'
     RESULT=1
   fi
   assert_contains "$(prompt_for 1)" "review" || RESULT=1

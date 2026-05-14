@@ -233,10 +233,10 @@ setup_agent_browser() {
 }
 
 # ---------------------------------------------------------------------------
-# Launch agent inside sandbox
+# Launch author inside sandbox
 # ---------------------------------------------------------------------------
 
-launch_agent() {
+launch_author() {
   printf '  Sandbox root      %s\n\n' "$SANDBOX_ROOT"
   sandbox-exec -f "$RENDERED_PROFILE" claude \
     --append-system-prompt "$FACTORY_SYSTEM_PROMPT" \
@@ -255,7 +255,7 @@ cmd_interactive() {
   setup_agent_browser
 
   printf '  Factory           interactive session\n'
-  launch_agent "$@"
+  launch_author "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -638,7 +638,7 @@ generate_report() {
 # ---------------------------------------------------------------------------
 
 # Run the session loop. The caller sets RUN_DIR, RUN_ID, and defines
-# a launch_agent function that takes a prompt and runs the agent.
+# a launch_author function that takes a prompt and runs the author.
 # The caller also sets PRE_SESSION_HOOK (optional) for per-session
 # setup like credential refresh.
 run_session_loop() {
@@ -708,23 +708,23 @@ run_session_loop() {
 
     SESSION_START="$(date +%s)"
 
-    # Launch agent via caller-defined function
+    # Launch author via caller-defined function
     set +e
-    launch_agent "$PROMPT" "$@"
-    AGENT_EXIT=$?
+    launch_author "$PROMPT" "$@"
+    AUTHOR_EXIT=$?
     set -e
 
     SESSION_ELAPSED="$(( $(date +%s) - SESSION_START ))"
-    printf '\n  Agent exited (code: %d, %ds)\n' "$AGENT_EXIT" "$SESSION_ELAPSED"
+    printf '\n  Author exited (code: %d, %ds)\n' "$AUTHOR_EXIT" "$SESSION_ELAPSED"
 
     # Write session metadata
     STATUS_AFTER="$(cat "${RUN_DIR}/status" 2>/dev/null || echo "unknown")"
     printf 'session=%d exit=%d duration=%ds status=%s\n' \
-      "$SESSION_COUNT" "$AGENT_EXIT" "$SESSION_ELAPSED" "$STATUS_AFTER" \
+      "$SESSION_COUNT" "$AUTHOR_EXIT" "$SESSION_ELAPSED" "$STATUS_AFTER" \
       >> "$SESSION_LOG"
 
     # Track consecutive failures
-    if [ "$AGENT_EXIT" -ne 0 ]; then
+    if [ "$AUTHOR_EXIT" -ne 0 ]; then
       CONSECUTIVE_FAILURES=$((CONSECUTIVE_FAILURES + 1))
       if [ "$CONSECUTIVE_FAILURES" -ge 3 ]; then
         printf '  %d consecutive failures — stopping.\n' "$CONSECUTIVE_FAILURES"
@@ -827,8 +827,8 @@ cmd_run_local() {
   # Run from worktree so relative paths in agent prompts resolve correctly
   cd "$WORKTREE_DIR"
 
-  # Define how this backend launches the agent
-  launch_agent() {
+  # Define how this backend launches the author
+  launch_author() {
     LAUNCH_PROMPT="$1"; shift
     sandbox-exec -f "$RENDERED_PROFILE" claude \
       --verbose --output-format stream-json \
@@ -870,8 +870,8 @@ cmd_run_bare() {
     printf 'factory: bare session loop (run: %s)\n' "$RUN_ID"
   fi
 
-  # Define how this backend launches the agent
-  launch_agent() {
+  # Define how this backend launches the author
+  launch_author() {
     LAUNCH_PROMPT="$1"; shift
     claude \
       --dangerously-skip-permissions \
@@ -1252,7 +1252,7 @@ cmd_resume() {
   setup_agent_browser
 
   printf '  Factory           resume session (run: %s)\n' "$RUN_ID"
-  launch_agent "$@"
+  launch_author "$@"
 }
 
 # ---------------------------------------------------------------------------

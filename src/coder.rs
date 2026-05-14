@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-/// Trait abstracting the coding agent (currently Claude Code).
+/// Trait abstracting the coding author (currently Claude Code).
 pub trait Coder {
     /// Launch the coder with a prompt, system prompt, and working directory.
     /// When `transcript_file` is provided, add `--verbose --output-format

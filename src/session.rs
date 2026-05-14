@@ -51,7 +51,7 @@ impl SessionHooks for SandboxedHooks {
 
 /// Run the session loop.
 pub fn run_session_loop(
-    agent: &dyn Coder,
+    author: &dyn Coder,
     config: &SessionConfig,
     hooks: &dyn SessionHooks,
 ) -> Result<()> {
@@ -135,8 +135,8 @@ pub fn run_session_loop(
 
         let session_start = std::time::Instant::now();
 
-        // Launch agent
-        let exit_code = agent.run(
+        // Launch author
+        let exit_code = author.run(
             &prompt,
             &config.system_prompt,
             &config.working_dir,
@@ -145,7 +145,7 @@ pub fn run_session_loop(
         )?;
 
         let session_elapsed = session_start.elapsed().as_secs();
-        eprintln!("\n  Agent exited (code: {exit_code}, {session_elapsed}s)");
+        eprintln!("\n  Author exited (code: {exit_code}, {session_elapsed}s)");
 
         // Write session metadata to sessions.log
         {
@@ -264,7 +264,7 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
 
-    /// Mock agent that calls a handler to determine exit code and writes status.
+    /// Mock author that calls a handler to determine exit code and writes status.
     struct TestAgent<F>
     where
         F: Fn(&str, u32, &Path) -> i32 + Send + Sync,
@@ -356,7 +356,7 @@ mod tests {
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let prompts = captured_prompts.clone();
 
-        let agent = TestAgent::new(move |prompt: &str, _n: u32, _: &Path| {
+        let author = TestAgent::new(move |prompt: &str, _n: u32, _: &Path| {
                 prompts.lock().unwrap().push(prompt.to_string());
                 fs::write(run_dir.join("status"), "needs-user").unwrap();
                 0
@@ -364,7 +364,7 @@ mod tests {
         );
 
         let config = make_config(&run);
-        run_session_loop(&agent, &config, &NoopHooks).unwrap();
+        run_session_loop(&author, &config, &NoopHooks).unwrap();
 
         let prompts = captured_prompts.lock().unwrap();
         assert!(prompts[0].contains("brief"));
@@ -380,7 +380,7 @@ mod tests {
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let prompts = captured_prompts.clone();
 
-        let agent = TestAgent::new(move |prompt: &str, _n: u32, _: &Path| {
+        let author = TestAgent::new(move |prompt: &str, _n: u32, _: &Path| {
                 prompts.lock().unwrap().push(prompt.to_string());
                 fs::write(run_dir.join("status"), "needs-user").unwrap();
                 0
@@ -388,7 +388,7 @@ mod tests {
         );
 
         let config = make_config(&run);
-        run_session_loop(&agent, &config, &NoopHooks).unwrap();
+        run_session_loop(&author, &config, &NoopHooks).unwrap();
 
         let prompts = captured_prompts.lock().unwrap();
         assert!(prompts[0].contains("handoff"));
@@ -399,16 +399,16 @@ mod tests {
         let (_tmp, run) = setup_test_run();
         let run_dir = run.dir.clone();
 
-        let agent = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
+        let author = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
                 fs::write(run_dir.join("status"), "needs-user").unwrap();
                 0
             }
         );
 
         let config = make_config(&run);
-        run_session_loop(&agent, &config, &NoopHooks).unwrap();
+        run_session_loop(&author, &config, &NoopHooks).unwrap();
 
-        assert_eq!(agent.call_count.load(Ordering::SeqCst), 1);
+        assert_eq!(author.call_count.load(Ordering::SeqCst), 1);
         assert_eq!(run.status().unwrap(), RunStatus::NeedsUser);
     }
 
@@ -417,16 +417,16 @@ mod tests {
         let (_tmp, run) = setup_test_run();
         let run_dir = run.dir.clone();
 
-        let agent = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
+        let author = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
                 fs::write(run_dir.join("status"), "failed").unwrap();
                 0
             }
         );
 
         let config = make_config(&run);
-        run_session_loop(&agent, &config, &NoopHooks).unwrap();
+        run_session_loop(&author, &config, &NoopHooks).unwrap();
 
-        assert_eq!(agent.call_count.load(Ordering::SeqCst), 1);
+        assert_eq!(author.call_count.load(Ordering::SeqCst), 1);
         assert_eq!(run.status().unwrap(), RunStatus::Failed);
     }
 
@@ -435,7 +435,7 @@ mod tests {
         let (_tmp, run) = setup_test_run();
         let run_dir = run.dir.clone();
 
-        let agent = TestAgent::new(move |_prompt: &str, n: u32, _: &Path| {
+        let author = TestAgent::new(move |_prompt: &str, n: u32, _: &Path| {
                 if n < 3 {
                     fs::write(run_dir.join("status"), "executing").unwrap();
                 } else {
@@ -446,9 +446,9 @@ mod tests {
         );
 
         let config = make_config(&run);
-        run_session_loop(&agent, &config, &NoopHooks).unwrap();
+        run_session_loop(&author, &config, &NoopHooks).unwrap();
 
-        assert_eq!(agent.call_count.load(Ordering::SeqCst), 3);
+        assert_eq!(author.call_count.load(Ordering::SeqCst), 3);
         assert_eq!(run.status().unwrap(), RunStatus::NeedsUser);
     }
 
@@ -457,7 +457,7 @@ mod tests {
         let (_tmp, run) = setup_test_run();
         let run_dir = run.dir.clone();
 
-        let agent = TestAgent::new(move |_prompt: &str, n: u32, _: &Path| {
+        let author = TestAgent::new(move |_prompt: &str, n: u32, _: &Path| {
                 if n == 1 {
                     fs::write(run_dir.join("status"), "rate-limited").unwrap();
                 } else {
@@ -468,9 +468,9 @@ mod tests {
         );
 
         let config = make_config(&run);
-        run_session_loop(&agent, &config, &NoopHooks).unwrap();
+        run_session_loop(&author, &config, &NoopHooks).unwrap();
 
-        assert_eq!(agent.call_count.load(Ordering::SeqCst), 2);
+        assert_eq!(author.call_count.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -479,15 +479,15 @@ mod tests {
         // Set initial status to executing so the loop continues
         fs::write(run.dir.join("status"), "executing").unwrap();
 
-        let agent = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
+        let author = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
                 1 // non-zero exit
             }
         );
 
         let config = make_config(&run);
-        run_session_loop(&agent, &config, &NoopHooks).unwrap();
+        run_session_loop(&author, &config, &NoopHooks).unwrap();
 
-        assert_eq!(agent.call_count.load(Ordering::SeqCst), 3);
+        assert_eq!(author.call_count.load(Ordering::SeqCst), 3);
         assert_eq!(run.status().unwrap(), RunStatus::Failed);
     }
 
@@ -497,7 +497,7 @@ mod tests {
         fs::write(run.dir.join("status"), "executing").unwrap();
         let run_dir = run.dir.clone();
 
-        let agent = TestAgent::new(move |_prompt: &str, n: u32, _: &Path| {
+        let author = TestAgent::new(move |_prompt: &str, n: u32, _: &Path| {
                 match n {
                     1 | 2 => 1,    // Two failures
                     3 => 0,         // Success — resets counter
@@ -511,10 +511,10 @@ mod tests {
         );
 
         let config = make_config(&run);
-        run_session_loop(&agent, &config, &NoopHooks).unwrap();
+        run_session_loop(&author, &config, &NoopHooks).unwrap();
 
         // Should have run more than 5 sessions (counter was reset)
-        assert!(agent.call_count.load(Ordering::SeqCst) > 5);
+        assert!(author.call_count.load(Ordering::SeqCst) > 5);
     }
 
     #[test]
@@ -522,16 +522,16 @@ mod tests {
         let (_tmp, run) = setup_test_run();
         let run_dir = run.dir.clone();
 
-        let agent = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
+        let author = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
                 fs::write(run_dir.join("status"), "executing").unwrap();
                 0
             }
         );
 
         let config = make_config(&run);
-        run_session_loop(&agent, &config, &NoopHooks).unwrap();
+        run_session_loop(&author, &config, &NoopHooks).unwrap();
 
-        assert_eq!(agent.call_count.load(Ordering::SeqCst), MAX_SESSIONS);
+        assert_eq!(author.call_count.load(Ordering::SeqCst), MAX_SESSIONS);
         assert_eq!(run.status().unwrap(), RunStatus::Failed);
     }
 
@@ -540,7 +540,7 @@ mod tests {
         let (_tmp, run) = setup_test_run();
         let run_dir = run.dir.clone();
 
-        let agent = TestAgent::new(move |_prompt: &str, n: u32, _: &Path| {
+        let author = TestAgent::new(move |_prompt: &str, n: u32, _: &Path| {
                 if n < 3 {
                     fs::write(run_dir.join("status"), "executing").unwrap();
                 } else {
@@ -551,7 +551,7 @@ mod tests {
         );
 
         let config = make_config(&run);
-        run_session_loop(&agent, &config, &NoopHooks).unwrap();
+        run_session_loop(&author, &config, &NoopHooks).unwrap();
 
         let log = fs::read_to_string(run.dir.join("sessions.log")).unwrap();
         let lines: Vec<&str> = log.lines().collect();
@@ -568,19 +568,19 @@ mod tests {
         let run_dir = run.dir.clone();
         let expected_path = run.dir.join("sessions/session-1/transcript.jsonl");
 
-        let agent = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
+        let author = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
                 fs::write(run_dir.join("status"), "needs-user").unwrap();
                 0
             }
         );
 
         let config = make_config(&run);
-        run_session_loop(&agent, &config, &NoopHooks).unwrap();
+        run_session_loop(&author, &config, &NoopHooks).unwrap();
 
         // Session directory should exist
         assert!(run.dir.join("sessions/session-1").is_dir());
-        // Transcript path should be passed to the agent
-        let paths = agent.transcript_paths.lock().unwrap();
+        // Transcript path should be passed to the author
+        let paths = author.transcript_paths.lock().unwrap();
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0].as_deref(), Some(expected_path.as_path()));
     }
@@ -590,13 +590,13 @@ mod tests {
         let (_tmp, run) = setup_test_run();
         fs::write(run.dir.join("status"), "executing").unwrap();
 
-        let agent = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
+        let author = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
                 1 // non-zero exit
             }
         );
 
         let config = make_config(&run);
-        run_session_loop(&agent, &config, &NoopHooks).unwrap();
+        run_session_loop(&author, &config, &NoopHooks).unwrap();
 
         let log = fs::read_to_string(run.dir.join("sessions.log")).unwrap();
         let lines: Vec<&str> = log.lines().collect();
@@ -632,7 +632,7 @@ mod tests {
         let (_tmp, run) = setup_test_run();
         let run_dir = run.dir.clone();
 
-        let agent = TestAgent::new(move |_prompt: &str, n: u32, _: &Path| {
+        let author = TestAgent::new(move |_prompt: &str, n: u32, _: &Path| {
             if n < 3 {
                 fs::write(run_dir.join("status"), "executing").unwrap();
             } else {
@@ -643,9 +643,9 @@ mod tests {
 
         let hooks = RecordingHooks::new();
         let config = make_config(&run);
-        run_session_loop(&agent, &config, &hooks).unwrap();
+        run_session_loop(&author, &config, &hooks).unwrap();
 
-        assert_eq!(agent.call_count.load(Ordering::SeqCst), 3);
+        assert_eq!(author.call_count.load(Ordering::SeqCst), 3);
         assert_eq!(hooks.calls(), 3);
     }
 
@@ -663,14 +663,14 @@ mod tests {
     fn test_loop_stops_when_pre_session_returns_error() {
         let (_tmp, run) = setup_test_run();
 
-        let agent = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
+        let author = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
             0
         });
 
         let config = make_config(&run);
-        let result = run_session_loop(&agent, &config, &FailingHooks);
+        let result = run_session_loop(&author, &config, &FailingHooks);
 
         assert!(result.is_err());
-        assert_eq!(agent.call_count.load(Ordering::SeqCst), 0);
+        assert_eq!(author.call_count.load(Ordering::SeqCst), 0);
     }
 }
