@@ -92,4 +92,14 @@ pub enum Commands {
 
     /// Initialize .factory/ directory
     Init,
+
+    /// Live TUI showing run activity
+    Dashboard {
+        /// Target a specific run ID
+        #[arg(long)]
+        run_id: Option<String>,
+
+        /// Path to project (default: current directory)
+        path: Option<String>,
+    },
 }

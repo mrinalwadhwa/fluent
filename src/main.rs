@@ -10,6 +10,7 @@ use factory::coder::{BareClaudeCode, Coder, SandboxedClaudeCode};
 use factory::cli::{Cli, Commands};
 use factory::content::ContentResolver;
 use factory::credential;
+use factory::dashboard;
 use factory::run::{self, Run};
 use factory::os;
 use factory::session::{self, DefaultHooks, SessionConfig};
@@ -96,6 +97,10 @@ fn main() -> Result<()> {
         }
         Some(Commands::Init) => {
             cmd_init(&cwd)?;
+        }
+        Some(Commands::Dashboard { run_id, path }) => {
+            let search_root = path.map(PathBuf::from).unwrap_or(cwd);
+            dashboard::run_dashboard(&search_root, run_id.as_deref())?;
         }
         None => {
             cmd_interactive(&sandbox_root, &resolver, &cli.extra_args)?;
