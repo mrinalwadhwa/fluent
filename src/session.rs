@@ -261,7 +261,7 @@ fn capture_session_snapshot(run_dir: &Path, session_count: u32) -> Result<()> {
     if claude_dir.is_dir() {
         let history = claude_dir.join("history.jsonl");
         if history.exists() {
-            let _ = fs::copy(&history, session_dir.join("transcript.jsonl"));
+            let _ = fs::copy(&history, session_dir.join("history.jsonl"));
         }
 
         // Find project memory
@@ -327,6 +327,20 @@ mod tests {
     {
         handler: F,
         call_count: AtomicU32,
+        transcript_paths: std::sync::Mutex<Vec<Option<PathBuf>>>,
+    }
+
+    impl<F> TestAgent<F>
+    where
+        F: Fn(&str, u32, &Path) -> i32 + Send + Sync,
+    {
+        fn new(handler: F) -> Self {
+            Self {
+                handler,
+                call_count: AtomicU32::new(0),
+                transcript_paths: std::sync::Mutex::new(Vec::new()),
+            }
+        }
     }
 
     impl<F> Coder for TestAgent<F>
@@ -339,11 +353,13 @@ mod tests {
             _system_prompt: &str,
             _working_dir: &Path,
             _extra_args: &[String],
-            _transcript_file: Option<&Path>,
+            transcript_file: Option<&Path>,
         ) -> Result<i32> {
             let n = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
-            // The run_dir is embedded in the prompt — extract it for the handler
-            // but really the handler uses the path from the closure's capture.
+            self.transcript_paths
+                .lock()
+                .unwrap()
+                .push(transcript_file.map(|p| p.to_path_buf()));
             Ok((self.handler)(prompt, n, Path::new("")))
         }
 
@@ -396,14 +412,12 @@ mod tests {
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let prompts = captured_prompts.clone();
 
-        let agent = TestAgent {
-            handler: move |prompt: &str, _n: u32, _: &Path| {
+        let agent = TestAgent::new(move |prompt: &str, _n: u32, _: &Path| {
                 prompts.lock().unwrap().push(prompt.to_string());
                 fs::write(run_dir.join("status"), "needs-user").unwrap();
                 0
-            },
-            call_count: AtomicU32::new(0),
-        };
+            }
+        );
 
         let config = make_config(&run);
         run_session_loop(&agent, &config, &NoopHooks).unwrap();
@@ -422,14 +436,12 @@ mod tests {
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let prompts = captured_prompts.clone();
 
-        let agent = TestAgent {
-            handler: move |prompt: &str, _n: u32, _: &Path| {
+        let agent = TestAgent::new(move |prompt: &str, _n: u32, _: &Path| {
                 prompts.lock().unwrap().push(prompt.to_string());
                 fs::write(run_dir.join("status"), "needs-user").unwrap();
                 0
-            },
-            call_count: AtomicU32::new(0),
-        };
+            }
+        );
 
         let config = make_config(&run);
         run_session_loop(&agent, &config, &NoopHooks).unwrap();
@@ -443,13 +455,11 @@ mod tests {
         let (_tmp, run) = setup_test_run();
         let run_dir = run.dir.clone();
 
-        let agent = TestAgent {
-            handler: move |_prompt: &str, _n: u32, _: &Path| {
+        let agent = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
                 fs::write(run_dir.join("status"), "needs-user").unwrap();
                 0
-            },
-            call_count: AtomicU32::new(0),
-        };
+            }
+        );
 
         let config = make_config(&run);
         run_session_loop(&agent, &config, &NoopHooks).unwrap();
@@ -463,13 +473,11 @@ mod tests {
         let (_tmp, run) = setup_test_run();
         let run_dir = run.dir.clone();
 
-        let agent = TestAgent {
-            handler: move |_prompt: &str, _n: u32, _: &Path| {
+        let agent = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
                 fs::write(run_dir.join("status"), "failed").unwrap();
                 0
-            },
-            call_count: AtomicU32::new(0),
-        };
+            }
+        );
 
         let config = make_config(&run);
         run_session_loop(&agent, &config, &NoopHooks).unwrap();
@@ -483,17 +491,15 @@ mod tests {
         let (_tmp, run) = setup_test_run();
         let run_dir = run.dir.clone();
 
-        let agent = TestAgent {
-            handler: move |_prompt: &str, n: u32, _: &Path| {
+        let agent = TestAgent::new(move |_prompt: &str, n: u32, _: &Path| {
                 if n < 3 {
                     fs::write(run_dir.join("status"), "executing").unwrap();
                 } else {
                     fs::write(run_dir.join("status"), "needs-user").unwrap();
                 }
                 0
-            },
-            call_count: AtomicU32::new(0),
-        };
+            }
+        );
 
         let config = make_config(&run);
         run_session_loop(&agent, &config, &NoopHooks).unwrap();
@@ -507,17 +513,15 @@ mod tests {
         let (_tmp, run) = setup_test_run();
         let run_dir = run.dir.clone();
 
-        let agent = TestAgent {
-            handler: move |_prompt: &str, n: u32, _: &Path| {
+        let agent = TestAgent::new(move |_prompt: &str, n: u32, _: &Path| {
                 if n == 1 {
                     fs::write(run_dir.join("status"), "rate-limited").unwrap();
                 } else {
                     fs::write(run_dir.join("status"), "needs-user").unwrap();
                 }
                 0
-            },
-            call_count: AtomicU32::new(0),
-        };
+            }
+        );
 
         let config = make_config(&run);
         run_session_loop(&agent, &config, &NoopHooks).unwrap();
@@ -531,12 +535,10 @@ mod tests {
         // Set initial status to executing so the loop continues
         fs::write(run.dir.join("status"), "executing").unwrap();
 
-        let agent = TestAgent {
-            handler: move |_prompt: &str, _n: u32, _: &Path| {
+        let agent = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
                 1 // non-zero exit
-            },
-            call_count: AtomicU32::new(0),
-        };
+            }
+        );
 
         let config = make_config(&run);
         run_session_loop(&agent, &config, &NoopHooks).unwrap();
@@ -551,8 +553,7 @@ mod tests {
         fs::write(run.dir.join("status"), "executing").unwrap();
         let run_dir = run.dir.clone();
 
-        let agent = TestAgent {
-            handler: move |_prompt: &str, n: u32, _: &Path| {
+        let agent = TestAgent::new(move |_prompt: &str, n: u32, _: &Path| {
                 match n {
                     1 | 2 => 1,    // Two failures
                     3 => 0,         // Success — resets counter
@@ -562,9 +563,8 @@ mod tests {
                         0
                     }
                 }
-            },
-            call_count: AtomicU32::new(0),
-        };
+            }
+        );
 
         let config = make_config(&run);
         run_session_loop(&agent, &config, &NoopHooks).unwrap();
@@ -578,13 +578,11 @@ mod tests {
         let (_tmp, run) = setup_test_run();
         let run_dir = run.dir.clone();
 
-        let agent = TestAgent {
-            handler: move |_prompt: &str, _n: u32, _: &Path| {
+        let agent = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
                 fs::write(run_dir.join("status"), "executing").unwrap();
                 0
-            },
-            call_count: AtomicU32::new(0),
-        };
+            }
+        );
 
         let config = make_config(&run);
         run_session_loop(&agent, &config, &NoopHooks).unwrap();
@@ -598,17 +596,15 @@ mod tests {
         let (_tmp, run) = setup_test_run();
         let run_dir = run.dir.clone();
 
-        let agent = TestAgent {
-            handler: move |_prompt: &str, n: u32, _: &Path| {
+        let agent = TestAgent::new(move |_prompt: &str, n: u32, _: &Path| {
                 if n < 3 {
                     fs::write(run_dir.join("status"), "executing").unwrap();
                 } else {
                     fs::write(run_dir.join("status"), "needs-user").unwrap();
                 }
                 0
-            },
-            call_count: AtomicU32::new(0),
-        };
+            }
+        );
 
         let config = make_config(&run);
         run_session_loop(&agent, &config, &NoopHooks).unwrap();
@@ -626,19 +622,41 @@ mod tests {
     fn test_loop_creates_session_transcript_dir() {
         let (_tmp, run) = setup_test_run();
         let run_dir = run.dir.clone();
+        let expected_path = run.dir.join("sessions/session-1/transcript.jsonl");
 
-        let agent = TestAgent {
-            handler: move |_prompt: &str, _n: u32, _: &Path| {
+        let agent = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
                 fs::write(run_dir.join("status"), "needs-user").unwrap();
                 0
-            },
-            call_count: AtomicU32::new(0),
-        };
+            }
+        );
 
         let config = make_config(&run);
         run_session_loop(&agent, &config, &NoopHooks).unwrap();
 
         // Session directory should exist
         assert!(run.dir.join("sessions/session-1").is_dir());
+        // Transcript path should be passed to the agent
+        let paths = agent.transcript_paths.lock().unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].as_deref(), Some(expected_path.as_path()));
+    }
+
+    #[test]
+    fn test_loop_writes_nonzero_exit_to_sessions_log() {
+        let (_tmp, run) = setup_test_run();
+        fs::write(run.dir.join("status"), "executing").unwrap();
+
+        let agent = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
+                1 // non-zero exit
+            }
+        );
+
+        let config = make_config(&run);
+        run_session_loop(&agent, &config, &NoopHooks).unwrap();
+
+        let log = fs::read_to_string(run.dir.join("sessions.log")).unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with("session=1 exit=1 duration="));
     }
 }

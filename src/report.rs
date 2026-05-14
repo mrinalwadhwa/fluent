@@ -3,6 +3,8 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+use crate::run::project_root_from_run_dir;
+
 /// Generate a run report at `<run_dir>/report.md`.
 pub fn generate_report(run_dir: &Path, run_id: &str, session_count: u32) -> Result<()> {
     let report_path = run_dir.join("report.md");
@@ -115,11 +117,8 @@ pub fn generate_report(run_dir: &Path, run_id: &str, session_count: u32) -> Resu
 
     // Commit log — git log from source branch to HEAD
     report.push_str("## Commits\n\n");
-    let worktree_root = run_dir
+    let worktree_root = project_root_from_run_dir(run_dir)
         .to_string_lossy()
-        .split("/.factory/runs/")
-        .next()
-        .unwrap_or(".")
         .to_string();
     if Path::new(&worktree_root).join(".git").exists()
         || Command::new("git")
@@ -253,5 +252,20 @@ mod tests {
 
         let report = fs::read_to_string(run_dir.join("report.md")).unwrap();
         assert!(report.contains("## Commits"));
+        // No .git dir in tmpdir — should show fallback
+        assert!(report.contains("(no git repo)"));
+    }
+
+    #[test]
+    fn test_generate_report_empty_sessions_log() {
+        let tmp = TempDir::new().unwrap();
+        let run_dir = tmp.path();
+        fs::write(run_dir.join("status"), "complete").unwrap();
+        fs::write(run_dir.join("sessions.log"), "").unwrap();
+
+        generate_report(run_dir, "test-run", 1).unwrap();
+
+        let report = fs::read_to_string(run_dir.join("report.md")).unwrap();
+        assert!(report.contains("(no session log)"));
     }
 }

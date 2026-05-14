@@ -141,11 +141,30 @@ impl Run {
         self.dir.join("handoff.md").exists()
     }
 
+    /// Derive the project root from the run directory.
+    ///
+    /// The run directory is at `<project>/.factory/runs/<id>`, so the
+    /// project root is three levels up.
+    pub fn project_root(&self) -> PathBuf {
+        project_root_from_run_dir(&self.dir)
+    }
+
     pub fn handle(&self) -> Option<String> {
         fs::read_to_string(self.dir.join("handle"))
             .ok()
             .map(|s| s.trim().to_string())
     }
+}
+
+/// Derive the project root from a run directory path.
+///
+/// Run directories are at `<project>/.factory/runs/<id>` — three levels up.
+pub fn project_root_from_run_dir(run_dir: &Path) -> PathBuf {
+    run_dir
+        .ancestors()
+        .nth(3)
+        .unwrap_or(Path::new("."))
+        .to_path_buf()
 }
 
 /// Resolve a run ID from the given search root.

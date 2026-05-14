@@ -4,6 +4,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::content::{prompt_section, ContentResolver};
+use crate::run::project_root_from_run_dir;
 
 /// Reviewer names in execution order.
 pub const REVIEWERS: &[&str] = &[
@@ -44,11 +45,8 @@ pub fn run_single_reviewer(
     run_dir: &Path,
 ) -> Result<Verdict> {
     // Run from the project root
-    let project_root = run_dir
+    let project_root = project_root_from_run_dir(run_dir)
         .to_string_lossy()
-        .split("/.factory/runs/")
-        .next()
-        .unwrap_or(".")
         .to_string();
 
     eprintln!("  [{reviewer_name}] starting...");

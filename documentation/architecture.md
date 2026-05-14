@@ -104,7 +104,9 @@ branch, and removes the worktree.
 | `mode` | `build` (default) or `review` |
 | `reviewers` | Comma-separated reviewer filter (optional) |
 | `scope` | Review focus targeting (optional) |
-| `reviews/` | Directory for review artifacts |
+| `sessions.log` | Per-session metadata (`session=N exit=CODE duration=Xs status=STATUS`) |
+| `report.md` | Generated run report |
+| `reviews/` | Review artifacts, transcripts (`transcript-{name}.jsonl`), and round archives (`round-N/`) |
 
 ### Run-id resolution
 
@@ -121,10 +123,12 @@ The factory command runs a session loop:
 
 ```
 while run is not complete:
-    launch agent with -p and brief/handoff prompt
+    launch agent with -p, --verbose --output-format stream-json
+    pipe stdout to sessions/session-N/transcript.jsonl
     agent works until context exhaustion or completion
     agent writes handoff.md + status file
-    capture session snapshot
+    write session metadata to sessions.log
+    capture session snapshot (history, memory, todos, plans)
     if terminal status: stop
     if executing: restart
     if rate-limited: wait 5 minutes, restart
@@ -140,7 +144,8 @@ Captured at each session boundary:
 ```
 .factory/runs/[run-id]/sessions/
   session-1/
-    transcript.jsonl
+    transcript.jsonl     ← stream-json output (piped from agent stdout)
+    history.jsonl        ← Claude's internal history (copied from ~/.claude)
     memory/
     todos/
     plans/
@@ -148,7 +153,10 @@ Captured at each session boundary:
     ...
 ```
 
-First-class learning artifacts, not debug logs.
+The transcript is the stream-json verbose output captured during the
+session. The history is Claude's internal conversation log, copied from
+`~/.claude/history.jsonl` after the session ends. Both are first-class
+learning artifacts, not debug logs.
 
 ## Agents
 
