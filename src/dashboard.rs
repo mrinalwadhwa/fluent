@@ -177,8 +177,16 @@ impl RunView {
     }
 
     fn scroll_to_bottom(&mut self) {
-        // Set offset beyond the end — draw_activity_feed clamps it
         self.scroll_offset = self.visible_lines().len();
+    }
+
+    /// Clamp scroll_offset to the actual max before manual scrolling,
+    /// so the first scroll input has immediate effect.
+    fn clamp_scroll(&mut self) {
+        let total = self.visible_lines().len();
+        if self.scroll_offset > total {
+            self.scroll_offset = total;
+        }
     }
 
     fn visible_lines(&self) -> &[String] {
@@ -298,11 +306,13 @@ fn run_event_loop(
                     crossterm::event::MouseEventKind::ScrollUp => {
                         let view = app.current_view_mut();
                         view.auto_scroll = false;
+                        view.clamp_scroll();
                         view.scroll_offset = view.scroll_offset.saturating_sub(3);
                     }
                     crossterm::event::MouseEventKind::ScrollDown => {
                         let view = app.current_view_mut();
                         view.auto_scroll = false;
+                        view.clamp_scroll();
                         let max = view.visible_lines().len();
                         view.scroll_offset = (view.scroll_offset + 3).min(max);
                     }
@@ -357,12 +367,14 @@ fn run_event_loop(
                     (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
                         let view = app.current_view_mut();
                         view.auto_scroll = false;
+                        view.clamp_scroll();
                         view.scroll_offset =
                             view.scroll_offset.saturating_sub(1);
                     }
                     (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
                         let view = app.current_view_mut();
                         view.auto_scroll = false;
+                        view.clamp_scroll();
                         let max = view.visible_lines().len();
                         view.scroll_offset =
                             (view.scroll_offset + 1).min(max);
@@ -380,11 +392,14 @@ fn run_event_loop(
                     (_, KeyCode::PageUp) => {
                         let view = app.current_view_mut();
                         view.auto_scroll = false;
+                        view.clamp_scroll();
                         view.scroll_offset =
                             view.scroll_offset.saturating_sub(20);
                     }
                     (_, KeyCode::PageDown) => {
                         let view = app.current_view_mut();
+                        view.auto_scroll = false;
+                        view.clamp_scroll();
                         let max = view.visible_lines().len();
                         view.scroll_offset =
                             (view.scroll_offset + 20).min(max);
