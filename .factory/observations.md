@@ -111,6 +111,16 @@ that just writes complete) still find issues with the broader codebase.
 The scope should be narrower — if the run produced no code changes,
 reviewers should pass immediately or be skipped.
 
+2026-05-13 — The Rust binary's observability features were added by
+an autonomous run but don't fully work at runtime despite unit tests
+passing. sessions.log isn't written, transcript.jsonl captures old
+~/.claude/history.jsonl instead of stream-json output, and review
+round archives aren't created. The unit tests mock the behavior but
+don't verify the actual subprocess piping or file output. This is a
+case where the replication anti-pattern applies — tests verify a
+model of the behavior, not the real behavior. Needs integration tests
+that run the binary and check the actual artifacts produced.
+
 2026-05-13 — capture_snapshot copies from ~/.claude/ which is the
 global Claude Code state, not the run's session. It captures history
 from all sessions, memory from the first project found (not
