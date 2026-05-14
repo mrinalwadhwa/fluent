@@ -17,6 +17,28 @@ pub fn inject_credentials() -> Result<()> {
     Ok(())
 }
 
+/// Refresh credentials before a new session.
+///
+/// Runs `claude -p "ok" --max-turns 1` outside the sandbox to trigger
+/// OAuth token refresh, then re-reads credentials from Keychain.
+/// Called between sessions in sandboxed mode because the sandbox blocks
+/// Keychain access — the agent cannot refresh tokens itself.
+pub fn refresh_credentials() -> Result<()> {
+    eprintln!("  Refreshing credentials...");
+
+    // Trigger Claude Code's internal token refresh
+    Command::new("claude")
+        .args(["-p", "ok", "--max-turns", "1"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok();
+
+    // Re-read OAuth token from Keychain (force refresh)
+    refresh_oauth_token()?;
+    Ok(())
+}
+
 /// Inject OAuth token from Keychain if not already set.
 fn inject_oauth_token() -> Result<()> {
     if std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_ok() {
@@ -61,6 +83,26 @@ fn inject_oauth_token() -> Result<()> {
                 if !key.is_empty() {
                     set_env_var("ANTHROPIC_API_KEY", &key);
                     eprintln!("  Anthropic key injected from Keychain");
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Re-read the OAuth token from Keychain, replacing any existing value.
+fn refresh_oauth_token() -> Result<()> {
+    let output = Command::new("security")
+        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+        .output();
+
+    if let Ok(output) = output {
+        if output.status.success() {
+            let cred_json = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !cred_json.is_empty() {
+                if let Some(token) = extract_oauth_token(&cred_json) {
+                    set_env_var("CLAUDE_CODE_OAUTH_TOKEN", &token);
                 }
             }
         }

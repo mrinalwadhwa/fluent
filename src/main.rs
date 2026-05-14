@@ -13,7 +13,7 @@ use factory::credential;
 use factory::dashboard;
 use factory::run::{self, Run};
 use factory::os;
-use factory::session::{self, DefaultHooks, SessionConfig};
+use factory::session::{self, DefaultHooks, SandboxedHooks, SessionConfig};
 use factory::worktree;
 
 fn main() -> Result<()> {
@@ -181,7 +181,7 @@ fn cmd_run_local(
         sandbox_profile: Some(profile.path.to_string_lossy().to_string()),
     };
 
-    session::run_session_loop(&agent, &config, &DefaultHooks)?;
+    session::run_session_loop(&agent, &config, &SandboxedHooks)?;
     Ok(())
 }
 

@@ -37,6 +37,18 @@ pub struct DefaultHooks;
 
 impl SessionHooks for DefaultHooks {}
 
+/// Hooks for sandboxed runs that refresh credentials before each session.
+///
+/// The sandbox blocks Keychain access, so the factory must refresh
+/// OAuth tokens outside the sandbox between sessions.
+pub struct SandboxedHooks;
+
+impl SessionHooks for SandboxedHooks {
+    fn pre_session(&self) -> Result<()> {
+        crate::credential::refresh_credentials()
+    }
+}
+
 /// Run the session loop.
 pub fn run_session_loop(
     agent: &dyn Coder,
