@@ -394,7 +394,8 @@ fn cmd_watch(search_root: &Path, interval: u64) -> Result<()> {
                     .unwrap_or_default();
                 match status_str.as_str() {
                     "complete" | "needs-user" | "failed" => {
-                        notify_status_change(&run.id, &status_str);
+                        let body = run.notification_body();
+                        notify_status_change(&body);
                         eprintln!("  [NOTIFY] Run {}: {}", run.id, status_str);
                     }
                     _ => {}
@@ -629,13 +630,12 @@ fn kill_existing_claude() -> Result<()> {
     Ok(())
 }
 
-fn notify_status_change(run_id: &str, status: &str) {
+fn notify_status_change(body: &str) {
+    let escaped = body.replace('\\', "\\\\").replace('"', "\\\"");
     Command::new("osascript")
         .args([
             "-e",
-            &format!(
-                "display notification \"Run {run_id}: {status}\" with title \"Factory\""
-            ),
+            &format!("display notification \"{escaped}\" with title \"Factory\""),
         ])
         .output()
         .ok();

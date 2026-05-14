@@ -141,6 +141,121 @@ impl Run {
         self.dir.join("handoff.md").exists()
     }
 
+    /// Count the number of session directories under this run.
+    pub fn session_count(&self) -> usize {
+        let sessions_dir = self.dir.join("sessions");
+        if !sessions_dir.is_dir() {
+            return 0;
+        }
+        fs::read_dir(&sessions_dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.path().is_dir())
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Check whether all review artifacts have a passing verdict.
+    pub fn reviews_passed(&self) -> Option<bool> {
+        let reviews_dir = self.dir.join("reviews");
+        if !reviews_dir.is_dir() {
+            return None;
+        }
+        let mut found_any = false;
+        let entries = fs::read_dir(&reviews_dir).ok()?;
+        for entry in entries.filter_map(|e| e.ok()) {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("review-") && name_str.ends_with(".md") {
+                found_any = true;
+                let content = fs::read_to_string(entry.path()).unwrap_or_default();
+                for line in content.lines() {
+                    let lower = line.to_lowercase();
+                    if lower.starts_with("verdict:") {
+                        let value = lower
+                            .strip_prefix("verdict:")
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        if value != "pass" {
+                            return Some(false);
+                        }
+                    }
+                }
+            }
+        }
+        if found_any { Some(true) } else { None }
+    }
+
+    /// Extract what the agent needs from the handoff file.
+    ///
+    /// Looks for "Open questions" section first, then falls back to the
+    /// first non-heading, non-empty line.
+    pub fn handoff_need(&self) -> Option<String> {
+        let content = fs::read_to_string(self.dir.join("handoff.md")).ok()?;
+        // Look for "Open questions" section
+        let mut in_section = false;
+        for line in content.lines() {
+            if line.starts_with('#') && line.to_lowercase().contains("open question") {
+                in_section = true;
+                continue;
+            }
+            if in_section {
+                if line.starts_with('#') {
+                    break;
+                }
+                let trimmed = line.trim().trim_start_matches("- ");
+                if !trimmed.is_empty() {
+                    let s = if trimmed.len() > 80 {
+                        format!("{}...", &trimmed[..77])
+                    } else {
+                        trimmed.to_string()
+                    };
+                    return Some(s);
+                }
+            }
+        }
+        None
+    }
+
+    /// Build the notification body for a status change.
+    pub fn notification_body(&self) -> String {
+        let brief = self.brief_summary();
+        let status = self
+            .status()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|_| "unknown".into());
+
+        let mut body = format!("{}: {}", self.id, status);
+        if brief != "-" {
+            body.push_str(&format!("\n{brief}"));
+        }
+
+        match status.as_str() {
+            "complete" => {
+                let sessions = self.session_count();
+                if sessions > 0 {
+                    body.push_str(&format!("\n{sessions} sessions"));
+                }
+                match self.reviews_passed() {
+                    Some(true) => body.push_str(", reviews passed"),
+                    Some(false) => body.push_str(", reviews failed"),
+                    None => {}
+                }
+            }
+            "needs-user" => {
+                if let Some(need) = self.handoff_need() {
+                    body.push_str(&format!("\n{need}"));
+                }
+            }
+            _ => {}
+        }
+
+        body
+    }
+
     /// Derive the project root from the run directory.
     ///
     /// The run directory is at `<project>/.factory/runs/<id>`, so the
@@ -663,5 +778,159 @@ mod tests {
             let status = RunStatus::parse(s);
             assert_eq!(status.as_str(), *s);
         }
+    }
+
+    #[test]
+    fn test_session_count() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-s", "complete");
+        let run_dir = tmp.path().join(".factory/runs/run-s");
+        fs::create_dir_all(run_dir.join("sessions/session-1")).unwrap();
+        fs::create_dir_all(run_dir.join("sessions/session-2")).unwrap();
+
+        let run = Run {
+            id: "run-s".into(),
+            dir: run_dir,
+        };
+        assert_eq!(run.session_count(), 2);
+    }
+
+    #[test]
+    fn test_session_count_no_sessions() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-ns", "complete");
+        let run = Run {
+            id: "run-ns".into(),
+            dir: tmp.path().join(".factory/runs/run-ns"),
+        };
+        assert_eq!(run.session_count(), 0);
+    }
+
+    #[test]
+    fn test_reviews_passed_all_pass() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-rp", "complete");
+        let run_dir = tmp.path().join(".factory/runs/run-rp");
+        fs::create_dir_all(run_dir.join("reviews")).unwrap();
+        fs::write(run_dir.join("reviews/review-tests.md"), "Verdict: pass\n\nLooks good.").unwrap();
+        fs::write(run_dir.join("reviews/review-style.md"), "Verdict: pass\n\nClean.").unwrap();
+
+        let run = Run {
+            id: "run-rp".into(),
+            dir: run_dir,
+        };
+        assert_eq!(run.reviews_passed(), Some(true));
+    }
+
+    #[test]
+    fn test_reviews_passed_one_fails() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-rf", "complete");
+        let run_dir = tmp.path().join(".factory/runs/run-rf");
+        fs::create_dir_all(run_dir.join("reviews")).unwrap();
+        fs::write(run_dir.join("reviews/review-tests.md"), "Verdict: pass").unwrap();
+        fs::write(run_dir.join("reviews/review-style.md"), "Verdict: fail").unwrap();
+
+        let run = Run {
+            id: "run-rf".into(),
+            dir: run_dir,
+        };
+        assert_eq!(run.reviews_passed(), Some(false));
+    }
+
+    #[test]
+    fn test_reviews_passed_no_reviews() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-nr", "complete");
+        let run = Run {
+            id: "run-nr".into(),
+            dir: tmp.path().join(".factory/runs/run-nr"),
+        };
+        assert_eq!(run.reviews_passed(), None);
+    }
+
+    #[test]
+    fn test_handoff_need() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-h", "needs-user");
+        let run_dir = tmp.path().join(".factory/runs/run-h");
+        fs::write(
+            run_dir.join("handoff.md"),
+            "## Run run-h\n\n### Open questions\n- Need API key for service X\n- Unclear scope\n",
+        )
+        .unwrap();
+
+        let run = Run {
+            id: "run-h".into(),
+            dir: run_dir,
+        };
+        assert_eq!(run.handoff_need(), Some("Need API key for service X".into()));
+    }
+
+    #[test]
+    fn test_handoff_need_missing() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-hm", "needs-user");
+        let run = Run {
+            id: "run-hm".into(),
+            dir: tmp.path().join(".factory/runs/run-hm"),
+        };
+        assert_eq!(run.handoff_need(), None);
+    }
+
+    #[test]
+    fn test_notification_body_complete() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-nc", "complete");
+        let run_dir = tmp.path().join(".factory/runs/run-nc");
+        fs::create_dir_all(run_dir.join("sessions/session-1")).unwrap();
+        fs::create_dir_all(run_dir.join("sessions/session-2")).unwrap();
+        fs::create_dir_all(run_dir.join("sessions/session-3")).unwrap();
+        fs::create_dir_all(run_dir.join("reviews")).unwrap();
+        fs::write(run_dir.join("reviews/review-tests.md"), "Verdict: pass").unwrap();
+
+        let run = Run {
+            id: "run-nc".into(),
+            dir: run_dir,
+        };
+        let body = run.notification_body();
+        assert!(body.contains("run-nc: complete"));
+        assert!(body.contains("Brief for run-nc"));
+        assert!(body.contains("3 sessions"));
+        assert!(body.contains("reviews passed"));
+    }
+
+    #[test]
+    fn test_notification_body_needs_user() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-nu", "needs-user");
+        let run_dir = tmp.path().join(".factory/runs/run-nu");
+        fs::write(
+            run_dir.join("handoff.md"),
+            "## Run\n### Open questions\n- Which database to use?\n",
+        )
+        .unwrap();
+
+        let run = Run {
+            id: "run-nu".into(),
+            dir: run_dir,
+        };
+        let body = run.notification_body();
+        assert!(body.contains("run-nu: needs-user"));
+        assert!(body.contains("Which database to use?"));
+    }
+
+    #[test]
+    fn test_notification_body_failed() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-nf", "failed");
+
+        let run = Run {
+            id: "run-nf".into(),
+            dir: tmp.path().join(".factory/runs/run-nf"),
+        };
+        let body = run.notification_body();
+        assert!(body.contains("run-nf: failed"));
+        assert!(body.contains("Brief for run-nf"));
     }
 }

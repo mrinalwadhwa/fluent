@@ -1077,11 +1077,62 @@ cmd_watch() {
       fi
 
       if [ -n "$CHANGED_RUN" ]; then
+        RUN_DIR="${FACTORY_RUNS}/${CHANGED_RUN}"
+        NOTIFY_BODY="${CHANGED_RUN}: ${CHANGED_STATUS}"
+
+        # Append brief summary
+        if [ -f "${RUN_DIR}/brief.md" ]; then
+          BRIEF_LINE="$(head -5 "${RUN_DIR}/brief.md" | grep -v '^#' | grep -v '^$' | head -1 | cut -c1-50)"
+          [ -n "$BRIEF_LINE" ] && NOTIFY_BODY="${NOTIFY_BODY}
+${BRIEF_LINE}"
+        fi
+
+        # Status-specific details
+        case "$CHANGED_STATUS" in
+          complete)
+            SESSION_COUNT=0
+            if [ -d "${RUN_DIR}/sessions" ]; then
+              SESSION_COUNT="$(find "${RUN_DIR}/sessions" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
+            fi
+            if [ "$SESSION_COUNT" -gt 0 ]; then
+              NOTIFY_BODY="${NOTIFY_BODY}
+${SESSION_COUNT} sessions"
+            fi
+            if [ -d "${RUN_DIR}/reviews" ]; then
+              ALL_PASS=true
+              FOUND_REVIEW=false
+              for review_file in "${RUN_DIR}/reviews"/review-*.md; do
+                [ -f "$review_file" ] || continue
+                FOUND_REVIEW=true
+                verdict="$(grep -i '^verdict:' "$review_file" 2>/dev/null | head -1 | sed 's/^[Vv]erdict:[[:space:]]*//' | tr '[:upper:]' '[:lower:]')"
+                if [ "$verdict" != "pass" ]; then
+                  ALL_PASS=false
+                fi
+              done
+              if [ "$FOUND_REVIEW" = true ]; then
+                if [ "$ALL_PASS" = true ]; then
+                  NOTIFY_BODY="${NOTIFY_BODY}, reviews passed"
+                else
+                  NOTIFY_BODY="${NOTIFY_BODY}, reviews failed"
+                fi
+              fi
+            fi
+            ;;
+          needs-user)
+            if [ -f "${RUN_DIR}/handoff.md" ]; then
+              NEED="$(sed -n '/^#.*[Oo]pen [Qq]uestion/,/^#/{/^#/d;/^$/d;s/^- //;p;}' "${RUN_DIR}/handoff.md" | head -1 | cut -c1-80)"
+              [ -n "$NEED" ] && NOTIFY_BODY="${NOTIFY_BODY}
+${NEED}"
+            fi
+            ;;
+        esac
+
         # macOS notification
         if command -v osascript >/dev/null 2>&1; then
-          osascript -e "display notification \"Run ${CHANGED_RUN}: ${CHANGED_STATUS}\" with title \"Factory\""
+          ESCAPED_BODY="$(printf '%s' "$NOTIFY_BODY" | sed 's/\\/\\\\/g;s/"/\\"/g')"
+          osascript -e "display notification \"${ESCAPED_BODY}\" with title \"Factory\""
         elif command -v terminal-notifier >/dev/null 2>&1; then
-          terminal-notifier -title "Factory" -message "Run ${CHANGED_RUN}: ${CHANGED_STATUS}"
+          terminal-notifier -title "Factory" -message "$NOTIFY_BODY"
         fi
         printf '  [NOTIFY] Run %s: %s\n' "$CHANGED_RUN" "$CHANGED_STATUS"
       fi
