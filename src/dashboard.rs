@@ -263,7 +263,7 @@ pub fn run_dashboard(search_root: &Path, run_id: Option<&str>) -> Result<()> {
     // Set up terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    crossterm::execute!(stdout, EnterAlternateScreen)?;
+    crossterm::execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -271,7 +271,7 @@ pub fn run_dashboard(search_root: &Path, run_id: Option<&str>) -> Result<()> {
 
     // Restore terminal
     disable_raw_mode()?;
-    crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::event::DisableMouseCapture)?;
     terminal.show_cursor()?;
 
     result
@@ -292,7 +292,24 @@ fn run_event_loop(
             .unwrap_or(Duration::ZERO);
 
         if event::poll(timeout)? {
-            if let CEvent::Key(key) = event::read()? {
+            match event::read()? {
+            CEvent::Mouse(mouse) => {
+                match mouse.kind {
+                    crossterm::event::MouseEventKind::ScrollUp => {
+                        let view = app.current_view_mut();
+                        view.auto_scroll = false;
+                        view.scroll_offset = view.scroll_offset.saturating_sub(3);
+                    }
+                    crossterm::event::MouseEventKind::ScrollDown => {
+                        let view = app.current_view_mut();
+                        view.auto_scroll = false;
+                        let max = view.visible_lines().len();
+                        view.scroll_offset = (view.scroll_offset + 3).min(max);
+                    }
+                    _ => {}
+                }
+            }
+            CEvent::Key(key) => {
                 match (key.modifiers, key.code) {
                     (KeyModifiers::CONTROL, KeyCode::Char('c'))
                     | (_, KeyCode::Char('q')) => {
@@ -345,13 +362,14 @@ fn run_event_loop(
                     }
                     (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
                         let view = app.current_view_mut();
+                        view.auto_scroll = false;
                         let max = view.visible_lines().len();
                         view.scroll_offset =
                             (view.scroll_offset + 1).min(max);
                     }
                     (_, KeyCode::Char('G')) | (_, KeyCode::End) => {
                         let view = app.current_view_mut();
-                        view.auto_scroll = true;
+                        view.auto_scroll = false;
                         view.scroll_to_bottom();
                     }
                     (_, KeyCode::Char('g')) | (_, KeyCode::Home) => {
@@ -373,6 +391,8 @@ fn run_event_loop(
                     }
                     _ => {}
                 }
+            }
+            _ => {}
             }
         }
 
