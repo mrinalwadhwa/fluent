@@ -34,32 +34,46 @@ pub enum Event {
 }
 
 impl Event {
-    /// Render a one-line summary of this event for the activity feed.
-    pub fn summary(&self) -> String {
+    /// Render this event as one or more lines for the activity feed.
+    pub fn lines(&self) -> Vec<String> {
         match self {
-            Event::SessionInit { model, .. } => format!("Session started (model: {model})"),
+            Event::SessionInit { model, .. } => {
+                vec![
+                    String::new(),
+                    format!("Session started (model: {model})"),
+                    String::new(),
+                ]
+            }
             Event::ToolUse { name, summary } => {
-                if summary.is_empty() {
+                let header = if summary.is_empty() {
                     format!("[{name}]")
                 } else {
                     format!("[{name}] {summary}")
-                }
+                };
+                vec![header]
             }
-            Event::Text { text } => text.clone(),
+            Event::Text { text } => {
+                let mut lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+                lines.push(String::new()); // blank line after text blocks
+                lines
+            }
             Event::Thinking { text } => {
                 if text.is_empty() {
-                    "thinking...".to_string()
+                    vec!["thinking...".to_string()]
                 } else {
-                    format!("💭 {text}")
+                    vec![format!("thinking: {text}")]
                 }
             }
             Event::ToolResult { content, .. } => {
                 if content.is_empty() {
-                    return String::new();
+                    return vec![];
                 }
-                format!("  → {content}")
+                content
+                    .lines()
+                    .map(|l| format!("  {l}"))
+                    .collect()
             }
-            Event::RateLimit => "rate limit check".to_string(),
+            Event::RateLimit => vec!["rate limit check".to_string()],
             Event::Result {
                 duration_ms,
                 cost_usd,
@@ -70,10 +84,21 @@ impl Event {
                 let cost = cost_usd
                     .map(|c| format!("${c:.4}"))
                     .unwrap_or_else(|| "?".into());
-                format!("Session complete ({dur}, {cost})")
+                vec![
+                    String::new(),
+                    format!("Session complete ({dur}, {cost})"),
+                ]
             }
-            Event::Unknown { event_type } => format!("({event_type})"),
+            Event::Unknown { event_type } => vec![format!("({event_type})")],
         }
+    }
+
+    /// Single-line summary (for backward compatibility and reviewer status).
+    pub fn summary(&self) -> String {
+        self.lines()
+            .into_iter()
+            .find(|l| !l.is_empty())
+            .unwrap_or_default()
     }
 }
 

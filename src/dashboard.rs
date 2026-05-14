@@ -181,14 +181,7 @@ impl RunView {
         self.current_agent()
             .events
             .iter()
-            .filter_map(|e| {
-                let s = e.summary();
-                if s.is_empty() {
-                    None
-                } else {
-                    Some(s)
-                }
-            })
+            .flat_map(|e| e.lines())
             .collect()
     }
 }
@@ -810,8 +803,9 @@ mod tests {
             auto_scroll: true,
         };
         let lines = view.visible_lines();
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0], "hello");
-        assert!(lines[1].contains("pondering"));
+        // Text "hello" + blank line after text, then "thinking: pondering"
+        let non_empty: Vec<&String> = lines.iter().filter(|l| !l.is_empty()).collect();
+        assert_eq!(non_empty[0], "hello");
+        assert!(non_empty[1].contains("pondering"));
     }
 }
