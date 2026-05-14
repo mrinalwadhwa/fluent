@@ -154,6 +154,20 @@ impl Run {
             .ok()
             .map(|s| s.trim().to_string())
     }
+
+    /// Get the run directory inside the worktree, if one exists.
+    pub fn worktree_run_dir(&self) -> Option<PathBuf> {
+        let wt_path = fs::read_to_string(self.dir.join("worktree"))
+            .ok()
+            .map(|s| s.trim().to_string())?;
+        let wt_dir = PathBuf::from(&wt_path);
+        let wt_run_dir = wt_dir.join(format!(".factory/runs/{}", self.id));
+        if wt_run_dir.is_dir() {
+            Some(wt_run_dir)
+        } else {
+            None
+        }
+    }
 }
 
 /// Derive the project root from a run directory path.

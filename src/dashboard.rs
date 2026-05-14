@@ -21,6 +21,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// State for a single run's dashboard view.
 struct RunView {
     run: Run,
+    /// The directory where sessions/transcripts live — the worktree's run dir
+    /// if a worktree exists, otherwise the source run dir.
+    live_dir: PathBuf,
     events: Vec<Event>,
     readers: Vec<TranscriptReader>,
     last_session: u32,
@@ -30,8 +33,11 @@ struct RunView {
 
 impl RunView {
     fn new(run: Run) -> Self {
+        // Resolve worktree path for live session data
+        let live_dir = run.worktree_run_dir().unwrap_or_else(|| run.dir.clone());
         let mut view = Self {
             run,
+            live_dir,
             events: Vec::new(),
             readers: Vec::new(),
             last_session: 0,
@@ -44,7 +50,7 @@ impl RunView {
     }
 
     fn discover_sessions(&mut self) {
-        let transcripts = transcript::list_transcripts(&self.run.dir);
+        let transcripts = transcript::list_transcripts(&self.live_dir);
         for (num, path) in transcripts {
             if num > self.last_session {
                 self.readers.push(TranscriptReader::new(path));
@@ -275,7 +281,10 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
 
     // Check if we need a reviewer panel at the bottom
     let view = app.current_view();
-    let has_reviewers = has_reviewer_activity(&view.run);
+    let has_reviewers = view.live_dir.join("reviews").is_dir()
+        && std::fs::read_dir(view.live_dir.join("reviews"))
+            .map(|mut e| e.next().is_some())
+            .unwrap_or(false);
 
     let main_chunks = if has_reviewers {
         Layout::default()
@@ -284,7 +293,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
                 Constraint::Length(3),  // header
                 Constraint::Length(3),  // run tabs
                 Constraint::Min(10),   // activity feed
-                Constraint::Length(5), // reviewer panel
+                Constraint::Length(7), // reviewer panel (5 reviewers + border)
                 Constraint::Length(1),  // help bar
             ])
             .split(size)
@@ -476,7 +485,7 @@ fn style_for_line(line: &str) -> Style {
 }
 
 fn draw_reviewer_panel(f: &mut ratatui::Frame, area: Rect, view: &RunView) {
-    let reviews_dir = view.run.dir.join("reviews");
+    let reviews_dir = view.live_dir.join("reviews");
     let mut reviewer_lines = Vec::new();
 
     if reviews_dir.is_dir() {
