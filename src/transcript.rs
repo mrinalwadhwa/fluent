@@ -10,6 +10,7 @@ pub enum Event {
         model: String,
     },
     ToolUse {
+        id: String,
         name: String,
         summary: String,
     },
@@ -44,7 +45,7 @@ impl Event {
                     String::new(),
                 ]
             }
-            Event::ToolUse { name, summary } => {
+            Event::ToolUse { name, summary, .. } => {
                 let header = if summary.is_empty() {
                     format!("[{name}]")
                 } else {
@@ -68,10 +69,20 @@ impl Event {
                 if content.is_empty() {
                     return vec![];
                 }
-                content
-                    .lines()
+                let lines: Vec<&str> = content.lines().collect();
+                let max_lines = 8;
+                let mut result: Vec<String> = lines
+                    .iter()
+                    .take(max_lines)
                     .map(|l| format!("  {l}"))
-                    .collect()
+                    .collect();
+                if lines.len() > max_lines {
+                    result.push(format!(
+                        "  ... ({} more lines)",
+                        lines.len() - max_lines
+                    ));
+                }
+                result
             }
             Event::RateLimit => vec!["rate limit check".to_string()],
             Event::Result {
@@ -138,12 +149,16 @@ pub fn parse_line(line: &str) -> Vec<Event> {
                 let block_type = block["type"].as_str().unwrap_or("");
                 match block_type {
                     "tool_use" => {
+                        let id = block["id"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string();
                         let name = block["name"]
                             .as_str()
                             .unwrap_or("?")
                             .to_string();
                         let summary = summarize_tool_input(&name, &block["input"]);
-                        events.push(Event::ToolUse { name, summary });
+                        events.push(Event::ToolUse { id, name, summary });
                     }
                     "text" => {
                         let text = block["text"].as_str().unwrap_or("").to_string();
@@ -179,12 +194,7 @@ pub fn parse_line(line: &str) -> Vec<Event> {
                         .as_str()
                         .unwrap_or("")
                         .to_string();
-                    // Extract content from tool result
-                    let content = if let Some(s) = block["content"].as_str() {
-                        truncate(s.lines().next().unwrap_or(""), 120)
-                    } else {
-                        String::new()
-                    };
+                    let content = extract_tool_result_content(block);
                     events.push(Event::ToolResult {
                         tool_use_id: id,
                         content,
@@ -201,6 +211,33 @@ pub fn parse_line(line: &str) -> Vec<Event> {
         _ => vec![Event::Unknown {
             event_type: event_type.to_string(),
         }],
+    }
+}
+
+/// Extract content from a tool_result block, preserving multiple lines.
+fn extract_tool_result_content(block: &serde_json::Value) -> String {
+    // Content can be a string or an array of content blocks
+    if let Some(s) = block["content"].as_str() {
+        s.to_string()
+    } else if let Some(arr) = block["content"].as_array() {
+        arr.iter()
+            .filter_map(|item| {
+                if item["type"].as_str() == Some("tool_result") || item["type"].as_str() == Some("text") {
+                    item["text"].as_str().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else if block.get("is_error") == Some(&serde_json::Value::Bool(true)) {
+        // Error results
+        block["content"]
+            .as_str()
+            .unwrap_or("(error)")
+            .to_string()
+    } else {
+        String::new()
     }
 }
 
@@ -390,7 +427,7 @@ mod tests {
         let events = parse_line(line);
         assert_eq!(events.len(), 1);
         match &events[0] {
-            Event::ToolUse { name, summary } => {
+            Event::ToolUse { name, summary, .. } => {
                 assert_eq!(name, "Read");
                 assert!(summary.contains("baz.rs"));
             }
