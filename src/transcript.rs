@@ -51,22 +51,29 @@ impl Event {
                 } else {
                     format!("[{name}] {summary}")
                 };
-                // Add blank line before file operations for visual separation
+                // Blank line before file operations for visual separation
                 match name.as_str() {
-                    "Read" | "Write" | "Edit" | "Bash" => vec![String::new(), header],
+                    "Read" | "Write" | "Edit" | "Bash" | "Grep" | "Glob" | "Agent" => {
+                        vec![String::new(), header]
+                    }
                     _ => vec![header],
                 }
             }
             Event::Text { text } => {
                 let mut lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
-                lines.push(String::new()); // blank line after text blocks
+                lines.push(String::new());
                 lines
             }
             Event::Thinking { text } => {
                 if text.is_empty() {
                     vec!["thinking...".to_string()]
                 } else {
-                    vec![format!("thinking: {text}")]
+                    let mut lines = vec!["thinking...".to_string()];
+                    for line in text.lines() {
+                        lines.push(format!("  {line}"));
+                    }
+                    lines.push(String::new());
+                    lines
                 }
             }
             Event::ToolResult { content, .. } => {
@@ -74,7 +81,7 @@ impl Event {
                     return vec![];
                 }
                 let lines: Vec<&str> = content.lines().collect();
-                let max_lines = 8;
+                let max_lines = 20;
                 let mut result: Vec<String> = lines
                     .iter()
                     .take(max_lines)
@@ -175,11 +182,7 @@ pub fn parse_line(line: &str) -> Vec<Event> {
                             .as_str()
                             .unwrap_or("")
                             .to_string();
-                        // Show first line of thinking, truncated
-                        let first_line = text.lines().next().unwrap_or("").to_string();
-                        events.push(Event::Thinking {
-                            text: truncate(&first_line, 120),
-                        });
+                        events.push(Event::Thinking { text });
                     }
                     _ => {}
                 }
@@ -250,64 +253,43 @@ fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
     match tool_name {
         "Read" => input["file_path"]
             .as_str()
-            .map(shorten_path)
-            .unwrap_or_default(),
-        "Edit" => {
-            let path = input["file_path"]
-                .as_str()
-                .map(shorten_path)
-                .unwrap_or_default();
-            path
-        }
+            .unwrap_or("")
+            .to_string(),
+        "Edit" => input["file_path"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
         "Write" => input["file_path"]
             .as_str()
-            .map(shorten_path)
-            .unwrap_or_default(),
+            .unwrap_or("")
+            .to_string(),
         "Bash" => {
             let cmd = input["command"].as_str().unwrap_or("");
             let desc = input["description"].as_str().unwrap_or("");
             if !desc.is_empty() && !cmd.is_empty() {
-                format!("{} — {}", truncate(desc, 40), truncate(cmd, 60))
+                format!("{desc}\n  $ {cmd}")
             } else if !desc.is_empty() {
-                truncate(desc, 100)
+                desc.to_string()
             } else {
-                truncate(cmd, 100)
+                format!("$ {cmd}")
             }
         }
         "Grep" => {
             let pattern = input["pattern"].as_str().unwrap_or("");
-            format!("/{pattern}/")
+            let path = input["path"].as_str().unwrap_or("");
+            if !path.is_empty() {
+                format!("/{pattern}/ in {path}")
+            } else {
+                format!("/{pattern}/")
+            }
         }
         "Glob" => input["pattern"].as_str().unwrap_or("").to_string(),
         "TodoWrite" => "update tasks".to_string(),
         "Agent" => {
             let desc = input["description"].as_str().unwrap_or("");
-            if !desc.is_empty() {
-                truncate(desc, 60)
-            } else {
-                String::new()
-            }
+            desc.to_string()
         }
         _ => String::new(),
-    }
-}
-
-fn shorten_path(p: &str) -> String {
-    // Show last 3 path components for more context
-    let parts: Vec<&str> = p.split('/').collect();
-    if parts.len() > 3 {
-        format!(".../{}", parts[parts.len() - 3..].join("/"))
-    } else {
-        p.to_string()
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() > max {
-        let end: String = s.chars().take(max - 3).collect();
-        format!("{end}...")
-    } else {
-        s.to_string()
     }
 }
 
@@ -526,7 +508,7 @@ mod tests {
         let events = parse_line(line);
         match &events[0] {
             Event::ToolUse { summary, .. } => {
-                assert_eq!(summary, "cargo build");
+                assert_eq!(summary, "$ cargo build");
             }
             _ => panic!("Expected ToolUse"),
         }
@@ -547,27 +529,27 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_summary_truncates() {
+    fn test_agent_summary_shows_full_description() {
+        let desc = "a".repeat(80);
         let input: serde_json::Value = serde_json::json!({
-            "description": "a]".repeat(40)
+            "description": desc
         });
         let result = summarize_tool_input("Agent", &input);
-        assert!(result.ends_with("..."));
-        assert!(result.chars().count() <= 60);
+        assert_eq!(result, desc);
     }
 
     #[test]
-    fn test_edit_summary_shortens_path() {
+    fn test_edit_summary_shows_full_path() {
         let input: serde_json::Value =
             serde_json::json!({"file_path": "/a/b/c/d.rs"});
-        assert_eq!(summarize_tool_input("Edit", &input), ".../b/c/d.rs");
+        assert_eq!(summarize_tool_input("Edit", &input), "/a/b/c/d.rs");
     }
 
     #[test]
-    fn test_write_summary_shortens_path() {
+    fn test_write_summary_shows_full_path() {
         let input: serde_json::Value =
             serde_json::json!({"file_path": "/a/b/c/d.rs"});
-        assert_eq!(summarize_tool_input("Write", &input), ".../b/c/d.rs");
+        assert_eq!(summarize_tool_input("Write", &input), "/a/b/c/d.rs");
     }
 
     #[test]
@@ -627,28 +609,6 @@ mod tests {
         assert_eq!(truncate("hello", 10), "hello");
     }
 
-    #[test]
-    fn test_truncate_exact() {
-        assert_eq!(truncate("hello", 5), "hello");
-    }
-
-    #[test]
-    fn test_truncate_long() {
-        assert_eq!(truncate("hello world!", 10), "hello w...");
-    }
-
-    #[test]
-    fn test_truncate_multibyte_utf8() {
-        let s = "héllo wörld café";
-        let result = truncate(s, 10);
-        assert!(result.ends_with("..."));
-        assert_eq!(result.chars().count(), 10);
-    }
-
-    #[test]
-    fn test_shorten_path_two_components() {
-        assert_eq!(shorten_path("dir/file.rs"), "dir/file.rs");
-    }
 
     #[test]
     fn test_incremental_reader_initial_read() {
@@ -740,16 +700,4 @@ mod tests {
         assert!(latest.to_string_lossy().contains("session-3"));
     }
 
-    #[test]
-    fn test_shorten_path_long() {
-        assert_eq!(
-            shorten_path("/very/long/path/to/file.rs"),
-            ".../path/to/file.rs"
-        );
-    }
-
-    #[test]
-    fn test_shorten_path_short() {
-        assert_eq!(shorten_path("file.rs"), "file.rs");
-    }
 }

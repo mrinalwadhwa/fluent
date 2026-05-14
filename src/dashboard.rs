@@ -673,8 +673,12 @@ fn style_for_line(line: &str) -> Style {
         Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD)
-    } else if line == "thinking..." {
+    } else if line.starts_with("thinking") || line.starts_with("  ") && !line.starts_with("  $") {
+        // Thinking blocks and indented tool results in grey
         Style::default().fg(Color::DarkGray)
+    } else if line.starts_with("  $") {
+        // Command lines within bash tool use
+        Style::default().fg(Color::Yellow)
     } else if line.starts_with("rate limit") {
         Style::default().fg(Color::Magenta)
     } else {
@@ -818,9 +822,10 @@ mod tests {
             auto_scroll: true,
         };
         let lines = view.visible_lines();
-        // Text "hello" + blank line after text, then "thinking: pondering"
         let non_empty: Vec<&String> = lines.iter().filter(|l| !l.is_empty()).collect();
         assert_eq!(non_empty[0], "hello");
-        assert!(non_empty[1].contains("pondering"));
+        // Thinking now shows "thinking..." header + indented content
+        assert_eq!(non_empty[1], "thinking...");
+        assert!(non_empty[2].contains("pondering"));
     }
 }
