@@ -193,10 +193,10 @@ fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
 }
 
 fn shorten_path(p: &str) -> String {
-    // Show last 2 path components
+    // Show last 3 path components for more context
     let parts: Vec<&str> = p.split('/').collect();
-    if parts.len() > 2 {
-        format!(".../{}", parts[parts.len() - 2..].join("/"))
+    if parts.len() > 3 {
+        format!(".../{}", parts[parts.len() - 3..].join("/"))
     } else {
         p.to_string()
     }

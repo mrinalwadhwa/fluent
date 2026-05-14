@@ -322,10 +322,10 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
 }
 
 fn draw_header(f: &mut ratatui::Frame, area: Rect, view: &RunView) {
-    let status = view
-        .run
-        .status()
-        .map(|s| s.to_string())
+    // Read status from worktree (where the agent writes it) with fallback to source
+    let status = std::fs::read_to_string(view.live_dir.join("status"))
+        .or_else(|_| std::fs::read_to_string(view.run.dir.join("status")))
+        .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "?".into());
 
     let status_color = match status.as_str() {
@@ -542,9 +542,31 @@ fn draw_reviewer_panel(f: &mut ratatui::Frame, area: Rect, view: &RunView) {
                         .and_then(|s| s.strip_suffix(".jsonl"))
                         .unwrap_or(&name);
 
-                    // If no review-*.md exists yet, show as running
+                    // If no review-*.md exists yet, show live activity
                     let review_file = reviews_dir.join(format!("review-{reviewer}.md"));
                     if !review_file.exists() {
+                        // Read last meaningful event from transcript
+                        let last_activity = std::fs::read_to_string(entry.path())
+                            .ok()
+                            .and_then(|content| {
+                                content
+                                    .lines()
+                                    .rev()
+                                    .filter_map(|line| {
+                                        let events = crate::transcript::parse_line(line);
+                                        events.into_iter().find_map(|e| {
+                                            let s = e.summary();
+                                            if s.is_empty() || s == "thinking..." || s.starts_with("rate limit") {
+                                                None
+                                            } else {
+                                                Some(s)
+                                            }
+                                        })
+                                    })
+                                    .next()
+                            })
+                            .unwrap_or_else(|| "starting...".to_string());
+
                         reviewer_lines.push(Line::from(vec![
                             Span::styled(
                                 "  ... ",
@@ -553,11 +575,11 @@ fn draw_reviewer_panel(f: &mut ratatui::Frame, area: Rect, view: &RunView) {
                                     .add_modifier(Modifier::BOLD),
                             ),
                             Span::styled(
-                                format!("{reviewer:<20}"),
+                                format!("{reviewer:<16}"),
                                 Style::default().fg(Color::White),
                             ),
                             Span::styled(
-                                "reviewing...",
+                                truncate_str(&last_activity, 70),
                                 Style::default().fg(Color::DarkGray),
                             ),
                         ]));
