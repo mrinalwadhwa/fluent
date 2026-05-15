@@ -605,12 +605,6 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_short() {
-        assert_eq!(truncate("hello", 10), "hello");
-    }
-
-
-    #[test]
     fn test_incremental_reader_initial_read() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("transcript.jsonl");

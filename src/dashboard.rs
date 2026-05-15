@@ -842,6 +842,7 @@ mod tests {
             selected_agent: 0,
             scroll_offset: 0,
             auto_scroll: true,
+            wrapped_total: 0,
         };
         let lines = view.visible_lines();
         let non_empty: Vec<&String> = lines.iter().filter(|l| !l.is_empty()).collect();

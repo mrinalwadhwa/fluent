@@ -747,14 +747,19 @@ fn watch_outputs_status_table() {
     fs::write(run_dir.join("runtime"), "local").unwrap();
     fs::write(run_dir.join("brief.md"), "# Brief\n\nWatch me\n").unwrap();
 
-    // Watch runs an infinite loop, so we use a short timeout and expect it to
-    // produce at least one status table before we kill it.
-    let output = factory_cmd()
+    // Watch runs an infinite loop — spawn, wait briefly, then kill explicitly.
+    let bin = assert_cmd::cargo::cargo_bin("factory");
+    let mut child = std::process::Command::new(&bin)
         .current_dir(tmp.path())
-        .args(["watch", "1"])
-        .timeout(std::time::Duration::from_secs(3))
-        .output()
+        .args(["watch", "2"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    child.kill().unwrap();
+    let output = child.wait_with_output().unwrap();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("RUN"), "should print header");
@@ -770,21 +775,22 @@ fn watch_detects_status_change_and_notifies() {
     fs::write(run_dir.join("status"), "executing").unwrap();
     fs::write(run_dir.join("brief.md"), "Brief\n").unwrap();
 
-    // Start watch in background, then change status after a moment
-    let run_dir_clone = run_dir.clone();
-    let handle = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(1500));
-        fs::write(run_dir_clone.join("status"), "complete").unwrap();
-    });
-
-    let output = factory_cmd()
+    let bin = assert_cmd::cargo::cargo_bin("factory");
+    let mut child = std::process::Command::new(&bin)
         .current_dir(tmp.path())
         .args(["watch", "1"])
-        .timeout(std::time::Duration::from_secs(5))
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
 
-    handle.join().unwrap();
+    // Change status after watch has polled at least once
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    fs::write(run_dir.join("status"), "complete").unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    child.kill().unwrap();
+    let output = child.wait_with_output().unwrap();
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
