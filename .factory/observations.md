@@ -53,11 +53,6 @@ user preferences and session continuity. Design decisions, architecture,
 and conventions belong in the project (observations → expertise →
 documentation lifecycle).
 
-2026-05-12 — The launch_author function only launches the author agent,
-never reviewers (those go through run_single_reviewer). Renamed from
-launch_agent to launch_author (and AGENT_EXIT to AUTHOR_EXIT) to make
-clear which agent is being launched.
-
 2026-05-12 — The define-behaviors skill should read existing behaviors
 from documentation/behaviors.md before writing new ones. This would
 calibrate the level of behavioral definition (what's too detailed,
