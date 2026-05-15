@@ -551,32 +551,14 @@ fn cmd_land(search_root: &Path, run_id: Option<&str>) -> Result<()> {
     let run = resolve_landable_run(search_root, run_id)?;
 
     // Verify reviews passed — check both source and worktree run dirs
-    let reviews_ok = match run.reviews_passed() {
-        Some(false) => false,
-        result => {
-            if result.is_none() {
-                // No reviews in source dir — check worktree
-                if let Some(wt_run_dir) = run.worktree_run_dir() {
-                    let wt_run = Run { id: run.id.clone(), dir: wt_run_dir };
-                    match wt_run.reviews_passed() {
-                        Some(false) => false,
-                        _ => true,
-                    }
-                } else {
-                    true
-                }
-            } else {
-                true
-            }
-        }
-    };
-    if !reviews_ok {
+    if run.effective_reviews_passed() == Some(false) {
         bail!("Cannot land run {}: reviews did not pass", run.id);
     }
 
     eprintln!("  Landing run {}...", run.id);
 
     worktree::land_run(search_root, &run.id, &run.dir)?;
+    run.set_status(&run::RunStatus::Landed)?;
 
     eprintln!("  Run {} landed successfully.", run.id);
     Ok(())
@@ -595,8 +577,8 @@ fn resolve_landable_run(search_root: &Path, run_id: Option<&str>) -> Result<Run>
             bail!("Run directory not found: {}", dir.display());
         }
         let run = Run { id: id.to_string(), dir };
-        if !is_run_complete(&run)? {
-            let status = effective_status(&run)?;
+        if !run.is_complete()? {
+            let status = run.effective_status()?;
             bail!("Run {} has status '{}', expected 'complete'", id, status);
         }
         return Ok(run);
@@ -613,7 +595,7 @@ fn resolve_landable_run(search_root: &Path, run_id: Option<&str>) -> Result<Run>
             }
             let id = entry.file_name().to_string_lossy().to_string();
             let run = Run { id, dir: path };
-            if is_run_complete(&run)? {
+            if run.is_complete()? {
                 candidates.push(run);
             }
         }
@@ -624,35 +606,6 @@ fn resolve_landable_run(search_root: &Path, run_id: Option<&str>) -> Result<Run>
     }
 
     bail!("No complete run found to land.")
-}
-
-/// Check if a run is complete, looking at both the source and worktree
-/// run directories.
-fn is_run_complete(run: &Run) -> Result<bool> {
-    if run.status()? == run::RunStatus::Complete {
-        return Ok(true);
-    }
-    // Check the worktree run dir — the agent writes status there
-    if let Some(wt_run_dir) = run.worktree_run_dir() {
-        let wt_status_path = wt_run_dir.join("status");
-        if let Ok(s) = fs::read_to_string(&wt_status_path) {
-            if run::RunStatus::parse(&s) == run::RunStatus::Complete {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
-}
-
-/// Get the effective status of a run (preferring worktree status).
-fn effective_status(run: &Run) -> Result<run::RunStatus> {
-    if let Some(wt_run_dir) = run.worktree_run_dir() {
-        let wt_status_path = wt_run_dir.join("status");
-        if let Ok(s) = fs::read_to_string(&wt_status_path) {
-            return Ok(run::RunStatus::parse(&s));
-        }
-    }
-    run.status()
 }
 
 // -------------------------------------------------------------------------

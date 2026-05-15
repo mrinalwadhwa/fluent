@@ -3,8 +3,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::run::RunStatus;
-
 /// Result of setting up a worktree for a run.
 pub struct WorktreeResult {
     pub worktree_dir: PathBuf,
@@ -141,9 +139,10 @@ const RUN_ARTIFACTS: &[&str] = &[
     "status",
 ];
 
-/// Land a completed run: rebase onto main, fast-forward merge, copy
-/// artifacts back to the source run directory, remove the worktree,
-/// and delete the branch.
+/// Land a completed run: copy artifacts back, remove the worktree,
+/// rebase onto the source branch, fast-forward merge, and delete the
+/// branch. The caller sets the run status to `landed` after this
+/// returns.
 pub fn land_run(source_root: &Path, run_id: &str, run_dir: &Path) -> Result<()> {
     // Read worktree path
     let wt_path_str = fs::read_to_string(run_dir.join("worktree"))
@@ -166,10 +165,18 @@ pub fn land_run(source_root: &Path, run_id: &str, run_dir: &Path) -> Result<()> 
 
     // Remove the worktree first — the branch can't be rebased while
     // it's checked out in a worktree
-    Command::new("git")
+    let wt_remove = Command::new("git")
         .args(["-C", &source_root.to_string_lossy()])
         .args(["worktree", "remove", "--force", &worktree_dir.to_string_lossy()])
         .output()?;
+
+    if !wt_remove.status.success() {
+        bail!(
+            "Failed to remove worktree {}:\n{}",
+            worktree_dir.display(),
+            String::from_utf8_lossy(&wt_remove.stderr)
+        );
+    }
 
     // Rebase the run branch onto the source branch
     let rebase = Command::new("git")
@@ -222,9 +229,6 @@ pub fn land_run(source_root: &Path, run_id: &str, run_dir: &Path) -> Result<()> 
         .args(["-C", &source_root.to_string_lossy()])
         .args(["branch", "-d", run_id])
         .output()?;
-
-    // Update status to landed
-    fs::write(run_dir.join("status"), RunStatus::Landed.as_str())?;
 
     Ok(())
 }

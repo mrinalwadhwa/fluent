@@ -83,9 +83,9 @@ project/
     src/                     ← agent works here
 ```
 
-When done, `factory land` rebases the run branch onto the source branch,
-fast-forward merges, copies artifacts back, removes the worktree, and
-deletes the branch.
+When done, `factory land` copies artifacts back from the worktree,
+removes the worktree, rebases the run branch onto the source branch,
+fast-forward merges, deletes the branch, and sets the status to `landed`.
 
 ### Run state
 

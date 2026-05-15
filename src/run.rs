@@ -282,6 +282,55 @@ impl Run {
             .map(|s| s.trim().to_string())
     }
 
+    /// Check if the run is complete, looking at both source and worktree.
+    pub fn is_complete(&self) -> Result<bool> {
+        if self.status()? == RunStatus::Complete {
+            return Ok(true);
+        }
+        if let Some(wt_run_dir) = self.worktree_run_dir() {
+            let wt_status_path = wt_run_dir.join("status");
+            if let Ok(s) = fs::read_to_string(&wt_status_path) {
+                if RunStatus::parse(&s) == RunStatus::Complete {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// Get the effective status, preferring the worktree status.
+    pub fn effective_status(&self) -> Result<RunStatus> {
+        if let Some(wt_run_dir) = self.worktree_run_dir() {
+            let wt_status_path = wt_run_dir.join("status");
+            if let Ok(s) = fs::read_to_string(&wt_status_path) {
+                return Ok(RunStatus::parse(&s));
+            }
+        }
+        self.status()
+    }
+
+    /// Check whether reviews passed, checking both source and worktree.
+    ///
+    /// If the source run directory has no reviews, falls back to the
+    /// worktree run directory.
+    pub fn effective_reviews_passed(&self) -> Option<bool> {
+        match self.reviews_passed() {
+            Some(false) => Some(false),
+            Some(true) => Some(true),
+            None => {
+                if let Some(wt_run_dir) = self.worktree_run_dir() {
+                    let wt_run = Run { id: self.id.clone(), dir: wt_run_dir };
+                    match wt_run.reviews_passed() {
+                        Some(false) => Some(false),
+                        _ => Some(true),
+                    }
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
     /// Get the run directory inside the worktree, if one exists.
     pub fn worktree_run_dir(&self) -> Option<PathBuf> {
         let wt_path = fs::read_to_string(self.dir.join("worktree"))
