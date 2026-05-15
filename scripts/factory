@@ -1263,6 +1263,105 @@ cmd_resume() {
 }
 
 # ---------------------------------------------------------------------------
+# Subcommand: land — rebase, merge, capture artifacts, clean up
+# ---------------------------------------------------------------------------
+
+# Artifacts to copy from worktree run dir back to source run dir.
+LAND_ARTIFACTS="sessions sessions.log reviews report.md status"
+
+cmd_land() {
+  RUN_ID="${1:-}"
+  SEARCH_ROOT="$(pwd)"
+  FACTORY_RUNS="${SEARCH_ROOT}/.factory/runs"
+
+  if [ -z "$RUN_ID" ]; then
+    # Find the most recent complete run
+    if [ -d "$FACTORY_RUNS" ]; then
+      for dir in "$FACTORY_RUNS"/*/; do
+        [ -d "$dir" ] || continue
+        if [ -f "${dir}status" ]; then
+          s="$(cat "${dir}status" 2>/dev/null || true)"
+          if [ "$s" = "complete" ]; then
+            RUN_ID="$(basename "$dir")"
+          fi
+        fi
+      done
+    fi
+    [ -n "$RUN_ID" ] || die "No complete run found to land."
+  fi
+
+  RUN_DIR="${FACTORY_RUNS}/${RUN_ID}"
+  [ -d "$RUN_DIR" ] || die "Run directory not found: $RUN_DIR"
+
+  # Verify status is complete
+  STATUS="$(cat "${RUN_DIR}/status" 2>/dev/null || true)"
+  [ "$STATUS" = "complete" ] || die "Run $RUN_ID has status '$STATUS', expected 'complete'"
+
+  # Verify reviews passed (if any)
+  if [ -d "${RUN_DIR}/reviews" ]; then
+    for review_file in "${RUN_DIR}/reviews"/review-*.md; do
+      [ -f "$review_file" ] || continue
+      verdict="$(grep -i '^verdict:' "$review_file" 2>/dev/null | head -1 | sed 's/^[Vv]erdict:[[:space:]]*//' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+      if [ -n "$verdict" ] && [ "$verdict" != "pass" ]; then
+        die "Cannot land run $RUN_ID: review $(basename "$review_file") has verdict '$verdict'"
+      fi
+    done
+  fi
+
+  # Read worktree path
+  WORKTREE_PATH="$(cat "${RUN_DIR}/worktree" 2>/dev/null || true)"
+  [ -n "$WORKTREE_PATH" ] || die "No worktree path recorded for run $RUN_ID"
+  [ -d "$WORKTREE_PATH" ] || die "Worktree directory does not exist: $WORKTREE_PATH"
+
+  printf '  Landing run %s...\n' "$RUN_ID"
+
+  # Copy artifacts from worktree run dir back to source run dir
+  WT_RUN_DIR="${WORKTREE_PATH}/.factory/runs/${RUN_ID}"
+  if [ -d "$WT_RUN_DIR" ]; then
+    for artifact in $LAND_ARTIFACTS; do
+      src="${WT_RUN_DIR}/${artifact}"
+      dst="${RUN_DIR}/${artifact}"
+      if [ -d "$src" ]; then
+        cp -r "$src" "$dst"
+      elif [ -f "$src" ]; then
+        cp "$src" "$dst"
+      fi
+    done
+    printf '  Artifacts copied.\n'
+  fi
+
+  # Read source branch
+  SOURCE_BRANCH="$(cat "${RUN_DIR}/source-branch" 2>/dev/null || echo "main")"
+
+  # Remove worktree first — branch can't be rebased while checked out
+  git -C "$SEARCH_ROOT" worktree remove --force "$WORKTREE_PATH" 2>/dev/null || true
+  printf '  Worktree removed.\n'
+
+  # Rebase onto source branch
+  if ! git -C "$SEARCH_ROOT" rebase "$SOURCE_BRANCH" "$RUN_ID" 2>/dev/null; then
+    git -C "$SEARCH_ROOT" rebase --abort 2>/dev/null || true
+    die "Rebase failed — resolve conflicts manually"
+  fi
+  printf '  Rebased onto %s.\n' "$SOURCE_BRANCH"
+
+  # Checkout source branch and fast-forward merge
+  git -C "$SEARCH_ROOT" checkout "$SOURCE_BRANCH"
+  if ! git -C "$SEARCH_ROOT" merge --ff-only "$RUN_ID"; then
+    die "Fast-forward merge failed"
+  fi
+  printf '  Merged (fast-forward).\n'
+
+  # Delete branch
+  git -C "$SEARCH_ROOT" branch -d "$RUN_ID" 2>/dev/null || true
+  printf '  Branch deleted.\n'
+
+  # Update status
+  printf 'landed' > "${RUN_DIR}/status"
+
+  printf '  Run %s landed successfully.\n' "$RUN_ID"
+}
+
+# ---------------------------------------------------------------------------
 # Usage
 # ---------------------------------------------------------------------------
 
@@ -1278,6 +1377,7 @@ Subcommands:
   pull [RUN_ID]       Download completed workspace from S3 (fargate)
   shell [RUN_ID]      Interactive shell into running task (fargate)
   resume [RUN_ID]     Restart a paused or failed run
+  land [RUN_ID]       Rebase, merge, capture artifacts, clean up
 
 Run options:
   --run-id ID         Target a specific run
@@ -1300,6 +1400,8 @@ Examples:
   factory pull                         # download fargate results
   factory shell                        # shell into running task
   factory resume                       # resume a paused run
+  factory land                         # land the most recent complete run
+  factory land RUN_ID                   # land a specific run
 EOF
   exit 0
 }
@@ -1426,6 +1528,10 @@ case "$SUBCOMMAND" in
   resume)
     shift
     cmd_resume "$@"
+    ;;
+  land)
+    shift
+    cmd_land "$@"
     ;;
   "")
     cmd_interactive "$@"

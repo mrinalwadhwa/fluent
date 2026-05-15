@@ -15,6 +15,7 @@ pub enum RunStatus {
     NeedsUser,
     Complete,
     Failed,
+    Landed,
     Unknown(String),
 }
 
@@ -30,6 +31,7 @@ impl RunStatus {
             "needs-user" => Self::NeedsUser,
             "complete" => Self::Complete,
             "failed" => Self::Failed,
+            "landed" => Self::Landed,
             other => Self::Unknown(other.to_string()),
         }
     }
@@ -45,6 +47,7 @@ impl RunStatus {
             Self::NeedsUser => "needs-user",
             Self::Complete => "complete",
             Self::Failed => "failed",
+            Self::Landed => "landed",
             Self::Unknown(s) => s.as_str(),
         }
     }
@@ -783,6 +786,7 @@ mod tests {
             "needs-user",
             "complete",
             "failed",
+            "landed",
         ] {
             let status = RunStatus::parse(s);
             assert_eq!(status.as_str(), *s);

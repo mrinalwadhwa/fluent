@@ -130,6 +130,118 @@ fn git_current_branch(dir: &Path) -> Result<String> {
     }
 }
 
+/// Artifacts to copy back from the worktree run directory before cleanup.
+const RUN_ARTIFACTS: &[&str] = &[
+    "sessions",
+    "sessions.log",
+    "reviews",
+    "report.md",
+    "status",
+];
+
+/// Land a completed run: rebase onto main, fast-forward merge, copy
+/// artifacts back to the source run directory, remove the worktree,
+/// and delete the branch.
+pub fn land_run(source_root: &Path, run_id: &str, run_dir: &Path) -> Result<()> {
+    // Read worktree path
+    let wt_path_str = fs::read_to_string(run_dir.join("worktree"))
+        .context("No worktree path recorded for this run")?;
+    let worktree_dir = PathBuf::from(wt_path_str.trim());
+    if !worktree_dir.is_dir() {
+        bail!("Worktree directory does not exist: {}", worktree_dir.display());
+    }
+
+    // Copy artifacts from worktree run dir back to source run dir
+    let wt_run_dir = worktree_dir.join(format!(".factory/runs/{run_id}"));
+    if wt_run_dir.is_dir() {
+        copy_run_artifacts(&wt_run_dir, run_dir)?;
+    }
+
+    // Read source branch before removing the worktree
+    let main_branch = fs::read_to_string(run_dir.join("source-branch"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "main".to_string());
+
+    // Remove the worktree first — the branch can't be rebased while
+    // it's checked out in a worktree
+    Command::new("git")
+        .args(["-C", &source_root.to_string_lossy()])
+        .args(["worktree", "remove", "--force", &worktree_dir.to_string_lossy()])
+        .output()?;
+
+    // Rebase the run branch onto the source branch
+    let rebase = Command::new("git")
+        .args(["-C", &source_root.to_string_lossy()])
+        .args(["rebase", &main_branch, run_id])
+        .output()?;
+
+    if !rebase.status.success() {
+        // Abort the failed rebase so the repo is not left in a broken state
+        Command::new("git")
+            .args(["-C", &source_root.to_string_lossy()])
+            .args(["rebase", "--abort"])
+            .output()
+            .ok();
+        bail!(
+            "Rebase failed — resolve conflicts manually:\n{}",
+            String::from_utf8_lossy(&rebase.stderr)
+        );
+    }
+
+    // Checkout the source branch
+    let checkout = Command::new("git")
+        .args(["-C", &source_root.to_string_lossy()])
+        .args(["checkout", &main_branch])
+        .output()?;
+
+    if !checkout.status.success() {
+        bail!(
+            "Failed to checkout {}: {}",
+            main_branch,
+            String::from_utf8_lossy(&checkout.stderr)
+        );
+    }
+
+    // Fast-forward merge
+    let merge = Command::new("git")
+        .args(["-C", &source_root.to_string_lossy()])
+        .args(["merge", "--ff-only", run_id])
+        .output()?;
+
+    if !merge.status.success() {
+        bail!(
+            "Fast-forward merge failed:\n{}",
+            String::from_utf8_lossy(&merge.stderr)
+        );
+    }
+
+    // Delete the branch
+    Command::new("git")
+        .args(["-C", &source_root.to_string_lossy()])
+        .args(["branch", "-d", run_id])
+        .output()?;
+
+    // Update status to landed
+    fs::write(run_dir.join("status"), "landed")?;
+
+    Ok(())
+}
+
+/// Copy run artifacts from the worktree run directory back to the
+/// source run directory.
+fn copy_run_artifacts(wt_run_dir: &Path, source_run_dir: &Path) -> Result<()> {
+    for name in RUN_ARTIFACTS {
+        let src = wt_run_dir.join(name);
+        let dst = source_run_dir.join(name);
+        if src.is_dir() {
+            copy_dir_contents(&src, &dst)?;
+        } else if src.is_file() {
+            fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
+}
+
 fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {

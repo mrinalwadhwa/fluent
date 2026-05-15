@@ -1365,3 +1365,217 @@ exit 0
         "round-1 should contain review-tests.md"
     );
 }
+
+// -------------------------------------------------------------------------
+// Land
+// -------------------------------------------------------------------------
+
+/// Set up a git project with a completed run in a worktree, ready to land.
+fn setup_completed_run(tmp: &TempDir) -> (std::path::PathBuf, String) {
+    let main_dir = setup_git_project(tmp);
+    let run_id = "20260515-land-test";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("brief.md"), "# Brief\n\nTest landing\n").unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+WORKING_DIR="$(pwd)"
+RUN_ID=$(ls "$WORKING_DIR/.factory/runs/" 2>/dev/null | head -1)
+RUN_DIR="$WORKING_DIR/.factory/runs/$RUN_ID"
+# Write a commit in the worktree
+echo "new content" > "$WORKING_DIR/feature.txt"
+git -C "$WORKING_DIR" add feature.txt
+git -C "$WORKING_DIR" commit -m "Add feature"
+# Create review and session artifacts
+mkdir -p "$RUN_DIR/reviews"
+printf 'Verdict: pass\n\nAll good.\n' > "$RUN_DIR/reviews/review-tests.md"
+mkdir -p "$RUN_DIR/sessions/session-1"
+echo '{"type":"result"}' > "$RUN_DIR/sessions/session-1/transcript.jsonl"
+printf 'session=1 exit=0 duration=5s status=complete\n' > "$RUN_DIR/sessions.log"
+printf '# Report\nDone.\n' > "$RUN_DIR/report.md"
+echo "complete" > "$RUN_DIR/status"
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["run", "--no-sandbox", "--run-id", run_id])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    (main_dir, run_id.to_string())
+}
+
+#[test]
+fn land_completes_full_lifecycle() {
+    let tmp = TempDir::new().unwrap();
+    let (main_dir, run_id) = setup_completed_run(&tmp);
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+
+    // Verify worktree exists before landing
+    let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
+    let wt_path = Path::new(wt_path_str.trim());
+    assert!(wt_path.is_dir(), "worktree should exist before landing");
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["land", &run_id])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Landing run"))
+        .stderr(predicate::str::contains("landed successfully"));
+
+    // Verify artifacts were copied back
+    assert!(
+        run_dir.join("sessions/session-1/transcript.jsonl").exists(),
+        "sessions should be copied back"
+    );
+    assert!(
+        run_dir.join("sessions.log").exists(),
+        "sessions.log should be copied back"
+    );
+    assert!(
+        run_dir.join("reviews/review-tests.md").exists(),
+        "reviews should be copied back"
+    );
+    assert!(
+        run_dir.join("report.md").exists(),
+        "report.md should be copied back"
+    );
+
+    // Verify status is landed
+    let status = fs::read_to_string(run_dir.join("status")).unwrap();
+    assert_eq!(status.trim(), "landed");
+
+    // Verify worktree was removed
+    assert!(!wt_path.is_dir(), "worktree should be removed after landing");
+
+    // Verify branch was deleted
+    let branches = std::process::Command::new("git")
+        .args(["-C", &main_dir.to_string_lossy()])
+        .args(["branch", "--list", &run_id])
+        .output()
+        .unwrap();
+    let branch_list = String::from_utf8_lossy(&branches.stdout);
+    assert!(
+        branch_list.trim().is_empty(),
+        "branch should be deleted after landing"
+    );
+
+    // Verify commit is on main
+    let log = std::process::Command::new("git")
+        .args(["-C", &main_dir.to_string_lossy()])
+        .args(["log", "--oneline", "-5"])
+        .output()
+        .unwrap();
+    let log_str = String::from_utf8_lossy(&log.stdout);
+    assert!(
+        log_str.contains("Add feature"),
+        "feature commit should be on main: {log_str}"
+    );
+}
+
+#[test]
+fn land_resolves_most_recent_complete_run() {
+    let tmp = TempDir::new().unwrap();
+    let (main_dir, run_id) = setup_completed_run(&tmp);
+
+    // Land without specifying run ID
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["land"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(&run_id));
+}
+
+#[test]
+fn land_rejects_non_complete_run() {
+    let tmp = TempDir::new().unwrap();
+    let run_dir = tmp.path().join(".factory/runs/test-not-complete");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "executing").unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["land", "test-not-complete"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("expected 'complete'"));
+}
+
+#[test]
+fn land_rejects_failed_reviews() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let run_id = "20260515-land-fail-review";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "complete").unwrap();
+    fs::write(run_dir.join("worktree"), main_dir.to_string_lossy().as_ref()).unwrap();
+    fs::write(run_dir.join("source-branch"), "main").unwrap();
+
+    // Create a failing review
+    fs::create_dir_all(run_dir.join("reviews")).unwrap();
+    fs::write(
+        run_dir.join("reviews/review-tests.md"),
+        "Verdict: fail\n\nTests broken.\n",
+    )
+    .unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["land", run_id])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("reviews did not pass"));
+}
+
+#[test]
+fn land_fails_when_no_complete_run() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join(".factory/runs/some-run")).unwrap();
+    fs::write(
+        tmp.path().join(".factory/runs/some-run/status"),
+        "executing",
+    )
+    .unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["land"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("No complete run found"));
+}
+
+#[test]
+fn land_preserves_linear_history() {
+    let tmp = TempDir::new().unwrap();
+    let (main_dir, run_id) = setup_completed_run(&tmp);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["land", &run_id])
+        .assert()
+        .success();
+
+    // Verify no merge commits exist (linear history)
+    let log = std::process::Command::new("git")
+        .args(["-C", &main_dir.to_string_lossy()])
+        .args(["log", "--oneline", "--merges"])
+        .output()
+        .unwrap();
+    let merge_log = String::from_utf8_lossy(&log.stdout);
+    assert!(
+        merge_log.trim().is_empty(),
+        "should have no merge commits (linear history): {merge_log}"
+    );
+}

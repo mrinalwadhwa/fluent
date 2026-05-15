@@ -102,4 +102,10 @@ pub enum Commands {
         /// Path to project (default: current directory)
         path: Option<String>,
     },
+
+    /// Rebase, merge, capture artifacts, and clean up a completed run
+    Land {
+        /// Run ID to land (default: most recent complete run)
+        run_id: Option<String>,
+    },
 }

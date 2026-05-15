@@ -102,6 +102,9 @@ fn main() -> Result<()> {
             let search_root = path.map(PathBuf::from).unwrap_or(cwd);
             dashboard::run_dashboard(&search_root, run_id.as_deref())?;
         }
+        Some(Commands::Land { run_id }) => {
+            cmd_land(&cwd, run_id.as_deref())?;
+        }
         None => {
             cmd_interactive(&sandbox_root, &resolver, &cli.extra_args)?;
         }
@@ -542,6 +545,114 @@ fn cmd_init(cwd: &Path) -> Result<()> {
     fs::create_dir_all(factory_dir.join("expertise"))?;
     eprintln!("  Initialized .factory/ in {}", cwd.display());
     Ok(())
+}
+
+fn cmd_land(search_root: &Path, run_id: Option<&str>) -> Result<()> {
+    let run = resolve_landable_run(search_root, run_id)?;
+
+    // Verify reviews passed — check both source and worktree run dirs
+    let reviews_ok = match run.reviews_passed() {
+        Some(false) => false,
+        result => {
+            if result.is_none() {
+                // No reviews in source dir — check worktree
+                if let Some(wt_run_dir) = run.worktree_run_dir() {
+                    let wt_run = Run { id: run.id.clone(), dir: wt_run_dir };
+                    match wt_run.reviews_passed() {
+                        Some(false) => false,
+                        _ => true,
+                    }
+                } else {
+                    true
+                }
+            } else {
+                true
+            }
+        }
+    };
+    if !reviews_ok {
+        bail!("Cannot land run {}: reviews did not pass", run.id);
+    }
+
+    eprintln!("  Landing run {}...", run.id);
+
+    worktree::land_run(search_root, &run.id, &run.dir)?;
+
+    eprintln!("  Run {} landed successfully.", run.id);
+    Ok(())
+}
+
+/// Resolve a run that can be landed (status = complete).
+///
+/// Checks both the source run directory and the worktree run directory
+/// for status, since the agent writes status to the worktree.
+fn resolve_landable_run(search_root: &Path, run_id: Option<&str>) -> Result<Run> {
+    let runs_dir = search_root.join(".factory/runs");
+
+    if let Some(id) = run_id {
+        let dir = runs_dir.join(id);
+        if !dir.is_dir() {
+            bail!("Run directory not found: {}", dir.display());
+        }
+        let run = Run { id: id.to_string(), dir };
+        if !is_run_complete(&run)? {
+            let status = effective_status(&run)?;
+            bail!("Run {} has status '{}', expected 'complete'", id, status);
+        }
+        return Ok(run);
+    }
+
+    // Scan for the most recent complete run
+    if runs_dir.is_dir() {
+        let mut candidates: Vec<Run> = Vec::new();
+        for entry in fs::read_dir(&runs_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let id = entry.file_name().to_string_lossy().to_string();
+            let run = Run { id, dir: path };
+            if is_run_complete(&run)? {
+                candidates.push(run);
+            }
+        }
+        candidates.sort_by(|a, b| b.id.cmp(&a.id));
+        if let Some(run) = candidates.into_iter().next() {
+            return Ok(run);
+        }
+    }
+
+    bail!("No complete run found to land.")
+}
+
+/// Check if a run is complete, looking at both the source and worktree
+/// run directories.
+fn is_run_complete(run: &Run) -> Result<bool> {
+    if run.status()? == run::RunStatus::Complete {
+        return Ok(true);
+    }
+    // Check the worktree run dir — the agent writes status there
+    if let Some(wt_run_dir) = run.worktree_run_dir() {
+        let wt_status_path = wt_run_dir.join("status");
+        if let Ok(s) = fs::read_to_string(&wt_status_path) {
+            if run::RunStatus::parse(&s) == run::RunStatus::Complete {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Get the effective status of a run (preferring worktree status).
+fn effective_status(run: &Run) -> Result<run::RunStatus> {
+    if let Some(wt_run_dir) = run.worktree_run_dir() {
+        let wt_status_path = wt_run_dir.join("status");
+        if let Ok(s) = fs::read_to_string(&wt_status_path) {
+            return Ok(run::RunStatus::parse(&s));
+        }
+    }
+    run.status()
 }
 
 // -------------------------------------------------------------------------
