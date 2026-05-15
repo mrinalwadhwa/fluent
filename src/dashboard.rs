@@ -7,7 +7,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs};
+use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
 use ratatui::Terminal;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -600,10 +600,38 @@ fn draw_agent_tabs(f: &mut ratatui::Frame, area: Rect, view: &RunView) {
 
 fn draw_activity_feed(f: &mut ratatui::Frame, area: Rect, view: &RunView) {
     let lines = view.visible_lines();
-    let visible_height = area.height.saturating_sub(2) as usize; // account for borders
+    let content_width = area.width.saturating_sub(2) as usize; // borders
+    let visible_height = area.height.saturating_sub(2) as usize;
 
-    // Calculate visible window
-    let total = lines.len();
+    // Wrap lines that exceed terminal width, preserving styles
+    let mut wrapped: Vec<(String, Style)> = Vec::new();
+    for line in lines.iter() {
+        let style = style_for_line(line);
+        if line.len() <= content_width || content_width == 0 {
+            wrapped.push((line.clone(), style));
+        } else {
+            // Wrap at content_width boundaries
+            let mut remaining = line.as_str();
+            let mut first = true;
+            while !remaining.is_empty() {
+                let split_at = remaining
+                    .char_indices()
+                    .nth(content_width)
+                    .map(|(i, _)| i)
+                    .unwrap_or(remaining.len());
+                let chunk = &remaining[..split_at];
+                if first {
+                    wrapped.push((chunk.to_string(), style));
+                    first = false;
+                } else {
+                    wrapped.push((format!("  {chunk}"), style));
+                }
+                remaining = &remaining[split_at..];
+            }
+        }
+    }
+
+    let total = wrapped.len();
     let start = if view.auto_scroll {
         total.saturating_sub(visible_height)
     } else {
@@ -611,12 +639,9 @@ fn draw_activity_feed(f: &mut ratatui::Frame, area: Rect, view: &RunView) {
     };
     let end = (start + visible_height).min(total);
 
-    let items: Vec<ListItem> = lines[start..end]
+    let styled_lines: Vec<Line> = wrapped[start..end]
         .iter()
-        .map(|line| {
-            let style = style_for_line(line);
-            ListItem::new(Line::from(Span::styled(line.as_str(), style)))
-        })
+        .map(|(text, style)| Line::from(Span::styled(text.as_str(), *style)))
         .collect();
 
     let scroll_indicator = if total > visible_height {
@@ -643,14 +668,14 @@ fn draw_activity_feed(f: &mut ratatui::Frame, area: Rect, view: &RunView) {
         }
     );
 
-    let list = List::new(items).block(
+    let paragraph = Paragraph::new(styled_lines).block(
         Block::default()
             .borders(Borders::ALL)
             .title(title)
             .title_bottom(scroll_indicator),
     );
 
-    f.render_widget(list, area);
+    f.render_widget(paragraph, area);
 }
 
 fn style_for_line(line: &str) -> Style {
