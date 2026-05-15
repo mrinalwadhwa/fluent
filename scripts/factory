@@ -831,6 +831,7 @@ cmd_run_local() {
   launch_author() {
     LAUNCH_PROMPT="$1"; shift
     sandbox-exec -f "$RENDERED_PROFILE" claude \
+      --dangerously-skip-permissions \
       --verbose --output-format stream-json \
       --append-system-prompt "$FACTORY_SYSTEM_PROMPT" \
       -p "$LAUNCH_PROMPT" \

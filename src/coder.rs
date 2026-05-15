@@ -74,6 +74,9 @@ impl SandboxedClaudeCode {
             let mut cmd = Command::new("sandbox-exec");
             cmd.args(["-f", profile]);
             cmd.arg("claude");
+            // The sandbox is the security boundary — allow the agent
+            // to operate freely within it.
+            cmd.arg("--dangerously-skip-permissions");
             cmd.current_dir(working_dir);
             cmd
         } else {
