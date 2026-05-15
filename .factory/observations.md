@@ -129,6 +129,14 @@ attribute on unsigned binaries. Fix: ad-hoc sign with codesign -s -
 after copying. The install step (cargo build --release + cp) needs to
 include signing. For Homebrew distribution, the formula handles this.
 
+2026-05-15 — Watch process leaks come from two sources: (1) our own
+integration tests (fixed with explicit child.kill()), and (2) tests
+that autonomous agents write in worktrees during runs — they spawn
+factory watch but don't reliably clean up. The root cause is that
+factory watch runs an infinite loop with no exit condition other than
+being killed. Fix options: add --timeout/--once flag for test use,
+or detect parent death (check if ppid becomes 1) and self-exit.
+
 2026-05-13 — The Rust binary's factory watch command spawns background
 processes (polling at 1s, 2s, 10s, 60s intervals) that are never
 cleaned up when the parent run finishes. Every run leaks 3+ watch
