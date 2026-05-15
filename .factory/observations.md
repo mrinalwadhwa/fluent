@@ -163,6 +163,13 @@ API endpoints only, (B) deny outbound except localhost with credential
 proxy mediating all API access, (C) read-only package caches. Option
 B aligns with isolation-by-impossibility principle.
 
+2026-05-15 — Dashboard should enable text selection and copying from
+the activity feed. Currently mouse capture for scroll wheel prevents
+normal terminal text selection. Consider toggling mouse capture off
+with a key (e.g. 'c' for copy mode) or using a modifier (hold Shift
+for native terminal selection, which some terminals support with
+mouse capture enabled).
+
 2026-05-15 — Dashboard auto-scroll should re-enable when the user
 scrolls to the bottom. Currently once disabled it stays off until
 the user switches agents or runs.
