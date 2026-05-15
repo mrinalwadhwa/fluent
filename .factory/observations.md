@@ -69,12 +69,6 @@ list statuses don't refresh. All displayed fields need to be
 re-evaluated on each poll cycle to reflect current state. The
 dashboard should make it obvious when something changes.
 
-2026-05-15 — The content resolver looks for sandbox profiles at
-sandbox/common.sb and sandbox/claude-code.sb but the files lived at
-~/.config/factory/common.sb (no sandbox/ subdirectory). Had to copy
-them to ~/.config/factory/sandbox/. The resolver path and the actual
-file location should match.
-
 2026-05-09 — The refine-writing skill at ~/Workspace/skills has
 reference files (ai_tells.md, benchmarks.md, sentence_corrections.md,
 structural_guidance.md) with much more detail than what was captured
