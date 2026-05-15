@@ -808,8 +808,10 @@ cmd_run_local() {
   printf 'local' > "${RUN_DIR}/backend"
   printf '%s' "$$" > "${RUN_DIR}/handle"
 
-  # Switch to worktree for execution
-  SANDBOX_ROOT="$WORKTREE_DIR"
+  # Sandbox root must include the git directory — worktrees reference
+  # the main repo's .git via a relative path. Use the parent of the
+  # worktree (the factory workspace) as the sandbox root.
+  SANDBOX_ROOT="$(cd "$WORKTREE_DIR/.." && pwd)"
   RUN_DIR="${WORKTREE_DIR}/.factory/runs/${RUN_ID}"
 
   # Re-render sandbox profile for the worktree path

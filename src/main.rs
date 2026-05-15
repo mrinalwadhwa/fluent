@@ -155,8 +155,15 @@ fn cmd_run_local(
     let worktree_dir = &wt_result.worktree_dir;
     worktree::disable_commit_signing(worktree_dir)?;
 
+    // Sandbox root must include the git directory — worktrees reference
+    // the main repo's .git via a relative path. Use the parent of the
+    // worktree (the factory workspace) as the sandbox root.
+    let sandbox_root = worktree_dir
+        .parent()
+        .unwrap_or(worktree_dir)
+        .to_string_lossy();
     let home = std::env::var("HOME").unwrap_or_default();
-    let profile = os::render_profile(resolver, &home, &worktree_dir.to_string_lossy())?;
+    let profile = os::render_profile(resolver, &home, &sandbox_root)?;
     let system_prompt = resolver
         .resolve_content("prompts/author.md")
         .unwrap_or_default();
