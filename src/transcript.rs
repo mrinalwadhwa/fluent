@@ -66,9 +66,9 @@ impl Event {
             }
             Event::Thinking { text } => {
                 if text.is_empty() {
-                    vec!["thinking...".to_string()]
+                    vec![String::new(), "thinking...".to_string()]
                 } else {
-                    let mut lines = vec!["thinking...".to_string()];
+                    let mut lines = vec![String::new(), "thinking...".to_string()];
                     for line in text.lines() {
                         lines.push(format!("  {line}"));
                     }

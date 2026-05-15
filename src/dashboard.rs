@@ -62,6 +62,8 @@ struct RunView {
     selected_agent: usize,
     scroll_offset: usize,
     auto_scroll: bool,
+    /// Wrapped line count from last render, for accurate scroll limits.
+    wrapped_total: usize,
 }
 
 impl RunView {
@@ -74,6 +76,7 @@ impl RunView {
             selected_agent: 0,
             scroll_offset: 0,
             auto_scroll: true,
+            wrapped_total: 0,
         };
         view.discover_agents();
         view.poll();
@@ -177,15 +180,11 @@ impl RunView {
     }
 
     fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = self.visible_lines().len();
+        self.scroll_offset = self.wrapped_total;
     }
 
-    /// Clamp scroll_offset to the actual displayable max, accounting
-    /// for visible height. Call after disabling auto_scroll so the
-    /// first scroll input has immediate effect.
     fn clamp_scroll(&mut self, visible_height: usize) {
-        let total = self.visible_lines().len();
-        let max = total.saturating_sub(visible_height);
+        let max = self.wrapped_total.saturating_sub(visible_height);
         if self.scroll_offset > max {
             self.scroll_offset = max;
         }
@@ -260,10 +259,6 @@ impl App {
         }
     }
 
-    fn current_view(&self) -> &RunView {
-        &self.runs[self.selected_run]
-    }
-
     fn current_view_mut(&mut self) -> &mut RunView {
         &mut self.runs[self.selected_run]
     }
@@ -300,9 +295,9 @@ fn run_event_loop(
         terminal.draw(|f| draw_ui(f, app))?;
 
         // Update feed height from terminal size for scroll clamping
-        // Layout: header(3) + runs(3) + agents(3) + feed(rest) + help(1) + borders(2)
+        // Layout: header(3) + runs(3) + agents(3) + margin(1) + feed(rest) + help(1) + borders(2)
         let term_height = terminal.size()?.height as usize;
-        app.feed_height = term_height.saturating_sub(3 + 3 + 3 + 1 + 2);
+        app.feed_height = term_height.saturating_sub(3 + 3 + 3 + 1 + 1 + 2);
 
         // Poll for events with timeout
         let timeout = POLL_INTERVAL
@@ -324,7 +319,7 @@ fn run_event_loop(
                         let view = app.current_view_mut();
                         view.auto_scroll = false;
                         view.clamp_scroll(fh);
-                        let max = view.visible_lines().len();
+                        let max = view.wrapped_total;
                         view.scroll_offset = (view.scroll_offset + 3).min(max);
                     }
                     _ => {}
@@ -386,7 +381,7 @@ fn run_event_loop(
                         let view = app.current_view_mut();
                         view.auto_scroll = false;
                         view.clamp_scroll(fh);
-                        let max = view.visible_lines().len();
+                        let max = view.wrapped_total;
                         view.scroll_offset =
                             (view.scroll_offset + 1).min(max);
                     }
@@ -411,7 +406,7 @@ fn run_event_loop(
                         let view = app.current_view_mut();
                         view.auto_scroll = false;
                         view.clamp_scroll(fh);
-                        let max = view.visible_lines().len();
+                        let max = view.wrapped_total;
                         view.scroll_offset =
                             (view.scroll_offset + 20).min(max);
                     }
@@ -436,9 +431,9 @@ fn run_event_loop(
     Ok(())
 }
 
-fn draw_ui(f: &mut ratatui::Frame, app: &App) {
+fn draw_ui(f: &mut ratatui::Frame, app: &mut App) {
     let size = f.area();
-    let view = app.current_view();
+    let idx = app.selected_run;
 
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -446,16 +441,17 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
             Constraint::Length(3), // header
             Constraint::Length(3), // run tabs
             Constraint::Length(3), // agent tabs
+            Constraint::Length(1), // margin
             Constraint::Min(10),  // activity feed
             Constraint::Length(1), // help bar
         ])
         .split(size);
 
-    draw_header(f, main_chunks[0], view);
+    draw_header(f, main_chunks[0], &app.runs[idx]);
     draw_run_tabs(f, main_chunks[1], app);
-    draw_agent_tabs(f, main_chunks[2], view);
-    draw_activity_feed(f, main_chunks[3], view);
-    draw_help_bar(f, main_chunks[4]);
+    draw_agent_tabs(f, main_chunks[2], &app.runs[idx]);
+    draw_activity_feed(f, main_chunks[4], &mut app.runs[idx]);
+    draw_help_bar(f, main_chunks[5]);
 }
 
 fn draw_header(f: &mut ratatui::Frame, area: Rect, view: &RunView) {
@@ -598,7 +594,7 @@ fn draw_agent_tabs(f: &mut ratatui::Frame, area: Rect, view: &RunView) {
     f.render_widget(tabs, area);
 }
 
-fn draw_activity_feed(f: &mut ratatui::Frame, area: Rect, view: &RunView) {
+fn draw_activity_feed(f: &mut ratatui::Frame, area: Rect, view: &mut RunView) {
     let lines = view.visible_lines();
     let content_width = area.width.saturating_sub(2) as usize; // borders
     let visible_height = area.height.saturating_sub(2) as usize;
@@ -632,6 +628,7 @@ fn draw_activity_feed(f: &mut ratatui::Frame, area: Rect, view: &RunView) {
     }
 
     let total = wrapped.len();
+    view.wrapped_total = total;
     let start = if view.auto_scroll {
         total.saturating_sub(visible_height)
     } else {
