@@ -163,6 +163,12 @@ API endpoints only, (B) deny outbound except localhost with credential
 proxy mediating all API access, (C) read-only package caches. Option
 B aligns with isolation-by-impossibility principle.
 
+2026-05-15 — Dashboard has a rendering bug: stray "A" characters
+appear at the left edge of the activity feed, breaking the border
+outline. Likely caused by line wrapping cutting at wrong byte
+boundaries in multi-byte or styled content, or by unparsed content
+from stream-json leaking into the display.
+
 2026-05-15 — Dashboard should enable text selection and copying from
 the activity feed. Currently mouse capture for scroll wheel prevents
 normal terminal text selection. Consider toggling mouse capture off
