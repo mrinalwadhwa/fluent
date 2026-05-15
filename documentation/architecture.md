@@ -19,7 +19,7 @@ from intent capture through execution and review across multiple sessions.
 ├─────────────────────────────────────────────────┤
 │  Factory command                                │
 │  factory run / status / pull / shell / watch    │
-│  factory resume / init / dashboard              │
+│  factory resume / init / dashboard / land       │
 │  Deterministic, operational                     │
 └─────────────────────────────────────────────────┘
 ```
@@ -37,7 +37,7 @@ can drive the entire workflow.
 ## Workflow
 
 ```
-Brief → Behaviors → Approach → Plan → Execute → Review
+Brief → Behaviors → Approach → Plan → Execute → Review → Land
 (interactive)                         (autonomous)
 ```
 
@@ -83,8 +83,9 @@ project/
     src/                     ← agent works here
 ```
 
-When done, the user reviews the branch diff, merges into the source
-branch, and removes the worktree.
+When done, `factory land` rebases the run branch onto the source branch,
+fast-forward merges, copies artifacts back, removes the worktree, and
+deletes the branch.
 
 ### Run state
 
@@ -94,7 +95,7 @@ branch, and removes the worktree.
 | `behaviors.diff.md` | New behaviors this run adds |
 | `approach.md` | Solution direction |
 | `plan.md` | Execution steps |
-| `status` | `briefed`, `behaviors-defined`, `approach-designed`, `planned`, `executing`, `rate-limited`, `needs-user`, `complete`, `failed` |
+| `status` | `briefed`, `behaviors-defined`, `approach-designed`, `planned`, `executing`, `rate-limited`, `needs-user`, `complete`, `failed`, `landed` |
 | `handoff.md` | Context for the next session |
 | `active-run` | Current run-id (in `.factory/`) |
 | `source-branch` | Branch the run forked from |

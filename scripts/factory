@@ -1302,7 +1302,10 @@ cmd_land() {
     for review_file in "${RUN_DIR}/reviews"/review-*.md; do
       [ -f "$review_file" ] || continue
       verdict="$(grep -i '^verdict:' "$review_file" 2>/dev/null | head -1 | sed 's/^[Vv]erdict:[[:space:]]*//' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
-      if [ -n "$verdict" ] && [ "$verdict" != "pass" ]; then
+      if [ -z "$verdict" ]; then
+        die "Cannot land run $RUN_ID: review $(basename "$review_file") has no verdict"
+      fi
+      if [ "$verdict" != "pass" ]; then
         die "Cannot land run $RUN_ID: review $(basename "$review_file") has verdict '$verdict'"
       fi
     done

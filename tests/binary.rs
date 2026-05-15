@@ -1579,3 +1579,65 @@ fn land_preserves_linear_history() {
         "should have no merge commits (linear history): {merge_log}"
     );
 }
+
+#[test]
+fn land_fails_on_rebase_conflict() {
+    let tmp = TempDir::new().unwrap();
+    let (main_dir, run_id) = setup_completed_run(&tmp);
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+
+    // Create a conflicting commit on main after the run branched
+    fs::write(main_dir.join("feature.txt"), "conflicting content").unwrap();
+    std::process::Command::new("git")
+        .args(["-C", &main_dir.to_string_lossy()])
+        .args(["add", "feature.txt"])
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["-C", &main_dir.to_string_lossy()])
+        .args(["commit", "-m", "conflicting commit on main"])
+        .output()
+        .unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["land", &run_id])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Rebase failed"));
+
+    // Verify repo is not left in a rebase state
+    let rebase_dir = main_dir.join(".git/rebase-merge");
+    assert!(
+        !rebase_dir.exists(),
+        "rebase should have been aborted on failure"
+    );
+
+    // Verify status was NOT changed to landed
+    let run_status = fs::read_to_string(run_dir.join("status")).unwrap();
+    assert_ne!(
+        run_status.trim(),
+        "landed",
+        "status should not be landed after failed rebase"
+    );
+}
+
+#[test]
+fn land_fails_when_worktree_file_missing() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let run_id = "20260515-land-no-wt";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "complete").unwrap();
+    fs::write(run_dir.join("source-branch"), "main").unwrap();
+    // Deliberately omit the worktree file
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["land", run_id])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("worktree"));
+}

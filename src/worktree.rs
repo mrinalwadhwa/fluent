@@ -3,6 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::run::RunStatus;
+
 /// Result of setting up a worktree for a run.
 pub struct WorktreeResult {
     pub worktree_dir: PathBuf,
@@ -222,7 +224,7 @@ pub fn land_run(source_root: &Path, run_id: &str, run_dir: &Path) -> Result<()> 
         .output()?;
 
     // Update status to landed
-    fs::write(run_dir.join("status"), "landed")?;
+    fs::write(run_dir.join("status"), RunStatus::Landed.as_str())?;
 
     Ok(())
 }

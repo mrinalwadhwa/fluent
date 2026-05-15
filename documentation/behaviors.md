@@ -221,6 +221,41 @@ THE SYSTEM SHALL find a run with status `needs-user` or `failed` and
 launch an interactive agent session for that run.
 Test: tests/behaviors/operations/test-resume-resolve.sh
 
+## Land
+
+WHEN `factory land` is invoked and the run status is not `complete`,
+THE SYSTEM SHALL refuse and exit non-zero.
+Test: tests/behaviors/operations/test-land.sh (land rejects non-complete run), tests/binary.rs (land_rejects_non_complete_run)
+
+WHEN `factory land` is invoked and any review has verdict `fail`,
+`uncertain`, or is missing a verdict line,
+THE SYSTEM SHALL refuse and exit non-zero.
+Test: tests/behaviors/operations/test-land.sh (land rejects fail review verdict, land rejects uncertain review verdict), tests/binary.rs (land_rejects_failed_reviews)
+
+WHEN `factory land` completes successfully,
+THE SYSTEM SHALL copy sessions/, sessions.log, reviews/, report.md, and
+status from the worktree back to the source run directory.
+Test: tests/behaviors/operations/test-land.sh (land copies artifacts from worktree), tests/binary.rs (land_completes_full_lifecycle)
+
+WHEN `factory land` completes successfully,
+THE SYSTEM SHALL remove the worktree, rebase the run branch onto the
+source branch, fast-forward merge into the source branch, and delete the
+run branch.
+Test: tests/behaviors/operations/test-land.sh (land removes worktree, land deletes run branch, land merges run commits into main), tests/binary.rs (land_completes_full_lifecycle, land_preserves_linear_history)
+
+WHEN `factory land` completes successfully,
+THE SYSTEM SHALL set the run status to `landed`.
+Test: tests/binary.rs (land_completes_full_lifecycle)
+
+WHEN `factory land` is invoked and the rebase has conflicts,
+THE SYSTEM SHALL abort the rebase, exit non-zero, and leave the
+repository in a clean state.
+Test: tests/behaviors/operations/test-land.sh (land fails on rebase conflict), tests/binary.rs (land_fails_on_rebase_conflict)
+
+WHEN `factory land` is invoked without a run ID,
+THE SYSTEM SHALL land the most recent complete run.
+Test: tests/behaviors/operations/test-land.sh, tests/binary.rs (land_resolves_most_recent_complete_run)
+
 ## Dashboard
 
 WHEN `factory dashboard` is invoked,
