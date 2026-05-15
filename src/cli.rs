@@ -66,6 +66,10 @@ pub enum Commands {
         /// Polling interval in seconds (default: 60)
         #[arg(default_value = "60")]
         interval: u64,
+
+        /// Exit after N seconds (0 = run forever)
+        #[arg(long, default_value = "0")]
+        timeout: u64,
     },
 
     /// Download completed workspace from S3 (fargate)

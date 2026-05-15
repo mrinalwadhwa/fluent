@@ -12,6 +12,7 @@ use crate::run::{Run, RunStatus};
 
 const MAX_SESSIONS: u32 = 50;
 const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+const MAX_REVIEW_ROUNDS: u32 = 10;
 
 /// Configuration for the session loop.
 pub struct SessionConfig {
@@ -188,6 +189,15 @@ pub fn run_session_loop(
                     "run-scoped"
                 };
                 review_round += 1;
+                if review_round > MAX_REVIEW_ROUNDS {
+                    eprintln!(
+                        "  Max review rounds ({}) reached — accepting current state.",
+                        MAX_REVIEW_ROUNDS
+                    );
+                    report::generate_report(run_dir, &run.id, session_count)?;
+                    eprintln!("\n  Run {} completed (review limit).", run.id);
+                    break;
+                }
                 if review::run_reviews(
                     run_dir,
                     &run.id,

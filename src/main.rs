@@ -83,8 +83,8 @@ fn main() -> Result<()> {
             let search_root = path.map(PathBuf::from).unwrap_or(cwd);
             cmd_status(&search_root)?;
         }
-        Some(Commands::Watch { interval }) => {
-            cmd_watch(&cwd, interval)?;
+        Some(Commands::Watch { interval, timeout }) => {
+            cmd_watch(&cwd, interval, timeout)?;
         }
         Some(Commands::Pull { run_id }) => {
             cmd_pull(&cwd, run_id.as_deref())?;
@@ -363,13 +363,32 @@ fn cmd_status(search_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_watch(search_root: &Path, interval: u64) -> Result<()> {
+fn cmd_watch(search_root: &Path, interval: u64, timeout: u64) -> Result<()> {
     eprintln!("  Watching factory runs (every {interval}s)...");
-    eprintln!("  Press Ctrl+C to stop.\n");
+    if timeout > 0 {
+        eprintln!("  Timeout: {timeout}s");
+    } else {
+        eprintln!("  Press Ctrl+C to stop.");
+    }
+    eprintln!();
 
+    let start = std::time::Instant::now();
+    let parent_pid = std::os::unix::process::parent_id();
     let mut last_output = String::new();
 
     loop {
+        // Exit if parent died (orphaned process — ppid changes)
+        if std::os::unix::process::parent_id() != parent_pid {
+            eprintln!("  Parent process exited — stopping watch.");
+            break;
+        }
+
+        // Exit if timeout reached
+        if timeout > 0 && start.elapsed().as_secs() >= timeout {
+            eprintln!("  Timeout reached — stopping watch.");
+            break;
+        }
+
         let runs = run::list_runs(search_root).unwrap_or_default();
         let mut current_output = String::new();
 
@@ -418,6 +437,8 @@ fn cmd_watch(search_root: &Path, interval: u64) -> Result<()> {
         println!("---");
         thread::sleep(Duration::from_secs(interval));
     }
+
+    Ok(())
 }
 
 fn cmd_pull(search_root: &Path, run_id: Option<&str>) -> Result<()> {

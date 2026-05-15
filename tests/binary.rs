@@ -747,24 +747,15 @@ fn watch_outputs_status_table() {
     fs::write(run_dir.join("runtime"), "local").unwrap();
     fs::write(run_dir.join("brief.md"), "# Brief\n\nWatch me\n").unwrap();
 
-    // Watch runs an infinite loop — spawn, wait briefly, then kill explicitly.
-    let bin = assert_cmd::cargo::cargo_bin("factory");
-    let mut child = std::process::Command::new(&bin)
+    factory_cmd()
         .current_dir(tmp.path())
-        .args(["watch", "2"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-
-    std::thread::sleep(std::time::Duration::from_secs(3));
-    child.kill().unwrap();
-    let output = child.wait_with_output().unwrap();
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("RUN"), "should print header");
-    assert!(stdout.contains("watch-test"), "should list the run");
-    assert!(stdout.contains("executing"), "should show status");
+        .args(["watch", "1", "--timeout", "2"])
+        .timeout(std::time::Duration::from_secs(10))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("RUN"))
+        .stdout(predicate::str::contains("watch-test"))
+        .stdout(predicate::str::contains("executing"));
 }
 
 #[test]
@@ -778,7 +769,7 @@ fn watch_detects_status_change_and_notifies() {
     let bin = assert_cmd::cargo::cargo_bin("factory");
     let mut child = std::process::Command::new(&bin)
         .current_dir(tmp.path())
-        .args(["watch", "1"])
+        .args(["watch", "1", "--timeout", "5"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -787,9 +778,7 @@ fn watch_detects_status_change_and_notifies() {
     // Change status after watch has polled at least once
     std::thread::sleep(std::time::Duration::from_millis(1500));
     fs::write(run_dir.join("status"), "complete").unwrap();
-    std::thread::sleep(std::time::Duration::from_secs(2));
 
-    child.kill().unwrap();
     let output = child.wait_with_output().unwrap();
 
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -797,6 +786,23 @@ fn watch_detects_status_change_and_notifies() {
         stderr.contains("[NOTIFY]") || stderr.contains("complete"),
         "should notify on status change: stderr={stderr}"
     );
+}
+
+#[test]
+fn watch_exits_on_timeout() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join(".factory/runs")).unwrap();
+
+    let start = std::time::Instant::now();
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["watch", "1", "--timeout", "2"])
+        .timeout(std::time::Duration::from_secs(10))
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Timeout reached"));
+    let elapsed = start.elapsed().as_secs();
+    assert!(elapsed < 5, "should exit promptly after timeout, took {elapsed}s");
 }
 
 // -------------------------------------------------------------------------
