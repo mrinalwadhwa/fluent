@@ -163,6 +163,22 @@ API endpoints only, (B) deny outbound except localhost with credential
 proxy mediating all API access, (C) read-only package caches. Option
 B aligns with isolation-by-impossibility principle.
 
+2026-05-15 — Dashboard auto-scroll should re-enable when the user
+scrolls to the bottom. Currently once disabled it stays off until
+the user switches agents or runs.
+
+2026-05-15 — Dashboard field refresh is inconsistent. Reviewer status
+colors don't always update, phase/status in header can be stale, run
+list statuses don't refresh. All displayed fields need to be
+re-evaluated on each poll cycle to reflect current state. The
+dashboard should make it obvious when something changes.
+
+2026-05-15 — The content resolver looks for sandbox profiles at
+sandbox/common.sb and sandbox/claude-code.sb but the files lived at
+~/.config/factory/common.sb (no sandbox/ subdirectory). Had to copy
+them to ~/.config/factory/sandbox/. The resolver path and the actual
+file location should match.
+
 2026-05-09 — The refine-writing skill at ~/Workspace/skills has
 reference files (ai_tells.md, benchmarks.md, sentence_corrections.md,
 structural_guidance.md) with much more detail than what was captured
