@@ -61,6 +61,7 @@ if [ -z "${PROMPTS_DIR:-}" ]; then
 fi
 
 FACTORY_SYSTEM_PROMPT="$(cat "${PROMPTS_DIR}/author.md")"
+FACTORY_MODEL="${FACTORY_MODEL:-claude-opus-4-6}"
 
 # Extract a named section from a prompt file.
 # Usage: prompt_section <file> <section-name>
@@ -372,6 +373,7 @@ run_single_reviewer() {
   set +e
   claude \
     --dangerously-skip-permissions \
+    --model "$FACTORY_MODEL" \
     --verbose --output-format stream-json \
     --append-system-prompt "$REVIEWER_SYSTEM" \
     -p "$REVIEWER_PROMPT" > "$REVIEWER_TRANSCRIPT"
@@ -834,6 +836,7 @@ cmd_run_local() {
     LAUNCH_PROMPT="$1"; shift
     sandbox-exec -f "$RENDERED_PROFILE" claude \
       --dangerously-skip-permissions \
+      --model "$FACTORY_MODEL" \
       --verbose --output-format stream-json \
       --append-system-prompt "$FACTORY_SYSTEM_PROMPT" \
       -p "$LAUNCH_PROMPT" \
@@ -878,6 +881,7 @@ cmd_run_bare() {
     LAUNCH_PROMPT="$1"; shift
     claude \
       --dangerously-skip-permissions \
+      --model "$FACTORY_MODEL" \
       --verbose --output-format stream-json \
       --append-system-prompt "$FACTORY_SYSTEM_PROMPT" \
       -p "$LAUNCH_PROMPT" \

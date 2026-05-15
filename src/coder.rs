@@ -4,6 +4,12 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+const DEFAULT_MODEL: &str = "claude-opus-4-6";
+
+fn model() -> String {
+    std::env::var("FACTORY_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string())
+}
+
 /// Trait abstracting the coding agent (currently Claude Code).
 pub trait Coder {
     /// Launch the coder with a prompt, system prompt, and working directory.
@@ -74,9 +80,8 @@ impl SandboxedClaudeCode {
             let mut cmd = Command::new("sandbox-exec");
             cmd.args(["-f", profile]);
             cmd.arg("claude");
-            // The sandbox is the security boundary — allow the agent
-            // to operate freely within it.
             cmd.arg("--dangerously-skip-permissions");
+            cmd.args(["--model", &model()]);
             cmd.current_dir(working_dir);
             cmd
         } else {
@@ -102,6 +107,7 @@ impl Coder for BareClaudeCode {
         let mut cmd = Command::new("claude");
         cmd.current_dir(working_dir);
         cmd.args(["--dangerously-skip-permissions"]);
+        cmd.args(["--model", &model()]);
         if transcript_file.is_some() {
             cmd.args(["--verbose", "--output-format", "stream-json"]);
         }
