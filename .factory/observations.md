@@ -155,6 +155,14 @@ only the run's agent session (requires Claude Code to expose per-
 session state), or filter to relevant content, or be dropped entirely
 until a proper mechanism exists.
 
+2026-05-15 — The sandbox allows outbound network, so a malicious
+package's postinstall script could exfiltrate workspace contents via
+HTTP. The sandbox prevents credential theft and privilege escalation
+but not data exfiltration. Options: (A) network proxy allowlisting
+API endpoints only, (B) deny outbound except localhost with credential
+proxy mediating all API access, (C) read-only package caches. Option
+B aligns with isolation-by-impossibility principle.
+
 2026-05-09 — The refine-writing skill at ~/Workspace/skills has
 reference files (ai_tells.md, benchmarks.md, sentence_corrections.md,
 structural_guidance.md) with much more detail than what was captured
