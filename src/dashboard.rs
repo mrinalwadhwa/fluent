@@ -321,6 +321,9 @@ fn run_event_loop(
                         view.clamp_scroll(fh);
                         let max = view.wrapped_total;
                         view.scroll_offset = (view.scroll_offset + 3).min(max);
+                        if view.scroll_offset >= max.saturating_sub(fh) {
+                            view.auto_scroll = true;
+                        }
                     }
                     _ => {}
                 }
@@ -384,6 +387,10 @@ fn run_event_loop(
                         let max = view.wrapped_total;
                         view.scroll_offset =
                             (view.scroll_offset + 1).min(max);
+                        // Re-enable auto-scroll when reaching the bottom
+                        if view.scroll_offset >= max.saturating_sub(fh) {
+                            view.auto_scroll = true;
+                        }
                     }
                     (_, KeyCode::Char('G')) | (_, KeyCode::End) => {
                         let view = app.current_view_mut();
@@ -409,6 +416,9 @@ fn run_event_loop(
                         let max = view.wrapped_total;
                         view.scroll_offset =
                             (view.scroll_offset + 20).min(max);
+                        if view.scroll_offset >= max.saturating_sub(fh) {
+                            view.auto_scroll = true;
+                        }
                     }
                     _ => {}
                 }
