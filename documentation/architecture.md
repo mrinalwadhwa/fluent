@@ -164,8 +164,9 @@ Reviewers examine either the run's changes or the full codebase:
   runs.
 
 When a run-scoped review triggers but no code has changed (the diff is
-empty), the review phase is skipped entirely. This avoids wasting
-reviewer sessions on runs that only modified run state files.
+empty) and no explicit scope file was provided, the review phase is
+skipped entirely. This avoids wasting reviewer sessions on runs that
+only modified run state files.
 
 ## Agents
 

@@ -202,16 +202,17 @@ Test: tests/behaviors/operations/test-review-phase.sh (reviewer fail returns non
 
 WHEN `factory run` is invoked and the run's mode is `review`,
 THE SYSTEM SHALL run reviewers with full-codebase scope and produce
-findings only. No author session is launched.
-Test: tests/behaviors/operations/test-review-phase.sh (review mode produces findings only)
+findings. No author session is launched; the run completes after
+one review round.
+Test: tests/behaviors/operations/test-review-phase.sh (review run all pass completes without author)
 
 WHEN `factory run` is invoked and the run has a `scope` file,
 THE SYSTEM SHALL copy the scope file into the worktree.
 Test: src/worktree.rs (test_worktree_copies_scope_file)
 
-WHEN reviewers all pass on a review run's initial review,
-THE SYSTEM SHALL set status to `complete` and stop the loop without
-launching the author.
+WHEN a review run completes its single review round,
+THE SYSTEM SHALL set status to `complete` and stop without launching
+the author, regardless of reviewer verdict.
 Test: tests/behaviors/operations/test-review-phase.sh (review run all pass completes without author)
 
 ## Watch timeout
@@ -222,7 +223,8 @@ Test: tests/behaviors/operations/test-watch-timeout.sh (watch exits on timeout),
 
 ## Skip reviews when no changes
 
-WHEN the review phase triggers but the run has no code changes (empty diff),
+WHEN the review phase triggers but the run has no code changes (empty diff)
+and no explicit scope file was provided,
 THE SYSTEM SHALL skip the review phase entirely and accept the run as
 complete.
 Test: tests/binary.rs (run_skips_reviews_when_no_code_changed)
