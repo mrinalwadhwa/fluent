@@ -9,6 +9,7 @@
 # Covers:
 #   - land refuses to land a run with status other than 'complete'
 #   - land refuses to land when any review verdict is not 'pass'
+#   - land allows landing when no reviews exist
 #   - land copies sessions/, sessions.log, reviews/, report.md, status back
 #   - land removes the worktree
 #   - land deletes the run's branch
@@ -424,6 +425,59 @@ test_shell_land_full_workflow() {
   return $RESULT
 }
 
+test_land_allows_no_reviews() {
+  setup_test_project
+
+  RUN_ID="run-no-reviews"
+
+  # Create run branch with a commit
+  git checkout -b "$RUN_ID" > /dev/null 2>&1
+  echo "run change" >> README.md
+  git add README.md
+  git commit -m "run commit for ${RUN_ID}" > /dev/null 2>&1
+  git checkout main > /dev/null 2>&1
+
+  WT_PATH="${TEST_DIR}/${RUN_ID}-wt"
+  git worktree add "$WT_PATH" "$RUN_ID" > /dev/null 2>&1
+
+  # Source run directory — no reviews/ directory at all
+  mkdir -p ".factory/runs/${RUN_ID}"
+  printf 'complete' > ".factory/runs/${RUN_ID}/status"
+  printf 'No reviews test' > ".factory/runs/${RUN_ID}/brief.md"
+  printf 'main' > ".factory/runs/${RUN_ID}/source-branch"
+  printf '%s' "$WT_PATH" > ".factory/runs/${RUN_ID}/worktree"
+  printf '%s' "$RUN_ID" > ".factory/active-run"
+
+  # Worktree artifacts — also no reviews
+  mkdir -p "${WT_PATH}/.factory/runs/${RUN_ID}/sessions/session-1"
+  printf 'complete' > "${WT_PATH}/.factory/runs/${RUN_ID}/status"
+  printf 'Session log' > "${WT_PATH}/.factory/runs/${RUN_ID}/sessions.log"
+  printf '{"event":"done"}' > "${WT_PATH}/.factory/runs/${RUN_ID}/sessions/session-1/transcript.jsonl"
+  printf 'Report' > "${WT_PATH}/.factory/runs/${RUN_ID}/report.md"
+
+  set +e
+  OUTPUT="$("$BINARY" land "$RUN_ID" 2>&1)"
+  EXIT_CODE=$?
+  set -e
+
+  RESULT=0
+  if [ "$EXIT_CODE" -ne 0 ]; then
+    printf '    FAIL: land should succeed when no reviews exist, exit code %d\n' "$EXIT_CODE"
+    printf '    Output: %s\n' "$OUTPUT"
+    RESULT=1
+  fi
+
+  # Verify it actually landed — main should contain the run commit
+  LOG="$(git log --oneline)"
+  if ! echo "$LOG" | grep -q "run commit for ${RUN_ID}"; then
+    printf '    FAIL: main should contain run commit after landing with no reviews\n'
+    RESULT=1
+  fi
+
+  cleanup_test_project
+  return $RESULT
+}
+
 # -------------------------------------------------------------------------
 # Run all tests
 # -------------------------------------------------------------------------
@@ -438,6 +492,7 @@ run_test "land removes worktree" test_land_removes_worktree
 run_test "land deletes run branch" test_land_deletes_branch
 run_test "land merges run commits into main" test_land_merges_to_main
 run_test "land fails on rebase conflict" test_land_fails_on_rebase_conflict
+run_test "land allows run with no reviews" test_land_allows_no_reviews
 run_test "shell: land rejects non-complete run (exit code)" test_shell_land_rejects_non_complete_status
 run_test "shell: land full workflow" test_shell_land_full_workflow
 

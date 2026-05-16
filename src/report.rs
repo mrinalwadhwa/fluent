@@ -195,6 +195,7 @@ mod tests {
         let report = fs::read_to_string(run_dir.join("report.md")).unwrap();
         assert!(report.contains("Run: test-run"));
         assert!(report.contains("Status: complete"));
+        assert!(report.contains("Mode: full"));
         assert!(report.contains("Sessions: 3"));
         assert!(report.contains("Do the thing"));
     }
