@@ -744,6 +744,13 @@ run_session_loop() {
 
     case "$STATUS" in
       complete)
+        REVIEW_ROUND=$((REVIEW_ROUND + 1))
+        if [ "$REVIEW_ROUND" -gt 10 ]; then
+          printf '  Max review rounds (10) reached — accepting current state.\n'
+          generate_report
+          printf '\n  Run %s completed (review limit).\n' "$RUN_ID"
+          break
+        fi
         REVIEW_SCOPE="run-scoped"
         [ "$RUN_MODE" = "review" ] && REVIEW_SCOPE="full-codebase"
         if run_reviews "$RUN_DIR" "$RUN_ID" "$REVIEWER_FILTER" "$REVIEW_SCOPE"; then
@@ -806,8 +813,8 @@ cmd_run_local() {
   resolve_run_id "$SOURCE_ROOT"
   setup_run_worktree "$SOURCE_ROOT"
 
-  # Record backend in source run dir
-  printf 'local' > "${RUN_DIR}/backend"
+  # Record runtime in source run dir
+  printf 'local' > "${RUN_DIR}/runtime"
   printf '%s' "$$" > "${RUN_DIR}/handle"
 
   # Sandbox root must include the git directory — worktrees reference
@@ -968,8 +975,8 @@ cmd_run_fargate() {
 
   printf '  Task: %s\n' "$TASK_ARN"
 
-  # Record backend and handle in source run dir
-  printf 'fargate' > "${RUN_DIR}/backend"
+  # Record runtime and handle in source run dir
+  printf 'fargate' > "${RUN_DIR}/runtime"
   printf '%s' "$TASK_ARN" > "${RUN_DIR}/handle"
 
   printf '  Run is executing on Fargate.\n'
@@ -1171,17 +1178,17 @@ cmd_status() {
     set -a; . "$FARGATE_CFG"; set +a
   fi
 
-  printf '%-20s %-16s %-10s %s\n' "RUN" "STATUS" "BACKEND" "BRIEF"
+  printf '%-20s %-16s %-10s %s\n' "RUN" "STATUS" "RUNTIME" "BRIEF"
   printf '%-20s %-16s %-10s %s\n' "---" "------" "-------" "-----"
 
   for dir in "$FACTORY_RUNS"/*/; do
     [ -d "$dir" ] || continue
     run_id="$(basename "$dir")"
     status="$(cat "${dir}status" 2>/dev/null || echo "-")"
-    backend="$(cat "${dir}backend" 2>/dev/null || echo "-")"
+    runtime="$(cat "${dir}runtime" 2>/dev/null || echo "-")"
 
     # For Fargate runs, check remote state
-    if [ "$backend" = "fargate" ] && [ -n "${FACTORY_CLUSTER:-}" ]; then
+    if [ "$runtime" = "fargate" ] && [ -n "${FACTORY_CLUSTER:-}" ]; then
       handle="$(cat "${dir}handle" 2>/dev/null || true)"
       if [ -n "$handle" ]; then
         # Check if completed workspace exists in S3
@@ -1216,7 +1223,7 @@ cmd_status() {
       [ -z "$brief" ] && brief="(brief exists)"
     fi
 
-    printf '%-20s %-16s %-10s %s\n' "$run_id" "$status" "$backend" "$brief"
+    printf '%-20s %-16s %-10s %s\n' "$run_id" "$status" "$runtime" "$brief"
   done
 }
 

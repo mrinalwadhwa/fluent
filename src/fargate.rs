@@ -8,12 +8,12 @@ use crate::run;
 use crate::worktree;
 
 pub struct FargateConfig {
-    pub cluster: String,
-    pub run_task: String,
-    pub s3_bucket: String,
-    pub subnets: String,
-    pub security_group: String,
-    pub region: String,
+    cluster: String,
+    run_task: String,
+    s3_bucket: String,
+    subnets: String,
+    security_group: String,
+    region: String,
 }
 
 pub fn load_config() -> Result<FargateConfig> {

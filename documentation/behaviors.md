@@ -230,7 +230,8 @@ Test: tests/binary.rs (run_skips_reviews_when_no_code_changed)
 ## Review round limit
 
 IF the review-fix cycle has run 10 times,
-THEN THE SYSTEM SHALL set status to `failed` and stop the loop.
+THEN THE SYSTEM SHALL accept the current state, generate a report, and
+complete the run.
 Test: src/session.rs (review round limit)
 
 ## Parent death detection

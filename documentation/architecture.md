@@ -319,9 +319,10 @@ factory/main/
     run.rs                   ← Run state, resolution, status
     session.rs               ← Session loop orchestration
     review.rs                ← Review loop, verdict parsing
-    os.rs                    ← Os trait, Seatbelt sandbox rendering
+    os.rs                    ← Seatbelt sandbox rendering, prerequisites
     worktree.rs              ← Git worktree operations
     report.rs                ← Report generation
+    fargate.rs               ← Fargate launch, pull, shell
     dashboard.rs             ← Live TUI for run activity
     transcript.rs            ← Parse stream-json transcripts incrementally
   documentation/

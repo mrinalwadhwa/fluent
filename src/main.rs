@@ -356,7 +356,19 @@ fn cmd_watch(search_root: &Path, interval: u64, timeout: u64) -> Result<()> {
         last_output.clone_from(&current_output);
         print!("{current_output}");
         println!("---");
-        thread::sleep(Duration::from_secs(interval));
+
+        // Sleep in 1-second chunks to allow prompt timeout/ppid checks
+        for _ in 0..interval {
+            thread::sleep(Duration::from_secs(1));
+            if timeout > 0 && start.elapsed().as_secs() >= timeout {
+                eprintln!("  Timeout reached — stopping watch.");
+                return Ok(());
+            }
+            if std::os::unix::process::parent_id() != parent_pid {
+                eprintln!("  Parent process exited — stopping watch.");
+                return Ok(());
+            }
+        }
     }
 
     Ok(())

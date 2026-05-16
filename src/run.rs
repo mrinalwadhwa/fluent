@@ -451,6 +451,9 @@ pub fn resolve_resumable_run(search_root: &Path, explicit_id: Option<&str>) -> R
     }
 
     if runs_dir.is_dir() {
+        let mut needs_user: Option<Run> = None;
+        let mut failed: Option<Run> = None;
+
         for entry in fs::read_dir(&runs_dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -461,11 +464,21 @@ pub fn resolve_resumable_run(search_root: &Path, explicit_id: Option<&str>) -> R
             if status_path.exists() {
                 let s = fs::read_to_string(&status_path).unwrap_or_default();
                 let status = RunStatus::parse(&s);
-                if status.is_resumable() {
-                    let id = entry.file_name().to_string_lossy().to_string();
-                    return Ok(Run { id, dir: path });
+                let id = entry.file_name().to_string_lossy().to_string();
+                match status {
+                    RunStatus::NeedsUser if needs_user.is_none() => {
+                        needs_user = Some(Run { id, dir: path });
+                    }
+                    RunStatus::Failed if failed.is_none() => {
+                        failed = Some(Run { id, dir: path });
+                    }
+                    _ => {}
                 }
             }
+        }
+
+        if let Some(run) = needs_user.or(failed) {
+            return Ok(run);
         }
     }
 
@@ -1158,5 +1171,121 @@ mod tests {
         assert!(body.contains("run-z: complete"));
         assert!(!body.contains("sessions"));
         assert!(body.contains("reviews passed"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_resumable_prefers_needs_user_over_failed() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-failed", "failed");
+        create_run(tmp.path(), "run-needs-user", "needs-user");
+
+        let run = resolve_resumable_run(tmp.path(), None).unwrap();
+        assert_eq!(run.id, "run-needs-user");
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_landable_explicit_id_complete() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-land", "complete");
+
+        let run = resolve_landable_run(tmp.path(), Some("run-land")).unwrap();
+        assert_eq!(run.id, "run-land");
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_landable_explicit_id_not_complete() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-exec", "executing");
+
+        let result = resolve_landable_run(tmp.path(), Some("run-exec"));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("executing"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_landable_explicit_id_missing() {
+        let tmp = setup_test_project();
+
+        let result = resolve_landable_run(tmp.path(), Some("nonexistent"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_landable_scan_finds_complete() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-old", "complete");
+        create_run(tmp.path(), "run-active", "executing");
+
+        let run = resolve_landable_run(tmp.path(), None).unwrap();
+        assert_eq!(run.id, "run-old");
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_landable_scan_no_complete() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-exec", "executing");
+        create_run(tmp.path(), "run-fail", "failed");
+
+        let result = resolve_landable_run(tmp.path(), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No complete run"));
+    }
+
+    #[test]
+    fn test_effective_reviews_passed_source_fails() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-erf", "complete");
+        let run_dir = tmp.path().join(".factory/runs/run-erf");
+        fs::create_dir_all(run_dir.join("reviews")).unwrap();
+        fs::write(run_dir.join("reviews/review-tests.md"), "Verdict: fail").unwrap();
+
+        let run = Run { id: "run-erf".into(), dir: run_dir };
+        assert_eq!(run.effective_reviews_passed(), Some(false));
+    }
+
+    #[test]
+    fn test_effective_reviews_passed_source_passes() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-erp", "complete");
+        let run_dir = tmp.path().join(".factory/runs/run-erp");
+        fs::create_dir_all(run_dir.join("reviews")).unwrap();
+        fs::write(run_dir.join("reviews/review-tests.md"), "Verdict: pass").unwrap();
+
+        let run = Run { id: "run-erp".into(), dir: run_dir };
+        assert_eq!(run.effective_reviews_passed(), Some(true));
+    }
+
+    #[test]
+    fn test_effective_reviews_passed_falls_through_to_worktree() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-ewt", "complete");
+        let run_dir = tmp.path().join(".factory/runs/run-ewt");
+
+        // Set up a worktree with review files
+        let wt_dir = tmp.path().join("worktree");
+        let wt_run_dir = wt_dir.join(".factory/runs/run-ewt");
+        fs::create_dir_all(wt_run_dir.join("reviews")).unwrap();
+        fs::write(wt_run_dir.join("reviews/review-arch.md"), "Verdict: pass").unwrap();
+        fs::write(run_dir.join("worktree"), wt_dir.to_string_lossy().as_ref()).unwrap();
+
+        let run = Run { id: "run-ewt".into(), dir: run_dir };
+        assert_eq!(run.effective_reviews_passed(), Some(true));
+    }
+
+    #[test]
+    fn test_effective_reviews_passed_none_when_no_reviews_anywhere() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-enr", "complete");
+        let run_dir = tmp.path().join(".factory/runs/run-enr");
+
+        let run = Run { id: "run-enr".into(), dir: run_dir };
+        assert_eq!(run.effective_reviews_passed(), None);
     }
 }
