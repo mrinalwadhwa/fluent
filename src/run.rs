@@ -74,6 +74,42 @@ impl fmt::Display for RunStatus {
     }
 }
 
+/// What kind of run this is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunMode {
+    /// Full lifecycle — author executes, reviewers check changes.
+    Full,
+    /// Review-only — reviewers produce findings, no author session.
+    Review,
+}
+
+impl RunMode {
+    pub fn parse(s: &str) -> Self {
+        match s.trim() {
+            "review" => Self::Review,
+            _ => Self::Full,
+        }
+    }
+}
+
+/// How broadly reviewers should examine the codebase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewScope {
+    /// Review only the run's changes.
+    Changes,
+    /// Review the entire codebase.
+    Full,
+}
+
+impl ReviewScope {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Changes => "changes",
+            Self::Full => "full",
+        }
+    }
+}
+
 /// A resolved run with its ID, directory, and metadata.
 #[derive(Debug, Clone)]
 pub struct Run {
@@ -122,10 +158,10 @@ impl Run {
         }
     }
 
-    pub fn mode(&self) -> String {
+    pub fn mode(&self) -> RunMode {
         fs::read_to_string(self.dir.join("mode"))
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| "build".into())
+            .map(|s| RunMode::parse(&s))
+            .unwrap_or(RunMode::Full)
     }
 
     pub fn reviewer_filter(&self) -> String {
@@ -796,10 +832,19 @@ mod tests {
             dir: run_dir,
         };
         assert_eq!(run.runtime(), "fargate");
-        assert_eq!(run.mode(), "review");
+        assert_eq!(run.mode(), RunMode::Review);
         assert_eq!(run.reviewer_filter(), "review-tests");
         assert_eq!(run.scope(), Some("src/".into()));
         assert_eq!(run.handle(), Some("abc123".into()));
+    }
+
+    #[test]
+    fn test_mode_defaults_to_full() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "mode-default", "planned");
+        let run_dir = tmp.path().join(".factory/runs/mode-default");
+        let run = Run { id: "mode-default".into(), dir: run_dir };
+        assert_eq!(run.mode(), RunMode::Full);
     }
 
     #[test]

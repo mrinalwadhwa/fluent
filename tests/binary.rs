@@ -1346,7 +1346,7 @@ exit 0
     fs::create_dir_all(&prompts_dir).unwrap();
     fs::write(
         prompts_dir.join("review-tests.md"),
-        "[system]\nYou are a test reviewer.\n[run-scoped]\nReview the changes.\n[full-codebase]\nReview everything.\n",
+        "[system]\nYou are a test reviewer.\n[changes]\nReview the changes.\n[full]\nReview everything.\n",
     )
     .unwrap();
 
@@ -1404,7 +1404,7 @@ exit 0
     fs::create_dir_all(&prompts_dir).unwrap();
     fs::write(
         prompts_dir.join("review-tests.md"),
-        "[system]\nReviewer.\n[run-scoped]\nReview.\n[full-codebase]\nReview all.\n",
+        "[system]\nReviewer.\n[changes]\nReview.\n[full]\nReview all.\n",
     )
     .unwrap();
 

@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::content::{prompt_section, ContentResolver};
-use crate::run::project_root_from_run_dir;
+use crate::run::{project_root_from_run_dir, ReviewScope};
 
 /// Reviewer names in execution order.
 pub const REVIEWERS: &[&str] = &[
@@ -130,7 +130,7 @@ pub fn run_reviews(
     run_dir: &Path,
     run_id: &str,
     reviewer_filter: &str,
-    review_mode: &str,
+    review_scope: ReviewScope,
     resolver: &ContentResolver,
     review_round: u32,
 ) -> Result<bool> {
@@ -149,7 +149,8 @@ pub fn run_reviews(
     };
 
     eprintln!(
-        "\n  === Review phase (run: {run_id}, mode: {review_mode}) ===\n"
+        "\n  === Review phase (run: {run_id}, scope: {}) ===\n",
+        review_scope.as_str()
     );
 
     let mut handles = Vec::new();
@@ -173,11 +174,7 @@ pub fn run_reviews(
         let system = prompt_section(&prompt_content, "system")
             .replace("{{RUN_ID}}", run_id);
 
-        let section = if review_mode == "full-codebase" {
-            "full-codebase"
-        } else {
-            "run-scoped"
-        };
+        let section = review_scope.as_str();
         let prompt = format!(
             "{}{}",
             prompt_section(&prompt_content, section).replace("{{RUN_ID}}", run_id),

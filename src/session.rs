@@ -8,7 +8,7 @@ use crate::coder::Coder;
 use crate::content::ContentResolver;
 use crate::report;
 use crate::review;
-use crate::run::{Run, RunStatus};
+use crate::run::{ReviewScope, Run, RunMode, RunStatus};
 
 const MAX_SESSIONS: u32 = 50;
 const MAX_CONSECUTIVE_FAILURES: u32 = 3;
@@ -69,21 +69,19 @@ pub fn run_session_loop(
         run.set_status(&RunStatus::Executing)?;
     }
 
-    // For review runs, start by running reviewers
+    // For review runs, run reviewers and stop.
     let mut review_round: u32 = 0;
-    let initial_prompt = if run_mode == "review" {
-        eprintln!("  Mode: review (reviewers run first)");
-        let review_scope = "full-codebase";
+    let initial_prompt = if run_mode == RunMode::Review {
+        eprintln!("  Mode: review (reviewers only)");
         review_round += 1;
         review::run_reviews(
             run_dir,
             &run.id,
             &reviewer_filter,
-            review_scope,
+            ReviewScope::Full,
             &config.resolver,
             review_round,
         )?;
-        // Review-only: produce findings and stop. No author session.
         run.set_status(&RunStatus::Complete)?;
         report::generate_report(run_dir, &run.id, 0)?;
         eprintln!("\n  Run {} completed (review only).", run.id);
@@ -177,16 +175,11 @@ pub fn run_session_loop(
 
         match status {
             RunStatus::Complete => {
-                let review_scope = if run_mode == "review" {
-                    "full-codebase"
-                } else {
-                    "run-scoped"
-                };
+                let review_scope = ReviewScope::Changes;
 
                 // Skip run-scoped reviews when no code changed and no
                 // explicit scope was requested by the user.
-                if review_scope == "run-scoped"
-                    && !run_dir.join("scope").exists()
+                if config.run.scope().is_none()
                     && !has_changes(&config.working_dir, run_dir)
                 {
                     eprintln!("  No code changes — skipping reviews.");
@@ -273,6 +266,9 @@ pub fn run_session_loop(
 }
 
 /// Check whether the worktree has commits beyond the source branch.
+/// Only detects committed differences — uncommitted or staged changes are
+/// invisible. This is intentional: agents are expected to commit before
+/// writing status "complete".
 fn has_changes(working_dir: &Path, run_dir: &Path) -> bool {
     let source_branch = match fs::read_to_string(run_dir.join("source-branch")) {
         Ok(b) => b.trim().to_string(),
