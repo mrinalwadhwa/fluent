@@ -75,25 +75,19 @@ pub fn run_session_loop(
         eprintln!("  Mode: review (reviewers run first)");
         let review_scope = "full-codebase";
         review_round += 1;
-        if !review::run_reviews(
+        review::run_reviews(
             run_dir,
             &run.id,
             &reviewer_filter,
             review_scope,
             &config.resolver,
             review_round,
-        )? {
-            format!(
-                "This is a review run. Reviewers have produced findings. Read the review artifacts at .factory/runs/{}/reviews/ and address the findings. When done, write status 'complete'.",
-                run.id
-            )
-        } else {
-            eprintln!("\n  All reviewers passed — nothing to fix.");
-            run.set_status(&RunStatus::Complete)?;
-            report::generate_report(run_dir, &run.id, 0)?;
-            eprintln!("\n  Run {} completed.", run.id);
-            return Ok(());
-        }
+        )?;
+        // Review-only: produce findings and stop. No author session.
+        run.set_status(&RunStatus::Complete)?;
+        report::generate_report(run_dir, &run.id, 0)?;
+        eprintln!("\n  Run {} completed (review only).", run.id);
+        return Ok(());
     } else if run.has_handoff() {
         format!(
             "Read the handoff at .factory/runs/{}/handoff.md and continue working.",
