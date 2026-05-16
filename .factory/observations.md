@@ -69,3 +69,23 @@ reference files (ai_tells.md, benchmarks.md, sentence_corrections.md,
 structural_guidance.md) with much more detail than what was captured
 into write-documentation. May want to pull more in later, especially
 the sentence corrections as concrete examples.
+
+2026-05-16 — Interactive skills (capture-brief, define-behaviors,
+design-approach, plan-execution) have no test scenarios. These are
+non-trivial skills that drive the planning phase. Testing them requires
+designing scenario-based tests that simulate the interview flow and
+verify outputs. Tracked in behaviors.md as "(needs scenarios)" but
+warrants its own run.
+
+2026-05-16 — The notification system (macOS osascript notifications
+from factory watch) needs a purpose review. What value do notifications
+add to the workflow? When are they useful vs noise? Should they be
+richer (actionable, with run context) or replaced by something else
+(dashboard focus, sound, status bar)?
+
+2026-05-16 — sessions.log only records author session duration, not
+review phase duration or wall-clock timestamps. A run that takes 2
+hours of wall clock shows 56 minutes of author time because the 7
+review rounds (35 reviewer sessions) aren't logged. Add ISO
+timestamps and review-phase entries to sessions.log so total run
+time and time-per-phase are visible.
