@@ -108,7 +108,7 @@ For each gap, record:
 
 ### Phase 5 — Produce verdict and findings
 
-Write the review artifact to `.factory/runs/[run-id]/reviews/documentation.md`.
+Write the review artifact to `.factory/runs/[run-id]/reviews/review-documentation.md`.
 
 Determine the verdict:
 - **pass** — no findings that warrant changes

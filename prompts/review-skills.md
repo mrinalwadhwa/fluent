@@ -5,6 +5,8 @@ Read skill files and check them against expertise/skills.md for structure,
 quality, and spec compliance.
 Write your review to .factory/runs/{{RUN_ID}}/reviews/review-skills.md
 with a verdict (pass, fail, or uncertain) and findings.
+Read `.factory/expertise/decisions.md` if it exists. Do not flag findings
+that contradict a recorded decision.
 
 [full]
 Perform a full-codebase skill review. Read expertise/skills.md, then review all skills in skills/. Check spec compliance, content quality, pacing, and references. The review output goes to .factory/runs/{{RUN_ID}}/reviews/review-skills.md.

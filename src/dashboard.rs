@@ -13,6 +13,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::review;
 use crate::run::{self, Run, RunStatus};
 use crate::transcript::{self, Event, TranscriptReader};
 
@@ -115,21 +116,7 @@ impl RunView {
                             let review_file =
                                 reviews_dir.join(format!("review-{reviewer}.md"));
                             if review_file.exists() {
-                                let verdict = std::fs::read_to_string(&review_file)
-                                    .ok()
-                                    .and_then(|c| {
-                                        c.lines()
-                                            .find(|l| l.to_lowercase().contains("verdict"))
-                                            .map(|l| l.to_string())
-                                    })
-                                    .unwrap_or_default();
-                                if verdict.to_lowercase().contains("pass") {
-                                    agent.status = "pass".into();
-                                } else if verdict.to_lowercase().contains("fail") {
-                                    agent.status = "fail".into();
-                                } else if verdict.to_lowercase().contains("uncertain") {
-                                    agent.status = "uncertain".into();
-                                }
+                                agent.status = verdict_status(&review_file);
                             } else {
                                 agent.status = "running".into();
                             }
@@ -141,21 +128,7 @@ impl RunView {
                                 let review_file =
                                     reviews_dir.join(format!("review-{reviewer}.md"));
                                 if review_file.exists() && agent.status == "running" {
-                                    let verdict = std::fs::read_to_string(&review_file)
-                                        .ok()
-                                        .and_then(|c| {
-                                            c.lines()
-                                                .find(|l| l.to_lowercase().contains("verdict"))
-                                                .map(|l| l.to_string())
-                                        })
-                                        .unwrap_or_default();
-                                    if verdict.to_lowercase().contains("pass") {
-                                        agent.status = "pass".into();
-                                    } else if verdict.to_lowercase().contains("fail") {
-                                        agent.status = "fail".into();
-                                    } else if verdict.to_lowercase().contains("uncertain") {
-                                        agent.status = "uncertain".into();
-                                    }
+                                    agent.status = verdict_status(&review_file);
                                 }
                             }
                         }
@@ -439,6 +412,15 @@ fn run_event_loop(
     }
 
     Ok(())
+}
+
+fn verdict_status(review_file: &Path) -> String {
+    let content = std::fs::read_to_string(review_file).unwrap_or_default();
+    match review::extract_verdict(&content) {
+        review::Verdict::Pass => "pass".into(),
+        review::Verdict::Fail => "fail".into(),
+        review::Verdict::Uncertain => "uncertain".into(),
+    }
 }
 
 fn draw_ui(f: &mut ratatui::Frame, app: &mut App) {

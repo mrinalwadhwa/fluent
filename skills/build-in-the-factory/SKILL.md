@@ -167,13 +167,19 @@ Run state lives in `.factory/runs/[run-id]/`:
 | `behaviors.diff.md` | New behaviors this run adds (from define-behaviors) |
 | `approach.md` | Solution direction (from design-approach) |
 | `plan.md` | Execution steps (from plan-execution) |
-| `status` | `briefed`, `behaviors-defined`, `approach-designed`, `planned`, `executing`, `rate-limited`, `needs-user`, `complete`, `failed` |
+| `status` | `briefed`, `behaviors-defined`, `approach-designed`, `planned`, `executing`, `rate-limited`, `needs-user`, `complete`, `failed`, `landed` |
 | `handoff.md` | Context for the next session |
 | `active-run` | Current run-id (in `.factory/`) |
-| `source-branch` | Branch the run was forked from |
+| `source-branch` | Branch the run forked from |
 | `worktree` | Path to the run's git worktree |
-| `backend` | `local` or `fargate` |
-| `handle` | Backend-specific identifier |
+| `runtime` | `local` or `fargate` |
+| `handle` | Runtime-specific identifier |
+| `mode` | `review` or absent (defaults to full lifecycle) |
+| `reviewers` | Comma-separated reviewer filter (optional) |
+| `scope` | Review focus targeting (optional) |
+| `sessions/` | Per-session transcript directories |
+| `sessions.log` | Per-session metadata log |
+| `report.md` | Generated run report |
 | `reviews/` | Review artifacts |
 
 Each run executes in its own git worktree (a sibling of the source
@@ -188,7 +194,7 @@ branch, and removes the worktree.
 ```sh
 factory run                          # start the local session loop
 factory run --run-id <id>            # target a specific run
-factory run --backend fargate        # run on Fargate
+factory run --runtime fargate        # run on Fargate
 factory status                       # show all runs and their state
 factory watch                        # poll status, notify on change
 factory pull                         # download completed workspace from S3
@@ -198,3 +204,16 @@ factory resume                       # restart a paused run
 
 For interactive stages, do not call these commands. Follow the skills
 directly in your session.
+
+---
+
+## Gotchas
+
+- **Don't re-read full history when resuming.** Read `handoff.md` only.
+  The handoff contains everything you need to continue. Re-reading the
+  full run history wastes context and risks confusion from stale state.
+
+- **Don't call `factory run` from within an interactive session.** The
+  factory command launches a session loop that manages your process.
+  Calling it from inside a session creates a nested loop. If you need
+  to start a run, tell the user to run it from their terminal.

@@ -95,6 +95,30 @@ test_resume_skips_planned() {
   return $RESULT
 }
 
+test_resume_prefers_needs_user_over_failed() {
+  setup_test_project
+
+  mkdir -p ".factory/runs/run-failed"
+  printf 'failed' > ".factory/runs/run-failed/status"
+  printf 'Failed run' > ".factory/runs/run-failed/brief.md"
+
+  mkdir -p ".factory/runs/run-needs-user"
+  printf 'needs-user' > ".factory/runs/run-needs-user/status"
+  printf 'Paused run' > ".factory/runs/run-needs-user/brief.md"
+
+  # Resume should prefer needs-user over failed
+  OUTPUT="$("$FACTORY" resume 2>&1 | head -5 || true)"
+
+  RESULT=0
+  if echo "$OUTPUT" | grep -q "Resuming run run-failed"; then
+    printf '    FAIL: resume should prefer needs-user over failed\n'
+    RESULT=1
+  fi
+
+  cleanup_test_project
+  return $RESULT
+}
+
 # -------------------------------------------------------------------------
 # Run all tests
 # -------------------------------------------------------------------------
@@ -103,6 +127,7 @@ printf 'test-resume-edges\n\n'
 
 run_test "resume with no runs" test_resume_with_no_runs
 run_test "resume skips planned runs" test_resume_skips_planned
+run_test "resume prefers needs-user over failed" test_resume_prefers_needs_user_over_failed
 
 printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
 

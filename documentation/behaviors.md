@@ -201,9 +201,9 @@ Test: tests/behaviors/operations/test-review-phase.sh (reviewer fail returns non
 ## Review runs
 
 WHEN `factory run` is invoked and the run's mode is `review`,
-THE SYSTEM SHALL run reviewers first (before the author) with full-codebase
-scope, then pass findings to the author.
-Test: tests/behaviors/operations/test-review-phase.sh (review run findings launch author)
+THE SYSTEM SHALL run reviewers with full-codebase scope and produce
+findings only. No author session is launched.
+Test: tests/behaviors/operations/test-review-phase.sh (review mode produces findings only)
 
 WHEN `factory run` is invoked and the run has a `scope` file,
 THE SYSTEM SHALL copy the scope file into the worktree.
@@ -213,6 +213,32 @@ WHEN reviewers all pass on a review run's initial review,
 THE SYSTEM SHALL set status to `complete` and stop the loop without
 launching the author.
 Test: tests/behaviors/operations/test-review-phase.sh (review run all pass completes without author)
+
+## Watch timeout
+
+WHEN `factory watch --timeout N` is invoked,
+THE SYSTEM SHALL stop polling after N seconds.
+Test: tests/behaviors/operations/test-watch-and-status-edges.sh (watch exits on timeout)
+
+## Skip reviews when no changes
+
+WHEN the review phase triggers but the run has no code changes (empty diff),
+THE SYSTEM SHALL skip the review phase entirely and accept the run as
+complete.
+Test: tests/binary.rs (run_skips_reviews_when_no_code_changed)
+
+## Review round limit
+
+IF the review-fix cycle has run 10 times,
+THEN THE SYSTEM SHALL set status to `failed` and stop the loop.
+Test: src/session.rs (review round limit)
+
+## Parent death detection
+
+WHILE `factory watch` is running,
+IF the parent process exits (ppid changes),
+THEN THE SYSTEM SHALL stop polling and exit.
+Test: tests/behaviors/operations/test-watch-and-status-edges.sh (watch detects parent exit)
 
 ## Resume
 

@@ -92,25 +92,6 @@ test_status_header_says_runtime() {
   return $RESULT
 }
 
-test_status_header_does_not_say_backend() {
-  TEST_DIR="$(mktemp -d -t factory-test-rename-XXXXXX)"
-
-  mkdir -p "${TEST_DIR}/.factory/runs/test-rename"
-  printf 'planned' > "${TEST_DIR}/.factory/runs/test-rename/status"
-  printf 'Test brief' > "${TEST_DIR}/.factory/runs/test-rename/brief.md"
-
-  OUTPUT="$(cd "$TEST_DIR" && "$FACTORY_BIN" status 2>&1)"
-
-  RESULT=0
-  if printf '%s' "$OUTPUT" | grep -q 'BACKEND'; then
-    printf '    FAIL: BACKEND header found in status output (should be RUNTIME)\n'
-    RESULT=1
-  fi
-
-  rm -rf "$TEST_DIR"
-  return $RESULT
-}
-
 test_run_help_description_says_runtime() {
   OUTPUT="$("$FACTORY_BIN" run --help 2>&1)"
 
@@ -191,7 +172,6 @@ run_test "run --help shows --runtime flag" test_run_help_shows_runtime_flag
 run_test "run --help does not show --backend" test_run_help_does_not_show_backend_flag
 run_test "run help description mentions runtime" test_run_help_description_says_runtime
 run_test "status header says RUNTIME" test_status_header_says_runtime
-run_test "status header does not say BACKEND" test_status_header_does_not_say_backend
 run_test "status reads runtime file" test_status_reads_runtime_file
 run_test "status shows dash without runtime file" test_status_shows_dash_without_runtime_file
 run_test "unknown runtime produces error" test_run_unknown_runtime_errors

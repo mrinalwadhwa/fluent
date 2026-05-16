@@ -102,7 +102,7 @@ fast-forward merges, deletes the branch, and sets the status to `landed`.
 | `worktree` | Path to the run's worktree |
 | `runtime` | `local` or `fargate` |
 | `handle` | Runtime-specific identifier |
-| `mode` | `build` (default) or `review` |
+| `mode` | `review` or absent (defaults to full lifecycle) |
 | `reviewers` | Comma-separated reviewer filter (optional) |
 | `scope` | Review focus targeting (optional) |
 | `sessions.log` | Per-session metadata (`session=N exit=CODE duration=Xs status=STATUS`) |
@@ -129,7 +129,11 @@ while run is not complete:
     author works until context exhaustion or completion
     author writes handoff.md + status file
     write session metadata to sessions.log
-    if terminal status: stop
+    if status is complete:
+        run review phase (all reviewers in parallel)
+        if all pass: stop
+        else: set status to executing, restart with findings
+    if terminal status (needs-user, failed): stop
     if executing: restart
     if rate-limited: wait 5 minutes, restart
 ```
@@ -153,6 +157,19 @@ The transcript is the stream-json verbose output captured during the
 session. Global `~/.claude` state (history, memory, todos, plans) is not
 copied into session directories.
 
+### Review scope
+
+Reviewers examine either the run's changes or the full codebase:
+
+- `ReviewScope::Changes` — review only the diff produced by this run.
+  Used in the normal post-execution review phase.
+- `ReviewScope::Full` — review the entire codebase. Used by review-mode
+  runs.
+
+When a run-scoped review triggers but no code has changed (the diff is
+empty), the review phase is skipped entirely. This avoids wasting
+reviewer sessions on runs that only modified run state files.
+
 ## Agents
 
 ### Author
@@ -162,27 +179,19 @@ than drifting.
 
 ### Reviewers
 
-Evaluate the author's output. Five reviewers:
+Evaluate the author's output. Five reviewers run in parallel, each
+following its own skill:
 
-**Documentation reviewer** (code-aware): reads code and docs, checks
-accuracy, writing quality, and completeness
-(`skills/review-documentation/SKILL.md`).
-
-**Behavior reviewer** (user-facing): observes behavior only, cannot see
-code — evaluates the system from the outside, as a user would
-(`skills/review-behaviors/SKILL.md`).
-
-**Architecture reviewer** (code-aware): reads code and architectural
-expertise, evaluates structural decisions against principles
-(`skills/review-architecture/SKILL.md`).
-
-**Skill reviewer** (code-aware): reads skill files and checks them
-against `expertise/skills.md` for structure, quality, spec compliance,
-and writing quality (`skills/review-skills/SKILL.md`).
-
-**Test reviewer** (code-aware): reads tests and evaluates coverage,
-isolation, structure, and adherence to testing principles
-(`skills/review-tests/SKILL.md`).
+- Documentation (code-aware) — reads code and docs, checks accuracy,
+  writing quality, and completeness.
+- Behaviors (user-facing) — observes behavior only, cannot see code.
+  Evaluates the system from the outside, as a user would.
+- Architecture (code-aware) — reads code and architectural expertise,
+  evaluates structural decisions against principles.
+- Skills (code-aware) — reads skill files and checks them against
+  `expertise/skills.md` for structure, quality, and spec compliance.
+- Tests (code-aware) — reads tests and evaluates coverage, isolation,
+  structure, and adherence to testing principles.
 
 Review verdicts: **pass** / **uncertain** (ask user) / **fail** (send
 back to author with findings).
@@ -203,10 +212,9 @@ verdict:
 - Any fail or uncertain: status resets to `executing`, the author
   restarts with instructions to read and address the review findings.
 
-**Review runs** (mode=review) invert the entry point. Reviewers run
-first with full-codebase scope. If they find issues, the author starts
-with the findings. If all reviewers pass, the run completes without
-launching the author.
+**Review runs** (mode=review) produce findings only. Reviewers run
+with full-codebase scope. Their findings are written to the reviews/
+directory and the run completes. No author session is launched.
 
 ### Resume
 

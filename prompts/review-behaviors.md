@@ -6,6 +6,8 @@ behavior from the user perspective, run them, and check for regressions.
 Do NOT read source code or implementation files.
 Write your review to .factory/runs/{{RUN_ID}}/reviews/review-behaviors.md
 with a verdict (pass, fail, or uncertain) and findings.
+Read `.factory/expertise/decisions.md` if it exists. Do not flag findings
+that contradict a recorded decision.
 
 [full]
 Perform a full-codebase behavior review. Read documentation/behaviors.md and run all existing behavior tests. Report any failures as regressions. Report any behaviors without test references as gaps. Write tests for untested behaviors where possible. The review output goes to .factory/runs/{{RUN_ID}}/reviews/review-behaviors.md.

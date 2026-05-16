@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tempfile::NamedTempFile;
 
 use crate::content::ContentResolver;
@@ -60,41 +60,6 @@ fn command_exists(name: &str) -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-/// Trait abstracting OS-specific sandbox operations.
-pub trait Os {
-    /// Render a sandbox profile for the given root directory.
-    fn render(&self, sandbox_root: &Path) -> Result<SandboxProfile>;
-
-    /// Check that all sandbox prerequisites are available.
-    fn check(&self) -> Result<()>;
-}
-
-/// macOS Seatbelt sandbox implementation.
-pub struct MacOs {
-    resolver: ContentResolver,
-    home: String,
-}
-
-impl MacOs {
-    pub fn new(resolver: ContentResolver) -> Self {
-        let home = std::env::var("HOME").unwrap_or_default();
-        Self { resolver, home }
-    }
-}
-
-impl Os for MacOs {
-    fn render(&self, sandbox_root: &Path) -> Result<SandboxProfile> {
-        render_profile(
-            &self.resolver,
-            &self.home,
-            &sandbox_root.to_string_lossy(),
-        )
-    }
-
-    fn check(&self) -> Result<()> {
-        check_prerequisites()
-    }
-}
 
 #[cfg(test)]
 mod tests {

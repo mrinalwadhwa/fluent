@@ -5,6 +5,8 @@ Read the code and architectural expertise. Evaluate structural decisions
 against the principles. Check at whatever scale is relevant.
 Write your review to .factory/runs/{{RUN_ID}}/reviews/review-architecture.md
 with a verdict (pass, fail, or uncertain) and findings.
+Read `.factory/expertise/decisions.md` if it exists. Do not flag findings
+that contradict a recorded decision.
 
 [full]
 Perform a full-codebase architecture review. Read expertise/architecture.md and documentation/architecture.md. Evaluate the overall system structure against the architectural principles. Check all viewpoints. The review output goes to .factory/runs/{{RUN_ID}}/reviews/review-architecture.md.

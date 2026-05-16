@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+use crate::review;
 use crate::run::project_root_from_run_dir;
 
 /// Generate a run report at `<run_dir>/report.md`.
@@ -55,19 +56,18 @@ pub fn generate_report(run_dir: &Path, run_id: &str, session_count: u32) -> Resu
                     continue;
                 }
                 has_reviews = true;
-                let verdict = fs::read_to_string(&path)
+                let verdict_str = fs::read_to_string(&path)
                     .ok()
-                    .and_then(|c| {
-                        c.lines()
-                            .find(|l| l.to_lowercase().starts_with("verdict:"))
-                            .map(|l| {
-                                l.split_once(':')
-                                    .map(|(_, v)| v.trim().to_string())
-                                    .unwrap_or_else(|| "no verdict".into())
-                            })
+                    .map(|c| {
+                        let v = review::extract_verdict(&c);
+                        match v {
+                            review::Verdict::Pass => "pass".to_string(),
+                            review::Verdict::Fail => "fail".to_string(),
+                            review::Verdict::Uncertain => "uncertain".to_string(),
+                        }
                     })
                     .unwrap_or_else(|| "no verdict".into());
-                report.push_str(&format!("- **{name}**: {verdict}\n"));
+                report.push_str(&format!("- **{name}**: {verdict_str}\n"));
             }
         }
         if !has_reviews {

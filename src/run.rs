@@ -3,6 +3,8 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::review;
+
 /// Status values a run can have.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunStatus {
@@ -213,22 +215,8 @@ impl Run {
             if name_str.starts_with("review-") && name_str.ends_with(".md") {
                 found_any = true;
                 let content = fs::read_to_string(entry.path()).unwrap_or_default();
-                let mut has_verdict = false;
-                for line in content.lines() {
-                    let lower = line.to_lowercase();
-                    if lower.starts_with("verdict:") {
-                        has_verdict = true;
-                        let value = lower
-                            .strip_prefix("verdict:")
-                            .unwrap_or("")
-                            .trim()
-                            .to_string();
-                        if value != "pass" {
-                            return Some(false);
-                        }
-                    }
-                }
-                if !has_verdict {
+                let verdict = review::extract_verdict(&content);
+                if !verdict.is_passing() {
                     return Some(false);
                 }
             }
@@ -347,8 +335,8 @@ impl Run {
 
     /// Check whether reviews passed, checking both source and worktree.
     ///
-    /// If the source run directory has no reviews, falls back to the
-    /// worktree run directory.
+    /// Returns `None` when neither location has review files (no reviews
+    /// ran). Returns `Some(true)` only when reviews exist and all pass.
     pub fn effective_reviews_passed(&self) -> Option<bool> {
         match self.reviews_passed() {
             Some(false) => Some(false),
@@ -356,10 +344,7 @@ impl Run {
             None => {
                 if let Some(wt_run_dir) = self.worktree_run_dir() {
                     let wt_run = Run { id: self.id.clone(), dir: wt_run_dir };
-                    match wt_run.reviews_passed() {
-                        Some(false) => Some(false),
-                        _ => Some(true),
-                    }
+                    wt_run.reviews_passed()
                 } else {
                     None
                 }
@@ -509,6 +494,50 @@ fn scan_active_run(runs_dir: &Path) -> Result<Option<Run>> {
     }
 
     Ok(found)
+}
+
+/// Resolve a run that can be landed (status = complete).
+///
+/// Checks both the source run directory and the worktree run directory
+/// for status, since the agent writes status to the worktree.
+pub fn resolve_landable_run(search_root: &Path, run_id: Option<&str>) -> Result<Run> {
+    let runs_dir = search_root.join(".factory/runs");
+
+    if let Some(id) = run_id {
+        let dir = runs_dir.join(id);
+        if !dir.is_dir() {
+            bail!("Run directory not found: {}", dir.display());
+        }
+        let run = Run { id: id.to_string(), dir };
+        if !run.is_complete()? {
+            let status = run.effective_status()?;
+            bail!("Run {} has status '{}', expected 'complete'", id, status);
+        }
+        return Ok(run);
+    }
+
+    // Scan for the most recent complete run
+    if runs_dir.is_dir() {
+        let mut candidates: Vec<Run> = Vec::new();
+        for entry in fs::read_dir(&runs_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let id = entry.file_name().to_string_lossy().to_string();
+            let run = Run { id, dir: path };
+            if run.is_complete()? {
+                candidates.push(run);
+            }
+        }
+        candidates.sort_by(|a, b| b.id.cmp(&a.id));
+        if let Some(run) = candidates.into_iter().next() {
+            return Ok(run);
+        }
+    }
+
+    bail!("No complete run found to land.")
 }
 
 /// List all runs in a search root.

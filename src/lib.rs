@@ -3,6 +3,7 @@ pub mod cli;
 pub mod content;
 pub mod credential;
 pub mod dashboard;
+pub mod fargate;
 pub mod report;
 pub mod review;
 pub mod run;

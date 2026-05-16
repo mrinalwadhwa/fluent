@@ -9,7 +9,7 @@
 # Covers:
 #   - Worktree copies all run state files (brief.md, behaviors.diff.md,
 #     approach.md, plan.md, status)
-#   - Status display includes backend and brief summary
+#   - Status display includes runtime and brief summary
 #   - Run-id scan ignores completed runs
 #   - Worktree records source-branch and worktree path
 #
@@ -178,18 +178,18 @@ test_resolve_run_id_scan_ignores_complete() {
   return $RESULT
 }
 
-test_status_display_includes_backend() {
+test_status_display_includes_runtime() {
   setup_test_project
 
-  mkdir -p ".factory/runs/run-backend-test"
-  printf 'executing' > ".factory/runs/run-backend-test/status"
-  printf 'Testing backend display' > ".factory/runs/run-backend-test/brief.md"
-  printf 'local' > ".factory/runs/run-backend-test/backend"
+  mkdir -p ".factory/runs/run-runtime-test"
+  printf 'executing' > ".factory/runs/run-runtime-test/status"
+  printf 'Testing runtime display' > ".factory/runs/run-runtime-test/brief.md"
+  printf 'local' > ".factory/runs/run-runtime-test/runtime"
 
   OUTPUT="$(cmd_status "$(pwd)" 2>&1 || true)"
 
   RESULT=0
-  assert_output_contains "$OUTPUT" "run-backend-test" || RESULT=1
+  assert_output_contains "$OUTPUT" "run-runtime-test" || RESULT=1
   assert_output_contains "$OUTPUT" "executing" || RESULT=1
   assert_output_contains "$OUTPUT" "local" || RESULT=1
 
@@ -203,7 +203,7 @@ test_status_display_includes_brief_summary() {
   mkdir -p ".factory/runs/run-brief-test"
   printf 'planned' > ".factory/runs/run-brief-test/status"
   printf 'Add a timeout flag to the factory command' > ".factory/runs/run-brief-test/brief.md"
-  printf 'local' > ".factory/runs/run-brief-test/backend"
+  printf 'local' > ".factory/runs/run-brief-test/runtime"
 
   OUTPUT="$(cmd_status "$(pwd)" 2>&1 || true)"
 
@@ -225,7 +225,7 @@ printf 'test-run-state\n\n'
 run_test "worktree copies all run state files" test_worktree_copies_all_run_state
 run_test "worktree records source-branch and path" test_worktree_records_source_branch_and_path
 run_test "run-id scan ignores completed runs" test_resolve_run_id_scan_ignores_complete
-run_test "status display includes backend" test_status_display_includes_backend
+run_test "status display includes runtime" test_status_display_includes_runtime
 run_test "status display includes brief summary" test_status_display_includes_brief_summary
 
 printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
