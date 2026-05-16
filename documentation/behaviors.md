@@ -218,7 +218,7 @@ Test: tests/behaviors/operations/test-review-phase.sh (review run all pass compl
 
 WHEN `factory watch --timeout N` is invoked,
 THE SYSTEM SHALL stop polling after N seconds.
-Test: tests/behaviors/operations/test-watch-and-status-edges.sh (watch exits on timeout)
+Test: tests/behaviors/operations/test-watch-timeout.sh (watch exits on timeout), tests/binary.rs (watch_exits_on_timeout)
 
 ## Skip reviews when no changes
 
@@ -239,7 +239,7 @@ Test: src/session.rs (review round limit)
 WHILE `factory watch` is running,
 IF the parent process exits (ppid changes),
 THEN THE SYSTEM SHALL stop polling and exit.
-Test: tests/behaviors/operations/test-watch-and-status-edges.sh (watch detects parent exit)
+Test: tests/behaviors/operations/test-watch-timeout.sh (watch detects parent exit)
 
 ## Resume
 

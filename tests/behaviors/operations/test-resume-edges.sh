@@ -110,8 +110,8 @@ test_resume_prefers_needs_user_over_failed() {
   OUTPUT="$("$FACTORY" resume 2>&1 | head -5 || true)"
 
   RESULT=0
-  if echo "$OUTPUT" | grep -q "Resuming run run-failed"; then
-    printf '    FAIL: resume should prefer needs-user over failed\n'
+  if ! echo "$OUTPUT" | grep -q "Resuming run run-needs-user"; then
+    printf '    FAIL: resume should select run-needs-user, got: %s\n' "$OUTPUT"
     RESULT=1
   fi
 

@@ -97,9 +97,10 @@ test_review_round_limit_completes() {
     printf '    FAIL: expected status "complete" after review round limit, got "%s"\n' "$FINAL_STATUS"
     RESULT=1
   fi
-  # Author should have been called up to 10 times (one per cycle), not more
-  if [ "$AUTHOR_CALLS" -gt 10 ]; then
-    printf '    FAIL: launch_author called %d times (limit is 10)\n' "$AUTHOR_CALLS"
+  # 1 initial author call + 10 review-fix cycles = 11 author calls total.
+  # The limit fires on the 11th completion (REVIEW_ROUND > 10).
+  if [ "$AUTHOR_CALLS" -ne 11 ]; then
+    printf '    FAIL: launch_author called %d times, expected 11 (1 initial + 10 fix cycles)\n' "$AUTHOR_CALLS"
     RESULT=1
   fi
 

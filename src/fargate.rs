@@ -7,7 +7,7 @@ use crate::credential;
 use crate::run;
 use crate::worktree;
 
-pub struct FargateConfig {
+struct FargateConfig {
     cluster: String,
     run_task: String,
     s3_bucket: String,
@@ -16,7 +16,7 @@ pub struct FargateConfig {
     region: String,
 }
 
-pub fn load_config() -> Result<FargateConfig> {
+fn load_config() -> Result<FargateConfig> {
     let home = std::env::var("HOME").unwrap_or_default();
     let cfg_path = format!("{home}/.config/factory/fargate.env");
 

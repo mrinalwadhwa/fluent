@@ -65,11 +65,20 @@ test_dashboard_handles_invalid_run_id() {
   printf 'Test brief' > "${TEST_DIR}/.factory/runs/valid-run/brief.md"
 
   # Request a non-existent run-id — should not crash
-  OUTPUT="$(cd "$TEST_DIR" && "$FACTORY_BIN" dashboard --run-id nonexistent 2>&1 || true)"
+  set +e
+  OUTPUT="$(cd "$TEST_DIR" && "$FACTORY_BIN" dashboard --run-id nonexistent 2>&1)"
+  EXIT_CODE=$?
+  set -e
 
   RESULT=0
   if echo "$OUTPUT" | grep -qi "panic"; then
     printf '    FAIL: dashboard panicked with invalid run-id\n'
+    RESULT=1
+  fi
+  # Should exit without crashing — exit code 0 or 1 are both acceptable,
+  # but a signal-killed process (128+) indicates a crash
+  if [ "$EXIT_CODE" -gt 128 ]; then
+    printf '    FAIL: dashboard crashed with signal %d\n' $((EXIT_CODE - 128))
     RESULT=1
   fi
 
@@ -83,15 +92,15 @@ test_dashboard_does_not_modify_run_state() {
   printf 'executing' > "${TEST_DIR}/.factory/runs/state-check/status"
   printf 'Test brief' > "${TEST_DIR}/.factory/runs/state-check/brief.md"
 
-  # Record file state before
-  BEFORE="$(find "${TEST_DIR}/.factory" -type f -exec md5 {} \; | sort)"
+  # Record file state before (use shasum for cross-platform portability)
+  BEFORE="$(find "${TEST_DIR}/.factory" -type f -exec shasum {} \; | sort)"
 
   # Run dashboard briefly (it will fail without a terminal, but should not
   # modify state regardless)
   cd "$TEST_DIR" && timeout 1 "$FACTORY_BIN" dashboard 2>/dev/null || true
 
   # Record file state after
-  AFTER="$(find "${TEST_DIR}/.factory" -type f -exec md5 {} \; | sort)"
+  AFTER="$(find "${TEST_DIR}/.factory" -type f -exec shasum {} \; | sort)"
 
   RESULT=0
   if [ "$BEFORE" != "$AFTER" ]; then

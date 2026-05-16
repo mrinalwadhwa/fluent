@@ -24,15 +24,11 @@ from intent capture through execution and review across multiple sessions.
 └─────────────────────────────────────────────────┘
 ```
 
-**Skills** describe procedures. They don't know about sandboxes, sessions,
-or runtimes.
-
-**The factory command** handles the operational envelope: sandbox setup,
-credential injection, session continuity, worktree creation, and remote
-execution.
-
-**The build-in-the-factory skill** bridges the two. An agent reads it and
-can drive the entire workflow.
+Skills describe procedures. They don't know about sandboxes, sessions,
+or runtimes. The factory command handles the operational envelope:
+sandbox setup, credential injection, session continuity, worktree
+creation, and remote execution. The build-in-the-factory skill bridges
+the two — an agent reads it and can drive the entire workflow.
 
 ## Workflow
 
@@ -379,16 +375,16 @@ factory/main/
 
 Three types of content, each with a different purpose:
 
-**Skills** are procedures — step-by-step instructions an agent follows.
+Skills are procedures — step-by-step instructions an agent follows.
 They live in `skills/` and follow the Agent Skills spec.
 
-**Expertise** is reference material for decision-making — principles,
+Expertise is reference material for decision-making — principles,
 patterns, conventions that inform choices within a procedure. Factory-level
 expertise lives in `expertise/` and applies to all projects. Project-level
 expertise accumulates in `.factory/expertise/` as patterns are observed
 across runs.
 
-**Documentation** describes the system as-built — what it does, how it's
+Documentation describes the system as-built — what it does, how it's
 structured, what behaviors are specified. `architecture.md` and
 `behaviors.md` describe what IS.
 

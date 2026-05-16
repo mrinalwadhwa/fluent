@@ -184,8 +184,9 @@ Run state lives in `.factory/runs/[run-id]/`:
 
 Each run executes in its own git worktree (a sibling of the source
 worktree). The factory command creates the worktree at launch time.
-When done, the user reviews the branch diff, merges into the source
-branch, and removes the worktree.
+When done, `factory land` rebases the worktree branch onto the source
+branch, fast-forward merges, captures artifacts, and removes the
+worktree.
 
 ---
 

@@ -410,9 +410,9 @@ run_reviews() {
 
   mkdir -p "${REVIEW_RUN_DIR}/reviews"
 
-  # Archive previous round's reviews if they exist
-  REVIEW_ROUND=$((${REVIEW_ROUND:-0} + 1))
-  if [ "$REVIEW_ROUND" -gt 1 ]; then
+  # Archive previous round's reviews if they exist.
+  # REVIEW_ROUND is incremented by run_session_loop before calling us.
+  if [ "${REVIEW_ROUND:-0}" -gt 1 ]; then
     PREV_ROUND=$((REVIEW_ROUND - 1))
     ARCHIVE_DIR="${REVIEW_RUN_DIR}/reviews/round-${PREV_ROUND}"
     mkdir -p "$ARCHIVE_DIR"
@@ -1237,19 +1237,23 @@ cmd_resume() {
   FACTORY_RUNS="${SEARCH_ROOT}/.factory/runs"
 
   if [ -z "$RUN_ID" ]; then
-    # Find a run that needs the user or failed
+    # Find a run that needs the user or failed (prefer needs-user)
+    NEEDS_USER_ID=""
+    FAILED_ID=""
     if [ -d "$FACTORY_RUNS" ]; then
       for dir in "$FACTORY_RUNS"/*/; do
         [ -d "$dir" ] || continue
         if [ -f "${dir}status" ]; then
           s="$(cat "${dir}status" 2>/dev/null || true)"
-          if [ "$s" = "needs-user" ] || [ "$s" = "failed" ]; then
-            RUN_ID="$(basename "$dir")"
-            break
+          if [ "$s" = "needs-user" ] && [ -z "$NEEDS_USER_ID" ]; then
+            NEEDS_USER_ID="$(basename "$dir")"
+          elif [ "$s" = "failed" ] && [ -z "$FAILED_ID" ]; then
+            FAILED_ID="$(basename "$dir")"
           fi
         fi
       done
     fi
+    RUN_ID="${NEEDS_USER_ID:-$FAILED_ID}"
     [ -n "$RUN_ID" ] || die "No run found needing resume."
   fi
 
