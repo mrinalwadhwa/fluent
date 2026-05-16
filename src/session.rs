@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
@@ -188,6 +188,19 @@ pub fn run_session_loop(
                 } else {
                     "run-scoped"
                 };
+
+                // Skip run-scoped reviews when no code changed and no
+                // explicit scope was requested by the user.
+                if review_scope == "run-scoped"
+                    && !run_dir.join("scope").exists()
+                    && !has_changes(&config.working_dir, run_dir)
+                {
+                    eprintln!("  No code changes — skipping reviews.");
+                    report::generate_report(run_dir, &run.id, session_count)?;
+                    eprintln!("\n  Run {} completed.", run.id);
+                    break;
+                }
+
                 review_round += 1;
                 if review_round > MAX_REVIEW_ROUNDS {
                     eprintln!(
@@ -265,6 +278,21 @@ pub fn run_session_loop(
     Ok(())
 }
 
+/// Check whether the worktree has commits beyond the source branch.
+fn has_changes(working_dir: &Path, run_dir: &Path) -> bool {
+    let source_branch = match fs::read_to_string(run_dir.join("source-branch")) {
+        Ok(b) => b.trim().to_string(),
+        Err(_) => return true, // assume changes if we can't tell
+    };
+    let output = std::process::Command::new("git")
+        .args(["diff", "--quiet", &format!("{source_branch}..HEAD")])
+        .current_dir(working_dir)
+        .status();
+    match output {
+        Ok(status) => !status.success(), // exit 1 = has differences
+        Err(_) => true,                  // assume changes if git fails
+    }
+}
 
 #[cfg(test)]
 mod tests {

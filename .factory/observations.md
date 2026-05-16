@@ -33,11 +33,6 @@ unknown — could be rate limits, container resource exhaustion, or
 something else. Needs investigation with reviewer transcripts next
 time it happens.
 
-2026-05-13 — Run-scoped reviewers on trivial runs (e.g. a test brief
-that just writes complete) still find issues with the broader codebase.
-The scope should be narrower — if the run produced no code changes,
-reviewers should pass immediately or be skipped.
-
 2026-05-15 — The sandbox allows outbound network, so a malicious
 package's postinstall script could exfiltrate workspace contents via
 HTTP. The sandbox prevents credential theft and privilege escalation

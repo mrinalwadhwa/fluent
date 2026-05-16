@@ -1328,7 +1328,10 @@ if [ "$IS_REVIEWER" = 1 ]; then
   exit 0
 fi
 
-# Author call
+# Author call — make a code change so reviews aren't skipped
+echo "new code" > "$WORKING_DIR/feature.txt"
+git -C "$WORKING_DIR" add feature.txt
+git -C "$WORKING_DIR" commit -m "Add feature"
 echo '{"type":"result"}'
 echo "complete" > "$RUN_DIR/status"
 exit 0
@@ -1369,6 +1372,60 @@ exit 0
     assert!(
         round1_dir.join("review-tests.md").exists(),
         "round-1 should contain review-tests.md"
+    );
+}
+
+#[test]
+fn run_skips_reviews_when_no_code_changed() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let run_id = "20260515-skip-review";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("brief.md"), "# Brief\n\nTrivial run\n").unwrap();
+
+    // Mock claude that writes complete without making any commits
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+WORKING_DIR="$(pwd)"
+RUN_ID=$(ls "$WORKING_DIR/.factory/runs/" 2>/dev/null | head -1)
+echo '{"type":"result"}'
+echo "complete" > "$WORKING_DIR/.factory/runs/$RUN_ID/status"
+exit 0
+"##,
+    );
+
+    // Create review prompt so reviewers would run if not skipped
+    let prompts_dir = main_dir.join("prompts");
+    fs::create_dir_all(&prompts_dir).unwrap();
+    fs::write(
+        prompts_dir.join("review-tests.md"),
+        "[system]\nReviewer.\n[run-scoped]\nReview.\n[full-codebase]\nReview all.\n",
+    )
+    .unwrap();
+
+    let _guard = worktree_guard(&main_dir, run_id);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["run", "--no-sandbox", "--run-id", run_id])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("No code changes"))
+        .stderr(predicate::str::contains("skipping reviews"));
+
+    // Reviews directory should not have any review artifacts
+    let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
+    let wt_run_dir = Path::new(wt_path_str.trim())
+        .join(format!(".factory/runs/{run_id}"));
+    assert!(
+        !wt_run_dir.join("reviews/review-tests.md").exists(),
+        "reviewer should not have run"
     );
 }
 
