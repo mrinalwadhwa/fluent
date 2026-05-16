@@ -208,8 +208,8 @@ verdict:
 - Any fail or uncertain: status resets to `executing`, the author
   restarts with instructions to read and address the review findings.
 
-**Review runs** (mode=review) produce findings only. Reviewers run
-with full-codebase scope. Their findings are written to the reviews/
+Review runs (mode=review) produce findings only. Reviewers run with
+full-codebase scope. Their findings are written to the reviews/
 directory and the run completes. No author session is launched.
 
 ### Resume
@@ -253,7 +253,7 @@ factory shell ───────────► (ECS Exec into container)
 factory pull ────────────► (download from S3 into worktree)
 ```
 
-**IAM permissions** (minimal):
+#### IAM permissions (minimal)
 
 | Permission | Scope | Purpose |
 |---|---|---|
@@ -266,7 +266,7 @@ Six actions total. No ECS, IAM, STS, or other AWS permissions. The
 container can be connected to (ECS Exec) but cannot connect out to other
 containers via SSM.
 
-**Infrastructure** (CloudFormation):
+#### Infrastructure (CloudFormation)
 
 - 1 ECR repository (`factory/run`)
 - 1 ECS cluster
@@ -373,24 +373,17 @@ factory/main/
 
 ## Skills, expertise, and documentation
 
-Three types of content, each with a different purpose:
+Three types of content serve different purposes. Procedures live in
+`skills/` as step-by-step instructions an agent follows (following the
+Agent Skills spec). Reference material for decision-making — principles,
+patterns, conventions — lives in `expertise/` at the factory level and
+in `.factory/expertise/` at the project level. System documentation
+(`architecture.md`, `behaviors.md`) describes what IS: structure,
+behaviors, and contracts.
 
-Skills are procedures — step-by-step instructions an agent follows.
-They live in `skills/` and follow the Agent Skills spec.
-
-Expertise is reference material for decision-making — principles,
-patterns, conventions that inform choices within a procedure. Factory-level
-expertise lives in `expertise/` and applies to all projects. Project-level
-expertise accumulates in `.factory/expertise/` as patterns are observed
-across runs.
-
-Documentation describes the system as-built — what it does, how it's
-structured, what behaviors are specified. `architecture.md` and
-`behaviors.md` describe what IS.
-
-The lifecycle: observations are captured during usage. Some become runs
-that build or improve things. Patterns observed across runs accumulate
-as project expertise in `.factory/expertise/`.
+Observations captured during usage become runs that build or improve
+things. Patterns observed across runs accumulate as project expertise
+in `.factory/expertise/`.
 
 ## Content resolution
 

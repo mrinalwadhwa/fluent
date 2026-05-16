@@ -66,7 +66,7 @@ test_dashboard_handles_invalid_run_id() {
 
   # Request a non-existent run-id — should not crash
   set +e
-  OUTPUT="$(cd "$TEST_DIR" && "$FACTORY_BIN" dashboard --run-id nonexistent 2>&1)"
+  OUTPUT="$(cd "$TEST_DIR" && timeout 2 "$FACTORY_BIN" dashboard --run-id nonexistent 2>&1)"
   EXIT_CODE=$?
   set -e
 
@@ -75,10 +75,16 @@ test_dashboard_handles_invalid_run_id() {
     printf '    FAIL: dashboard panicked with invalid run-id\n'
     RESULT=1
   fi
-  # Should exit without crashing — exit code 0 or 1 are both acceptable,
-  # but a signal-killed process (128+) indicates a crash
+  # Signal-killed process (128+) indicates a crash
   if [ "$EXIT_CODE" -gt 128 ]; then
     printf '    FAIL: dashboard crashed with signal %d\n' $((EXIT_CODE - 128))
+    RESULT=1
+  fi
+  # Exit code 2+ (excluding timeout=124) suggests an unhandled error rather
+  # than graceful fallback. Acceptable codes: 0 (ok), 1 (minor error),
+  # 124 (timeout killed it — expected for TUI without terminal).
+  if [ "$EXIT_CODE" -gt 1 ] && [ "$EXIT_CODE" -ne 124 ] && [ "$EXIT_CODE" -le 128 ]; then
+    printf '    FAIL: dashboard exited with unexpected code %d\n' "$EXIT_CODE"
     RESULT=1
   fi
 

@@ -152,6 +152,34 @@ test_watch_displays_run_status() {
   return $RESULT
 }
 
+test_watch_notifies_once_on_status_change() {
+  TEST_DIR="$(mktemp -d -t factory-test-watch-XXXXXX)"
+
+  mkdir -p "${TEST_DIR}/.factory/runs/run-dedup"
+  printf 'executing' > "${TEST_DIR}/.factory/runs/run-dedup/status"
+  printf 'Dedup test' > "${TEST_DIR}/.factory/runs/run-dedup/brief.md"
+
+  # Change status to complete after 2 seconds so watch detects the
+  # transition. Watch polls every 1s and runs for 6s total, giving
+  # multiple cycles after the change where dedup should suppress repeats.
+  (sleep 2 && printf 'complete' > "${TEST_DIR}/.factory/runs/run-dedup/status") &
+  BG_PID=$!
+
+  OUTPUT="$(cd "$TEST_DIR" && "$FACTORY_BIN" watch 1 --timeout 6 2>&1)"
+  wait "$BG_PID" 2>/dev/null || true
+
+  NOTIFY_COUNT="$(echo "$OUTPUT" | grep -c '\[NOTIFY\]' || true)"
+
+  RESULT=0
+  if [ "$NOTIFY_COUNT" -ne 1 ]; then
+    printf '    FAIL: expected 1 notification, got %d\n' "$NOTIFY_COUNT"
+    RESULT=1
+  fi
+
+  rm -rf "$TEST_DIR"
+  return $RESULT
+}
+
 # -------------------------------------------------------------------------
 # Run all tests
 # -------------------------------------------------------------------------
@@ -163,6 +191,7 @@ run_test "status displays mixed runtimes" test_status_displays_mixed_runtimes
 run_test "watch reports default interval" test_watch_reports_default_interval
 run_test "watch accepts custom interval" test_watch_accepts_custom_interval
 run_test "watch displays run status" test_watch_displays_run_status
+run_test "watch notifies once on status change" test_watch_notifies_once_on_status_change
 
 printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
 
