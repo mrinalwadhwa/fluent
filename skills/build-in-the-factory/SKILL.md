@@ -210,11 +210,11 @@ directly in your session.
 
 ## Gotchas
 
-- **Don't re-read full history when resuming.** Read `handoff.md` only.
+- When resuming a run, read `handoff.md` only — not the full history.
   The handoff contains everything you need to continue. Re-reading the
   full run history wastes context and risks confusion from stale state.
 
-- **Don't call `factory run` from within an interactive session.** The
+- Never call `factory run` from within an interactive session. The
   factory command launches a session loop that manages your process.
   Calling it from inside a session creates a nested loop. If you need
   to start a run, tell the user to run it from their terminal.

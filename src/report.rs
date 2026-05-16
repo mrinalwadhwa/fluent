@@ -11,7 +11,7 @@ pub fn generate_report(run_dir: &Path, run_id: &str, session_count: u32) -> Resu
     let report_path = run_dir.join("report.md");
 
     let status = fs::read_to_string(run_dir.join("status")).unwrap_or_else(|_| "unknown".into());
-    let mode = fs::read_to_string(run_dir.join("mode")).unwrap_or_else(|_| "build".into());
+    let mode = fs::read_to_string(run_dir.join("mode")).unwrap_or_else(|_| "full".into());
 
     let brief_summary = fs::read_to_string(run_dir.join("brief.md"))
         .ok()

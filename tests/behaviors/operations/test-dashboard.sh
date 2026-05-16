@@ -64,7 +64,7 @@ test_dashboard_handles_invalid_run_id() {
   printf 'planned' > "${TEST_DIR}/.factory/runs/valid-run/status"
   printf 'Test brief' > "${TEST_DIR}/.factory/runs/valid-run/brief.md"
 
-  # Request a non-existent run-id — should not crash
+  # Request a non-existent run-id — should exit with an error message
   set +e
   OUTPUT="$(cd "$TEST_DIR" && timeout 2 "$FACTORY_BIN" dashboard --run-id nonexistent 2>&1)"
   EXIT_CODE=$?
@@ -80,11 +80,9 @@ test_dashboard_handles_invalid_run_id() {
     printf '    FAIL: dashboard crashed with signal %d\n' $((EXIT_CODE - 128))
     RESULT=1
   fi
-  # Exit code 2+ (excluding timeout=124) suggests an unhandled error rather
-  # than graceful fallback. Acceptable codes: 0 (ok), 1 (minor error),
-  # 124 (timeout killed it — expected for TUI without terminal).
-  if [ "$EXIT_CODE" -gt 1 ] && [ "$EXIT_CODE" -ne 124 ] && [ "$EXIT_CODE" -le 128 ]; then
-    printf '    FAIL: dashboard exited with unexpected code %d\n' "$EXIT_CODE"
+  # Should report that the run was not found
+  if ! echo "$OUTPUT" | grep -qi "not found"; then
+    printf '    FAIL: expected "not found" error message, got: %s\n' "$OUTPUT"
     RESULT=1
   fi
 

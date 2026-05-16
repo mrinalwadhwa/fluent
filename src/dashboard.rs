@@ -189,7 +189,10 @@ impl App {
 
         // Find the index of the target run, or pick the first active one
         let selected = if let Some(id) = target_run_id {
-            views.iter().position(|v| v.run.id == id).unwrap_or(0)
+            match views.iter().position(|v| v.run.id == id) {
+                Some(pos) => pos,
+                None => anyhow::bail!("Run '{}' not found", id),
+            }
         } else {
             views
                 .iter()

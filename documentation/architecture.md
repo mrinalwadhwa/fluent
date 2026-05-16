@@ -11,7 +11,8 @@ from intent capture through execution and review across multiple sessions.
 │  capture-brief, define-behaviors,               │
 │  design-approach, plan-execution                │
 │  review-documentation, review-behaviors,        │
-│  review-architecture, review-skills              │
+│  review-architecture, review-skills,            │
+│  review-tests                                   │
 │  Portable procedures any agent follows          │
 ├─────────────────────────────────────────────────┤
 │  build-in-the-factory skill                     │

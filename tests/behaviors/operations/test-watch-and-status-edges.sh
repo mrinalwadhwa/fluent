@@ -7,6 +7,7 @@
 #   - factory watch polls at the specified interval
 #   - factory watch polls at the default interval (60s)
 #   - factory watch displays run status
+#   - factory watch notifies once per status change
 #
 # Usage:
 #   tests/behaviors/operations/test-watch-and-status-edges.sh
