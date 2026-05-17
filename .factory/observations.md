@@ -107,3 +107,12 @@ vague TUI description. Missing: keyboard navigation, scroll behavior,
 activity feed content, line wrapping, run list refresh. Needs a
 dedicated effort to write a full spec — separate from the activity
 signaling work.
+
+2026-05-16 — The factory's author agent should evaluate dependencies
+with extreme skepticism. Every new crate needs justification: what
+value does it add vs the risk surface and transitive dependency
+count? The expertise/architecture.md should include a principle
+about minimal dependencies. Review prompts should flag new deps
+for scrutiny. Consider: can the same result be achieved with std
+or an existing dep? Is the crate well-maintained? What's the
+transitive cost?
