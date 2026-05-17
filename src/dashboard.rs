@@ -1168,4 +1168,72 @@ mod tests {
         assert!(text2.contains("✓"));
         assert!(!text2.contains("⟳"));
     }
+
+    #[test]
+    fn test_discover_agents_updates_verdict() {
+        // Verify that discover_agents() re-evaluates reviewer status on each
+        // poll cycle. A reviewer starts as "running" (transcript present, no
+        // review file), then after the review file appears, discover_agents()
+        // updates the status to the verdict.
+        use std::fs;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let run_dir = tmp.path().to_path_buf();
+        let reviews_dir = run_dir.join("reviews");
+        fs::create_dir_all(&reviews_dir).unwrap();
+
+        // Write a transcript file so the reviewer is discovered
+        fs::write(
+            reviews_dir.join("transcript-behaviors.jsonl"),
+            "{}",
+        )
+        .unwrap();
+
+        let mut view = RunView {
+            run: Run {
+                id: "test-run".to_string(),
+                dir: run_dir.clone(),
+            },
+            live_dir: run_dir.clone(),
+            agents: vec![AgentView::new("author")],
+            selected_agent: 0,
+            scroll_offset: 0,
+            auto_scroll: true,
+            wrapped_total: 0,
+            cached_status: "executing".to_string(),
+        };
+
+        // First discover: no review file yet → status should be "running"
+        view.discover_agents();
+        assert_eq!(view.agents.len(), 2);
+        assert_eq!(view.agents[1].name, "behaviors");
+        assert_eq!(view.agents[1].status, "running");
+
+        // Write the review file with a pass verdict
+        fs::write(
+            reviews_dir.join("review-behaviors.md"),
+            "Verdict: pass\n\nAll good.",
+        )
+        .unwrap();
+
+        // Second discover: review file exists → status updates to "pass"
+        view.discover_agents();
+        assert_eq!(view.agents[1].status, "pass");
+    }
+
+    #[test]
+    fn test_compute_phase_all_reviewers_done_failed() {
+        // When all reviewers are done and the run status is "failed",
+        // compute_phase should return "Failed" via the has_reviewers branch.
+        let mut r1 = AgentView::new("tests");
+        r1.status = "pass".into();
+        let mut r2 = AgentView::new("arch");
+        r2.status = "fail".into();
+        let view = make_run_view("run-1", vec![AgentView::new("author"), r1, r2]);
+        let (text, color, animated) = compute_phase(&view, "failed");
+        assert_eq!(text, "Failed");
+        assert_eq!(color, Color::Red);
+        assert!(!animated);
+    }
 }

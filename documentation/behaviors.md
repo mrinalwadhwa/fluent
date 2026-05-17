@@ -311,21 +311,21 @@ showing verdict or current activity.
 WHILE a run is actively executing (author or reviewers running),
 THE SYSTEM SHALL show a visual indicator that distinguishes "active"
 from "idle" at a glance.
-Test: dashboard::tests::test_header_spinner_advances_with_tick, dashboard::tests::test_agent_tab_running_shows_spinner_symbol, dashboard::tests::test_header_author_executing_shows_spinner
+Test: dashboard::tests::test_header_spinner_advances_with_tick, dashboard::tests::test_agent_tab_running_shows_spinner_symbol, dashboard::tests::test_header_author_executing_shows_spinner, tests/behaviors/operations/test-dashboard-activity.sh (no crash when run is actively executing, no crash when reviewers are running)
 
 WHEN everything is done (no processes running, terminal status),
 THE SYSTEM SHALL make completion obvious — no ambiguity about whether
 something is still in progress.
-Test: dashboard::tests::test_header_complete_no_spinner, dashboard::tests::test_header_failed_no_spinner
+Test: dashboard::tests::test_header_complete_no_spinner, dashboard::tests::test_header_failed_no_spinner, tests/behaviors/operations/test-dashboard-activity.sh (no crash when run is complete)
 
 WHEN a reviewer finishes,
 THE SYSTEM SHALL reflect the new verdict immediately.
-Test: dashboard::tests::test_agent_tab_shows_verdict_immediately, dashboard::tests::test_stale_state_refresh
+Test: dashboard::tests::test_agent_tab_shows_verdict_immediately, dashboard::tests::test_discover_agents_updates_verdict, tests/behaviors/operations/test-dashboard-activity.sh (no crash when reviewer verdict arrives)
 
 WHEN the dashboard is displayed,
 THE SYSTEM SHALL show a phase label that accurately describes what is
-happening right now (authoring, reviewing, complete, failed, needs input).
-Test: dashboard::tests::test_header_reviewing_shows_progress, dashboard::tests::test_header_complete_no_spinner, dashboard::tests::test_header_failed_no_spinner, dashboard::tests::test_compute_phase_needs_user
+happening right now (executing, reviewing, complete, failed, needs input).
+Test: dashboard::tests::test_header_reviewing_shows_progress, dashboard::tests::test_header_complete_no_spinner, dashboard::tests::test_header_failed_no_spinner, dashboard::tests::test_compute_phase_needs_user, tests/behaviors/operations/test-dashboard-activity.sh (no crash when run has failed, no crash when run needs user input, no crash with mixed run states)
 
 ## Sandbox (local)
 

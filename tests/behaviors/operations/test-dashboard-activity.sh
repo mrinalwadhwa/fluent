@@ -10,7 +10,7 @@
 #   - Dashboard does not crash when run needs user input
 #
 # Note: Visual rendering assertions (spinner presence, phase labels, "Complete" text)
-# are verified by the Rust VT100Backend unit tests:
+# are verified by the Rust TestBackend unit tests:
 #   cargo test --lib dashboard
 #
 # Usage:
