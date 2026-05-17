@@ -102,7 +102,7 @@ fast-forward merges, deletes the branch, and sets the status to `landed`.
 | `mode` | `review` or absent (defaults to full lifecycle) |
 | `reviewers` | Comma-separated reviewer filter (optional) |
 | `scope` | Review focus targeting (optional) |
-| `sessions.log` | Per-session metadata (`session=N exit=CODE duration=Xs status=STATUS`) |
+| `sessions.log` | Per-session metadata: `{timestamp} session=N exit=CODE duration=Xs status=STATUS` and review-phase entries: `{timestamp} review=N duration=Xs verdict=VERDICT` |
 | `report.md` | Generated run report |
 | `reviews/` | Review artifacts, transcripts (`transcript-{name}.jsonl`), and round archives (`round-N/`) |
 
@@ -355,10 +355,14 @@ factory/main/
     design-approach/SKILL.md
     plan-execution/SKILL.md
     review-architecture/SKILL.md
+    review-architecture/references/   ← symlinks to expertise/ (dereferenced on install)
     review-behaviors/SKILL.md
     review-documentation/SKILL.md
+    review-documentation/references/
     review-skills/SKILL.md
+    review-skills/references/
     review-tests/SKILL.md
+    review-tests/references/
   infrastructure/
     cloudformation.yaml
     run/
