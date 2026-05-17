@@ -89,3 +89,32 @@ hours of wall clock shows 56 minutes of author time because the 7
 review rounds (35 reviewer sessions) aren't logged. Add ISO
 timestamps and review-phase entries to sessions.log so total run
 time and time-per-phase are visible.
+
+2026-05-16 — Skills distribution strategy (confirmed with skills.sh test):
+
+Structure changes needed:
+- Add references/ directory to each skill with symlinks to expertise/
+- skills.sh dereferences symlinks on install (confirmed: `dereference: true`)
+- Review skills: change "Read expertise/X.md" to "Read references/X.md"
+- Slim down prompts/review-*.md to minimal factory glue (output path,
+  run ID, scope instruction) — point to the skill for procedure
+- Audit expertise/ files — split factory-specific content into
+  .factory/expertise/ or documentation/. General principles stay.
+- Create complementary "create" skills for each "review" skill:
+  architect, write-tests, write-documentation, write-skill
+- New expertise-heavy skills (test-tui, test-web, etc.) use the
+  symlink pattern for their reference material
+
+Key decisions:
+- expertise/ is distributable general-purpose content
+- .factory/expertise/ is project-specific (decisions, learnings)
+- Skills are self-contained after skills.sh install
+- ContentResolver unchanged — agents read skills directly
+- Prompts are thin factory orchestration glue, not content
+
+2026-05-16 — The dashboard has no complete behavioral spec. Existing
+behaviors cover safety (doesn't crash, doesn't modify state) and a
+vague TUI description. Missing: keyboard navigation, scroll behavior,
+activity feed content, line wrapping, run list refresh. Needs a
+dedicated effort to write a full spec — separate from the activity
+signaling work.
