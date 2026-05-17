@@ -1072,7 +1072,7 @@ exit 0
     let lines: Vec<&str> = log.lines().collect();
     assert_eq!(lines.len(), 1, "should have one session entry");
     assert!(
-        lines[0].starts_with("session=1 exit=0 duration="),
+        lines[0].contains("session=1 exit=0 duration="),
         "wrong format: {}",
         lines[0]
     );

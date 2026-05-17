@@ -143,6 +143,7 @@ pub fn run_session_loop(
         // Write session metadata to sessions.log
         {
             let status_after = run.status().map(|s| s.to_string()).unwrap_or_else(|_| "unknown".into());
+            let timestamp = now_iso();
             let mut log_file = fs::OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -150,7 +151,7 @@ pub fn run_session_loop(
             use std::io::Write;
             writeln!(
                 log_file,
-                "session={session_count} exit={exit_code} duration={session_elapsed}s status={status_after}"
+                "{timestamp} session={session_count} exit={exit_code} duration={session_elapsed}s status={status_after}"
             )?;
         }
 
@@ -198,14 +199,31 @@ pub fn run_session_loop(
                     eprintln!("\n  Run {} completed (review limit).", run.id);
                     break;
                 }
-                if review::run_reviews(
+                let review_start = std::time::Instant::now();
+                let all_pass = review::run_reviews(
                     run_dir,
                     &run.id,
                     &reviewer_filter,
                     review_scope,
                     &config.resolver,
                     review_round,
-                )? {
+                )?;
+                // Log review phase
+                {
+                    let review_elapsed = review_start.elapsed().as_secs();
+                    let timestamp = now_iso();
+                    let verdict = if all_pass { "pass" } else { "fail" };
+                    let mut log_file = fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(run_dir.join("sessions.log"))?;
+                    use std::io::Write;
+                    writeln!(
+                        log_file,
+                        "{timestamp} review={review_round} duration={review_elapsed}s verdict={verdict}"
+                    )?;
+                }
+                if all_pass {
                     report::generate_report(run_dir, &run.id, session_count)?;
                     eprintln!("\n  Run {} completed.", run.id);
                     break;
@@ -263,6 +281,11 @@ pub fn run_session_loop(
 
     eprintln!("\n  Total sessions: {session_count}");
     Ok(())
+}
+
+/// ISO 8601 UTC timestamp for log entries.
+fn now_iso() -> String {
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
 /// Check whether the worktree has commits beyond the source branch.
@@ -584,9 +607,9 @@ mod tests {
         let log = fs::read_to_string(run.dir.join("sessions.log")).unwrap();
         let lines: Vec<&str> = log.lines().collect();
         assert_eq!(lines.len(), 3);
-        assert!(lines[0].starts_with("session=1 exit=0 duration="));
+        assert!(lines[0].contains("session=1 exit=0 duration="));
         assert!(lines[0].contains("status=executing"));
-        assert!(lines[2].starts_with("session=3 exit=0 duration="));
+        assert!(lines[2].contains("session=3 exit=0 duration="));
         assert!(lines[2].contains("status=needs-user"));
     }
 
@@ -629,7 +652,7 @@ mod tests {
         let log = fs::read_to_string(run.dir.join("sessions.log")).unwrap();
         let lines: Vec<&str> = log.lines().collect();
         assert_eq!(lines.len(), 3);
-        assert!(lines[0].starts_with("session=1 exit=1 duration="));
+        assert!(lines[0].contains("session=1 exit=1 duration="));
     }
 
     /// Hooks that record pre_session calls for testing.

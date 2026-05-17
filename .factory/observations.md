@@ -22,11 +22,6 @@ behavioral contract.
 that could block headless agents beyond commit signing (merge conflict
 resolution, gpg passphrase prompts, interactive rebase).
 
-2026-05-12 — Factory output goes to stdout, same as the agent's
-print-mode output. Piping factory run output is destructive. The
-factory should write its own output to stderr or log to a file by
-default so stdout is safe to pipe or discard.
-
 2026-05-13 — On the Fargate test, round 2 reviewers all crashed
 (exit 1) after round 1 had 5 reviewers + author session 2. Cause
 unknown — could be rate limits, container resource exhaustion, or
@@ -83,12 +78,6 @@ add to the workflow? When are they useful vs noise? Should they be
 richer (actionable, with run context) or replaced by something else
 (dashboard focus, sound, status bar)?
 
-2026-05-16 — sessions.log only records author session duration, not
-review phase duration or wall-clock timestamps. A run that takes 2
-hours of wall clock shows 56 minutes of author time because the 7
-review rounds (35 reviewer sessions) aren't logged. Add ISO
-timestamps and review-phase entries to sessions.log so total run
-time and time-per-phase are visible.
 
 2026-05-16 — Skills distribution strategy (confirmed with skills.sh test):
 
