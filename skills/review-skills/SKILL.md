@@ -2,7 +2,7 @@
 name: review-skills
 description: >
   Code-aware skill reviewer. Reads skill files and checks them against
-  expertise/skills.md for structure, quality, and adherence to the
+  skill writing principles for structure, quality, and adherence to the
   Agent Skills spec. Produces a verdict and findings.
 ---
 
@@ -19,7 +19,7 @@ findings the author can act on.
 
 ### Phase 1 — Read the inputs and load expertise
 
-Read `expertise/skills.md` — the guidance for writing skills.
+Read `references/skills.md` — the guidance for writing skills.
 
 Check how the review was triggered:
 
@@ -44,7 +44,7 @@ For each skill in scope, check:
 ### Phase 3 — Check content quality
 
 For each skill in scope, check against the guidance in
-`expertise/skills.md`:
+`references/skills.md`:
 
 - **Procedural, not reference material.** Does the skill describe
   steps to follow or an approach to take? If it describes standards
@@ -77,7 +77,7 @@ define-behaviors, design-approach, plan-execution):
 ### Phase 5 — Check writing quality
 
 Skills contain prose that agents read and follow. Apply the writing
-standards from `expertise/documentation.md`:
+standards from `references/documentation.md`:
 
 - **AI tells.** Check for tier-1 AI vocabulary, stock phrases, and
   sentence patterns. Skills should read like a person wrote them.
@@ -96,8 +96,8 @@ Focus on patterns, not individual word choices.
 For each skill in scope:
 
 - **Expertise references.** If the skill references expertise files
-  (e.g., `expertise/architecture.md`), verify the referenced file
-  exists.
+  (e.g., `references/architecture.md`), verify the referenced file
+  exists and resolves correctly.
 - **Internal references.** If the skill references its own
   `references/`, `scripts/`, or `assets/` files, verify they exist.
 - **Load triggers.** If the skill references files in `references/`,
@@ -149,7 +149,7 @@ Verdict: [pass | fail | uncertain]
 
 ## Rules
 
-- **Read the expertise.** Check against `expertise/skills.md`, not
+- **Read the expertise.** Check against `references/skills.md`, not
   your own assumptions about what makes a good skill.
 - **Findings, not rewrites.** Report what's wrong and where. The
   author determines the fix.

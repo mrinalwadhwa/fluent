@@ -37,11 +37,15 @@ On session start, check .factory/runs/ for active runs. If a handoff.md exists, 
 
 The expertise/ directory contains project standards and principles.
 Consult the relevant file before making decisions in that area:
-- expertise/architecture.md — architectural principles
+- expertise/architecture.md — architectural principles, dependency evaluation
 - expertise/documentation.md — writing standards
 - expertise/shell-scripts.md — shell script quality
 - expertise/skills.md — skill design
 - expertise/tests.md — testing principles
+
+When adding dependencies, read expertise/architecture.md § Dependencies.
+Evaluate each new dependency with extreme scrutiny — prefer the standard
+library and small amounts of owned code over third-party packages.
 
 The .factory/expertise/ directory contains project-specific learnings
 accumulated from past runs. Check it for patterns and conventions

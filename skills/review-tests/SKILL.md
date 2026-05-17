@@ -2,7 +2,7 @@
 name: review-tests
 description: >
   Code-aware test reviewer. Reads test files and the code they test,
-  checks test quality against expertise/tests.md. Evaluates whether
+  checks test quality against testing principles. Evaluates whether
   tests verify behavior, are well-structured, and provide confidence
   proportional to their cost. Produces a verdict and findings.
 ---
@@ -20,7 +20,7 @@ confidence. Produce findings the author can act on.
 
 ### Phase 1 — Read the inputs and load expertise
 
-Read `expertise/tests.md` — the principles for writing tests.
+Read `references/tests.md` — the principles for writing tests.
 
 Check how the review was triggered:
 
@@ -147,7 +147,7 @@ Verdict: [pass | fail | uncertain]
 
 ## Rules
 
-- **Read the expertise.** Check against `expertise/tests.md`, not
+- **Read the expertise.** Check against `references/tests.md`, not
   your own assumptions about testing.
 - **Findings, not rewrites.** Report what's wrong and where. The
   author determines the fix.

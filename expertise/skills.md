@@ -2,7 +2,7 @@
 
 How to write skills that agents follow well. Based on the Agent
 Skills spec (agentskills.io) and patterns learned from building
-factory skills.
+skills in production.
 
 ## What a skill is
 
@@ -259,7 +259,7 @@ valuable part of the skill.
 ### Test systematically
 
 For a structured approach to iteration, write test cases with
-expected outcomes and grade the results. The factory's test-skill
-harness simulates skill conversations for interactive skills.
+expected outcomes and grade the results. If your project has a skill
+test harness, use it to simulate conversations for interactive skills.
 Autonomous skills can be tested by running them against known
 inputs and checking outputs.

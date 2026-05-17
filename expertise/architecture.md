@@ -273,6 +273,45 @@ aggregates with a single root entity. Access the group through the
 root only. This enforces consistency boundaries — the aggregate
 guarantees its invariants.
 
+## Dependencies
+
+Every dependency is a liability. It brings code you didn't write into
+your trust boundary, adds a build step, introduces version conflicts,
+and creates an upgrade treadmill. Evaluate new dependencies with
+extreme scrutiny.
+
+**The dependency test.** Before adding a dependency, answer:
+1. What does it do that I can't do in 50 lines of code?
+2. How many transitive dependencies does it pull in?
+3. Is it actively maintained? What happens if it's abandoned?
+4. Does it match my project's stability requirements?
+5. Am I using 5% of its surface area?
+
+If the answer to (1) is "not much," write the code yourself. A small
+amount of code you own and understand is better than a large
+dependency you don't.
+
+**Transitive dependencies are the real cost.** A library that pulls in
+30 transitive dependencies exposes you to 30 potential security
+vulnerabilities, 30 potential breaking changes, and 30 potential
+abandonments. Check the dependency tree before adding anything.
+
+**Prefer the standard library.** Most languages ship with HTTP clients,
+JSON parsers, path manipulation, and crypto. These are tested,
+maintained, and don't add to your dependency count. Only reach for
+third-party libraries when the standard library genuinely can't do
+what you need.
+
+**Lock versions aggressively.** Use exact versions or tight ranges.
+Floating ranges ("^1.0") mean your build can change without your
+code changing. Lock files help but don't eliminate the problem —
+they still allow updates when you run the package manager.
+
+**Vendoring vs fetching.** For critical dependencies, consider vendoring
+(copying the source into your repo). This eliminates supply-chain risk
+at the cost of manual updates. Appropriate for small, stable libraries
+you depend on heavily.
+
 ## Anti-patterns
 
 Patterns that signal structural problems:
