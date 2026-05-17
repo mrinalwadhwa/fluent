@@ -187,7 +187,7 @@ following its own skill:
 - Architecture (code-aware) — reads code and architectural expertise,
   evaluates structural decisions against principles.
 - Skills (code-aware) — reads skill files and checks them against
-  `expertise/skills.md` for structure, quality, and spec compliance.
+  `references/skills.md` for structure, quality, and spec compliance.
 - Tests (code-aware) — reads tests and evaluates coverage, isolation,
   structure, and adherence to testing principles.
 

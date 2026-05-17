@@ -9,10 +9,13 @@ Skills are procedures (what to do). Expertise is reference material
 
 ## Usage
 
-Skills reference expertise files with explicit paths:
+Skills reference expertise via their `references/` directory:
 
 ```markdown
-Read expertise/architecture.md when evaluating structural decisions.
+Read references/architecture.md when evaluating structural decisions.
 ```
+
+Each skill's `references/` directory contains symlinks to expertise
+files. On distribution, symlinks are dereferenced into copies.
 
 Agents load expertise on demand — not all at once.
