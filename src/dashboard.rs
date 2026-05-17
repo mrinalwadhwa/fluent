@@ -999,6 +999,15 @@ mod tests {
     }
 
     #[test]
+    fn test_compute_phase_rate_limited() {
+        let view = make_run_view("run-1", vec![AgentView::new("author")]);
+        let (text, color, animated) = compute_phase(&view, "rate-limited");
+        assert_eq!(text, "Rate limited");
+        assert_eq!(color, Color::Magenta);
+        assert!(animated);
+    }
+
+    #[test]
     fn test_compute_phase_reviewing_active() {
         let mut r1 = AgentView::new("tests");
         r1.status = "running".into();
@@ -1007,6 +1016,19 @@ mod tests {
         let view = make_run_view("run-1", vec![AgentView::new("author"), r1, r2]);
         let (text, color, animated) = compute_phase(&view, "executing");
         assert_eq!(text, "Reviewing 1/2");
+        assert_eq!(color, Color::Cyan);
+        assert!(animated);
+    }
+
+    #[test]
+    fn test_compute_phase_reviewing_all_running() {
+        let mut r1 = AgentView::new("tests");
+        r1.status = "running".into();
+        let mut r2 = AgentView::new("arch");
+        r2.status = "running".into();
+        let view = make_run_view("run-1", vec![AgentView::new("author"), r1, r2]);
+        let (text, color, animated) = compute_phase(&view, "executing");
+        assert_eq!(text, "Reviewing 0/2");
         assert_eq!(color, Color::Cyan);
         assert!(animated);
     }
@@ -1067,6 +1089,16 @@ mod tests {
     }
 
     #[test]
+    fn test_header_rate_limited_shows_spinner() {
+        let view =
+            make_run_view_with_status("test-run", vec![AgentView::new("author")], "rate-limited");
+        let buf = render_header_buf(&view, 0);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Rate limited"));
+        assert!(has_spinner(&buf));
+    }
+
+    #[test]
     fn test_header_complete_no_spinner() {
         let mut r1 = AgentView::new("tests");
         r1.status = "pass".into();
@@ -1083,13 +1115,11 @@ mod tests {
 
     #[test]
     fn test_header_failed_no_spinner() {
-        let view = make_run_view("test-run", vec![AgentView::new("author")]);
-        // compute_phase is called with "failed" status since live_dir won't
-        // have a status file in tests — we test compute_phase directly
-        let (text, color, animated) = compute_phase(&view, "failed");
-        assert_eq!(text, "Failed");
-        assert_eq!(color, Color::Red);
-        assert!(!animated);
+        let view = make_run_view_with_status("test-run", vec![AgentView::new("author")], "failed");
+        let buf = render_header_buf(&view, 0);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Failed"));
+        assert!(!has_spinner(&buf));
     }
 
     #[test]
@@ -1118,7 +1148,9 @@ mod tests {
 
     #[test]
     fn test_stale_state_refresh() {
-        // Simulate: reviewer starts as "running", then gets updated to "pass"
+        // Verify that the agent tab renders the running symbol before update
+        // and the pass symbol after — confirming the render path reflects
+        // status changes without delay.
         let mut r1 = AgentView::new("tests");
         r1.status = "running".into();
         let view = make_run_view("test-run", vec![AgentView::new("author"), r1]);
@@ -1127,12 +1159,11 @@ mod tests {
         let text1 = render_agent_tabs(&view);
         assert!(text1.contains("⟳"));
 
-        // Simulate status update (as would happen during poll)
+        // Second render with updated status: shows verdict immediately
         let mut r1_updated = AgentView::new("tests");
         r1_updated.status = "pass".into();
         let view2 = make_run_view("test-run", vec![AgentView::new("author"), r1_updated]);
 
-        // Second render: shows verdict immediately
         let text2 = render_agent_tabs(&view2);
         assert!(text2.contains("✓"));
         assert!(!text2.contains("⟳"));
