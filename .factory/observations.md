@@ -53,12 +53,6 @@ mouse capture enabled).
 scrolls to the bottom. Currently once disabled it stays off until
 the user switches agents or runs.
 
-2026-05-15 — Dashboard field refresh is inconsistent. Reviewer status
-colors don't always update, phase/status in header can be stale, run
-list statuses don't refresh. All displayed fields need to be
-re-evaluated on each poll cycle to reflect current state. The
-dashboard should make it obvious when something changes.
-
 2026-05-09 — The refine-writing skill at ~/Workspace/skills has
 reference files (ai_tells.md, benchmarks.md, sentence_corrections.md,
 structural_guidance.md) with much more detail than what was captured
@@ -78,29 +72,6 @@ add to the workflow? When are they useful vs noise? Should they be
 richer (actionable, with run context) or replaced by something else
 (dashboard focus, sound, status bar)?
 
-
-2026-05-16 — Skills distribution strategy (confirmed with skills.sh test):
-
-Structure changes needed:
-- Add references/ directory to each skill with symlinks to expertise/
-- skills.sh dereferences symlinks on install (confirmed: `dereference: true`)
-- Review skills: change "Read expertise/X.md" to "Read references/X.md"
-- Slim down prompts/review-*.md to minimal factory glue (output path,
-  run ID, scope instruction) — point to the skill for procedure
-- Audit expertise/ files — split factory-specific content into
-  .factory/expertise/ or documentation/. General principles stay.
-- Create complementary "create" skills for each "review" skill:
-  architect, write-tests, write-documentation, write-skill
-- New expertise-heavy skills (test-tui, test-web, etc.) use the
-  symlink pattern for their reference material
-
-Key decisions:
-- expertise/ is distributable general-purpose content
-- .factory/expertise/ is project-specific (decisions, learnings)
-- Skills are self-contained after skills.sh install
-- ContentResolver unchanged — agents read skills directly
-- Prompts are thin factory orchestration glue, not content
-
 2026-05-16 — The dashboard has no complete behavioral spec. Existing
 behaviors cover safety (doesn't crash, doesn't modify state) and a
 vague TUI description. Missing: keyboard navigation, scroll behavior,
@@ -108,11 +79,8 @@ activity feed content, line wrapping, run list refresh. Needs a
 dedicated effort to write a full spec — separate from the activity
 signaling work.
 
-2026-05-16 — The factory's author agent should evaluate dependencies
-with extreme skepticism. Every new crate needs justification: what
-value does it add vs the risk surface and transitive dependency
-count? The expertise/architecture.md should include a principle
-about minimal dependencies. Review prompts should flag new deps
-for scrutiny. Consider: can the same result be achieved with std
-or an existing dep? Is the crate well-maintained? What's the
-transitive cost?
+2026-05-16 — Complementary "create" skills needed: architect (pairs
+with review-architecture), write-tests (pairs with review-tests),
+write-documentation (pairs with review-documentation), write-skill
+(pairs with review-skills). Each shares expertise via references/
+symlinks with its review counterpart.
