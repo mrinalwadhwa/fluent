@@ -9,6 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
 use ratatui::Terminal;
+use unicode_width::UnicodeWidthStr;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -47,7 +48,8 @@ impl AgentView {
         for reader in &mut self.readers {
             let new_events = reader.read_new();
             for event in &new_events {
-                self.cached_lines.extend(event.lines());
+                self.cached_lines
+                    .extend(event.lines().into_iter().map(|l| strip_ansi(&l)));
             }
             self.events.extend(new_events);
         }
@@ -629,26 +631,29 @@ fn draw_activity_feed(f: &mut ratatui::Frame, area: Rect, view: &mut RunView) {
 
     // Wrap lines that exceed terminal width, preserving styles
     let mut wrapped: Vec<(String, Style)> = Vec::new();
+    let indent = "  ";
+    let indent_width = 2;
     for line in lines.iter() {
         let style = style_for_line(line);
-        if line.len() <= content_width || content_width == 0 {
+        if line.width() <= content_width || content_width == 0 {
             wrapped.push((line.clone(), style));
         } else {
-            // Wrap at content_width boundaries
+            // Wrap at content_width display-column boundaries
             let mut remaining = line.as_str();
             let mut first = true;
             while !remaining.is_empty() {
-                let split_at = remaining
-                    .char_indices()
-                    .nth(content_width)
-                    .map(|(i, _)| i)
-                    .unwrap_or(remaining.len());
+                let max_cols = if first {
+                    content_width
+                } else {
+                    content_width.saturating_sub(indent_width)
+                };
+                let split_at = split_at_width(remaining, max_cols);
                 let chunk = &remaining[..split_at];
                 if first {
                     wrapped.push((chunk.to_string(), style));
                     first = false;
                 } else {
-                    wrapped.push((format!("  {chunk}"), style));
+                    wrapped.push((format!("{indent}{chunk}"), style));
                 }
                 remaining = &remaining[split_at..];
             }
@@ -701,6 +706,67 @@ fn draw_activity_feed(f: &mut ratatui::Frame, area: Rect, view: &mut RunView) {
     );
 
     f.render_widget(paragraph, area);
+}
+
+/// Strip ANSI escape sequences (CSI and OSC) from a string.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            match chars.peek() {
+                Some('[') => {
+                    // CSI sequence: consume until final byte (0x40-0x7E)
+                    chars.next();
+                    while let Some(&c) = chars.peek() {
+                        chars.next();
+                        if c as u32 >= 0x40 && c as u32 <= 0x7E {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    // OSC sequence: consume until ST (ESC\ or BEL)
+                    chars.next();
+                    while let Some(&c) = chars.peek() {
+                        if c == '\x07' {
+                            chars.next();
+                            break;
+                        }
+                        if c == '\x1b' {
+                            chars.next();
+                            if chars.peek() == Some(&'\\') {
+                                chars.next();
+                            }
+                            break;
+                        }
+                        chars.next();
+                    }
+                }
+                _ => {
+                    // Unknown escape — skip just the ESC
+                }
+            }
+        } else if ch.is_control() && ch != '\t' && ch != '\n' {
+            // Skip other control characters
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Find the byte index at which `s` reaches `max_cols` display columns.
+fn split_at_width(s: &str, max_cols: usize) -> usize {
+    let mut cols = 0;
+    for (i, ch) in s.char_indices() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if cols + w > max_cols {
+            return i;
+        }
+        cols += w;
+    }
+    s.len()
 }
 
 fn style_for_line(line: &str) -> Style {
@@ -1235,5 +1301,81 @@ mod tests {
         assert_eq!(text, "Failed");
         assert_eq!(color, Color::Red);
         assert!(!animated);
+    }
+
+    // --- Wrapping tests ---
+
+    #[test]
+    fn test_split_at_width_ascii() {
+        assert_eq!(split_at_width("hello world", 5), 5);
+        assert_eq!(split_at_width("hello", 10), 5);
+        assert_eq!(split_at_width("", 5), 0);
+    }
+
+    #[test]
+    fn test_split_at_width_multibyte() {
+        // Each CJK char is 2 columns wide
+        let s = "\u{4e16}\u{754c}hello"; // "世界hello"
+        // 世=2cols, 界=2cols, h=1col => first 4 cols = "世界"
+        assert_eq!(split_at_width(s, 4), 6); // 2 chars * 3 bytes each
+        // 5 cols: can't fit 世界h (2+2+1=5), can fit
+        assert_eq!(split_at_width(s, 5), 7); // 世界h = 6+1 bytes
+    }
+
+    #[test]
+    fn test_split_at_width_wide_char_boundary() {
+        // If max_cols lands in the middle of a wide char, don't include it
+        let s = "\u{4e16}\u{754c}"; // "世界" — 4 columns
+        assert_eq!(split_at_width(s, 3), 3); // Only "世" fits (2 cols), 界 needs 2 more
+    }
+
+    #[test]
+    fn test_activity_feed_wrapping_no_cutoff() {
+        // A line exactly at content_width should not be wrapped
+        let mut agent = AgentView::new("author");
+        // 40 chars for a 40-col content area
+        agent.cached_lines = vec!["a".repeat(40)];
+
+        let mut view = make_run_view("test-run", vec![agent]);
+        // Render in a 42-wide area (40 content + 2 border)
+        let backend = TestBackend::new(42, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 42, 5);
+                draw_activity_feed(f, area, &mut view);
+            })
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        // Full line should appear without truncation
+        assert!(text.contains(&"a".repeat(40)));
+    }
+
+    #[test]
+    fn test_activity_feed_wrapping_continuation_not_truncated() {
+        // A long line should wrap and continuation should not lose chars
+        let mut agent = AgentView::new("author");
+        // 50 chars in a 20-col content area → wraps
+        let long_line = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMN";
+        agent.cached_lines = vec![long_line.to_string()];
+
+        let mut view = make_run_view("test-run", vec![agent]);
+        // 22-wide area (20 content + 2 border), tall enough to show wrapped lines
+        let backend = TestBackend::new(22, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 22, 8);
+                draw_activity_feed(f, area, &mut view);
+            })
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        // All characters from the original line should appear somewhere in output
+        for ch in long_line.chars() {
+            assert!(
+                text.contains(ch),
+                "Character '{ch}' missing from wrapped output"
+            );
+        }
     }
 }

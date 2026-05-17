@@ -335,6 +335,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "tempfile",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]
