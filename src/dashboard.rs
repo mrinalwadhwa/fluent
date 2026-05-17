@@ -18,6 +18,7 @@ use crate::run::{self, Run, RunStatus};
 use crate::transcript::{self, Event, TranscriptReader};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
+const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /// An agent whose transcript we can display.
 struct AgentView {
@@ -65,11 +66,14 @@ struct RunView {
     auto_scroll: bool,
     /// Wrapped line count from last render, for accurate scroll limits.
     wrapped_total: usize,
+    /// Cached run status string, updated on each poll.
+    cached_status: String,
 }
 
 impl RunView {
     fn new(run: Run) -> Self {
         let live_dir = run.worktree_run_dir().unwrap_or_else(|| run.dir.clone());
+        let cached_status = Self::read_status(&live_dir, &run.dir);
         let mut view = Self {
             run,
             live_dir,
@@ -78,10 +82,18 @@ impl RunView {
             scroll_offset: 0,
             auto_scroll: true,
             wrapped_total: 0,
+            cached_status,
         };
         view.discover_agents();
         view.poll();
         view
+    }
+
+    fn read_status(live_dir: &Path, source_dir: &Path) -> String {
+        std::fs::read_to_string(live_dir.join("status"))
+            .or_else(|_| std::fs::read_to_string(source_dir.join("status")))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "?".into())
     }
 
     fn discover_agents(&mut self) {
@@ -122,13 +134,15 @@ impl RunView {
                             }
                             self.agents.push(agent);
                         } else {
-                            // Update status of existing reviewer
+                            // Re-evaluate status every poll cycle
                             if let Some(agent) = self.agents.iter_mut().find(|a| a.name == reviewer)
                             {
                                 let review_file =
                                     reviews_dir.join(format!("review-{reviewer}.md"));
-                                if review_file.exists() && agent.status == "running" {
+                                if review_file.exists() {
                                     agent.status = verdict_status(&review_file);
+                                } else {
+                                    agent.status = "running".into();
                                 }
                             }
                         }
@@ -139,6 +153,7 @@ impl RunView {
     }
 
     fn poll(&mut self) {
+        self.cached_status = Self::read_status(&self.live_dir, &self.run.dir);
         self.discover_agents();
         for agent in &mut self.agents {
             agent.poll();
@@ -176,6 +191,8 @@ struct App {
     should_quit: bool,
     /// Cached activity feed height for scroll clamping.
     feed_height: usize,
+    /// Monotonically increasing counter, incremented each render frame.
+    tick: u64,
 }
 
 impl App {
@@ -215,6 +232,7 @@ impl App {
             search_root: search_root.to_path_buf(),
             should_quit: false,
             feed_height: 20,
+            tick: 0,
         })
     }
 
@@ -429,6 +447,8 @@ fn verdict_status(review_file: &Path) -> String {
 fn draw_ui(f: &mut ratatui::Frame, app: &mut App) {
     let size = f.area();
     let idx = app.selected_run;
+    let tick = app.tick;
+    app.tick += 1;
 
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -442,35 +462,21 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut App) {
         ])
         .split(size);
 
-    draw_header(f, main_chunks[0], &app.runs[idx]);
+    draw_header(f, main_chunks[0], &app.runs[idx], tick);
     draw_run_tabs(f, main_chunks[1], app);
     draw_agent_tabs(f, main_chunks[2], &app.runs[idx]);
     draw_activity_feed(f, main_chunks[4], &mut app.runs[idx]);
     draw_help_bar(f, main_chunks[5]);
 }
 
-fn draw_header(f: &mut ratatui::Frame, area: Rect, view: &RunView) {
-    // Read status from worktree (where the agent writes it) with fallback to source
-    let status = std::fs::read_to_string(view.live_dir.join("status"))
-        .or_else(|_| std::fs::read_to_string(view.run.dir.join("status")))
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| "?".into());
+/// Compute the phase display for the header.
+///
+/// Returns (phase_text, color, is_animated).
+fn compute_phase(view: &RunView, status: &str) -> (String, Color, bool) {
+    let reviewers_running = view.agents.iter().skip(1).any(|a| a.status == "running");
+    let has_reviewers = view.agents.len() > 1;
 
-    let status_color = match status.as_str() {
-        "executing" => Color::Green,
-        "complete" => Color::Blue,
-        "failed" => Color::Red,
-        "needs-user" => Color::Yellow,
-        "rate-limited" => Color::Magenta,
-        "planned" => Color::Cyan,
-        _ => Color::White,
-    };
-
-    let session_count = view.agents[0].last_session;
-    let event_count = view.current_agent().events.len();
-
-    // Determine phase
-    let phase = if view.agents.iter().skip(1).any(|a| a.status == "running") {
+    if reviewers_running {
         let done = view
             .agents
             .iter()
@@ -478,27 +484,54 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, view: &RunView) {
             .filter(|a| a.status != "running" && !a.status.is_empty())
             .count();
         let total = view.agents.len() - 1;
-        if total > 0 {
-            format!("Reviewing ({done}/{total})")
-        } else {
-            status.clone()
+        (format!("Reviewing {done}/{total}"), Color::Cyan, true)
+    } else if has_reviewers
+        && view.agents.iter().skip(1).all(|a| !a.status.is_empty() && a.status != "running")
+    {
+        // All reviewers done, check overall status
+        match status {
+            "complete" | "landed" => ("Complete".into(), Color::Blue, false),
+            "failed" => ("Failed".into(), Color::Red, false),
+            "needs-user" => ("Needs input".into(), Color::Yellow, false),
+            _ => (status.into(), Color::White, false),
         }
     } else {
-        status.clone()
+        match status {
+            "executing" => ("Executing".into(), Color::Green, true),
+            "complete" => ("Complete".into(), Color::Blue, false),
+            "failed" => ("Failed".into(), Color::Red, false),
+            "needs-user" => ("Needs input".into(), Color::Yellow, false),
+            "rate-limited" => ("Rate limited".into(), Color::Magenta, true),
+            "planned" => ("Planned".into(), Color::Cyan, false),
+            _ => (status.into(), Color::White, false),
+        }
+    }
+}
+
+fn draw_header(f: &mut ratatui::Frame, area: Rect, view: &RunView, tick: u64) {
+    let (phase_text, phase_color, animated) = compute_phase(view, &view.cached_status);
+
+    let spinner = if animated {
+        let frame = SPINNER_FRAMES[(tick % SPINNER_FRAMES.len() as u64) as usize];
+        format!(" {frame}")
+    } else {
+        String::new()
     };
+
+    let session_count = view.agents[0].last_session;
+    let event_count = view.current_agent().events.len();
 
     let header = Paragraph::new(Line::from(vec![
         Span::styled("Run: ", Style::default().fg(Color::DarkGray)),
         Span::styled(&view.run.id, Style::default().add_modifier(Modifier::BOLD)),
         Span::raw("  "),
-        Span::styled("Phase: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(phase, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{phase_text}{spinner}"),
+            Style::default().fg(phase_color).add_modifier(Modifier::BOLD),
+        ),
         Span::raw("  "),
         Span::styled("Session: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            format!("{session_count}"),
-            Style::default(),
-        ),
+        Span::styled(format!("{session_count}"), Style::default()),
         Span::raw("  "),
         Span::styled("Events: ", Style::default().fg(Color::DarkGray)),
         Span::styled(format!("{event_count}"), Style::default()),
@@ -727,6 +760,98 @@ fn draw_help_bar(f: &mut ratatui::Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+
+    // --- Helpers for rendering tests ---
+
+    /// Create a synthetic RunView without filesystem access.
+    fn make_run_view(id: &str, agents: Vec<AgentView>) -> RunView {
+        make_run_view_with_status(id, agents, "executing")
+    }
+
+    fn make_run_view_with_status(id: &str, agents: Vec<AgentView>, status: &str) -> RunView {
+        RunView {
+            run: Run {
+                id: id.to_string(),
+                dir: PathBuf::from("/tmp/test"),
+            },
+            live_dir: PathBuf::from("/tmp/test"),
+            agents,
+            selected_agent: 0,
+            scroll_offset: 0,
+            auto_scroll: true,
+            wrapped_total: 0,
+            cached_status: status.to_string(),
+        }
+    }
+
+    /// Render draw_header to a TestBackend and return the buffer text.
+    fn render_header(view: &RunView, tick: u64) -> String {
+        let backend = TestBackend::new(80, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                draw_header(f, f.area(), view, tick);
+            })
+            .unwrap();
+        buffer_text(terminal.backend().buffer())
+    }
+
+    /// Render agent tabs to a TestBackend and return the buffer text.
+    fn render_agent_tabs(view: &RunView) -> String {
+        let backend = TestBackend::new(80, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                draw_agent_tabs(f, f.area(), view);
+            })
+            .unwrap();
+        buffer_text(terminal.backend().buffer())
+    }
+
+    /// Extract all text content from a buffer (concatenated lines).
+    fn buffer_text(buf: &Buffer) -> String {
+        let area = buf.area;
+        let mut text = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let cell = &buf[(x, y)];
+                text.push_str(cell.symbol());
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    /// Check if any cell in the buffer contains one of the spinner frame characters.
+    fn has_spinner(buf: &Buffer) -> bool {
+        let area = buf.area;
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let cell = &buf[(x, y)];
+                let ch = cell.symbol().chars().next().unwrap_or(' ');
+                if SPINNER_FRAMES.contains(&ch) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Render header to TestBackend and return the buffer directly.
+    fn render_header_buf(view: &RunView, tick: u64) -> Buffer {
+        let backend = TestBackend::new(80, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                draw_header(f, f.area(), view, tick);
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    // --- Style tests ---
 
     #[test]
     fn test_style_for_line_bash() {
@@ -827,23 +952,189 @@ mod tests {
             agent.cached_lines.extend(event.lines());
         }
         agent.events = events;
-        let view = RunView {
-            run: Run {
-                id: "test".to_string(),
-                dir: PathBuf::from("/tmp/test"),
-            },
-            live_dir: PathBuf::from("/tmp/test"),
-            agents: vec![agent],
-            selected_agent: 0,
-            scroll_offset: 0,
-            auto_scroll: true,
-            wrapped_total: 0,
-        };
+        let view = make_run_view("test", vec![agent]);
         let lines = view.visible_lines();
         let non_empty: Vec<&String> = lines.iter().filter(|l| !l.is_empty()).collect();
         assert_eq!(non_empty[0], "hello");
-        // Thinking now shows "thinking..." header + indented content
         assert_eq!(non_empty[1], "thinking...");
         assert!(non_empty[2].contains("pondering"));
+    }
+
+    // --- Phase detection tests ---
+
+    #[test]
+    fn test_compute_phase_executing() {
+        let view = make_run_view("run-1", vec![AgentView::new("author")]);
+        let (text, color, animated) = compute_phase(&view, "executing");
+        assert_eq!(text, "Executing");
+        assert_eq!(color, Color::Green);
+        assert!(animated);
+    }
+
+    #[test]
+    fn test_compute_phase_complete() {
+        let view = make_run_view("run-1", vec![AgentView::new("author")]);
+        let (text, color, animated) = compute_phase(&view, "complete");
+        assert_eq!(text, "Complete");
+        assert_eq!(color, Color::Blue);
+        assert!(!animated);
+    }
+
+    #[test]
+    fn test_compute_phase_failed() {
+        let view = make_run_view("run-1", vec![AgentView::new("author")]);
+        let (text, color, animated) = compute_phase(&view, "failed");
+        assert_eq!(text, "Failed");
+        assert_eq!(color, Color::Red);
+        assert!(!animated);
+    }
+
+    #[test]
+    fn test_compute_phase_needs_user() {
+        let view = make_run_view("run-1", vec![AgentView::new("author")]);
+        let (text, color, animated) = compute_phase(&view, "needs-user");
+        assert_eq!(text, "Needs input");
+        assert_eq!(color, Color::Yellow);
+        assert!(!animated);
+    }
+
+    #[test]
+    fn test_compute_phase_reviewing_active() {
+        let mut r1 = AgentView::new("tests");
+        r1.status = "running".into();
+        let mut r2 = AgentView::new("arch");
+        r2.status = "pass".into();
+        let view = make_run_view("run-1", vec![AgentView::new("author"), r1, r2]);
+        let (text, color, animated) = compute_phase(&view, "executing");
+        assert_eq!(text, "Reviewing 1/2");
+        assert_eq!(color, Color::Cyan);
+        assert!(animated);
+    }
+
+    #[test]
+    fn test_compute_phase_all_reviewers_done() {
+        let mut r1 = AgentView::new("tests");
+        r1.status = "pass".into();
+        let mut r2 = AgentView::new("arch");
+        r2.status = "fail".into();
+        let view = make_run_view("run-1", vec![AgentView::new("author"), r1, r2]);
+        let (text, color, animated) = compute_phase(&view, "complete");
+        assert_eq!(text, "Complete");
+        assert_eq!(color, Color::Blue);
+        assert!(!animated);
+    }
+
+    // --- Rendering tests using TestBackend ---
+
+    #[test]
+    fn test_header_author_executing_shows_spinner() {
+        let view = make_run_view("test-run", vec![AgentView::new("author")]);
+        let buf = render_header_buf(&view, 0);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Executing"));
+        assert!(has_spinner(&buf));
+    }
+
+    #[test]
+    fn test_header_spinner_advances_with_tick() {
+        let view = make_run_view("test-run", vec![AgentView::new("author")]);
+        let text_t0 = render_header(&view, 0);
+        let text_t1 = render_header(&view, 1);
+        // Different ticks produce different spinner characters
+        assert_ne!(text_t0, text_t1);
+        // Both should contain "Executing"
+        assert!(text_t0.contains("Executing"));
+        assert!(text_t1.contains("Executing"));
+    }
+
+    #[test]
+    fn test_header_reviewing_shows_progress() {
+        let mut r1 = AgentView::new("tests");
+        r1.status = "running".into();
+        let mut r2 = AgentView::new("arch");
+        r2.status = "pass".into();
+        let mut r3 = AgentView::new("docs");
+        r3.status = "running".into();
+        let view = make_run_view(
+            "test-run",
+            vec![AgentView::new("author"), r1, r2, r3],
+        );
+        let buf = render_header_buf(&view, 5);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Reviewing"));
+        assert!(text.contains("1/3"));
+        assert!(has_spinner(&buf));
+    }
+
+    #[test]
+    fn test_header_complete_no_spinner() {
+        let mut r1 = AgentView::new("tests");
+        r1.status = "pass".into();
+        let view = make_run_view_with_status(
+            "test-run",
+            vec![AgentView::new("author"), r1],
+            "complete",
+        );
+        let buf = render_header_buf(&view, 0);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Complete"));
+        assert!(!has_spinner(&buf));
+    }
+
+    #[test]
+    fn test_header_failed_no_spinner() {
+        let view = make_run_view("test-run", vec![AgentView::new("author")]);
+        // compute_phase is called with "failed" status since live_dir won't
+        // have a status file in tests — we test compute_phase directly
+        let (text, color, animated) = compute_phase(&view, "failed");
+        assert_eq!(text, "Failed");
+        assert_eq!(color, Color::Red);
+        assert!(!animated);
+    }
+
+    #[test]
+    fn test_agent_tab_shows_verdict_immediately() {
+        let mut r1 = AgentView::new("tests");
+        r1.status = "pass".into();
+        let mut r2 = AgentView::new("arch");
+        r2.status = "fail".into();
+        let view = make_run_view(
+            "test-run",
+            vec![AgentView::new("author"), r1, r2],
+        );
+        let text = render_agent_tabs(&view);
+        assert!(text.contains("✓"));
+        assert!(text.contains("✗"));
+    }
+
+    #[test]
+    fn test_agent_tab_running_shows_spinner_symbol() {
+        let mut r1 = AgentView::new("tests");
+        r1.status = "running".into();
+        let view = make_run_view("test-run", vec![AgentView::new("author"), r1]);
+        let text = render_agent_tabs(&view);
+        assert!(text.contains("⟳"));
+    }
+
+    #[test]
+    fn test_stale_state_refresh() {
+        // Simulate: reviewer starts as "running", then gets updated to "pass"
+        let mut r1 = AgentView::new("tests");
+        r1.status = "running".into();
+        let view = make_run_view("test-run", vec![AgentView::new("author"), r1]);
+
+        // First render: shows running indicator
+        let text1 = render_agent_tabs(&view);
+        assert!(text1.contains("⟳"));
+
+        // Simulate status update (as would happen during poll)
+        let mut r1_updated = AgentView::new("tests");
+        r1_updated.status = "pass".into();
+        let view2 = make_run_view("test-run", vec![AgentView::new("author"), r1_updated]);
+
+        // Second render: shows verdict immediately
+        let text2 = render_agent_tabs(&view2);
+        assert!(text2.contains("✓"));
+        assert!(!text2.contains("⟳"));
     }
 }
