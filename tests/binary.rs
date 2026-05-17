@@ -767,7 +767,7 @@ fn watch_detects_status_change_and_notifies() {
     fs::write(run_dir.join("brief.md"), "Brief\n").unwrap();
 
     let bin = assert_cmd::cargo::cargo_bin("factory");
-    let mut child = std::process::Command::new(&bin)
+    let child = std::process::Command::new(&bin)
         .current_dir(tmp.path())
         .args(["watch", "1", "--timeout", "5"])
         .stdout(std::process::Stdio::piped())
