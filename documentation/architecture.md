@@ -12,7 +12,7 @@ from intent capture through execution and review across multiple sessions.
 │  design-approach, plan-execution                │
 │  review-documentation, review-behaviors,        │
 │  review-architecture, review-skills,            │
-│  review-tests                                   │
+│  review-tests, write-tests                      │
 │  Portable procedures any agent follows          │
 ├─────────────────────────────────────────────────┤
 │  build-in-the-factory skill                     │
@@ -413,6 +413,8 @@ factory/main/
     review-skills/references/
     review-tests/SKILL.md
     review-tests/references/
+    write-tests/SKILL.md
+    write-tests/references/
   infrastructure/
     cloudformation.yaml
     run/
