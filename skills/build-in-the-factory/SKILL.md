@@ -106,8 +106,9 @@ approval, set status to `behaviors-defined`.
 ### 3. Design approach
 
 Follow the `design-approach` skill. Research external systems, evaluate
-options, make technical choices. Write `approach.md`. Present to the
-user for review. On approval, set status to `approach-designed`.
+options, make technical choices, and record the expertise files that
+should guide execution. Write `approach.md`. Present to the user for
+review. On approval, set status to `approach-designed`.
 
 ### 4. Plan execution
 

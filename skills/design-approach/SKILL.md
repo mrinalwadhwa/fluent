@@ -29,12 +29,19 @@ Read:
 - `.factory/runs/[run-id]/brief.md` — the intent
 - `.factory/runs/[run-id]/behaviors.diff.md` — what the system must do
 - `documentation/architecture.md` — how the system is built today
+- `expertise/INDEX.md` — available expertise files and when to load
+  them
 - `references/architecture.md` — architectural principles for
   evaluating structural decisions
 - Open questions deferred from define-behaviors
 
 Understand the gap between the current architecture and what the new
 behaviors require.
+
+Use `expertise/INDEX.md` to decide which expertise files are relevant
+to this run. Load the ones that apply before evaluating options. Track
+which files informed the approach so the executing agent can load the
+same context without rediscovering it.
 
 ### Phase 2 — Identify decisions
 
@@ -146,6 +153,11 @@ it to the user:
 This is a coherence check. If something needs changing, fix it and
 confirm again.
 
+The approach must include an `Expertise` section listing the repo-level
+expertise files that should guide execution. Include a short reason for
+each file. If no additional expertise beyond architecture applied, say
+so explicitly rather than omitting the section.
+
 Set status to `approach-designed`.
 
 ---
@@ -157,6 +169,11 @@ Set status to `approach-designed`.
 
 Run: [run-id]
 Brief: [one-line summary]
+
+## Expertise
+
+- `[expertise/file.md]` — [why this expertise applies]
+- `[expertise/architecture.md]` — [why architectural principles apply]
 
 ## Key decisions
 

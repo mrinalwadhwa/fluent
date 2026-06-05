@@ -36,7 +36,8 @@ THE SYSTEM SHALL set status to `behaviors-defined`.
 
 WHEN the user invokes the design-approach skill,
 THE SYSTEM SHALL research external systems, evaluate options, and write
-approach.md with key technical decisions and solution direction.
+approach.md with relevant expertise references, key technical decisions,
+and solution direction.
 
 WHEN the approach is approved by the user,
 THE SYSTEM SHALL set status to `approach-designed`.

@@ -91,7 +91,7 @@ fast-forward merges, deletes the branch, and sets the status to `landed`.
 |---|---|
 | `brief.md` | User's intent |
 | `behaviors.diff.md` | New behaviors this run adds |
-| `approach.md` | Solution direction |
+| `approach.md` | Solution direction and expertise references |
 | `plan.md` | Execution steps |
 | `status` | `briefed`, `behaviors-defined`, `approach-designed`, `planned`, `executing`, `reviewing`, `rate-limited`, `needs-user`, `complete`, `failed`, `landed` |
 | `handoff.md` | Context for the next session |
