@@ -157,3 +157,22 @@ visual bugs (missing animation, stale status, rendering glitches)
 without a human looking at screenshots. This should be a skill —
 distributable expertise on how to test terminal user interfaces
 using tmux capture and VT100 rendering.
+
+2026-06-05 — The run tab shows "[planned]" for runs that are
+actively executing. The source run directory keeps the original
+status while the worktree has the current status. The run tab
+reads from the source dir, not the worktree. The live_dir fix
+applies to the selected run's header but not to the run tab
+labels — those read from run.status() which uses the source dir.
+
+2026-06-05 — The dashboard animation still feels sluggish despite
+the 100ms render interval. The spinner needs to cycle faster to
+feel responsive — consider 50-80ms or a different animation style
+that communicates activity more clearly at lower frame rates.
+
+2026-06-05 — Wrote expertise/terminal-ui.md without following the
+factory process. A proper run with reviewers would have caught:
+missing testing approaches for the expertise itself, unclear
+discoverability by authors and reviewers, and whether the content
+follows our expertise conventions. Always run expertise and skill
+changes through the factory — the skills reviewer exists for this.
