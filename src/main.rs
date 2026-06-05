@@ -12,6 +12,8 @@ use factory::content::ContentResolver;
 use factory::credential;
 use factory::dashboard;
 use factory::fargate;
+use factory::parallel;
+use factory::plan;
 use factory::run::{self, Run};
 use factory::os;
 use factory::session::{self, DefaultHooks, SandboxedHooks, SessionConfig};
@@ -150,11 +152,37 @@ fn cmd_run_local(
     credential::setup_git_signing();
 
     let run = run::resolve_run(source_root, run_id)?;
-    let wt_result = worktree::setup_run_worktree(source_root, &run.id, &run.dir)?;
 
     // Record runtime
     fs::write(run.dir.join("runtime"), "local")?;
     fs::write(run.dir.join("handle"), std::process::id().to_string())?;
+
+    // Check for a parallel plan
+    if let Some(parsed_plan) = try_parse_parallel_plan(&run) {
+        let workspace_root = source_root
+            .parent()
+            .unwrap_or(source_root)
+            .to_string_lossy();
+        let home = std::env::var("HOME").unwrap_or_default();
+        let profile = os::render_profile(resolver, &home, &workspace_root)?;
+        let system_prompt = resolver
+            .resolve_content("prompts/author.md")
+            .unwrap_or_default();
+
+        eprintln!("  Factory           parallel plan (run: {})", run.id);
+
+        return parallel::run_parallel_plan(
+            source_root,
+            &run,
+            &parsed_plan,
+            &system_prompt,
+            extra_args,
+            Some(&profile.path.to_string_lossy()),
+        );
+    }
+
+    // Standard single-run flow
+    let wt_result = worktree::setup_run_worktree(source_root, &run.id, &run.dir)?;
 
     let worktree_dir = &wt_result.worktree_dir;
     worktree::disable_commit_signing(worktree_dir)?;
@@ -207,6 +235,26 @@ fn cmd_run_bare(
     // Record runtime and handle
     fs::write(run.dir.join("runtime"), "local")?;
     fs::write(run.dir.join("handle"), std::process::id().to_string())?;
+
+    // Check for a parallel plan (requires git)
+    if worktree::is_git_repo(search_root) {
+        if let Some(parsed_plan) = try_parse_parallel_plan(&run) {
+            let system_prompt = resolver
+                .resolve_content("prompts/author.md")
+                .unwrap_or_default();
+
+            eprintln!("factory: bare parallel plan (run: {})", run.id);
+
+            return parallel::run_parallel_plan(
+                search_root,
+                &run,
+                &parsed_plan,
+                &system_prompt,
+                extra_args,
+                None,
+            );
+        }
+    }
 
     let (working_dir, wt_run) = if worktree::is_git_repo(search_root) {
         let wt_result = worktree::setup_run_worktree(search_root, &run.id, &run.dir)?;
@@ -441,6 +489,20 @@ fn cmd_land(search_root: &Path, run_id: Option<&str>) -> Result<()> {
 // Helpers
 // -------------------------------------------------------------------------
 
+/// Try to parse the run's plan.md as a parallel plan.
+///
+/// Returns `Some(plan)` if plan.md exists and describes a parallel
+/// execution (multiple groups or multiple steps in a group). Returns
+/// `None` if the plan is missing, unparseable, or single-step.
+fn try_parse_parallel_plan(run: &Run) -> Option<plan::Plan> {
+    let content = fs::read_to_string(run.dir.join("plan.md")).ok()?;
+    let parsed = plan::parse_plan(&content).ok()?;
+    if parsed.is_parallel() {
+        Some(parsed)
+    } else {
+        None
+    }
+}
 
 fn dirs_log_file() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());

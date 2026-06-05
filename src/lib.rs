@@ -4,6 +4,8 @@ pub mod content;
 pub mod credential;
 pub mod dashboard;
 pub mod fargate;
+pub mod parallel;
+pub mod plan;
 pub mod report;
 pub mod review;
 pub mod run;
