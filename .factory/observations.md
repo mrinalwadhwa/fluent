@@ -97,3 +97,51 @@ width, accounted for continuation indent, and added ANSI stripping.
 Needs visual confirmation on a longer-running run. The user reported
 "the dashboard looked a lot better" after the fix but didn't
 specifically confirm the stray A is gone.
+
+2026-06-05 — The dashboard spinner advances too slowly when agents
+are working. The poll interval controls the frame rate, so the
+spinner only ticks every 500ms. This makes the dashboard feel
+sluggish even when work is actively happening. Consider decoupling
+the spinner tick rate from the data poll interval.
+
+2026-06-05 — Create a skill for generating PDFs using Typst. Typst
+is a modern typesetting system (alternative to LaTeX) that compiles
+markup to PDF. A skill could teach agents to write Typst documents
+for resumes, reports, invoices, or any structured document that
+needs PDF output. Reference Claude Code history for threads that use
+Typst.
+
+2026-06-05 — The plan phase identifies parallelizable steps but
+the factory has no mechanism to execute them in parallel. A plan
+that says "step 1a, 1b, 1c are independent" still runs as a single
+serial session. The factory should support decomposing a plan into
+parallel child runs — create separate run directories for each
+parallel step, launch them simultaneously, and gate the next step
+on all completing.
+
+2026-06-05 — How does the factory learn? Expertise files are
+manually written. Observations are manually captured. Decisions
+are manually recorded. There's no mechanism for the system to
+accumulate knowledge from runs automatically. Review findings,
+author mistakes, production incidents — these could feed back
+into expertise and decisions without human curation. The lifecycle
+has "capture" as a phase but it's not implemented beyond copying
+artifacts. What does automated knowledge capture look like?
+
+2026-06-05 — The factory currently only supports Claude Code as
+the coding agent. It should support other agents: OpenAI Codex,
+Pi, and potentially others. The Coder trait already abstracts
+the agent interface (run, run_interactive), but the implementations
+(SandboxedClaudeCode, BareClaudeCode) are Claude-specific. Need
+to design how agent selection works, how prompts/flags differ per
+agent, and whether the session loop needs agent-specific behavior.
+
+2026-06-05 — The dashboard shows "Complete" with no animation when
+the author writes status "complete" but reviewers haven't run yet
+or have failing verdicts. This makes it look like the run is
+finished when actually the factory session loop is about to launch
+reviewers or restart the author. The factory should write a
+transient status like "reviewing" while reviewers are running, so
+the dashboard (and any other consumer of the status file) can
+distinguish "author thinks done, review pending" from "everything
+is actually done."
