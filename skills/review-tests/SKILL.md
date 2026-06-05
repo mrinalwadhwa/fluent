@@ -21,6 +21,8 @@ confidence. Produce findings the author can act on.
 ### Phase 1 — Read the inputs and load expertise
 
 Read `references/tests.md` — the principles for writing tests.
+If the code under review includes a terminal UI, also read
+`references/terminal-ui.md` for TUI-specific testing patterns.
 
 Check how the review was triggered:
 
