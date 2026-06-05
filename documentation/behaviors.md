@@ -294,12 +294,12 @@ Test: tests/behaviors/operations/test-dashboard.sh
 
 WHEN `factory dashboard` is invoked for a project with no runs,
 THE SYSTEM SHALL show an empty state instead of exiting with an error.
-Test: tests/behaviors/operations/test-dashboard-overflow.sh (empty state instead of error with no runs), dashboard::tests::test_run_tabs_empty_no_panic
+Test: tests/behaviors/operations/test-dashboard.sh (empty state instead of error with no runs), dashboard::tests::test_run_tabs_empty_no_panic
 
 WHEN there are more runs than fit in the run tab bar,
 THE SYSTEM SHALL keep the selected run visible and indicate
 that more runs exist beyond the visible area.
-Test: tests/behaviors/operations/test-dashboard-overflow.sh (no crash with many runs), dashboard::tests::test_run_tabs_overflow_shows_right_arrow, dashboard::tests::test_run_tabs_selected_always_visible, dashboard::tests::test_clamp_run_tab_offset_keeps_selected_visible
+Test: tests/behaviors/operations/test-dashboard.sh (no crash with many runs), dashboard::tests::test_run_tabs_overflow_shows_right_arrow, dashboard::tests::test_run_tabs_selected_always_visible, dashboard::tests::test_clamp_run_tab_offset_keeps_selected_visible
 
 WHEN `factory dashboard --run-id` is invoked with a non-existent run ID,
 THE SYSTEM SHALL exit gracefully without crashing.
@@ -310,8 +310,9 @@ THE SYSTEM SHALL not modify any run state files.
 Test: tests/behaviors/operations/test-dashboard.sh (dashboard does not modify run state)
 
 WHEN a run is in the review phase,
-THE SYSTEM SHALL show a reviewer panel with one line per reviewer
-showing verdict or current activity.
+THE SYSTEM SHALL show each reviewer as an agent tab displaying a status
+symbol and color: ✓ (Green) for pass, ✗ (Red) for fail, ? (Yellow) for
+uncertain, ⟳ (Cyan) for running.
 
 WHILE a run is actively executing (author or reviewers running),
 THE SYSTEM SHALL show a visual indicator that distinguishes "active"
@@ -319,8 +320,8 @@ from "idle" at a glance.
 Test: dashboard::tests::test_header_spinner_advances_with_tick, dashboard::tests::test_agent_tab_running_shows_spinner_symbol, dashboard::tests::test_header_author_executing_shows_spinner, tests/behaviors/operations/test-dashboard-activity.sh (no crash when run is actively executing, no crash when reviewers are running)
 
 WHEN everything is done (no processes running, terminal status),
-THE SYSTEM SHALL make completion obvious — no ambiguity about whether
-something is still in progress.
+THE SYSTEM SHALL stop showing the spinner animation in the header and
+display the final status without activity indicators.
 Test: dashboard::tests::test_header_complete_no_spinner, dashboard::tests::test_header_failed_no_spinner, tests/behaviors/operations/test-dashboard-activity.sh (no crash when run is complete)
 
 WHEN a reviewer finishes,
@@ -346,11 +347,13 @@ THE SYSTEM SHALL exit the dashboard and restore the terminal.
 
 WHEN the user presses Tab,
 THE SYSTEM SHALL select the next agent tab within the current run,
-reset the scroll position, and re-enable auto-scroll.
+display that agent's transcript in the activity feed, reset the scroll
+position, and re-enable auto-scroll.
 
 WHEN the user presses Shift-Tab,
 THE SYSTEM SHALL select the previous agent tab within the current run,
-reset the scroll position, and re-enable auto-scroll.
+display that agent's transcript in the activity feed, reset the scroll
+position, and re-enable auto-scroll.
 
 WHEN the user presses ← or →,
 THE SYSTEM SHALL select the previous or next run.
@@ -373,6 +376,7 @@ auto-scroll.
 WHEN the user presses PgUp or PgDn,
 THE SYSTEM SHALL scroll the activity feed by 20 lines. If PgDn reaches
 the bottom, auto-scroll re-enables.
+Test: dashboard::tests::test_page_down_reenables_auto_scroll_at_bottom
 
 ### Dashboard mouse scroll
 
@@ -383,6 +387,7 @@ auto-scroll.
 WHEN the user scrolls the mouse wheel down,
 THE SYSTEM SHALL scroll the activity feed down by 3 lines. If the scroll
 position reaches the bottom, auto-scroll re-enables.
+Test: dashboard::tests::test_mouse_scroll_down_reenables_auto_scroll_at_bottom
 
 ### Dashboard copy mode
 

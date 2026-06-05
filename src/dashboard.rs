@@ -186,6 +186,72 @@ impl RunView {
         }
     }
 
+    /// Scroll up by one line (k/Up handler).
+    fn scroll_up(&mut self, visible_height: usize) {
+        self.auto_scroll = false;
+        self.clamp_scroll(visible_height);
+        self.scroll_offset = self.scroll_offset.saturating_sub(1);
+    }
+
+    /// Scroll down by one line (j/Down handler). Re-enables auto-scroll at the bottom.
+    fn scroll_down(&mut self, visible_height: usize) {
+        self.auto_scroll = false;
+        self.clamp_scroll(visible_height);
+        let max = self.wrapped_total;
+        self.scroll_offset = (self.scroll_offset + 1).min(max);
+        if self.scroll_offset >= max.saturating_sub(visible_height) {
+            self.auto_scroll = true;
+        }
+    }
+
+    /// Scroll to the end (G/End handler). Re-enables auto-scroll.
+    fn scroll_to_end(&mut self) {
+        self.auto_scroll = true;
+        self.scroll_to_bottom();
+    }
+
+    /// Scroll to the top (g/Home handler). Disables auto-scroll.
+    fn scroll_to_top(&mut self) {
+        self.auto_scroll = false;
+        self.scroll_offset = 0;
+    }
+
+    /// Scroll up by one page (PageUp handler).
+    fn scroll_up_page(&mut self, visible_height: usize) {
+        self.auto_scroll = false;
+        self.clamp_scroll(visible_height);
+        self.scroll_offset = self.scroll_offset.saturating_sub(20);
+    }
+
+    /// Scroll down by one page (PageDown handler). Re-enables auto-scroll at the bottom.
+    fn scroll_down_page(&mut self, visible_height: usize) {
+        self.auto_scroll = false;
+        self.clamp_scroll(visible_height);
+        let max = self.wrapped_total;
+        self.scroll_offset = (self.scroll_offset + 20).min(max);
+        if self.scroll_offset >= max.saturating_sub(visible_height) {
+            self.auto_scroll = true;
+        }
+    }
+
+    /// Scroll up by mouse wheel (3 lines). Disables auto-scroll.
+    fn mouse_scroll_up(&mut self, visible_height: usize) {
+        self.auto_scroll = false;
+        self.clamp_scroll(visible_height);
+        self.scroll_offset = self.scroll_offset.saturating_sub(3);
+    }
+
+    /// Scroll down by mouse wheel (3 lines). Re-enables auto-scroll at the bottom.
+    fn mouse_scroll_down(&mut self, visible_height: usize) {
+        self.auto_scroll = false;
+        self.clamp_scroll(visible_height);
+        let max = self.wrapped_total;
+        self.scroll_offset = (self.scroll_offset + 3).min(max);
+        if self.scroll_offset >= max.saturating_sub(visible_height) {
+            self.auto_scroll = true;
+        }
+    }
+
     fn visible_lines(&self) -> &[String] {
         &self.current_agent().cached_lines
     }
@@ -319,20 +385,10 @@ fn run_event_loop(
             CEvent::Mouse(mouse) if !app.runs.is_empty() => {
                 match mouse.kind {
                     crossterm::event::MouseEventKind::ScrollUp => {
-                        let view = app.current_view_mut();
-                        view.auto_scroll = false;
-                        view.clamp_scroll(fh);
-                        view.scroll_offset = view.scroll_offset.saturating_sub(3);
+                        app.current_view_mut().mouse_scroll_up(fh);
                     }
                     crossterm::event::MouseEventKind::ScrollDown => {
-                        let view = app.current_view_mut();
-                        view.auto_scroll = false;
-                        view.clamp_scroll(fh);
-                        let max = view.wrapped_total;
-                        view.scroll_offset = (view.scroll_offset + 3).min(max);
-                        if view.scroll_offset >= max.saturating_sub(fh) {
-                            view.auto_scroll = true;
-                        }
+                        app.current_view_mut().mouse_scroll_down(fh);
                     }
                     _ => {}
                 }
@@ -395,57 +451,28 @@ fn run_event_loop(
                     (_, KeyCode::Up) | (_, KeyCode::Char('k'))
                         if !app.runs.is_empty() =>
                     {
-                        let view = app.current_view_mut();
-                        view.auto_scroll = false;
-                        view.clamp_scroll(fh);
-                        view.scroll_offset =
-                            view.scroll_offset.saturating_sub(1);
+                        app.current_view_mut().scroll_up(fh);
                     }
                     (_, KeyCode::Down) | (_, KeyCode::Char('j'))
                         if !app.runs.is_empty() =>
                     {
-                        let view = app.current_view_mut();
-                        view.auto_scroll = false;
-                        view.clamp_scroll(fh);
-                        let max = view.wrapped_total;
-                        view.scroll_offset =
-                            (view.scroll_offset + 1).min(max);
-                        // Re-enable auto-scroll when reaching the bottom
-                        if view.scroll_offset >= max.saturating_sub(fh) {
-                            view.auto_scroll = true;
-                        }
+                        app.current_view_mut().scroll_down(fh);
                     }
                     (_, KeyCode::Char('G')) | (_, KeyCode::End)
                         if !app.runs.is_empty() =>
                     {
-                        let view = app.current_view_mut();
-                        view.auto_scroll = true;
-                        view.scroll_to_bottom();
+                        app.current_view_mut().scroll_to_end();
                     }
                     (_, KeyCode::Char('g')) | (_, KeyCode::Home)
                         if !app.runs.is_empty() =>
                     {
-                        let view = app.current_view_mut();
-                        view.auto_scroll = false;
-                        view.scroll_offset = 0;
+                        app.current_view_mut().scroll_to_top();
                     }
                     (_, KeyCode::PageUp) if !app.runs.is_empty() => {
-                        let view = app.current_view_mut();
-                        view.auto_scroll = false;
-                        view.clamp_scroll(fh);
-                        view.scroll_offset =
-                            view.scroll_offset.saturating_sub(20);
+                        app.current_view_mut().scroll_up_page(fh);
                     }
                     (_, KeyCode::PageDown) if !app.runs.is_empty() => {
-                        let view = app.current_view_mut();
-                        view.auto_scroll = false;
-                        view.clamp_scroll(fh);
-                        let max = view.wrapped_total;
-                        view.scroll_offset =
-                            (view.scroll_offset + 20).min(max);
-                        if view.scroll_offset >= max.saturating_sub(fh) {
-                            view.auto_scroll = true;
-                        }
+                        app.current_view_mut().scroll_down_page(fh);
                     }
                     _ => {}
                 }
@@ -1836,16 +1863,12 @@ mod tests {
     #[test]
     fn test_scroll_to_bottom_enables_auto_scroll() {
         // G/End should re-enable auto-scroll
-        let mut agent = AgentView::new("author");
-        agent.cached_lines = (0..100).map(|i| format!("line {i}")).collect();
-        let mut view = make_run_view("test-run", vec![agent]);
+        let mut view = make_run_view("test-run", vec![AgentView::new("author")]);
         view.auto_scroll = false;
         view.scroll_offset = 10;
         view.wrapped_total = 100;
 
-        // Simulate G key behavior
-        view.auto_scroll = true;
-        view.scroll_to_bottom();
+        view.scroll_to_end();
 
         assert!(view.auto_scroll);
         assert_eq!(view.scroll_offset, 100);
@@ -1854,21 +1877,43 @@ mod tests {
     #[test]
     fn test_scroll_down_reenables_auto_scroll_at_bottom() {
         // j/Down should re-enable auto-scroll when reaching the bottom
-        let mut agent = AgentView::new("author");
-        agent.cached_lines = (0..30).map(|i| format!("line {i}")).collect();
-        let mut view = make_run_view("test-run", vec![agent]);
+        let mut view = make_run_view("test-run", vec![AgentView::new("author")]);
         view.wrapped_total = 30;
         view.auto_scroll = false;
-        // Position just above the bottom threshold (visible_height = 20)
         let fh = 20;
-        let max = view.wrapped_total;
-        view.scroll_offset = max.saturating_sub(fh) - 1;
+        view.scroll_offset = view.wrapped_total.saturating_sub(fh) - 1;
 
-        // Simulate j key: scroll down by 1
-        view.scroll_offset = (view.scroll_offset + 1).min(max);
-        if view.scroll_offset >= max.saturating_sub(fh) {
-            view.auto_scroll = true;
-        }
+        view.scroll_down(fh);
+
+        assert!(view.auto_scroll);
+    }
+
+    #[test]
+    fn test_page_down_reenables_auto_scroll_at_bottom() {
+        // PageDown should re-enable auto-scroll when reaching the bottom
+        let mut view = make_run_view("test-run", vec![AgentView::new("author")]);
+        view.wrapped_total = 30;
+        view.auto_scroll = false;
+        let fh = 20;
+        // Position near the bottom so a 20-line page reaches it
+        view.scroll_offset = view.wrapped_total.saturating_sub(fh) - 5;
+
+        view.scroll_down_page(fh);
+
+        assert!(view.auto_scroll);
+    }
+
+    #[test]
+    fn test_mouse_scroll_down_reenables_auto_scroll_at_bottom() {
+        // Mouse scroll down should re-enable auto-scroll when reaching the bottom
+        let mut view = make_run_view("test-run", vec![AgentView::new("author")]);
+        view.wrapped_total = 30;
+        view.auto_scroll = false;
+        let fh = 20;
+        // Position so that scrolling 3 lines reaches the bottom
+        view.scroll_offset = view.wrapped_total.saturating_sub(fh) - 1;
+
+        view.mouse_scroll_down(fh);
 
         assert!(view.auto_scroll);
     }
