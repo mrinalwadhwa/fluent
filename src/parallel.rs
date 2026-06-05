@@ -179,12 +179,18 @@ where
         eprintln!("  Merging group {} results...", group_num);
         for info in &child_infos {
             worktree::land_run(source_root, &info.id, &info.source_dir)?;
+            let child_run = Run {
+                id: info.id.clone(),
+                dir: info.source_dir.clone(),
+            };
+            child_run.set_status(&RunStatus::Landed)?;
             eprintln!("  Merged step {}", info.id);
         }
-    }
 
-    let children_list = all_child_ids.join("\n");
-    fs::write(parent_run.dir.join("children"), &children_list)?;
+        // Write children file after each group so partial progress is visible
+        let children_list = all_child_ids.join("\n");
+        fs::write(parent_run.dir.join("children"), &children_list)?;
+    }
 
     parent_run.set_status(&RunStatus::Complete)?;
     eprintln!("\n  Parallel plan completed ({} steps).", total_steps);

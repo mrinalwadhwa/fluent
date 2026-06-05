@@ -133,20 +133,20 @@ Before finalizing, surface:
 > defer — it's valuable but not blocking. The risk I see is [X] — if
 > that doesn't work, we'd need to reconsider [Y]."
 
-### Phase 7 — Sync points (decomposed runs only)
+### Phase 7 — Sync points (parallel plans only)
 
-When child runs exist, identify where they must converge:
+When the plan has parallel child runs, identify where they must converge:
 
-- Which runs are involved?
+- Which child runs are involved?
 - What must be true at the convergence point?
-- Is it blocking (one run can't continue without it) or non-blocking?
+- Is it blocking (one child run can't continue without it) or non-blocking?
 
 > "After child run A finishes the API and child run B finishes the UI,
 > they need to integrate. The API contract needs to be locked before B
 > can start integration work."
 
 Define interface contracts between child runs before execution — this
-prevents parallel runs from diverging.
+prevents parallel child runs from diverging.
 
 ### Phase 8 — Assemble and confirm
 
@@ -210,6 +210,14 @@ Child run IDs are `{parent-id}-{group-idx}-{step-idx}` (1-indexed).
 ### Step: [step title]
 
 [Brief — this runs after group 1 merges.]
+
+## Sync points
+
+- [Which child runs converge, what must be true, blocking or not]
+
+## Interfaces
+
+- [Contract between parallel child runs — shared types, API shape, file paths]
 ```
 
 ---

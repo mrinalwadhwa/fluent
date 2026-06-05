@@ -497,7 +497,7 @@ fn cmd_land(search_root: &Path, run_id: Option<&str>) -> Result<()> {
 fn try_parse_parallel_plan(run: &Run) -> Option<plan::Plan> {
     let content = fs::read_to_string(run.dir.join("plan.md")).ok()?;
     let parsed = plan::parse_plan(&content).ok()?;
-    if parsed.is_parallel() {
+    if parsed.needs_orchestrator() {
         Some(parsed)
     } else {
         None

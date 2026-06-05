@@ -19,11 +19,13 @@ pub struct Step {
 }
 
 impl Plan {
-    /// Whether the plan requires parallel execution.
+    /// Whether the plan requires the parallel orchestrator.
     ///
     /// Returns true when the plan has more than one group or any group
-    /// is marked parallel with multiple steps.
-    pub fn is_parallel(&self) -> bool {
+    /// is marked parallel with multiple steps. Plans that return true
+    /// bypass the session loop and use `parallel::run_parallel_plan`
+    /// instead.
+    pub fn needs_orchestrator(&self) -> bool {
         self.groups.len() > 1
             || self.groups.iter().any(|g| g.parallel && g.steps.len() > 1)
     }
@@ -192,11 +194,11 @@ Do the thing.
         assert_eq!(plan.groups.len(), 1);
         assert_eq!(plan.groups[0].steps.len(), 1);
         assert!(!plan.groups[0].parallel);
-        assert!(!plan.is_parallel());
+        assert!(!plan.needs_orchestrator());
     }
 
     #[test]
-    fn test_is_parallel_parallel_group() {
+    fn test_needs_orchestrator_parallel_group() {
         let content = "\
 ## Group 1 (parallel)
 
@@ -210,11 +212,11 @@ Brief B.
 ";
         let plan = parse_plan(content).unwrap();
         assert!(plan.groups[0].parallel);
-        assert!(plan.is_parallel());
+        assert!(plan.needs_orchestrator());
     }
 
     #[test]
-    fn test_is_not_parallel_unmarked_multi_step() {
+    fn test_no_orchestrator_unmarked_multi_step() {
         let content = "\
 ## Group 1
 
@@ -228,11 +230,11 @@ Brief B.
 ";
         let plan = parse_plan(content).unwrap();
         assert!(!plan.groups[0].parallel);
-        assert!(!plan.is_parallel());
+        assert!(!plan.needs_orchestrator());
     }
 
     #[test]
-    fn test_is_parallel_multiple_groups() {
+    fn test_needs_orchestrator_multiple_groups() {
         let content = "\
 ## Group 1
 
@@ -247,7 +249,7 @@ Brief A.
 Brief B.
 ";
         let plan = parse_plan(content).unwrap();
-        assert!(plan.is_parallel());
+        assert!(plan.needs_orchestrator());
     }
 
     #[test]

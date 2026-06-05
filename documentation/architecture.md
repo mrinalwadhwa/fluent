@@ -119,7 +119,11 @@ The factory command resolves the run-id through a priority chain:
 
 ### Session continuity
 
-The factory command runs a session loop:
+The factory command checks for a parallel plan before entering the session
+loop. If `plan.md` exists and describes multiple groups or any group marked
+`(parallel)`, execution takes the orchestrator path instead.
+
+**Serial path** (default — single run, session loop):
 
 ```
 while run is not complete:
@@ -137,6 +141,25 @@ while run is not complete:
     if executing: restart
     if rate-limited: wait 5 minutes, restart
 ```
+
+**Parallel path** (orchestrator — parent run with child runs):
+
+```
+for each group in plan:
+    create child run for each step (run dir, worktree, brief)
+    if group is parallel: launch all children concurrently
+    else: run children one at a time
+    wait for all children to complete
+    if any child failed: set parent to failed, stop
+    merge each child's branch into parent branch
+    set each child's status to landed
+record children list in parent run dir
+set parent status to complete
+```
+
+The parent run's session loop never executes — the orchestrator
+(`parallel::run_parallel_plan`) replaces it entirely. Each child run
+gets its own session loop in its own worktree.
 
 The agent writes one word to `status` before exiting. The loop reads that
 word. That's the entire contract.
