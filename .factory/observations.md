@@ -84,3 +84,16 @@ with review-architecture), write-tests (pairs with review-tests),
 write-documentation (pairs with review-documentation), write-skill
 (pairs with review-skills). Each shares expertise via references/
 symlinks with its review counterpart.
+
+2026-05-18 — Create a skill for browsing the web using agent-browser
+as a fallback when WebFetch/curl fail (Medium, paywalled sites,
+JS-rendered pages). Also create a skill for fetching YouTube video
+transcripts using yt-dlp (fetch auto-generated captions, clean VTT
+into readable text).
+
+2026-05-18 — Dashboard stray "A" rendering bug may be resolved by
+the wrapping fix (af72ae1). The fix switched to unicode display
+width, accounted for continuation indent, and added ANSI stripping.
+Needs visual confirmation on a longer-running run. The user reported
+"the dashboard looked a lot better" after the fix but didn't
+specifically confirm the stray A is gone.
