@@ -92,7 +92,7 @@ fast-forward merges, deletes the branch, and sets the status to `landed`.
 | `behaviors.diff.md` | New behaviors this run adds |
 | `approach.md` | Solution direction |
 | `plan.md` | Execution steps |
-| `status` | `briefed`, `behaviors-defined`, `approach-designed`, `planned`, `executing`, `rate-limited`, `needs-user`, `complete`, `failed`, `landed` |
+| `status` | `briefed`, `behaviors-defined`, `approach-designed`, `planned`, `executing`, `reviewing`, `rate-limited`, `needs-user`, `complete`, `failed`, `landed` |
 | `handoff.md` | Context for the next session |
 | `active-run` | Current run-id (in `.factory/`) |
 | `source-branch` | Branch the run forked from |
@@ -127,8 +127,9 @@ while run is not complete:
     author writes handoff.md + status file
     write session metadata to sessions.log
     if status is complete:
+        set status to reviewing
         run review phase (all reviewers in parallel)
-        if all pass: stop
+        if all pass: set status to complete, stop
         else: set status to executing, restart with findings
     if terminal status (needs-user, failed): stop
     if executing: restart

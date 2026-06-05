@@ -71,6 +71,8 @@ Check the status:
 
 - `executing` — read `handoff.md` and continue from where the previous
   session left off. Do not re-read the full history.
+- `reviewing` — reviewers are running autonomously. Note the run status
+  to the user and wait. Do not treat it as idle.
 - `needs-user` — present the question from `handoff.md` and wait for the
   user's answer.
 

@@ -180,7 +180,7 @@ Test: tests/behaviors/operations/test-notification-content.sh
 WHEN a factory command needs the run-id,
 THE SYSTEM SHALL check in order: `--run-id` flag, `FACTORY_RUN_ID` env
 var, `.factory/active-run` file, then scan for active runs. The scan
-considers a run active if its status is `planned` or `executing`.
+considers a run active if its status is `planned`, `executing`, or `reviewing`.
 Test: src/run.rs (resolve run-id tests), tests/binary.rs (run-id resolution tests)
 
 ## Review phase
@@ -188,7 +188,7 @@ Test: src/run.rs (resolve run-id tests), tests/binary.rs (run-id resolution test
 WHEN the author sets status to `complete`,
 THE SYSTEM SHALL set status to `reviewing`, run all reviewers in parallel,
 and restore status to `complete` if all pass or `executing` if any fail.
-Test: tests/behaviors/operations/test-review-phase.sh (complete with passing reviews stops loop, review failure restarts author)
+Test: tests/behaviors/operations/test-review-phase.sh (complete with passing reviews stops loop, review failure restarts author), tests/behaviors/operations/test-reviewing-status.sh (status is reviewing while reviewers run, status transitions to complete when all pass, status is executing before author restarts on failure)
 
 WHEN all reviewers return verdict `pass`,
 THE SYSTEM SHALL accept the run as complete and stop the loop.
@@ -202,9 +202,9 @@ Test: tests/behaviors/operations/test-review-phase.sh (reviewer fail returns non
 ## Review runs
 
 WHEN `factory run` is invoked and the run's mode is `review`,
-THE SYSTEM SHALL run reviewers with full-codebase scope and produce
-findings. No author session is launched; the run completes after
-one review round.
+THE SYSTEM SHALL set status to `reviewing`, run reviewers with
+full-codebase scope, and produce findings. No author session is
+launched; the run completes after one review round.
 Test: tests/behaviors/operations/test-review-phase.sh (review run all pass completes without author)
 
 WHEN `factory run` is invoked and the run has a `scope` file,

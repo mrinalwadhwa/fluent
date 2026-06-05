@@ -1311,6 +1311,15 @@ mod tests {
     }
 
     #[test]
+    fn test_compute_phase_reviewing_no_reviewers() {
+        let view = make_run_view("run-1", vec![AgentView::new("author")]);
+        let (text, color, animated) = compute_phase(&view, "reviewing");
+        assert_eq!(text, "Reviewing");
+        assert_eq!(color, Color::Cyan);
+        assert!(animated);
+    }
+
+    #[test]
     fn test_compute_phase_all_reviewers_done() {
         let mut r1 = AgentView::new("tests");
         r1.status = "pass".into();

@@ -660,6 +660,7 @@ run_session_loop() {
   if [ "$RUN_MODE" = "review" ]; then
     printf '  Mode: review (reviewers run first)\n'
     REVIEW_SCOPE="full-codebase"
+    printf 'reviewing' > "${RUN_DIR}/status"
     if ! run_reviews "$RUN_DIR" "$RUN_ID" "$REVIEWER_FILTER" "$REVIEW_SCOPE"; then
       INITIAL_PROMPT="This is a review run. Reviewers have produced findings. Read the review artifacts at .factory/runs/${RUN_ID}/reviews/ and address the findings. When done, write status 'complete'."
     else
@@ -753,7 +754,9 @@ run_session_loop() {
         fi
         REVIEW_SCOPE="run-scoped"
         [ "$RUN_MODE" = "review" ] && REVIEW_SCOPE="full-codebase"
+        printf 'reviewing' > "${RUN_DIR}/status"
         if run_reviews "$RUN_DIR" "$RUN_ID" "$REVIEWER_FILTER" "$REVIEW_SCOPE"; then
+          printf 'complete' > "${RUN_DIR}/status"
           generate_report
           printf '\n  Run %s completed.\n' "$RUN_ID"
           break

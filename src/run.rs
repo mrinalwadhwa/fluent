@@ -637,6 +637,7 @@ mod tests {
         assert!(RunStatus::Failed.is_resumable());
         assert!(!RunStatus::Planned.is_resumable());
         assert!(!RunStatus::Executing.is_resumable());
+        assert!(!RunStatus::Reviewing.is_resumable());
         assert!(!RunStatus::Complete.is_resumable());
     }
 
@@ -911,6 +912,7 @@ mod tests {
         assert!(RunStatus::NeedsUser.is_terminal());
         assert!(!RunStatus::Planned.is_terminal());
         assert!(!RunStatus::Executing.is_terminal());
+        assert!(!RunStatus::Reviewing.is_terminal());
         assert!(!RunStatus::Briefed.is_terminal());
         assert!(!RunStatus::Unknown("x".into()).is_terminal());
     }
