@@ -356,7 +356,9 @@ display that agent's transcript in the activity feed, reset the scroll
 position, and re-enable auto-scroll.
 
 WHEN the user presses ← or →,
-THE SYSTEM SHALL select the previous or next run.
+THE SYSTEM SHALL select the previous or next run and display that run's
+activity feed. Each run preserves its own scroll position and auto-scroll
+state independently.
 
 WHEN the user presses j, k, ↑, or ↓,
 THE SYSTEM SHALL scroll the activity feed by one line and disable
@@ -395,7 +397,7 @@ WHEN the user presses `c`,
 THE SYSTEM SHALL toggle copy mode: disable mouse capture so the terminal
 allows text selection, and show a [COPY MODE] indicator in the help bar.
 Pressing `c` again re-enables mouse capture.
-Test: dashboard::tests::test_help_bar_shows_copy_key, dashboard::tests::test_help_bar_shows_copy_mode_indicator
+Test: dashboard::tests::test_toggle_copy_mode, dashboard::tests::test_help_bar_shows_copy_key, dashboard::tests::test_help_bar_shows_copy_mode_indicator
 
 ### Dashboard activity feed
 

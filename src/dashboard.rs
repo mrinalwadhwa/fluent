@@ -332,6 +332,13 @@ impl App {
     fn current_view_mut(&mut self) -> &mut RunView {
         &mut self.runs[self.selected_run]
     }
+
+    /// Toggle copy mode and return the new state.
+    /// Caller is responsible for issuing the terminal mouse capture command.
+    fn toggle_copy_mode(&mut self) -> bool {
+        self.copy_mode = !self.copy_mode;
+        self.copy_mode
+    }
 }
 
 /// Launch the dashboard TUI.
@@ -347,9 +354,14 @@ pub fn run_dashboard(search_root: &Path, run_id: Option<&str>) -> Result<()> {
 
     let result = run_event_loop(&mut terminal, &mut app);
 
-    // Restore terminal
+    // Restore terminal — only re-disable mouse capture if copy mode hasn't
+    // already done so, to avoid sending a redundant escape sequence.
     disable_raw_mode()?;
-    crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::event::DisableMouseCapture)?;
+    if app.copy_mode {
+        crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    } else {
+        crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::event::DisableMouseCapture)?;
+    }
     terminal.show_cursor()?;
 
     result
@@ -374,7 +386,8 @@ fn run_event_loop(
         let term_height = terminal.size()?.height as usize;
         app.feed_height = term_height.saturating_sub(3 + 3 + 3 + 1 + 1 + 2);
 
-        // Poll for events with short timeout to keep render loop responsive
+        // Sleep only for the remaining render budget. If we just rendered,
+        // this is nearly RENDER_INTERVAL; if we skipped, it may be zero.
         let timeout = RENDER_INTERVAL
             .checked_sub(last_render.elapsed())
             .unwrap_or(Duration::ZERO);
@@ -400,8 +413,7 @@ fn run_event_loop(
                         app.should_quit = true;
                     }
                     (_, KeyCode::Char('c')) => {
-                        app.copy_mode = !app.copy_mode;
-                        if app.copy_mode {
+                        if app.toggle_copy_mode() {
                             crossterm::execute!(
                                 terminal.backend_mut(),
                                 crossterm::event::DisableMouseCapture
@@ -1856,6 +1868,22 @@ mod tests {
             .unwrap();
         let text = buffer_text(terminal.backend().buffer());
         assert!(text.contains("[COPY MODE]"));
+    }
+
+    // --- Copy mode toggle test ---
+
+    #[test]
+    fn test_toggle_copy_mode() {
+        let mut app = make_app_with_runs(&["run-1"], 0);
+        assert!(!app.copy_mode);
+
+        // First toggle enables copy mode
+        assert!(app.toggle_copy_mode());
+        assert!(app.copy_mode);
+
+        // Second toggle disables copy mode
+        assert!(!app.toggle_copy_mode());
+        assert!(!app.copy_mode);
     }
 
     // --- Auto-scroll re-enable tests ---
