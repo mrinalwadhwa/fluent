@@ -167,7 +167,7 @@ Run state lives in `.factory/runs/[run-id]/`:
 | `behaviors.diff.md` | New behaviors this run adds (from define-behaviors) |
 | `approach.md` | Solution direction (from design-approach) |
 | `plan.md` | Execution steps (from plan-execution) |
-| `status` | `briefed`, `behaviors-defined`, `approach-designed`, `planned`, `executing`, `rate-limited`, `needs-user`, `complete`, `failed`, `landed` |
+| `status` | `briefed`, `behaviors-defined`, `approach-designed`, `planned`, `executing`, `reviewing`, `rate-limited`, `needs-user`, `complete`, `failed`, `landed` |
 | `handoff.md` | Context for the next session |
 | `active-run` | Current run-id (in `.factory/`) |
 | `source-branch` | Branch the run forked from |

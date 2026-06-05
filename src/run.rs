@@ -13,6 +13,7 @@ pub enum RunStatus {
     ApproachDesigned,
     Planned,
     Executing,
+    Reviewing,
     RateLimited,
     NeedsUser,
     Complete,
@@ -29,6 +30,7 @@ impl RunStatus {
             "approach-designed" => Self::ApproachDesigned,
             "planned" => Self::Planned,
             "executing" => Self::Executing,
+            "reviewing" => Self::Reviewing,
             "rate-limited" => Self::RateLimited,
             "needs-user" => Self::NeedsUser,
             "complete" => Self::Complete,
@@ -45,6 +47,7 @@ impl RunStatus {
             Self::ApproachDesigned => "approach-designed",
             Self::Planned => "planned",
             Self::Executing => "executing",
+            Self::Reviewing => "reviewing",
             Self::RateLimited => "rate-limited",
             Self::NeedsUser => "needs-user",
             Self::Complete => "complete",
@@ -56,7 +59,7 @@ impl RunStatus {
 
     /// Whether this status means the run is active and eligible for scanning.
     pub fn is_active(&self) -> bool {
-        matches!(self, Self::Planned | Self::Executing)
+        matches!(self, Self::Planned | Self::Executing | Self::Reviewing)
     }
 
     /// Whether this status is terminal.
@@ -602,6 +605,7 @@ mod tests {
         assert_eq!(RunStatus::parse("complete"), RunStatus::Complete);
         assert_eq!(RunStatus::parse("needs-user"), RunStatus::NeedsUser);
         assert_eq!(RunStatus::parse("failed"), RunStatus::Failed);
+        assert_eq!(RunStatus::parse("reviewing"), RunStatus::Reviewing);
         assert_eq!(RunStatus::parse("rate-limited"), RunStatus::RateLimited);
         assert_eq!(
             RunStatus::parse("briefed"),
@@ -621,6 +625,7 @@ mod tests {
     fn test_status_is_active() {
         assert!(RunStatus::Planned.is_active());
         assert!(RunStatus::Executing.is_active());
+        assert!(RunStatus::Reviewing.is_active());
         assert!(!RunStatus::Complete.is_active());
         assert!(!RunStatus::NeedsUser.is_active());
         assert!(!RunStatus::Failed.is_active());
@@ -918,6 +923,7 @@ mod tests {
             "approach-designed",
             "planned",
             "executing",
+            "reviewing",
             "rate-limited",
             "needs-user",
             "complete",

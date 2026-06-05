@@ -601,6 +601,7 @@ fn compute_phase(view: &RunView, status: &str) -> (String, Color, bool) {
     } else {
         match status {
             "executing" => ("Executing".into(), Color::Green, true),
+            "reviewing" => ("Reviewing".into(), Color::Cyan, true),
             "complete" => ("Complete".into(), Color::Blue, false),
             "failed" => ("Failed".into(), Color::Red, false),
             "needs-user" => ("Needs input".into(), Color::Yellow, false),

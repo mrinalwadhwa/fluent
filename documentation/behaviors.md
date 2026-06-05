@@ -186,7 +186,8 @@ Test: src/run.rs (resolve run-id tests), tests/binary.rs (run-id resolution test
 ## Review phase
 
 WHEN the author sets status to `complete`,
-THE SYSTEM SHALL run all reviewers in parallel before accepting completion.
+THE SYSTEM SHALL set status to `reviewing`, run all reviewers in parallel,
+and restore status to `complete` if all pass or `executing` if any fail.
 Test: tests/behaviors/operations/test-review-phase.sh (complete with passing reviews stops loop, review failure restarts author)
 
 WHEN all reviewers return verdict `pass`,
@@ -331,7 +332,7 @@ Test: dashboard::tests::test_agent_tab_shows_verdict_immediately, dashboard::tes
 WHEN the dashboard is displayed,
 THE SYSTEM SHALL show a phase label that accurately describes what is
 happening right now (executing, reviewing, complete, failed, needs input,
-rate-limited, planned).
+rate-limited, planned). The `reviewing` phase shows a spinner.
 Test: dashboard::tests::test_header_reviewing_shows_progress, dashboard::tests::test_header_complete_no_spinner, dashboard::tests::test_header_failed_no_spinner, dashboard::tests::test_compute_phase_needs_user, dashboard::tests::test_compute_phase_rate_limited, dashboard::tests::test_header_rate_limited_shows_spinner, dashboard::tests::test_compute_phase_planned, tests/behaviors/operations/test-dashboard-activity.sh (no crash when run has failed, no crash when run needs user input, no crash with mixed run states)
 
 ### Dashboard layout

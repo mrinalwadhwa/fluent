@@ -73,6 +73,7 @@ pub fn run_session_loop(
     let mut review_round: u32 = 0;
     let initial_prompt = if run_mode == RunMode::Review {
         eprintln!("  Mode: review (reviewers only)");
+        run.set_status(&RunStatus::Reviewing)?;
         review_round += 1;
         review::run_reviews(
             run_dir,
@@ -189,12 +190,14 @@ pub fn run_session_loop(
                     break;
                 }
 
+                run.set_status(&RunStatus::Reviewing)?;
                 review_round += 1;
                 if review_round > MAX_REVIEW_ROUNDS {
                     eprintln!(
                         "  Max review rounds ({}) reached — accepting current state.",
                         MAX_REVIEW_ROUNDS
                     );
+                    run.set_status(&RunStatus::Complete)?;
                     report::generate_report(run_dir, &run.id, session_count)?;
                     eprintln!("\n  Run {} completed (review limit).", run.id);
                     break;
@@ -224,6 +227,7 @@ pub fn run_session_loop(
                     )?;
                 }
                 if all_pass {
+                    run.set_status(&RunStatus::Complete)?;
                     report::generate_report(run_dir, &run.id, session_count)?;
                     eprintln!("\n  Run {} completed.", run.id);
                     break;
