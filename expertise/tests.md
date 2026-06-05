@@ -1,158 +1,141 @@
 # How to write tests
 
-Principles for writing tests that give confidence without becoming a
-maintenance burden.
-
 ## Why tests exist
 
-Tests answer one question: does the system work? Every test decision
-— what to test, how to test it, how many tests to write — should be
-evaluated against this: does this test increase confidence that the
-system works, proportional to its cost?
+Tests build confidence in code. Each one encodes a scenario and an
+expected outcome. Every passing test ratchets up confidence: one
+more set of inputs that work as expected.
 
-Tests also serve as living documentation. A well-written test shows
-how the code is meant to be used and what it's expected to do. Unlike
-comments or docs, tests stay in sync with the code because they break
-when the code changes.
+Once you have a repeatable test for a scenario, you can safely
+refactor the code that implements it. The test tells you immediately
+whether it still works. If your suite of tests covers enough ground,
+you can ship frequently and with confidence.
 
-## Test behavior, not implementation
+Writing a test makes you think about the interface. If the test is
+hard to write, the interface may need work.
 
-Tests should verify what the system does, not how it does it. A test
-that breaks when you refactor without changing behavior is a tax, not
-an asset.
+Tests capture your thinking at the time of writing: what you
+expected for a given scenario. A teammate reading the code months
+later can look at the tests to understand intended behavior. But
+tests only cover what you thought to cover. Production will have
+scenarios you didn't think of.
 
-**Behavioral test:** "when the user submits an empty form, an error
-message appears." This survives any refactoring of the form
-validation logic.
+## Properties of good tests
 
-**Implementation test:** "the validateEmail function returns false
-for empty strings." This breaks if you rename the function,
-restructure the validation, or move the logic — even if the behavior
-is unchanged.
+### Test observable behavior, not internal structure
 
-Implementation tests have their place: complex algorithms, parsing
-logic, mathematical computations where the implementation IS the
-behavior. But they should be the exception, not the default.
+Tests should be sensitive to changes in observable behavior and
+insensitive to changes in internal structure. A good test verifies
+behavior through the test subject's public interface and ignores
+the implementation behind it.
 
-The practical test: if you can refactor the code without changing
-what users observe, and a test breaks, that test was testing
-implementation.
+If you reorganize internals without changing the public interface
+or its outputs, no test should break. Rename a private method,
+extract a function, change a data structure — none of these should
+cause a test failure.
 
-## Testing levels
+Common causes of structure-coupling: testing private methods
+directly, asserting on call counts, or mocking parts of your own
+code instead of mocking only external dependencies like databases
+or APIs.
 
-Different levels of tests catch different kinds of problems. No
-single level is sufficient.
+The exception is when the goal is to implement a specific
+algorithm — a parser, a sort, a hash function. The algorithm is
+the specified behavior, and testing it directly makes sense.
 
-### Unit tests
+### Write tests that are isolated and deterministic
 
-Test individual components in isolation. Fast, numerous, good for
-logic and edge cases. The foundation of any test suite.
+Each test should set up its own state, run independently, and
+produce the same result every time. If a test passes when run alone
+but fails when run after another test, it depends on shared state
+it shouldn't. If a test passes on Monday and fails on Tuesday with
+no code changes, it depends on something outside its control: a
+clock, a random seed, a network service, a database that wasn't
+cleaned up.
 
-Good for: business logic, data transformations, algorithms,
-validation rules, pure functions.
+Flaky tests are worse than missing tests. A flaky test trains you
+to ignore failures, and real regressions slip through alongside
+the noise. Fix or delete flaky tests immediately.
 
-Not good for: verifying that components work together, database
-interactions, API contracts, user-visible behavior.
+Isolated tests compose naturally. If you have four ways to compute
+interest and five ways to report it, you don't need twenty tests.
+Test the four computations, test the five reports, add one test
+that wires them together. Nine tests give you the same confidence
+as twenty, and they're faster and easier to maintain. This works
+when the dimensions are genuinely independent. When they're not,
+test the combinations that matter.
 
-### Integration tests
+### Keep tests fast and automated
 
-Test that components work together correctly. Slower than unit
-tests but catch a different class of bugs — the kind where each
-piece works individually but they fail when connected.
+Slow tests don't get run. If the suite takes long enough that you
+hesitate to run it, you'll start batching changes, and when
+something fails you won't know which change caused it.
 
-Good for: database operations, API calls, file system interactions,
-component interactions, configuration loading.
+Every test should run without human intervention. No manual setup,
+no visual inspection of output, no "check that the UI looks right."
+If a test requires a person to judge whether it passed, it won't
+get run often enough to catch anything.
 
-The sweet spot for most projects. Integration tests give the best
-ratio of confidence to cost. They're slower than unit tests but
-catch more real-world bugs.
+When a test is slow, the problem is usually the design of the code
+under test, not the test itself. Code that requires a database, a
+network call, or a heavy setup to test a piece of logic can often
+be restructured so the logic is testable in isolation.
 
-### End-to-end tests
+### Make tests easy to write and easy to read
 
-Test complete user journeys through the actual system. Maximum
-confidence but slow, brittle, and expensive to maintain.
+If a test is hard to write, the code is probably hard to use.
+Simplify the interface.
 
-Good for: critical user paths (login, checkout, data export), smoke
-tests that verify the system starts and responds.
+Tests are read more than they're written. A reader should
+understand what a test checks from the test itself, without
+chasing through shared helpers or abstract base classes. Favor
+clarity in each test over eliminating duplication across tests.
+Some repetition between tests is fine if it keeps each one
+self-explanatory.
 
-Keep these few. They're notoriously flaky — failing for reasons
-unrelated to code changes (network timeouts, rendering differences,
-race conditions). Every flaky end-to-end test erodes trust in the
-entire test suite.
+### Write tests so that when they fail, the cause is obvious
 
-### Contract tests
+If you need a debugger to figure out why a test broke, the test is
+too coarse. Smaller tests that exercise less code point directly to
+the problem. When multiple tests fail at once, start with the
+leaf-level failures. They're usually the root cause.
 
-Verify that the interface between two systems matches what both
-sides expect. Catch breaking changes between services without
-running the full system.
+### When production breaks despite passing tests, write a test that would have caught it
 
-Good for: API boundaries, service-to-service communication, any
-place where one team's changes could break another team's code.
+A passing suite should mean something. If all tests are green but
+production breaks routinely, the suite is testing the wrong things
+or not enough of the right things. You can't replicate every
+production condition in a test, but when you find a gap between
+test results and production behavior, close it.
 
-### Static analysis
+## How to choose test cases
 
-Not tests in the traditional sense, but catches issues before any
-test runs: type errors, unused variables, style violations, common
-bug patterns. The cheapest form of quality checking.
+You can't test every possible input. The goal is to pick inputs
+that find the most bugs with the fewest tests.
 
-## How many tests to write
+Group inputs into categories that should behave the same way, and
+test one value from each category. If a function accepts ages 0-120,
+you don't need 121 tests. You need a valid age, a negative age, and
+an age above 120. If it handles the valid case correctly for 25,
+it will handle it correctly for 47.
 
-Write lots of fast unit tests, some integration tests, and very few
-end-to-end tests. This is the testing pyramid — more tests at the
-bottom, fewer at the top.
+Bugs cluster at boundaries. If a range is 1-100, test 0, 1, 100,
+and 101. The values just inside and just outside each boundary are
+where off-by-one errors live. Combine this with the categories:
+pick the boundary values from each group rather than values in
+the middle.
 
-The exact ratio depends on the project. A CLI tool needs mostly unit
-tests. A payment gateway needs mostly integration tests. A website
-needs more UI tests. Don't apply a standard pyramid to every project
-— understand where your application's risks are and test those areas
-most heavily.
+For some code, specifying exact inputs and outputs is less useful
+than specifying properties that should hold for any input. "Sorting
+a list twice produces the same result as sorting it once." "Encoding
+then decoding returns the original." Property-based testing
+frameworks generate random inputs and check these properties,
+finding edge cases you wouldn't think to write by hand.
 
-Diminishing returns set in around 70% coverage. Don't chase 100% —
-it leads to tests for trivial code and slows down refactoring. The
-exception: small, reusable libraries where complete coverage is
-manageable and valuable.
+## How to structure a test
 
-When a higher-level test catches a bug that no lower-level test
-caught, write a lower-level test for it. Push test coverage down the
-pyramid where tests are faster and more reliable.
-
-## Test design techniques
-
-### Equivalence partitioning
-
-Group inputs into classes that should behave the same way. Test one
-value from each class instead of every possible value. If a function
-accepts ages 0-120, you don't need 121 tests — you need tests for a
-valid age, a negative age, and an age above 120.
-
-### Boundary value analysis
-
-Bugs cluster at boundaries. If a function accepts 1-100, test at 0,
-1, 2, 99, 100, and 101. The values just inside and outside each
-boundary are where off-by-one errors live.
-
-### Equivalence partitioning + boundary analysis together
-
-Partition the input space, then test the boundaries of each
-partition. This gives good coverage with minimal tests.
-
-### Property-based testing
-
-Instead of specifying exact inputs and outputs, specify properties
-that should hold for any input. The testing framework generates
-random inputs and checks the properties. Good for finding edge cases
-you wouldn't think to test manually.
-
-Example property: "sorting a list and then sorting it again produces
-the same result as sorting it once." The framework tries hundreds of
-random lists to verify this.
-
-## Test quality
-
-### Naming
-
-The test name should describe the behavior being verified. A reader
-should understand what the test checks from the name alone.
+Name the test after the scenario it verifies. A reader should
+understand what the test checks from the name alone.
 
 ```
 # Vague
@@ -162,169 +145,101 @@ test_process
 # Clear
 test_empty_email_shows_error
 test_expired_token_returns_401
-test_creates_run_directory_with_status_file
 ```
 
-### Structure
+Follow arrange-act-assert: set up the preconditions, perform the
+action, verify the outcome. When setup gets long, extract it into
+a helper so the test body stays focused on the action and assertion.
 
-Use arrange-act-assert:
+Each test should verify one behavior. If the name needs "and,"
+split it into two tests. When a multi-assertion test fails, you
+have to read the body to figure out what broke. With one behavior
+per test, the name tells you.
 
-1. **Arrange** — set up preconditions
-2. **Act** — perform the action
-3. **Assert** — verify the outcome
+## Testing levels
 
-Keep each section clear. When arrange is longer than act + assert,
-the test may be testing too much, or the setup should be extracted
-into a helper.
+- **Unit tests** test a single component in isolation. Fast, good
+  for logic, edge cases, algorithms. The bulk of most test suites.
+- **Integration tests** test that components work together.
+  Slower, but they catch bugs that unit tests can't, the kind
+  where each piece works alone but they fail when connected.
+  Often the best confidence-to-cost ratio.
+- **End-to-end tests** test complete user journeys through the
+  real system. High confidence, but they're slower and more
+  brittle than other levels. Failures often come from environment
+  issues rather than code bugs.
+- **Contract tests** verify that two systems agree on their
+  shared interface. Useful at API boundaries where one team's
+  changes could break another's.
 
-### One behavior per test
-
-Each test verifies one thing. When a test with multiple assertions
-fails, you need to read the test body to know what broke. With one
-behavior per test, the name tells you.
-
-If the test name needs "and," split it.
-
-### Self-contained and isolated
-
-Tests should not depend on each other or on shared mutable state.
-Running tests in any order, or running a single test alone, should
-produce the same result.
-
-Each test sets up its own state and cleans up after itself. Use
-temporary directories, fresh instances, and setup/teardown
-functions. Don't rely on state left by a previous test.
-
-### Deterministic
-
-A test that sometimes passes and sometimes fails (without code
-changes) is worse than no test. Flaky tests destroy confidence in
-the entire suite. Developers learn to ignore failures, and real
-regressions slip through.
-
-Common causes of flakiness: timing dependencies, shared state
-between tests, reliance on external services, non-deterministic
-ordering, race conditions. Fix or remove flaky tests immediately.
-
-### Tests are code
-
-Apply the same quality standards to test code as to production code.
-Extract common setup into helpers. Name things clearly. Don't
-copy-paste tests — if multiple tests share setup, factor it out.
-Poorly maintained tests accumulate debt faster than production code.
+No single level is sufficient. A project that only has unit tests
+won't catch integration bugs. A project that only has end-to-end
+tests will have a slow, flaky suite. Match the level to what
+you're verifying.
 
 ## Test doubles
 
-Test doubles (mocks, stubs, fakes, spies) replace real dependencies
-in tests. Use them deliberately.
+Test doubles replace real dependencies in tests. The main types:
 
-**Mock:** records what was called and with what arguments. Verify
-that the right calls were made.
+- **Fake**: actually works. You can write to it, query it, and
+  get realistic responses. An in-memory database that stores and
+  retrieves data. A local HTTP server that handles requests.
+- **Stub**: you tell it what to return and it doesn't do anything
+  else. A function that always returns the same user object
+  regardless of what you ask for.
+- **Mock**: you tell it what calls to expect, then check that
+  those calls happened. An object that lets you assert
+  "send_email was called with this address and this body."
 
-**Stub:** returns predetermined responses. Control what the
-dependency provides to the code under test.
+Prefer real implementations when they're fast and deterministic.
+When they're not, prefer fakes. Fakes behave like the real thing
+and catch bugs that stubs and mocks miss because they execute
+actual logic. A test using an in-memory database will catch a
+malformed query. A test using a mock won't.
 
-**Fake:** a lightweight working implementation. An in-memory
-database, a local file system, a simple HTTP server.
+Mocks verify interactions, not outcomes. That makes them sensitive
+to how code is structured rather than what it does. If you refactor
+the internals, mock-based tests break even when behavior is
+unchanged. Reserve mocks for cases where the interaction itself is
+the behavior you care about: verifying that an email was sent, that
+a payment API was called with the right amount.
 
-**When to use doubles:** for external dependencies that are slow
-(network, database), non-deterministic (time, randomness), or
-expensive (payment APIs, cloud services).
-
-**When not to use doubles:** for internal modules that are fast and
-deterministic. Excessive mocking means you're testing that your mocks
-work, not that your code works. If a test needs many mocks, the code
-under test may have too many dependencies.
-
-## What not to test
-
-**Trivial code.** A function that returns a constant or a simple
-getter doesn't need a test. Focus on code with logic, branching,
-and integration points.
-
-**The framework.** If the language guarantees that assignment works,
-don't test assignment. Test what your code does, not what the
-runtime does.
-
-**Private internals.** If you need to test a private function
-directly, it might belong in its own module with a public interface.
-Or the behavior it implements should be tested through the public
-API.
-
-**Configuration format.** Don't test that YAML parses correctly
-unless parsing is your code's job. Test the behavior the
-configuration enables.
+If a test needs many doubles, the code under test probably has too
+many dependencies.
 
 ## Test the actual code
 
-Tests must exercise the real implementation, not a copy of it.
+Tests must exercise the code you're trying to verify. When code
+is hard to reach through its public interface, it's tempting to
+copy the logic into the test and verify the copy instead. The test
+passes, but it's testing itself. If the real code changes, the
+test still passes because it's running its own duplicate.
 
-**The replication anti-pattern.** When an agent can't easily test
-internal logic, it copies that logic into the test and verifies the
-copy instead of the original. The test passes, but it's testing
-itself — if the real code changes, the test still passes because it's
-running its own duplicate. This gives false confidence.
+If you can't test a piece of code through its public interface:
 
-If you can't test a piece of code through its public interface,
-consider these options in order:
-
-1. **Restructure the code.** Can the logic be extracted into a
-   module with its own interface? Often the reason something is hard
-   to test is that it's buried in a function that does too much.
-
-2. **Relax visibility constraints.** It's acceptable to make
-   something more visible (package-private, internal, pub(crate))
-   specifically to make it testable. A slightly wider interface that
-   enables real testing is better than a perfectly encapsulated
-   module you can't verify. This is a justified trade-off, not a
-   design failure.
-
+1. **Restructure the code.** Extract the logic into a module with
+   its own interface. Often the reason something is hard to test is
+   that it's buried in a function that does too much.
+2. **Relax visibility.** Making something package-private or
+   pub(crate) to enable testing is a justified tradeoff.
 3. **Test through a higher-level interface.** If the behavior is
-   observable at a higher level, test it there. The internal function
-   gets coverage indirectly.
+   observable at a higher level, test it there.
+4. **Duplicate as a last resort.** If nothing else works and the
+   logic is critical, duplicating it in the test can be justified.
+   Document why, and recognize it won't catch changes to the
+   original.
 
-4. **As a last resort, duplicate carefully.** If none of the above
-   work and the logic is critical, duplicating it in the test can be
-   justified — but document why, and recognize that the test won't
-   catch changes to the original. This should be rare and flagged for
-   future improvement.
+Adjust the code to be testable rather than adjusting the test to
+avoid the code.
 
-The priority is: test the real code. Adjust the code's design to be
-testable rather than adjusting the test to avoid the code.
+## What not to test
 
-## Anti-patterns
-
-**Testing implementation details.** Tests coupled to code structure
-break on refactoring. They cost maintenance without catching real
-bugs.
-
-**Excessive mocking.** Every mock is an assumption about how the
-dependency behaves. Too many assumptions mean the test verifies a
-fantasy, not reality.
-
-**Flaky tests kept in the suite.** A flaky test teaches everyone
-to ignore test failures. Fix it or remove it.
-
-**Large test functions.** A test with 50 lines of setup is testing
-too much. Break it into focused tests with shared helpers.
-
-**100% coverage as a goal.** Coverage measures which lines executed,
-not whether the tests verify anything useful. A test that calls code
-without asserting outcomes adds coverage without adding confidence.
-
-**Not converting production bugs to tests.** Every production bug
-is a testing gap. When you fix a bug, write a test that would have
-caught it. This prevents regression and documents the issue.
-
-**Snapshot tests as the only test.** Snapshots detect changes but
-don't verify correctness. A changed snapshot tells you something
-changed — not whether the change is right. Use behavioral assertions
-alongside snapshots.
-
-**Testing the same thing at multiple levels.** If a unit test covers
-a case, don't repeat it in an integration test. Each test level
-should catch a different class of bugs.
-
-**Slow test suites.** If tests take too long, developers stop
-running them. Keep the fast suite under 30 seconds. Isolate slow
-tests into a separate suite for CI.
+- Trivial code. A function that returns a constant or a simple
+  getter doesn't need a test.
+- Framework guarantees. If the language guarantees that assignment
+  works, don't test assignment.
+- Configuration format. Don't test that YAML parses correctly
+  unless parsing is your code's job.
+- Private internals. If you need to test a private function
+  directly, it probably belongs in its own module with a public
+  interface.
