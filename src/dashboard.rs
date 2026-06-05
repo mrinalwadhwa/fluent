@@ -195,6 +195,8 @@ struct App {
     feed_height: usize,
     /// Monotonically increasing counter, incremented each render frame.
     tick: u64,
+    /// First visible run tab index for horizontal scrolling.
+    run_tab_offset: usize,
 }
 
 impl App {
@@ -224,10 +226,6 @@ impl App {
                 .unwrap_or(0)
         };
 
-        if views.is_empty() {
-            anyhow::bail!("No runs found in {}", search_root.display());
-        }
-
         Ok(Self {
             runs: views,
             selected_run: selected,
@@ -235,6 +233,7 @@ impl App {
             should_quit: false,
             feed_height: 20,
             tick: 0,
+            run_tab_offset: 0,
         })
     }
 
@@ -303,7 +302,7 @@ fn run_event_loop(
         if event::poll(timeout)? {
             let fh = app.feed_height;
             match event::read()? {
-            CEvent::Mouse(mouse) => {
+            CEvent::Mouse(mouse) if !app.runs.is_empty() => {
                 match mouse.kind {
                     crossterm::event::MouseEventKind::ScrollUp => {
                         let view = app.current_view_mut();
@@ -330,7 +329,7 @@ fn run_event_loop(
                     | (_, KeyCode::Char('q')) => {
                         app.should_quit = true;
                     }
-                    (_, KeyCode::Tab) => {
+                    (_, KeyCode::Tab) if !app.runs.is_empty() => {
                         // Cycle through agents within the current run
                         let view = app.current_view_mut();
                         if !view.agents.is_empty() {
@@ -341,7 +340,7 @@ fn run_event_loop(
                             view.scroll_to_bottom();
                         }
                     }
-                    (_, KeyCode::BackTab) => {
+                    (_, KeyCode::BackTab) if !app.runs.is_empty() => {
                         let view = app.current_view_mut();
                         if !view.agents.is_empty() {
                             view.selected_agent = if view.selected_agent == 0 {
@@ -354,29 +353,29 @@ fn run_event_loop(
                             view.scroll_to_bottom();
                         }
                     }
-                    (_, KeyCode::Right) => {
-                        if !app.runs.is_empty() {
-                            app.selected_run =
-                                (app.selected_run + 1) % app.runs.len();
-                        }
+                    (_, KeyCode::Right) if !app.runs.is_empty() => {
+                        app.selected_run =
+                            (app.selected_run + 1) % app.runs.len();
                     }
-                    (_, KeyCode::Left) => {
-                        if !app.runs.is_empty() {
-                            app.selected_run = if app.selected_run == 0 {
-                                app.runs.len() - 1
-                            } else {
-                                app.selected_run - 1
-                            };
-                        }
+                    (_, KeyCode::Left) if !app.runs.is_empty() => {
+                        app.selected_run = if app.selected_run == 0 {
+                            app.runs.len() - 1
+                        } else {
+                            app.selected_run - 1
+                        };
                     }
-                    (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
+                    (_, KeyCode::Up) | (_, KeyCode::Char('k'))
+                        if !app.runs.is_empty() =>
+                    {
                         let view = app.current_view_mut();
                         view.auto_scroll = false;
                         view.clamp_scroll(fh);
                         view.scroll_offset =
                             view.scroll_offset.saturating_sub(1);
                     }
-                    (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
+                    (_, KeyCode::Down) | (_, KeyCode::Char('j'))
+                        if !app.runs.is_empty() =>
+                    {
                         let view = app.current_view_mut();
                         view.auto_scroll = false;
                         view.clamp_scroll(fh);
@@ -388,24 +387,28 @@ fn run_event_loop(
                             view.auto_scroll = true;
                         }
                     }
-                    (_, KeyCode::Char('G')) | (_, KeyCode::End) => {
+                    (_, KeyCode::Char('G')) | (_, KeyCode::End)
+                        if !app.runs.is_empty() =>
+                    {
                         let view = app.current_view_mut();
                         view.auto_scroll = false;
                         view.scroll_to_bottom();
                     }
-                    (_, KeyCode::Char('g')) | (_, KeyCode::Home) => {
+                    (_, KeyCode::Char('g')) | (_, KeyCode::Home)
+                        if !app.runs.is_empty() =>
+                    {
                         let view = app.current_view_mut();
                         view.auto_scroll = false;
                         view.scroll_offset = 0;
                     }
-                    (_, KeyCode::PageUp) => {
+                    (_, KeyCode::PageUp) if !app.runs.is_empty() => {
                         let view = app.current_view_mut();
                         view.auto_scroll = false;
                         view.clamp_scroll(fh);
                         view.scroll_offset =
                             view.scroll_offset.saturating_sub(20);
                     }
-                    (_, KeyCode::PageDown) => {
+                    (_, KeyCode::PageDown) if !app.runs.is_empty() => {
                         let view = app.current_view_mut();
                         view.auto_scroll = false;
                         view.clamp_scroll(fh);
@@ -448,9 +451,40 @@ fn verdict_status(review_file: &Path) -> String {
 
 fn draw_ui(f: &mut ratatui::Frame, app: &mut App) {
     let size = f.area();
-    let idx = app.selected_run;
     let tick = app.tick;
     app.tick += 1;
+
+    if app.runs.is_empty() {
+        let main_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // header
+                Constraint::Min(3),    // empty state
+                Constraint::Length(1), // help bar
+            ])
+            .split(size);
+
+        let header = Paragraph::new(Line::from(vec![
+            Span::styled("No runs found", Style::default().fg(Color::DarkGray)),
+        ]))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Factory Dashboard "),
+        );
+        f.render_widget(header, main_chunks[0]);
+
+        let empty = Paragraph::new(Line::from(Span::styled(
+            "No runs in this project. Create a brief to start a run.",
+            Style::default().fg(Color::DarkGray),
+        )))
+        .block(Block::default().borders(Borders::ALL).title(" Runs "));
+        f.render_widget(empty, main_chunks[1]);
+        draw_help_bar(f, main_chunks[2]);
+        return;
+    }
+
+    let idx = app.selected_run;
 
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -547,40 +581,119 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, view: &RunView, tick: u64) {
     f.render_widget(header, area);
 }
 
-fn draw_run_tabs(f: &mut ratatui::Frame, area: Rect, app: &App) {
-    let titles: Vec<Line> = app
-        .runs
-        .iter()
-        .map(|v| {
-            let status = v
-                .run
-                .status()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|_| "?".into());
-            let color = match status.as_str() {
-                "executing" => Color::Green,
-                "complete" => Color::Blue,
-                "failed" => Color::Red,
-                "needs-user" => Color::Yellow,
-                _ => Color::White,
-            };
-            Line::from(Span::styled(
-                format!(" {} [{}] ", v.run.id, status),
-                Style::default().fg(color),
-            ))
-        })
-        .collect();
+/// Build the display label for a single run tab.
+fn run_tab_label(v: &RunView) -> (String, Color) {
+    let status = v
+        .run
+        .status()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|_| "?".into());
+    let color = match status.as_str() {
+        "executing" => Color::Green,
+        "complete" => Color::Blue,
+        "failed" => Color::Red,
+        "needs-user" => Color::Yellow,
+        _ => Color::White,
+    };
+    (format!(" {} [{}] ", v.run.id, status), color)
+}
 
-    let tabs = Tabs::new(titles)
-        .block(Block::default().borders(Borders::ALL).title(" Runs "))
-        .select(app.selected_run)
-        .highlight_style(
+/// Ensure `run_tab_offset` keeps the selected run visible within `width`.
+fn clamp_run_tab_offset(app: &mut App, content_width: usize) {
+    if app.runs.is_empty() {
+        app.run_tab_offset = 0;
+        return;
+    }
+
+    let labels: Vec<String> = app.runs.iter().map(|v| run_tab_label(v).0).collect();
+
+    // Ensure selected is at least at offset
+    if app.selected_run < app.run_tab_offset {
+        app.run_tab_offset = app.selected_run;
+    }
+
+    // Walk forward from offset, accumulating widths until selected is visible
+    loop {
+        let mut used = 0usize;
+        let mut selected_visible = false;
+        let arrow_reserve = if app.run_tab_offset > 0 { 2 } else { 0 };
+        used += arrow_reserve;
+
+        for i in app.run_tab_offset..labels.len() {
+            let label_w = labels[i].width();
+            let separator = if i > app.run_tab_offset { 3 } else { 0 }; // " │ "
+            let needed = used + separator + label_w;
+            // Reserve space for right arrow if more tabs follow
+            let right_arrow = if i + 1 < labels.len() { 2 } else { 0 };
+            if needed + right_arrow > content_width && i != app.run_tab_offset {
+                break;
+            }
+            used = needed;
+            if i == app.selected_run {
+                selected_visible = true;
+            }
+        }
+
+        if selected_visible || app.run_tab_offset >= app.selected_run {
+            break;
+        }
+        app.run_tab_offset += 1;
+    }
+}
+
+fn draw_run_tabs(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
+    let content_width = area.width.saturating_sub(2) as usize; // borders
+
+    clamp_run_tab_offset(app, content_width);
+
+    let has_left = app.run_tab_offset > 0;
+    let labels: Vec<(String, Color)> = app.runs.iter().map(|v| run_tab_label(v)).collect();
+
+    // Determine which tabs fit
+    let mut visible_end = app.run_tab_offset;
+    let mut used = if has_left { 2 } else { 0 }; // "◀ "
+    for i in app.run_tab_offset..labels.len() {
+        let label_w = labels[i].0.width();
+        let separator = if i > app.run_tab_offset { 3 } else { 0 };
+        let needed = used + separator + label_w;
+        let right_arrow = if i + 1 < labels.len() { 2 } else { 0 };
+        if needed + right_arrow > content_width && i != app.run_tab_offset {
+            break;
+        }
+        used = needed;
+        visible_end = i + 1;
+    }
+    let has_right = visible_end < labels.len();
+
+    // Build the spans
+    let mut spans: Vec<Span> = Vec::new();
+    if has_left {
+        spans.push(Span::styled("◀ ", Style::default().fg(Color::DarkGray)));
+    }
+    for i in app.run_tab_offset..visible_end {
+        if i > app.run_tab_offset {
+            spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+        }
+        let (ref label, color) = labels[i];
+        let style = if i == app.selected_run {
             Style::default()
+                .fg(color)
                 .add_modifier(Modifier::BOLD)
-                .add_modifier(Modifier::REVERSED),
-        );
+                .add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default().fg(color)
+        };
+        spans.push(Span::styled(label.as_str(), style));
+    }
+    if has_right {
+        spans.push(Span::styled(" ▶", Style::default().fg(Color::DarkGray)));
+    }
 
-    f.render_widget(tabs, area);
+    let line = Line::from(spans);
+    let paragraph = Paragraph::new(line)
+        .block(Block::default().borders(Borders::ALL).title(" Runs "));
+
+    f.render_widget(paragraph, area);
 }
 
 fn draw_agent_tabs(f: &mut ratatui::Frame, area: Rect, view: &RunView) {
@@ -1377,5 +1490,189 @@ mod tests {
                 "Character '{ch}' missing from wrapped output"
             );
         }
+    }
+
+    // --- strip_ansi tests (guards against stray "A" rendering bug) ---
+
+    #[test]
+    fn test_strip_ansi_csi_sequence() {
+        // CSI color codes should be fully removed
+        let input = "\x1b[31mhello\x1b[0m";
+        assert_eq!(strip_ansi(input), "hello");
+    }
+
+    #[test]
+    fn test_strip_ansi_osc_sequence() {
+        // OSC sequences (e.g. terminal title) should be removed
+        let input = "\x1b]0;title\x07text";
+        assert_eq!(strip_ansi(input), "text");
+    }
+
+    #[test]
+    fn test_strip_ansi_stray_escape_no_leak() {
+        // A bare ESC followed by a non-bracket char must not leak
+        // the following character into output. This is the pattern
+        // that caused the original "stray A" bug.
+        let input = "\x1b[?25hA visible text";
+        let result = strip_ansi(input);
+        // The CSI sequence "\x1b[?25h" ends at 'h', so "A visible text" remains
+        assert_eq!(result, "A visible text");
+
+        // Bare ESC not followed by [ or ] — only ESC is consumed
+        let input2 = "\x1bXhello";
+        let result2 = strip_ansi(input2);
+        assert_eq!(result2, "Xhello");
+    }
+
+    #[test]
+    fn test_strip_ansi_preserves_plain_text() {
+        assert_eq!(strip_ansi("hello world"), "hello world");
+        assert_eq!(strip_ansi(""), "");
+    }
+
+    #[test]
+    fn test_strip_ansi_removes_control_chars() {
+        // Control characters other than \t and \n should be removed
+        let input = "a\x01b\x02c";
+        assert_eq!(strip_ansi(input), "abc");
+    }
+
+    // --- Scrollable run tab tests ---
+
+    fn make_app_with_runs(ids: &[&str], selected: usize) -> App {
+        let views: Vec<RunView> = ids
+            .iter()
+            .map(|id| make_run_view(id, vec![AgentView::new("author")]))
+            .collect();
+        App {
+            runs: views,
+            selected_run: selected,
+            search_root: PathBuf::from("/tmp"),
+            should_quit: false,
+            feed_height: 20,
+            tick: 0,
+            run_tab_offset: 0,
+        }
+    }
+
+    fn render_run_tabs_text(app: &mut App, width: u16) -> String {
+        let backend = TestBackend::new(width, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                draw_run_tabs(f, f.area(), app);
+            })
+            .unwrap();
+        buffer_text(terminal.backend().buffer())
+    }
+
+    #[test]
+    fn test_run_tabs_all_fit_no_arrows() {
+        let mut app = make_app_with_runs(&["run-a", "run-b"], 0);
+        let text = render_run_tabs_text(&mut app, 80);
+        assert!(text.contains("run-a"));
+        assert!(text.contains("run-b"));
+        assert!(!text.contains('◀'));
+        assert!(!text.contains('▶'));
+    }
+
+    #[test]
+    fn test_run_tabs_overflow_shows_right_arrow() {
+        // Use many long run IDs in a narrow terminal
+        let mut app = make_app_with_runs(
+            &[
+                "20260101-first-run",
+                "20260102-second-run",
+                "20260103-third-run",
+                "20260104-fourth-run",
+            ],
+            0,
+        );
+        let text = render_run_tabs_text(&mut app, 50);
+        // First run should be visible since it's selected
+        assert!(text.contains("20260101"));
+        // Should show right arrow indicating more runs
+        assert!(text.contains('▶'));
+    }
+
+    #[test]
+    fn test_run_tabs_selected_always_visible() {
+        let mut app = make_app_with_runs(
+            &[
+                "20260101-first-run",
+                "20260102-second-run",
+                "20260103-third-run",
+                "20260104-fourth-run",
+                "20260105-fifth-run",
+            ],
+            4, // select the last run
+        );
+        let text = render_run_tabs_text(&mut app, 50);
+        // Last run must be visible
+        assert!(text.contains("20260105"));
+        // Should show left arrow since earlier runs are hidden
+        assert!(text.contains('◀'));
+    }
+
+    #[test]
+    fn test_run_tabs_navigate_right_shifts_offset() {
+        let mut app = make_app_with_runs(
+            &[
+                "20260101-first",
+                "20260102-second",
+                "20260103-third",
+                "20260104-fourth",
+            ],
+            0,
+        );
+        // Move selection to the last run
+        app.selected_run = 3;
+        let text = render_run_tabs_text(&mut app, 40);
+        assert!(text.contains("20260104"));
+    }
+
+    #[test]
+    fn test_run_tabs_empty_no_panic() {
+        let mut app = App {
+            runs: Vec::new(),
+            selected_run: 0,
+            search_root: PathBuf::from("/tmp"),
+            should_quit: false,
+            feed_height: 20,
+            tick: 0,
+            run_tab_offset: 0,
+        };
+
+        // Should render the empty state without panicking
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                draw_ui(f, &mut app);
+            })
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("No runs"));
+    }
+
+    #[test]
+    fn test_run_tabs_single_run_no_arrows() {
+        let mut app = make_app_with_runs(&["only-run"], 0);
+        let text = render_run_tabs_text(&mut app, 80);
+        assert!(text.contains("only-run"));
+        assert!(!text.contains('◀'));
+        assert!(!text.contains('▶'));
+    }
+
+    #[test]
+    fn test_clamp_run_tab_offset_keeps_selected_visible() {
+        let mut app = make_app_with_runs(
+            &["run-0", "run-1", "run-2", "run-3", "run-4"],
+            4,
+        );
+        app.run_tab_offset = 0;
+        // With a narrow width, offset must advance to show run-4
+        clamp_run_tab_offset(&mut app, 30);
+        assert!(app.run_tab_offset > 0);
     }
 }
