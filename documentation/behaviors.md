@@ -345,6 +345,11 @@ WHEN a completed run has `report.md` and author or reviewer transcripts,
 THE SYSTEM SHALL keep the transcript views accessible from the dashboard.
 Test: dashboard::tests::test_report_view_keeps_transcript_tabs_accessible
 
+WHEN a run completes after the user has selected a transcript tab,
+THE SYSTEM SHALL keep that transcript tab selected instead of switching
+to the report view during dashboard polling.
+Test: dashboard::tests::test_completion_poll_keeps_touched_transcript_selection
+
 WHEN a run is in the review phase,
 THE SYSTEM SHALL show each reviewer as an agent tab displaying a status
 symbol and color: ✓ (Green) for pass, ✗ (Red) for fail, ? (Yellow) for
