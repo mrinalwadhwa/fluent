@@ -103,7 +103,7 @@ rm -- "$file"
 
 ```sh
 readonly MAX_RETRIES=3
-readonly CONFIG_DIR="${HOME}/.config/factory"
+readonly CONFIG_DIR="${HOME}/.config/myapp"
 ```
 
 **Use local in functions** to avoid polluting global scope:
@@ -253,7 +253,7 @@ than spawning `expr`, `test`, or `grep` for simple checks.
 
 ## Portability
 
-The factory's scripts use `#!/usr/bin/env sh` for portability.
+Use `#!/usr/bin/env sh` for portability.
 When writing for POSIX sh:
 
 - No `[[ ]]` — use `[ ]` with careful quoting

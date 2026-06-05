@@ -72,11 +72,11 @@ vague:    significant performance improvement
 specific: p99 latency dropped from 180ms to 45ms
 
 vague:    the system handles errors gracefully
-specific: when the API returns 429, the session loop waits 5 minutes
+specific: when the API returns 429, the client waits 5 minutes
           and retries
 
-vague:    supports multiple backends
-specific: runs locally (macOS sandbox) or on AWS Fargate
+vague:    supports multiple deployment targets
+specific: runs locally on macOS and Linux, or on AWS Fargate
 ```
 
 ### Show the tradeoff
@@ -198,8 +198,8 @@ explore..." / "Let's now turn our attention to..." If a sentence
 describes what the document is about to do, cut it and do the thing.
 
 **Avoidance of plain "is"** — AI substitutes "serves as," "features,"
-"offers" for the plain "is." "The factory is a workflow system" is
-better than "The factory serves as a workflow system."
+"offers" for the plain "is." "The system is a workflow engine" is
+better than "The system serves as a workflow engine."
 
 **Rule of three as default** — AI puts everything in threes. Vary the
 count. Use two items. Use four. Use one.
