@@ -12,7 +12,8 @@ from intent capture through execution and review across multiple sessions.
 │  design-approach, plan-execution                │
 │  review-documentation, review-behaviors,        │
 │  review-architecture, review-skills,            │
-│  review-tests, write-tests                      │
+│  review-tests, architect, write-documentation,   │
+│  write-tests                                    │
 │  Portable procedures any agent follows          │
 ├─────────────────────────────────────────────────┤
 │  build-in-the-factory skill                     │
@@ -399,6 +400,8 @@ factory/main/
       common.sb              ← Seatbelt profile template
       claude-code.sb         ← Seatbelt profile template
   skills/
+    architect/SKILL.md
+    architect/references/
     build-in-the-factory/SKILL.md
     capture-brief/SKILL.md
     define-behaviors/SKILL.md
@@ -413,6 +416,8 @@ factory/main/
     review-skills/references/
     review-tests/SKILL.md
     review-tests/references/
+    write-documentation/SKILL.md
+    write-documentation/references/
     write-tests/SKILL.md
     write-tests/references/
   infrastructure/
