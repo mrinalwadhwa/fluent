@@ -184,39 +184,32 @@ Brief: [one-line summary]
 - [Risk and what it affects]
 ```
 
-## Output format (decomposed run)
+## Output format (parallel plan)
+
+When the work decomposes into independent child runs, use the group/step
+format. The factory parses this structure and creates child runs
+automatically. Each H2 is a group (executed in sequence). Each H3 is a
+step. Groups marked `(parallel)` launch their steps concurrently; unmarked
+groups run steps one at a time.
+
+Child run IDs are `{parent-id}-{group-idx}-{step-idx}` (1-indexed).
 
 ```markdown
-# Plan
+## Group 1 (parallel)
 
-Run: [run-id]
-Brief: [one-line summary]
+### Step: [step title]
 
-## Child runs
+[Brief for this child run — scope, behaviors it delivers, what it produces.]
 
-### [child-run-name-1]
-Scope: [what it covers]
-Behaviors: [which behaviors it delivers]
-Produces: [what it outputs that others need]
-Depends on: [nothing, or specific outputs]
+### Step: [step title]
 
-### [child-run-name-2]
-Scope: [what it covers]
-Behaviors: [which behaviors it delivers]
-Produces: [what it outputs]
-Depends on: [nothing, or specific outputs]
+[Brief for this child run.]
 
-## Execution order
+## Group 2
 
-[Which child runs proceed in parallel, which must wait.]
+### Step: [step title]
 
-## Sync points
-
-- [Where runs converge, what must be true, blocking or not]
-
-## Interfaces
-
-[Shared contracts or boundaries between child runs.]
+[Brief — this runs after group 1 merges.]
 ```
 
 ---

@@ -127,8 +127,10 @@ the loop handles the rest.
 
 ### 5. Execute
 
-Implement the plan. If the plan decomposes into child runs, create their
-run directories and execute them. At leaf level, write code directly.
+Implement the plan. If the plan uses parallel groups, the factory command
+detects the structured plan.md and automatically creates child run
+directories, worktrees, and launches child sessions. At leaf level, write
+code directly.
 
 During execution, you have latitude to adapt within the approach. For
 significant deviations, pause and renegotiate via `needs-user`.
@@ -183,6 +185,8 @@ Run state lives in `.factory/runs/[run-id]/`:
 | `sessions.log` | Per-session metadata log |
 | `report.md` | Generated run report |
 | `reviews/` | Review artifacts |
+| `children` | Child run IDs, one per line (parallel runs only, written by the factory) |
+| `parent` | Parent run ID (child runs only, written by the factory) |
 
 Each run executes in its own git worktree (a sibling of the source
 worktree). The factory command creates the worktree at launch time.

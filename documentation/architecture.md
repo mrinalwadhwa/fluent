@@ -105,6 +105,8 @@ fast-forward merges, deletes the branch, and sets the status to `landed`.
 | `sessions.log` | Per-session metadata: `{timestamp} session=N exit=CODE duration=Xs status=STATUS` and review-phase entries: `{timestamp} review=N duration=Xs verdict=VERDICT` |
 | `report.md` | Generated run report |
 | `reviews/` | Review artifacts, transcripts (`transcript-{name}.jsonl`), and round archives (`round-N/`) |
+| `children` | Child run IDs, one per line (written by the parallel orchestrator for parent runs) |
+| `parent` | Parent run ID (written for each child run) |
 
 ### Run-id resolution
 
@@ -324,6 +326,8 @@ factory/main/
     fargate.rs               ← Fargate launch, pull, shell
     dashboard.rs             ← Live TUI for run activity
     transcript.rs            ← Parse stream-json transcripts incrementally
+    plan.rs                  ← Parse plan.md into groups and steps
+    parallel.rs              ← Parallel plan orchestrator (child runs)
   documentation/
     architecture.md          ← this file
     behaviors.md             ← behavioral statements (EARS)

@@ -27,10 +27,11 @@ struct ChildInfo {
 
 /// Execute a parallel plan by launching child runs for each step.
 ///
-/// Groups execute sequentially. Steps within each group execute
-/// concurrently, each in its own worktree. After a group completes,
-/// child branches are merged into the source branch before the next
-/// group begins.
+/// Groups execute sequentially. Steps within a group marked `(parallel)`
+/// execute concurrently, each in its own worktree. Steps in an unmarked
+/// group execute one at a time in order. After a group completes, child
+/// branches are merged into the source branch before the next group
+/// begins.
 pub fn run_parallel_plan(
     source_root: &Path,
     parent_run: &Run,
@@ -70,87 +71,108 @@ where
 
     for (gi, group) in plan.groups.iter().enumerate() {
         let group_num = gi + 1;
+        let mode = if group.parallel { "parallel" } else { "sequential" };
         eprintln!(
-            "\n  === Group {} ({} step{}) ===",
+            "\n  === Group {} ({} step{}, {}) ===",
             group_num,
             group.steps.len(),
             if group.steps.len() == 1 { "" } else { "s" },
+            mode,
         );
 
         let mut child_infos: Vec<ChildInfo> = Vec::new();
-        let mut handles: Vec<thread::JoinHandle<Result<()>>> = Vec::new();
 
-        for (si, step) in group.steps.iter().enumerate() {
-            let step_num = si + 1;
-            let child_id = format!("{}-{}-{}", parent_run.id, group_num, step_num);
-            let child_dir = source_root.join(format!(".factory/runs/{}", child_id));
-            fs::create_dir_all(&child_dir)?;
+        if group.parallel {
+            // Parallel: set up all steps then launch threads
+            let mut handles: Vec<thread::JoinHandle<Result<()>>> = Vec::new();
 
-            let brief_content = format!("# {}\n\n{}", step.title, step.brief);
-            fs::write(child_dir.join("brief.md"), &brief_content)?;
-            fs::write(child_dir.join("status"), "planned")?;
-            fs::write(child_dir.join("parent"), &parent_run.id)?;
+            for (si, step) in group.steps.iter().enumerate() {
+                let (child_info, ctx) = setup_child_step(
+                    source_root, parent_run, group_num, si, step,
+                    system_prompt, extra_args, sandbox_profile,
+                )?;
+                all_child_ids.push(child_info.id.clone());
+                child_infos.push(child_info);
 
-            let wt_result =
-                worktree::setup_run_worktree(source_root, &child_id, &child_dir)?;
-            worktree::disable_commit_signing(&wt_result.worktree_dir)?;
+                let runner = child_runner.clone();
+                handles.push(thread::spawn(move || runner(ctx)));
+            }
 
-            eprintln!("  Step {}.{}: {}", group_num, step_num, step.title);
+            // Wait for all children
+            let mut errors: Vec<String> = Vec::new();
+            for (i, handle) in handles.into_iter().enumerate() {
+                let child_id = &child_infos[i].id;
+                match handle.join() {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => errors.push(format!("{}: {}", child_id, e)),
+                    Err(_) => errors.push(format!("{}: thread panicked", child_id)),
+                }
+            }
 
-            child_infos.push(ChildInfo {
-                id: child_id.clone(),
-                source_dir: child_dir,
-            });
-            all_child_ids.push(child_id.clone());
+            if !errors.is_empty() {
+                parent_run.set_status(&RunStatus::Failed)?;
+                bail!("Group {} failed:\n  {}", group_num, errors.join("\n  "));
+            }
+        } else {
+            // Sequential: run steps one at a time
+            for (si, step) in group.steps.iter().enumerate() {
+                let (child_info, ctx) = setup_child_step(
+                    source_root, parent_run, group_num, si, step,
+                    system_prompt, extra_args, sandbox_profile,
+                )?;
+                all_child_ids.push(child_info.id.clone());
+                child_infos.push(child_info);
 
-            let ctx = ChildContext {
-                id: child_id,
-                worktree_dir: wt_result.worktree_dir,
-                system_prompt: system_prompt.to_string(),
-                extra_args: extra_args.to_vec(),
-                sandbox_profile: sandbox_profile.map(String::from),
-            };
+                match child_runner.clone()(ctx) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        let child_id = &child_infos.last().unwrap().id;
+                        parent_run.set_status(&RunStatus::Failed)?;
+                        bail!("Group {} failed:\n  {}: {}", group_num, child_id, e);
+                    }
+                }
 
-            let runner = child_runner.clone();
-            handles.push(thread::spawn(move || runner(ctx)));
-        }
-
-        // Wait for all children
-        let mut errors: Vec<String> = Vec::new();
-        for (i, handle) in handles.into_iter().enumerate() {
-            let child_id = &child_infos[i].id;
-            match handle.join() {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => errors.push(format!("{}: {}", child_id, e)),
-                Err(_) => errors.push(format!("{}: thread panicked", child_id)),
+                // Verify this step completed before continuing
+                let info = child_infos.last().unwrap();
+                let child_run = Run {
+                    id: info.id.clone(),
+                    dir: info.source_dir.clone(),
+                };
+                let status = child_run.effective_status()?;
+                if status != RunStatus::Complete {
+                    parent_run.set_status(&RunStatus::Failed)?;
+                    bail!(
+                        "Group {} has failed steps:\n  {}: {}",
+                        group_num,
+                        info.id,
+                        status
+                    );
+                }
             }
         }
 
-        if !errors.is_empty() {
-            parent_run.set_status(&RunStatus::Failed)?;
-            bail!("Group {} failed:\n  {}", group_num, errors.join("\n  "));
-        }
-
-        // Verify all children completed
-        let mut failed: Vec<String> = Vec::new();
-        for info in &child_infos {
-            let child_run = Run {
-                id: info.id.clone(),
-                dir: info.source_dir.clone(),
-            };
-            let status = child_run.effective_status()?;
-            if status != RunStatus::Complete {
-                failed.push(format!("{}: {}", info.id, status));
+        // Verify all children completed (parallel path)
+        if group.parallel {
+            let mut failed: Vec<String> = Vec::new();
+            for info in &child_infos {
+                let child_run = Run {
+                    id: info.id.clone(),
+                    dir: info.source_dir.clone(),
+                };
+                let status = child_run.effective_status()?;
+                if status != RunStatus::Complete {
+                    failed.push(format!("{}: {}", info.id, status));
+                }
             }
-        }
 
-        if !failed.is_empty() {
-            parent_run.set_status(&RunStatus::Failed)?;
-            bail!(
-                "Group {} has failed steps:\n  {}",
-                group_num,
-                failed.join("\n  ")
-            );
+            if !failed.is_empty() {
+                parent_run.set_status(&RunStatus::Failed)?;
+                bail!(
+                    "Group {} has failed steps:\n  {}",
+                    group_num,
+                    failed.join("\n  ")
+                );
+            }
         }
 
         // Merge children back into the source branch
@@ -168,6 +190,49 @@ where
     eprintln!("\n  Parallel plan completed ({} steps).", total_steps);
 
     Ok(())
+}
+
+/// Set up a child step: create its run directory, worktree, and return
+/// the context needed to launch it.
+fn setup_child_step(
+    source_root: &Path,
+    parent_run: &Run,
+    group_num: usize,
+    step_index: usize,
+    step: &crate::plan::Step,
+    system_prompt: &str,
+    extra_args: &[String],
+    sandbox_profile: Option<&str>,
+) -> Result<(ChildInfo, ChildContext)> {
+    let step_num = step_index + 1;
+    let child_id = format!("{}-{}-{}", parent_run.id, group_num, step_num);
+    let child_dir = source_root.join(format!(".factory/runs/{}", child_id));
+    fs::create_dir_all(&child_dir)?;
+
+    let brief_content = format!("# {}\n\n{}", step.title, step.brief);
+    fs::write(child_dir.join("brief.md"), &brief_content)?;
+    fs::write(child_dir.join("status"), "planned")?;
+    fs::write(child_dir.join("parent"), &parent_run.id)?;
+
+    let wt_result = worktree::setup_run_worktree(source_root, &child_id, &child_dir)?;
+    worktree::disable_commit_signing(&wt_result.worktree_dir)?;
+
+    eprintln!("  Step {}.{}: {}", group_num, step_num, step.title);
+
+    let info = ChildInfo {
+        id: child_id.clone(),
+        source_dir: child_dir,
+    };
+
+    let ctx = ChildContext {
+        id: child_id,
+        worktree_dir: wt_result.worktree_dir,
+        system_prompt: system_prompt.to_string(),
+        extra_args: extra_args.to_vec(),
+        sandbox_profile: sandbox_profile.map(String::from),
+    };
+
+    Ok((info, ctx))
 }
 
 /// Execute a single child run's session loop.
@@ -243,11 +308,12 @@ mod tests {
         tmp
     }
 
-    fn make_plan(groups: Vec<Vec<(&str, &str)>>) -> Plan {
+    fn make_plan(groups: Vec<(bool, Vec<(&str, &str)>)>) -> Plan {
         Plan {
             groups: groups
                 .into_iter()
-                .map(|steps| Group {
+                .map(|(parallel, steps)| Group {
+                    parallel,
                     steps: steps
                         .into_iter()
                         .map(|(title, brief)| Step {
@@ -319,10 +385,10 @@ mod tests {
             dir: parent_dir.clone(),
         };
 
-        let plan = make_plan(vec![vec![
+        let plan = make_plan(vec![(true, vec![
             ("Task A", "Do A."),
             ("Task B", "Do B."),
-        ]]);
+        ])]);
 
         let result = execute_plan(
             &main_dir,
@@ -364,8 +430,8 @@ mod tests {
         };
 
         let plan = make_plan(vec![
-            vec![("Group1 A", "Do 1A."), ("Group1 B", "Do 1B.")],
-            vec![("Group2 A", "Do 2A.")],
+            (true, vec![("Group1 A", "Do 1A."), ("Group1 B", "Do 1B.")]),
+            (false, vec![("Group2 A", "Do 2A.")]),
         ]);
 
         let result = execute_plan(
@@ -408,10 +474,10 @@ mod tests {
             dir: parent_dir,
         };
 
-        let plan = make_plan(vec![vec![
+        let plan = make_plan(vec![(true, vec![
             ("Task A", "Do A."),
             ("Task B", "Do B."),
-        ]]);
+        ])]);
 
         let result = execute_plan(
             &main_dir,
@@ -455,10 +521,10 @@ mod tests {
             dir: parent_dir,
         };
 
-        let plan = make_plan(vec![vec![
+        let plan = make_plan(vec![(true, vec![
             ("Auth endpoints", "Implement login and logout."),
             ("DB schema", "Create users table."),
-        ]]);
+        ])]);
 
         let result = execute_plan(
             &main_dir,
@@ -502,8 +568,8 @@ mod tests {
 
         // Group 1 creates file, group 2 should see it
         let plan = make_plan(vec![
-            vec![("First", "Create first.")],
-            vec![("Second", "Create second.")],
+            (false, vec![("First", "Create first.")]),
+            (false, vec![("Second", "Create second.")]),
         ]);
 
         // Custom runner that verifies group 2 can see group 1's file
@@ -550,5 +616,199 @@ mod tests {
         );
 
         assert!(result.is_ok(), "Plan should succeed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parallel_mixed_success_failure_preserves_worktrees() {
+        let tmp = setup_git_project();
+        let main_dir = tmp.path().join("main");
+
+        let parent_id = "test-mixed";
+        let parent_dir = main_dir.join(format!(".factory/runs/{parent_id}"));
+        fs::create_dir_all(&parent_dir).unwrap();
+        fs::write(parent_dir.join("status"), "planned").unwrap();
+        fs::write(parent_dir.join("brief.md"), "Brief").unwrap();
+
+        let parent_run = Run {
+            id: parent_id.to_string(),
+            dir: parent_dir.clone(),
+        };
+
+        let plan = make_plan(vec![(true, vec![
+            ("Good step", "Succeeds."),
+            ("Bad step", "Fails."),
+        ])]);
+
+        // Runner where step 1 succeeds and step 2 fails
+        let runner = |ctx: ChildContext| -> Result<()> {
+            let wt_run_dir = ctx.worktree_dir.join(format!(".factory/runs/{}", ctx.id));
+            if ctx.id.ends_with("-1-2") {
+                fs::write(wt_run_dir.join("status"), "failed")?;
+            } else {
+                let filename = format!("{}.txt", ctx.id);
+                fs::write(ctx.worktree_dir.join(&filename), &ctx.id)?;
+                Command::new("git")
+                    .args(["add", &filename])
+                    .current_dir(&ctx.worktree_dir)
+                    .output()?;
+                Command::new("git")
+                    .args(["commit", "-m", &format!("Add {}", ctx.id)])
+                    .current_dir(&ctx.worktree_dir)
+                    .output()?;
+                fs::write(wt_run_dir.join("status"), "complete")?;
+            }
+            Ok(())
+        };
+
+        let result = execute_plan(
+            &main_dir,
+            &parent_run,
+            &plan,
+            "test",
+            &[],
+            None,
+            runner,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(parent_run.status().unwrap(), RunStatus::Failed);
+
+        // Both worktrees should still exist for inspection
+        let wt1 = tmp.path().join(format!("{parent_id}-1-1"));
+        let wt2 = tmp.path().join(format!("{parent_id}-1-2"));
+        assert!(wt1.exists(), "Successful sibling worktree should be preserved");
+        assert!(wt2.exists(), "Failed sibling worktree should be preserved");
+
+        cleanup_worktrees(
+            &tmp,
+            &main_dir,
+            &[
+                format!("{parent_id}-1-1"),
+                format!("{parent_id}-1-2"),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_parallel_thread_error_stops_plan() {
+        let tmp = setup_git_project();
+        let main_dir = tmp.path().join("main");
+
+        let parent_id = "test-threrr";
+        let parent_dir = main_dir.join(format!(".factory/runs/{parent_id}"));
+        fs::create_dir_all(&parent_dir).unwrap();
+        fs::write(parent_dir.join("status"), "planned").unwrap();
+        fs::write(parent_dir.join("brief.md"), "Brief").unwrap();
+
+        let parent_run = Run {
+            id: parent_id.to_string(),
+            dir: parent_dir,
+        };
+
+        let plan = make_plan(vec![(true, vec![
+            ("Task A", "Do A."),
+        ])]);
+
+        // Runner that returns an error from the thread
+        let runner = |_ctx: ChildContext| -> Result<()> {
+            bail!("simulated thread error");
+        };
+
+        let result = execute_plan(
+            &main_dir,
+            &parent_run,
+            &plan,
+            "test",
+            &[],
+            None,
+            runner,
+        );
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("simulated thread error"),
+            "Error should propagate from thread: {}",
+            err_msg
+        );
+        assert_eq!(parent_run.status().unwrap(), RunStatus::Failed);
+
+        cleanup_worktrees(
+            &tmp,
+            &main_dir,
+            &[format!("{parent_id}-1-1")],
+        );
+    }
+
+    #[test]
+    fn test_sequential_group_runs_steps_in_order() {
+        let tmp = setup_git_project();
+        let main_dir = tmp.path().join("main");
+
+        let parent_id = "test-seqsteps";
+        let parent_dir = main_dir.join(format!(".factory/runs/{parent_id}"));
+        fs::create_dir_all(&parent_dir).unwrap();
+        fs::write(parent_dir.join("status"), "planned").unwrap();
+        fs::write(parent_dir.join("brief.md"), "Brief").unwrap();
+
+        let parent_run = Run {
+            id: parent_id.to_string(),
+            dir: parent_dir,
+        };
+
+        // Unmarked group with two steps — should run sequentially
+        let plan = make_plan(vec![(false, vec![
+            ("Step A", "First."),
+            ("Step B", "Second."),
+        ])]);
+
+        // Track execution order using a shared counter
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let order_clone = order.clone();
+
+        let runner = move |ctx: ChildContext| -> Result<()> {
+            let wt_run_dir = ctx.worktree_dir.join(format!(".factory/runs/{}", ctx.id));
+            order_clone.lock().unwrap().push(ctx.id.clone());
+
+            let filename = format!("{}.txt", ctx.id);
+            fs::write(ctx.worktree_dir.join(&filename), &ctx.id)?;
+            Command::new("git")
+                .args(["add", &filename])
+                .current_dir(&ctx.worktree_dir)
+                .output()?;
+            Command::new("git")
+                .args(["commit", "-m", &format!("Add {}", ctx.id)])
+                .current_dir(&ctx.worktree_dir)
+                .output()?;
+
+            fs::write(wt_run_dir.join("status"), "complete")?;
+            Ok(())
+        };
+
+        let result = execute_plan(
+            &main_dir,
+            &parent_run,
+            &plan,
+            "test",
+            &[],
+            None,
+            runner,
+        );
+
+        assert!(result.is_ok(), "Plan should succeed: {:?}", result.err());
+
+        // Verify steps ran in order
+        let execution_order = order.lock().unwrap();
+        assert_eq!(execution_order.len(), 2);
+        assert!(
+            execution_order[0].ends_with("-1-1"),
+            "Step 1 should run first: {:?}",
+            *execution_order
+        );
+        assert!(
+            execution_order[1].ends_with("-1-2"),
+            "Step 2 should run second: {:?}",
+            *execution_order
+        );
     }
 }

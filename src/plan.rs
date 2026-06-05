@@ -5,8 +5,10 @@ pub struct Plan {
     pub groups: Vec<Group>,
 }
 
-/// A group of steps that execute concurrently.
+/// A group of steps. Steps in a parallel group execute concurrently;
+/// steps in a sequential group execute one at a time.
 pub struct Group {
+    pub parallel: bool,
     pub steps: Vec<Step>,
 }
 
@@ -20,20 +22,23 @@ impl Plan {
     /// Whether the plan requires parallel execution.
     ///
     /// Returns true when the plan has more than one group or any group
-    /// contains more than one step.
+    /// is marked parallel with multiple steps.
     pub fn is_parallel(&self) -> bool {
-        self.groups.len() > 1 || self.groups.iter().any(|g| g.steps.len() > 1)
+        self.groups.len() > 1
+            || self.groups.iter().any(|g| g.parallel && g.steps.len() > 1)
     }
 }
 
 /// Parse a plan.md into structured groups and steps.
 ///
 /// Groups are delimited by `## ` headings, steps by `### ` headings.
+/// A group heading containing `(parallel)` marks its steps for concurrent
+/// execution. Groups without the marker execute steps sequentially.
 /// Everything after a step heading until the next heading is the step's
 /// brief content.
 ///
 /// ```text
-/// ## Group 1
+/// ## Group 1 (parallel)
 ///
 /// ### Step: Add auth endpoints
 ///
@@ -55,15 +60,21 @@ pub fn parse_plan(content: &str) -> Result<Plan> {
     let mut current_title: Option<String> = None;
     let mut current_brief: Vec<String> = Vec::new();
     let mut in_group = false;
+    let mut current_parallel = false;
 
     for line in content.lines() {
         if line.starts_with("## ") && !line.starts_with("### ") {
             // New group — flush current step and group
             flush_step(&mut current_title, &mut current_brief, &mut current_steps);
             if in_group && !current_steps.is_empty() {
-                groups.push(Group { steps: current_steps });
+                groups.push(Group {
+                    parallel: current_parallel,
+                    steps: current_steps,
+                });
                 current_steps = Vec::new();
             }
+            let heading = line.trim_start_matches('#').trim();
+            current_parallel = heading.contains("(parallel)");
             in_group = true;
         } else if line.starts_with("### ") {
             // New step — flush previous step
@@ -83,7 +94,10 @@ pub fn parse_plan(content: &str) -> Result<Plan> {
     // Flush remaining step and group
     flush_step(&mut current_title, &mut current_brief, &mut current_steps);
     if !current_steps.is_empty() {
-        groups.push(Group { steps: current_steps });
+        groups.push(Group {
+            parallel: current_parallel,
+            steps: current_steps,
+        });
     }
 
     if groups.is_empty() {
@@ -112,7 +126,7 @@ mod tests {
     #[test]
     fn test_parse_two_groups() {
         let content = "\
-## Group 1
+## Group 1 (parallel)
 
 ### Step: Add auth
 
@@ -130,11 +144,13 @@ Build the login page.
 ";
         let plan = parse_plan(content).unwrap();
         assert_eq!(plan.groups.len(), 2);
+        assert!(plan.groups[0].parallel);
         assert_eq!(plan.groups[0].steps.len(), 2);
         assert_eq!(plan.groups[0].steps[0].title, "Add auth");
         assert_eq!(plan.groups[0].steps[0].brief, "Implement login endpoints.");
         assert_eq!(plan.groups[0].steps[1].title, "Add schema");
         assert_eq!(plan.groups[0].steps[1].brief, "Create the users table.");
+        assert!(!plan.groups[1].parallel);
         assert_eq!(plan.groups[1].steps.len(), 1);
         assert_eq!(plan.groups[1].steps[0].title, "Add frontend");
         assert_eq!(plan.groups[1].steps[0].brief, "Build the login page.");
@@ -143,7 +159,7 @@ Build the login page.
     #[test]
     fn test_parse_single_group_multiple_steps() {
         let content = "\
-## Group 1
+## Group 1 (parallel)
 
 ### Step: Task A
 
@@ -160,6 +176,7 @@ Do task C.
         let plan = parse_plan(content).unwrap();
         assert_eq!(plan.groups.len(), 1);
         assert_eq!(plan.groups[0].steps.len(), 3);
+        assert!(plan.groups[0].parallel);
     }
 
     #[test]
@@ -174,11 +191,30 @@ Do the thing.
         let plan = parse_plan(content).unwrap();
         assert_eq!(plan.groups.len(), 1);
         assert_eq!(plan.groups[0].steps.len(), 1);
+        assert!(!plan.groups[0].parallel);
         assert!(!plan.is_parallel());
     }
 
     #[test]
-    fn test_is_parallel_multiple_steps() {
+    fn test_is_parallel_parallel_group() {
+        let content = "\
+## Group 1 (parallel)
+
+### Step: A
+
+Brief A.
+
+### Step: B
+
+Brief B.
+";
+        let plan = parse_plan(content).unwrap();
+        assert!(plan.groups[0].parallel);
+        assert!(plan.is_parallel());
+    }
+
+    #[test]
+    fn test_is_not_parallel_unmarked_multi_step() {
         let content = "\
 ## Group 1
 
@@ -191,7 +227,8 @@ Brief A.
 Brief B.
 ";
         let plan = parse_plan(content).unwrap();
-        assert!(plan.is_parallel());
+        assert!(!plan.groups[0].parallel);
+        assert!(!plan.is_parallel());
     }
 
     #[test]
@@ -250,6 +287,19 @@ Implement auth.
 ";
         let plan = parse_plan(content).unwrap();
         assert_eq!(plan.groups[0].steps[0].title, "Add authentication");
+    }
+
+    #[test]
+    fn test_parse_step_space_prefix() {
+        let content = "\
+## Group 1
+
+### Step A
+
+Do step A.
+";
+        let plan = parse_plan(content).unwrap();
+        assert_eq!(plan.groups[0].steps[0].title, "A");
     }
 
     #[test]

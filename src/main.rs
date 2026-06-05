@@ -492,8 +492,8 @@ fn cmd_land(search_root: &Path, run_id: Option<&str>) -> Result<()> {
 /// Try to parse the run's plan.md as a parallel plan.
 ///
 /// Returns `Some(plan)` if plan.md exists and describes a parallel
-/// execution (multiple groups or multiple steps in a group). Returns
-/// `None` if the plan is missing, unparseable, or single-step.
+/// execution (multiple groups or any group marked `(parallel)`). Returns
+/// `None` if the plan is missing, unparseable, or sequential-only.
 fn try_parse_parallel_plan(run: &Run) -> Option<plan::Plan> {
     let content = fs::read_to_string(run.dir.join("plan.md")).ok()?;
     let parsed = plan::parse_plan(&content).ok()?;

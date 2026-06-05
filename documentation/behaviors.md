@@ -422,6 +422,50 @@ WHILE the dashboard is running,
 THE SYSTEM SHALL render frames at ~100ms intervals for smooth animation
 and poll for new data at ~2s intervals to avoid unnecessary I/O.
 
+## Parallel plan execution
+
+### Plan parsing
+
+WHEN a run has a plan.md with structured parallel groups,
+THE SYSTEM SHALL create a child run for each step before execution begins.
+Test: tests/behaviors/operations/test-parallel-runs.sh (parallel plan creates child runs)
+
+WHEN a plan has no parallel groups (single sequential list),
+THE SYSTEM SHALL execute normally as a single session loop.
+Test: tests/behaviors/operations/test-parallel-runs.sh (single-step plan uses serial loop, no plan uses serial loop)
+
+### Parallel execution
+
+WHEN a parallel group is ready to execute,
+THE SYSTEM SHALL launch all child runs in that group concurrently, each
+in its own worktree.
+Test: tests/behaviors/operations/test-parallel-runs.sh (parallel plan creates child runs, child failure preserves sibling worktrees)
+
+WHILE child runs are executing,
+THE SYSTEM SHALL show their status in the dashboard.
+Test: tests/behaviors/operations/test-parallel-runs.sh (child runs shown in dashboard without crash)
+
+### Merging
+
+WHEN all child runs in a parallel group complete successfully,
+THE SYSTEM SHALL merge their changes into the parent branch before
+launching the next group.
+Test: tests/behaviors/operations/test-parallel-runs.sh (sequential groups run in order)
+
+### Failure handling
+
+WHEN a child run fails,
+THE SYSTEM SHALL stop execution, report which step failed, and leave
+sibling runs' worktrees intact for inspection.
+Test: tests/behaviors/operations/test-parallel-runs.sh (child failure marks parent failed, child failure preserves sibling worktrees)
+
+### Sequential gating
+
+WHEN a plan has multiple groups,
+THE SYSTEM SHALL execute them in order, launching each group only after
+the previous group's merge completes.
+Test: tests/behaviors/operations/test-parallel-runs.sh (sequential groups run in order)
+
 ## Sandbox (local)
 
 WHILE running on the local runtime,
