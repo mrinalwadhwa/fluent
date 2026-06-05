@@ -155,6 +155,11 @@ impl RunView {
     }
 
     fn poll(&mut self) {
+        // Re-resolve live_dir in case a worktree was created since startup
+        let resolved = self.run.worktree_run_dir().unwrap_or_else(|| self.run.dir.clone());
+        if resolved != self.live_dir {
+            self.live_dir = resolved;
+        }
         self.cached_status = Self::read_status(&self.live_dir, &self.run.dir);
         self.discover_agents();
         for agent in &mut self.agents {
