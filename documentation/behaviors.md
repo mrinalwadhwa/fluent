@@ -293,8 +293,13 @@ an activity feed of transcript events, and keyboard navigation.
 Test: tests/behaviors/operations/test-dashboard.sh
 
 WHEN `factory dashboard` is invoked for a project with no runs,
-THE SYSTEM SHALL exit gracefully without crashing.
-Test: tests/behaviors/operations/test-dashboard.sh (dashboard exits gracefully with no runs)
+THE SYSTEM SHALL show an empty state instead of exiting with an error.
+Test: tests/behaviors/operations/test-dashboard-overflow.sh (empty state instead of error with no runs), dashboard::tests::test_run_tabs_empty_no_panic
+
+WHEN there are more runs than fit in the run tab bar,
+THE SYSTEM SHALL keep the selected run visible and indicate
+that more runs exist beyond the visible area.
+Test: tests/behaviors/operations/test-dashboard-overflow.sh (no crash with many runs), dashboard::tests::test_run_tabs_overflow_shows_right_arrow, dashboard::tests::test_run_tabs_selected_always_visible, dashboard::tests::test_clamp_run_tab_offset_keeps_selected_visible
 
 WHEN `factory dashboard --run-id` is invoked with a non-existent run ID,
 THE SYSTEM SHALL exit gracefully without crashing.

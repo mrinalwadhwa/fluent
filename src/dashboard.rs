@@ -598,6 +598,39 @@ fn run_tab_label(v: &RunView) -> (String, Color) {
     (format!(" {} [{}] ", v.run.id, status), color)
 }
 
+/// Compute which tabs are visible starting from `offset` within `content_width`.
+///
+/// Returns `(visible_end, selected_visible)` where `visible_end` is the
+/// exclusive upper bound of the visible range, and `selected_visible`
+/// indicates whether `selected` falls within that range.
+fn visible_tab_range(
+    labels: &[String],
+    offset: usize,
+    selected: usize,
+    content_width: usize,
+) -> (usize, bool) {
+    let mut used = if offset > 0 { 2 } else { 0 }; // "◀ "
+    let mut visible_end = offset;
+    let mut selected_visible = false;
+
+    for i in offset..labels.len() {
+        let label_w = labels[i].width();
+        let separator = if i > offset { 3 } else { 0 }; // " │ "
+        let needed = used + separator + label_w;
+        let right_arrow = if i + 1 < labels.len() { 2 } else { 0 };
+        if needed + right_arrow > content_width && i != offset {
+            break;
+        }
+        used = needed;
+        visible_end = i + 1;
+        if i == selected {
+            selected_visible = true;
+        }
+    }
+
+    (visible_end, selected_visible)
+}
+
 /// Ensure `run_tab_offset` keeps the selected run visible within `width`.
 fn clamp_run_tab_offset(app: &mut App, content_width: usize) {
     if app.runs.is_empty() {
@@ -612,27 +645,10 @@ fn clamp_run_tab_offset(app: &mut App, content_width: usize) {
         app.run_tab_offset = app.selected_run;
     }
 
-    // Walk forward from offset, accumulating widths until selected is visible
+    // Walk forward from offset until selected is visible
     loop {
-        let mut used = 0usize;
-        let mut selected_visible = false;
-        let arrow_reserve = if app.run_tab_offset > 0 { 2 } else { 0 };
-        used += arrow_reserve;
-
-        for i in app.run_tab_offset..labels.len() {
-            let label_w = labels[i].width();
-            let separator = if i > app.run_tab_offset { 3 } else { 0 }; // " │ "
-            let needed = used + separator + label_w;
-            // Reserve space for right arrow if more tabs follow
-            let right_arrow = if i + 1 < labels.len() { 2 } else { 0 };
-            if needed + right_arrow > content_width && i != app.run_tab_offset {
-                break;
-            }
-            used = needed;
-            if i == app.selected_run {
-                selected_visible = true;
-            }
-        }
+        let (_, selected_visible) =
+            visible_tab_range(&labels, app.run_tab_offset, app.selected_run, content_width);
 
         if selected_visible || app.run_tab_offset >= app.selected_run {
             break;
@@ -648,21 +664,14 @@ fn draw_run_tabs(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
 
     let has_left = app.run_tab_offset > 0;
     let labels: Vec<(String, Color)> = app.runs.iter().map(|v| run_tab_label(v)).collect();
+    let label_strings: Vec<String> = labels.iter().map(|(s, _)| s.clone()).collect();
 
-    // Determine which tabs fit
-    let mut visible_end = app.run_tab_offset;
-    let mut used = if has_left { 2 } else { 0 }; // "◀ "
-    for i in app.run_tab_offset..labels.len() {
-        let label_w = labels[i].0.width();
-        let separator = if i > app.run_tab_offset { 3 } else { 0 };
-        let needed = used + separator + label_w;
-        let right_arrow = if i + 1 < labels.len() { 2 } else { 0 };
-        if needed + right_arrow > content_width && i != app.run_tab_offset {
-            break;
-        }
-        used = needed;
-        visible_end = i + 1;
-    }
+    let (visible_end, _) = visible_tab_range(
+        &label_strings,
+        app.run_tab_offset,
+        app.selected_run,
+        content_width,
+    );
     let has_right = visible_end < labels.len();
 
     // Build the spans
@@ -1509,19 +1518,20 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_ansi_stray_escape_no_leak() {
-        // A bare ESC followed by a non-bracket char must not leak
-        // the following character into output. This is the pattern
-        // that caused the original "stray A" bug.
+    fn test_strip_ansi_csi_terminator_preserves_next_char() {
+        // CSI sequence "\x1b[?25h" ends at 'h'; the 'A' after it
+        // must not be consumed. This was the original "stray A" bug.
         let input = "\x1b[?25hA visible text";
         let result = strip_ansi(input);
-        // The CSI sequence "\x1b[?25h" ends at 'h', so "A visible text" remains
         assert_eq!(result, "A visible text");
+    }
 
-        // Bare ESC not followed by [ or ] — only ESC is consumed
-        let input2 = "\x1bXhello";
-        let result2 = strip_ansi(input2);
-        assert_eq!(result2, "Xhello");
+    #[test]
+    fn test_strip_ansi_bare_esc_consumes_only_esc() {
+        // Bare ESC not followed by [ or ] — only ESC itself is consumed
+        let input = "\x1bXhello";
+        let result = strip_ansi(input);
+        assert_eq!(result, "Xhello");
     }
 
     #[test]
@@ -1615,7 +1625,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_tabs_navigate_right_shifts_offset() {
+    fn test_run_tabs_far_right_selection_visible() {
         let mut app = make_app_with_runs(
             &[
                 "20260101-first",
@@ -1625,10 +1635,29 @@ mod tests {
             ],
             0,
         );
-        // Move selection to the last run
+        // Set selection to the last run (no key-handling, just state)
         app.selected_run = 3;
         let text = render_run_tabs_text(&mut app, 40);
         assert!(text.contains("20260104"));
+    }
+
+    #[test]
+    fn test_run_tabs_backward_scroll_shows_selected() {
+        let mut app = make_app_with_runs(
+            &[
+                "20260101-first",
+                "20260102-second",
+                "20260103-third",
+                "20260104-fourth",
+            ],
+            0,
+        );
+        // Artificially set offset past the selected run
+        app.run_tab_offset = 2;
+        app.selected_run = 0;
+        let text = render_run_tabs_text(&mut app, 50);
+        // Selected run must be visible after backward clamp
+        assert!(text.contains("20260101"));
     }
 
     #[test]
