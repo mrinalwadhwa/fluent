@@ -330,8 +330,9 @@ Test: dashboard::tests::test_agent_tab_shows_verdict_immediately, dashboard::tes
 
 WHEN the dashboard is displayed,
 THE SYSTEM SHALL show a phase label that accurately describes what is
-happening right now (executing, reviewing, complete, failed, needs input).
-Test: dashboard::tests::test_header_reviewing_shows_progress, dashboard::tests::test_header_complete_no_spinner, dashboard::tests::test_header_failed_no_spinner, dashboard::tests::test_compute_phase_needs_user, tests/behaviors/operations/test-dashboard-activity.sh (no crash when run has failed, no crash when run needs user input, no crash with mixed run states)
+happening right now (executing, reviewing, complete, failed, needs input,
+rate-limited, planned).
+Test: dashboard::tests::test_header_reviewing_shows_progress, dashboard::tests::test_header_complete_no_spinner, dashboard::tests::test_header_failed_no_spinner, dashboard::tests::test_compute_phase_needs_user, dashboard::tests::test_compute_phase_rate_limited, dashboard::tests::test_header_rate_limited_shows_spinner, dashboard::tests::test_compute_phase_planned, tests/behaviors/operations/test-dashboard-activity.sh (no crash when run has failed, no crash when run needs user input, no crash with mixed run states)
 
 ### Dashboard layout
 

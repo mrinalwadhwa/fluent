@@ -1275,6 +1275,15 @@ mod tests {
     }
 
     #[test]
+    fn test_compute_phase_planned() {
+        let view = make_run_view("run-1", vec![AgentView::new("author")]);
+        let (text, color, animated) = compute_phase(&view, "planned");
+        assert_eq!(text, "Planned");
+        assert_eq!(color, Color::Cyan);
+        assert!(!animated);
+    }
+
+    #[test]
     fn test_compute_phase_reviewing_active() {
         let mut r1 = AgentView::new("tests");
         r1.status = "running".into();
