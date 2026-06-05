@@ -91,13 +91,13 @@ into expertise and decisions without human curation. The lifecycle
 has "capture" as a phase but it's not implemented beyond copying
 artifacts. What does automated knowledge capture look like?
 
-2026-06-05 — The factory currently only supports Claude Code as
-the coding agent. It should support other agents: OpenAI Codex,
-Pi, and potentially others. The Coder trait already abstracts
-the agent interface (run, run_interactive), but the implementations
-(SandboxedClaudeCode, BareClaudeCode) are Claude-specific. Need
-to design how agent selection works, how prompts/flags differ per
-agent, and whether the session loop needs agent-specific behavior.
+2026-06-05 — The factory now has local Codex support via the Coder
+abstraction: `--coder codex` / `FACTORY_CODER=codex` launches
+`codex exec --json --cd <worktree>` and records the selected coder
+in run state. This unblocks local no-sandbox runs for Codex. Remaining
+agent-support work: verify sandboxed Codex, add Fargate Codex support,
+and consider whether Pi or other agents need different prompt/session
+behavior beyond the current Coder trait.
 
 2026-06-05 — Dashboard "reviewing" status shows no spinner in the
 header. compute_phase needs to map "reviewing" to animated=true.
@@ -188,3 +188,30 @@ but the queue agent can be intelligent — resolving simple conflicts,
 running targeted reviews on the merged code, and rejecting merges
 that break tests. Direct commits to main would be forbidden while
 the queue is active.
+
+2026-06-05 — Rate limit UX needs improvement. When the user hits
+Anthropic's usage limit: (1) the dashboard should show a countdown
+to next retry, not just a static "Rate limited" label, (2) a
+notification should tell the user things paused but aren't broken,
+(3) the session loop should respect Retry-After headers rather
+than using a fixed 5-minute wait, (4) multiple concurrent runs
+should stagger retries to avoid thundering herd on the rate limit.
+
+2026-06-05 — Codex sandbox support needs a focused verification run.
+The implementation can wrap Codex with the existing macOS Seatbelt
+profile, but this should not be treated as secure until tested end to
+end: Codex auth/config access, JSON transcript output, write access
+limited to the worktree, no writes outside the sandbox root, and no
+regression in credential handling. The Codex CLI also has its own
+sandbox/approval model, so the interaction between Codex flags and
+outer `sandbox-exec` needs explicit validation.
+
+2026-06-05 — Fargate Codex support is intentionally not implemented
+yet. The Fargate path is still Claude-specific: container image,
+entrypoint, auth token injection, and session assumptions all target
+Claude Code. Codex support likely needs a container image update,
+Codex authentication/config strategy, runtime selection in the task
+environment, and tests for launch, session loop, upload/download, and
+review artifacts. Until then, `factory run --runtime fargate --coder
+codex` should fail clearly instead of starting a run that breaks
+halfway through.

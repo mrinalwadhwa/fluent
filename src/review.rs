@@ -1,8 +1,8 @@
 use anyhow::Result;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
+use crate::coder::CoderKind;
 use crate::content::{prompt_section, ContentResolver};
 use crate::run::{project_root_from_run_dir, ReviewScope};
 
@@ -43,6 +43,7 @@ pub fn run_single_reviewer(
     system_prompt: &str,
     review_prompt: &str,
     run_dir: &Path,
+    coder_kind: CoderKind,
 ) -> Result<Verdict> {
     // Run from the project root
     let project_root = project_root_from_run_dir(run_dir)
@@ -53,24 +54,20 @@ pub fn run_single_reviewer(
 
     let transcript_path = run_dir.join(format!("reviews/transcript-{reviewer_name}.jsonl"));
 
-    let status = Command::new("claude")
-        .current_dir(&project_root)
-        .args(["--dangerously-skip-permissions"])
-        .args(["--verbose", "--output-format", "stream-json"])
-        .args(["--append-system-prompt", system_prompt])
-        .args(["-p", review_prompt])
-        .stdout(
-            std::fs::File::create(&transcript_path)
-                .map(std::process::Stdio::from)
-                .unwrap_or_else(|_| std::process::Stdio::null()),
-        )
-        .status();
+    let reviewer = coder_kind.boxed(None);
+    let exit_code = reviewer.run(
+        review_prompt,
+        system_prompt,
+        Path::new(&project_root),
+        &[],
+        Some(&transcript_path),
+    );
 
-    match status {
-        Ok(s) if !s.success() => {
+    match exit_code {
+        Ok(code) if code != 0 => {
             eprintln!(
                 "  [{reviewer_name}] session failed (exit {}), skipping",
-                s.code().unwrap_or(-1)
+                code
             );
             return Ok(Verdict::Pass);
         }
@@ -133,6 +130,7 @@ pub fn run_reviews(
     review_scope: ReviewScope,
     resolver: &ContentResolver,
     review_round: u32,
+    coder_kind: CoderKind,
 ) -> Result<bool> {
     fs::create_dir_all(run_dir.join("reviews"))?;
 
@@ -171,8 +169,7 @@ pub fn run_reviews(
             }
         };
 
-        let system = prompt_section(&prompt_content, "system")
-            .replace("{{RUN_ID}}", run_id);
+        let system = prompt_section(&prompt_content, "system").replace("{{RUN_ID}}", run_id);
 
         let section = review_scope.as_str();
         let prompt = format!(
@@ -185,7 +182,7 @@ pub fn run_reviews(
         let reviewer_name = reviewer.to_string();
 
         handles.push(std::thread::spawn(move || {
-            run_single_reviewer(&reviewer_name, &system, &prompt, &run_dir)
+            run_single_reviewer(&reviewer_name, &system, &prompt, &run_dir, coder_kind)
         }));
     }
 
@@ -264,14 +261,8 @@ mod tests {
 
     #[test]
     fn test_extract_verdict_case_insensitive() {
-        assert_eq!(
-            extract_verdict("Verdict: PASS\n\nAll good."),
-            Verdict::Pass
-        );
-        assert_eq!(
-            extract_verdict("verdict: Pass\n"),
-            Verdict::Pass
-        );
+        assert_eq!(extract_verdict("Verdict: PASS\n\nAll good."), Verdict::Pass);
+        assert_eq!(extract_verdict("verdict: Pass\n"), Verdict::Pass);
     }
 
     #[test]

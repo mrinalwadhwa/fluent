@@ -178,6 +178,7 @@ Run state lives in `.factory/runs/[run-id]/`:
 | `source-branch` | Branch the run forked from |
 | `worktree` | Path to the run's git worktree |
 | `runtime` | `local` or `fargate` |
+| `coder` | `claude` or `codex` |
 | `handle` | Runtime-specific identifier |
 | `mode` | `review` or absent (defaults to full lifecycle) |
 | `reviewers` | Comma-separated reviewer filter (optional) |
@@ -202,6 +203,7 @@ worktree.
 ```sh
 factory run                          # start the local session loop
 factory run --run-id <id>            # target a specific run
+factory run --coder codex            # run locally with OpenAI Codex
 factory run --runtime fargate        # run on Fargate
 factory status                       # show all runs and their state
 factory watch                        # poll status, notify on change

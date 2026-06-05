@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
 
+use crate::coder::CoderKind;
 use crate::content::ContentResolver;
 
 /// Rendered sandbox profile that cleans up on drop.
@@ -44,11 +45,17 @@ pub fn render_profile(
 
 /// Check that sandbox prerequisites are available.
 pub fn check_prerequisites() -> Result<()> {
+    check_prerequisites_for(CoderKind::Claude)
+}
+
+/// Check that sandbox prerequisites and the selected coder are available.
+pub fn check_prerequisites_for(coder_kind: CoderKind) -> Result<()> {
     if !command_exists("sandbox-exec") {
         bail!("sandbox-exec not found (macOS only)");
     }
-    if !command_exists("claude") {
-        bail!("claude not found in PATH");
+    let command = coder_kind.as_str();
+    if !command_exists(command) {
+        bail!("{command} not found in PATH");
     }
     Ok(())
 }
@@ -59,7 +66,6 @@ fn command_exists(name: &str) -> bool {
         .output()
         .is_ok_and(|o| o.status.success())
 }
-
 
 #[cfg(test)]
 mod tests {

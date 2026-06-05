@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
-use crate::coder::Coder;
+use crate::coder::{Coder, CoderKind};
 use crate::content::ContentResolver;
 use crate::report;
 use crate::review;
@@ -55,6 +55,7 @@ pub fn run_session_loop(
     author: &dyn Coder,
     config: &SessionConfig,
     hooks: &dyn SessionHooks,
+    coder_kind: CoderKind,
 ) -> Result<()> {
     let run = &config.run;
     let run_dir = &run.dir;
@@ -82,6 +83,7 @@ pub fn run_session_loop(
             ReviewScope::Full,
             &config.resolver,
             review_round,
+            coder_kind,
         )?;
         run.set_status(&RunStatus::Complete)?;
         report::generate_report(run_dir, &run.id, 0)?;
@@ -105,16 +107,10 @@ pub fn run_session_loop(
 
     loop {
         session_count += 1;
-        eprintln!(
-            "\n  === Session {} (run: {}) ===\n",
-            session_count, run.id
-        );
+        eprintln!("\n  === Session {} (run: {}) ===\n", session_count, run.id);
 
         if session_count > MAX_SESSIONS {
-            eprintln!(
-                "  Max sessions ({}) reached — stopping.",
-                MAX_SESSIONS
-            );
+            eprintln!("  Max sessions ({}) reached — stopping.", MAX_SESSIONS);
             run.set_status(&RunStatus::Failed)?;
             break;
         }
@@ -143,7 +139,10 @@ pub fn run_session_loop(
 
         // Write session metadata to sessions.log
         {
-            let status_after = run.status().map(|s| s.to_string()).unwrap_or_else(|_| "unknown".into());
+            let status_after = run
+                .status()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|_| "unknown".into());
             let timestamp = now_iso();
             let mut log_file = fs::OpenOptions::new()
                 .create(true)
@@ -181,9 +180,7 @@ pub fn run_session_loop(
 
                 // Skip run-scoped reviews when no code changed and no
                 // explicit scope was requested by the user.
-                if config.run.scope().is_none()
-                    && !has_changes(&config.working_dir, run_dir)
-                {
+                if config.run.scope().is_none() && !has_changes(&config.working_dir, run_dir) {
                     eprintln!("  No code changes — skipping reviews.");
                     report::generate_report(run_dir, &run.id, session_count)?;
                     eprintln!("\n  Run {} completed.", run.id);
@@ -210,6 +207,7 @@ pub fn run_session_loop(
                     review_scope,
                     &config.resolver,
                     review_round,
+                    coder_kind,
                 )?;
                 // Log review phase
                 {
@@ -232,9 +230,7 @@ pub fn run_session_loop(
                     eprintln!("\n  Run {} completed.", run.id);
                     break;
                 } else {
-                    eprintln!(
-                        "  Review returned findings — restarting author..."
-                    );
+                    eprintln!("  Review returned findings — restarting author...");
                     run.set_status(&RunStatus::Executing)?;
                     prompt = format!(
                         "Reviewers found issues. Read the review artifacts at .factory/runs/{}/reviews/ and address the findings.",
@@ -274,10 +270,7 @@ pub fn run_session_loop(
                 hooks.sleep(Duration::from_secs(300));
             }
             _ => {
-                eprintln!(
-                    "  Unexpected status \"{}\" — stopping.",
-                    status.as_str()
-                );
+                eprintln!("  Unexpected status \"{}\" — stopping.", status.as_str());
                 break;
             }
         }
@@ -412,14 +405,13 @@ mod tests {
         let prompts = captured_prompts.clone();
 
         let author = TestAgent::new(move |prompt: &str, _n: u32, _: &Path| {
-                prompts.lock().unwrap().push(prompt.to_string());
-                fs::write(run_dir.join("status"), "needs-user").unwrap();
-                0
-            }
-        );
+            prompts.lock().unwrap().push(prompt.to_string());
+            fs::write(run_dir.join("status"), "needs-user").unwrap();
+            0
+        });
 
         let config = make_config(&run);
-        run_session_loop(&author, &config, &NoopHooks).unwrap();
+        run_session_loop(&author, &config, &NoopHooks, CoderKind::Claude).unwrap();
 
         let prompts = captured_prompts.lock().unwrap();
         assert!(prompts[0].contains("brief"));
@@ -436,14 +428,13 @@ mod tests {
         let prompts = captured_prompts.clone();
 
         let author = TestAgent::new(move |prompt: &str, _n: u32, _: &Path| {
-                prompts.lock().unwrap().push(prompt.to_string());
-                fs::write(run_dir.join("status"), "needs-user").unwrap();
-                0
-            }
-        );
+            prompts.lock().unwrap().push(prompt.to_string());
+            fs::write(run_dir.join("status"), "needs-user").unwrap();
+            0
+        });
 
         let config = make_config(&run);
-        run_session_loop(&author, &config, &NoopHooks).unwrap();
+        run_session_loop(&author, &config, &NoopHooks, CoderKind::Claude).unwrap();
 
         let prompts = captured_prompts.lock().unwrap();
         assert!(prompts[0].contains("handoff"));
@@ -455,13 +446,12 @@ mod tests {
         let run_dir = run.dir.clone();
 
         let author = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
-                fs::write(run_dir.join("status"), "needs-user").unwrap();
-                0
-            }
-        );
+            fs::write(run_dir.join("status"), "needs-user").unwrap();
+            0
+        });
 
         let config = make_config(&run);
-        run_session_loop(&author, &config, &NoopHooks).unwrap();
+        run_session_loop(&author, &config, &NoopHooks, CoderKind::Claude).unwrap();
 
         assert_eq!(author.call_count.load(Ordering::SeqCst), 1);
         assert_eq!(run.status().unwrap(), RunStatus::NeedsUser);
@@ -473,13 +463,12 @@ mod tests {
         let run_dir = run.dir.clone();
 
         let author = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
-                fs::write(run_dir.join("status"), "failed").unwrap();
-                0
-            }
-        );
+            fs::write(run_dir.join("status"), "failed").unwrap();
+            0
+        });
 
         let config = make_config(&run);
-        run_session_loop(&author, &config, &NoopHooks).unwrap();
+        run_session_loop(&author, &config, &NoopHooks, CoderKind::Claude).unwrap();
 
         assert_eq!(author.call_count.load(Ordering::SeqCst), 1);
         assert_eq!(run.status().unwrap(), RunStatus::Failed);
@@ -491,17 +480,16 @@ mod tests {
         let run_dir = run.dir.clone();
 
         let author = TestAgent::new(move |_prompt: &str, n: u32, _: &Path| {
-                if n < 3 {
-                    fs::write(run_dir.join("status"), "executing").unwrap();
-                } else {
-                    fs::write(run_dir.join("status"), "needs-user").unwrap();
-                }
-                0
+            if n < 3 {
+                fs::write(run_dir.join("status"), "executing").unwrap();
+            } else {
+                fs::write(run_dir.join("status"), "needs-user").unwrap();
             }
-        );
+            0
+        });
 
         let config = make_config(&run);
-        run_session_loop(&author, &config, &NoopHooks).unwrap();
+        run_session_loop(&author, &config, &NoopHooks, CoderKind::Claude).unwrap();
 
         assert_eq!(author.call_count.load(Ordering::SeqCst), 3);
         assert_eq!(run.status().unwrap(), RunStatus::NeedsUser);
@@ -513,17 +501,16 @@ mod tests {
         let run_dir = run.dir.clone();
 
         let author = TestAgent::new(move |_prompt: &str, n: u32, _: &Path| {
-                if n == 1 {
-                    fs::write(run_dir.join("status"), "rate-limited").unwrap();
-                } else {
-                    fs::write(run_dir.join("status"), "needs-user").unwrap();
-                }
-                0
+            if n == 1 {
+                fs::write(run_dir.join("status"), "rate-limited").unwrap();
+            } else {
+                fs::write(run_dir.join("status"), "needs-user").unwrap();
             }
-        );
+            0
+        });
 
         let config = make_config(&run);
-        run_session_loop(&author, &config, &NoopHooks).unwrap();
+        run_session_loop(&author, &config, &NoopHooks, CoderKind::Claude).unwrap();
 
         assert_eq!(author.call_count.load(Ordering::SeqCst), 2);
     }
@@ -535,12 +522,11 @@ mod tests {
         fs::write(run.dir.join("status"), "executing").unwrap();
 
         let author = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
-                1 // non-zero exit
-            }
-        );
+            1 // non-zero exit
+        });
 
         let config = make_config(&run);
-        run_session_loop(&author, &config, &NoopHooks).unwrap();
+        run_session_loop(&author, &config, &NoopHooks, CoderKind::Claude).unwrap();
 
         assert_eq!(author.call_count.load(Ordering::SeqCst), 3);
         assert_eq!(run.status().unwrap(), RunStatus::Failed);
@@ -553,20 +539,19 @@ mod tests {
         let run_dir = run.dir.clone();
 
         let author = TestAgent::new(move |_prompt: &str, n: u32, _: &Path| {
-                match n {
-                    1 | 2 => 1,    // Two failures
-                    3 => 0,         // Success — resets counter
-                    4 | 5 => 1,    // Two more failures (not three)
-                    _ => {
-                        fs::write(run_dir.join("status"), "needs-user").unwrap();
-                        0
-                    }
+            match n {
+                1 | 2 => 1, // Two failures
+                3 => 0,     // Success — resets counter
+                4 | 5 => 1, // Two more failures (not three)
+                _ => {
+                    fs::write(run_dir.join("status"), "needs-user").unwrap();
+                    0
                 }
             }
-        );
+        });
 
         let config = make_config(&run);
-        run_session_loop(&author, &config, &NoopHooks).unwrap();
+        run_session_loop(&author, &config, &NoopHooks, CoderKind::Claude).unwrap();
 
         // Should have run more than 5 sessions (counter was reset)
         assert!(author.call_count.load(Ordering::SeqCst) > 5);
@@ -578,13 +563,12 @@ mod tests {
         let run_dir = run.dir.clone();
 
         let author = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
-                fs::write(run_dir.join("status"), "executing").unwrap();
-                0
-            }
-        );
+            fs::write(run_dir.join("status"), "executing").unwrap();
+            0
+        });
 
         let config = make_config(&run);
-        run_session_loop(&author, &config, &NoopHooks).unwrap();
+        run_session_loop(&author, &config, &NoopHooks, CoderKind::Claude).unwrap();
 
         assert_eq!(author.call_count.load(Ordering::SeqCst), MAX_SESSIONS);
         assert_eq!(run.status().unwrap(), RunStatus::Failed);
@@ -596,17 +580,16 @@ mod tests {
         let run_dir = run.dir.clone();
 
         let author = TestAgent::new(move |_prompt: &str, n: u32, _: &Path| {
-                if n < 3 {
-                    fs::write(run_dir.join("status"), "executing").unwrap();
-                } else {
-                    fs::write(run_dir.join("status"), "needs-user").unwrap();
-                }
-                0
+            if n < 3 {
+                fs::write(run_dir.join("status"), "executing").unwrap();
+            } else {
+                fs::write(run_dir.join("status"), "needs-user").unwrap();
             }
-        );
+            0
+        });
 
         let config = make_config(&run);
-        run_session_loop(&author, &config, &NoopHooks).unwrap();
+        run_session_loop(&author, &config, &NoopHooks, CoderKind::Claude).unwrap();
 
         let log = fs::read_to_string(run.dir.join("sessions.log")).unwrap();
         let lines: Vec<&str> = log.lines().collect();
@@ -624,13 +607,12 @@ mod tests {
         let expected_path = run.dir.join("sessions/session-1/transcript.jsonl");
 
         let author = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
-                fs::write(run_dir.join("status"), "needs-user").unwrap();
-                0
-            }
-        );
+            fs::write(run_dir.join("status"), "needs-user").unwrap();
+            0
+        });
 
         let config = make_config(&run);
-        run_session_loop(&author, &config, &NoopHooks).unwrap();
+        run_session_loop(&author, &config, &NoopHooks, CoderKind::Claude).unwrap();
 
         // Session directory should exist
         assert!(run.dir.join("sessions/session-1").is_dir());
@@ -646,12 +628,11 @@ mod tests {
         fs::write(run.dir.join("status"), "executing").unwrap();
 
         let author = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
-                1 // non-zero exit
-            }
-        );
+            1 // non-zero exit
+        });
 
         let config = make_config(&run);
-        run_session_loop(&author, &config, &NoopHooks).unwrap();
+        run_session_loop(&author, &config, &NoopHooks, CoderKind::Claude).unwrap();
 
         let log = fs::read_to_string(run.dir.join("sessions.log")).unwrap();
         let lines: Vec<&str> = log.lines().collect();
@@ -666,7 +647,9 @@ mod tests {
 
     impl RecordingHooks {
         fn new() -> Self {
-            Self { call_count: AtomicU32::new(0) }
+            Self {
+                call_count: AtomicU32::new(0),
+            }
         }
 
         fn calls(&self) -> u32 {
@@ -698,7 +681,7 @@ mod tests {
 
         let hooks = RecordingHooks::new();
         let config = make_config(&run);
-        run_session_loop(&author, &config, &hooks).unwrap();
+        run_session_loop(&author, &config, &hooks, CoderKind::Claude).unwrap();
 
         assert_eq!(author.call_count.load(Ordering::SeqCst), 3);
         assert_eq!(hooks.calls(), 3);
@@ -718,12 +701,10 @@ mod tests {
     fn test_loop_stops_when_pre_session_returns_error() {
         let (_tmp, run) = setup_test_run();
 
-        let author = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
-            0
-        });
+        let author = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| 0);
 
         let config = make_config(&run);
-        let result = run_session_loop(&author, &config, &FailingHooks);
+        let result = run_session_loop(&author, &config, &FailingHooks, CoderKind::Claude);
 
         assert!(result.is_err());
         assert_eq!(author.call_count.load(Ordering::SeqCst), 0);

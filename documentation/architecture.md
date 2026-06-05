@@ -98,6 +98,7 @@ fast-forward merges, deletes the branch, and sets the status to `landed`.
 | `source-branch` | Branch the run forked from |
 | `worktree` | Path to the run's worktree |
 | `runtime` | `local` or `fargate` |
+| `coder` | `claude` or `codex` |
 | `handle` | Runtime-specific identifier |
 | `mode` | `review` or absent (defaults to full lifecycle) |
 | `reviewers` | Comma-separated reviewer filter (optional) |
@@ -127,7 +128,7 @@ group with more than one step, execution takes the orchestrator path instead.
 
 ```
 while run is not complete:
-    launch author with -p, --verbose --output-format stream-json
+    launch author with the selected coder in non-interactive JSON mode
     pipe stdout to sessions/session-N/transcript.jsonl
     author works until context exhaustion or completion
     author writes handoff.md + status file
@@ -176,7 +177,7 @@ Each session produces a single artifact:
 ```
 .factory/runs/[run-id]/sessions/
   session-1/
-    transcript.jsonl     ← stream-json output (piped from agent stdout)
+    transcript.jsonl     ← JSON event output (piped from agent stdout)
   session-2/
     ...
 ```
@@ -200,6 +201,21 @@ skipped entirely. This avoids wasting reviewer sessions on runs that
 only modified run state files.
 
 ## Agents
+
+### Coder selection
+
+Local runs support Claude Code and OpenAI Codex. Claude remains the
+default for compatibility. Select Codex with `--coder codex` or
+`FACTORY_CODER=codex`. The factory records the selected coder in the
+run's `coder` file.
+
+Claude sessions use `claude -p --append-system-prompt` with stream-json
+output. Codex sessions use `codex exec --json --cd <worktree>` and
+receive the factory system prompt prepended to the session prompt because
+the Codex CLI has no Claude-style append-system-prompt flag.
+
+Fargate currently supports only Claude because its container entrypoint
+and credential path remain Claude-specific.
 
 ### Author
 
@@ -248,8 +264,8 @@ directory and the run completes. No author session is launched.
 ### Resume
 
 `factory resume` finds a run with status `needs-user` or `failed` and
-launches an interactive agent session so the user can provide input or
-unblock the run.
+launches an interactive agent session with the selected coder so the
+user can provide input or unblock the run.
 
 ## Runtimes
 
@@ -264,8 +280,9 @@ Brave Search key). Token refresh at session boundaries.
 `factory run --no-sandbox` runs the session loop without Seatbelt
 sandboxing or credential refresh. A git worktree is still created when
 the directory is a git repo. Used on platforms without macOS sandbox
-support or when the agent is already isolated by other means. The agent
-runs with `--dangerously-skip-permissions`.
+support or when the agent is already isolated by other means. Claude
+runs with `--dangerously-skip-permissions`; Codex runs with
+`--dangerously-bypass-approvals-and-sandbox`.
 
 ### Fargate
 
@@ -341,7 +358,7 @@ factory/main/
   src/
     main.rs                  ← CLI dispatch (clap)
     lib.rs                   ← public API for tests
-    coder.rs                 ← Coder trait + implementations
+    coder.rs                 ← Coder trait + Claude/Codex implementations
     cli.rs                   ← CLI argument types
     content.rs               ← Content resolution (project → user → bundled)
     credential.rs            ← Keychain credential injection

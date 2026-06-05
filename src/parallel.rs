@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
 
-use crate::coder::{BareClaudeCode, SandboxedClaudeCode};
+use crate::coder::CoderKind;
 use crate::content::ContentResolver;
 use crate::plan::Plan;
 use crate::run::{Run, RunStatus};
@@ -16,6 +16,7 @@ pub(crate) struct ChildContext {
     pub worktree_dir: PathBuf,
     pub system_prompt: String,
     pub extra_args: Vec<String>,
+    pub coder_kind: CoderKind,
     pub sandbox_profile: Option<String>,
 }
 
@@ -38,9 +39,19 @@ pub fn run_parallel_plan(
     plan: &Plan,
     system_prompt: &str,
     extra_args: &[String],
+    coder_kind: CoderKind,
     sandbox_profile: Option<&str>,
 ) -> Result<()> {
-    execute_plan(source_root, parent_run, plan, system_prompt, extra_args, sandbox_profile, run_child)
+    execute_plan(
+        source_root,
+        parent_run,
+        plan,
+        system_prompt,
+        extra_args,
+        coder_kind,
+        sandbox_profile,
+        run_child,
+    )
 }
 
 /// Core orchestrator, parameterized on the child runner for testability.
@@ -50,6 +61,7 @@ fn execute_plan<F>(
     plan: &Plan,
     system_prompt: &str,
     extra_args: &[String],
+    coder_kind: CoderKind,
     sandbox_profile: Option<&str>,
     child_runner: F,
 ) -> Result<()>
@@ -71,7 +83,11 @@ where
 
     for (gi, group) in plan.groups.iter().enumerate() {
         let group_num = gi + 1;
-        let mode = if group.parallel { "parallel" } else { "sequential" };
+        let mode = if group.parallel {
+            "parallel"
+        } else {
+            "sequential"
+        };
         eprintln!(
             "\n  === Group {} ({} step{}, {}) ===",
             group_num,
@@ -88,8 +104,15 @@ where
 
             for (si, step) in group.steps.iter().enumerate() {
                 let (child_info, ctx) = setup_child_step(
-                    source_root, parent_run, group_num, si, step,
-                    system_prompt, extra_args, sandbox_profile,
+                    source_root,
+                    parent_run,
+                    group_num,
+                    si,
+                    step,
+                    system_prompt,
+                    extra_args,
+                    coder_kind,
+                    sandbox_profile,
                 )?;
                 all_child_ids.push(child_info.id.clone());
                 child_infos.push(child_info);
@@ -117,8 +140,15 @@ where
             // Sequential: run steps one at a time
             for (si, step) in group.steps.iter().enumerate() {
                 let (child_info, ctx) = setup_child_step(
-                    source_root, parent_run, group_num, si, step,
-                    system_prompt, extra_args, sandbox_profile,
+                    source_root,
+                    parent_run,
+                    group_num,
+                    si,
+                    step,
+                    system_prompt,
+                    extra_args,
+                    coder_kind,
+                    sandbox_profile,
                 )?;
                 all_child_ids.push(child_info.id.clone());
                 child_infos.push(child_info);
@@ -208,6 +238,7 @@ fn setup_child_step(
     step: &crate::plan::Step,
     system_prompt: &str,
     extra_args: &[String],
+    coder_kind: CoderKind,
     sandbox_profile: Option<&str>,
 ) -> Result<(ChildInfo, ChildContext)> {
     let step_num = step_index + 1;
@@ -219,6 +250,7 @@ fn setup_child_step(
     fs::write(child_dir.join("brief.md"), &brief_content)?;
     fs::write(child_dir.join("status"), "planned")?;
     fs::write(child_dir.join("parent"), &parent_run.id)?;
+    fs::write(child_dir.join("coder"), coder_kind.as_str())?;
 
     let wt_result = worktree::setup_run_worktree(source_root, &child_id, &child_dir)?;
     worktree::disable_commit_signing(&wt_result.worktree_dir)?;
@@ -235,6 +267,7 @@ fn setup_child_step(
         worktree_dir: wt_result.worktree_dir,
         system_prompt: system_prompt.to_string(),
         extra_args: extra_args.to_vec(),
+        coder_kind,
         sandbox_profile: sandbox_profile.map(String::from),
     };
 
@@ -256,17 +289,11 @@ fn run_child(ctx: ChildContext) -> Result<()> {
         resolver: ContentResolver::new(Some(&ctx.worktree_dir)),
     };
 
-    match ctx.sandbox_profile {
-        Some(profile) => {
-            let author = SandboxedClaudeCode {
-                sandbox_profile: Some(profile),
-            };
-            session::run_session_loop(&author, &config, &SandboxedHooks)
-        }
-        None => {
-            let author = BareClaudeCode;
-            session::run_session_loop(&author, &config, &DefaultHooks)
-        }
+    let author = ctx.coder_kind.boxed(ctx.sandbox_profile.clone());
+    if ctx.sandbox_profile.is_some() {
+        session::run_session_loop(&*author, &config, &SandboxedHooks, ctx.coder_kind)
+    } else {
+        session::run_session_loop(&*author, &config, &DefaultHooks, ctx.coder_kind)
     }
 }
 
@@ -391,10 +418,7 @@ mod tests {
             dir: parent_dir.clone(),
         };
 
-        let plan = make_plan(vec![(true, vec![
-            ("Task A", "Do A."),
-            ("Task B", "Do B."),
-        ])]);
+        let plan = make_plan(vec![(true, vec![("Task A", "Do A."), ("Task B", "Do B.")])]);
 
         let result = execute_plan(
             &main_dir,
@@ -402,6 +426,7 @@ mod tests {
             &plan,
             "test",
             &[],
+            CoderKind::Claude,
             None,
             mock_child_runner,
         );
@@ -446,6 +471,7 @@ mod tests {
             &plan,
             "test",
             &[],
+            CoderKind::Claude,
             None,
             mock_child_runner,
         );
@@ -480,10 +506,7 @@ mod tests {
             dir: parent_dir,
         };
 
-        let plan = make_plan(vec![(true, vec![
-            ("Task A", "Do A."),
-            ("Task B", "Do B."),
-        ])]);
+        let plan = make_plan(vec![(true, vec![("Task A", "Do A."), ("Task B", "Do B.")])]);
 
         let result = execute_plan(
             &main_dir,
@@ -491,6 +514,7 @@ mod tests {
             &plan,
             "test",
             &[],
+            CoderKind::Claude,
             None,
             mock_failing_runner,
         );
@@ -504,10 +528,7 @@ mod tests {
         cleanup_worktrees(
             &tmp,
             &main_dir,
-            &[
-                format!("{parent_id}-1-1"),
-                format!("{parent_id}-1-2"),
-            ],
+            &[format!("{parent_id}-1-1"), format!("{parent_id}-1-2")],
         );
     }
 
@@ -527,10 +548,13 @@ mod tests {
             dir: parent_dir,
         };
 
-        let plan = make_plan(vec![(true, vec![
-            ("Auth endpoints", "Implement login and logout."),
-            ("DB schema", "Create users table."),
-        ])]);
+        let plan = make_plan(vec![(
+            true,
+            vec![
+                ("Auth endpoints", "Implement login and logout."),
+                ("DB schema", "Create users table."),
+            ],
+        )]);
 
         let result = execute_plan(
             &main_dir,
@@ -538,6 +562,7 @@ mod tests {
             &plan,
             "test",
             &[],
+            CoderKind::Claude,
             None,
             mock_child_runner,
         );
@@ -584,10 +609,9 @@ mod tests {
 
             // If this is a group-2 child, verify group-1 file exists
             if ctx.id.contains("-2-") {
-                let g1_file = ctx.worktree_dir.join(format!(
-                    "{}-1-1.txt",
-                    ctx.id.rsplit_once("-2-").unwrap().0
-                ));
+                let g1_file = ctx
+                    .worktree_dir
+                    .join(format!("{}-1-1.txt", ctx.id.rsplit_once("-2-").unwrap().0));
                 assert!(
                     g1_file.exists(),
                     "Group 2 should see group 1's file at {}",
@@ -617,6 +641,7 @@ mod tests {
             &plan,
             "test",
             &[],
+            CoderKind::Claude,
             None,
             runner,
         );
@@ -640,10 +665,10 @@ mod tests {
             dir: parent_dir.clone(),
         };
 
-        let plan = make_plan(vec![(true, vec![
-            ("Good step", "Succeeds."),
-            ("Bad step", "Fails."),
-        ])]);
+        let plan = make_plan(vec![(
+            true,
+            vec![("Good step", "Succeeds."), ("Bad step", "Fails.")],
+        )]);
 
         // Runner where step 1 succeeds and step 2 fails
         let runner = |ctx: ChildContext| -> Result<()> {
@@ -672,6 +697,7 @@ mod tests {
             &plan,
             "test",
             &[],
+            CoderKind::Claude,
             None,
             runner,
         );
@@ -682,16 +708,16 @@ mod tests {
         // Both worktrees should still exist for inspection
         let wt1 = tmp.path().join(format!("{parent_id}-1-1"));
         let wt2 = tmp.path().join(format!("{parent_id}-1-2"));
-        assert!(wt1.exists(), "Successful sibling worktree should be preserved");
+        assert!(
+            wt1.exists(),
+            "Successful sibling worktree should be preserved"
+        );
         assert!(wt2.exists(), "Failed sibling worktree should be preserved");
 
         cleanup_worktrees(
             &tmp,
             &main_dir,
-            &[
-                format!("{parent_id}-1-1"),
-                format!("{parent_id}-1-2"),
-            ],
+            &[format!("{parent_id}-1-1"), format!("{parent_id}-1-2")],
         );
     }
 
@@ -711,9 +737,7 @@ mod tests {
             dir: parent_dir,
         };
 
-        let plan = make_plan(vec![(true, vec![
-            ("Task A", "Do A."),
-        ])]);
+        let plan = make_plan(vec![(true, vec![("Task A", "Do A.")])]);
 
         // Runner that returns an error from the thread
         let runner = |_ctx: ChildContext| -> Result<()> {
@@ -726,6 +750,7 @@ mod tests {
             &plan,
             "test",
             &[],
+            CoderKind::Claude,
             None,
             runner,
         );
@@ -739,11 +764,7 @@ mod tests {
         );
         assert_eq!(parent_run.status().unwrap(), RunStatus::Failed);
 
-        cleanup_worktrees(
-            &tmp,
-            &main_dir,
-            &[format!("{parent_id}-1-1")],
-        );
+        cleanup_worktrees(&tmp, &main_dir, &[format!("{parent_id}-1-1")]);
     }
 
     #[test]
@@ -763,10 +784,10 @@ mod tests {
         };
 
         // Sequential group where the second step's runner returns an error
-        let plan = make_plan(vec![(false, vec![
-            ("Step A", "First."),
-            ("Step B", "Fails."),
-        ])]);
+        let plan = make_plan(vec![(
+            false,
+            vec![("Step A", "First."), ("Step B", "Fails.")],
+        )]);
 
         let runner = |ctx: ChildContext| -> Result<()> {
             let wt_run_dir = ctx.worktree_dir.join(format!(".factory/runs/{}", ctx.id));
@@ -793,6 +814,7 @@ mod tests {
             &plan,
             "test",
             &[],
+            CoderKind::Claude,
             None,
             runner,
         );
@@ -809,10 +831,7 @@ mod tests {
         cleanup_worktrees(
             &tmp,
             &main_dir,
-            &[
-                format!("{parent_id}-1-1"),
-                format!("{parent_id}-1-2"),
-            ],
+            &[format!("{parent_id}-1-1"), format!("{parent_id}-1-2")],
         );
     }
 
@@ -833,9 +852,7 @@ mod tests {
         };
 
         // Sequential group where the runner returns Ok but sets status to failed
-        let plan = make_plan(vec![(false, vec![
-            ("Step A", "Fails."),
-        ])]);
+        let plan = make_plan(vec![(false, vec![("Step A", "Fails.")])]);
 
         let runner = |ctx: ChildContext| -> Result<()> {
             let wt_run_dir = ctx.worktree_dir.join(format!(".factory/runs/{}", ctx.id));
@@ -849,6 +866,7 @@ mod tests {
             &plan,
             "test",
             &[],
+            CoderKind::Claude,
             None,
             runner,
         );
@@ -862,11 +880,7 @@ mod tests {
         );
         assert_eq!(parent_run.status().unwrap(), RunStatus::Failed);
 
-        cleanup_worktrees(
-            &tmp,
-            &main_dir,
-            &[format!("{parent_id}-1-1")],
-        );
+        cleanup_worktrees(&tmp, &main_dir, &[format!("{parent_id}-1-1")]);
     }
 
     #[test]
@@ -886,10 +900,10 @@ mod tests {
         };
 
         // Unmarked group with two steps — should run sequentially
-        let plan = make_plan(vec![(false, vec![
-            ("Step A", "First."),
-            ("Step B", "Second."),
-        ])]);
+        let plan = make_plan(vec![(
+            false,
+            vec![("Step A", "First."), ("Step B", "Second.")],
+        )]);
 
         // Track execution order using a shared counter
         let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -920,6 +934,7 @@ mod tests {
             &plan,
             "test",
             &[],
+            CoderKind::Claude,
             None,
             runner,
         );

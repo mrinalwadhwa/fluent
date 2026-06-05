@@ -65,9 +65,19 @@ Test: tests/test-run (setup_run_worktree from non-main branch)
 ## Session loop (local)
 
 WHEN `factory run` is invoked with the local runtime,
-THE SYSTEM SHALL launch Claude in print mode with the brief or handoff
-as the initial prompt.
+THE SYSTEM SHALL launch the selected coder in non-interactive mode with
+the brief or handoff as the initial prompt.
 Test: tests/behaviors/operations/test-session-loop.sh (initial prompt uses brief, initial prompt uses handoff)
+
+WHEN `factory run --coder codex` is invoked with the local runtime,
+THE SYSTEM SHALL launch Codex with `codex exec --json`, prepend the
+factory system prompt to the run prompt, and capture Codex JSON output
+as the session transcript.
+Test: tests/binary.rs (run_with_codex_uses_exec_json_and_status_contract)
+
+WHEN `factory run` is invoked with an unknown coder,
+THE SYSTEM SHALL fail before resolving or launching a run.
+Test: tests/binary.rs (run_unknown_coder_fails)
 
 WHEN the agent exits with status `executing`,
 THE SYSTEM SHALL restart the agent.
@@ -97,8 +107,8 @@ number, exit code, duration, and status.
 Test: src/session.rs (test_loop_writes_sessions_log, test_loop_writes_nonzero_exit_to_sessions_log), tests/binary.rs (run_writes_sessions_log), tests/behaviors/operations/test-observability.sh
 
 WHEN the session loop launches an agent session,
-THE SYSTEM SHALL pass `--verbose --output-format stream-json` and pipe
-stdout to `sessions/session-N/transcript.jsonl`.
+THE SYSTEM SHALL request machine-readable JSON events from the selected
+coder and pipe stdout to `sessions/session-N/transcript.jsonl`.
 Test: src/session.rs (test_loop_creates_session_transcript_dir), tests/binary.rs (run_captures_stream_json_transcript), tests/behaviors/operations/test-observability.sh
 
 ## Review archiving
@@ -126,6 +136,10 @@ Test: src/session.rs (test_loop_calls_pre_session_before_each_session, test_loop
 
 WHEN `factory run --runtime fargate` is invoked,
 THE SYSTEM SHALL upload the worktree to S3 and start an ECS Fargate task.
+
+WHEN `factory run --runtime fargate --coder codex` is invoked,
+THE SYSTEM SHALL fail with a clear unsupported-coder error.
+Test: tests/binary.rs (run_fargate_with_codex_fails_before_config)
 
 WHEN the Fargate task starts,
 THE SYSTEM SHALL pull the workspace from S3 and run the session loop.

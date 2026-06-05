@@ -6,16 +6,16 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-use factory::coder::{BareClaudeCode, Coder, SandboxedClaudeCode};
 use factory::cli::{Cli, Commands};
+use factory::coder::CoderKind;
 use factory::content::ContentResolver;
 use factory::credential;
 use factory::dashboard;
 use factory::fargate;
+use factory::os;
 use factory::parallel;
 use factory::plan;
 use factory::run::{self, Run};
-use factory::os;
 use factory::session::{self, DefaultHooks, SandboxedHooks, SessionConfig};
 use factory::worktree;
 
@@ -51,10 +51,10 @@ fn main() -> Result<()> {
 
     // --dry-run: render sandbox profile and exit
     if cli.dry_run {
-        os::check_prerequisites()?;
+        let coder_kind = CoderKind::resolve(cli.coder.as_deref())?;
+        os::check_prerequisites_for(coder_kind)?;
         let home = std::env::var("HOME").unwrap_or_default();
-        let profile =
-            os::render_profile(&resolver, &home, &sandbox_root.to_string_lossy())?;
+        let profile = os::render_profile(&resolver, &home, &sandbox_root.to_string_lossy())?;
         println!("--- Rendered Seatbelt profile ---");
         println!("HOME         = {home}");
         println!("SANDBOX_ROOT = {}", sandbox_root.display());
@@ -68,16 +68,34 @@ fn main() -> Result<()> {
             run_id,
             runtime,
             no_sandbox,
+            coder,
             extra_args,
         }) => match runtime.as_str() {
             "local" => {
+                let coder_kind = CoderKind::resolve(coder.as_deref().or(cli.coder.as_deref()))?;
                 if no_sandbox || cli.no_sandbox {
-                    cmd_run_bare(&sandbox_root, run_id.as_deref(), &resolver, &extra_args)?;
+                    cmd_run_bare(
+                        &sandbox_root,
+                        run_id.as_deref(),
+                        &resolver,
+                        &extra_args,
+                        coder_kind,
+                    )?;
                 } else {
-                    cmd_run_local(&sandbox_root, run_id.as_deref(), &resolver, &extra_args)?;
+                    cmd_run_local(
+                        &sandbox_root,
+                        run_id.as_deref(),
+                        &resolver,
+                        &extra_args,
+                        coder_kind,
+                    )?;
                 }
             }
             "fargate" => {
+                let coder_kind = CoderKind::resolve(coder.as_deref().or(cli.coder.as_deref()))?;
+                if coder_kind != CoderKind::Claude {
+                    bail!("Fargate runtime currently supports only the claude coder");
+                }
                 fargate::launch(&sandbox_root, run_id.as_deref())?;
             }
             other => bail!("Unknown runtime '{other}'. Available: local, fargate."),
@@ -95,8 +113,13 @@ fn main() -> Result<()> {
         Some(Commands::Shell { run_id }) => {
             fargate::shell(&cwd, run_id.as_deref())?;
         }
-        Some(Commands::Resume { run_id, extra_args }) => {
-            cmd_resume(&cwd, run_id.as_deref(), &resolver, &extra_args)?;
+        Some(Commands::Resume {
+            run_id,
+            coder,
+            extra_args,
+        }) => {
+            let coder_kind = CoderKind::resolve(coder.as_deref().or(cli.coder.as_deref()))?;
+            cmd_resume(&cwd, run_id.as_deref(), &resolver, &extra_args, coder_kind)?;
         }
         Some(Commands::Init) => {
             cmd_init(&cwd)?;
@@ -109,7 +132,8 @@ fn main() -> Result<()> {
             cmd_land(&cwd, run_id.as_deref())?;
         }
         None => {
-            cmd_interactive(&sandbox_root, &resolver, &cli.extra_args)?;
+            let coder_kind = CoderKind::resolve(cli.coder.as_deref())?;
+            cmd_interactive(&sandbox_root, &resolver, &cli.extra_args, coder_kind)?;
         }
     }
 
@@ -120,8 +144,9 @@ fn cmd_interactive(
     sandbox_root: &Path,
     resolver: &ContentResolver,
     extra_args: &[String],
+    coder_kind: CoderKind,
 ) -> Result<()> {
-    os::check_prerequisites()?;
+    os::check_prerequisites_for(coder_kind)?;
     credential::inject_credentials()?;
     credential::setup_git_signing();
 
@@ -134,9 +159,7 @@ fn cmd_interactive(
     eprintln!("  Factory           interactive session");
     eprintln!("  Sandbox root      {}", sandbox_root.display());
 
-    let author = SandboxedClaudeCode {
-        sandbox_profile: Some(profile.path.to_string_lossy().to_string()),
-    };
+    let author = coder_kind.boxed(Some(profile.path.to_string_lossy().to_string()));
     author.run_interactive(&system_prompt, sandbox_root, extra_args)?;
     Ok(())
 }
@@ -146,8 +169,9 @@ fn cmd_run_local(
     run_id: Option<&str>,
     resolver: &ContentResolver,
     extra_args: &[String],
+    coder_kind: CoderKind,
 ) -> Result<()> {
-    os::check_prerequisites()?;
+    os::check_prerequisites_for(coder_kind)?;
     credential::inject_credentials()?;
     credential::setup_git_signing();
 
@@ -156,6 +180,7 @@ fn cmd_run_local(
     // Record runtime
     fs::write(run.dir.join("runtime"), "local")?;
     fs::write(run.dir.join("handle"), std::process::id().to_string())?;
+    fs::write(run.dir.join("coder"), coder_kind.as_str())?;
 
     // Check for a parallel plan
     if let Some(parsed_plan) = try_parse_parallel_plan(&run) {
@@ -177,6 +202,7 @@ fn cmd_run_local(
             &parsed_plan,
             &system_prompt,
             extra_args,
+            coder_kind,
             Some(&profile.path.to_string_lossy()),
         );
     }
@@ -216,11 +242,9 @@ fn cmd_run_local(
         resolver: ContentResolver::new(Some(worktree_dir)),
     };
 
-    let author = SandboxedClaudeCode {
-        sandbox_profile: Some(profile.path.to_string_lossy().to_string()),
-    };
+    let author = coder_kind.boxed(Some(profile.path.to_string_lossy().to_string()));
 
-    session::run_session_loop(&author, &config, &SandboxedHooks)?;
+    session::run_session_loop(&*author, &config, &SandboxedHooks, coder_kind)?;
     Ok(())
 }
 
@@ -229,12 +253,14 @@ fn cmd_run_bare(
     run_id: Option<&str>,
     resolver: &ContentResolver,
     extra_args: &[String],
+    coder_kind: CoderKind,
 ) -> Result<()> {
     let run = run::resolve_run(search_root, run_id)?;
 
     // Record runtime and handle
     fs::write(run.dir.join("runtime"), "local")?;
     fs::write(run.dir.join("handle"), std::process::id().to_string())?;
+    fs::write(run.dir.join("coder"), coder_kind.as_str())?;
 
     // Check for a parallel plan (requires git)
     if worktree::is_git_repo(search_root) {
@@ -251,6 +277,7 @@ fn cmd_run_bare(
                 &parsed_plan,
                 &system_prompt,
                 extra_args,
+                coder_kind,
                 None,
             );
         }
@@ -286,11 +313,10 @@ fn cmd_run_bare(
         resolver: ContentResolver::new(Some(&working_dir)),
     };
 
-    let author = BareClaudeCode;
-    session::run_session_loop(&author, &config, &DefaultHooks)?;
+    let author = coder_kind.boxed(None);
+    session::run_session_loop(&*author, &config, &DefaultHooks, coder_kind)?;
     Ok(())
 }
-
 
 fn cmd_status(search_root: &Path) -> Result<()> {
     let runs_dir = search_root.join(".factory/runs");
@@ -382,10 +408,7 @@ fn cmd_watch(search_root: &Path, interval: u64, timeout: u64) -> Result<()> {
         if current_output != last_output && !last_output.is_empty() {
             // Check for notification-worthy changes
             for run in &runs {
-                let status_str = run
-                    .status()
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
+                let status_str = run.status().map(|s| s.to_string()).unwrap_or_default();
                 match status_str.as_str() {
                     "complete" | "needs-user" | "failed" => {
                         let key = (run.id.clone(), status_str.clone());
@@ -422,36 +445,30 @@ fn cmd_watch(search_root: &Path, interval: u64, timeout: u64) -> Result<()> {
     Ok(())
 }
 
-
 fn cmd_resume(
     search_root: &Path,
     run_id: Option<&str>,
     resolver: &ContentResolver,
     extra_args: &[String],
+    coder_kind: CoderKind,
 ) -> Result<()> {
     let run = run::resolve_resumable_run(search_root, run_id)?;
 
     eprintln!("  Resuming run {}", run.id);
 
-    os::check_prerequisites()?;
+    os::check_prerequisites_for(coder_kind)?;
     credential::inject_credentials()?;
     credential::setup_git_signing();
 
     let home = std::env::var("HOME").unwrap_or_default();
-    let profile =
-        os::render_profile(resolver, &home, &search_root.to_string_lossy())?;
+    let profile = os::render_profile(resolver, &home, &search_root.to_string_lossy())?;
     let system_prompt = resolver
         .resolve_content("prompts/author.md")
         .unwrap_or_default();
 
-    eprintln!(
-        "  Factory           resume session (run: {})",
-        run.id
-    );
+    eprintln!("  Factory           resume session (run: {})", run.id);
 
-    let author = SandboxedClaudeCode {
-        sandbox_profile: Some(profile.path.to_string_lossy().to_string()),
-    };
+    let author = coder_kind.boxed(Some(profile.path.to_string_lossy().to_string()));
     author.run_interactive(&system_prompt, search_root, extra_args)?;
     Ok(())
 }
@@ -459,7 +476,10 @@ fn cmd_resume(
 fn cmd_init(cwd: &Path) -> Result<()> {
     let factory_dir = cwd.join(".factory");
     if factory_dir.exists() {
-        eprintln!("  Already initialized: .factory/ exists in {}", cwd.display());
+        eprintln!(
+            "  Already initialized: .factory/ exists in {}",
+            cwd.display()
+        );
         return Ok(());
     }
     fs::create_dir_all(factory_dir.join("runs"))?;
@@ -495,7 +515,9 @@ fn cmd_land(search_root: &Path, run_id: Option<&str>) -> Result<()> {
             if status != run::RunStatus::Landed {
                 bail!(
                     "Cannot land parent run {}: child {} has status '{}', expected 'landed'",
-                    run.id, child_id, status
+                    run.id,
+                    child_id,
+                    status
                 );
             }
         }
@@ -534,9 +556,7 @@ fn dirs_log_file() -> PathBuf {
 }
 
 fn kill_existing_claude() -> Result<()> {
-    let output = Command::new("pgrep")
-        .args(["-f", "claude"])
-        .output();
+    let output = Command::new("pgrep").args(["-f", "claude"]).output();
     if let Ok(output) = output {
         if output.status.success() {
             let pids = String::from_utf8_lossy(&output.stdout);
@@ -549,19 +569,14 @@ fn kill_existing_claude() -> Result<()> {
             }
             thread::sleep(Duration::from_secs(3));
 
-            let output = Command::new("pgrep")
-                .args(["-f", "claude"])
-                .output();
+            let output = Command::new("pgrep").args(["-f", "claude"]).output();
             if let Ok(output) = output {
                 if output.status.success() {
                     let pids = String::from_utf8_lossy(&output.stdout);
                     for pid in pids.lines() {
                         let pid = pid.trim();
                         if !pid.is_empty() {
-                            Command::new("kill")
-                                .args(["-9", pid])
-                                .output()
-                                .ok();
+                            Command::new("kill").args(["-9", pid]).output().ok();
                         }
                     }
                     thread::sleep(Duration::from_millis(500));

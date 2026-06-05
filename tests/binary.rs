@@ -288,6 +288,26 @@ fn write_mock_claude(bin_dir: &Path, script: &str) {
     }
 }
 
+fn write_mock_codex(bin_dir: &Path, script: &str) {
+    fs::create_dir_all(bin_dir).unwrap();
+
+    let codex_path = bin_dir.join("codex");
+    fs::write(&codex_path, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&codex_path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let sandbox_path = bin_dir.join("sandbox-exec");
+    fs::write(&sandbox_path, "#!/bin/bash\nexit 1\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&sandbox_path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
 struct WorktreeGuard {
     main_dir: std::path::PathBuf,
     run_id: String,
@@ -473,8 +493,7 @@ exit 1
     // Verify worktree status is "failed"
     let worktree_path = fs::read_to_string(run_dir.join("worktree")).unwrap();
     let wt_status = fs::read_to_string(
-        Path::new(worktree_path.trim())
-            .join(format!(".factory/runs/{run_id}/status")),
+        Path::new(worktree_path.trim()).join(format!(".factory/runs/{run_id}/status")),
     )
     .unwrap();
     assert_eq!(wt_status.trim(), "failed");
@@ -523,8 +542,7 @@ exit 0
 
     let worktree_path = fs::read_to_string(run_dir.join("worktree")).unwrap();
     let prompt = fs::read_to_string(
-        Path::new(worktree_path.trim())
-            .join(format!(".factory/runs/{run_id}/captured-prompt")),
+        Path::new(worktree_path.trim()).join(format!(".factory/runs/{run_id}/captured-prompt")),
     )
     .unwrap();
     assert!(
@@ -610,7 +628,10 @@ exit 0
     let wt_path = Path::new(wt_path_str.trim());
     let wt_run = wt_path.join(format!(".factory/runs/{run_id}"));
 
-    assert!(wt_run.join("brief.md").exists(), "brief.md should be copied");
+    assert!(
+        wt_run.join("brief.md").exists(),
+        "brief.md should be copied"
+    );
     assert!(wt_run.join("plan.md").exists(), "plan.md should be copied");
     assert!(wt_run.join("status").exists(), "status should be copied");
 
@@ -619,7 +640,10 @@ exit 0
     assert_eq!(active_run.trim(), run_id);
 
     // source-branch should be recorded
-    assert!(run_dir.join("source-branch").exists(), "source-branch should be written");
+    assert!(
+        run_dir.join("source-branch").exists(),
+        "source-branch should be written"
+    );
 }
 
 #[test]
@@ -802,7 +826,10 @@ fn watch_exits_on_timeout() {
         .success()
         .stderr(predicate::str::contains("Timeout reached"));
     let elapsed = start.elapsed().as_secs();
-    assert!(elapsed < 5, "should exit promptly after timeout, took {elapsed}s");
+    assert!(
+        elapsed < 5,
+        "should exit promptly after timeout, took {elapsed}s"
+    );
 }
 
 // -------------------------------------------------------------------------
@@ -827,8 +854,7 @@ fn resume_finds_needs_user_run() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("Resuming run resume-target")
-            || stderr.contains("resume-target"),
+        stderr.contains("Resuming run resume-target") || stderr.contains("resume-target"),
         "should resolve the needs-user run: stderr={stderr}"
     );
 }
@@ -898,11 +924,7 @@ fn resume_skips_executing_run() {
 fn pull_fails_without_fargate_config() {
     let tmp = TempDir::new().unwrap();
     fs::create_dir_all(tmp.path().join(".factory/runs/pull-run")).unwrap();
-    fs::write(
-        tmp.path().join(".factory/runs/pull-run/runtime"),
-        "fargate",
-    )
-    .unwrap();
+    fs::write(tmp.path().join(".factory/runs/pull-run/runtime"), "fargate").unwrap();
 
     factory_cmd()
         .current_dir(tmp.path())
@@ -921,11 +943,7 @@ fn pull_fails_without_fargate_config() {
 fn pull_no_fargate_run() {
     let tmp = TempDir::new().unwrap();
     fs::create_dir_all(tmp.path().join(".factory/runs/local-run")).unwrap();
-    fs::write(
-        tmp.path().join(".factory/runs/local-run/runtime"),
-        "local",
-    )
-    .unwrap();
+    fs::write(tmp.path().join(".factory/runs/local-run/runtime"), "local").unwrap();
 
     factory_cmd()
         .current_dir(tmp.path())
@@ -1015,6 +1033,36 @@ fn run_fargate_fails_without_config() {
 }
 
 #[test]
+fn run_fargate_with_codex_fails_before_config() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let run_id = "20260605-fargate-codex";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("brief.md"), "Brief\n").unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "run",
+            "--runtime",
+            "fargate",
+            "--coder",
+            "codex",
+            "--run-id",
+            run_id,
+        ])
+        .env("HOME", tmp.path().to_str().unwrap())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Fargate runtime currently supports only the claude coder",
+        ));
+}
+
+#[test]
 fn run_unknown_runtime_fails() {
     let tmp = TempDir::new().unwrap();
 
@@ -1063,8 +1111,7 @@ exit 0
 
     // sessions.log should exist in the worktree's run dir
     let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
-    let wt_run_dir = Path::new(wt_path_str.trim())
-        .join(format!(".factory/runs/{run_id}"));
+    let wt_run_dir = Path::new(wt_path_str.trim()).join(format!(".factory/runs/{run_id}"));
     let log_path = wt_run_dir.join("sessions.log");
     assert!(log_path.exists(), "sessions.log should exist");
 
@@ -1124,8 +1171,7 @@ exit 0
 
     // transcript.jsonl should contain stream-json from claude's stdout
     let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
-    let wt_run_dir = Path::new(wt_path_str.trim())
-        .join(format!(".factory/runs/{run_id}"));
+    let wt_run_dir = Path::new(wt_path_str.trim()).join(format!(".factory/runs/{run_id}"));
     let transcript = wt_run_dir.join("sessions/session-1/transcript.jsonl");
     assert!(transcript.exists(), "transcript.jsonl should exist");
 
@@ -1140,6 +1186,99 @@ exit 0
         "transcript should contain stream-json assistant marker, got: {}",
         content
     );
+}
+
+#[test]
+fn run_with_codex_uses_exec_json_and_status_contract() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let run_id = "20260605-codex-run";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("brief.md"), "# Brief\n\nRun with Codex\n").unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_codex(
+        &bin_dir,
+        r##"#!/bin/bash
+WORKING_DIR="$(pwd)"
+RUN_ID=$(ls "$WORKING_DIR/.factory/runs/" 2>/dev/null | head -1)
+RUN_DIR="$WORKING_DIR/.factory/runs/$RUN_ID"
+printf '%s\n' "$@" > "$RUN_DIR/codex-args"
+printf '%s\n' "${@: -1}" > "$RUN_DIR/codex-prompt"
+echo '{"type":"assistant","message":"codex running"}'
+echo "needs-user" > "$RUN_DIR/status"
+exit 0
+"##,
+    );
+
+    let _guard = worktree_guard(&main_dir, run_id);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "run",
+            "--no-sandbox",
+            "--coder",
+            "codex",
+            "--run-id",
+            run_id,
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
+    let wt_run_dir = Path::new(wt_path_str.trim()).join(format!(".factory/runs/{run_id}"));
+    let coder = fs::read_to_string(run_dir.join("coder")).unwrap();
+    assert_eq!(coder.trim(), "codex");
+
+    let args = fs::read_to_string(wt_run_dir.join("codex-args")).unwrap();
+    assert!(
+        args.lines().any(|line| line == "exec"),
+        "expected codex exec: {args}"
+    );
+    assert!(
+        args.lines().any(|line| line == "--json"),
+        "expected --json: {args}"
+    );
+    assert!(
+        args.lines()
+            .any(|line| line == "--dangerously-bypass-approvals-and-sandbox"),
+        "expected non-interactive bypass flag: {args}"
+    );
+
+    let prompt = fs::read_to_string(wt_run_dir.join("codex-prompt")).unwrap();
+    assert!(
+        prompt.contains("Status file contract"),
+        "prompt should include factory system prompt: {prompt}"
+    );
+    assert!(
+        prompt.contains("brief"),
+        "prompt should include run prompt: {prompt}"
+    );
+
+    let transcript =
+        fs::read_to_string(wt_run_dir.join("sessions/session-1/transcript.jsonl")).unwrap();
+    assert!(
+        transcript.contains("codex running"),
+        "transcript should capture Codex JSON output: {transcript}"
+    );
+}
+
+#[test]
+fn run_unknown_coder_fails() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join(".factory/runs")).unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["run", "--no-sandbox", "--coder", "unknown"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Unknown coder"));
 }
 
 #[test]
@@ -1186,8 +1325,7 @@ exit 0
         .success();
 
     let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
-    let wt_run_dir = Path::new(wt_path_str.trim())
-        .join(format!(".factory/runs/{run_id}"));
+    let wt_run_dir = Path::new(wt_path_str.trim()).join(format!(".factory/runs/{run_id}"));
     let transcript = wt_run_dir.join("sessions/session-1/transcript.jsonl");
     assert!(transcript.exists(), "transcript.jsonl should exist");
 
@@ -1228,11 +1366,7 @@ fn run_does_not_capture_global_claude_state() {
     fs::write(claude_dir.join("plans/plan.json"), "{}").unwrap();
     fs::create_dir_all(claude_dir.join("projects/test/memory")).unwrap();
     fs::write(claude_dir.join("projects/test/memory/MEMORY.md"), "test").unwrap();
-    fs::write(
-        claude_dir.join("history.jsonl"),
-        r#"{"old":"history"}"#,
-    )
-    .unwrap();
+    fs::write(claude_dir.join("history.jsonl"), r#"{"old":"history"}"#).unwrap();
 
     let bin_dir = tmp.path().join("bin");
     write_mock_claude(
@@ -1257,8 +1391,8 @@ exit 0
         .success();
 
     let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
-    let session_dir = Path::new(wt_path_str.trim())
-        .join(format!(".factory/runs/{run_id}/sessions/session-1"));
+    let session_dir =
+        Path::new(wt_path_str.trim()).join(format!(".factory/runs/{run_id}/sessions/session-1"));
 
     // Should NOT have global state dirs
     assert!(
@@ -1292,7 +1426,11 @@ fn run_archives_review_rounds() {
     let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
     fs::create_dir_all(&run_dir).unwrap();
     fs::write(run_dir.join("status"), "planned").unwrap();
-    fs::write(run_dir.join("brief.md"), "# Brief\n\nTest review archiving\n").unwrap();
+    fs::write(
+        run_dir.join("brief.md"),
+        "# Brief\n\nTest review archiving\n",
+    )
+    .unwrap();
 
     // Mock claude that distinguishes author vs reviewer by system prompt.
     // The reviewer gets "--append-system-prompt" containing "test reviewer"
@@ -1362,13 +1500,9 @@ exit 0
 
     // Check that round-1 archive exists
     let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
-    let wt_run_dir = Path::new(wt_path_str.trim())
-        .join(format!(".factory/runs/{run_id}"));
+    let wt_run_dir = Path::new(wt_path_str.trim()).join(format!(".factory/runs/{run_id}"));
     let round1_dir = wt_run_dir.join("reviews/round-1");
-    assert!(
-        round1_dir.exists(),
-        "reviews/round-1/ archive should exist"
-    );
+    assert!(round1_dir.exists(), "reviews/round-1/ archive should exist");
     assert!(
         round1_dir.join("review-tests.md").exists(),
         "round-1 should contain review-tests.md"
@@ -1421,8 +1555,7 @@ exit 0
 
     // Reviews directory should not have any review artifacts
     let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
-    let wt_run_dir = Path::new(wt_path_str.trim())
-        .join(format!(".factory/runs/{run_id}"));
+    let wt_run_dir = Path::new(wt_path_str.trim()).join(format!(".factory/runs/{run_id}"));
     assert!(
         !wt_run_dir.join("reviews/review-tests.md").exists(),
         "reviewer should not have run"
@@ -1517,7 +1650,10 @@ fn land_completes_full_lifecycle() {
     assert_eq!(status.trim(), "landed");
 
     // Verify worktree was removed
-    assert!(!wt_path.is_dir(), "worktree should be removed after landing");
+    assert!(
+        !wt_path.is_dir(),
+        "worktree should be removed after landing"
+    );
 
     // Verify branch was deleted
     let branches = std::process::Command::new("git")
@@ -1582,7 +1718,11 @@ fn land_rejects_failed_reviews() {
     let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
     fs::create_dir_all(&run_dir).unwrap();
     fs::write(run_dir.join("status"), "complete").unwrap();
-    fs::write(run_dir.join("worktree"), main_dir.to_string_lossy().as_ref()).unwrap();
+    fs::write(
+        run_dir.join("worktree"),
+        main_dir.to_string_lossy().as_ref(),
+    )
+    .unwrap();
     fs::write(run_dir.join("source-branch"), "main").unwrap();
 
     // Create a failing review

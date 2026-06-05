@@ -29,6 +29,10 @@ pub struct Cli {
     #[arg(long)]
     pub no_sandbox: bool,
 
+    /// Coding agent to launch: claude or codex
+    #[arg(long)]
+    pub coder: Option<String>,
+
     /// Extra args passed through to the agent
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub extra_args: Vec<String>,
@@ -49,6 +53,10 @@ pub enum Commands {
         /// Disable sandbox
         #[arg(long)]
         no_sandbox: bool,
+
+        /// Coding agent to launch: claude or codex
+        #[arg(long)]
+        coder: Option<String>,
 
         /// Extra args passed through to the agent
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -88,6 +96,10 @@ pub enum Commands {
     Resume {
         /// Run ID to resume
         run_id: Option<String>,
+
+        /// Coding agent to launch: claude or codex
+        #[arg(long)]
+        coder: Option<String>,
 
         /// Extra args passed through to the agent
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
