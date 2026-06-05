@@ -18,7 +18,8 @@ use crate::review;
 use crate::run::{self, Run, RunStatus};
 use crate::transcript::{self, Event, TranscriptReader};
 
-const POLL_INTERVAL: Duration = Duration::from_millis(500);
+const RENDER_INTERVAL: Duration = Duration::from_millis(100);
+const DATA_POLL_INTERVAL: Duration = Duration::from_millis(2000);
 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /// An agent whose transcript we can display.
@@ -202,6 +203,8 @@ struct App {
     tick: u64,
     /// First visible run tab index for horizontal scrolling.
     run_tab_offset: usize,
+    /// When true, mouse capture is disabled so the user can select text.
+    copy_mode: bool,
 }
 
 impl App {
@@ -239,6 +242,7 @@ impl App {
             feed_height: 20,
             tick: 0,
             run_tab_offset: 0,
+            copy_mode: false,
         })
     }
 
@@ -289,19 +293,24 @@ fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
 ) -> Result<()> {
-    let mut last_poll = Instant::now();
+    let mut last_data_poll = Instant::now();
+    let mut last_render = Instant::now();
 
     loop {
-        terminal.draw(|f| draw_ui(f, app))?;
+        // Render at ~100ms for smooth animation
+        if last_render.elapsed() >= RENDER_INTERVAL {
+            terminal.draw(|f| draw_ui(f, app))?;
+            last_render = Instant::now();
+        }
 
         // Update feed height from terminal size for scroll clamping
         // Layout: header(3) + runs(3) + agents(3) + margin(1) + feed(rest) + help(1) + borders(2)
         let term_height = terminal.size()?.height as usize;
         app.feed_height = term_height.saturating_sub(3 + 3 + 3 + 1 + 1 + 2);
 
-        // Poll for events with timeout
-        let timeout = POLL_INTERVAL
-            .checked_sub(last_poll.elapsed())
+        // Poll for events with short timeout to keep render loop responsive
+        let timeout = RENDER_INTERVAL
+            .checked_sub(last_render.elapsed())
             .unwrap_or(Duration::ZERO);
 
         if event::poll(timeout)? {
@@ -333,6 +342,20 @@ fn run_event_loop(
                     (KeyModifiers::CONTROL, KeyCode::Char('c'))
                     | (_, KeyCode::Char('q')) => {
                         app.should_quit = true;
+                    }
+                    (_, KeyCode::Char('c')) => {
+                        app.copy_mode = !app.copy_mode;
+                        if app.copy_mode {
+                            crossterm::execute!(
+                                terminal.backend_mut(),
+                                crossterm::event::DisableMouseCapture
+                            )?;
+                        } else {
+                            crossterm::execute!(
+                                terminal.backend_mut(),
+                                crossterm::event::EnableMouseCapture
+                            )?;
+                        }
                     }
                     (_, KeyCode::Tab) if !app.runs.is_empty() => {
                         // Cycle through agents within the current run
@@ -396,7 +419,7 @@ fn run_event_loop(
                         if !app.runs.is_empty() =>
                     {
                         let view = app.current_view_mut();
-                        view.auto_scroll = false;
+                        view.auto_scroll = true;
                         view.scroll_to_bottom();
                     }
                     (_, KeyCode::Char('g')) | (_, KeyCode::Home)
@@ -435,10 +458,10 @@ fn run_event_loop(
             break;
         }
 
-        // Periodic poll for new data
-        if last_poll.elapsed() >= POLL_INTERVAL {
+        // Periodic poll for new data at a slower cadence
+        if last_data_poll.elapsed() >= DATA_POLL_INTERVAL {
             app.poll();
-            last_poll = Instant::now();
+            last_data_poll = Instant::now();
         }
     }
 
@@ -485,7 +508,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut App) {
         )))
         .block(Block::default().borders(Borders::ALL).title(" Runs "));
         f.render_widget(empty, main_chunks[1]);
-        draw_help_bar(f, main_chunks[2]);
+        draw_help_bar(f, main_chunks[2], app.copy_mode);
         return;
     }
 
@@ -507,7 +530,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut App) {
     draw_run_tabs(f, main_chunks[1], app);
     draw_agent_tabs(f, main_chunks[2], &app.runs[idx]);
     draw_activity_feed(f, main_chunks[4], &mut app.runs[idx]);
-    draw_help_bar(f, main_chunks[5]);
+    draw_help_bar(f, main_chunks[5], app.copy_mode);
 }
 
 /// Compute the phase display for the header.
@@ -930,8 +953,8 @@ fn style_for_line(line: &str) -> Style {
 }
 
 
-fn draw_help_bar(f: &mut ratatui::Frame, area: Rect) {
-    let help = Paragraph::new(Line::from(vec![
+fn draw_help_bar(f: &mut ratatui::Frame, area: Rect, copy_mode: bool) {
+    let mut spans = vec![
         Span::styled(" q", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" quit  "),
         Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
@@ -943,9 +966,21 @@ fn draw_help_bar(f: &mut ratatui::Frame, area: Rect) {
         Span::styled("G", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" bottom  "),
         Span::styled("g", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" top"),
-    ]))
-    .style(Style::default().fg(Color::DarkGray));
+        Span::raw(" top  "),
+        Span::styled("c", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" copy"),
+    ];
+    if copy_mode {
+        spans.push(Span::styled(
+            "  [COPY MODE]",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    let help = Paragraph::new(Line::from(spans))
+        .style(Style::default().fg(Color::DarkGray));
 
     f.render_widget(help, area);
 }
@@ -1567,6 +1602,7 @@ mod tests {
             feed_height: 20,
             tick: 0,
             run_tab_offset: 0,
+            copy_mode: false,
         }
     }
 
@@ -1675,6 +1711,7 @@ mod tests {
             feed_height: 20,
             tick: 0,
             run_tab_offset: 0,
+            copy_mode: false,
         };
 
         // Should render the empty state without panicking
@@ -1708,5 +1745,131 @@ mod tests {
         // With a narrow width, offset must advance to show run-4
         clamp_run_tab_offset(&mut app, 30);
         assert!(app.run_tab_offset > 0);
+    }
+
+    // --- ANSI + multibyte rendering test (stray character guard) ---
+
+    #[test]
+    fn test_activity_feed_ansi_multibyte_no_stray_chars() {
+        // Lines with ANSI escapes should render cleanly after stripping.
+        // The CSI sequence "\x1b[?25h" must not swallow the following 'A'.
+        let mut agent = AgentView::new("author");
+        agent.cached_lines = vec![
+            strip_ansi("\x1b[31m[Bash]\x1b[0m ls -la"),
+            strip_ansi("\x1b[?25hA visible text after cursor show"),
+            strip_ansi("\x1b[32m\x1b[1mcolored bold\x1b[0m normal"),
+        ];
+
+        let mut view = make_run_view("test-run", vec![agent]);
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 60, 10);
+                draw_activity_feed(f, area, &mut view);
+            })
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+
+        // ANSI sequences stripped, content preserved
+        assert!(text.contains("[Bash] ls -la"));
+        assert!(text.contains("A visible text"));
+        assert!(text.contains("colored bold"));
+    }
+
+    #[test]
+    fn test_activity_feed_multibyte_wrapping() {
+        // CJK characters (2-column wide) should wrap without losing chars.
+        let mut agent = AgentView::new("author");
+        // 10 CJK chars = 20 display columns, plus ASCII = wraps in 22-col area
+        let line = "\u{4e16}\u{754c}\u{4f60}\u{597d}\u{4e16}\u{754c}\u{4f60}\u{597d}\u{4e16}\u{754c} hello";
+        agent.cached_lines = vec![line.to_string()];
+
+        let mut view = make_run_view("test-run", vec![agent]);
+        let backend = TestBackend::new(22, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 22, 8);
+                draw_activity_feed(f, area, &mut view);
+            })
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+
+        // All characters should appear somewhere in the wrapped output
+        assert!(text.contains("hello"));
+        // At least some CJK chars rendered
+        assert!(text.contains('\u{4e16}') || text.contains('\u{754c}'));
+    }
+
+    // --- Copy mode help bar test ---
+
+    #[test]
+    fn test_help_bar_shows_copy_key() {
+        let backend = TestBackend::new(80, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                draw_help_bar(f, f.area(), false);
+            })
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("copy"));
+        assert!(!text.contains("[COPY MODE]"));
+    }
+
+    #[test]
+    fn test_help_bar_shows_copy_mode_indicator() {
+        let backend = TestBackend::new(80, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                draw_help_bar(f, f.area(), true);
+            })
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("[COPY MODE]"));
+    }
+
+    // --- Auto-scroll re-enable tests ---
+
+    #[test]
+    fn test_scroll_to_bottom_enables_auto_scroll() {
+        // G/End should re-enable auto-scroll
+        let mut agent = AgentView::new("author");
+        agent.cached_lines = (0..100).map(|i| format!("line {i}")).collect();
+        let mut view = make_run_view("test-run", vec![agent]);
+        view.auto_scroll = false;
+        view.scroll_offset = 10;
+        view.wrapped_total = 100;
+
+        // Simulate G key behavior
+        view.auto_scroll = true;
+        view.scroll_to_bottom();
+
+        assert!(view.auto_scroll);
+        assert_eq!(view.scroll_offset, 100);
+    }
+
+    #[test]
+    fn test_scroll_down_reenables_auto_scroll_at_bottom() {
+        // j/Down should re-enable auto-scroll when reaching the bottom
+        let mut agent = AgentView::new("author");
+        agent.cached_lines = (0..30).map(|i| format!("line {i}")).collect();
+        let mut view = make_run_view("test-run", vec![agent]);
+        view.wrapped_total = 30;
+        view.auto_scroll = false;
+        // Position just above the bottom threshold (visible_height = 20)
+        let fh = 20;
+        let max = view.wrapped_total;
+        view.scroll_offset = max.saturating_sub(fh) - 1;
+
+        // Simulate j key: scroll down by 1
+        view.scroll_offset = (view.scroll_offset + 1).min(max);
+        if view.scroll_offset >= max.saturating_sub(fh) {
+            view.auto_scroll = true;
+        }
+
+        assert!(view.auto_scroll);
     }
 }

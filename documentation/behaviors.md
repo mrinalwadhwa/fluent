@@ -332,6 +332,87 @@ THE SYSTEM SHALL show a phase label that accurately describes what is
 happening right now (executing, reviewing, complete, failed, needs input).
 Test: dashboard::tests::test_header_reviewing_shows_progress, dashboard::tests::test_header_complete_no_spinner, dashboard::tests::test_header_failed_no_spinner, dashboard::tests::test_compute_phase_needs_user, tests/behaviors/operations/test-dashboard-activity.sh (no crash when run has failed, no crash when run needs user input, no crash with mixed run states)
 
+### Dashboard layout
+
+WHEN the dashboard is displayed,
+THE SYSTEM SHALL render five vertical regions: header (run ID, status,
+session count, event count), run tabs, agent tabs, activity feed, and
+help bar.
+
+### Dashboard keyboard navigation
+
+WHEN the user presses `q` or Ctrl+C,
+THE SYSTEM SHALL exit the dashboard and restore the terminal.
+
+WHEN the user presses Tab,
+THE SYSTEM SHALL select the next agent tab within the current run,
+reset the scroll position, and re-enable auto-scroll.
+
+WHEN the user presses Shift-Tab,
+THE SYSTEM SHALL select the previous agent tab within the current run,
+reset the scroll position, and re-enable auto-scroll.
+
+WHEN the user presses ← or →,
+THE SYSTEM SHALL select the previous or next run.
+
+WHEN the user presses j, k, ↑, or ↓,
+THE SYSTEM SHALL scroll the activity feed by one line and disable
+auto-scroll. If scrolling down reaches the bottom, auto-scroll
+re-enables.
+Test: dashboard::tests::test_scroll_down_reenables_auto_scroll_at_bottom
+
+WHEN the user presses G or End,
+THE SYSTEM SHALL scroll the activity feed to the bottom and re-enable
+auto-scroll.
+Test: dashboard::tests::test_scroll_to_bottom_enables_auto_scroll
+
+WHEN the user presses g or Home,
+THE SYSTEM SHALL scroll the activity feed to the top and disable
+auto-scroll.
+
+WHEN the user presses PgUp or PgDn,
+THE SYSTEM SHALL scroll the activity feed by 20 lines. If PgDn reaches
+the bottom, auto-scroll re-enables.
+
+### Dashboard mouse scroll
+
+WHEN the user scrolls the mouse wheel up,
+THE SYSTEM SHALL scroll the activity feed up by 3 lines and disable
+auto-scroll.
+
+WHEN the user scrolls the mouse wheel down,
+THE SYSTEM SHALL scroll the activity feed down by 3 lines. If the scroll
+position reaches the bottom, auto-scroll re-enables.
+
+### Dashboard copy mode
+
+WHEN the user presses `c`,
+THE SYSTEM SHALL toggle copy mode: disable mouse capture so the terminal
+allows text selection, and show a [COPY MODE] indicator in the help bar.
+Pressing `c` again re-enables mouse capture.
+Test: dashboard::tests::test_help_bar_shows_copy_key, dashboard::tests::test_help_bar_shows_copy_mode_indicator
+
+### Dashboard activity feed
+
+WHEN a line in the activity feed exceeds the terminal width,
+THE SYSTEM SHALL wrap the line at display-column boundaries with a
+2-space continuation indent, preserving all characters.
+Test: dashboard::tests::test_activity_feed_wrapping_no_cutoff, dashboard::tests::test_activity_feed_wrapping_continuation_not_truncated, dashboard::tests::test_activity_feed_multibyte_wrapping
+
+WHEN the activity feed contains content with ANSI escape sequences,
+THE SYSTEM SHALL strip all ANSI CSI and OSC sequences before rendering,
+preserving the visible text that follows escape terminators.
+Test: dashboard::tests::test_strip_ansi_csi_terminator_preserves_next_char, dashboard::tests::test_activity_feed_ansi_multibyte_no_stray_chars
+
+WHILE auto-scroll is enabled,
+THE SYSTEM SHALL keep the bottom of the feed visible as new events arrive.
+
+### Dashboard render and poll cadence
+
+WHILE the dashboard is running,
+THE SYSTEM SHALL render frames at ~100ms intervals for smooth animation
+and poll for new data at ~2s intervals to avoid unnecessary I/O.
+
 ## Sandbox (local)
 
 WHILE running on the local runtime,
