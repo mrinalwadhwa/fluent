@@ -747,6 +747,129 @@ mod tests {
     }
 
     #[test]
+    fn test_sequential_group_runner_error_stops_plan() {
+        let tmp = setup_git_project();
+        let main_dir = tmp.path().join("main");
+
+        let parent_id = "test-seqerr";
+        let parent_dir = main_dir.join(format!(".factory/runs/{parent_id}"));
+        fs::create_dir_all(&parent_dir).unwrap();
+        fs::write(parent_dir.join("status"), "planned").unwrap();
+        fs::write(parent_dir.join("brief.md"), "Brief").unwrap();
+
+        let parent_run = Run {
+            id: parent_id.to_string(),
+            dir: parent_dir,
+        };
+
+        // Sequential group where the second step's runner returns an error
+        let plan = make_plan(vec![(false, vec![
+            ("Step A", "First."),
+            ("Step B", "Fails."),
+        ])]);
+
+        let runner = |ctx: ChildContext| -> Result<()> {
+            let wt_run_dir = ctx.worktree_dir.join(format!(".factory/runs/{}", ctx.id));
+            if ctx.id.ends_with("-1-2") {
+                bail!("simulated sequential runner error");
+            }
+            let filename = format!("{}.txt", ctx.id);
+            fs::write(ctx.worktree_dir.join(&filename), &ctx.id)?;
+            Command::new("git")
+                .args(["add", &filename])
+                .current_dir(&ctx.worktree_dir)
+                .output()?;
+            Command::new("git")
+                .args(["commit", "-m", &format!("Add {}", ctx.id)])
+                .current_dir(&ctx.worktree_dir)
+                .output()?;
+            fs::write(wt_run_dir.join("status"), "complete")?;
+            Ok(())
+        };
+
+        let result = execute_plan(
+            &main_dir,
+            &parent_run,
+            &plan,
+            "test",
+            &[],
+            None,
+            runner,
+        );
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("simulated sequential runner error"),
+            "Error should propagate: {}",
+            err_msg
+        );
+        assert_eq!(parent_run.status().unwrap(), RunStatus::Failed);
+
+        cleanup_worktrees(
+            &tmp,
+            &main_dir,
+            &[
+                format!("{parent_id}-1-1"),
+                format!("{parent_id}-1-2"),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_sequential_group_non_complete_status_stops_plan() {
+        let tmp = setup_git_project();
+        let main_dir = tmp.path().join("main");
+
+        let parent_id = "test-seqfail";
+        let parent_dir = main_dir.join(format!(".factory/runs/{parent_id}"));
+        fs::create_dir_all(&parent_dir).unwrap();
+        fs::write(parent_dir.join("status"), "planned").unwrap();
+        fs::write(parent_dir.join("brief.md"), "Brief").unwrap();
+
+        let parent_run = Run {
+            id: parent_id.to_string(),
+            dir: parent_dir,
+        };
+
+        // Sequential group where the runner returns Ok but sets status to failed
+        let plan = make_plan(vec![(false, vec![
+            ("Step A", "Fails."),
+        ])]);
+
+        let runner = |ctx: ChildContext| -> Result<()> {
+            let wt_run_dir = ctx.worktree_dir.join(format!(".factory/runs/{}", ctx.id));
+            fs::write(wt_run_dir.join("status"), "failed")?;
+            Ok(())
+        };
+
+        let result = execute_plan(
+            &main_dir,
+            &parent_run,
+            &plan,
+            "test",
+            &[],
+            None,
+            runner,
+        );
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("failed steps"),
+            "Should report failed steps: {}",
+            err_msg
+        );
+        assert_eq!(parent_run.status().unwrap(), RunStatus::Failed);
+
+        cleanup_worktrees(
+            &tmp,
+            &main_dir,
+            &[format!("{parent_id}-1-1")],
+        );
+    }
+
+    #[test]
     fn test_sequential_group_runs_steps_in_order() {
         let tmp = setup_git_project();
         let main_dir = tmp.path().join("main");

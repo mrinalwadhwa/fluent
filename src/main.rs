@@ -478,7 +478,31 @@ fn cmd_land(search_root: &Path, run_id: Option<&str>) -> Result<()> {
 
     eprintln!("  Landing run {}...", run.id);
 
-    worktree::land_run(search_root, &run.id, &run.dir)?;
+    // Parallel parent runs have no worktree — their children were already
+    // merged by the orchestrator. Just verify children are landed and set
+    // the parent status.
+    let children_file = run.dir.join("children");
+    if children_file.exists() {
+        let children_content = fs::read_to_string(&children_file)?;
+        let runs_dir = search_root.join(".factory/runs");
+        for child_id in children_content.lines().filter(|l| !l.is_empty()) {
+            let child_dir = runs_dir.join(child_id);
+            let child_run = run::Run {
+                id: child_id.to_string(),
+                dir: child_dir,
+            };
+            let status = child_run.effective_status()?;
+            if status != run::RunStatus::Landed {
+                bail!(
+                    "Cannot land parent run {}: child {} has status '{}', expected 'landed'",
+                    run.id, child_id, status
+                );
+            }
+        }
+    } else {
+        worktree::land_run(search_root, &run.id, &run.dir)?;
+    }
+
     run.set_status(&run::RunStatus::Landed)?;
 
     eprintln!("  Run {} landed successfully.", run.id);
@@ -492,8 +516,8 @@ fn cmd_land(search_root: &Path, run_id: Option<&str>) -> Result<()> {
 /// Try to parse the run's plan.md as a parallel plan.
 ///
 /// Returns `Some(plan)` if plan.md exists and describes a parallel
-/// execution (multiple groups or any group marked `(parallel)`). Returns
-/// `None` if the plan is missing, unparseable, or sequential-only.
+/// execution (multiple groups or any parallel group with multiple steps).
+/// Returns `None` if the plan is missing, unparseable, or sequential-only.
 fn try_parse_parallel_plan(run: &Run) -> Option<plan::Plan> {
     let content = fs::read_to_string(run.dir.join("plan.md")).ok()?;
     let parsed = plan::parse_plan(&content).ok()?;

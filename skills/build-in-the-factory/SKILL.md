@@ -127,7 +127,8 @@ the loop handles the rest.
 
 ### 5. Execute
 
-Implement the plan. If the plan uses parallel groups, the factory command
+Implement the plan. If the plan uses the group/step format (multiple
+groups or any parallel group with multiple steps), the factory command
 detects the structured plan.md and automatically creates child run
 directories, worktrees, and launches child sessions. At leaf level, write
 code directly.

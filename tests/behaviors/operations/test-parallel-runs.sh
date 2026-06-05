@@ -410,39 +410,36 @@ test_child_runs_shown_in_dashboard() {
   printf 'Parent run brief' > ".factory/runs/${parent_id}/brief.md"
   printf 'executing' > ".factory/runs/${parent_id}/status"
 
-  for step in alpha beta; do
-    local child_id="${parent_id}-1-${step}"
+  for idx in 1 2; do
+    local child_id="${parent_id}-1-${idx}"
     mkdir -p ".factory/runs/${child_id}"
-    printf 'Child %s brief' "$step" > ".factory/runs/${child_id}/brief.md"
+    printf 'Child %d brief' "$idx" > ".factory/runs/${child_id}/brief.md"
     printf 'executing' > ".factory/runs/${child_id}/status"
   done
 
   local result=0
 
-  # Run the dashboard briefly. Capture its exit code to detect crashes.
-  # The dashboard is a TUI that runs until killed, so we launch it in the
-  # background, let it initialize, then kill it. If it crashed before the
-  # kill, the wait will capture the crash exit code.
-  "${FACTORY}" dashboard --run-id "${parent_id}" > /dev/null 2>&1 &
-  local dash_pid=$!
+  # The dashboard is a TUI that requires a controlling TTY. Use `script`
+  # to provide a pseudo-TTY, with a timeout to kill it after startup.
+  # If the dashboard crashes on startup, the exit code will be non-zero.
+  local dash_output
+  dash_output="$(mktemp -t factory-dash-XXXXXX)"
 
-  sleep 1
+  # Run dashboard under a pseudo-TTY via `script`. Let it run for 2 seconds
+  # then kill it. On macOS, `script -q` suppresses the header.
+  script -q "$dash_output" bash -c \
+    '"${0}" dashboard --run-id "${1}" & pid=$!; sleep 2; kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null' \
+    "${FACTORY}" "${parent_id}" > /dev/null 2>&1
+  local exit_code=$?
 
-  # Check if the process is still running (didn't crash during startup)
-  if ! kill -0 "$dash_pid" 2>/dev/null; then
-    # Process already exited — get its exit code
-    wait "$dash_pid"
-    local exit_code=$?
-    if [ "$exit_code" -ne 0 ]; then
-      printf '    FAIL: dashboard crashed on startup (exit %d)\n' "$exit_code"
-      result=1
-    fi
-  else
-    # Process is still running — send SIGTERM and check it exits cleanly
-    kill "$dash_pid" 2>/dev/null
-    wait "$dash_pid" 2>/dev/null
+  # script exits 0 if the inner shell exits 0. A crash during startup
+  # propagates a non-zero exit code through the shell.
+  if [ "$exit_code" -ne 0 ]; then
+    printf '    FAIL: dashboard crashed on startup (exit %d)\n' "$exit_code"
+    result=1
   fi
 
+  rm -f "$dash_output"
   cleanup_test_project
   return $result
 }
