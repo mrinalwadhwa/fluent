@@ -325,6 +325,25 @@ WHEN `factory dashboard` is invoked,
 THE SYSTEM SHALL not modify any run state files.
 Test: tests/behaviors/operations/test-dashboard.sh (dashboard does not modify run state)
 
+WHEN the dashboard displays a run with status `complete` or `landed`
+and that run has `report.md`,
+THE SYSTEM SHALL show the run report in the activity feed by default.
+Test: dashboard::tests::test_completed_run_with_report_shows_report_by_default
+
+WHEN the dashboard displays a completed run without `report.md`,
+THE SYSTEM SHALL continue to show the available transcript activity.
+Test: dashboard::tests::test_completed_run_without_report_shows_author_transcript
+
+WHEN the dashboard displays a run whose status is not `complete` or
+`landed`,
+THE SYSTEM SHALL continue to show live transcript activity by default,
+even when `report.md` exists.
+Test: dashboard::tests::test_nonterminal_run_with_report_shows_author_transcript
+
+WHEN a completed run has `report.md` and author or reviewer transcripts,
+THE SYSTEM SHALL keep the transcript views accessible from the dashboard.
+Test: dashboard::tests::test_report_view_keeps_transcript_tabs_accessible
+
 WHEN a run is in the review phase,
 THE SYSTEM SHALL show each reviewer as an agent tab displaying a status
 symbol and color: ✓ (Green) for pass, ✗ (Red) for fail, ? (Yellow) for

@@ -1,18 +1,18 @@
 use anyhow::Result;
 use crossterm::event::{self, Event as CEvent, KeyCode, KeyModifiers};
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
-use ratatui::Terminal;
-use unicode_width::UnicodeWidthStr;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use unicode_width::UnicodeWidthStr;
 
 use crate::review;
 use crate::run::{self, Run, RunStatus};
@@ -45,6 +45,12 @@ impl AgentView {
         }
     }
 
+    fn new_static(name: &str, content: &str) -> Self {
+        let mut view = Self::new(name);
+        view.cached_lines = content.lines().map(strip_ansi).collect();
+        view
+    }
+
     fn poll(&mut self) {
         for reader in &mut self.readers {
             let new_events = reader.read_new();
@@ -65,6 +71,7 @@ struct RunView {
     live_dir: PathBuf,
     agents: Vec<AgentView>,
     selected_agent: usize,
+    agent_selection_touched: bool,
     scroll_offset: usize,
     auto_scroll: bool,
     /// Wrapped line count from last render, for accurate scroll limits.
@@ -82,12 +89,14 @@ impl RunView {
             live_dir,
             agents: vec![AgentView::new("author")],
             selected_agent: 0,
+            agent_selection_touched: false,
             scroll_offset: 0,
             auto_scroll: true,
             wrapped_total: 0,
             cached_status,
         };
         view.discover_agents();
+        view.sync_report_view(true);
         view.poll();
         view
     }
@@ -97,6 +106,50 @@ impl RunView {
             .or_else(|_| std::fs::read_to_string(source_dir.join("status")))
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| "?".into())
+    }
+
+    fn report_path(&self) -> Option<PathBuf> {
+        let live_report = self.live_dir.join("report.md");
+        if live_report.exists() {
+            return Some(live_report);
+        }
+
+        let source_report = self.run.dir.join("report.md");
+        if source_report.exists() {
+            Some(source_report)
+        } else {
+            None
+        }
+    }
+
+    fn should_default_to_report(&self) -> bool {
+        matches!(self.cached_status.as_str(), "complete" | "landed")
+            && !self.agent_selection_touched
+    }
+
+    fn sync_report_view(&mut self, allow_default_selection: bool) {
+        let Some(path) = self.report_path() else {
+            return;
+        };
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return;
+        };
+
+        let report_idx = if let Some(idx) = self.agents.iter().position(|a| a.name == "report") {
+            self.agents[idx] = AgentView::new_static("report", &content);
+            idx
+        } else {
+            let idx = self.agents.len().min(1);
+            self.agents
+                .insert(idx, AgentView::new_static("report", &content));
+            idx
+        };
+
+        if allow_default_selection && self.should_default_to_report() {
+            self.selected_agent = report_idx;
+            self.scroll_offset = 0;
+            self.auto_scroll = true;
+        }
     }
 
     fn discover_agents(&mut self) {
@@ -128,8 +181,7 @@ impl RunView {
                             let mut agent = AgentView::new(&reviewer);
                             agent.readers.push(TranscriptReader::new(entry.path()));
                             // Check for verdict
-                            let review_file =
-                                reviews_dir.join(format!("review-{reviewer}.md"));
+                            let review_file = reviews_dir.join(format!("review-{reviewer}.md"));
                             if review_file.exists() {
                                 agent.status = verdict_status(&review_file);
                             } else {
@@ -140,8 +192,7 @@ impl RunView {
                             // Re-evaluate status every poll cycle
                             if let Some(agent) = self.agents.iter_mut().find(|a| a.name == reviewer)
                             {
-                                let review_file =
-                                    reviews_dir.join(format!("review-{reviewer}.md"));
+                                let review_file = reviews_dir.join(format!("review-{reviewer}.md"));
                                 if review_file.exists() {
                                     agent.status = verdict_status(&review_file);
                                 } else {
@@ -157,12 +208,16 @@ impl RunView {
 
     fn poll(&mut self) {
         // Re-resolve live_dir in case a worktree was created since startup
-        let resolved = self.run.worktree_run_dir().unwrap_or_else(|| self.run.dir.clone());
+        let resolved = self
+            .run
+            .worktree_run_dir()
+            .unwrap_or_else(|| self.run.dir.clone());
         if resolved != self.live_dir {
             self.live_dir = resolved;
         }
         self.cached_status = Self::read_status(&self.live_dir, &self.run.dir);
         self.discover_agents();
+        self.sync_report_view(false);
         for agent in &mut self.agents {
             agent.poll();
         }
@@ -173,6 +228,34 @@ impl RunView {
 
     fn current_agent(&self) -> &AgentView {
         &self.agents[self.selected_agent]
+    }
+
+    fn select_next_agent(&mut self) {
+        if self.agents.is_empty() {
+            return;
+        }
+
+        self.agent_selection_touched = true;
+        self.selected_agent = (self.selected_agent + 1) % self.agents.len();
+        self.scroll_offset = 0;
+        self.auto_scroll = true;
+        self.scroll_to_bottom();
+    }
+
+    fn select_previous_agent(&mut self) {
+        if self.agents.is_empty() {
+            return;
+        }
+
+        self.agent_selection_touched = true;
+        self.selected_agent = if self.selected_agent == 0 {
+            self.agents.len() - 1
+        } else {
+            self.selected_agent - 1
+        };
+        self.scroll_offset = 0;
+        self.auto_scroll = true;
+        self.scroll_to_bottom();
     }
 
     fn scroll_to_bottom(&mut self) {
@@ -277,10 +360,7 @@ impl App {
     fn new(search_root: &Path, target_run_id: Option<&str>) -> Result<Self> {
         let all_runs = run::list_runs(search_root)?;
 
-        let views: Vec<RunView> = all_runs
-            .into_iter()
-            .map(|r| RunView::new(r))
-            .collect();
+        let views: Vec<RunView> = all_runs.into_iter().map(|r| RunView::new(r)).collect();
 
         // Find the index of the target run, or pick the first active one
         let selected = if let Some(id) = target_run_id {
@@ -315,8 +395,7 @@ impl App {
     fn poll(&mut self) {
         // Check for new runs
         if let Ok(all_runs) = run::list_runs(&self.search_root) {
-            let existing_ids: Vec<String> =
-                self.runs.iter().map(|v| v.run.id.clone()).collect();
+            let existing_ids: Vec<String> = self.runs.iter().map(|v| v.run.id.clone()).collect();
             for r in all_runs {
                 if !existing_ids.contains(&r.id) {
                     self.runs.push(RunView::new(r));
@@ -348,7 +427,11 @@ pub fn run_dashboard(search_root: &Path, run_id: Option<&str>) -> Result<()> {
     // Set up terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    crossterm::execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture)?;
+    crossterm::execute!(
+        stdout,
+        EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -360,7 +443,11 @@ pub fn run_dashboard(search_root: &Path, run_id: Option<&str>) -> Result<()> {
     if app.copy_mode {
         crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     } else {
-        crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::event::DisableMouseCapture)?;
+        crossterm::execute!(
+            terminal.backend_mut(),
+            LeaveAlternateScreen,
+            crossterm::event::DisableMouseCapture
+        )?;
     }
     terminal.show_cursor()?;
 
@@ -395,8 +482,7 @@ fn run_event_loop(
         if event::poll(timeout)? {
             let fh = app.feed_height;
             match event::read()? {
-            CEvent::Mouse(mouse) if !app.runs.is_empty() => {
-                match mouse.kind {
+                CEvent::Mouse(mouse) if !app.runs.is_empty() => match mouse.kind {
                     crossterm::event::MouseEventKind::ScrollUp => {
                         app.current_view_mut().mouse_scroll_up(fh);
                     }
@@ -404,12 +490,9 @@ fn run_event_loop(
                         app.current_view_mut().mouse_scroll_down(fh);
                     }
                     _ => {}
-                }
-            }
-            CEvent::Key(key) => {
-                match (key.modifiers, key.code) {
-                    (KeyModifiers::CONTROL, KeyCode::Char('c'))
-                    | (_, KeyCode::Char('q')) => {
+                },
+                CEvent::Key(key) => match (key.modifiers, key.code) {
+                    (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Char('q')) => {
                         app.should_quit = true;
                     }
                     (_, KeyCode::Char('c')) => {
@@ -426,32 +509,13 @@ fn run_event_loop(
                         }
                     }
                     (_, KeyCode::Tab) if !app.runs.is_empty() => {
-                        // Cycle through agents within the current run
-                        let view = app.current_view_mut();
-                        if !view.agents.is_empty() {
-                            view.selected_agent =
-                                (view.selected_agent + 1) % view.agents.len();
-                            view.scroll_offset = 0;
-                            view.auto_scroll = true;
-                            view.scroll_to_bottom();
-                        }
+                        app.current_view_mut().select_next_agent();
                     }
                     (_, KeyCode::BackTab) if !app.runs.is_empty() => {
-                        let view = app.current_view_mut();
-                        if !view.agents.is_empty() {
-                            view.selected_agent = if view.selected_agent == 0 {
-                                view.agents.len() - 1
-                            } else {
-                                view.selected_agent - 1
-                            };
-                            view.scroll_offset = 0;
-                            view.auto_scroll = true;
-                            view.scroll_to_bottom();
-                        }
+                        app.current_view_mut().select_previous_agent();
                     }
                     (_, KeyCode::Right) if !app.runs.is_empty() => {
-                        app.selected_run =
-                            (app.selected_run + 1) % app.runs.len();
+                        app.selected_run = (app.selected_run + 1) % app.runs.len();
                     }
                     (_, KeyCode::Left) if !app.runs.is_empty() => {
                         app.selected_run = if app.selected_run == 0 {
@@ -460,24 +524,16 @@ fn run_event_loop(
                             app.selected_run - 1
                         };
                     }
-                    (_, KeyCode::Up) | (_, KeyCode::Char('k'))
-                        if !app.runs.is_empty() =>
-                    {
+                    (_, KeyCode::Up) | (_, KeyCode::Char('k')) if !app.runs.is_empty() => {
                         app.current_view_mut().scroll_up(fh);
                     }
-                    (_, KeyCode::Down) | (_, KeyCode::Char('j'))
-                        if !app.runs.is_empty() =>
-                    {
+                    (_, KeyCode::Down) | (_, KeyCode::Char('j')) if !app.runs.is_empty() => {
                         app.current_view_mut().scroll_down(fh);
                     }
-                    (_, KeyCode::Char('G')) | (_, KeyCode::End)
-                        if !app.runs.is_empty() =>
-                    {
+                    (_, KeyCode::Char('G')) | (_, KeyCode::End) if !app.runs.is_empty() => {
                         app.current_view_mut().scroll_to_end();
                     }
-                    (_, KeyCode::Char('g')) | (_, KeyCode::Home)
-                        if !app.runs.is_empty() =>
-                    {
+                    (_, KeyCode::Char('g')) | (_, KeyCode::Home) if !app.runs.is_empty() => {
                         app.current_view_mut().scroll_to_top();
                     }
                     (_, KeyCode::PageUp) if !app.runs.is_empty() => {
@@ -487,9 +543,8 @@ fn run_event_loop(
                         app.current_view_mut().scroll_down_page(fh);
                     }
                     _ => {}
-                }
-            }
-            _ => {}
+                },
+                _ => {}
             }
         }
 
@@ -531,9 +586,10 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut App) {
             ])
             .split(size);
 
-        let header = Paragraph::new(Line::from(vec![
-            Span::styled("No runs found", Style::default().fg(Color::DarkGray)),
-        ]))
+        let header = Paragraph::new(Line::from(vec![Span::styled(
+            "No runs found",
+            Style::default().fg(Color::DarkGray),
+        )]))
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -560,7 +616,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut App) {
             Constraint::Length(3), // run tabs
             Constraint::Length(3), // agent tabs
             Constraint::Length(1), // margin
-            Constraint::Min(10),  // activity feed
+            Constraint::Min(10),   // activity feed
             Constraint::Length(1), // help bar
         ])
         .split(size);
@@ -576,20 +632,26 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut App) {
 ///
 /// Returns (phase_text, color, is_animated).
 fn compute_phase(view: &RunView, status: &str) -> (String, Color, bool) {
-    let reviewers_running = view.agents.iter().skip(1).any(|a| a.status == "running");
-    let has_reviewers = view.agents.len() > 1;
+    let reviewer_statuses: Vec<&str> = view
+        .agents
+        .iter()
+        .filter(|a| a.name != "author" && a.name != "report")
+        .map(|a| a.status.as_str())
+        .collect();
+    let reviewers_running = reviewer_statuses.iter().any(|status| *status == "running");
+    let has_reviewers = !reviewer_statuses.is_empty();
 
     if reviewers_running {
-        let done = view
-            .agents
+        let done = reviewer_statuses
             .iter()
-            .skip(1)
-            .filter(|a| a.status != "running" && !a.status.is_empty())
+            .filter(|status| **status != "running" && !status.is_empty())
             .count();
-        let total = view.agents.len() - 1;
+        let total = reviewer_statuses.len();
         (format!("Reviewing {done}/{total}"), Color::Cyan, true)
     } else if has_reviewers
-        && view.agents.iter().skip(1).all(|a| !a.status.is_empty() && a.status != "running")
+        && reviewer_statuses
+            .iter()
+            .all(|status| !status.is_empty() && *status != "running")
     {
         // All reviewers done, check overall status
         match status {
@@ -631,7 +693,9 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, view: &RunView, tick: u64) {
         Span::raw("  "),
         Span::styled(
             format!("{phase_text}{spinner}"),
-            Style::default().fg(phase_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(phase_color)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled("Session: ", Style::default().fg(Color::DarkGray)),
@@ -767,8 +831,8 @@ fn draw_run_tabs(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
     }
 
     let line = Line::from(spans);
-    let paragraph = Paragraph::new(line)
-        .block(Block::default().borders(Borders::ALL).title(" Runs "));
+    let paragraph =
+        Paragraph::new(line).block(Block::default().borders(Borders::ALL).title(" Runs "));
 
     f.render_widget(paragraph, area);
 }
@@ -786,6 +850,8 @@ fn draw_agent_tabs(f: &mut ratatui::Frame, area: Rect, view: &RunView) {
                 _ => {
                     if a.name == "author" {
                         ("●", Color::White)
+                    } else if a.name == "report" {
+                        ("■", Color::Blue)
                     } else {
                         ("○", Color::DarkGray)
                     }
@@ -992,7 +1058,6 @@ fn style_for_line(line: &str) -> Style {
     }
 }
 
-
 fn draw_help_bar(f: &mut ratatui::Frame, area: Rect, copy_mode: bool) {
     let mut spans = vec![
         Span::styled(" q", Style::default().add_modifier(Modifier::BOLD)),
@@ -1019,8 +1084,7 @@ fn draw_help_bar(f: &mut ratatui::Frame, area: Rect, copy_mode: bool) {
         ));
     }
 
-    let help = Paragraph::new(Line::from(spans))
-        .style(Style::default().fg(Color::DarkGray));
+    let help = Paragraph::new(Line::from(spans)).style(Style::default().fg(Color::DarkGray));
 
     f.render_widget(help, area);
 }
@@ -1047,6 +1111,7 @@ mod tests {
             live_dir: PathBuf::from("/tmp/test"),
             agents,
             selected_agent: 0,
+            agent_selection_touched: false,
             scroll_offset: 0,
             auto_scroll: true,
             wrapped_total: 0,
@@ -1076,6 +1141,56 @@ mod tests {
             })
             .unwrap();
         buffer_text(terminal.backend().buffer())
+    }
+
+    fn render_activity_feed_text(view: &mut RunView) -> String {
+        let backend = TestBackend::new(100, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                draw_activity_feed(f, f.area(), view);
+            })
+            .unwrap();
+        buffer_text(terminal.backend().buffer())
+    }
+
+    fn write_author_transcript(run_dir: &Path, text: &str) {
+        let session_dir = run_dir.join("sessions/session-1");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(
+            session_dir.join("transcript.jsonl"),
+            format!(
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{text}"}}]}}}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    fn write_reviewer_transcript(run_dir: &Path, reviewer: &str, text: &str) {
+        let reviews_dir = run_dir.join("reviews");
+        std::fs::create_dir_all(&reviews_dir).unwrap();
+        std::fs::write(
+            reviews_dir.join(format!("transcript-{reviewer}.jsonl")),
+            format!(
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{text}"}}]}}}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            reviews_dir.join(format!("review-{reviewer}.md")),
+            "Verdict: pass\n",
+        )
+        .unwrap();
+    }
+
+    fn make_filesystem_run(run_dir: &Path, id: &str, status: &str) -> Run {
+        std::fs::create_dir_all(run_dir).unwrap();
+        std::fs::write(run_dir.join("status"), status).unwrap();
+        std::fs::write(run_dir.join("brief.md"), format!("Brief for {id}")).unwrap();
+        Run {
+            id: id.to_string(),
+            dir: run_dir.to_path_buf(),
+        }
     }
 
     /// Extract all text content from a buffer (concatenated lines).
@@ -1228,6 +1343,83 @@ mod tests {
         assert!(non_empty[2].contains("pondering"));
     }
 
+    #[test]
+    fn test_completed_run_with_report_shows_report_by_default() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let run_dir = tmp.path().join("done-run");
+        let run = make_filesystem_run(&run_dir, "done-run", "complete");
+        write_author_transcript(&run_dir, "final author transcript");
+        std::fs::write(
+            run_dir.join("report.md"),
+            "# Run Report\n\nCross-session summary",
+        )
+        .unwrap();
+
+        let mut view = RunView::new(run);
+
+        assert_eq!(view.current_agent().name, "report");
+        assert!(render_agent_tabs(&view).contains("report"));
+        let text = render_activity_feed_text(&mut view);
+        assert!(text.contains("Cross-session summary"));
+        assert!(!text.contains("final author transcript"));
+    }
+
+    #[test]
+    fn test_completed_run_without_report_shows_author_transcript() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let run_dir = tmp.path().join("done-run");
+        let run = make_filesystem_run(&run_dir, "done-run", "complete");
+        write_author_transcript(&run_dir, "final author transcript");
+
+        let mut view = RunView::new(run);
+
+        assert_eq!(view.current_agent().name, "author");
+        let text = render_activity_feed_text(&mut view);
+        assert!(text.contains("final author transcript"));
+        assert!(!render_agent_tabs(&view).contains("report"));
+    }
+
+    #[test]
+    fn test_nonterminal_run_with_report_shows_author_transcript() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let run_dir = tmp.path().join("active-run");
+        let run = make_filesystem_run(&run_dir, "active-run", "executing");
+        write_author_transcript(&run_dir, "live author transcript");
+        std::fs::write(run_dir.join("report.md"), "Stale report content").unwrap();
+
+        let mut view = RunView::new(run);
+
+        assert_eq!(view.current_agent().name, "author");
+        assert!(render_agent_tabs(&view).contains("report"));
+        let text = render_activity_feed_text(&mut view);
+        assert!(text.contains("live author transcript"));
+        assert!(!text.contains("Stale report content"));
+    }
+
+    #[test]
+    fn test_report_view_keeps_transcript_tabs_accessible() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let run_dir = tmp.path().join("done-run");
+        let run = make_filesystem_run(&run_dir, "done-run", "complete");
+        write_author_transcript(&run_dir, "author transcript content");
+        write_reviewer_transcript(&run_dir, "behaviors", "reviewer transcript content");
+        std::fs::write(run_dir.join("report.md"), "Report summary content").unwrap();
+
+        let mut view = RunView::new(run);
+        assert_eq!(view.current_agent().name, "report");
+
+        view.select_previous_agent();
+        assert_eq!(view.current_agent().name, "author");
+        let author_text = render_activity_feed_text(&mut view);
+        assert!(author_text.contains("author transcript content"));
+
+        view.select_next_agent();
+        view.select_next_agent();
+        assert_eq!(view.current_agent().name, "behaviors");
+        let reviewer_text = render_activity_feed_text(&mut view);
+        assert!(reviewer_text.contains("reviewer transcript content"));
+    }
+
     // --- Phase detection tests ---
 
     #[test]
@@ -1363,10 +1555,7 @@ mod tests {
         r2.status = "pass".into();
         let mut r3 = AgentView::new("docs");
         r3.status = "running".into();
-        let view = make_run_view(
-            "test-run",
-            vec![AgentView::new("author"), r1, r2, r3],
-        );
+        let view = make_run_view("test-run", vec![AgentView::new("author"), r1, r2, r3]);
         let buf = render_header_buf(&view, 5);
         let text = buffer_text(&buf);
         assert!(text.contains("Reviewing"));
@@ -1388,11 +1577,8 @@ mod tests {
     fn test_header_complete_no_spinner() {
         let mut r1 = AgentView::new("tests");
         r1.status = "pass".into();
-        let view = make_run_view_with_status(
-            "test-run",
-            vec![AgentView::new("author"), r1],
-            "complete",
-        );
+        let view =
+            make_run_view_with_status("test-run", vec![AgentView::new("author"), r1], "complete");
         let buf = render_header_buf(&view, 0);
         let text = buffer_text(&buf);
         assert!(text.contains("Complete"));
@@ -1414,10 +1600,7 @@ mod tests {
         r1.status = "pass".into();
         let mut r2 = AgentView::new("arch");
         r2.status = "fail".into();
-        let view = make_run_view(
-            "test-run",
-            vec![AgentView::new("author"), r1, r2],
-        );
+        let view = make_run_view("test-run", vec![AgentView::new("author"), r1, r2]);
         let text = render_agent_tabs(&view);
         assert!(text.contains("✓"));
         assert!(text.contains("✗"));
@@ -1470,11 +1653,7 @@ mod tests {
         fs::create_dir_all(&reviews_dir).unwrap();
 
         // Write a transcript file so the reviewer is discovered
-        fs::write(
-            reviews_dir.join("transcript-behaviors.jsonl"),
-            "{}",
-        )
-        .unwrap();
+        fs::write(reviews_dir.join("transcript-behaviors.jsonl"), "{}").unwrap();
 
         let mut view = RunView {
             run: Run {
@@ -1484,6 +1663,7 @@ mod tests {
             live_dir: run_dir.clone(),
             agents: vec![AgentView::new("author")],
             selected_agent: 0,
+            agent_selection_touched: false,
             scroll_offset: 0,
             auto_scroll: true,
             wrapped_total: 0,
@@ -1795,10 +1975,7 @@ mod tests {
 
     #[test]
     fn test_clamp_run_tab_offset_keeps_selected_visible() {
-        let mut app = make_app_with_runs(
-            &["run-0", "run-1", "run-2", "run-3", "run-4"],
-            4,
-        );
+        let mut app = make_app_with_runs(&["run-0", "run-1", "run-2", "run-3", "run-4"], 4);
         app.run_tab_offset = 0;
         // With a narrow width, offset must advance to show run-4
         clamp_run_tab_offset(&mut app, 30);
