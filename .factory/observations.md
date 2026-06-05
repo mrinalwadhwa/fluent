@@ -36,23 +36,6 @@ API endpoints only, (B) deny outbound except localhost with credential
 proxy mediating all API access, (C) read-only package caches. Option
 B aligns with isolation-by-impossibility principle.
 
-2026-05-15 — Dashboard has a rendering bug: stray "A" characters
-appear at the left edge of the activity feed, breaking the border
-outline. Likely caused by line wrapping cutting at wrong byte
-boundaries in multi-byte or styled content, or by unparsed content
-from stream-json leaking into the display.
-
-2026-05-15 — Dashboard should enable text selection and copying from
-the activity feed. Currently mouse capture for scroll wheel prevents
-normal terminal text selection. Consider toggling mouse capture off
-with a key (e.g. 'c' for copy mode) or using a modifier (hold Shift
-for native terminal selection, which some terminals support with
-mouse capture enabled).
-
-2026-05-15 — Dashboard auto-scroll should re-enable when the user
-scrolls to the bottom. Currently once disabled it stays off until
-the user switches agents or runs.
-
 2026-05-09 — The refine-writing skill at ~/Workspace/skills has
 reference files (ai_tells.md, benchmarks.md, sentence_corrections.md,
 structural_guidance.md) with much more detail than what was captured
@@ -72,13 +55,6 @@ add to the workflow? When are they useful vs noise? Should they be
 richer (actionable, with run context) or replaced by something else
 (dashboard focus, sound, status bar)?
 
-2026-05-16 — The dashboard has no complete behavioral spec. Existing
-behaviors cover safety (doesn't crash, doesn't modify state) and a
-vague TUI description. Missing: keyboard navigation, scroll behavior,
-activity feed content, line wrapping, run list refresh. Needs a
-dedicated effort to write a full spec — separate from the activity
-signaling work.
-
 2026-05-16 — Complementary "create" skills needed: architect (pairs
 with review-architecture), write-tests (pairs with review-tests),
 write-documentation (pairs with review-documentation), write-skill
@@ -90,19 +66,6 @@ as a fallback when WebFetch/curl fail (Medium, paywalled sites,
 JS-rendered pages). Also create a skill for fetching YouTube video
 transcripts using yt-dlp (fetch auto-generated captions, clean VTT
 into readable text).
-
-2026-05-18 — Dashboard stray "A" rendering bug may be resolved by
-the wrapping fix (af72ae1). The fix switched to unicode display
-width, accounted for continuation indent, and added ANSI stripping.
-Needs visual confirmation on a longer-running run. The user reported
-"the dashboard looked a lot better" after the fix but didn't
-specifically confirm the stray A is gone.
-
-2026-06-05 — The dashboard spinner advances too slowly when agents
-are working. The poll interval controls the frame rate, so the
-spinner only ticks every 500ms. This makes the dashboard feel
-sluggish even when work is actively happening. Consider decoupling
-the spinner tick rate from the data poll interval.
 
 2026-06-05 — Create a skill for generating PDFs using Typst. Typst
 is a modern typesetting system (alternative to LaTeX) that compiles
@@ -136,12 +99,52 @@ the agent interface (run, run_interactive), but the implementations
 to design how agent selection works, how prompts/flags differ per
 agent, and whether the session loop needs agent-specific behavior.
 
-2026-06-05 — The dashboard shows "Complete" with no animation when
-the author writes status "complete" but reviewers haven't run yet
-or have failing verdicts. This makes it look like the run is
-finished when actually the factory session loop is about to launch
-reviewers or restart the author. The factory should write a
-transient status like "reviewing" while reviewers are running, so
-the dashboard (and any other consumer of the status file) can
-distinguish "author thinks done, review pending" from "everything
-is actually done."
+2026-06-05 — Dashboard "reviewing" status shows no spinner in the
+header. compute_phase needs to map "reviewing" to animated=true.
+Also, reviewer tabs show stale verdicts from the previous round
+instead of resetting to "running" when a new review round starts.
+The dashboard needs to detect that review artifacts have been
+archived (moved to round-N/) and reset reviewer status accordingly.
+
+2026-06-05 — When a run completes, the dashboard should show the
+run's report (report.md) in the activity feed or a dedicated pane.
+Currently a completed run shows the last author session's transcript
+which ends with "Session complete." The report summarizes what
+happened across all sessions and review rounds — that's what the
+user wants to see when checking on a finished run.
+
+2026-06-05 — The author-reviewer loop can be faster without
+skipping reviewers. All reviewers still run every round, but
+with scoped prompts: reviewers that passed last round get "your
+previous verdict was pass, these files changed, re-evaluate only
+if relevant to your domain." Reviewers that failed get "here are
+your findings, here's what the author changed, re-evaluate."
+The factory can derive this from the diff and previous verdicts
+without author input. The author's handoff explains what changed
+and why, which naturally scopes the review.
+
+2026-06-05 — Quality over speed in the review loop. Don't optimize
+review time at the expense of thoroughness. Scoped review prompts
+should provide context (previous verdict, what changed) to help
+reviewers focus, not to reduce their coverage. A reviewer that
+passed last round should still re-evaluate fully if the changes
+could affect its domain. The goal is better-informed reviewers,
+not faster ones. Reviewers should always view what the author
+says with skepticism — the author's explanation of what changed
+is context, not evidence. The reviewer verifies independently.
+
+2026-06-05 — The dashboard needs much more animation to signal
+activity. Currently only the header phase label animates. Should
+also animate: active agents in the agent tabs (spinner next to
+name), active runs in the run tabs (spinner next to status),
+and the "reviewing" status. Active runs and agents should sort
+first in their respective lists. Consider a global activity
+indicator in the dashboard title bar when any run is active.
+The dashboard should feel alive when work is happening and
+completely still when everything is done.
+
+2026-06-05 — The dashboard never removes runs that were deleted
+from disk. App::poll discovers new runs but never prunes stale
+ones. If a run directory is removed while the dashboard is open,
+the run stays in the list with "[-]" status forever. Poll should
+remove runs whose directories no longer exist.
