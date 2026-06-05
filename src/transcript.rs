@@ -215,9 +215,56 @@ pub fn parse_line(line: &str) -> Vec<Event> {
             duration_ms: val["duration_ms"].as_u64(),
             cost_usd: val["cost_usd"].as_f64().or_else(|| val["total_cost_usd"].as_f64()),
         }],
+        "thread.started" => vec![Event::SessionInit {
+            session_id: val["thread_id"].as_str().unwrap_or("").to_string(),
+            model: "codex".to_string(),
+        }],
+        "turn.started" => vec![],
+        "turn.completed" => vec![Event::Result {
+            duration_ms: None,
+            cost_usd: None,
+        }],
+        "item.started" | "item.completed" => parse_codex_item(event_type, &val["item"]),
         _ => vec![Event::Unknown {
             event_type: event_type.to_string(),
         }],
+    }
+}
+
+/// Parse Codex CLI `--json` item events into the dashboard's event model.
+fn parse_codex_item(event_type: &str, item: &serde_json::Value) -> Vec<Event> {
+    let item_type = item["type"].as_str().unwrap_or("");
+    match item_type {
+        "agent_message" => {
+            let text = item["text"].as_str().unwrap_or("").to_string();
+            if text.is_empty() {
+                vec![]
+            } else {
+                vec![Event::Text { text }]
+            }
+        }
+        "command_execution" => {
+            let id = item["id"].as_str().unwrap_or("").to_string();
+            let command = item["command"].as_str().unwrap_or("").to_string();
+            let output = item["aggregated_output"].as_str().unwrap_or("").to_string();
+            match event_type {
+                "item.started" => vec![Event::ToolUse {
+                    id,
+                    name: "Bash".to_string(),
+                    summary: if command.is_empty() {
+                        String::new()
+                    } else {
+                        format!("$ {command}")
+                    },
+                }],
+                "item.completed" if !output.is_empty() => vec![Event::ToolResult {
+                    tool_use_id: id,
+                    content: output,
+                }],
+                _ => vec![],
+            }
+        }
+        _ => vec![],
     }
 }
 
@@ -574,6 +621,67 @@ mod tests {
             }
             _ => panic!("Expected Result"),
         }
+    }
+
+    #[test]
+    fn test_parse_codex_thread_started() {
+        let line = r#"{"type":"thread.started","thread_id":"abc"}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::SessionInit { session_id, model } => {
+                assert_eq!(session_id, "abc");
+                assert_eq!(model, "codex");
+            }
+            _ => panic!("Expected SessionInit"),
+        }
+    }
+
+    #[test]
+    fn test_parse_codex_agent_message() {
+        let line = r#"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I checked the run."}}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::Text { text } => assert_eq!(text, "I checked the run."),
+            _ => panic!("Expected Text"),
+        }
+    }
+
+    #[test]
+    fn test_parse_codex_command_started() {
+        let line = r#"{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc pwd","aggregated_output":"","exit_code":null,"status":"in_progress"}}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::ToolUse { name, summary, .. } => {
+                assert_eq!(name, "Bash");
+                assert!(summary.contains("/bin/zsh -lc pwd"));
+            }
+            _ => panic!("Expected ToolUse"),
+        }
+    }
+
+    #[test]
+    fn test_parse_codex_command_completed_output() {
+        let line = r#"{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc pwd","aggregated_output":"/tmp/project\n","exit_code":0,"status":"completed"}}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::ToolResult { content, .. } => {
+                assert_eq!(content, "/tmp/project\n");
+            }
+            _ => panic!("Expected ToolResult"),
+        }
+    }
+
+    #[test]
+    fn test_parse_codex_turn_events() {
+        assert!(parse_line(r#"{"type":"turn.started"}"#).is_empty());
+
+        let events = parse_line(r#"{"type":"turn.completed"}"#);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], Event::Result { .. }));
     }
 
     #[test]
