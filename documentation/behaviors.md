@@ -305,7 +305,8 @@ Test: tests/behaviors/operations/test-land.sh, tests/binary.rs (land_resolves_mo
 
 WHEN `factory dashboard` is invoked,
 THE SYSTEM SHALL display a TUI listing all runs with their status,
-an activity feed of transcript events, and keyboard navigation.
+an activity feed for the selected transcript or report view, and
+keyboard navigation.
 Test: tests/behaviors/operations/test-dashboard.sh
 
 WHEN `factory dashboard` is invoked for a project with no runs,
@@ -383,13 +384,13 @@ THE SYSTEM SHALL exit the dashboard and restore the terminal.
 
 WHEN the user presses Tab,
 THE SYSTEM SHALL select the next agent tab within the current run,
-display that agent's transcript in the activity feed, reset the scroll
-position, and re-enable auto-scroll.
+display that tab's transcript or report content in the activity feed,
+reset the scroll position, and re-enable auto-scroll.
 
 WHEN the user presses Shift-Tab,
 THE SYSTEM SHALL select the previous agent tab within the current run,
-display that agent's transcript in the activity feed, reset the scroll
-position, and re-enable auto-scroll.
+display that tab's transcript or report content in the activity feed,
+reset the scroll position, and re-enable auto-scroll.
 
 WHEN the user presses ← or →,
 THE SYSTEM SHALL select the previous or next run and display that run's

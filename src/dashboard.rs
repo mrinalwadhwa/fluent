@@ -96,7 +96,7 @@ impl RunView {
             cached_status,
         };
         view.discover_agents();
-        view.sync_report_view(true);
+        view.sync_report_view();
         view.poll();
         view
     }
@@ -127,7 +127,7 @@ impl RunView {
             && !self.agent_selection_touched
     }
 
-    fn sync_report_view(&mut self, allow_default_selection: bool) {
+    fn sync_report_view(&mut self) {
         let Some(path) = self.report_path() else {
             return;
         };
@@ -142,10 +142,13 @@ impl RunView {
             let idx = self.agents.len().min(1);
             self.agents
                 .insert(idx, AgentView::new_static("report", &content));
+            if self.selected_agent >= idx {
+                self.selected_agent += 1;
+            }
             idx
         };
 
-        if allow_default_selection && self.should_default_to_report() {
+        if self.should_default_to_report() {
             self.selected_agent = report_idx;
             self.scroll_offset = 0;
             self.auto_scroll = true;
@@ -217,7 +220,7 @@ impl RunView {
         }
         self.cached_status = Self::read_status(&self.live_dir, &self.run.dir);
         self.discover_agents();
-        self.sync_report_view(false);
+        self.sync_report_view();
         for agent in &mut self.agents {
             agent.poll();
         }
@@ -1394,6 +1397,49 @@ mod tests {
         let text = render_activity_feed_text(&mut view);
         assert!(text.contains("live author transcript"));
         assert!(!text.contains("Stale report content"));
+    }
+
+    #[test]
+    fn test_active_run_defaults_to_report_after_completion_poll() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let run_dir = tmp.path().join("active-run");
+        let run = make_filesystem_run(&run_dir, "active-run", "executing");
+        write_author_transcript(&run_dir, "live author transcript");
+
+        let mut view = RunView::new(run);
+        assert_eq!(view.current_agent().name, "author");
+
+        std::fs::write(run_dir.join("report.md"), "Final report summary").unwrap();
+        std::fs::write(run_dir.join("status"), "complete").unwrap();
+        view.poll();
+
+        assert_eq!(view.current_agent().name, "report");
+        let text = render_activity_feed_text(&mut view);
+        assert!(text.contains("Final report summary"));
+        assert!(!text.contains("live author transcript"));
+    }
+
+    #[test]
+    fn test_completion_poll_keeps_touched_transcript_selection() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let run_dir = tmp.path().join("active-run");
+        let run = make_filesystem_run(&run_dir, "active-run", "executing");
+        write_author_transcript(&run_dir, "author transcript content");
+        write_reviewer_transcript(&run_dir, "behaviors", "reviewer transcript content");
+
+        let mut view = RunView::new(run);
+        view.select_next_agent();
+        assert_eq!(view.current_agent().name, "behaviors");
+
+        std::fs::write(run_dir.join("report.md"), "Final report summary").unwrap();
+        std::fs::write(run_dir.join("status"), "landed").unwrap();
+        view.poll();
+
+        assert_eq!(view.current_agent().name, "behaviors");
+        assert!(render_agent_tabs(&view).contains("report"));
+        let text = render_activity_feed_text(&mut view);
+        assert!(text.contains("reviewer transcript content"));
+        assert!(!text.contains("Final report summary"));
     }
 
     #[test]
