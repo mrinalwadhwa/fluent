@@ -321,25 +321,187 @@ fn summary_includes_sessions_reviews_handoff_and_report() {
         "## Open questions\n- Should Factory retry after the failed review?\n",
     )
     .unwrap();
-    fs::write(run_dir.join("report.md"), "# Run Report\n").unwrap();
+    fs::write(
+        run_dir.join("report.md"),
+        "# Run Report\n\nREPORT_BODY_SENTINEL should not print\n",
+    )
+    .unwrap();
 
-    factory_cmd()
+    let output = factory_cmd()
         .current_dir(tmp.path())
         .args(["summary", "--run-id", "artifact-summary"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "session=1 exit=0 duration=5s status=executing",
-        ))
-        .stdout(predicate::str::contains(
-            "review=1 duration=2s verdict=fail",
-        ))
-        .stdout(predicate::str::contains("architecture: pass"))
-        .stdout(predicate::str::contains("tests: fail"))
-        .stdout(predicate::str::contains(
-            "Should Factory retry after the failed review?",
-        ))
-        .stdout(predicate::str::contains("Available: report.md"));
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "summary failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("session=1 exit=0 duration=5s status=executing"),
+        "summary should include session entries: {stdout}"
+    );
+    assert!(
+        stdout.contains("review=1 duration=2s verdict=fail"),
+        "summary should include review session entries: {stdout}"
+    );
+    assert!(
+        stdout.contains("architecture: pass"),
+        "summary should include architecture verdict: {stdout}"
+    );
+    assert!(
+        stdout.contains("tests: fail"),
+        "summary should include test verdict: {stdout}"
+    );
+    assert!(
+        stdout.contains("Should Factory retry after the failed review?"),
+        "summary should include the open question: {stdout}"
+    );
+    assert!(
+        stdout.contains("Available: report.md"),
+        "summary should show report presence: {stdout}"
+    );
+    assert!(
+        !stdout.contains("REPORT_BODY_SENTINEL"),
+        "summary should not dump report contents: {stdout}"
+    );
+}
+
+#[test]
+fn summary_prefers_live_worktree_artifacts() {
+    let tmp = TempDir::new().unwrap();
+    let source_run = tmp.path().join(".factory/runs/worktree-summary");
+    let worktree_root = tmp.path().join("worktree");
+    let live_run = worktree_root.join(".factory/runs/worktree-summary");
+    fs::create_dir_all(source_run.join("reviews")).unwrap();
+    fs::create_dir_all(live_run.join("reviews")).unwrap();
+    fs::write(source_run.join("status"), "planned").unwrap();
+    fs::write(source_run.join("brief.md"), "# Brief\n\nWorktree summary\n").unwrap();
+    fs::write(source_run.join("worktree"), worktree_root.to_str().unwrap()).unwrap();
+    fs::write(
+        source_run.join("sessions.log"),
+        "source session should not print\n",
+    )
+    .unwrap();
+    fs::write(source_run.join("reviews/review-tests.md"), "Verdict: fail").unwrap();
+    fs::write(
+        source_run.join("handoff.md"),
+        "source handoff should not print\n",
+    )
+    .unwrap();
+
+    fs::write(live_run.join("status"), "complete").unwrap();
+    fs::write(live_run.join("sessions.log"), "live session should print\n").unwrap();
+    fs::write(live_run.join("reviews/review-tests.md"), "Verdict: pass").unwrap();
+    fs::write(live_run.join("handoff.md"), "live handoff should print\n").unwrap();
+    fs::write(live_run.join("report.md"), "# Live report\n").unwrap();
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["summary", "--run-id", "worktree-summary"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "summary failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Status: complete"), "{stdout}");
+    assert!(stdout.contains("Artifacts:"), "{stdout}");
+    assert!(stdout.contains("live session should print"), "{stdout}");
+    assert!(stdout.contains("tests: pass"), "{stdout}");
+    assert!(stdout.contains("live handoff should print"), "{stdout}");
+    assert!(stdout.contains("Available: report.md"), "{stdout}");
+    assert!(
+        !stdout.contains("source session should not print"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("tests: fail"), "{stdout}");
+    assert!(
+        !stdout.contains("source handoff should not print"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn summary_limits_sessions_to_latest_entries() {
+    let tmp = TempDir::new().unwrap();
+    let run_dir = tmp.path().join(".factory/runs/session-limit");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "executing").unwrap();
+    fs::write(run_dir.join("brief.md"), "Session limit\n").unwrap();
+    fs::write(
+        run_dir.join("sessions.log"),
+        [
+            "session=1 old entry",
+            "session=2 retained entry",
+            "session=3 retained entry",
+            "session=4 retained entry",
+            "session=5 retained entry",
+            "session=6 newest entry",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["summary", "--run-id", "session-limit"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "summary failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("session=1 old entry"), "{stdout}");
+    assert!(stdout.contains("session=2 retained entry"), "{stdout}");
+    assert!(stdout.contains("session=6 newest entry"), "{stdout}");
+}
+
+#[test]
+fn summary_uses_handoff_fallback_without_open_questions() {
+    let tmp = TempDir::new().unwrap();
+    let run_dir = tmp.path().join(".factory/runs/handoff-fallback");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "needs-user").unwrap();
+    fs::write(run_dir.join("brief.md"), "Fallback handoff\n").unwrap();
+    fs::write(
+        run_dir.join("handoff.md"),
+        "# Handoff\n\nBrief: Ignore boilerplate\nStatus: needs-user\n- Retry after updating credentials\n",
+    )
+    .unwrap();
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["summary", "--run-id", "handoff-fallback"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "summary failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Handoff\n  Retry after updating credentials"),
+        "summary should use the first actionable fallback line: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Brief: Ignore boilerplate"),
+        "summary should skip handoff boilerplate: {stdout}"
+    );
 }
 
 #[test]
