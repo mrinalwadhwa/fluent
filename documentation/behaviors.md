@@ -192,10 +192,17 @@ THE SYSTEM SHALL include the run's current phase derived from existing
 status artifacts.
 Test: tests/binary.rs (summary_resolves_active_run)
 
-WHEN the summarized run has agent metadata or child runs,
-THE SYSTEM SHALL include author, reviewer, and child run activity from
-durable run artifacts.
-Test: tests/binary.rs (summary_includes_sessions_reviews_handoff_and_report), tests/binary.rs (summary_includes_child_activity)
+WHEN a run summary is printed,
+THE SYSTEM SHALL include author activity from durable run artifacts.
+Test: tests/binary.rs (summary_includes_sessions_reviews_handoff_and_report)
+
+WHEN the summarized run has reviewer activity,
+THE SYSTEM SHALL include reviewer activity from durable run artifacts.
+Test: tests/binary.rs (summary_includes_sessions_reviews_handoff_and_report)
+
+WHEN the summarized run has child runs,
+THE SYSTEM SHALL include child run activity from durable run artifacts.
+Test: tests/binary.rs (summary_includes_child_activity)
 
 WHEN the summarized run has session history,
 THE SYSTEM SHALL include the latest entries from `sessions.log`.
