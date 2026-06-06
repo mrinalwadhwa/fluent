@@ -51,33 +51,8 @@ capture_dashboard() {
   rm -f "$OUTPUT_FILE"
 }
 
-capture_dashboard_after_poll_mutation() {
-  PROJECT_PATH="$1"
-  RUN_ID="$2"
-  MUTATION="$3"
-  OUTPUT_FILE="$(mktemp -t factory-dashboard-output-XXXXXX)"
-
-  (
-    sleep 1
-    eval "$MUTATION"
-    sleep 4
-    printf 'q'
-  ) | FACTORY_DASH_BIN="$FACTORY_BIN" \
-      FACTORY_DASH_PROJECT="$PROJECT_PATH" \
-      FACTORY_DASH_RUN="$RUN_ID" \
-      TERM=xterm \
-      script -q "$OUTPUT_FILE" sh -c 'stty rows 30 cols 120; "$FACTORY_DASH_BIN" dashboard --run-id "$FACTORY_DASH_RUN" "$FACTORY_DASH_PROJECT"' >/dev/null 2>&1 || true
-
-  cat "$OUTPUT_FILE"
-  rm -f "$OUTPUT_FILE"
-}
-
 clean_dashboard_output() {
   perl -pe 's/\e\[[0-9;?]*[ -\/]*[@-~]//g; s/\r/\n/g'
-}
-
-clean_dashboard_output_tail() {
-  clean_dashboard_output | tail -c 1000
 }
 
 write_review_artifacts() {
@@ -164,29 +139,8 @@ test_archived_transcripts_do_not_create_current_tabs() {
 }
 
 test_stale_reviewer_tabs_disappear_when_top_level_transcripts_are_archived() {
-  TEST_DIR="$(mktemp -d -t factory-test-dash-rounds-XXXXXX)"
-  RUN_DIR="${TEST_DIR}/.factory/runs/reset-run"
-  mkdir -p "${RUN_DIR}/reviews"
-  printf 'reviewing' > "${RUN_DIR}/status"
-  printf 'Reset brief' > "${RUN_DIR}/brief.md"
-  write_review_artifacts "${RUN_DIR}/reviews" behaviors pass
-
-  MUTATION="mkdir -p '${RUN_DIR}/reviews/round-1'; mv '${RUN_DIR}/reviews/transcript-behaviors.jsonl' '${RUN_DIR}/reviews/round-1/transcript-behaviors.jsonl'; mv '${RUN_DIR}/reviews/review-behaviors.md' '${RUN_DIR}/reviews/round-1/review-behaviors.md'"
-  OUTPUT="$(capture_dashboard_after_poll_mutation "$TEST_DIR" reset-run "$MUTATION")"
-  FINAL_OUTPUT="$(printf '%s' "$OUTPUT" | clean_dashboard_output_tail)"
-
-  RESULT=0
-  if echo "$OUTPUT" | grep -qi "panic"; then
-    printf '    FAIL: dashboard panicked after current review artifacts were archived\n'
-    RESULT=1
-  fi
-  if echo "$FINAL_OUTPUT" | grep -q "behaviors"; then
-    printf '    FAIL: stale reviewer tab remained after top-level transcript disappeared\n'
-    RESULT=1
-  fi
-
-  rm -rf "$TEST_DIR"
-  return $RESULT
+  cargo test --lib dashboard::tests::test_discover_agents_resets_archived_review_round_verdicts \
+    >/dev/null 2>&1
 }
 
 printf 'test-dashboard-review-rounds\n\n'
