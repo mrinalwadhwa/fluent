@@ -591,14 +591,15 @@ Test: tests/behaviors/operations/test-parallel-runs.sh (sequential groups run in
 
 WHILE running Claude on the sandboxed local runtime,
 THE SYSTEM SHALL execute Claude inside a macOS Seatbelt sandbox with
-filesystem access restricted to the workspace root.
-Test: tests/behaviors/operations/test-sandbox.sh (dry-run renders profile with workspace root, sandbox enforces filesystem boundary, sandbox blocks write outside workspace, sandboxed run uses sandbox-exec)
+filesystem write access restricted to the run worktree and the source
+repository's common git directory.
+Test: tests/behaviors/operations/test-sandbox.sh (dry-run renders profile with workspace root, sandbox enforces filesystem boundary, sandbox blocks write outside workspace, sandboxed run uses sandbox-exec, sandboxed run can commit and blocks sibling write)
 
 WHEN `factory run --coder codex` is invoked with the sandboxed local runtime,
 THE SYSTEM SHALL launch Codex with the `workspace-write` sandbox and
 approval policy `never`, using the run worktree as `--cd` and the
-workspace parent as an added writable directory so linked worktree git
-metadata is writable.
+source repository's common git directory as an added writable directory
+so linked worktree git metadata is writable.
 Test: tests/behaviors/operations/test-codex-runtime.sh (sandboxed codex uses workspace-write), tests/behaviors/operations/test-codex-approval-flag.sh (approval-policy flag appears before exec)
 
 WHEN `factory run --coder codex --no-sandbox` is invoked,

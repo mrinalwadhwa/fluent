@@ -107,6 +107,25 @@ pub fn is_git_repo(dir: &Path) -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+/// Return the repository's common git directory as an absolute path.
+pub fn git_common_dir(dir: &Path) -> Result<PathBuf> {
+    let output = Command::new("git")
+        .args(["-C", &dir.to_string_lossy()])
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()?;
+
+    if !output.status.success() {
+        bail!(
+            "Failed to resolve common git directory: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    Ok(PathBuf::from(
+        String::from_utf8_lossy(&output.stdout).trim(),
+    ))
+}
+
 fn git_current_branch(dir: &Path) -> Result<String> {
     let output = Command::new("git")
         .args(["-C", &dir.to_string_lossy()])

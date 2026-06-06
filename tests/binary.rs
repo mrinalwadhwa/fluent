@@ -1279,6 +1279,9 @@ WORKING_DIR="$(pwd)"
 RUN_ID=$(ls "$WORKING_DIR/.factory/runs/" 2>/dev/null | head -1)
 RUN_DIR="$WORKING_DIR/.factory/runs/$RUN_ID"
 printf '%s\n' "$@" > "$RUN_DIR/codex-args"
+echo "codex sandbox commit" > codex-sandbox-commit.txt
+git add codex-sandbox-commit.txt > "$RUN_DIR/codex-commit-output" 2>&1
+git commit -m "Codex sandbox commit" >> "$RUN_DIR/codex-commit-output" 2>&1
 echo '{"type":"assistant","message":"codex sandboxed"}'
 echo "needs-user" > "$RUN_DIR/status"
 exit 0
@@ -1311,16 +1314,18 @@ exit 0
             && args.lines().any(|line| line == "workspace-write"),
         "expected Codex workspace-write sandbox: {args}"
     );
+    let common_git_dir = std::process::Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(&main_dir)
+        .output()
+        .unwrap();
+    let common_git_dir = String::from_utf8_lossy(&common_git_dir.stdout)
+        .trim()
+        .to_string();
     assert!(
         args.lines().any(|line| line == "--add-dir")
-            && args.lines().any(|line| line
-                == main_dir
-                    .parent()
-                    .unwrap()
-                    .canonicalize()
-                    .unwrap()
-                    .to_string_lossy()),
-        "expected Codex writable root to include workspace parent: {args}"
+            && args.lines().any(|line| line == common_git_dir),
+        "expected Codex writable root to include common git dir: {args}"
     );
     assert!(
         args.lines().any(|line| line == "--ask-for-approval")
@@ -1357,6 +1362,16 @@ exit 0
             .lines()
             .any(|line| line == "--dangerously-bypass-approvals-and-sandbox"),
         "sandboxed Codex run should not bypass sandboxing: {args}"
+    );
+
+    let log = std::process::Command::new("git")
+        .args(["log", "-1", "--format=%s"])
+        .current_dir(Path::new(wt_path_str.trim()))
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&log.stdout).trim(),
+        "Codex sandbox commit"
     );
 
     let transcript =

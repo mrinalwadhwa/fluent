@@ -254,19 +254,23 @@ run's `coder` file.
 
 Claude sessions use `claude -p --append-system-prompt` with stream-json
 output. Sandboxed Claude sessions run inside the macOS Seatbelt profile
-that Factory renders for the worktree.
+that Factory renders for the run worktree plus the source repository's
+common git directory. The worktree root lets the agent edit project
+files; the common git directory lets linked worktrees update branch,
+index, and worktree metadata without granting write access to unrelated
+sibling worktrees.
 
 Codex sessions use `codex --ask-for-approval never exec --json --cd <worktree>`
 and receive the factory system prompt prepended to the session prompt
 because the Codex CLI has no Claude-style append-system-prompt flag.
 `--ask-for-approval` is a top-level Codex option and must appear before
 `exec`. For sandboxed local runs, Factory also passes
-`--sandbox workspace-write` and `--add-dir <workspace-parent>` as exec
+`--sandbox workspace-write` and `--add-dir <common-git-dir>` as exec
 subcommand options instead of wrapping the Codex process in
 `sandbox-exec`. The worktree remains Codex's working root, while the
-workspace parent is writable so linked worktrees can update git metadata
-under the source worktree's `.git`. In bare mode, Codex runs with
-`--dangerously-bypass-approvals-and-sandbox`.
+source repository's common git directory is writable so linked worktrees
+can update branch, index, and worktree metadata. In bare mode, Codex
+runs with `--dangerously-bypass-approvals-and-sandbox`.
 
 Fargate currently supports only Claude because its container entrypoint
 and credential path remain Claude-specific.

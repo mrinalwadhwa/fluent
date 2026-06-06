@@ -194,7 +194,7 @@ test_sandboxed_codex_uses_workspace_write() {
     RESULT=1
   else
     ARGS="$(cat "${WT}/.codex-args")"
-    EXPECTED_ROOT="$(cd "$TEST_DIR" && pwd -P)"
+    EXPECTED_ROOT="$(git -C "${TEST_DIR}/project" rev-parse --path-format=absolute --git-common-dir)"
     assert_contains "$ARGS" "exec" || RESULT=1
     assert_contains "$ARGS" "--sandbox workspace-write" || RESULT=1
     assert_contains "$ARGS" "--add-dir $EXPECTED_ROOT" || RESULT=1
@@ -304,7 +304,7 @@ PLAN
     printf '    FAIL: mock codex did not run for parallel children\n'
     RESULT=1
   else
-    EXPECTED_ROOT="$(cd "$TEST_DIR" && pwd -P)"
+    EXPECTED_ROOT="$(git -C "${TEST_DIR}/project" rev-parse --path-format=absolute --git-common-dir)"
     assert_contains "$CHILD_ARGS" "exec" || RESULT=1
     assert_contains "$CHILD_ARGS" "--sandbox workspace-write" || RESULT=1
     assert_contains "$CHILD_ARGS" "--add-dir $EXPECTED_ROOT" || RESULT=1

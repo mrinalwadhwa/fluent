@@ -20,11 +20,6 @@ use factory::run::{self, Run};
 use factory::session::{self, DefaultHooks, SandboxedHooks, SessionConfig};
 use factory::worktree;
 
-fn workspace_sandbox_root(source_root: &Path) -> PathBuf {
-    let root = source_root.parent().unwrap_or(source_root);
-    fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
-}
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -156,7 +151,7 @@ fn cmd_interactive(
     credential::inject_credentials()?;
     credential::setup_git_signing();
 
-    let (sandbox, _sandbox_profile) = build_coder_sandbox(coder_kind, resolver, sandbox_root)?;
+    let (sandbox, _sandbox_profile) = build_coder_sandbox(coder_kind, resolver, sandbox_root, &[])?;
     let system_prompt = resolver
         .resolve_content("prompts/author.md")
         .unwrap_or_default();
@@ -189,9 +184,8 @@ fn cmd_run_local(
 
     // Check for a parallel plan
     if let Some(parsed_plan) = try_parse_parallel_plan(&run) {
-        let workspace_root = workspace_sandbox_root(source_root);
-        let (sandbox, _sandbox_profile) =
-            build_coder_sandbox(coder_kind, resolver, &workspace_root)?;
+        let common_git_dir = worktree::git_common_dir(source_root)?;
+        let sandbox = build_parallel_coder_sandbox(coder_kind, vec![common_git_dir]);
         let system_prompt = resolver
             .resolve_content("prompts/author.md")
             .unwrap_or_default();
@@ -215,11 +209,9 @@ fn cmd_run_local(
     let worktree_dir = &wt_result.worktree_dir;
     worktree::disable_commit_signing(worktree_dir)?;
 
-    // Sandbox root must include the git directory — worktrees reference
-    // the main repo's .git via a relative path. Use the parent of the
-    // worktree (the factory workspace) as the sandbox root.
-    let sandbox_root = workspace_sandbox_root(source_root);
-    let (sandbox, _sandbox_profile) = build_coder_sandbox(coder_kind, resolver, &sandbox_root)?;
+    let common_git_dir = worktree::git_common_dir(source_root)?;
+    let (sandbox, _sandbox_profile) =
+        build_coder_sandbox(coder_kind, resolver, worktree_dir, &[common_git_dir])?;
     let system_prompt = resolver
         .resolve_content("prompts/author.md")
         .unwrap_or_default();
@@ -462,7 +454,7 @@ fn cmd_resume(
     credential::inject_credentials()?;
     credential::setup_git_signing();
 
-    let (sandbox, _sandbox_profile) = build_coder_sandbox(coder_kind, resolver, search_root)?;
+    let (sandbox, _sandbox_profile) = build_coder_sandbox(coder_kind, resolver, search_root, &[])?;
     let system_prompt = resolver
         .resolve_content("prompts/author.md")
         .unwrap_or_default();
@@ -535,21 +527,38 @@ fn cmd_land(search_root: &Path, run_id: Option<&str>) -> Result<()> {
 fn build_coder_sandbox(
     coder_kind: CoderKind,
     resolver: &ContentResolver,
-    sandbox_root: &Path,
+    working_dir: &Path,
+    additional_writable_roots: &[PathBuf],
 ) -> Result<(CoderSandbox, Option<os::SandboxProfile>)> {
     match coder_kind {
         CoderKind::Claude => {
             let home = std::env::var("HOME").unwrap_or_default();
-            let profile = os::render_profile(resolver, &home, &sandbox_root.to_string_lossy())?;
+            let mut roots = vec![working_dir.to_path_buf()];
+            roots.extend(additional_writable_roots.iter().cloned());
+            let profile = os::render_profile_for_roots(resolver, &home, &roots)?;
             let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
             Ok((sandbox, Some(profile)))
         }
         CoderKind::Codex => Ok((
             CoderSandbox::CodexWorkspaceWrite {
-                writable_root: Some(sandbox_root.to_path_buf()),
+                writable_roots: additional_writable_roots.to_vec(),
             },
             None,
         )),
+    }
+}
+
+fn build_parallel_coder_sandbox(
+    coder_kind: CoderKind,
+    additional_writable_roots: Vec<PathBuf>,
+) -> CoderSandbox {
+    match coder_kind {
+        CoderKind::Claude => CoderSandbox::SeatbeltRoots {
+            writable_roots: additional_writable_roots,
+        },
+        CoderKind::Codex => CoderSandbox::CodexWorkspaceWrite {
+            writable_roots: additional_writable_roots,
+        },
     }
 }
 

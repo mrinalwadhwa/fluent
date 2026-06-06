@@ -34,7 +34,8 @@ ERRORS=""
 # -------------------------------------------------------------------------
 
 setup_test_project() {
-  TEST_DIR="$(mktemp -d -t factory-test-sandbox-XXXXXX)"
+  TEST_PARENT="${FACTORY_SANDBOX_TEST_PARENT:-$HOME}"
+  TEST_DIR="$(mktemp -d "${TEST_PARENT}/factory-test-sandbox-XXXXXX")"
   TEST_DIR="$(cd "$TEST_DIR" && pwd -P)"
   mkdir -p "${TEST_DIR}/project"
   cd "${TEST_DIR}/project"
@@ -45,7 +46,7 @@ setup_test_project() {
   echo "test" > README.md
   git add . && git commit -m "init" > /dev/null 2>&1
 
-  MOCK_BIN="${TEST_DIR}/bin"
+  MOCK_BIN="$(git rev-parse --path-format=absolute --git-common-dir)/mock-bin"
   mkdir -p "$MOCK_BIN"
 }
 
@@ -271,6 +272,10 @@ test_sandboxed_run_uses_sandbox_exec() {
   # probe file. If the read fails, the process is sandboxed.
   cat > "${MOCK_BIN}/claude" << 'MOCK_SCRIPT'
 #!/bin/bash
+if printf '%s\n' "$*" | grep -q -- '--max-turns'; then
+  echo '{"type":"result","subtype":"success","result":"refresh","session_id":"mock-refresh"}'
+  exit 0
+fi
 # Mock claude — detect sandbox by trying to read a probe file outside workspace
 DETECTION="unsandboxed"
 if ! cat "${HOME}/.factory-sandbox-probe" > /dev/null 2>&1; then
@@ -313,6 +318,74 @@ MOCK_SCRIPT
   return $RESULT
 }
 
+test_sandboxed_run_can_commit_and_blocks_sibling_write() {
+  setup_test_project
+  create_planned_run "test-sandbox-commit"
+
+  SIBLING_DIR="${TEST_DIR}/sibling"
+  mkdir -p "$SIBLING_DIR"
+  SIBLING_WRITE_PROBE="${SIBLING_DIR}/blocked-write.txt"
+  export SIBLING_WRITE_PROBE
+
+  cat > "${MOCK_BIN}/claude" << 'MOCK_SCRIPT'
+#!/bin/bash
+set -u
+if printf '%s\n' "$*" | grep -q -- '--max-turns'; then
+  echo '{"type":"result","subtype":"success","result":"refresh","session_id":"mock-refresh"}'
+  exit 0
+fi
+echo "sandbox commit" > sandbox-commit.txt
+if git add sandbox-commit.txt > .commit-output 2>&1 &&
+   git commit -m "Sandbox commit" >> .commit-output 2>&1; then
+  echo "commit-ok" > .commit-result
+else
+  echo "commit-failed" > .commit-result
+fi
+
+if echo "should-not-write" > "$SIBLING_WRITE_PROBE" 2>/dev/null; then
+  echo "sibling-wrote" > .sibling-write-result
+else
+  echo "sibling-blocked" > .sibling-write-result
+fi
+
+echo '{"type":"result","subtype":"success","result":"done","session_id":"mock"}'
+if [ -f .factory/active-run ]; then
+  RID=$(cat .factory/active-run)
+  echo -n "needs-user" > ".factory/runs/$RID/status"
+fi
+MOCK_SCRIPT
+  chmod +x "${MOCK_BIN}/claude"
+
+  PATH="${MOCK_BIN}:${PATH}" "$FACTORY_BIN" run --run-id "test-sandbox-commit" \
+    > /dev/null 2>&1 || true
+
+  RESULT=0
+  WT="$(find_worktree ".factory/runs/test-sandbox-commit")"
+  if [ -z "$WT" ]; then
+    printf '    FAIL: worktree not found\n'
+    RESULT=1
+  else
+    if [ "$(cat "${WT}/.commit-result" 2>/dev/null || true)" != "commit-ok" ]; then
+      printf '    FAIL: sandboxed agent could not commit from worktree\n'
+      cat "${WT}/.commit-output" 2>/dev/null || true
+      RESULT=1
+    fi
+
+    if [ "$(cat "${WT}/.sibling-write-result" 2>/dev/null || true)" != "sibling-blocked" ]; then
+      printf '    FAIL: sandboxed agent could write sibling directory\n'
+      RESULT=1
+    fi
+
+    if [ "$(cat "$SIBLING_WRITE_PROBE" 2>/dev/null || true)" = "should-not-write" ]; then
+      printf '    FAIL: sibling write probe contains forbidden content\n'
+      RESULT=1
+    fi
+  fi
+
+  cleanup_test_project
+  return $RESULT
+}
+
 # Behavior: WHILE running inside the sandbox, THE SYSTEM SHALL inject
 # credentials via environment variables...
 #
@@ -326,6 +399,10 @@ test_credentials_injected_via_env_vars() {
   # Create a mock claude that dumps credential-related env vars
   cat > "${MOCK_BIN}/claude" << 'MOCK_SCRIPT'
 #!/bin/bash
+if printf '%s\n' "$*" | grep -q -- '--max-turns'; then
+  echo '{"type":"result","subtype":"success","result":"refresh","session_id":"mock-refresh"}'
+  exit 0
+fi
 # Mock claude — check for credential env vars
 env | grep -iE '(CLAUDE|ANTHROPIC|OAUTH|AWS_ACCESS|AWS_SECRET|AWS_SESSION|BRAVE)' \
   > "${PWD}/.credential-env" 2>/dev/null || true
@@ -410,6 +487,7 @@ run_test "profile denies Keychain Mach services" test_profile_denies_keychain_ma
 run_test "sandbox enforces filesystem boundary" test_sandbox_enforces_filesystem_boundary
 run_test "sandbox blocks write outside workspace" test_sandbox_blocks_write_outside_workspace
 run_test "sandboxed run uses sandbox-exec" test_sandboxed_run_uses_sandbox_exec
+run_test "sandboxed run can commit and blocks sibling write" test_sandboxed_run_can_commit_and_blocks_sibling_write
 run_test "credentials injected via env vars" test_credentials_injected_via_env_vars
 run_test "profile denies credential filesystem access" test_profile_denies_credential_filesystem_access
 

@@ -28,7 +28,8 @@ pub enum CoderKind {
 pub enum CoderSandbox {
     None,
     SeatbeltProfile(String),
-    CodexWorkspaceWrite { writable_root: Option<PathBuf> },
+    SeatbeltRoots { writable_roots: Vec<PathBuf> },
+    CodexWorkspaceWrite { writable_roots: Vec<PathBuf> },
 }
 
 impl CoderKind {
@@ -62,9 +63,9 @@ impl CoderKind {
             },
             Self::Codex => Box::new(CodexCode {
                 sandboxed: matches!(sandbox, CoderSandbox::CodexWorkspaceWrite { .. }),
-                writable_root: match sandbox {
-                    CoderSandbox::CodexWorkspaceWrite { writable_root } => writable_root,
-                    _ => None,
+                writable_roots: match sandbox {
+                    CoderSandbox::CodexWorkspaceWrite { writable_roots } => writable_roots,
+                    _ => Vec::new(),
                 },
             }),
         }
@@ -199,7 +200,7 @@ impl Coder for BareClaudeCode {
 /// OpenAI Codex CLI.
 pub struct CodexCode {
     pub sandboxed: bool,
-    pub writable_root: Option<PathBuf>,
+    pub writable_roots: Vec<PathBuf>,
 }
 
 impl Coder for CodexCode {
@@ -252,7 +253,7 @@ impl CodexCode {
         cmd.args(["--cd", &working_dir.to_string_lossy()]);
         if self.sandboxed {
             cmd.args(["--sandbox", "workspace-write"]);
-            if let Some(root) = &self.writable_root {
+            for root in &self.writable_roots {
                 cmd.args(["--add-dir", &root.to_string_lossy()]);
             }
         } else {

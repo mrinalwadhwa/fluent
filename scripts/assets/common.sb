@@ -257,10 +257,9 @@
 ;; 6. User paths -- read + write
 ;; -------------------------------------------------------------------------
 
-;; Sandbox root -- project file access boundary (+ parent for FSEvents watcher)
+;; Sandbox roots -- project file access boundaries (+ git metadata for linked worktrees)
 (allow file-read-metadata (regex #"^_HOME_(/[^/]+)*$"))  ; metadata on ancestors
-(allow file-read*  (subpath "_SANDBOX_ROOT_"))
-(allow file-write* (subpath "_SANDBOX_ROOT_"))
+_SANDBOX_ROOT_RULES_
 
 ;; Claude configuration, sessions, and cache
 (allow file-read*  (subpath "_HOME_/.claude"))

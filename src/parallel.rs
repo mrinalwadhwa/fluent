@@ -6,6 +6,7 @@ use std::thread;
 use crate::coder::{CoderKind, CoderSandbox};
 use crate::content::ContentResolver;
 use crate::land;
+use crate::os;
 use crate::plan::Plan;
 use crate::run::{Run, RunStatus};
 use crate::session::{self, DefaultHooks, SandboxedHooks, SessionConfig};
@@ -277,6 +278,21 @@ fn setup_child_step(
 
 /// Execute a single child run's session loop.
 fn run_child(ctx: ChildContext) -> Result<()> {
+    let mut sandbox_profile = None;
+    let sandbox = match ctx.sandbox {
+        CoderSandbox::SeatbeltRoots { writable_roots } => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let mut roots = vec![ctx.worktree_dir.clone()];
+            roots.extend(writable_roots);
+            let resolver = ContentResolver::new(Some(&ctx.worktree_dir));
+            let profile = os::render_profile_for_roots(&resolver, &home, &roots)?;
+            let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
+            sandbox_profile = Some(profile);
+            sandbox
+        }
+        sandbox => sandbox,
+    };
+
     let wt_run = Run {
         id: ctx.id.clone(),
         dir: ctx.worktree_dir.join(format!(".factory/runs/{}", ctx.id)),
@@ -290,9 +306,10 @@ fn run_child(ctx: ChildContext) -> Result<()> {
         resolver: ContentResolver::new(Some(&ctx.worktree_dir)),
     };
 
-    let use_sandboxed_hooks = ctx.coder_kind == CoderKind::Claude
-        && matches!(ctx.sandbox, CoderSandbox::SeatbeltProfile(_));
-    let author = ctx.coder_kind.boxed(ctx.sandbox);
+    let use_sandboxed_hooks =
+        ctx.coder_kind == CoderKind::Claude && matches!(sandbox, CoderSandbox::SeatbeltProfile(_));
+    let author = ctx.coder_kind.boxed(sandbox);
+    let _sandbox_profile = sandbox_profile;
     if use_sandboxed_hooks {
         session::run_session_loop(&*author, &config, &SandboxedHooks, ctx.coder_kind)
     } else {
@@ -650,15 +667,15 @@ run_before_land = true
         };
 
         let plan = make_plan(vec![(true, vec![("Task A", "Do A."), ("Task B", "Do B.")])]);
-        let workspace_root = tmp.path().to_path_buf();
-        let expected_root = workspace_root.clone();
+        let common_git_dir = worktree::git_common_dir(&main_dir).unwrap();
+        let expected_root = common_git_dir.clone();
 
         let runner = move |ctx: ChildContext| -> Result<()> {
             assert_eq!(ctx.coder_kind, CoderKind::Codex);
             assert_eq!(
                 ctx.sandbox,
                 CoderSandbox::CodexWorkspaceWrite {
-                    writable_root: Some(expected_root.clone()),
+                    writable_roots: vec![expected_root.clone()],
                 }
             );
 
@@ -675,7 +692,7 @@ run_before_land = true
             &[],
             CoderKind::Codex,
             CoderSandbox::CodexWorkspaceWrite {
-                writable_root: Some(workspace_root),
+                writable_roots: vec![common_git_dir],
             },
             runner,
         );
