@@ -9,6 +9,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
+use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -169,6 +170,7 @@ impl RunView {
         // Discover reviewer transcripts
         let reviews_dir = self.live_dir.join("reviews");
         if reviews_dir.is_dir() {
+            let mut current_reviewers = BTreeSet::new();
             if let Ok(entries) = std::fs::read_dir(&reviews_dir) {
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().to_string();
@@ -178,6 +180,7 @@ impl RunView {
                             .and_then(|s| s.strip_suffix(".jsonl"))
                             .unwrap_or(&name)
                             .to_string();
+                        current_reviewers.insert(reviewer.clone());
 
                         // Add reviewer if not already tracked
                         if !self.agents.iter().any(|a| a.name == reviewer) {
@@ -185,7 +188,7 @@ impl RunView {
                             agent.readers.push(TranscriptReader::new(entry.path()));
                             // Check for verdict
                             let review_file = reviews_dir.join(format!("review-{reviewer}.md"));
-                            if review_file.exists() {
+                            if current_round_review_exists(&reviews_dir, &review_file) {
                                 agent.status = verdict_status(&review_file);
                             } else {
                                 agent.status = "running".into();
@@ -196,7 +199,7 @@ impl RunView {
                             if let Some(agent) = self.agents.iter_mut().find(|a| a.name == reviewer)
                             {
                                 let review_file = reviews_dir.join(format!("review-{reviewer}.md"));
-                                if review_file.exists() {
+                                if current_round_review_exists(&reviews_dir, &review_file) {
                                     agent.status = verdict_status(&review_file);
                                 } else {
                                     agent.status = "running".into();
@@ -206,7 +209,37 @@ impl RunView {
                     }
                 }
             }
+            self.retain_current_reviewers(&current_reviewers);
+        } else {
+            self.retain_current_reviewers(&BTreeSet::new());
         }
+    }
+
+    fn retain_current_reviewers(&mut self, current_reviewers: &BTreeSet<String>) {
+        let selected_name = self
+            .agents
+            .get(self.selected_agent)
+            .map(|agent| agent.name.clone());
+
+        self.agents.retain(|agent| {
+            matches!(agent.name.as_str(), "author" | "report")
+                || current_reviewers.contains(&agent.name)
+        });
+
+        if let Some(selected_name) = selected_name {
+            if let Some(index) = self
+                .agents
+                .iter()
+                .position(|agent| agent.name == selected_name)
+            {
+                self.selected_agent = index;
+                return;
+            }
+        }
+
+        self.selected_agent = 0;
+        self.scroll_offset = 0;
+        self.auto_scroll = true;
     }
 
     fn poll(&mut self) {
@@ -581,6 +614,59 @@ fn verdict_status(review_file: &Path) -> String {
         review::Verdict::Fail => "fail".into(),
         review::Verdict::Uncertain => "uncertain".into(),
     }
+}
+
+fn current_round_review_exists(reviews_dir: &Path, review_file: &Path) -> bool {
+    if !review_file.exists() {
+        return false;
+    }
+
+    let Some(file_name) = review_file.file_name() else {
+        return true;
+    };
+    let Some(archive_file) = latest_archived_review_file(reviews_dir, file_name) else {
+        return true;
+    };
+
+    let Ok(review_modified) = review_file
+        .metadata()
+        .and_then(|metadata| metadata.modified())
+    else {
+        return true;
+    };
+    let Ok(archive_modified) = archive_file
+        .metadata()
+        .and_then(|metadata| metadata.modified())
+    else {
+        return true;
+    };
+
+    review_modified > archive_modified
+}
+
+fn latest_archived_review_file(reviews_dir: &Path, file_name: &std::ffi::OsStr) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(reviews_dir).ok()?;
+
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            if !file_type.is_dir() {
+                return None;
+            }
+
+            let name = entry.file_name();
+            let round = name.to_string_lossy();
+            let round_number = round.strip_prefix("round-")?.parse::<u32>().ok()?;
+            let path = entry.path().join(file_name);
+            if path.exists() {
+                Some((round_number, path))
+            } else {
+                None
+            }
+        })
+        .max_by_key(|(round_number, _)| *round_number)
+        .map(|(_, path)| path)
 }
 
 fn draw_ui(f: &mut ratatui::Frame, app: &mut App) {
@@ -1563,6 +1649,16 @@ mod tests {
     }
 
     #[test]
+    fn test_header_reviewing_status_shows_spinner_without_reviewers() {
+        let view =
+            make_run_view_with_status("test-run", vec![AgentView::new("author")], "reviewing");
+        let buf = render_header_buf(&view, 0);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Reviewing"));
+        assert!(has_spinner(&buf));
+    }
+
+    #[test]
     fn test_compute_phase_all_reviewers_done() {
         let mut r1 = AgentView::new("tests");
         r1.status = "pass".into();
@@ -1735,6 +1831,78 @@ mod tests {
         .unwrap();
 
         // Second discover: review file exists → status updates to "pass"
+        view.discover_agents();
+        assert_eq!(view.agents[1].status, "pass");
+    }
+
+    #[test]
+    fn test_discover_agents_resets_archived_review_round_verdicts() {
+        use std::fs;
+        use std::time::Duration;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let run_dir = tmp.path().to_path_buf();
+        let reviews_dir = run_dir.join("reviews");
+        fs::create_dir_all(&reviews_dir).unwrap();
+
+        fs::write(reviews_dir.join("transcript-behaviors.jsonl"), "{}").unwrap();
+        fs::write(
+            reviews_dir.join("review-behaviors.md"),
+            "Verdict: pass\n\nOld round.",
+        )
+        .unwrap();
+
+        let mut view = RunView {
+            run: Run {
+                id: "test-run".to_string(),
+                dir: run_dir.clone(),
+            },
+            live_dir: run_dir.clone(),
+            agents: vec![AgentView::new("author")],
+            selected_agent: 0,
+            agent_selection_touched: false,
+            scroll_offset: 0,
+            auto_scroll: true,
+            wrapped_total: 0,
+            cached_status: "reviewing".to_string(),
+        };
+
+        view.discover_agents();
+        assert_eq!(view.agents.len(), 2);
+        assert_eq!(view.agents[1].name, "behaviors");
+        assert_eq!(view.agents[1].status, "pass");
+
+        std::thread::sleep(Duration::from_millis(10));
+        let archive_dir = reviews_dir.join("round-1");
+        fs::create_dir_all(&archive_dir).unwrap();
+        fs::copy(
+            reviews_dir.join("review-behaviors.md"),
+            archive_dir.join("review-behaviors.md"),
+        )
+        .unwrap();
+        fs::rename(
+            reviews_dir.join("transcript-behaviors.jsonl"),
+            archive_dir.join("transcript-behaviors.jsonl"),
+        )
+        .unwrap();
+
+        view.discover_agents();
+        assert_eq!(view.agents.len(), 1);
+        assert_eq!(view.agents[0].name, "author");
+
+        fs::write(reviews_dir.join("transcript-behaviors.jsonl"), "{}").unwrap();
+        view.discover_agents();
+        assert_eq!(view.agents.len(), 2);
+        assert_eq!(view.agents[1].name, "behaviors");
+        assert_eq!(view.agents[1].status, "running");
+
+        std::thread::sleep(Duration::from_millis(10));
+        fs::write(
+            reviews_dir.join("review-behaviors.md"),
+            "Verdict: pass\n\nNew round.",
+        )
+        .unwrap();
         view.discover_agents();
         assert_eq!(view.agents[1].status, "pass");
     }
