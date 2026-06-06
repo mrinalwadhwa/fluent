@@ -147,6 +147,21 @@ assert_not_contains() {
   fi
 }
 
+assert_before() {
+  local haystack="$1" first="$2" second="$3"
+  local pos_first pos_second
+  pos_first="$(printf '%s' "$haystack" | grep -bo -- "$first" | head -1 | cut -d: -f1)"
+  pos_second="$(printf '%s' "$haystack" | grep -bo -- "$second" | head -1 | cut -d: -f1)"
+  if [ -z "$pos_first" ] || [ -z "$pos_second" ]; then
+    printf '    FAIL: could not locate "%s" or "%s"\n' "$first" "$second"
+    return 1
+  fi
+  if [ "$pos_first" -ge "$pos_second" ]; then
+    printf '    FAIL: "%s" (pos %s) must appear before "%s" (pos %s)\n' "$first" "$pos_first" "$second" "$pos_second"
+    return 1
+  fi
+}
+
 run_test() {
   TEST_NAME="$1"
   printf '  %s ... ' "$TEST_NAME"
@@ -182,6 +197,7 @@ test_sandboxed_codex_uses_workspace_write() {
     assert_contains "$ARGS" "exec" || RESULT=1
     assert_contains "$ARGS" "--sandbox workspace-write" || RESULT=1
     assert_contains "$ARGS" "--ask-for-approval never" || RESULT=1
+    assert_before "$ARGS" "--ask-for-approval" "exec" || RESULT=1
     assert_not_contains "$ARGS" "--dangerously-bypass-approvals-and-sandbox" || RESULT=1
   fi
 
@@ -289,6 +305,7 @@ PLAN
     assert_contains "$CHILD_ARGS" "exec" || RESULT=1
     assert_contains "$CHILD_ARGS" "--sandbox workspace-write" || RESULT=1
     assert_contains "$CHILD_ARGS" "--ask-for-approval never" || RESULT=1
+    assert_before "$CHILD_ARGS" "--ask-for-approval" "exec" || RESULT=1
     assert_not_contains "$CHILD_ARGS" "--dangerously-bypass-approvals-and-sandbox" || RESULT=1
   fi
 

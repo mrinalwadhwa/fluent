@@ -1316,6 +1316,31 @@ exit 0
             && args.lines().any(|line| line == "never"),
         "expected Codex approval policy never: {args}"
     );
+
+    // --ask-for-approval is a top-level option and must precede the exec subcommand
+    let approval_pos = args
+        .lines()
+        .position(|line| line == "--ask-for-approval")
+        .expect("--ask-for-approval not found");
+    let exec_pos = args
+        .lines()
+        .position(|line| line == "exec")
+        .expect("exec not found");
+    assert!(
+        approval_pos < exec_pos,
+        "--ask-for-approval (pos {approval_pos}) must precede exec (pos {exec_pos}): {args}"
+    );
+
+    // --sandbox is an exec subcommand option and must follow exec
+    let sandbox_pos = args
+        .lines()
+        .position(|line| line == "--sandbox")
+        .expect("--sandbox not found");
+    assert!(
+        sandbox_pos > exec_pos,
+        "--sandbox (pos {sandbox_pos}) must follow exec (pos {exec_pos}): {args}"
+    );
+
     assert!(
         !args
             .lines()
