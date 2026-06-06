@@ -2,8 +2,9 @@
 # test-codex-runtime — Verify Codex local and Fargate launch behaviors.
 #
 # Tests Codex runtime behavior through the factory CLI external
-# interface. Mocks codex and sandbox-exec on PATH to record whether
-# factory launches the right command without reading implementation.
+# interface. Mocks codex and, where needed, sandbox-exec on PATH to
+# record whether factory launches the right command without reading
+# implementation.
 #
 # Usage:
 #   tests/behaviors/operations/test-codex-runtime.sh
@@ -87,6 +88,16 @@ MOCK_SCRIPT
   chmod +x "${MOCK_BIN}/sandbox-exec"
 }
 
+write_mock_only_path_tools() {
+  TOOL_BIN="${TEST_DIR}/tools"
+  mkdir -p "$TOOL_BIN"
+  for tool in bash cat git which; do
+    tool_path="$(command -v "$tool")"
+    ln -s "$tool_path" "${TOOL_BIN}/${tool}"
+  done
+  MOCK_ONLY_PATH="${MOCK_BIN}:${TOOL_BIN}"
+}
+
 write_mock_claude_refresh_probe() {
   cat > "${MOCK_BIN}/claude" << 'MOCK_SCRIPT'
 #!/usr/bin/env bash
@@ -153,12 +164,12 @@ test_sandboxed_codex_uses_workspace_write() {
   setup_test_project
   create_planned_run "test-codex-sandboxed"
   write_mock_codex
-  write_mock_sandbox_exec
+  write_mock_only_path_tools
 
   SANDBOX_EXEC_LOG="${TEST_DIR}/sandbox-exec.log"
   export SANDBOX_EXEC_LOG
 
-  PATH="${MOCK_BIN}:${PATH}" "$FACTORY_BIN" run --coder codex \
+  PATH="$MOCK_ONLY_PATH" "$FACTORY_BIN" run --coder codex \
     --run-id "test-codex-sandboxed" > "${TEST_DIR}/factory.out" 2>&1 || true
 
   RESULT=0

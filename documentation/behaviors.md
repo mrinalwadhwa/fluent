@@ -131,7 +131,7 @@ WHEN a new Claude session starts on the sandboxed local runtime,
 THE SYSTEM SHALL run an unsandboxed Claude invocation to refresh the
 OAuth token, then re-read the token from Keychain into the process
 environment.
-Test: src/session.rs (test_loop_calls_pre_session_before_each_session, test_loop_stops_when_pre_session_returns_error), tests/behaviors/operations/test-sandbox.sh (sandboxed run uses sandbox-exec)
+Test: src/session.rs (test_loop_calls_pre_session_before_each_session, test_loop_stops_when_pre_session_returns_error), tests/behaviors/operations/test-claude-runtime-hooks.sh (sandboxed claude runs refresh hook)
 
 WHEN a new Codex session starts on the sandboxed local runtime,
 THE SYSTEM SHALL NOT run the Claude credential refresh hook.
