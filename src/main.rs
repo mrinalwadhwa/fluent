@@ -474,7 +474,14 @@ fn cmd_resume(
     eprintln!("  Resuming run {}", run.id);
 
     if !std::io::stdin().is_terminal() {
-        return cmd_resume_headless(search_root, &run, resolver, extra_args, coder_kind, no_sandbox);
+        return cmd_resume_headless(
+            search_root,
+            &run,
+            resolver,
+            extra_args,
+            coder_kind,
+            no_sandbox,
+        );
     }
 
     os::check_prerequisites_for(coder_kind)?;
