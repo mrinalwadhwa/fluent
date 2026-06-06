@@ -270,3 +270,19 @@ separate from Factory's flag placement. Earlier failed smoke
 gap: the worktree run status was `failed`, while the source run
 directory still showed `planned` because failed worktree artifacts were
 not copied back.
+
+2026-06-05 — Run `20260605-193223` addressed the dashboard stale-status
+and deleted-run observations: run tabs now use the same cached live
+status as the header, initial selection prefers live active runs, polling
+removes source run directories that disappeared, and the dashboard falls
+back to an existing run or the empty state when the selected run is
+removed. The run added unit coverage and external dashboard behavior
+coverage for those cases.
+
+2026-06-05 — Factory review detection is commit-based. During run
+`20260605-193223`, an author wrote valid implementation changes and
+marked the run complete, but left the worktree dirty. Factory compared
+`main..HEAD`, saw no committed diff, skipped reviews, and produced a
+no-code-changes report. The session loop should require or verify a clean
+committed worktree before `complete`, or Factory should detect dirty
+worktrees and fail/needs-user instead of skipping reviews.
