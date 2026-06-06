@@ -127,7 +127,7 @@ Test: tests/binary.rs (run_archives_review_rounds), tests/behaviors/operations/t
 
 ## Session loop (local) — credential refresh
 
-WHEN a new session starts on the sandboxed local runtime,
+WHEN a new Claude session starts on the sandboxed local runtime,
 THE SYSTEM SHALL run an unsandboxed Claude invocation to refresh the
 OAuth token, then re-read the token from Keychain into the process
 environment.
@@ -509,9 +509,20 @@ Test: tests/behaviors/operations/test-parallel-runs.sh (sequential groups run in
 ## Sandbox (local)
 
 WHILE running on the local runtime,
-THE SYSTEM SHALL execute the agent inside a macOS Seatbelt sandbox with
+THE SYSTEM SHALL execute the selected agent inside a sandbox with
 filesystem access restricted to the workspace root.
-Test: tests/behaviors/operations/test-sandbox.sh (dry-run renders profile with workspace root, sandbox enforces filesystem boundary, sandbox blocks write outside workspace, sandboxed run uses sandbox-exec)
+Test: tests/behaviors/operations/test-sandbox.sh (dry-run renders profile with workspace root, sandbox enforces filesystem boundary, sandbox blocks write outside workspace, sandboxed run uses sandbox-exec), tests/binary.rs (run_with_codex_uses_workspace_write_sandbox)
+
+WHEN `factory run --coder codex` is invoked with the sandboxed local runtime,
+THE SYSTEM SHALL launch Codex with its `workspace-write` sandbox and
+approval policy `never`, without wrapping the Codex process in
+`sandbox-exec`.
+Test: tests/binary.rs (run_with_codex_uses_workspace_write_sandbox)
+
+WHEN `factory run --coder codex --no-sandbox` is invoked,
+THE SYSTEM SHALL launch Codex with
+`--dangerously-bypass-approvals-and-sandbox`.
+Test: tests/binary.rs (run_with_codex_uses_exec_json_and_status_contract)
 
 WHILE running inside the sandbox,
 THE SYSTEM SHALL inject credentials via environment variables, never by

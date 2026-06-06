@@ -2,6 +2,18 @@
 
 These instructions define how Coding Agents should assist with this project.
 
+## Factory workflow
+
+Use the factory to build the factory. For non-trivial code,
+documentation, skill, expertise, or behavior changes, follow the
+`build-in-the-factory` skill and go through the full run lifecycle:
+brief, behaviors, approach, plan, execution, review, and land.
+
+Do not implement substantial changes directly on `main`. Direct edits are
+acceptable only for small inspection, note-taking, or explicitly
+requested mechanical changes. Use `.factory/observations.md` to record
+future work and lessons, but use Factory runs for the actual build work.
+
 ## Commit messages
 
 ### Subject line

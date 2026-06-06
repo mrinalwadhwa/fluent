@@ -224,20 +224,20 @@ impl Coder for CodexCode {
 
 impl CodexCode {
     fn build_command(&self, working_dir: &Path, exec_mode: bool) -> Command {
-        let mut cmd = if let Some(ref profile) = self.sandbox_profile {
-            let mut cmd = Command::new("sandbox-exec");
-            cmd.args(["-f", profile]);
-            cmd.arg("codex");
-            cmd
-        } else {
-            Command::new("codex")
-        };
+        let mut cmd = Command::new("codex");
 
         if exec_mode {
             cmd.arg("exec");
         }
         cmd.args(["--cd", &working_dir.to_string_lossy()]);
-        cmd.args(["--dangerously-bypass-approvals-and-sandbox"]);
+        if self.sandbox_profile.is_some() {
+            cmd.args(["--sandbox", "workspace-write"]);
+            if exec_mode {
+                cmd.args(["--ask-for-approval", "never"]);
+            }
+        } else {
+            cmd.args(["--dangerously-bypass-approvals-and-sandbox"]);
+        }
         if let Some(model) = codex_model() {
             cmd.args(["--model", &model]);
         }

@@ -244,7 +244,11 @@ fn cmd_run_local(
 
     let author = coder_kind.boxed(Some(profile.path.to_string_lossy().to_string()));
 
-    session::run_session_loop(&*author, &config, &SandboxedHooks, coder_kind)?;
+    if coder_kind == CoderKind::Claude {
+        session::run_session_loop(&*author, &config, &SandboxedHooks, coder_kind)?;
+    } else {
+        session::run_session_loop(&*author, &config, &DefaultHooks, coder_kind)?;
+    }
     Ok(())
 }
 

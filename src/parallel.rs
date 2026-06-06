@@ -290,7 +290,7 @@ fn run_child(ctx: ChildContext) -> Result<()> {
     };
 
     let author = ctx.coder_kind.boxed(ctx.sandbox_profile.clone());
-    if ctx.sandbox_profile.is_some() {
+    if ctx.sandbox_profile.is_some() && ctx.coder_kind == CoderKind::Claude {
         session::run_session_loop(&*author, &config, &SandboxedHooks, ctx.coder_kind)
     } else {
         session::run_session_loop(&*author, &config, &DefaultHooks, ctx.coder_kind)

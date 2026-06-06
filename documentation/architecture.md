@@ -211,12 +211,24 @@ default for compatibility. Select Codex with `--coder codex` or
 run's `coder` file.
 
 Claude sessions use `claude -p --append-system-prompt` with stream-json
-output. Codex sessions use `codex exec --json --cd <worktree>` and
-receive the factory system prompt prepended to the session prompt because
-the Codex CLI has no Claude-style append-system-prompt flag.
+output. Sandboxed Claude sessions run inside the macOS Seatbelt profile
+that Factory renders for the worktree.
+
+Codex sessions use `codex exec --json --cd <worktree>` and receive the
+factory system prompt prepended to the session prompt because the Codex
+CLI has no Claude-style append-system-prompt flag. For sandboxed local
+runs, Factory passes its isolation decision to Codex as
+`--sandbox workspace-write --ask-for-approval never` instead of wrapping
+the Codex process in `sandbox-exec`. This gives the autonomous run one
+Codex-managed sandbox boundary. In bare mode, Codex runs with
+`--dangerously-bypass-approvals-and-sandbox`.
 
 Fargate currently supports only Claude because its container entrypoint
 and credential path remain Claude-specific.
+
+Sandboxed local Claude runs refresh Claude OAuth credentials outside the
+sandbox at session boundaries. Sandboxed local Codex runs do not use that
+Claude refresh hook.
 
 ### Author
 
@@ -279,11 +291,11 @@ Brave Search key). Token refresh at session boundaries.
 ### Local (bare)
 
 `factory run --no-sandbox` runs the session loop without Seatbelt
-sandboxing or credential refresh. A git worktree is still created when
-the directory is a git repo. Used on platforms without macOS sandbox
-support or when the agent is already isolated by other means. Claude
-runs with `--dangerously-skip-permissions`; Codex runs with
-`--dangerously-bypass-approvals-and-sandbox`.
+sandboxing, Codex sandboxing, or credential refresh. A git worktree is
+still created when the directory is a git repo. Used on platforms
+without local sandbox support or when the agent is already isolated by
+other means. Claude runs with `--dangerously-skip-permissions`; Codex
+runs with `--dangerously-bypass-approvals-and-sandbox`.
 
 ### Fargate
 

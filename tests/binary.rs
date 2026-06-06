@@ -1269,6 +1269,77 @@ exit 0
 }
 
 #[test]
+fn run_with_codex_uses_workspace_write_sandbox() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let run_id = "20260605-codex-sandbox-run";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("brief.md"), "# Brief\n\nRun Codex sandboxed\n").unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_codex(
+        &bin_dir,
+        r##"#!/bin/bash
+WORKING_DIR="$(pwd)"
+RUN_ID=$(ls "$WORKING_DIR/.factory/runs/" 2>/dev/null | head -1)
+RUN_DIR="$WORKING_DIR/.factory/runs/$RUN_ID"
+printf '%s\n' "$@" > "$RUN_DIR/codex-args"
+echo '{"type":"assistant","message":"codex sandboxed"}'
+echo "needs-user" > "$RUN_DIR/status"
+exit 0
+"##,
+    );
+
+    let _guard = worktree_guard(&main_dir, run_id);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["run", "--coder", "codex", "--run-id", run_id])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
+    let wt_run_dir = Path::new(wt_path_str.trim()).join(format!(".factory/runs/{run_id}"));
+    let args = fs::read_to_string(wt_run_dir.join("codex-args")).unwrap();
+
+    assert!(
+        args.lines().any(|line| line == "exec"),
+        "expected codex exec: {args}"
+    );
+    assert!(
+        args.lines().any(|line| line == "--json"),
+        "expected --json: {args}"
+    );
+    assert!(
+        args.lines().any(|line| line == "--sandbox")
+            && args.lines().any(|line| line == "workspace-write"),
+        "expected Codex workspace-write sandbox: {args}"
+    );
+    assert!(
+        args.lines().any(|line| line == "--ask-for-approval")
+            && args.lines().any(|line| line == "never"),
+        "expected Codex approval policy never: {args}"
+    );
+    assert!(
+        !args
+            .lines()
+            .any(|line| line == "--dangerously-bypass-approvals-and-sandbox"),
+        "sandboxed Codex run should not bypass sandboxing: {args}"
+    );
+
+    let transcript =
+        fs::read_to_string(wt_run_dir.join("sessions/session-1/transcript.jsonl")).unwrap();
+    assert!(
+        transcript.contains("codex sandboxed"),
+        "transcript should capture Codex JSON output: {transcript}"
+    );
+}
+
+#[test]
 fn run_unknown_coder_fails() {
     let tmp = TempDir::new().unwrap();
     fs::create_dir_all(tmp.path().join(".factory/runs")).unwrap();
