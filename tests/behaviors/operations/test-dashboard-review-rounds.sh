@@ -36,16 +36,94 @@ run_test() {
 capture_dashboard() {
   PROJECT_PATH="$1"
   RUN_ID="$2"
+  WAIT_FOR_TEXT="$3"
   OUTPUT_FILE="$(mktemp -t factory-dashboard-output-XXXXXX)"
 
-  (
-    sleep 1
-    printf 'q'
-  ) | FACTORY_DASH_BIN="$FACTORY_BIN" \
-      FACTORY_DASH_PROJECT="$PROJECT_PATH" \
-      FACTORY_DASH_RUN="$RUN_ID" \
-      TERM=xterm \
-      script -q "$OUTPUT_FILE" sh -c 'stty rows 30 cols 120; "$FACTORY_DASH_BIN" dashboard --run-id "$FACTORY_DASH_RUN" "$FACTORY_DASH_PROJECT"' >/dev/null 2>&1 || true
+  FACTORY_DASH_BIN="$FACTORY_BIN" \
+    FACTORY_DASH_PROJECT="$PROJECT_PATH" \
+    FACTORY_DASH_RUN="$RUN_ID" \
+    FACTORY_DASH_WAIT_FOR="$WAIT_FOR_TEXT" \
+    FACTORY_DASH_OUTPUT="$OUTPUT_FILE" \
+    python3 <<'PY'
+import os
+import pty
+import select
+import subprocess
+import sys
+import time
+import fcntl
+import struct
+import termios
+
+factory_bin = os.environ["FACTORY_DASH_BIN"]
+project_path = os.environ["FACTORY_DASH_PROJECT"]
+run_id = os.environ["FACTORY_DASH_RUN"]
+wait_for_text = os.environ["FACTORY_DASH_WAIT_FOR"]
+output_file = os.environ["FACTORY_DASH_OUTPUT"]
+
+master, slave = pty.openpty()
+fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 120, 0, 0))
+env = os.environ.copy()
+env["TERM"] = "xterm"
+proc = subprocess.Popen(
+    [factory_bin, "dashboard", "--run-id", run_id, project_path],
+    stdin=slave,
+    stdout=slave,
+    stderr=slave,
+    env=env,
+    close_fds=True,
+)
+os.close(slave)
+
+output = bytearray()
+deadline = time.time() + 8
+try:
+    while time.time() < deadline:
+        ready, _, _ = select.select([master], [], [], 0.05)
+        if ready:
+            try:
+                chunk = os.read(master, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            output.extend(chunk)
+        if wait_for_text.encode("utf-8") in output:
+            break
+    else:
+        print(
+            f"    FAIL: timed out waiting for {wait_for_text!r}",
+            file=sys.stderr,
+        )
+finally:
+    try:
+        os.write(master, b"q")
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    try:
+        while True:
+            ready, _, _ = select.select([master], [], [], 0)
+            if not ready:
+                break
+            chunk = os.read(master, 65536)
+            if not chunk:
+                break
+            output.extend(chunk)
+    except OSError:
+        pass
+    os.close(master)
+
+with open(output_file, "wb") as handle:
+    handle.write(output)
+
+if wait_for_text.encode("utf-8") not in output:
+    sys.exit(1)
+PY
 
   cat "$OUTPUT_FILE"
   rm -f "$OUTPUT_FILE"
@@ -70,7 +148,7 @@ test_reviewing_status_shows_active_work_before_transcripts() {
   printf 'reviewing' > "${TEST_DIR}/.factory/runs/reviewing-run/status"
   printf 'Reviewing brief' > "${TEST_DIR}/.factory/runs/reviewing-run/brief.md"
 
-  OUTPUT="$(capture_dashboard "$TEST_DIR" reviewing-run)"
+  OUTPUT="$(capture_dashboard "$TEST_DIR" reviewing-run "Reviewing")"
   CLEAN_OUTPUT="$(printf '%s' "$OUTPUT" | clean_dashboard_output)"
 
   RESULT=0
@@ -100,7 +178,7 @@ test_archived_reviews_do_not_drive_current_verdict() {
   write_review_artifacts "${RUN_DIR}/reviews/round-1" behaviors fail
   write_review_artifacts "${RUN_DIR}/reviews" behaviors pass
 
-  OUTPUT="$(capture_dashboard "$TEST_DIR" round-run)"
+  OUTPUT="$(capture_dashboard "$TEST_DIR" round-run "✓ behaviors")"
   CLEAN_OUTPUT="$(printf '%s' "$OUTPUT" | clean_dashboard_output)"
 
   RESULT=0
@@ -125,7 +203,7 @@ test_archived_transcripts_do_not_create_current_tabs() {
   printf 'Archived brief' > "${RUN_DIR}/brief.md"
   write_review_artifacts "${RUN_DIR}/reviews/round-1" behaviors fail
 
-  OUTPUT="$(capture_dashboard "$TEST_DIR" archived-run)"
+  OUTPUT="$(capture_dashboard "$TEST_DIR" archived-run "Reviewing")"
   CLEAN_OUTPUT="$(printf '%s' "$OUTPUT" | clean_dashboard_output)"
 
   RESULT=0
