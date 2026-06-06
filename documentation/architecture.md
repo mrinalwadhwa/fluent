@@ -305,9 +305,9 @@ worktree and source repository common git directory. Factory passes
 `--dangerously-bypass-approvals-and-sandbox` to Codex in this mode so
 Codex does not apply its own sandbox or pause for approvals inside the
 Factory sandbox. Factory also sets `SSL_CERT_FILE` for sandboxed Codex
-when the caller has not already set it, using a file-based CA bundle so
-Codex can connect without Keychain IPC. `FACTORY_CODEX_CA_BUNDLE`
-overrides the detected bundle path. In bare mode, Codex also runs with
+using a file-based CA bundle so Codex can connect without Keychain IPC.
+`FACTORY_CODEX_CA_BUNDLE` overrides the detected bundle path and any
+caller-provided `SSL_CERT_FILE`. In bare mode, Codex also runs with
 `--dangerously-bypass-approvals-and-sandbox`, but without
 `sandbox-exec`.
 

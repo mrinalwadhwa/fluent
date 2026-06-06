@@ -223,6 +223,38 @@ test_sandboxed_codex_uses_factory_seatbelt() {
   return $RESULT
 }
 
+test_sandboxed_codex_prefers_factory_ca_bundle() {
+  setup_test_project
+  create_planned_run "test-codex-factory-ca-bundle"
+  write_mock_codex
+  write_mock_sandbox_exec
+  write_mock_only_path_tools
+
+  SANDBOX_EXEC_LOG="${TEST_DIR}/sandbox-exec.log"
+  CODEX_CA_BUNDLE="${TEST_DIR}/codex-ca-bundle.pem"
+  CALLER_CA_BUNDLE="${TEST_DIR}/caller-ca-bundle.pem"
+  printf 'factory ca bundle' > "$CODEX_CA_BUNDLE"
+  printf 'caller ca bundle' > "$CALLER_CA_BUNDLE"
+  export SANDBOX_EXEC_LOG
+
+  SSL_CERT_FILE="$CALLER_CA_BUNDLE" FACTORY_CODEX_CA_BUNDLE="$CODEX_CA_BUNDLE" PATH="$MOCK_ONLY_PATH" \
+    "$FACTORY_BIN" run --coder codex \
+    --run-id "test-codex-factory-ca-bundle" > "${TEST_DIR}/factory.out" 2>&1 || true
+
+  RESULT=0
+  WT="$(find_worktree ".factory/runs/test-codex-factory-ca-bundle")"
+  if [ -z "$WT" ] || [ ! -f "${WT}/.codex-ssl-cert-file" ]; then
+    printf '    FAIL: mock codex did not record SSL_CERT_FILE\n'
+    RESULT=1
+  elif [ "$(cat "${WT}/.codex-ssl-cert-file")" != "$CODEX_CA_BUNDLE" ]; then
+    printf '    FAIL: sandboxed Codex used inherited SSL_CERT_FILE\n'
+    RESULT=1
+  fi
+
+  cleanup_test_project
+  return $RESULT
+}
+
 test_no_sandbox_codex_bypasses_approvals_and_sandbox() {
   setup_test_project
   create_planned_run "test-codex-no-sandbox"
@@ -379,6 +411,7 @@ fi
 printf 'test-codex-runtime\n\n'
 
 run_test "sandboxed codex uses factory seatbelt" test_sandboxed_codex_uses_factory_seatbelt
+run_test "sandboxed codex prefers factory ca bundle" test_sandboxed_codex_prefers_factory_ca_bundle
 run_test "no-sandbox codex bypasses approvals and sandbox" test_no_sandbox_codex_bypasses_approvals_and_sandbox
 run_test "codex does not run claude refresh hook" test_codex_does_not_run_claude_refresh_hook
 run_test "parallel codex does not run claude refresh hook" test_parallel_codex_does_not_run_claude_refresh_hook

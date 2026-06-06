@@ -10,6 +10,13 @@ the system does, not how. EARS format.
 | `tests/test-skill` | Skill conversation simulations | `tests/test-skill <scenario> <skill> [--judge]` |
 | `tests/test-run` | Operational assertions | `tests/test-run` |
 
+WHEN `tests/test-skill` completes a skill conversation simulation,
+THE HARNESS SHALL print the run directory and list `transcript.md` as
+the full conversation artifact. The harness SHALL list `brief.md` only
+when it extracted a captured artifact from the skill agent response, and
+SHALL list `verdict.md` only when the judge wrote scoring.
+Test: tests/behaviors/operations/test-skill-harness-artifacts.sh
+
 ---
 
 ## Version reporting
@@ -724,14 +731,21 @@ filesystem write access restricted to the run worktree and the source
 repository's common git directory.
 Test: tests/behaviors/operations/test-sandbox.sh (dry-run renders profile with workspace root, sandbox enforces filesystem boundary, sandbox blocks write outside workspace, sandboxed run uses sandbox-exec, sandboxed run can commit and blocks sibling write)
 
+WHEN the sandbox behavior suite starts on a host where `sandbox-exec`
+exists but cannot apply a minimal Seatbelt profile,
+THE SUITE SHALL fail with an explicit message that sandbox behavior
+coverage requires a working Seatbelt runtime.
+Test: tests/behaviors/operations/test-sandbox-prereq.sh
+
 WHEN `factory run --coder codex` is invoked with the sandboxed local runtime,
 THE SYSTEM SHALL launch Codex under `sandbox-exec` with Factory's
 Seatbelt profile, approval policy `never`, and the run worktree as
 `--cd`, while disabling Codex's own sandbox. The rendered profile SHALL
 include `common.sb` plus the Codex-specific `codex.sb` layer. The
 Codex process SHALL receive `SSL_CERT_FILE` for a file-based CA bundle
-when the caller has not already set it.
-Test: tests/behaviors/operations/test-codex-runtime.sh (sandboxed codex uses factory seatbelt), tests/behaviors/operations/test-codex-approval-flag.sh (approval-policy flag appears before exec)
+selected by Factory, even when the caller inherited a different
+`SSL_CERT_FILE`.
+Test: tests/behaviors/operations/test-codex-runtime.sh (sandboxed codex uses factory seatbelt, sandboxed codex prefers factory ca bundle), tests/behaviors/operations/test-codex-approval-flag.sh (approval-policy flag appears before exec)
 
 WHEN `factory run --coder codex --no-sandbox` is invoked,
 THE SYSTEM SHALL launch Codex with

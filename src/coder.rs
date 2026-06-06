@@ -261,10 +261,8 @@ impl CodexCode {
             let mut cmd = Command::new("sandbox-exec");
             cmd.args(["-f", profile]);
             cmd.arg("codex");
-            if std::env::var_os("SSL_CERT_FILE").is_none() {
-                if let Some(ca_bundle) = codex_ca_bundle() {
-                    cmd.env("SSL_CERT_FILE", ca_bundle);
-                }
+            if let Some(ca_bundle) = codex_ca_bundle() {
+                cmd.env("SSL_CERT_FILE", ca_bundle);
             }
             cmd
         } else {

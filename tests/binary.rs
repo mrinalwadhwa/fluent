@@ -2210,11 +2210,11 @@ exit 0
 }
 
 #[test]
-fn run_with_codex_preserves_caller_ssl_cert_file() {
+fn run_with_codex_prefers_factory_ca_bundle() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
 
-    let run_id = "20260606-codex-preserve-ssl-cert";
+    let run_id = "20260606-codex-factory-ca-bundle";
     let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
     fs::create_dir_all(&run_dir).unwrap();
     fs::write(run_dir.join("status"), "planned").unwrap();
@@ -2244,7 +2244,7 @@ fn run_with_codex_preserves_caller_ssl_cert_file() {
     let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
     let wt_run_dir = Path::new(wt_path_str.trim()).join(format!(".factory/runs/{run_id}"));
     let ssl_cert_file = fs::read_to_string(wt_run_dir.join("codex-ssl-cert-file")).unwrap();
-    assert_eq!(ssl_cert_file.trim(), caller_ca_bundle.to_string_lossy());
+    assert_eq!(ssl_cert_file.trim(), ca_bundle.to_string_lossy());
     assert!(
         sandbox_exec_log.exists(),
         "sandboxed Codex should be launched through sandbox-exec"
