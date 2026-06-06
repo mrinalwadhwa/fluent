@@ -10,6 +10,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
 use std::collections::BTreeSet;
+use std::fs::Metadata;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -32,6 +33,7 @@ struct AgentView {
     readers: Vec<TranscriptReader>,
     last_session: u32,
     status: String, // "running", "pass", "fail", "uncertain", ""
+    transcript_source: Option<TranscriptSource>,
 }
 
 impl AgentView {
@@ -43,6 +45,7 @@ impl AgentView {
             readers: Vec::new(),
             last_session: 0,
             status: String::new(),
+            transcript_source: None,
         }
     }
 
@@ -60,6 +63,64 @@ impl AgentView {
                     .extend(event.lines().into_iter().map(|l| strip_ansi(&l)));
             }
             self.events.extend(new_events);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TranscriptSource {
+    file_id: FileId,
+    len: u64,
+}
+
+impl TranscriptSource {
+    fn from_path(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        Some(Self {
+            file_id: FileId::from_metadata(&metadata),
+            len: metadata.len(),
+        })
+    }
+
+    fn still_current_for(&self, path: &Path) -> bool {
+        let Some(current) = Self::from_path(path) else {
+            return false;
+        };
+
+        current.file_id == self.file_id && current.len >= self.len
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileId {
+    dev: u64,
+    ino: u64,
+}
+
+#[cfg(unix)]
+impl FileId {
+    fn from_metadata(metadata: &Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+
+        Self {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        }
+    }
+}
+
+#[cfg(not(unix))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileId {
+    modified: Option<std::time::SystemTime>,
+}
+
+#[cfg(not(unix))]
+impl FileId {
+    fn from_metadata(metadata: &Metadata) -> Self {
+        Self {
+            modified: metadata.modified().ok(),
         }
     }
 }
@@ -175,6 +236,8 @@ impl RunView {
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().to_string();
                     if name.starts_with("transcript-") && name.ends_with(".jsonl") {
+                        let transcript_path = entry.path();
+                        let transcript_source = TranscriptSource::from_path(&transcript_path);
                         let reviewer = name
                             .strip_prefix("transcript-")
                             .and_then(|s| s.strip_suffix(".jsonl"))
@@ -183,27 +246,21 @@ impl RunView {
                         current_reviewers.insert(reviewer.clone());
 
                         // Add reviewer if not already tracked
-                        if !self.agents.iter().any(|a| a.name == reviewer) {
-                            let mut agent = AgentView::new(&reviewer);
-                            agent.readers.push(TranscriptReader::new(entry.path()));
-                            let review_file = reviews_dir.join(format!("review-{reviewer}.md"));
-                            if review_file.exists() {
-                                agent.status = verdict_status(&review_file);
+                        if let Some(agent) = self.agents.iter_mut().find(|a| a.name == reviewer) {
+                            if !agent_transcript_matches(agent, &transcript_path) {
+                                *agent =
+                                    reviewer_agent(&reviewer, &transcript_path, transcript_source);
+                                update_reviewer_status(agent, &reviews_dir, &reviewer);
                             } else {
-                                agent.status = "running".into();
+                                agent.transcript_source = transcript_source;
+                                update_reviewer_status(agent, &reviews_dir, &reviewer);
                             }
-                            self.agents.push(agent);
                         } else {
-                            // Re-evaluate status every poll cycle
-                            if let Some(agent) = self.agents.iter_mut().find(|a| a.name == reviewer)
-                            {
-                                let review_file = reviews_dir.join(format!("review-{reviewer}.md"));
-                                if review_file.exists() {
-                                    agent.status = verdict_status(&review_file);
-                                } else {
-                                    agent.status = "running".into();
-                                }
-                            }
+                            let mut agent = AgentView::new(&reviewer);
+                            agent.readers.push(TranscriptReader::new(transcript_path));
+                            agent.transcript_source = transcript_source;
+                            update_reviewer_status(&mut agent, &reviews_dir, &reviewer);
+                            self.agents.push(agent);
                         }
                     }
                 }
@@ -372,6 +429,39 @@ impl RunView {
 
     fn visible_lines(&self) -> &[String] {
         &self.current_agent().cached_lines
+    }
+}
+
+fn reviewer_agent(
+    reviewer: &str,
+    transcript_path: &Path,
+    transcript_source: Option<TranscriptSource>,
+) -> AgentView {
+    let mut agent = AgentView::new(reviewer);
+    agent
+        .readers
+        .push(TranscriptReader::new(transcript_path.to_path_buf()));
+    agent.transcript_source = transcript_source;
+    agent
+}
+
+fn agent_transcript_matches(agent: &AgentView, transcript_path: &Path) -> bool {
+    let Some(source) = &agent.transcript_source else {
+        return false;
+    };
+
+    agent
+        .readers
+        .iter()
+        .any(|reader| reader.path == transcript_path && source.still_current_for(transcript_path))
+}
+
+fn update_reviewer_status(agent: &mut AgentView, reviews_dir: &Path, reviewer: &str) {
+    let review_file = reviews_dir.join(format!("review-{reviewer}.md"));
+    if review_file.exists() {
+        agent.status = verdict_status(&review_file);
+    } else {
+        agent.status = "running".into();
     }
 }
 
@@ -1791,7 +1881,11 @@ mod tests {
         let reviews_dir = run_dir.join("reviews");
         fs::create_dir_all(&reviews_dir).unwrap();
 
-        fs::write(reviews_dir.join("transcript-behaviors.jsonl"), "{}").unwrap();
+        fs::write(
+            reviews_dir.join("transcript-behaviors.jsonl"),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"old round content"}]}}"#,
+        )
+        .unwrap();
         fs::write(
             reviews_dir.join("review-behaviors.md"),
             "Verdict: pass\n\nOld round.",
@@ -1817,6 +1911,13 @@ mod tests {
         assert_eq!(view.agents.len(), 2);
         assert_eq!(view.agents[1].name, "behaviors");
         assert_eq!(view.agents[1].status, "pass");
+        view.poll();
+        assert!(
+            view.agents[1]
+                .cached_lines
+                .iter()
+                .any(|line| line.contains("old round content"))
+        );
 
         let archive_dir = reviews_dir.join("round-1");
         fs::create_dir_all(&archive_dir).unwrap();
@@ -1835,11 +1936,27 @@ mod tests {
         assert_eq!(view.agents.len(), 1);
         assert_eq!(view.agents[0].name, "author");
 
-        fs::write(reviews_dir.join("transcript-behaviors.jsonl"), "{}").unwrap();
-        view.discover_agents();
+        fs::write(
+            reviews_dir.join("transcript-behaviors.jsonl"),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"new round content"}]}}"#,
+        )
+        .unwrap();
+        view.poll();
         assert_eq!(view.agents.len(), 2);
         assert_eq!(view.agents[1].name, "behaviors");
         assert_eq!(view.agents[1].status, "running");
+        assert!(
+            view.agents[1]
+                .cached_lines
+                .iter()
+                .any(|line| line.contains("new round content"))
+        );
+        assert!(
+            !view.agents[1]
+                .cached_lines
+                .iter()
+                .any(|line| line.contains("old round content"))
+        );
 
         fs::write(
             reviews_dir.join("review-behaviors.md"),
