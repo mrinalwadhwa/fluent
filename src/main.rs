@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::Parser;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -7,7 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 use factory::cli::{Cli, Commands};
-use factory::coder::CoderKind;
+use factory::coder::{CoderKind, CoderSandbox};
 use factory::content::ContentResolver;
 use factory::credential;
 use factory::dashboard;
@@ -150,8 +150,14 @@ fn cmd_interactive(
     credential::inject_credentials()?;
     credential::setup_git_signing();
 
-    let home = std::env::var("HOME").unwrap_or_default();
-    let profile = os::render_profile(resolver, &home, &sandbox_root.to_string_lossy())?;
+    let sandbox = match coder_kind {
+        CoderKind::Claude => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let profile = os::render_profile(resolver, &home, &sandbox_root.to_string_lossy())?;
+            CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string())
+        }
+        CoderKind::Codex => CoderSandbox::CodexWorkspaceWrite,
+    };
     let system_prompt = resolver
         .resolve_content("prompts/author.md")
         .unwrap_or_default();
@@ -159,7 +165,7 @@ fn cmd_interactive(
     eprintln!("  Factory           interactive session");
     eprintln!("  Sandbox root      {}", sandbox_root.display());
 
-    let author = coder_kind.boxed(Some(profile.path.to_string_lossy().to_string()));
+    let author = coder_kind.boxed(sandbox);
     author.run_interactive(&system_prompt, sandbox_root, extra_args)?;
     Ok(())
 }
@@ -184,12 +190,18 @@ fn cmd_run_local(
 
     // Check for a parallel plan
     if let Some(parsed_plan) = try_parse_parallel_plan(&run) {
-        let workspace_root = source_root
-            .parent()
-            .unwrap_or(source_root)
-            .to_string_lossy();
-        let home = std::env::var("HOME").unwrap_or_default();
-        let profile = os::render_profile(resolver, &home, &workspace_root)?;
+        let sandbox = match coder_kind {
+            CoderKind::Claude => {
+                let workspace_root = source_root
+                    .parent()
+                    .unwrap_or(source_root)
+                    .to_string_lossy();
+                let home = std::env::var("HOME").unwrap_or_default();
+                let profile = os::render_profile(resolver, &home, &workspace_root)?;
+                CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string())
+            }
+            CoderKind::Codex => CoderSandbox::CodexWorkspaceWrite,
+        };
         let system_prompt = resolver
             .resolve_content("prompts/author.md")
             .unwrap_or_default();
@@ -203,7 +215,7 @@ fn cmd_run_local(
             &system_prompt,
             extra_args,
             coder_kind,
-            Some(&profile.path.to_string_lossy()),
+            sandbox,
         );
     }
 
@@ -220,8 +232,14 @@ fn cmd_run_local(
         .parent()
         .unwrap_or(worktree_dir)
         .to_string_lossy();
-    let home = std::env::var("HOME").unwrap_or_default();
-    let profile = os::render_profile(resolver, &home, &sandbox_root)?;
+    let sandbox = match coder_kind {
+        CoderKind::Claude => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let profile = os::render_profile(resolver, &home, &sandbox_root)?;
+            CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string())
+        }
+        CoderKind::Codex => CoderSandbox::CodexWorkspaceWrite,
+    };
     let system_prompt = resolver
         .resolve_content("prompts/author.md")
         .unwrap_or_default();
@@ -242,7 +260,7 @@ fn cmd_run_local(
         resolver: ContentResolver::new(Some(worktree_dir)),
     };
 
-    let author = coder_kind.boxed(Some(profile.path.to_string_lossy().to_string()));
+    let author = coder_kind.boxed(sandbox);
 
     if coder_kind == CoderKind::Claude {
         session::run_session_loop(&*author, &config, &SandboxedHooks, coder_kind)?;
@@ -282,7 +300,7 @@ fn cmd_run_bare(
                 &system_prompt,
                 extra_args,
                 coder_kind,
-                None,
+                CoderSandbox::None,
             );
         }
     }
@@ -317,7 +335,7 @@ fn cmd_run_bare(
         resolver: ContentResolver::new(Some(&working_dir)),
     };
 
-    let author = coder_kind.boxed(None);
+    let author = coder_kind.boxed(CoderSandbox::None);
     session::run_session_loop(&*author, &config, &DefaultHooks, coder_kind)?;
     Ok(())
 }
@@ -464,15 +482,21 @@ fn cmd_resume(
     credential::inject_credentials()?;
     credential::setup_git_signing();
 
-    let home = std::env::var("HOME").unwrap_or_default();
-    let profile = os::render_profile(resolver, &home, &search_root.to_string_lossy())?;
+    let sandbox = match coder_kind {
+        CoderKind::Claude => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let profile = os::render_profile(resolver, &home, &search_root.to_string_lossy())?;
+            CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string())
+        }
+        CoderKind::Codex => CoderSandbox::CodexWorkspaceWrite,
+    };
     let system_prompt = resolver
         .resolve_content("prompts/author.md")
         .unwrap_or_default();
 
     eprintln!("  Factory           resume session (run: {})", run.id);
 
-    let author = coder_kind.boxed(Some(profile.path.to_string_lossy().to_string()));
+    let author = coder_kind.boxed(sandbox);
     author.run_interactive(&system_prompt, search_root, extra_args)?;
     Ok(())
 }

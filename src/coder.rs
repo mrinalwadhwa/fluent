@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -23,6 +23,14 @@ pub enum CoderKind {
     Codex,
 }
 
+/// Sandbox mode requested for the coder launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoderSandbox {
+    None,
+    SeatbeltProfile(String),
+    CodexWorkspaceWrite,
+}
+
 impl CoderKind {
     pub fn resolve(value: Option<&str>) -> Result<Self> {
         let value = value
@@ -44,15 +52,17 @@ impl CoderKind {
         }
     }
 
-    pub fn boxed(&self, sandbox_profile: Option<String>) -> Box<dyn Coder> {
+    pub fn boxed(&self, sandbox: CoderSandbox) -> Box<dyn Coder> {
         match self {
-            Self::Claude => match sandbox_profile {
-                Some(profile) => Box::new(SandboxedClaudeCode {
+            Self::Claude => match sandbox {
+                CoderSandbox::SeatbeltProfile(profile) => Box::new(SandboxedClaudeCode {
                     sandbox_profile: Some(profile),
                 }),
-                None => Box::new(BareClaudeCode),
+                _ => Box::new(BareClaudeCode),
             },
-            Self::Codex => Box::new(CodexCode { sandbox_profile }),
+            Self::Codex => Box::new(CodexCode {
+                sandboxed: matches!(sandbox, CoderSandbox::CodexWorkspaceWrite),
+            }),
         }
     }
 }
@@ -184,7 +194,7 @@ impl Coder for BareClaudeCode {
 
 /// OpenAI Codex CLI.
 pub struct CodexCode {
-    pub sandbox_profile: Option<String>,
+    pub sandboxed: bool,
 }
 
 impl Coder for CodexCode {
@@ -230,7 +240,7 @@ impl CodexCode {
             cmd.arg("exec");
         }
         cmd.args(["--cd", &working_dir.to_string_lossy()]);
-        if self.sandbox_profile.is_some() {
+        if self.sandboxed {
             cmd.args(["--sandbox", "workspace-write"]);
             if exec_mode {
                 cmd.args(["--ask-for-approval", "never"]);

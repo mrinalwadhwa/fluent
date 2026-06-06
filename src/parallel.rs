@@ -1,9 +1,9 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
 
-use crate::coder::CoderKind;
+use crate::coder::{CoderKind, CoderSandbox};
 use crate::content::ContentResolver;
 use crate::plan::Plan;
 use crate::run::{Run, RunStatus};
@@ -17,7 +17,7 @@ pub(crate) struct ChildContext {
     pub system_prompt: String,
     pub extra_args: Vec<String>,
     pub coder_kind: CoderKind,
-    pub sandbox_profile: Option<String>,
+    pub sandbox: CoderSandbox,
 }
 
 /// Tracking info kept by the orchestrator for each child.
@@ -40,7 +40,7 @@ pub fn run_parallel_plan(
     system_prompt: &str,
     extra_args: &[String],
     coder_kind: CoderKind,
-    sandbox_profile: Option<&str>,
+    sandbox: CoderSandbox,
 ) -> Result<()> {
     execute_plan(
         source_root,
@@ -49,7 +49,7 @@ pub fn run_parallel_plan(
         system_prompt,
         extra_args,
         coder_kind,
-        sandbox_profile,
+        sandbox,
         run_child,
     )
 }
@@ -62,7 +62,7 @@ fn execute_plan<F>(
     system_prompt: &str,
     extra_args: &[String],
     coder_kind: CoderKind,
-    sandbox_profile: Option<&str>,
+    sandbox: CoderSandbox,
     child_runner: F,
 ) -> Result<()>
 where
@@ -112,7 +112,7 @@ where
                     system_prompt,
                     extra_args,
                     coder_kind,
-                    sandbox_profile,
+                    sandbox.clone(),
                 )?;
                 all_child_ids.push(child_info.id.clone());
                 child_infos.push(child_info);
@@ -148,7 +148,7 @@ where
                     system_prompt,
                     extra_args,
                     coder_kind,
-                    sandbox_profile,
+                    sandbox.clone(),
                 )?;
                 all_child_ids.push(child_info.id.clone());
                 child_infos.push(child_info);
@@ -239,7 +239,7 @@ fn setup_child_step(
     system_prompt: &str,
     extra_args: &[String],
     coder_kind: CoderKind,
-    sandbox_profile: Option<&str>,
+    sandbox: CoderSandbox,
 ) -> Result<(ChildInfo, ChildContext)> {
     let step_num = step_index + 1;
     let child_id = format!("{}-{}-{}", parent_run.id, group_num, step_num);
@@ -268,7 +268,7 @@ fn setup_child_step(
         system_prompt: system_prompt.to_string(),
         extra_args: extra_args.to_vec(),
         coder_kind,
-        sandbox_profile: sandbox_profile.map(String::from),
+        sandbox,
     };
 
     Ok((info, ctx))
@@ -289,8 +289,10 @@ fn run_child(ctx: ChildContext) -> Result<()> {
         resolver: ContentResolver::new(Some(&ctx.worktree_dir)),
     };
 
-    let author = ctx.coder_kind.boxed(ctx.sandbox_profile.clone());
-    if ctx.sandbox_profile.is_some() && ctx.coder_kind == CoderKind::Claude {
+    let use_sandboxed_hooks = ctx.coder_kind == CoderKind::Claude
+        && matches!(ctx.sandbox, CoderSandbox::SeatbeltProfile(_));
+    let author = ctx.coder_kind.boxed(ctx.sandbox);
+    if use_sandboxed_hooks {
         session::run_session_loop(&*author, &config, &SandboxedHooks, ctx.coder_kind)
     } else {
         session::run_session_loop(&*author, &config, &DefaultHooks, ctx.coder_kind)
@@ -427,7 +429,7 @@ mod tests {
             "test",
             &[],
             CoderKind::Claude,
-            None,
+            CoderSandbox::None,
             mock_child_runner,
         );
 
@@ -472,7 +474,7 @@ mod tests {
             "test",
             &[],
             CoderKind::Claude,
-            None,
+            CoderSandbox::None,
             mock_child_runner,
         );
 
@@ -515,7 +517,7 @@ mod tests {
             "test",
             &[],
             CoderKind::Claude,
-            None,
+            CoderSandbox::None,
             mock_failing_runner,
         );
 
@@ -563,7 +565,7 @@ mod tests {
             "test",
             &[],
             CoderKind::Claude,
-            None,
+            CoderSandbox::None,
             mock_child_runner,
         );
         assert!(result.is_ok());
@@ -579,6 +581,47 @@ mod tests {
             fs::read_to_string(child2_dir.join("brief.md")).unwrap(),
             "# DB schema\n\nCreate users table."
         );
+    }
+
+    #[test]
+    fn test_parallel_codex_children_use_workspace_write_sandbox() {
+        let tmp = setup_git_project();
+        let main_dir = tmp.path().join("main");
+
+        let parent_id = "test-codex-sandbox";
+        let parent_dir = main_dir.join(format!(".factory/runs/{parent_id}"));
+        fs::create_dir_all(&parent_dir).unwrap();
+        fs::write(parent_dir.join("status"), "planned").unwrap();
+        fs::write(parent_dir.join("brief.md"), "Brief").unwrap();
+
+        let parent_run = Run {
+            id: parent_id.to_string(),
+            dir: parent_dir,
+        };
+
+        let plan = make_plan(vec![(true, vec![("Task A", "Do A."), ("Task B", "Do B.")])]);
+
+        let runner = |ctx: ChildContext| -> Result<()> {
+            assert_eq!(ctx.coder_kind, CoderKind::Codex);
+            assert_eq!(ctx.sandbox, CoderSandbox::CodexWorkspaceWrite);
+
+            let wt_run_dir = ctx.worktree_dir.join(format!(".factory/runs/{}", ctx.id));
+            fs::write(wt_run_dir.join("status"), "complete")?;
+            Ok(())
+        };
+
+        let result = execute_plan(
+            &main_dir,
+            &parent_run,
+            &plan,
+            "test",
+            &[],
+            CoderKind::Codex,
+            CoderSandbox::CodexWorkspaceWrite,
+            runner,
+        );
+
+        assert!(result.is_ok(), "Plan should succeed: {:?}", result.err());
     }
 
     #[test]
@@ -642,7 +685,7 @@ mod tests {
             "test",
             &[],
             CoderKind::Claude,
-            None,
+            CoderSandbox::None,
             runner,
         );
 
@@ -698,7 +741,7 @@ mod tests {
             "test",
             &[],
             CoderKind::Claude,
-            None,
+            CoderSandbox::None,
             runner,
         );
 
@@ -751,7 +794,7 @@ mod tests {
             "test",
             &[],
             CoderKind::Claude,
-            None,
+            CoderSandbox::None,
             runner,
         );
 
@@ -815,7 +858,7 @@ mod tests {
             "test",
             &[],
             CoderKind::Claude,
-            None,
+            CoderSandbox::None,
             runner,
         );
 
@@ -867,7 +910,7 @@ mod tests {
             "test",
             &[],
             CoderKind::Claude,
-            None,
+            CoderSandbox::None,
             runner,
         );
 
@@ -935,7 +978,7 @@ mod tests {
             "test",
             &[],
             CoderKind::Claude,
-            None,
+            CoderSandbox::None,
             runner,
         );
 

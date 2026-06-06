@@ -2,9 +2,9 @@ use anyhow::Result;
 use std::fs;
 use std::path::Path;
 
-use crate::coder::CoderKind;
-use crate::content::{prompt_section, ContentResolver};
-use crate::run::{project_root_from_run_dir, ReviewScope};
+use crate::coder::{CoderKind, CoderSandbox};
+use crate::content::{ContentResolver, prompt_section};
+use crate::run::{ReviewScope, project_root_from_run_dir};
 
 /// Reviewer names in execution order.
 pub const REVIEWERS: &[&str] = &[
@@ -54,7 +54,7 @@ pub fn run_single_reviewer(
 
     let transcript_path = run_dir.join(format!("reviews/transcript-{reviewer_name}.jsonl"));
 
-    let reviewer = coder_kind.boxed(None);
+    let reviewer = coder_kind.boxed(CoderSandbox::None);
     let exit_code = reviewer.run(
         review_prompt,
         system_prompt,

@@ -284,9 +284,11 @@ user can provide input or unblock the run.
 
 ### Local
 
-macOS Seatbelt sandbox. The factory command runs the session loop on the
-local machine. Credential injection from Keychain (OAuth token, AWS STS,
-Brave Search key). Token refresh at session boundaries.
+The factory command runs the session loop on the local machine. Claude
+runs inside a macOS Seatbelt sandbox and uses the Claude token refresh
+hook at session boundaries. Codex runs with `--sandbox workspace-write`
+and `--ask-for-approval never`; Factory does not wrap Codex in
+`sandbox-exec` or run the Claude refresh hook for Codex sessions.
 
 ### Local (bare)
 
