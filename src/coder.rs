@@ -16,6 +16,26 @@ fn codex_model() -> Option<String> {
     std::env::var("FACTORY_CODEX_MODEL").ok()
 }
 
+fn codex_ca_bundle() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("FACTORY_CODEX_CA_BUNDLE") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
+    [
+        "/opt/homebrew/etc/ca-certificates/cert.pem",
+        "/opt/homebrew/etc/openssl@3/cert.pem",
+        "/usr/local/etc/ca-certificates/cert.pem",
+        "/usr/local/etc/openssl@3/cert.pem",
+        "/etc/ssl/cert.pem",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .find(|path| path.is_file())
+}
+
 /// Which coding agent the factory should launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoderKind {
@@ -241,6 +261,11 @@ impl CodexCode {
             let mut cmd = Command::new("sandbox-exec");
             cmd.args(["-f", profile]);
             cmd.arg("codex");
+            if std::env::var_os("SSL_CERT_FILE").is_none() {
+                if let Some(ca_bundle) = codex_ca_bundle() {
+                    cmd.env("SSL_CERT_FILE", ca_bundle);
+                }
+            }
             cmd
         } else {
             Command::new("codex")

@@ -1327,6 +1327,7 @@ WORKING_DIR="$(pwd)"
 RUN_ID=$(ls "$WORKING_DIR/.factory/runs/" 2>/dev/null | head -1)
 RUN_DIR="$WORKING_DIR/.factory/runs/$RUN_ID"
 printf '%s\n' "$@" > "$RUN_DIR/codex-args"
+printf '%s\n' "${SSL_CERT_FILE:-}" > "$RUN_DIR/codex-ssl-cert-file"
 echo "codex sandbox commit" > codex-sandbox-commit.txt
 git add codex-sandbox-commit.txt > "$RUN_DIR/codex-commit-output" 2>&1
 git commit -m "Codex sandbox commit" >> "$RUN_DIR/codex-commit-output" 2>&1
@@ -1337,6 +1338,8 @@ exit 0
     );
     write_mock_sandbox_exec(&bin_dir);
     let sandbox_exec_log = tmp.path().join("sandbox-exec.log");
+    let ca_bundle = tmp.path().join("ca-bundle.pem");
+    fs::write(&ca_bundle, "test ca bundle").unwrap();
 
     let _guard = worktree_guard(&main_dir, run_id);
 
@@ -1345,12 +1348,15 @@ exit 0
         .args(["run", "--coder", "codex", "--run-id", run_id])
         .env("PATH", mock_path(&bin_dir))
         .env("SANDBOX_EXEC_LOG", &sandbox_exec_log)
+        .env("FACTORY_CODEX_CA_BUNDLE", &ca_bundle)
         .assert()
         .success();
 
     let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
     let wt_run_dir = Path::new(wt_path_str.trim()).join(format!(".factory/runs/{run_id}"));
     let args = fs::read_to_string(wt_run_dir.join("codex-args")).unwrap();
+    let ssl_cert_file = fs::read_to_string(wt_run_dir.join("codex-ssl-cert-file")).unwrap();
+    assert_eq!(ssl_cert_file.trim(), ca_bundle.to_string_lossy());
 
     assert!(
         args.lines().any(|line| line == "exec"),

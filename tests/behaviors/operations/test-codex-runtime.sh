@@ -69,6 +69,7 @@ write_mock_codex() {
   cat > "${MOCK_BIN}/codex" << 'MOCK_SCRIPT'
 #!/usr/bin/env bash
 printf '%s\n' "$*" > .codex-args
+printf '%s\n' "${SSL_CERT_FILE:-}" > .codex-ssl-cert-file
 echo "CODEX_LAUNCHED=1" > .codex-launched
 echo '{"type":"result","subtype":"success","result":"done","session_id":"mock"}'
 if [ -f .factory/active-run ]; then
@@ -186,9 +187,11 @@ test_sandboxed_codex_uses_factory_seatbelt() {
   write_mock_only_path_tools
 
   SANDBOX_EXEC_LOG="${TEST_DIR}/sandbox-exec.log"
+  CODEX_CA_BUNDLE="${TEST_DIR}/codex-ca-bundle.pem"
+  printf 'test ca bundle' > "$CODEX_CA_BUNDLE"
   export SANDBOX_EXEC_LOG
 
-  PATH="$MOCK_ONLY_PATH" "$FACTORY_BIN" run --coder codex \
+  FACTORY_CODEX_CA_BUNDLE="$CODEX_CA_BUNDLE" PATH="$MOCK_ONLY_PATH" "$FACTORY_BIN" run --coder codex \
     --run-id "test-codex-sandboxed" > "${TEST_DIR}/factory.out" 2>&1 || true
 
   RESULT=0
@@ -204,6 +207,10 @@ test_sandboxed_codex_uses_factory_seatbelt() {
     assert_not_contains "$ARGS" "--add-dir" || RESULT=1
     assert_contains "$ARGS" "--ask-for-approval never" || RESULT=1
     assert_before "$ARGS" "--ask-for-approval" "exec" || RESULT=1
+    if [ "$(cat "${WT}/.codex-ssl-cert-file")" != "$CODEX_CA_BUNDLE" ]; then
+      printf '    FAIL: sandboxed Codex did not receive SSL_CERT_FILE\n'
+      RESULT=1
+    fi
   fi
 
   if [ ! -f "$SANDBOX_EXEC_LOG" ]; then
