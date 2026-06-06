@@ -68,6 +68,21 @@ Maintain a linear commit history — never create merge commits.
 - Fast-forward merge only: `git merge --ff-only <branch>`
 - If the fast-forward fails, rebase the branch again and retry
 
+## Installing Factory
+
+When asked to install the local Factory binary, build the release binary
+and install it to the PATH-preferred user location:
+
+```bash
+cargo build --release
+install -m 0755 target/release/factory /Users/mrinal/.local/bin/factory
+factory version
+```
+
+Do not use `cargo install --path .` for this repository unless the user
+explicitly asks for it; that installs to Cargo's bin directory, while
+this environment resolves `/Users/mrinal/.local/bin/factory` first.
+
 ## Documentation
 
 - Don't create too many summary documents and markdown files.
