@@ -651,7 +651,7 @@ run_before_land = true
     }
 
     #[test]
-    fn test_parallel_codex_children_use_workspace_write_sandbox() {
+    fn test_parallel_codex_children_use_seatbelt_roots() {
         let tmp = setup_git_project();
         let main_dir = tmp.path().join("main");
 
@@ -674,7 +674,7 @@ run_before_land = true
             assert_eq!(ctx.coder_kind, CoderKind::Codex);
             assert_eq!(
                 ctx.sandbox,
-                CoderSandbox::CodexWorkspaceWrite {
+                CoderSandbox::SeatbeltRoots {
                     writable_roots: vec![expected_root.clone()],
                 }
             );
@@ -691,7 +691,7 @@ run_before_land = true
             "test",
             &[],
             CoderKind::Codex,
-            CoderSandbox::CodexWorkspaceWrite {
+            CoderSandbox::SeatbeltRoots {
                 writable_roots: vec![common_git_dir],
             },
             runner,

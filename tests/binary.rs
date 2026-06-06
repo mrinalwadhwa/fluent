@@ -300,6 +300,22 @@ fn write_mock_codex(bin_dir: &Path, script: &str) {
     }
 }
 
+fn write_mock_sandbox_exec(bin_dir: &Path) {
+    fs::create_dir_all(bin_dir).unwrap();
+
+    let sandbox_path = bin_dir.join("sandbox-exec");
+    fs::write(
+        &sandbox_path,
+        "#!/bin/bash\nprintf 'used' > \"${SANDBOX_EXEC_LOG:?}\"\nif [ \"$1\" = \"-f\" ]; then shift 2; fi\nexec \"$@\"\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&sandbox_path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
 struct WorktreeGuard {
     main_dir: std::path::PathBuf,
     run_id: String,
@@ -1205,7 +1221,6 @@ echo "needs-user" > "$RUN_DIR/status"
 exit 0
 "##,
     );
-
     let _guard = worktree_guard(&main_dir, run_id);
 
     factory_cmd()
@@ -1261,7 +1276,7 @@ exit 0
 }
 
 #[test]
-fn run_with_codex_uses_workspace_write_sandbox() {
+fn run_with_codex_uses_factory_seatbelt() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
 
@@ -1287,6 +1302,8 @@ echo "needs-user" > "$RUN_DIR/status"
 exit 0
 "##,
     );
+    write_mock_sandbox_exec(&bin_dir);
+    let sandbox_exec_log = tmp.path().join("sandbox-exec.log");
 
     let _guard = worktree_guard(&main_dir, run_id);
 
@@ -1294,6 +1311,7 @@ exit 0
         .current_dir(&main_dir)
         .args(["run", "--coder", "codex", "--run-id", run_id])
         .env("PATH", mock_path(&bin_dir))
+        .env("SANDBOX_EXEC_LOG", &sandbox_exec_log)
         .assert()
         .success();
 
@@ -1310,22 +1328,19 @@ exit 0
         "expected --json: {args}"
     );
     assert!(
-        args.lines().any(|line| line == "--sandbox")
-            && args.lines().any(|line| line == "workspace-write"),
-        "expected Codex workspace-write sandbox: {args}"
+        sandbox_exec_log.exists(),
+        "sandboxed Codex should be launched through sandbox-exec"
     );
-    let common_git_dir = std::process::Command::new("git")
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
-    let common_git_dir = String::from_utf8_lossy(&common_git_dir.stdout)
-        .trim()
-        .to_string();
     assert!(
-        args.lines().any(|line| line == "--add-dir")
-            && args.lines().any(|line| line == common_git_dir),
-        "expected Codex writable root to include common git dir: {args}"
+        args.lines()
+            .any(|line| line == "--dangerously-bypass-approvals-and-sandbox"),
+        "expected Codex to bypass its own sandbox under Factory Seatbelt: {args}"
+    );
+    assert!(
+        !args.lines().any(|line| line == "--sandbox")
+            && !args.lines().any(|line| line == "workspace-write")
+            && !args.lines().any(|line| line == "--add-dir"),
+        "sandboxed Codex should not use Codex workspace-write sandbox: {args}"
     );
     assert!(
         args.lines().any(|line| line == "--ask-for-approval")
@@ -1347,21 +1362,12 @@ exit 0
         "--ask-for-approval (pos {approval_pos}) must precede exec (pos {exec_pos}): {args}"
     );
 
-    // --sandbox is an exec subcommand option and must follow exec
-    let sandbox_pos = args
-        .lines()
-        .position(|line| line == "--sandbox")
-        .expect("--sandbox not found");
     assert!(
-        sandbox_pos > exec_pos,
-        "--sandbox (pos {sandbox_pos}) must follow exec (pos {exec_pos}): {args}"
-    );
-
-    assert!(
-        !args
-            .lines()
-            .any(|line| line == "--dangerously-bypass-approvals-and-sandbox"),
-        "sandboxed Codex run should not bypass sandboxing: {args}"
+        args.lines()
+            .position(|line| line == "--dangerously-bypass-approvals-and-sandbox")
+            .expect("bypass flag not found")
+            > exec_pos,
+        "bypass flag should be an exec option after exec: {args}"
     );
 
     let log = std::process::Command::new("git")

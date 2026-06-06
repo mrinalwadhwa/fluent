@@ -83,7 +83,10 @@ write_mock_sandbox_exec() {
   cat > "${MOCK_BIN}/sandbox-exec" << 'MOCK_SCRIPT'
 #!/usr/bin/env bash
 echo "SANDBOX_EXEC_USED=1" > "${SANDBOX_EXEC_LOG}"
-exit 97
+if [ "$1" = "-f" ]; then
+  shift 2
+fi
+exec "$@"
 MOCK_SCRIPT
   chmod +x "${MOCK_BIN}/sandbox-exec"
 }
@@ -175,10 +178,11 @@ run_test() {
   fi
 }
 
-test_sandboxed_codex_uses_workspace_write() {
+test_sandboxed_codex_uses_factory_seatbelt() {
   setup_test_project
   create_planned_run "test-codex-sandboxed"
   write_mock_codex
+  write_mock_sandbox_exec
   write_mock_only_path_tools
 
   SANDBOX_EXEC_LOG="${TEST_DIR}/sandbox-exec.log"
@@ -194,17 +198,16 @@ test_sandboxed_codex_uses_workspace_write() {
     RESULT=1
   else
     ARGS="$(cat "${WT}/.codex-args")"
-    EXPECTED_ROOT="$(git -C "${TEST_DIR}/project" rev-parse --path-format=absolute --git-common-dir)"
     assert_contains "$ARGS" "exec" || RESULT=1
-    assert_contains "$ARGS" "--sandbox workspace-write" || RESULT=1
-    assert_contains "$ARGS" "--add-dir $EXPECTED_ROOT" || RESULT=1
+    assert_contains "$ARGS" "--dangerously-bypass-approvals-and-sandbox" || RESULT=1
+    assert_not_contains "$ARGS" "--sandbox workspace-write" || RESULT=1
+    assert_not_contains "$ARGS" "--add-dir" || RESULT=1
     assert_contains "$ARGS" "--ask-for-approval never" || RESULT=1
     assert_before "$ARGS" "--ask-for-approval" "exec" || RESULT=1
-    assert_not_contains "$ARGS" "--dangerously-bypass-approvals-and-sandbox" || RESULT=1
   fi
 
-  if [ -f "$SANDBOX_EXEC_LOG" ]; then
-    printf '    FAIL: sandbox-exec was used for sandboxed Codex\n'
+  if [ ! -f "$SANDBOX_EXEC_LOG" ]; then
+    printf '    FAIL: sandbox-exec was not used for sandboxed Codex\n'
     RESULT=1
   fi
 
@@ -248,9 +251,12 @@ test_codex_does_not_run_claude_refresh_hook() {
   setup_test_project
   create_planned_run "test-codex-no-claude-hook"
   write_mock_codex
+  write_mock_sandbox_exec
   write_mock_claude_refresh_probe
 
+  SANDBOX_EXEC_LOG="${TEST_DIR}/sandbox-exec.log"
   CLAUDE_REFRESH_PROBE_FILE="${TEST_DIR}/claude-refresh.log"
+  export SANDBOX_EXEC_LOG
   export CLAUDE_REFRESH_PROBE_FILE
 
   PATH="${MOCK_BIN}:${PATH}" "$FACTORY_BIN" run --coder codex \
@@ -304,13 +310,12 @@ PLAN
     printf '    FAIL: mock codex did not run for parallel children\n'
     RESULT=1
   else
-    EXPECTED_ROOT="$(git -C "${TEST_DIR}/project" rev-parse --path-format=absolute --git-common-dir)"
     assert_contains "$CHILD_ARGS" "exec" || RESULT=1
-    assert_contains "$CHILD_ARGS" "--sandbox workspace-write" || RESULT=1
-    assert_contains "$CHILD_ARGS" "--add-dir $EXPECTED_ROOT" || RESULT=1
+    assert_contains "$CHILD_ARGS" "--dangerously-bypass-approvals-and-sandbox" || RESULT=1
+    assert_not_contains "$CHILD_ARGS" "--sandbox workspace-write" || RESULT=1
+    assert_not_contains "$CHILD_ARGS" "--add-dir" || RESULT=1
     assert_contains "$CHILD_ARGS" "--ask-for-approval never" || RESULT=1
     assert_before "$CHILD_ARGS" "--ask-for-approval" "exec" || RESULT=1
-    assert_not_contains "$CHILD_ARGS" "--dangerously-bypass-approvals-and-sandbox" || RESULT=1
   fi
 
   if [ -f "$CLAUDE_REFRESH_PROBE_FILE" ]; then
@@ -318,8 +323,8 @@ PLAN
     RESULT=1
   fi
 
-  if [ -f "$SANDBOX_EXEC_LOG" ]; then
-    printf '    FAIL: sandbox-exec was used for parallel sandboxed Codex\n'
+  if [ ! -f "$SANDBOX_EXEC_LOG" ]; then
+    printf '    FAIL: sandbox-exec was not used for parallel sandboxed Codex\n'
     RESULT=1
   fi
 
@@ -365,7 +370,7 @@ fi
 
 printf 'test-codex-runtime\n\n'
 
-run_test "sandboxed codex uses workspace-write" test_sandboxed_codex_uses_workspace_write
+run_test "sandboxed codex uses factory seatbelt" test_sandboxed_codex_uses_factory_seatbelt
 run_test "no-sandbox codex bypasses approvals and sandbox" test_no_sandbox_codex_bypasses_approvals_and_sandbox
 run_test "codex does not run claude refresh hook" test_codex_does_not_run_claude_refresh_hook
 run_test "parallel codex does not run claude refresh hook" test_parallel_codex_does_not_run_claude_refresh_hook

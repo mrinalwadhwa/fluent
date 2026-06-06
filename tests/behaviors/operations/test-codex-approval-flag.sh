@@ -78,6 +78,17 @@ MOCK_SCRIPT
   chmod +x "${MOCK_BIN}/codex"
 }
 
+write_mock_sandbox_exec() {
+  cat > "${MOCK_BIN}/sandbox-exec" << 'MOCK_SCRIPT'
+#!/usr/bin/env bash
+if [ "$1" = "-f" ]; then
+  shift 2
+fi
+exec "$@"
+MOCK_SCRIPT
+  chmod +x "${MOCK_BIN}/sandbox-exec"
+}
+
 write_mock_only_path_tools() {
   TOOL_BIN="${TEST_DIR}/tools"
   mkdir -p "$TOOL_BIN"
@@ -111,6 +122,7 @@ test_approval_flag_before_exec() {
   setup_test_project
   create_planned_run "test-approval-order"
   write_mock_codex
+  write_mock_sandbox_exec
   write_mock_only_path_tools
 
   PATH="$MOCK_ONLY_PATH" "$FACTORY_BIN" run --coder codex \

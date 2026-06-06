@@ -265,6 +265,10 @@ _SANDBOX_ROOT_RULES_
 (allow file-read*  (subpath "_HOME_/.claude"))
 (allow file-write* (subpath "_HOME_/.claude"))
 
+;; Codex configuration, auth, sessions, and cache
+(allow file-read*  (subpath "_HOME_/.codex"))
+(allow file-write* (subpath "_HOME_/.codex"))
+
 ;; agent-browser daemon socket directory
 (allow file-read*  (subpath "_HOME_/.agent-browser"))
 (allow file-write* (subpath "_HOME_/.agent-browser"))

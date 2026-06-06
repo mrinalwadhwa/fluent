@@ -596,11 +596,10 @@ repository's common git directory.
 Test: tests/behaviors/operations/test-sandbox.sh (dry-run renders profile with workspace root, sandbox enforces filesystem boundary, sandbox blocks write outside workspace, sandboxed run uses sandbox-exec, sandboxed run can commit and blocks sibling write)
 
 WHEN `factory run --coder codex` is invoked with the sandboxed local runtime,
-THE SYSTEM SHALL launch Codex with the `workspace-write` sandbox and
-approval policy `never`, using the run worktree as `--cd` and the
-source repository's common git directory as an added writable directory
-so linked worktree git metadata is writable.
-Test: tests/behaviors/operations/test-codex-runtime.sh (sandboxed codex uses workspace-write), tests/behaviors/operations/test-codex-approval-flag.sh (approval-policy flag appears before exec)
+THE SYSTEM SHALL launch Codex under `sandbox-exec` with Factory's
+Seatbelt profile, approval policy `never`, and the run worktree as
+`--cd`, while disabling Codex's own sandbox.
+Test: tests/behaviors/operations/test-codex-runtime.sh (sandboxed codex uses factory seatbelt), tests/behaviors/operations/test-codex-approval-flag.sh (approval-policy flag appears before exec)
 
 WHEN `factory run --coder codex --no-sandbox` is invoked,
 THE SYSTEM SHALL launch Codex with

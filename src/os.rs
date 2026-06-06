@@ -91,7 +91,8 @@ pub fn check_prerequisites() -> Result<()> {
 
 /// Check that sandbox prerequisites and the selected coder are available.
 pub fn check_prerequisites_for(coder_kind: CoderKind) -> Result<()> {
-    if coder_kind == CoderKind::Claude && !command_exists("sandbox-exec") {
+    if matches!(coder_kind, CoderKind::Claude | CoderKind::Codex) && !command_exists("sandbox-exec")
+    {
         bail!("sandbox-exec not found (macOS only)");
     }
     let command = coder_kind.as_str();

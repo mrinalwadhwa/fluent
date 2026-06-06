@@ -539,12 +539,14 @@ fn build_coder_sandbox(
             let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
             Ok((sandbox, Some(profile)))
         }
-        CoderKind::Codex => Ok((
-            CoderSandbox::CodexWorkspaceWrite {
-                writable_roots: additional_writable_roots.to_vec(),
-            },
-            None,
-        )),
+        CoderKind::Codex => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let mut roots = vec![working_dir.to_path_buf()];
+            roots.extend(additional_writable_roots.iter().cloned());
+            let profile = os::render_profile_for_roots(resolver, &home, &roots)?;
+            let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
+            Ok((sandbox, Some(profile)))
+        }
     }
 }
 
@@ -553,10 +555,7 @@ fn build_parallel_coder_sandbox(
     additional_writable_roots: Vec<PathBuf>,
 ) -> CoderSandbox {
     match coder_kind {
-        CoderKind::Claude => CoderSandbox::SeatbeltRoots {
-            writable_roots: additional_writable_roots,
-        },
-        CoderKind::Codex => CoderSandbox::CodexWorkspaceWrite {
+        CoderKind::Claude | CoderKind::Codex => CoderSandbox::SeatbeltRoots {
             writable_roots: additional_writable_roots,
         },
     }

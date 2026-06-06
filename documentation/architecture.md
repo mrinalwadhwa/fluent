@@ -264,13 +264,14 @@ Codex sessions use `codex --ask-for-approval never exec --json --cd <worktree>`
 and receive the factory system prompt prepended to the session prompt
 because the Codex CLI has no Claude-style append-system-prompt flag.
 `--ask-for-approval` is a top-level Codex option and must appear before
-`exec`. For sandboxed local runs, Factory also passes
-`--sandbox workspace-write` and `--add-dir <common-git-dir>` as exec
-subcommand options instead of wrapping the Codex process in
-`sandbox-exec`. The worktree remains Codex's working root, while the
-source repository's common git directory is writable so linked worktrees
-can update branch, index, and worktree metadata. In bare mode, Codex
-runs with `--dangerously-bypass-approvals-and-sandbox`.
+`exec`. Sandboxed local Codex runs are wrapped by Factory's macOS
+Seatbelt profile with the same writable roots as Claude: the run
+worktree and source repository common git directory. Factory passes
+`--dangerously-bypass-approvals-and-sandbox` to Codex in this mode so
+Codex does not apply its own sandbox or pause for approvals inside the
+Factory sandbox. In bare mode, Codex also runs with
+`--dangerously-bypass-approvals-and-sandbox`, but without
+`sandbox-exec`.
 
 Fargate currently supports only Claude because its container entrypoint
 and credential path remain Claude-specific.
@@ -344,10 +345,9 @@ user can provide input or unblock the run.
 ### Local
 
 The factory command runs the session loop on the local machine. Claude
-runs inside a macOS Seatbelt sandbox and uses the Claude token refresh
-hook at session boundaries. Codex runs with `--sandbox workspace-write`
-and `--ask-for-approval never`; Factory does not wrap Codex in
-`sandbox-exec` or run the Claude refresh hook for Codex sessions.
+and Codex run inside a macOS Seatbelt sandbox rendered by Factory.
+Claude uses the Claude token refresh hook at session boundaries; Codex
+does not.
 
 ### Local (bare)
 

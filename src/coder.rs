@@ -29,7 +29,6 @@ pub enum CoderSandbox {
     None,
     SeatbeltProfile(String),
     SeatbeltRoots { writable_roots: Vec<PathBuf> },
-    CodexWorkspaceWrite { writable_roots: Vec<PathBuf> },
 }
 
 impl CoderKind {
@@ -62,10 +61,9 @@ impl CoderKind {
                 _ => Box::new(BareClaudeCode),
             },
             Self::Codex => Box::new(CodexCode {
-                sandboxed: matches!(sandbox, CoderSandbox::CodexWorkspaceWrite { .. }),
-                writable_roots: match sandbox {
-                    CoderSandbox::CodexWorkspaceWrite { writable_roots } => writable_roots,
-                    _ => Vec::new(),
+                sandbox_profile: match &sandbox {
+                    CoderSandbox::SeatbeltProfile(profile) => Some(profile.clone()),
+                    _ => None,
                 },
             }),
         }
@@ -199,8 +197,7 @@ impl Coder for BareClaudeCode {
 
 /// OpenAI Codex CLI.
 pub struct CodexCode {
-    pub sandboxed: bool,
-    pub writable_roots: Vec<PathBuf>,
+    pub sandbox_profile: Option<String>,
 }
 
 impl Coder for CodexCode {
@@ -240,22 +237,26 @@ impl Coder for CodexCode {
 
 impl CodexCode {
     fn build_command(&self, working_dir: &Path, exec_mode: bool) -> Command {
-        let mut cmd = Command::new("codex");
+        let mut cmd = if let Some(profile) = &self.sandbox_profile {
+            let mut cmd = Command::new("sandbox-exec");
+            cmd.args(["-f", profile]);
+            cmd.arg("codex");
+            cmd
+        } else {
+            Command::new("codex")
+        };
 
         // --ask-for-approval is a top-level option, not an exec subcommand
         // option, so it must appear before the `exec` subcommand.
-        if self.sandboxed && exec_mode {
+        if self.sandbox_profile.is_some() && exec_mode {
             cmd.args(["--ask-for-approval", "never"]);
         }
         if exec_mode {
             cmd.arg("exec");
         }
         cmd.args(["--cd", &working_dir.to_string_lossy()]);
-        if self.sandboxed {
-            cmd.args(["--sandbox", "workspace-write"]);
-            for root in &self.writable_roots {
-                cmd.args(["--add-dir", &root.to_string_lossy()]);
-            }
+        if self.sandbox_profile.is_some() {
+            cmd.args(["--dangerously-bypass-approvals-and-sandbox"]);
         } else {
             cmd.args(["--dangerously-bypass-approvals-and-sandbox"]);
         }
