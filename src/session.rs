@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
@@ -194,10 +195,21 @@ pub fn run_session_loop(
                         "  Max review rounds ({}) reached — accepting current state.",
                         MAX_REVIEW_ROUNDS
                     );
-                    run.set_status(&RunStatus::Complete)?;
-                    report::generate_report(run_dir, &run.id, session_count)?;
-                    eprintln!("\n  Run {} completed (review limit).", run.id);
-                    break;
+                    if complete_or_continue_dirty(
+                        run,
+                        &config.working_dir,
+                        "Review limit reached, but the worktree still has uncommitted changes.",
+                    )? {
+                        report::generate_report(run_dir, &run.id, session_count)?;
+                        eprintln!("\n  Run {} completed (review limit).", run.id);
+                        break;
+                    }
+                    prompt = format!(
+                        "Review limit reached, but the worktree still has uncommitted changes. Read the handoff at .factory/runs/{}/handoff.md and commit or resolve them before completing.",
+                        run.id
+                    );
+                    hooks.sleep(Duration::from_secs(2));
+                    continue;
                 }
                 let review_start = std::time::Instant::now();
                 let all_pass = review::run_reviews(
@@ -225,10 +237,23 @@ pub fn run_session_loop(
                     )?;
                 }
                 if all_pass {
-                    run.set_status(&RunStatus::Complete)?;
-                    report::generate_report(run_dir, &run.id, session_count)?;
-                    eprintln!("\n  Run {} completed.", run.id);
-                    break;
+                    if complete_or_continue_dirty(
+                        run,
+                        &config.working_dir,
+                        "Reviews passed, but the worktree still has uncommitted changes.",
+                    )? {
+                        report::generate_report(run_dir, &run.id, session_count)?;
+                        eprintln!("\n  Run {} completed.", run.id);
+                        break;
+                    }
+                    eprintln!(
+                        "  Reviews passed, but uncommitted changes remain — restarting author..."
+                    );
+                    prompt = format!(
+                        "Reviews passed, but the worktree still has uncommitted changes. Read the handoff at .factory/runs/{}/handoff.md and commit or resolve them before completing.",
+                        run.id
+                    );
+                    hooks.sleep(Duration::from_secs(2));
                 } else {
                     eprintln!("  Review returned findings — restarting author...");
                     run.set_status(&RunStatus::Executing)?;
@@ -280,36 +305,130 @@ pub fn run_session_loop(
     Ok(())
 }
 
+fn complete_or_continue_dirty(run: &Run, working_dir: &Path, reason: &str) -> Result<bool> {
+    if has_dirty_worktree(working_dir) {
+        write_dirty_handoff(run, working_dir, reason)?;
+        run.set_status(&RunStatus::Executing)?;
+        Ok(false)
+    } else {
+        run.set_status(&RunStatus::Complete)?;
+        Ok(true)
+    }
+}
+
+fn write_dirty_handoff(run: &Run, working_dir: &Path, reason: &str) -> Result<()> {
+    let status = git_status_porcelain(working_dir).unwrap_or_else(|| {
+        "Unable to read git status; assume uncommitted changes remain.".to_string()
+    });
+    let mut file = fs::File::create(run.dir.join("handoff.md"))?;
+    writeln!(file, "## Run {}", run.id)?;
+    writeln!(
+        file,
+        "Brief: Resolve uncommitted completed work before landing."
+    )?;
+    writeln!(file, "Status: executing")?;
+    writeln!(file)?;
+    writeln!(file, "### Completed")?;
+    writeln!(file, "- {reason}")?;
+    writeln!(
+        file,
+        "- Reviews have already run for the dirty worktree state."
+    )?;
+    writeln!(file)?;
+    writeln!(file, "### In progress")?;
+    writeln!(
+        file,
+        "- Commit, revert, or intentionally ignore the remaining worktree changes."
+    )?;
+    writeln!(file)?;
+    writeln!(file, "### Open questions")?;
+    writeln!(file, "- None.")?;
+    writeln!(file)?;
+    writeln!(file, "### Next steps")?;
+    writeln!(file, "- Run `git status --short` in the worktree.")?;
+    writeln!(
+        file,
+        "- Make the worktree clean before writing `complete` again."
+    )?;
+    if !status.trim().is_empty() {
+        writeln!(file)?;
+        writeln!(file, "Current git status:")?;
+        writeln!(file)?;
+        writeln!(file, "```")?;
+        write!(file, "{status}")?;
+        if !status.ends_with('\n') {
+            writeln!(file)?;
+        }
+        writeln!(file, "```")?;
+    }
+    Ok(())
+}
+
 /// ISO 8601 UTC timestamp for log entries.
 fn now_iso() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
-/// Check whether the worktree has commits beyond the source branch.
-/// Only detects committed differences — uncommitted or staged changes are
-/// invisible. This is intentional: agents are expected to commit before
-/// writing status "complete".
+/// Check whether the worktree has committed or uncommitted changes.
+///
+/// Dirty worktrees must count as changed so completed author work cannot
+/// bypass review just because it has not been committed yet.
 fn has_changes(working_dir: &Path, run_dir: &Path) -> bool {
     let source_branch = match fs::read_to_string(run_dir.join("source-branch")) {
         Ok(b) => b.trim().to_string(),
         Err(_) => return true, // assume changes if we can't tell
     };
-    let output = std::process::Command::new("git")
+    let committed_diff = std::process::Command::new("git")
         .args(["diff", "--quiet", &format!("{source_branch}..HEAD")])
         .current_dir(working_dir)
         .status();
-    match output {
-        Ok(status) => !status.success(), // exit 1 = has differences
-        Err(_) => true,                  // assume changes if git fails
+
+    match committed_diff {
+        Ok(status) if !status.success() => return true,
+        Ok(_) => {}
+        Err(_) => return true, // assume changes if git fails
+    }
+
+    has_dirty_worktree(working_dir)
+}
+
+fn has_dirty_worktree(working_dir: &Path) -> bool {
+    match git_status_porcelain(working_dir) {
+        Some(status) => !status.is_empty(),
+        None => true,
+    }
+}
+
+fn git_status_porcelain(working_dir: &Path) -> Option<String> {
+    let worktree_status = std::process::Command::new("git")
+        .args([
+            "status",
+            "--porcelain",
+            "--untracked-files=normal",
+            "--",
+            ".",
+            ":(exclude).factory",
+        ])
+        .current_dir(working_dir)
+        .output();
+
+    match worktree_status {
+        Ok(output) if output.status.success() => {
+            Some(String::from_utf8_lossy(&output.stdout).to_string())
+        }
+        Ok(_) | Err(_) => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+    use std::ffi::OsString;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex, OnceLock};
     use tempfile::TempDir;
 
     /// Mock author that calls a handler to determine exit code and writes status.
@@ -370,6 +489,36 @@ mod tests {
         fn sleep(&self, _duration: Duration) {}
     }
 
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    struct PathGuard {
+        previous: Option<OsString>,
+    }
+
+    impl Drop for PathGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.previous.take() {
+                    Some(path) => env::set_var("PATH", path),
+                    None => env::remove_var("PATH"),
+                }
+            }
+        }
+    }
+
+    fn prepend_path(path: &Path) -> PathGuard {
+        let previous = env::var_os("PATH");
+        let mut paths = vec![path.to_path_buf()];
+        if let Some(existing) = previous.clone() {
+            paths.extend(env::split_paths(&existing));
+        }
+        let joined = env::join_paths(paths).unwrap();
+        unsafe {
+            env::set_var("PATH", joined);
+        }
+        PathGuard { previous }
+    }
+
     /// No-op review runner for tests that don't need real reviews.
     fn setup_test_run() -> (TempDir, Run) {
         let tmp = TempDir::new().unwrap();
@@ -394,6 +543,191 @@ mod tests {
             extra_args: vec![],
             resolver: ContentResolver::new(None),
         }
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed:\nstdout: {}\nstderr: {}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn setup_change_detection_repo() -> (TempDir, PathBuf, PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "commit.gpgsign", "false"]);
+        run_git(&repo, &["config", "user.email", "test@test"]);
+        run_git(&repo, &["config", "user.name", "test"]);
+
+        fs::write(repo.join(".gitignore"), "ignored.txt\n").unwrap();
+        fs::write(repo.join("tracked.txt"), "base\n").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "init"]);
+
+        let run_dir = repo.join(".factory/runs/test-run");
+        fs::create_dir_all(&run_dir).unwrap();
+        fs::write(run_dir.join("source-branch"), "main").unwrap();
+        run_git(&repo, &["checkout", "-b", "test-run"]);
+
+        (tmp, repo, run_dir)
+    }
+
+    #[test]
+    fn has_changes_returns_false_for_clean_worktree() {
+        let (_tmp, repo, run_dir) = setup_change_detection_repo();
+
+        assert!(!has_changes(&repo, &run_dir));
+    }
+
+    #[test]
+    fn has_changes_detects_committed_diff() {
+        let (_tmp, repo, run_dir) = setup_change_detection_repo();
+        fs::write(repo.join("committed.txt"), "change\n").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "change"]);
+
+        assert!(has_changes(&repo, &run_dir));
+    }
+
+    #[test]
+    fn has_changes_detects_unstaged_tracked_change() {
+        let (_tmp, repo, run_dir) = setup_change_detection_repo();
+        fs::write(repo.join("tracked.txt"), "dirty\n").unwrap();
+
+        assert!(has_changes(&repo, &run_dir));
+    }
+
+    #[test]
+    fn has_changes_detects_staged_change() {
+        let (_tmp, repo, run_dir) = setup_change_detection_repo();
+        fs::write(repo.join("staged.txt"), "staged\n").unwrap();
+        run_git(&repo, &["add", "staged.txt"]);
+
+        assert!(has_changes(&repo, &run_dir));
+    }
+
+    #[test]
+    fn has_changes_detects_untracked_file() {
+        let (_tmp, repo, run_dir) = setup_change_detection_repo();
+        fs::write(repo.join("untracked.txt"), "untracked\n").unwrap();
+
+        assert!(has_changes(&repo, &run_dir));
+    }
+
+    #[test]
+    fn has_changes_ignores_ignored_files() {
+        let (_tmp, repo, run_dir) = setup_change_detection_repo();
+        fs::write(repo.join("ignored.txt"), "ignored\n").unwrap();
+
+        assert!(!has_changes(&repo, &run_dir));
+    }
+
+    #[test]
+    fn has_changes_ignores_factory_run_state() {
+        let (_tmp, repo, run_dir) = setup_change_detection_repo();
+        fs::write(run_dir.join("report.md"), "run state\n").unwrap();
+
+        assert!(!has_changes(&repo, &run_dir));
+    }
+
+    #[test]
+    fn complete_or_continue_dirty_keeps_review_limit_dirty_run_executing() {
+        let (_tmp, repo, run_dir) = setup_change_detection_repo();
+        let run = Run {
+            id: "test-run".to_string(),
+            dir: run_dir,
+        };
+        fs::write(repo.join("tracked.txt"), "dirty\n").unwrap();
+
+        let completed = complete_or_continue_dirty(
+            &run,
+            &repo,
+            "Review limit reached, but the worktree still has uncommitted changes.",
+        )
+        .unwrap();
+
+        assert!(!completed);
+        assert_eq!(run.status().unwrap(), RunStatus::Executing);
+        let handoff = fs::read_to_string(run.dir.join("handoff.md")).unwrap();
+        assert!(handoff.contains("Review limit reached"));
+        assert!(handoff.contains("tracked.txt"));
+    }
+
+    #[test]
+    fn test_loop_review_limit_dirty_worktree_restarts_author() {
+        let _env_guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let (_tmp, repo, run_dir) = setup_change_detection_repo();
+        fs::write(run_dir.join("brief.md"), "Test brief").unwrap();
+        fs::write(run_dir.join("status"), "planned").unwrap();
+        fs::write(run_dir.join("reviewers"), "tests").unwrap();
+        let run = Run {
+            id: "test-run".to_string(),
+            dir: run_dir,
+        };
+
+        let bin_dir = repo.join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let fake_claude = bin_dir.join("claude");
+        fs::write(
+            &fake_claude,
+            "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p .factory/runs/test-run/reviews\nprintf 'Verdict: fail\\n\\nAlways failing.\\n' > .factory/runs/test-run/reviews/review-tests.md\nprintf '{\"type\":\"result\"}\\n'\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_claude).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_claude, permissions).unwrap();
+        let _path_guard = prepend_path(&bin_dir);
+
+        let run_dir = run.dir.clone();
+        let repo_for_author = repo.clone();
+        let saw_limit_prompt = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let saw_limit_prompt_for_author = saw_limit_prompt.clone();
+        let author = TestAgent::new(move |prompt: &str, n: u32, _: &Path| {
+            if prompt.contains("Review limit reached") {
+                saw_limit_prompt_for_author.store(true, Ordering::SeqCst);
+                assert_eq!(
+                    fs::read_to_string(run_dir.join("status")).unwrap(),
+                    "executing"
+                );
+                assert!(run_dir.join("handoff.md").exists());
+                fs::write(run_dir.join("status"), "needs-user").unwrap();
+                return 0;
+            }
+
+            if n == 1 {
+                fs::write(repo_for_author.join("tracked.txt"), "dirty\n").unwrap();
+            }
+            fs::write(run_dir.join("status"), "complete").unwrap();
+            0
+        });
+
+        let config = SessionConfig {
+            run: run.clone(),
+            system_prompt: "test".to_string(),
+            working_dir: repo,
+            extra_args: vec![],
+            resolver: ContentResolver::new(None),
+        };
+        run_session_loop(&author, &config, &NoopHooks, CoderKind::Claude).unwrap();
+
+        assert!(saw_limit_prompt.load(Ordering::SeqCst));
+        assert_eq!(
+            author.call_count.load(Ordering::SeqCst),
+            MAX_REVIEW_ROUNDS + 2
+        );
+        let handoff = fs::read_to_string(run.dir.join("handoff.md")).unwrap();
+        assert!(handoff.contains("Review limit reached"));
+        assert!(handoff.contains("tracked.txt"));
     }
 
     #[test]

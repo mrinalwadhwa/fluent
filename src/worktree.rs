@@ -158,6 +158,12 @@ pub fn land_run(source_root: &Path, run_id: &str, run_dir: &Path) -> Result<()> 
         copy_run_artifacts(&wt_run_dir, run_dir)?;
     }
 
+    if worktree_is_dirty(&worktree_dir)? {
+        bail!(
+            "Cannot land run with uncommitted worktree changes. Commit, revert, or ignore them before landing."
+        );
+    }
+
     // Read source branch before removing the worktree
     let main_branch = fs::read_to_string(run_dir.join("source-branch"))
         .map(|s| s.trim().to_string())
@@ -261,6 +267,30 @@ fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn worktree_is_dirty(worktree_dir: &Path) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["-C", &worktree_dir.to_string_lossy()])
+        .args([
+            "status",
+            "--porcelain",
+            "--untracked-files=normal",
+            "--",
+            ".",
+            ":(exclude).factory",
+        ])
+        .output()
+        .context("Failed to check worktree status before landing")?;
+
+    if !output.status.success() {
+        bail!(
+            "Failed to check worktree status before landing:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    Ok(!output.stdout.is_empty())
 }
 
 #[cfg(test)]

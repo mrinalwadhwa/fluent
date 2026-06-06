@@ -135,10 +135,16 @@ while run is not complete:
     author writes handoff.md + status file
     write session metadata to sessions.log
     if status is complete:
+        if no committed, staged, unstaged tracked, or untracked changes exist
+           and no explicit review scope exists: set status to complete, stop
         set status to reviewing
         run review phase (all reviewers in parallel)
-        if all pass: set status to complete, stop
-        else: set status to executing, restart with findings
+        if all pass and worktree is clean outside .factory:
+            set status to complete, stop
+        else if all pass and worktree is dirty outside .factory:
+            write handoff.md, set status to executing, restart
+        else:
+            set status to executing, restart with findings
     if terminal status (needs-user, failed): stop
     if executing: restart
     if rate-limited: wait 5 minutes, restart
@@ -196,10 +202,24 @@ Reviewers examine either the run's changes or the full codebase:
 - `ReviewScope::Full` — review the entire codebase. Used by review-mode
   runs.
 
-When a run-scoped review triggers but no code has changed (the diff is
-empty) and no explicit scope file was provided, the review phase is
-skipped entirely. This avoids wasting reviewer sessions on runs that
-only modified run state files.
+When a run-scoped review triggers but no code has changed and no
+explicit scope file was provided, the review phase is skipped entirely.
+Factory treats the run as changed when the run branch has committed
+differences from the source branch, or when `git status --porcelain`
+reports staged changes, unstaged tracked changes, or untracked
+non-ignored files outside `.factory` in the run worktree. This avoids
+wasting reviewer sessions on runs that only modified run state files
+while still reviewing dirty author output.
+
+An author-session run can only finish as `complete` with a clean
+worktree. If reviewers pass while staged, unstaged, or untracked
+non-ignored files remain, the session loop writes a handoff and moves
+the run back to `executing` so the next author session can commit,
+revert, or intentionally ignore the remaining work. Review-only runs
+complete after reviewers finish because they do not launch an author to
+modify the worktree. The landing path also rejects dirty completed
+worktrees before removing them, so uncommitted author output is not
+discarded during land.
 
 ## Agents
 
@@ -262,14 +282,24 @@ The author escalates to `needs-user` only when genuinely stuck.
 
 ### Review phase
 
-The session loop triggers a review phase when the author sets status to
-`complete`. Reviewers run in parallel, each producing an artifact in
+The session loop evaluates review eligibility when the author sets
+status to `complete`. It skips run-scoped reviews only when the user did
+not request an explicit review scope and the run worktree has no
+committed, staged, unstaged, or untracked non-ignored changes. Otherwise
+reviewers run in parallel, each producing an artifact in
 `.factory/runs/[run-id]/reviews/`. The loop parses each reviewer's
 verdict:
 
-- All pass: the run completes.
+- All pass: the run completes only if the worktree is clean; if
+  uncommitted changes remain outside `.factory`, the loop writes a
+  handoff, sets status back to `executing`, and restarts the author to
+  resolve them.
 - Any fail or uncertain: status resets to `executing`, the author
   restarts with instructions to read and address the review findings.
+
+If the run exceeds the review-round limit, the loop accepts the current
+review state with the same clean-worktree guard: clean work completes,
+while uncommitted work receives a handoff and returns to `executing`.
 
 Review runs (mode=review) produce findings only. Reviewers run with
 full-codebase scope. Their findings are written to the reviews/

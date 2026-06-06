@@ -1602,6 +1602,25 @@ fn run_skips_reviews_when_no_code_changed() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
 
+    fs::write(main_dir.join(".gitignore"), ".factory/*\n").unwrap();
+    let prompts_dir = main_dir.join("prompts");
+    fs::create_dir_all(&prompts_dir).unwrap();
+    fs::write(
+        prompts_dir.join("review-tests.md"),
+        "[system]\nReviewer.\n[changes]\nReview.\n[full]\nReview all.\n",
+    )
+    .unwrap();
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(&main_dir)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "add test fixtures"])
+        .current_dir(&main_dir)
+        .output()
+        .unwrap();
+
     let run_id = "20260515-skip-review";
     let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
     fs::create_dir_all(&run_dir).unwrap();
@@ -1621,15 +1640,6 @@ exit 0
 "##,
     );
 
-    // Create review prompt so reviewers would run if not skipped
-    let prompts_dir = main_dir.join("prompts");
-    fs::create_dir_all(&prompts_dir).unwrap();
-    fs::write(
-        prompts_dir.join("review-tests.md"),
-        "[system]\nReviewer.\n[changes]\nReview.\n[full]\nReview all.\n",
-    )
-    .unwrap();
-
     let _guard = worktree_guard(&main_dir, run_id);
 
     factory_cmd()
@@ -1647,6 +1657,93 @@ exit 0
     assert!(
         !wt_run_dir.join("reviews/review-tests.md").exists(),
         "reviewer should not have run"
+    );
+}
+
+#[test]
+fn run_reviews_when_complete_worktree_is_dirty() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    fs::write(main_dir.join(".gitignore"), ".factory/*\n").unwrap();
+    let prompts_dir = main_dir.join("prompts");
+    fs::create_dir_all(&prompts_dir).unwrap();
+    fs::write(
+        prompts_dir.join("review-tests.md"),
+        "[system]\nReviewer.\n[changes]\nReview.\n[full]\nReview all.\n",
+    )
+    .unwrap();
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(&main_dir)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "add test fixtures"])
+        .current_dir(&main_dir)
+        .output()
+        .unwrap();
+
+    let run_id = "20260515-dirty-review";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("brief.md"), "# Brief\n\nDirty run\n").unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+WORKING_DIR="$(pwd)"
+RUN_ID=$(ls "$WORKING_DIR/.factory/runs/" 2>/dev/null | head -1)
+echo '{"type":"result"}'
+if [ ! -f "$WORKING_DIR/.factory/runs/$RUN_ID/authored" ]; then
+  echo "dirty work" > "$WORKING_DIR/dirty.txt"
+  touch "$WORKING_DIR/.factory/runs/$RUN_ID/authored"
+elif [ -f "$WORKING_DIR/.factory/runs/$RUN_ID/handoff.md" ]; then
+  git -C "$WORKING_DIR" add dirty.txt
+  git -C "$WORKING_DIR" commit -m "Add dirty work"
+fi
+echo "complete" > "$WORKING_DIR/.factory/runs/$RUN_ID/status"
+exit 0
+"##,
+    );
+
+    let _guard = worktree_guard(&main_dir, run_id);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["run", "--no-sandbox", "--run-id", run_id])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Review phase"))
+        .stderr(predicate::str::contains("No code changes").not());
+
+    let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
+    let wt_path = Path::new(wt_path_str.trim());
+    assert!(
+        wt_path.join("dirty.txt").exists(),
+        "dirty author work should remain in the worktree after it is committed"
+    );
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=normal"])
+        .current_dir(wt_path)
+        .output()
+        .unwrap();
+    assert!(
+        status.stdout.is_empty(),
+        "worktree should be clean after completion: {}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+    let log = std::process::Command::new("git")
+        .args(["log", "--oneline", "-3"])
+        .current_dir(wt_path)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&log.stdout).contains("Add dirty work"),
+        "dirty author work should be committed before completion"
     );
 }
 
@@ -1795,6 +1892,29 @@ fn land_rejects_non_complete_run() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("expected 'complete'"));
+}
+
+#[test]
+fn land_rejects_dirty_completed_worktree() {
+    let tmp = TempDir::new().unwrap();
+    let (main_dir, run_id) = setup_completed_run(&tmp);
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
+    let wt_path = Path::new(wt_path_str.trim());
+
+    fs::write(wt_path.join("leftover.txt"), "uncommitted\n").unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["land", &run_id])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("uncommitted worktree changes"));
+
+    assert!(
+        wt_path.join("leftover.txt").exists(),
+        "landing failure should preserve dirty worktree content"
+    );
 }
 
 #[test]

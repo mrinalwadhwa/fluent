@@ -206,11 +206,15 @@ Test: src/run.rs (resolve run-id tests), tests/binary.rs (run-id resolution test
 
 WHEN the author sets status to `complete`,
 THE SYSTEM SHALL set status to `reviewing`, run all reviewers in parallel,
-and restore status to `complete` if all pass or `executing` if any fail.
+and restore status to `complete` if all pass or `executing` if any fail,
+unless the run qualifies for the no-change skip or still has dirty
+worktree content after passing review.
 Test: tests/behaviors/operations/test-review-phase.sh (complete with passing reviews stops loop, review failure restarts author), tests/behaviors/operations/test-reviewing-status.sh (status is reviewing while reviewers run, status transitions to complete when all pass, status is executing before author restarts on failure)
 
 WHEN all reviewers return verdict `pass`,
-THE SYSTEM SHALL accept the run as complete and stop the loop.
+THE SYSTEM SHALL accept the run as complete and stop the loop when the
+run worktree has no tracked changes, staged changes, or untracked
+non-ignored files outside `.factory`.
 Test: tests/behaviors/operations/test-review-phase.sh (all reviewers pass returns zero, complete with passing reviews stops loop)
 
 WHEN any reviewer returns verdict `fail` or `uncertain`,
@@ -243,17 +247,31 @@ Test: tests/behaviors/operations/test-watch-timeout.sh (watch exits on timeout),
 
 ## Skip reviews when no changes
 
-WHEN the review phase triggers but the run has no code changes (empty diff)
-and no explicit scope file was provided,
+WHEN the review phase triggers but the run has no committed changes, no
+tracked worktree changes, no staged changes, no untracked non-ignored
+files, and no explicit scope file was provided,
 THE SYSTEM SHALL skip the review phase entirely and accept the run as
 complete.
 Test: tests/binary.rs (run_skips_reviews_when_no_code_changed)
+
+WHEN the author sets status to `complete` and the run worktree has
+tracked changes, staged changes, or untracked non-ignored files,
+THE SYSTEM SHALL treat the run as changed and enter the review phase.
+Test: src/session.rs (has_changes tests)
+
+WHEN reviewers pass for a completed run but the run worktree still has
+tracked changes, staged changes, or untracked non-ignored files outside
+`.factory`,
+THE SYSTEM SHALL write a handoff, set status to `executing`, and require
+the author to make the worktree clean before final completion.
+Test: tests/binary.rs (run_reviews_when_complete_worktree_is_dirty)
 
 ## Review round limit
 
 IF the review-fix cycle has run 10 times,
 THEN THE SYSTEM SHALL accept the current state, generate a report, and
-complete the run.
+complete the run when the worktree has no tracked changes, staged
+changes, or untracked non-ignored files outside `.factory`.
 Test: tests/behaviors/operations/test-review-round-limit.sh (review round limit completes after 10 cycles)
 
 ## Parent death detection
@@ -280,6 +298,11 @@ WHEN `factory land` is invoked and any review has verdict `fail`,
 `uncertain`, or is missing a verdict line,
 THE SYSTEM SHALL refuse and exit non-zero.
 Test: tests/behaviors/operations/test-land.sh (land rejects fail review verdict, land rejects uncertain review verdict), tests/binary.rs (land_rejects_failed_reviews)
+
+WHEN `factory land` is invoked and the run worktree has tracked changes,
+staged changes, or untracked non-ignored files outside `.factory`,
+THE SYSTEM SHALL refuse and exit non-zero.
+Test: tests/binary.rs (land_rejects_dirty_completed_worktree)
 
 WHEN `factory land` completes successfully,
 THE SYSTEM SHALL copy sessions/, sessions.log, reviews/, report.md, and
