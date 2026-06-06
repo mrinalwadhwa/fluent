@@ -12,6 +12,13 @@ the system does, not how. EARS format.
 
 ---
 
+## Version reporting
+
+WHEN `factory version` is invoked,
+THE SYSTEM SHALL print the Factory package version and build commit to
+stdout and exit successfully without requiring a Factory project.
+Test: tests/binary.rs (version_prints_package_version_and_commit)
+
 ## Brief capture
 
 WHEN the user invokes the capture-brief skill,

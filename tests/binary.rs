@@ -9,6 +9,35 @@ fn factory_cmd() -> Command {
 }
 
 #[test]
+fn version_prints_package_version_and_commit() {
+    let tmp = TempDir::new().unwrap();
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .arg("version")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "version failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stderr, b"");
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let fields = stdout.trim_end().split(' ').collect::<Vec<_>>();
+    assert_eq!(fields.len(), 3, "version output should have three fields");
+    assert_eq!(fields[0], "factory");
+    assert_eq!(fields[1], env!("CARGO_PKG_VERSION"));
+    assert!(
+        fields[2] == "unknown" || fields[2].chars().all(|ch| ch.is_ascii_hexdigit()),
+        "commit should be a short hex id or unknown: {stdout}"
+    );
+}
+
+#[test]
 fn dry_run_with_codex_uses_codex_profile_layer() {
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");

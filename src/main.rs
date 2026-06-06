@@ -18,6 +18,7 @@ use factory::parallel;
 use factory::plan;
 use factory::run::{self, Run};
 use factory::session::{self, DefaultHooks, SandboxedHooks, SessionConfig};
+use factory::version;
 use factory::worktree;
 
 fn main() -> Result<()> {
@@ -136,6 +137,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Land { run_id }) => {
             cmd_land(&cwd, run_id.as_deref())?;
+        }
+        Some(Commands::Version) => {
+            println!("{}", version::version_string());
         }
         None => {
             let coder_kind = CoderKind::resolve(cli.coder.as_deref())?;

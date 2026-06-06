@@ -22,6 +22,7 @@ from intent capture through execution and review across multiple sessions.
 │  Factory command                                │
 │  factory run / status / pull / shell / watch    │
 │  factory resume / init / dashboard / land       │
+│  factory version                                │
 │  Deterministic, operational                     │
 └─────────────────────────────────────────────────┘
 ```
@@ -242,6 +243,19 @@ complete after reviewers finish because they do not launch an author to
 modify the worktree. The landing path also rejects dirty completed
 worktrees before removing them, so uncommitted author output is not
 discarded during land.
+
+## Version Metadata
+
+`factory version` prints a single line:
+
+```sh
+factory 0.1.0 abc1234
+```
+
+The first field is the package version from `Cargo.toml`. The second
+field is the short Git commit captured by `build.rs` when Cargo builds
+the binary. If Git is unavailable at build time, Factory prints
+`unknown` in the commit field.
 
 ## Agents
 

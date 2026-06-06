@@ -124,4 +124,7 @@ pub enum Commands {
         /// Run ID to land (default: most recent complete run)
         run_id: Option<String>,
     },
+
+    /// Print Factory version and build commit
+    Version,
 }

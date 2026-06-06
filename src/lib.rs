@@ -15,4 +15,5 @@ pub mod review;
 pub mod run;
 pub mod session;
 pub mod transcript;
+pub mod version;
 pub mod worktree;
