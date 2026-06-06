@@ -214,12 +214,13 @@ Claude sessions use `claude -p --append-system-prompt` with stream-json
 output. Sandboxed Claude sessions run inside the macOS Seatbelt profile
 that Factory renders for the worktree.
 
-Codex sessions use `codex exec --json --cd <worktree>` and receive the
-factory system prompt prepended to the session prompt because the Codex
-CLI has no Claude-style append-system-prompt flag. For sandboxed local
-runs, Factory passes its isolation decision to Codex as
-`--sandbox workspace-write --ask-for-approval never` instead of wrapping
-the Codex process in `sandbox-exec`. This gives the autonomous run one
+Codex sessions use `codex --ask-for-approval never exec --json --cd <worktree>`
+and receive the factory system prompt prepended to the session prompt
+because the Codex CLI has no Claude-style append-system-prompt flag.
+`--ask-for-approval` is a top-level Codex option and must appear before
+`exec`. For sandboxed local runs, Factory also passes
+`--sandbox workspace-write` (an exec subcommand option) instead of
+wrapping the Codex process in `sandbox-exec`. This gives the autonomous run one
 Codex-managed sandbox boundary. In bare mode, Codex runs with
 `--dangerously-bypass-approvals-and-sandbox`.
 

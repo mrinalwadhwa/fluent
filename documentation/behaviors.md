@@ -518,10 +518,10 @@ filesystem access restricted to the workspace root.
 Test: tests/behaviors/operations/test-sandbox.sh (dry-run renders profile with workspace root, sandbox enforces filesystem boundary, sandbox blocks write outside workspace, sandboxed run uses sandbox-exec)
 
 WHEN `factory run --coder codex` is invoked with the sandboxed local runtime,
-THE SYSTEM SHALL launch Codex with its `workspace-write` sandbox and
-approval policy `never`, without wrapping the Codex process in
-`sandbox-exec`.
-Test: tests/binary.rs (run_with_codex_uses_workspace_write_sandbox)
+THE SYSTEM SHALL launch Codex with the `workspace-write` sandbox and
+approval policy `never` using command-line arguments accepted by the
+installed Codex CLI.
+Test: tests/behaviors/operations/test-codex-runtime.sh (sandboxed codex uses workspace-write), tests/behaviors/operations/test-codex-approval-flag.sh (approval-policy flag appears before exec)
 
 WHEN `factory run --coder codex --no-sandbox` is invoked,
 THE SYSTEM SHALL launch Codex with
