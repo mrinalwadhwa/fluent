@@ -124,9 +124,9 @@ Test: src/session.rs (test_loop_creates_session_transcript_dir), tests/binary.rs
 
 WHEN a review round fails and a new round starts,
 THE SYSTEM SHALL archive previous review artifacts to `reviews/round-N/`
-before running new reviews. Review files are copied; transcript files
-are moved.
-Test: src/review.rs (test_archive_previous_round_copies_reviews, test_archive_previous_round_noop_for_first_round), tests/binary.rs (run_archives_review_rounds), tests/behaviors/operations/test-observability.sh
+before running new reviews. Review files and transcript files are moved,
+leaving top-level `reviews/` artifacts for the current round only.
+Test: src/review.rs (test_archive_previous_round_moves_reviews, test_archive_previous_round_noop_for_first_round), tests/binary.rs (run_archives_review_rounds), tests/behaviors/operations/test-observability.sh
 
 WHEN a reviewer runs,
 THE SYSTEM SHALL capture its stream-json output to
@@ -497,6 +497,13 @@ THE SYSTEM SHALL show each reviewer as an agent tab displaying a status
 symbol and color: ✓ (Green) for pass, ✗ (Red) for fail, ? (Yellow) for
 uncertain, ⟳ (Cyan) for running.
 
+WHEN a new review round starts,
+THE SYSTEM SHALL derive current reviewer tabs and verdicts only from
+top-level `reviews/transcript-*.jsonl` and `reviews/review-*.md`
+artifacts. Archived `reviews/round-N/` artifacts shall not create
+reviewer tabs or current verdicts.
+Test: dashboard::tests::test_discover_agents_resets_archived_review_round_verdicts, tests/behaviors/operations/test-dashboard-review-rounds.sh (archived reviews do not drive current verdict, archived transcripts do not create current tabs)
+
 WHILE a run is actively executing (author or reviewers running),
 THE SYSTEM SHALL show a visual indicator that distinguishes "active"
 from "idle" at a glance.
@@ -514,8 +521,9 @@ Test: dashboard::tests::test_agent_tab_shows_verdict_immediately, dashboard::tes
 WHEN the dashboard is displayed,
 THE SYSTEM SHALL show a phase label that accurately describes what is
 happening right now (executing, reviewing, complete, failed, needs input,
-rate-limited, planned). The `reviewing` phase shows a spinner.
-Test: dashboard::tests::test_header_reviewing_shows_progress, dashboard::tests::test_header_complete_no_spinner, dashboard::tests::test_header_failed_no_spinner, dashboard::tests::test_compute_phase_needs_user, dashboard::tests::test_compute_phase_rate_limited, dashboard::tests::test_header_rate_limited_shows_spinner, dashboard::tests::test_compute_phase_planned, tests/behaviors/operations/test-dashboard-activity.sh (no crash when run has failed, no crash when run needs user input, no crash with mixed run states)
+rate-limited, planned). The `reviewing` phase shows a spinner, including
+before reviewer transcripts exist.
+Test: dashboard::tests::test_header_reviewing_shows_progress, dashboard::tests::test_header_complete_no_spinner, dashboard::tests::test_header_failed_no_spinner, dashboard::tests::test_compute_phase_needs_user, dashboard::tests::test_compute_phase_rate_limited, dashboard::tests::test_header_rate_limited_shows_spinner, dashboard::tests::test_compute_phase_planned, tests/behaviors/operations/test-dashboard-activity.sh (no crash when run has failed, no crash when run needs user input, no crash with mixed run states), tests/behaviors/operations/test-dashboard-review-rounds.sh (reviewing status shows active work before transcripts)
 
 ### Dashboard layout
 

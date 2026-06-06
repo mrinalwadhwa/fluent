@@ -186,9 +186,8 @@ impl RunView {
                         if !self.agents.iter().any(|a| a.name == reviewer) {
                             let mut agent = AgentView::new(&reviewer);
                             agent.readers.push(TranscriptReader::new(entry.path()));
-                            // Check for verdict
                             let review_file = reviews_dir.join(format!("review-{reviewer}.md"));
-                            if current_round_review_exists(&reviews_dir, &review_file) {
+                            if review_file.exists() {
                                 agent.status = verdict_status(&review_file);
                             } else {
                                 agent.status = "running".into();
@@ -199,7 +198,7 @@ impl RunView {
                             if let Some(agent) = self.agents.iter_mut().find(|a| a.name == reviewer)
                             {
                                 let review_file = reviews_dir.join(format!("review-{reviewer}.md"));
-                                if current_round_review_exists(&reviews_dir, &review_file) {
+                                if review_file.exists() {
                                     agent.status = verdict_status(&review_file);
                                 } else {
                                     agent.status = "running".into();
@@ -614,59 +613,6 @@ fn verdict_status(review_file: &Path) -> String {
         review::Verdict::Fail => "fail".into(),
         review::Verdict::Uncertain => "uncertain".into(),
     }
-}
-
-fn current_round_review_exists(reviews_dir: &Path, review_file: &Path) -> bool {
-    if !review_file.exists() {
-        return false;
-    }
-
-    let Some(file_name) = review_file.file_name() else {
-        return true;
-    };
-    let Some(archive_file) = latest_archived_review_file(reviews_dir, file_name) else {
-        return true;
-    };
-
-    let Ok(review_modified) = review_file
-        .metadata()
-        .and_then(|metadata| metadata.modified())
-    else {
-        return true;
-    };
-    let Ok(archive_modified) = archive_file
-        .metadata()
-        .and_then(|metadata| metadata.modified())
-    else {
-        return true;
-    };
-
-    review_modified > archive_modified
-}
-
-fn latest_archived_review_file(reviews_dir: &Path, file_name: &std::ffi::OsStr) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(reviews_dir).ok()?;
-
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let file_type = entry.file_type().ok()?;
-            if !file_type.is_dir() {
-                return None;
-            }
-
-            let name = entry.file_name();
-            let round = name.to_string_lossy();
-            let round_number = round.strip_prefix("round-")?.parse::<u32>().ok()?;
-            let path = entry.path().join(file_name);
-            if path.exists() {
-                Some((round_number, path))
-            } else {
-                None
-            }
-        })
-        .max_by_key(|(round_number, _)| *round_number)
-        .map(|(_, path)| path)
 }
 
 fn draw_ui(f: &mut ratatui::Frame, app: &mut App) {
@@ -1838,7 +1784,6 @@ mod tests {
     #[test]
     fn test_discover_agents_resets_archived_review_round_verdicts() {
         use std::fs;
-        use std::time::Duration;
         use tempfile::TempDir;
 
         let tmp = TempDir::new().unwrap();
@@ -1873,10 +1818,9 @@ mod tests {
         assert_eq!(view.agents[1].name, "behaviors");
         assert_eq!(view.agents[1].status, "pass");
 
-        std::thread::sleep(Duration::from_millis(10));
         let archive_dir = reviews_dir.join("round-1");
         fs::create_dir_all(&archive_dir).unwrap();
-        fs::copy(
+        fs::rename(
             reviews_dir.join("review-behaviors.md"),
             archive_dir.join("review-behaviors.md"),
         )
@@ -1897,7 +1841,6 @@ mod tests {
         assert_eq!(view.agents[1].name, "behaviors");
         assert_eq!(view.agents[1].status, "running");
 
-        std::thread::sleep(Duration::from_millis(10));
         fs::write(
             reviews_dir.join("review-behaviors.md"),
             "Verdict: pass\n\nNew round.",

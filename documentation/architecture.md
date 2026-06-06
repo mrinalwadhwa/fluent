@@ -130,7 +130,7 @@ when the required checks and reviews pass.
 | `scope` | Review focus targeting (optional) |
 | `sessions.log` | Per-session metadata: `{timestamp} session=N exit=CODE duration=Xs status=STATUS` and review-phase entries: `{timestamp} review=N duration=Xs verdict=VERDICT` |
 | `report.md` | Generated run report |
-| `reviews/` | Review artifacts, transcripts (`transcript-{name}.jsonl`), and round archives (`round-N/`) |
+| `reviews/` | Current review artifacts, transcripts (`transcript-{name}.jsonl`), and prior round archives (`round-N/`) |
 | `children` | Child run IDs, one per line (written by the parallel orchestrator for parent runs) |
 | `parent` | Parent run ID (written for each child run) |
 
@@ -364,6 +364,13 @@ verdict:
 If the run exceeds the review-round limit, the loop accepts the current
 review state with the same clean-worktree guard: clean work completes,
 while uncommitted work receives a handoff and returns to `executing`.
+
+When a new review round starts, the review lifecycle moves the previous
+round's top-level `review-*.md` and `transcript-*.jsonl` files into
+`reviews/round-N/`. The top-level `reviews/` directory therefore
+represents only the current review round; archived `round-N/` contents
+remain historical records and do not drive current dashboard reviewer
+tabs or verdicts.
 
 Review runs (mode=review) produce findings only. Reviewers run with
 full-codebase scope. Their findings are written to the reviews/

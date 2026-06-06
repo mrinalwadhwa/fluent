@@ -105,15 +105,13 @@ fn archive_previous_round(run_dir: &Path, review_round: u32) {
         return;
     }
 
-    // Copy review-*.md files to archive
     if let Ok(entries) = fs::read_dir(&reviews_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
             if name_str.starts_with("review-") && name_str.ends_with(".md") {
-                let _ = fs::copy(entry.path(), archive_dir.join(&name));
+                let _ = fs::rename(entry.path(), archive_dir.join(&name));
             } else if name_str.starts_with("transcript-") && name_str.ends_with(".jsonl") {
-                // Move transcript files to archive
                 let _ = fs::rename(entry.path(), archive_dir.join(&name));
             }
         }
@@ -297,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn test_archive_previous_round_copies_reviews() {
+    fn test_archive_previous_round_moves_reviews() {
         let tmp = tempfile::TempDir::new().unwrap();
         let run_dir = tmp.path();
         let reviews = run_dir.join("reviews");
@@ -311,14 +309,11 @@ mod tests {
 
         archive_previous_round(run_dir, 2);
 
-        // Archive directory should exist with copies
         let archive = reviews.join("round-1");
         assert!(archive.join("review-tests.md").exists());
         assert!(archive.join("transcript-tests.jsonl").exists());
 
-        // Review file should still exist (copied, not moved)
-        assert!(reviews.join("review-tests.md").exists());
-        // Transcript should be moved (not just copied)
+        assert!(!reviews.join("review-tests.md").exists());
         assert!(!reviews.join("transcript-tests.jsonl").exists());
     }
 }
