@@ -2,6 +2,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
 use std::path::Path;
+use std::process::Command as StdCommand;
 use tempfile::TempDir;
 
 fn factory_cmd() -> Command {
@@ -31,10 +32,21 @@ fn version_prints_package_version_and_commit() {
     assert_eq!(fields.len(), 3, "version output should have three fields");
     assert_eq!(fields[0], "factory");
     assert_eq!(fields[1], env!("CARGO_PKG_VERSION"));
-    assert!(
-        fields[2] == "unknown" || fields[2].chars().all(|ch| ch.is_ascii_hexdigit()),
-        "commit should be a short hex id or unknown: {stdout}"
-    );
+    match expected_build_commit() {
+        Some(commit) => assert_eq!(fields[2], commit, "commit should match the build HEAD"),
+        None => assert_eq!(fields[2], "unknown", "commit should use the fallback"),
+    }
+}
+
+fn expected_build_commit() -> Option<String> {
+    StdCommand::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|stdout| stdout.trim().to_string())
+        .filter(|commit| !commit.is_empty())
 }
 
 #[test]
@@ -361,6 +373,17 @@ fn write_mock_codex(bin_dir: &Path, script: &str) {
         fs::set_permissions(&codex_path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 }
+
+const CODEX_SSL_CERT_FILE_RECORDER: &str = r##"#!/bin/bash
+WORKING_DIR="$(pwd)"
+RUN_ID=$(ls "$WORKING_DIR/.factory/runs/" 2>/dev/null | head -1)
+RUN_DIR="$WORKING_DIR/.factory/runs/$RUN_ID"
+printf '%s\n' "$@" > "$RUN_DIR/codex-args"
+printf '%s\n' "${SSL_CERT_FILE:-}" > "$RUN_DIR/codex-ssl-cert-file"
+echo '{"type":"assistant","message":"codex sandboxed"}'
+echo "needs-user" > "$RUN_DIR/status"
+exit 0
+"##;
 
 fn write_mock_sandbox_exec(bin_dir: &Path) {
     fs::create_dir_all(bin_dir).unwrap();
@@ -1378,6 +1401,7 @@ exit 0
         .env("PATH", mock_path(&bin_dir))
         .env("SANDBOX_EXEC_LOG", &sandbox_exec_log)
         .env("FACTORY_CODEX_CA_BUNDLE", &ca_bundle)
+        .env_remove("SSL_CERT_FILE")
         .assert()
         .success();
 
@@ -1453,6 +1477,48 @@ exit 0
     assert!(
         transcript.contains("codex sandboxed"),
         "transcript should capture Codex JSON output: {transcript}"
+    );
+}
+
+#[test]
+fn run_with_codex_preserves_caller_ssl_cert_file() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let run_id = "20260606-codex-preserve-ssl-cert";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("brief.md"), "# Brief\n\nRun Codex sandboxed\n").unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_codex(&bin_dir, CODEX_SSL_CERT_FILE_RECORDER);
+    write_mock_sandbox_exec(&bin_dir);
+    let sandbox_exec_log = tmp.path().join("sandbox-exec.log");
+    let ca_bundle = tmp.path().join("ca-bundle.pem");
+    let caller_ca_bundle = tmp.path().join("caller-ca-bundle.pem");
+    fs::write(&ca_bundle, "factory ca bundle").unwrap();
+    fs::write(&caller_ca_bundle, "caller ca bundle").unwrap();
+
+    let _guard = worktree_guard(&main_dir, run_id);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["run", "--coder", "codex", "--run-id", run_id])
+        .env("PATH", mock_path(&bin_dir))
+        .env("SANDBOX_EXEC_LOG", &sandbox_exec_log)
+        .env("FACTORY_CODEX_CA_BUNDLE", &ca_bundle)
+        .env("SSL_CERT_FILE", &caller_ca_bundle)
+        .assert()
+        .success();
+
+    let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
+    let wt_run_dir = Path::new(wt_path_str.trim()).join(format!(".factory/runs/{run_id}"));
+    let ssl_cert_file = fs::read_to_string(wt_run_dir.join("codex-ssl-cert-file")).unwrap();
+    assert_eq!(ssl_cert_file.trim(), caller_ca_bundle.to_string_lossy());
+    assert!(
+        sandbox_exec_log.exists(),
+        "sandboxed Codex should be launched through sandbox-exec"
     );
 }
 
