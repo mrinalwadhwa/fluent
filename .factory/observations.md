@@ -1,7 +1,8 @@
 # Observations
 
-Append-only log of things noticed during factory usage. Each one is a
-potential brief. Promote to a run when ready to act on it.
+Open queue of things noticed during factory usage. Each one is a
+potential brief. When an observation is resolved, move it to
+observations-resolved.md with the resolution context.
 
 ---
 
@@ -301,14 +302,28 @@ observe, triage, approve runs, restart runs, resolve needs-user items,
 or land changes at different levels.
 
 2026-06-06 — Stale run artifacts need a first-class cleanup policy rather
-than manual deletion. Landed and reported runs should remain queryable but
-should not dominate the default dashboard view. Superseded planned,
-complete, or failed smoke runs need an explicit abandoned/superseded
-status, archive marker, or `factory cleanup` command that preserves the
-reason and removes registered git worktrees safely. The leftover Codex
-smoke worktrees (`20260605-codex-installed-smoke`,
+than manual deletion. Cleanup should happen where the Factory state
+resides: the source worktree's `.factory/runs` registry and its
+registered git worktrees. It should not be modeled as ordinary author
+work inside an isolated run worktree, because that worktree only carries
+its own copied run state. Landed and reported runs should remain
+queryable but should not dominate the default dashboard view.
+Superseded planned, complete, or failed smoke runs need an explicit
+abandoned/superseded status, archive marker, or `factory cleanup`
+command that preserves the reason in the source Factory state and
+removes registered git worktrees safely. The leftover Codex smoke
+worktrees (`20260605-codex-installed-smoke`,
 `20260606-codex-installed-ca-smoke`, and
 `20260606-codex-installed-seatbelt-smoke`) point at commits already
-contained in `main`, but this session could not remove their sibling
-worktree directories because Git could not validate those paths under the
-current filesystem permissions.
+contained in `main`, but the curation run could not remove their sibling
+worktree directories because Git could not validate those paths under
+the run sandbox's filesystem permissions.
+
+2026-06-06 — `factory resume` should support non-interactive automation
+or provide a separate headless resume path. During run curation,
+`factory resume 20260606-run-curation --coder codex` failed with
+`stdin is not a terminal`, while `factory run --run-id
+20260606-run-curation --coder codex` could continue the run. Automation
+should not have to know that distinction, and a resume path should be
+usable from scripts, agents, or other non-TTY orchestrators when the
+intent is to restart the session loop rather than attach interactively.
