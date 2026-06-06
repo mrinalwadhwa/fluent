@@ -299,6 +299,36 @@ WHEN `factory land` is invoked and any review has verdict `fail`,
 THE SYSTEM SHALL refuse and exit non-zero.
 Test: tests/behaviors/operations/test-land.sh (land rejects fail review verdict, land rejects uncertain review verdict), tests/binary.rs (land_rejects_failed_reviews)
 
+WHEN the project has no `.factory/config.toml`,
+THE SYSTEM SHALL run `factory land` without requiring project checks.
+Test: tests/binary.rs (land_completes_full_lifecycle)
+
+WHEN `.factory/config.toml` defines a check with `run_before_land = true`,
+THE SYSTEM SHALL run the check command in the run worktree before
+removing the worktree, rebasing, merging, or marking the run landed.
+Test: tests/binary.rs (land_runs_configured_check_before_landing)
+
+WHEN a pre-land check fails and has no enabled autofix command,
+THE SYSTEM SHALL exit non-zero, keep the worktree intact, keep the run
+unlanded, and print the check name, failed command, command output, and
+configured fix command if present.
+Test: tests/binary.rs (land_runs_configured_check_before_landing)
+
+WHEN a pre-land check fails and has `autofix = true` with a
+`fix_command`,
+THE SYSTEM SHALL require no uncommitted changes outside `.factory`
+before running the fix command, run the fix command in the run worktree,
+commit project changes outside `.factory` when the fix changes project
+files, rerun pre-land checks, rerun reviewers after an autofix commit,
+and continue landing only if the required checks and reviews pass.
+Test: tests/binary.rs (land_refuses_autofix_when_worktree_has_user_changes, land_autofixes_and_reruns_reviewers)
+
+WHEN an autofix command changes files and the subsequent reviewer rerun
+fails or is uncertain,
+THE SYSTEM SHALL keep the worktree intact, leave the run unlanded, copy
+the new review artifacts to the source run directory, and exit non-zero.
+Test: tests/binary.rs (land_keeps_worktree_when_autofix_review_fails)
+
 WHEN `factory land` is invoked and the run worktree has tracked changes,
 staged changes, or untracked non-ignored files outside `.factory`,
 THE SYSTEM SHALL refuse and exit non-zero.
@@ -538,9 +568,10 @@ Test: tests/behaviors/operations/test-parallel-runs.sh (child runs shown in dash
 ### Merging
 
 WHEN all child runs in a parallel group complete successfully,
-THE SYSTEM SHALL merge their changes into the parent branch before
-launching the next group.
-Test: tests/behaviors/operations/test-parallel-runs.sh (sequential groups run in order)
+THE SYSTEM SHALL run configured pre-land checks for each child run and
+merge their changes into the parent branch before launching the next
+group.
+Test: tests/behaviors/operations/test-parallel-runs.sh (sequential groups run in order), src/parallel.rs (test_parallel_children_run_pre_land_checks)
 
 ### Failure handling
 
@@ -565,8 +596,9 @@ Test: tests/behaviors/operations/test-sandbox.sh (dry-run renders profile with w
 
 WHEN `factory run --coder codex` is invoked with the sandboxed local runtime,
 THE SYSTEM SHALL launch Codex with the `workspace-write` sandbox and
-approval policy `never` using command-line arguments accepted by the
-installed Codex CLI.
+approval policy `never`, using the run worktree as `--cd` and the
+workspace parent as an added writable directory so linked worktree git
+metadata is writable.
 Test: tests/behaviors/operations/test-codex-runtime.sh (sandboxed codex uses workspace-write), tests/behaviors/operations/test-codex-approval-flag.sh (approval-policy flag appears before exec)
 
 WHEN `factory run --coder codex --no-sandbox` is invoked,

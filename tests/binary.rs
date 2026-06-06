@@ -1312,6 +1312,17 @@ exit 0
         "expected Codex workspace-write sandbox: {args}"
     );
     assert!(
+        args.lines().any(|line| line == "--add-dir")
+            && args.lines().any(|line| line
+                == main_dir
+                    .parent()
+                    .unwrap()
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy()),
+        "expected Codex writable root to include workspace parent: {args}"
+    );
+    assert!(
         args.lines().any(|line| line == "--ask-for-approval")
             && args.lines().any(|line| line == "never"),
         "expected Codex approval policy never: {args}"
@@ -1915,6 +1926,213 @@ fn land_rejects_dirty_completed_worktree() {
         wt_path.join("leftover.txt").exists(),
         "landing failure should preserve dirty worktree content"
     );
+}
+
+#[test]
+fn land_runs_configured_check_before_landing() {
+    let tmp = TempDir::new().unwrap();
+    let (main_dir, run_id) = setup_completed_run(&tmp);
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
+    let wt_path = Path::new(wt_path_str.trim());
+    fs::create_dir_all(main_dir.join(".factory")).unwrap();
+    fs::write(
+        main_dir.join(".factory/config.toml"),
+        r#"
+[checks.format]
+command = "printf check-failed >&2; exit 1"
+fix_command = "cargo fmt --all"
+run_before_land = true
+"#,
+    )
+    .unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["land", &run_id])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Pre-land check 'format' failed"))
+        .stderr(predicate::str::contains(
+            "Configured fix command: cargo fmt --all",
+        ))
+        .stderr(predicate::str::contains("check-failed"));
+
+    assert!(wt_path.is_dir(), "failed check should keep worktree");
+}
+
+#[test]
+fn land_refuses_autofix_when_worktree_has_user_changes() {
+    let tmp = TempDir::new().unwrap();
+    let (main_dir, run_id) = setup_completed_run(&tmp);
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
+    let wt_path = Path::new(wt_path_str.trim());
+
+    fs::write(wt_path.join("dirty-user-file"), "do not commit me\n").unwrap();
+    fs::write(
+        main_dir.join(".factory/config.toml"),
+        r#"
+[checks.format]
+command = "test -f already-fixed"
+fix_command = "touch already-fixed"
+autofix = true
+run_before_land = true
+"#,
+    )
+    .unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["land", &run_id])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Cannot autofix check 'format'"))
+        .stderr(predicate::str::contains("uncommitted changes"));
+
+    assert!(
+        !wt_path.join("already-fixed").exists(),
+        "fix command should not run when user-visible files are dirty"
+    );
+    assert!(
+        wt_path.join("dirty-user-file").exists(),
+        "dirty user work should remain in the worktree"
+    );
+}
+
+#[test]
+fn land_autofixes_and_reruns_reviewers() {
+    let tmp = TempDir::new().unwrap();
+    let (main_dir, run_id) = setup_completed_run(&tmp);
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
+    let wt_path = Path::new(wt_path_str.trim());
+    let wt_run_dir = wt_path.join(format!(".factory/runs/{run_id}"));
+
+    fs::write(run_dir.join("reviewers"), "tests").unwrap();
+    fs::write(wt_run_dir.join("reviewers"), "tests").unwrap();
+    fs::write(wt_path.join("needs-format"), "bad\n").unwrap();
+    std::process::Command::new("git")
+        .args(["-C", &wt_path.to_string_lossy()])
+        .args(["add", "needs-format"])
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["-C", &wt_path.to_string_lossy()])
+        .args(["commit", "-m", "Add unformatted file"])
+        .output()
+        .unwrap();
+
+    fs::write(
+        main_dir.join(".factory/config.toml"),
+        r#"
+[checks.format]
+command = "test ! -f needs-format"
+fix_command = "rm needs-format"
+autofix = true
+run_before_land = true
+"#,
+    )
+    .unwrap();
+
+    let bin_dir = tmp.path().join("land-bin");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+WORKING_DIR="$(pwd)"
+RUN_ID=$(ls "$WORKING_DIR/.factory/runs/" 2>/dev/null | head -1)
+RUN_DIR="$WORKING_DIR/.factory/runs/$RUN_ID"
+mkdir -p "$RUN_DIR/reviews"
+printf 'Verdict: pass\n\nAutofix review passed.\n' > "$RUN_DIR/reviews/review-tests.md"
+printf 'reviewed\n' > "$RUN_DIR/review-rerun-marker"
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["land", &run_id])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Autofix changes committed"))
+        .stderr(predicate::str::contains("Rerunning reviewers"));
+
+    let log = std::process::Command::new("git")
+        .args(["-C", &main_dir.to_string_lossy()])
+        .args(["log", "--oneline", "-5"])
+        .output()
+        .unwrap();
+    let log = String::from_utf8_lossy(&log.stdout);
+    assert!(log.contains("Apply project check autofix"));
+    let review = fs::read_to_string(run_dir.join("reviews/review-tests.md")).unwrap();
+    assert!(review.contains("Autofix review passed"));
+    assert!(!main_dir.join("needs-format").exists());
+}
+
+#[test]
+fn land_keeps_worktree_when_autofix_review_fails() {
+    let tmp = TempDir::new().unwrap();
+    let (main_dir, run_id) = setup_completed_run(&tmp);
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
+    let wt_path = Path::new(wt_path_str.trim());
+    let wt_run_dir = wt_path.join(format!(".factory/runs/{run_id}"));
+
+    fs::write(run_dir.join("reviewers"), "tests").unwrap();
+    fs::write(wt_run_dir.join("reviewers"), "tests").unwrap();
+    fs::write(wt_path.join("needs-format"), "bad\n").unwrap();
+    std::process::Command::new("git")
+        .args(["-C", &wt_path.to_string_lossy()])
+        .args(["add", "needs-format"])
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["-C", &wt_path.to_string_lossy()])
+        .args(["commit", "-m", "Add unformatted file"])
+        .output()
+        .unwrap();
+
+    fs::write(
+        main_dir.join(".factory/config.toml"),
+        r#"
+[checks.format]
+command = "test ! -f needs-format"
+fix_command = "rm needs-format"
+autofix = true
+run_before_land = true
+"#,
+    )
+    .unwrap();
+
+    let bin_dir = tmp.path().join("land-bin-fail");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+WORKING_DIR="$(pwd)"
+RUN_ID=$(ls "$WORKING_DIR/.factory/runs/" 2>/dev/null | head -1)
+RUN_DIR="$WORKING_DIR/.factory/runs/$RUN_ID"
+mkdir -p "$RUN_DIR/reviews"
+printf 'Verdict: fail\n\nAutofix needs more work.\n' > "$RUN_DIR/reviews/review-tests.md"
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["land", &run_id])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "reviewers did not pass after autofix",
+        ));
+
+    assert!(wt_path.is_dir(), "review failure should keep worktree");
+    let review = fs::read_to_string(run_dir.join("reviews/review-tests.md")).unwrap();
+    assert!(review.contains("Verdict: fail"));
+    let status = fs::read_to_string(run_dir.join("status")).unwrap();
+    assert_ne!(status.trim(), "landed");
 }
 
 #[test]

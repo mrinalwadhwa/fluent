@@ -42,7 +42,12 @@ pub fn refresh_credentials() -> Result<()> {
 /// Read the OAuth token from Keychain via `security find-generic-password`.
 fn read_oauth_from_keychain() -> Option<String> {
     let output = Command::new("security")
-        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+        .args([
+            "find-generic-password",
+            "-s",
+            "Claude Code-credentials",
+            "-w",
+        ])
         .output()
         .ok()?;
 
@@ -154,7 +159,12 @@ fn inject_aws_credentials() -> Result<()> {
     }
 
     let output = Command::new("aws")
-        .args(["configure", "export-credentials", "--format", "env-no-export"])
+        .args([
+            "configure",
+            "export-credentials",
+            "--format",
+            "env-no-export",
+        ])
         .output();
 
     if let Ok(output) = output {

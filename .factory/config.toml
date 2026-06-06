@@ -1,0 +1,5 @@
+[checks.format]
+command = "cargo fmt --all -- --check"
+fix_command = "cargo fmt --all"
+autofix = true
+run_before_land = true

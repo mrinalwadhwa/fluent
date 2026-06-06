@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 /// A parsed execution plan with sequential groups of parallelizable steps.
 pub struct Plan {
@@ -26,8 +26,7 @@ impl Plan {
     /// bypass the session loop and use `parallel::run_parallel_plan`
     /// instead.
     pub fn needs_orchestrator(&self) -> bool {
-        self.groups.len() > 1
-            || self.groups.iter().any(|g| g.parallel && g.steps.len() > 1)
+        self.groups.len() > 1 || self.groups.iter().any(|g| g.parallel && g.steps.len() > 1)
     }
 }
 
@@ -109,11 +108,7 @@ pub fn parse_plan(content: &str) -> Result<Plan> {
     Ok(Plan { groups })
 }
 
-fn flush_step(
-    title: &mut Option<String>,
-    brief_lines: &mut Vec<String>,
-    steps: &mut Vec<Step>,
-) {
+fn flush_step(title: &mut Option<String>, brief_lines: &mut Vec<String>, steps: &mut Vec<Step>) {
     if let Some(title) = title.take() {
         let brief = brief_lines.join("\n").trim().to_string();
         steps.push(Step { title, brief });

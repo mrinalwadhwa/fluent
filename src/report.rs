@@ -86,9 +86,7 @@ pub fn generate_report(run_dir: &Path, run_id: &str, session_count: u32) -> Resu
                 if let Ok(content) = fs::read_to_string(entry.path()) {
                     finding_count += content
                         .lines()
-                        .filter(|l| {
-                            l.starts_with(|c: char| c.is_ascii_digit())
-                        })
+                        .filter(|l| l.starts_with(|c: char| c.is_ascii_digit()))
                         .count();
                 }
             }
@@ -103,12 +101,7 @@ pub fn generate_report(run_dir: &Path, run_id: &str, session_count: u32) -> Resu
     }
 
     report.push_str("## Artifacts\n\n");
-    for artifact in &[
-        "brief.md",
-        "behaviors.diff.md",
-        "approach.md",
-        "plan.md",
-    ] {
+    for artifact in &["brief.md", "behaviors.diff.md", "approach.md", "plan.md"] {
         if run_dir.join(artifact).exists() {
             report.push_str(&format!("- {artifact}\n"));
         }

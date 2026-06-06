@@ -12,12 +12,18 @@ use factory::content::ContentResolver;
 use factory::credential;
 use factory::dashboard;
 use factory::fargate;
+use factory::land;
 use factory::os;
 use factory::parallel;
 use factory::plan;
 use factory::run::{self, Run};
 use factory::session::{self, DefaultHooks, SandboxedHooks, SessionConfig};
 use factory::worktree;
+
+fn workspace_sandbox_root(source_root: &Path) -> PathBuf {
+    let root = source_root.parent().unwrap_or(source_root);
+    fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+}
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -150,14 +156,7 @@ fn cmd_interactive(
     credential::inject_credentials()?;
     credential::setup_git_signing();
 
-    let sandbox = match coder_kind {
-        CoderKind::Claude => {
-            let home = std::env::var("HOME").unwrap_or_default();
-            let profile = os::render_profile(resolver, &home, &sandbox_root.to_string_lossy())?;
-            CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string())
-        }
-        CoderKind::Codex => CoderSandbox::CodexWorkspaceWrite,
-    };
+    let (sandbox, _sandbox_profile) = build_coder_sandbox(coder_kind, resolver, sandbox_root)?;
     let system_prompt = resolver
         .resolve_content("prompts/author.md")
         .unwrap_or_default();
@@ -190,18 +189,9 @@ fn cmd_run_local(
 
     // Check for a parallel plan
     if let Some(parsed_plan) = try_parse_parallel_plan(&run) {
-        let sandbox = match coder_kind {
-            CoderKind::Claude => {
-                let workspace_root = source_root
-                    .parent()
-                    .unwrap_or(source_root)
-                    .to_string_lossy();
-                let home = std::env::var("HOME").unwrap_or_default();
-                let profile = os::render_profile(resolver, &home, &workspace_root)?;
-                CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string())
-            }
-            CoderKind::Codex => CoderSandbox::CodexWorkspaceWrite,
-        };
+        let workspace_root = workspace_sandbox_root(source_root);
+        let (sandbox, _sandbox_profile) =
+            build_coder_sandbox(coder_kind, resolver, &workspace_root)?;
         let system_prompt = resolver
             .resolve_content("prompts/author.md")
             .unwrap_or_default();
@@ -228,18 +218,8 @@ fn cmd_run_local(
     // Sandbox root must include the git directory — worktrees reference
     // the main repo's .git via a relative path. Use the parent of the
     // worktree (the factory workspace) as the sandbox root.
-    let sandbox_root = worktree_dir
-        .parent()
-        .unwrap_or(worktree_dir)
-        .to_string_lossy();
-    let sandbox = match coder_kind {
-        CoderKind::Claude => {
-            let home = std::env::var("HOME").unwrap_or_default();
-            let profile = os::render_profile(resolver, &home, &sandbox_root)?;
-            CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string())
-        }
-        CoderKind::Codex => CoderSandbox::CodexWorkspaceWrite,
-    };
+    let sandbox_root = workspace_sandbox_root(source_root);
+    let (sandbox, _sandbox_profile) = build_coder_sandbox(coder_kind, resolver, &sandbox_root)?;
     let system_prompt = resolver
         .resolve_content("prompts/author.md")
         .unwrap_or_default();
@@ -482,14 +462,7 @@ fn cmd_resume(
     credential::inject_credentials()?;
     credential::setup_git_signing();
 
-    let sandbox = match coder_kind {
-        CoderKind::Claude => {
-            let home = std::env::var("HOME").unwrap_or_default();
-            let profile = os::render_profile(resolver, &home, &search_root.to_string_lossy())?;
-            CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string())
-        }
-        CoderKind::Codex => CoderSandbox::CodexWorkspaceWrite,
-    };
+    let (sandbox, _sandbox_profile) = build_coder_sandbox(coder_kind, resolver, search_root)?;
     let system_prompt = resolver
         .resolve_content("prompts/author.md")
         .unwrap_or_default();
@@ -550,13 +523,34 @@ fn cmd_land(search_root: &Path, run_id: Option<&str>) -> Result<()> {
             }
         }
     } else {
-        worktree::land_run(search_root, &run.id, &run.dir)?;
+        land::land_worktree_run(search_root, &run)?;
     }
 
     run.set_status(&run::RunStatus::Landed)?;
 
     eprintln!("  Run {} landed successfully.", run.id);
     Ok(())
+}
+
+fn build_coder_sandbox(
+    coder_kind: CoderKind,
+    resolver: &ContentResolver,
+    sandbox_root: &Path,
+) -> Result<(CoderSandbox, Option<os::SandboxProfile>)> {
+    match coder_kind {
+        CoderKind::Claude => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let profile = os::render_profile(resolver, &home, &sandbox_root.to_string_lossy())?;
+            let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
+            Ok((sandbox, Some(profile)))
+        }
+        CoderKind::Codex => Ok((
+            CoderSandbox::CodexWorkspaceWrite {
+                writable_root: Some(sandbox_root.to_path_buf()),
+            },
+            None,
+        )),
+    }
 }
 
 // -------------------------------------------------------------------------

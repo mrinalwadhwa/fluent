@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-4-6";
@@ -28,7 +28,7 @@ pub enum CoderKind {
 pub enum CoderSandbox {
     None,
     SeatbeltProfile(String),
-    CodexWorkspaceWrite,
+    CodexWorkspaceWrite { writable_root: Option<PathBuf> },
 }
 
 impl CoderKind {
@@ -61,7 +61,11 @@ impl CoderKind {
                 _ => Box::new(BareClaudeCode),
             },
             Self::Codex => Box::new(CodexCode {
-                sandboxed: matches!(sandbox, CoderSandbox::CodexWorkspaceWrite),
+                sandboxed: matches!(sandbox, CoderSandbox::CodexWorkspaceWrite { .. }),
+                writable_root: match sandbox {
+                    CoderSandbox::CodexWorkspaceWrite { writable_root } => writable_root,
+                    _ => None,
+                },
             }),
         }
     }
@@ -195,6 +199,7 @@ impl Coder for BareClaudeCode {
 /// OpenAI Codex CLI.
 pub struct CodexCode {
     pub sandboxed: bool,
+    pub writable_root: Option<PathBuf>,
 }
 
 impl Coder for CodexCode {
@@ -247,6 +252,9 @@ impl CodexCode {
         cmd.args(["--cd", &working_dir.to_string_lossy()]);
         if self.sandboxed {
             cmd.args(["--sandbox", "workspace-write"]);
+            if let Some(root) = &self.writable_root {
+                cmd.args(["--add-dir", &root.to_string_lossy()]);
+            }
         } else {
             cmd.args(["--dangerously-bypass-approvals-and-sandbox"]);
         }

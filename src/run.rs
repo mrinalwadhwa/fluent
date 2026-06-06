@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -132,8 +132,7 @@ impl Run {
     }
 
     pub fn set_status(&self, status: &RunStatus) -> Result<()> {
-        fs::write(self.dir.join("status"), status.as_str())
-            .context("Failed to write run status")
+        fs::write(self.dir.join("status"), status.as_str()).context("Failed to write run status")
     }
 
     pub fn runtime(&self) -> String {
@@ -145,20 +144,18 @@ impl Run {
     pub fn brief_summary(&self) -> String {
         let path = self.dir.join("brief.md");
         match fs::read_to_string(&path) {
-            Ok(content) => {
-                content
-                    .lines()
-                    .filter(|l| !l.starts_with('#') && !l.is_empty())
-                    .next()
-                    .map(|l| {
-                        if l.len() > 50 {
-                            format!("{}...", &l[..47])
-                        } else {
-                            l.to_string()
-                        }
-                    })
-                    .unwrap_or_else(|| "(brief exists)".into())
-            }
+            Ok(content) => content
+                .lines()
+                .filter(|l| !l.starts_with('#') && !l.is_empty())
+                .next()
+                .map(|l| {
+                    if l.len() > 50 {
+                        format!("{}...", &l[..47])
+                    } else {
+                        l.to_string()
+                    }
+                })
+                .unwrap_or_else(|| "(brief exists)".into()),
             Err(_) => "-".into(),
         }
     }
@@ -346,7 +343,10 @@ impl Run {
             Some(true) => Some(true),
             None => {
                 if let Some(wt_run_dir) = self.worktree_run_dir() {
-                    let wt_run = Run { id: self.id.clone(), dir: wt_run_dir };
+                    let wt_run = Run {
+                        id: self.id.clone(),
+                        dir: wt_run_dir,
+                    };
                     wt_run.reviews_passed()
                 } else {
                     None
@@ -367,6 +367,13 @@ impl Run {
         } else {
             None
         }
+    }
+
+    pub fn worktree_dir(&self) -> Option<PathBuf> {
+        fs::read_to_string(self.dir.join("worktree"))
+            .ok()
+            .map(|s| PathBuf::from(s.trim()))
+            .filter(|p| p.is_dir())
     }
 }
 
@@ -524,7 +531,10 @@ pub fn resolve_landable_run(search_root: &Path, run_id: Option<&str>) -> Result<
         if !dir.is_dir() {
             bail!("Run directory not found: {}", dir.display());
         }
-        let run = Run { id: id.to_string(), dir };
+        let run = Run {
+            id: id.to_string(),
+            dir,
+        };
         if !run.is_complete()? {
             let status = run.effective_status()?;
             bail!("Run {} has status '{}', expected 'complete'", id, status);
@@ -607,10 +617,7 @@ mod tests {
         assert_eq!(RunStatus::parse("failed"), RunStatus::Failed);
         assert_eq!(RunStatus::parse("reviewing"), RunStatus::Reviewing);
         assert_eq!(RunStatus::parse("rate-limited"), RunStatus::RateLimited);
-        assert_eq!(
-            RunStatus::parse("briefed"),
-            RunStatus::Briefed
-        );
+        assert_eq!(RunStatus::parse("briefed"), RunStatus::Briefed);
         assert_eq!(
             RunStatus::parse("behaviors-defined"),
             RunStatus::BehaviorsDefined
@@ -662,11 +669,7 @@ mod tests {
     fn test_resolve_active_run_pointer() {
         let tmp = setup_test_project();
         create_run(tmp.path(), "run-from-pointer", "planned");
-        fs::write(
-            tmp.path().join(".factory/active-run"),
-            "run-from-pointer",
-        )
-        .unwrap();
+        fs::write(tmp.path().join(".factory/active-run"), "run-from-pointer").unwrap();
 
         let run = resolve_run(tmp.path(), None).unwrap();
         assert_eq!(run.id, "run-from-pointer");
@@ -891,7 +894,10 @@ mod tests {
         let tmp = setup_test_project();
         create_run(tmp.path(), "mode-default", "planned");
         let run_dir = tmp.path().join(".factory/runs/mode-default");
-        let run = Run { id: "mode-default".into(), dir: run_dir };
+        let run = Run {
+            id: "mode-default".into(),
+            dir: run_dir,
+        };
         assert_eq!(run.mode(), RunMode::Full);
     }
 
@@ -969,8 +975,16 @@ mod tests {
         create_run(tmp.path(), "run-rp", "complete");
         let run_dir = tmp.path().join(".factory/runs/run-rp");
         fs::create_dir_all(run_dir.join("reviews")).unwrap();
-        fs::write(run_dir.join("reviews/review-tests.md"), "Verdict: pass\n\nLooks good.").unwrap();
-        fs::write(run_dir.join("reviews/review-style.md"), "Verdict: pass\n\nClean.").unwrap();
+        fs::write(
+            run_dir.join("reviews/review-tests.md"),
+            "Verdict: pass\n\nLooks good.",
+        )
+        .unwrap();
+        fs::write(
+            run_dir.join("reviews/review-style.md"),
+            "Verdict: pass\n\nClean.",
+        )
+        .unwrap();
 
         let run = Run {
             id: "run-rp".into(),
@@ -1021,7 +1035,10 @@ mod tests {
             id: "run-h".into(),
             dir: run_dir,
         };
-        assert_eq!(run.handoff_need(), Some("Need API key for service X".into()));
+        assert_eq!(
+            run.handoff_need(),
+            Some("Need API key for service X".into())
+        );
     }
 
     #[test]
@@ -1116,7 +1133,11 @@ mod tests {
         create_run(tmp.path(), "run-ru", "complete");
         let run_dir = tmp.path().join(".factory/runs/run-ru");
         fs::create_dir_all(run_dir.join("reviews")).unwrap();
-        fs::write(run_dir.join("reviews/review-tests.md"), "Verdict: uncertain").unwrap();
+        fs::write(
+            run_dir.join("reviews/review-tests.md"),
+            "Verdict: uncertain",
+        )
+        .unwrap();
 
         let run = Run {
             id: "run-ru".into(),
@@ -1130,10 +1151,7 @@ mod tests {
         let tmp = setup_test_project();
         create_run(tmp.path(), "run-ht", "needs-user");
         let run_dir = tmp.path().join(".factory/runs/run-ht");
-        let long_question = format!(
-            "## Run\n### Open questions\n- {}\n",
-            "A".repeat(100)
-        );
+        let long_question = format!("## Run\n### Open questions\n- {}\n", "A".repeat(100));
         fs::write(run_dir.join("handoff.md"), long_question).unwrap();
 
         let run = Run {
@@ -1254,7 +1272,10 @@ mod tests {
         fs::create_dir_all(run_dir.join("reviews")).unwrap();
         fs::write(run_dir.join("reviews/review-tests.md"), "Verdict: fail").unwrap();
 
-        let run = Run { id: "run-erf".into(), dir: run_dir };
+        let run = Run {
+            id: "run-erf".into(),
+            dir: run_dir,
+        };
         assert_eq!(run.effective_reviews_passed(), Some(false));
     }
 
@@ -1266,7 +1287,10 @@ mod tests {
         fs::create_dir_all(run_dir.join("reviews")).unwrap();
         fs::write(run_dir.join("reviews/review-tests.md"), "Verdict: pass").unwrap();
 
-        let run = Run { id: "run-erp".into(), dir: run_dir };
+        let run = Run {
+            id: "run-erp".into(),
+            dir: run_dir,
+        };
         assert_eq!(run.effective_reviews_passed(), Some(true));
     }
 
@@ -1283,7 +1307,10 @@ mod tests {
         fs::write(wt_run_dir.join("reviews/review-arch.md"), "Verdict: pass").unwrap();
         fs::write(run_dir.join("worktree"), wt_dir.to_string_lossy().as_ref()).unwrap();
 
-        let run = Run { id: "run-ewt".into(), dir: run_dir };
+        let run = Run {
+            id: "run-ewt".into(),
+            dir: run_dir,
+        };
         assert_eq!(run.effective_reviews_passed(), Some(true));
     }
 
@@ -1293,7 +1320,10 @@ mod tests {
         create_run(tmp.path(), "run-enr", "complete");
         let run_dir = tmp.path().join(".factory/runs/run-enr");
 
-        let run = Run { id: "run-enr".into(), dir: run_dir };
+        let run = Run {
+            id: "run-enr".into(),
+            dir: run_dir,
+        };
         assert_eq!(run.effective_reviews_passed(), None);
     }
 }

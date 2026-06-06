@@ -35,6 +35,7 @@ ERRORS=""
 
 setup_test_project() {
   TEST_DIR="$(mktemp -d -t factory-test-sandbox-XXXXXX)"
+  TEST_DIR="$(cd "$TEST_DIR" && pwd -P)"
   mkdir -p "${TEST_DIR}/project"
   cd "${TEST_DIR}/project"
   git init -b main > /dev/null 2>&1

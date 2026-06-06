@@ -32,8 +32,7 @@ fn load_config() -> Result<FargateConfig> {
 
     Ok(FargateConfig {
         cluster: env_required("FACTORY_CLUSTER")?,
-        run_task: std::env::var("FACTORY_RUN_TASK")
-            .unwrap_or_else(|_| "factory-run".into()),
+        run_task: std::env::var("FACTORY_RUN_TASK").unwrap_or_else(|_| "factory-run".into()),
         s3_bucket: env_required("FACTORY_S3_BUCKET")?,
         subnets: env_required("FACTORY_SUBNETS")?,
         security_group: env_required("FACTORY_SECURITY_GROUP")?,
@@ -81,10 +80,7 @@ pub fn launch(source_root: &Path, run_id: Option<&str>) -> Result<()> {
         .args(["s3", "cp", "--region", &config.region])
         .args([
             "-",
-            &format!(
-                "s3://{}/runs/{}/workspace-in.tar",
-                config.s3_bucket, run.id
-            ),
+            &format!("s3://{}/runs/{}/workspace-in.tar", config.s3_bucket, run.id),
         ])
         .stdin(tar_child.stdout.unwrap())
         .status()?;
@@ -129,10 +125,7 @@ pub fn launch(source_root: &Path, run_id: Option<&str>) -> Result<()> {
     fs::write(run.dir.join("handle"), &task_arn)?;
 
     eprintln!("  Run is executing on Fargate.");
-    eprintln!(
-        "  Worktree: {}",
-        wt_result.worktree_dir.display()
-    );
+    eprintln!("  Worktree: {}", wt_result.worktree_dir.display());
     eprintln!("  Use \"factory status\" to check progress.");
     eprintln!("  Use \"factory shell\" to attach to the running session.");
     eprintln!("  Use \"factory pull\" to retrieve results.");
@@ -151,8 +144,7 @@ pub fn pull(search_root: &Path, run_id: Option<&str>) -> Result<()> {
         if runs_dir.is_dir() {
             for entry in fs::read_dir(&runs_dir)? {
                 let entry = entry?;
-                let runtime =
-                    fs::read_to_string(entry.path().join("runtime")).unwrap_or_default();
+                let runtime = fs::read_to_string(entry.path().join("runtime")).unwrap_or_default();
                 if runtime.trim() == "fargate" {
                     found = Some(entry.file_name().to_string_lossy().to_string());
                     break;
@@ -165,8 +157,7 @@ pub fn pull(search_root: &Path, run_id: Option<&str>) -> Result<()> {
     let config = load_config()?;
 
     let run_dir = runs_dir.join(&run_id);
-    let worktree_path =
-        fs::read_to_string(run_dir.join("worktree")).unwrap_or_default();
+    let worktree_path = fs::read_to_string(run_dir.join("worktree")).unwrap_or_default();
     let target = if !worktree_path.is_empty() && Path::new(&worktree_path).is_dir() {
         std::path::PathBuf::from(worktree_path)
     } else {
@@ -182,10 +173,7 @@ pub fn pull(search_root: &Path, run_id: Option<&str>) -> Result<()> {
     let s3_pipe = Command::new("aws")
         .args(["s3", "cp", "--region", &config.region])
         .args([
-            &format!(
-                "s3://{}/runs/{run_id}/workspace.tar",
-                config.s3_bucket
-            ),
+            &format!("s3://{}/runs/{run_id}/workspace.tar", config.s3_bucket),
             "-",
         ])
         .stdout(std::process::Stdio::piped())

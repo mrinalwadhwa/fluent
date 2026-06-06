@@ -5,6 +5,7 @@ use std::thread;
 
 use crate::coder::{CoderKind, CoderSandbox};
 use crate::content::ContentResolver;
+use crate::land;
 use crate::plan::Plan;
 use crate::run::{Run, RunStatus};
 use crate::session::{self, DefaultHooks, SandboxedHooks, SessionConfig};
@@ -208,11 +209,11 @@ where
         // Merge children back into the source branch
         eprintln!("  Merging group {} results...", group_num);
         for info in &child_infos {
-            worktree::land_run(source_root, &info.id, &info.source_dir)?;
             let child_run = Run {
                 id: info.id.clone(),
                 dir: info.source_dir.clone(),
             };
+            land::land_worktree_run(source_root, &child_run)?;
             child_run.set_status(&RunStatus::Landed)?;
             eprintln!("  Merged step {}", info.id);
         }
@@ -447,6 +448,55 @@ mod tests {
     }
 
     #[test]
+    fn test_parallel_children_run_pre_land_checks() {
+        let tmp = setup_git_project();
+        let main_dir = tmp.path().join("main");
+        fs::write(
+            main_dir.join(".factory/config.toml"),
+            r#"
+[checks.required]
+command = "test -f required-check-passed"
+run_before_land = true
+"#,
+        )
+        .unwrap();
+
+        let parent_id = "test-child-check";
+        let parent_dir = main_dir.join(format!(".factory/runs/{parent_id}"));
+        fs::create_dir_all(&parent_dir).unwrap();
+        fs::write(parent_dir.join("status"), "planned").unwrap();
+        fs::write(parent_dir.join("brief.md"), "Brief").unwrap();
+
+        let parent_run = Run {
+            id: parent_id.to_string(),
+            dir: parent_dir,
+        };
+        let plan = make_plan(vec![(false, vec![("Task A", "Do A.")])]);
+
+        let result = execute_plan(
+            &main_dir,
+            &parent_run,
+            &plan,
+            "test",
+            &[],
+            CoderKind::Claude,
+            CoderSandbox::None,
+            mock_child_runner,
+        );
+
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("required"),
+            "pre-land check failure should bubble up"
+        );
+        assert!(
+            !main_dir.join(format!("{parent_id}-1-1.txt")).exists(),
+            "child changes should not merge when checks fail"
+        );
+        cleanup_worktrees(&tmp, &main_dir, &[format!("{parent_id}-1-1")]);
+    }
+
+    #[test]
     fn test_parallel_two_groups_sequential() {
         let tmp = setup_git_project();
         let main_dir = tmp.path().join("main");
@@ -600,10 +650,17 @@ mod tests {
         };
 
         let plan = make_plan(vec![(true, vec![("Task A", "Do A."), ("Task B", "Do B.")])]);
+        let workspace_root = tmp.path().to_path_buf();
+        let expected_root = workspace_root.clone();
 
-        let runner = |ctx: ChildContext| -> Result<()> {
+        let runner = move |ctx: ChildContext| -> Result<()> {
             assert_eq!(ctx.coder_kind, CoderKind::Codex);
-            assert_eq!(ctx.sandbox, CoderSandbox::CodexWorkspaceWrite);
+            assert_eq!(
+                ctx.sandbox,
+                CoderSandbox::CodexWorkspaceWrite {
+                    writable_root: Some(expected_root.clone()),
+                }
+            );
 
             let wt_run_dir = ctx.worktree_dir.join(format!(".factory/runs/{}", ctx.id));
             fs::write(wt_run_dir.join("status"), "complete")?;
@@ -617,7 +674,9 @@ mod tests {
             "test",
             &[],
             CoderKind::Codex,
-            CoderSandbox::CodexWorkspaceWrite,
+            CoderSandbox::CodexWorkspaceWrite {
+                writable_root: Some(workspace_root),
+            },
             runner,
         );
 

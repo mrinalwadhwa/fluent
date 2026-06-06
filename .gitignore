@@ -17,6 +17,7 @@ node_modules/
 
 # Factory — working state, except observations and expertise
 .factory/*
+!.factory/config.toml
 !.factory/observations.md
 !.factory/observations-resolved.md
 !.factory/expertise/

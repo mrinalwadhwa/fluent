@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -20,18 +20,13 @@ pub fn setup_run_worktree(
     fs::write(run_dir.join("source-branch"), &source_branch)?;
 
     // Compute worktree path as sibling of source worktree
-    let project_root = source_root
-        .parent()
-        .context("source_root has no parent")?;
+    let project_root = source_root.parent().context("source_root has no parent")?;
     let worktree_dir = project_root.join(run_id);
 
     if worktree_dir.is_dir() {
         eprintln!("  Worktree already exists: {}", worktree_dir.display());
     } else {
-        eprintln!(
-            "  Creating worktree {} from {}...",
-            run_id, source_branch
-        );
+        eprintln!("  Creating worktree {} from {}...", run_id, source_branch);
         // Try creating a new branch, fall back to existing branch
         let result = Command::new("git")
             .args(["-C", &source_root.to_string_lossy()])
@@ -60,12 +55,7 @@ pub fn setup_run_worktree(
 
             let result2 = Command::new("git")
                 .args(["-C", &source_root.to_string_lossy()])
-                .args([
-                    "worktree",
-                    "add",
-                    &worktree_dir.to_string_lossy(),
-                    run_id,
-                ])
+                .args(["worktree", "add", &worktree_dir.to_string_lossy(), run_id])
                 .output()?;
 
             if !result2.status.success() {
@@ -83,13 +73,13 @@ pub fn setup_run_worktree(
     copy_dir_contents(run_dir, &wt_run_dir)?;
 
     // Write active-run pointer in the worktree
-    fs::write(
-        worktree_dir.join(".factory/active-run"),
-        run_id,
-    )?;
+    fs::write(worktree_dir.join(".factory/active-run"), run_id)?;
 
     // Record worktree path in source run dir
-    fs::write(run_dir.join("worktree"), worktree_dir.to_string_lossy().as_ref())?;
+    fs::write(
+        run_dir.join("worktree"),
+        worktree_dir.to_string_lossy().as_ref(),
+    )?;
 
     eprintln!("  Worktree ready: {}", worktree_dir.display());
 
@@ -131,13 +121,7 @@ fn git_current_branch(dir: &Path) -> Result<String> {
 }
 
 /// Artifacts to copy back from the worktree run directory before cleanup.
-const RUN_ARTIFACTS: &[&str] = &[
-    "sessions",
-    "sessions.log",
-    "reviews",
-    "report.md",
-    "status",
-];
+const RUN_ARTIFACTS: &[&str] = &["sessions", "sessions.log", "reviews", "report.md", "status"];
 
 /// Land a completed run: copy artifacts back, remove the worktree,
 /// rebase onto the source branch, fast-forward merge, and delete the
@@ -149,7 +133,10 @@ pub fn land_run(source_root: &Path, run_id: &str, run_dir: &Path) -> Result<()> 
         .context("No worktree path recorded for this run")?;
     let worktree_dir = PathBuf::from(wt_path_str.trim());
     if !worktree_dir.is_dir() {
-        bail!("Worktree directory does not exist: {}", worktree_dir.display());
+        bail!(
+            "Worktree directory does not exist: {}",
+            worktree_dir.display()
+        );
     }
 
     // Copy artifacts from worktree run dir back to source run dir
@@ -173,7 +160,12 @@ pub fn land_run(source_root: &Path, run_id: &str, run_dir: &Path) -> Result<()> 
     // it's checked out in a worktree
     let wt_remove = Command::new("git")
         .args(["-C", &source_root.to_string_lossy()])
-        .args(["worktree", "remove", "--force", &worktree_dir.to_string_lossy()])
+        .args([
+            "worktree",
+            "remove",
+            "--force",
+            &worktree_dir.to_string_lossy(),
+        ])
         .output()?;
 
     if !wt_remove.status.success() {
@@ -241,7 +233,7 @@ pub fn land_run(source_root: &Path, run_id: &str, run_dir: &Path) -> Result<()> 
 
 /// Copy run artifacts from the worktree run directory back to the
 /// source run directory.
-fn copy_run_artifacts(wt_run_dir: &Path, source_run_dir: &Path) -> Result<()> {
+pub fn copy_run_artifacts(wt_run_dir: &Path, source_run_dir: &Path) -> Result<()> {
     for name in RUN_ARTIFACTS {
         let src = wt_run_dir.join(name);
         let dst = source_run_dir.join(name);
@@ -360,18 +352,16 @@ mod tests {
         let wt = result.worktree_dir;
 
         assert!(wt.join(format!(".factory/runs/{run_id}/brief.md")).exists());
-        assert!(wt
-            .join(format!(".factory/runs/{run_id}/behaviors.diff.md"))
-            .exists());
-        assert!(wt
-            .join(format!(".factory/runs/{run_id}/approach.md"))
-            .exists());
-        assert!(wt
-            .join(format!(".factory/runs/{run_id}/plan.md"))
-            .exists());
-        assert!(wt
-            .join(format!(".factory/runs/{run_id}/status"))
-            .exists());
+        assert!(
+            wt.join(format!(".factory/runs/{run_id}/behaviors.diff.md"))
+                .exists()
+        );
+        assert!(
+            wt.join(format!(".factory/runs/{run_id}/approach.md"))
+                .exists()
+        );
+        assert!(wt.join(format!(".factory/runs/{run_id}/plan.md")).exists());
+        assert!(wt.join(format!(".factory/runs/{run_id}/status")).exists());
         assert_eq!(
             fs::read_to_string(wt.join(".factory/active-run")).unwrap(),
             run_id
@@ -437,9 +427,7 @@ mod tests {
         let result = setup_run_worktree(&main_dir, run_id, &run_dir).unwrap();
         let wt = result.worktree_dir;
 
-        assert!(wt
-            .join(format!(".factory/runs/{run_id}/scope"))
-            .exists());
+        assert!(wt.join(format!(".factory/runs/{run_id}/scope")).exists());
         assert_eq!(
             fs::read_to_string(wt.join(format!(".factory/runs/{run_id}/scope"))).unwrap(),
             "documentation/"
@@ -468,9 +456,7 @@ mod tests {
         let result = setup_run_worktree(&main_dir, run_id, &run_dir).unwrap();
         let wt = result.worktree_dir;
 
-        assert!(wt
-            .join(format!(".factory/runs/{run_id}/mode"))
-            .exists());
+        assert!(wt.join(format!(".factory/runs/{run_id}/mode")).exists());
         assert_eq!(
             fs::read_to_string(wt.join(format!(".factory/runs/{run_id}/mode"))).unwrap(),
             "review"
@@ -504,9 +490,10 @@ mod tests {
         let result = setup_run_worktree(&main_dir, run_id, &run_dir).unwrap();
         let wt = result.worktree_dir;
 
-        assert!(wt
-            .join(format!(".factory/runs/{run_id}/reviewers"))
-            .exists());
+        assert!(
+            wt.join(format!(".factory/runs/{run_id}/reviewers"))
+                .exists()
+        );
         assert_eq!(
             fs::read_to_string(wt.join(format!(".factory/runs/{run_id}/reviewers"))).unwrap(),
             "review-documentation,review-behaviors"
@@ -591,7 +578,10 @@ mod tests {
         .trim()
         .to_string();
 
-        assert_eq!(wt_head, new_head, "Reused worktree should be at current HEAD, not old branch point");
+        assert_eq!(
+            wt_head, new_head,
+            "Reused worktree should be at current HEAD, not old branch point"
+        );
 
         // Cleanup
         Command::new("git")

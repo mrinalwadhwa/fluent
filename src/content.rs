@@ -75,12 +75,8 @@ pub fn bundled_content(relative: &str) -> Option<String> {
         "prompts/review-documentation.md" => {
             Some(include_str!("../prompts/review-documentation.md").to_string())
         }
-        "prompts/review-skills.md" => {
-            Some(include_str!("../prompts/review-skills.md").to_string())
-        }
-        "prompts/review-tests.md" => {
-            Some(include_str!("../prompts/review-tests.md").to_string())
-        }
+        "prompts/review-skills.md" => Some(include_str!("../prompts/review-skills.md").to_string()),
+        "prompts/review-tests.md" => Some(include_str!("../prompts/review-tests.md").to_string()),
         // Sandbox profiles
         "sandbox/common.sb" => Some(include_str!("../scripts/assets/common.sb").to_string()),
         "sandbox/claude-code.sb" => {

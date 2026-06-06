@@ -80,6 +80,54 @@ setup_run_with_worktree() {
   printf 'Report from run' > "${wt_path}/.factory/runs/${run_id}/report.md"
 }
 
+write_check_config() {
+  mkdir -p .factory
+  cat > .factory/config.toml
+}
+
+write_mock_reviewer() {
+  local verdict="${1:-pass}"
+  local failing_reviewer="${2:-}"
+
+  MOCK_BIN="${TEST_DIR}/bin"
+  mkdir -p "$MOCK_BIN"
+  cat > "${MOCK_BIN}/claude" <<'EOF'
+#!/usr/bin/env bash
+args="$(printf '%s' "$*" | tr '\n' ' ')"
+review_path="$(
+  printf '%s' "$args" |
+    sed -n 's#.*Write your review to \([^ ]*reviews/review-[a-z]*\.md\).*#\1#p'
+)"
+reviewer="unknown"
+
+if [ -n "${review_path}" ]; then
+  reviewer="$(basename "$review_path" .md)"
+  reviewer="${reviewer#review-}"
+  mkdir -p "$(dirname "$review_path")"
+  if [ "${reviewer}" = "${MOCK_FAILING_REVIEWER:-}" ]; then
+    printf 'Verdict: %s\n\nMock reviewer finding.\n' \
+      "${MOCK_REVIEW_VERDICT:-fail}" \
+      > "$review_path"
+  else
+    printf 'Verdict: pass\n\nMock reviewer passed.\n' \
+      > "$review_path"
+  fi
+fi
+
+if [ -n "${MOCK_REVIEW_LOG:-}" ]; then
+  printf '%s\n' "${reviewer}" >> "${MOCK_REVIEW_LOG}"
+fi
+
+printf '{"type":"result","subtype":"success","result":"done","session_id":"mock"}\n'
+EOF
+  chmod +x "${MOCK_BIN}/claude"
+
+  MOCK_REVIEW_VERDICT="$verdict"
+  MOCK_FAILING_REVIEWER="$failing_reviewer"
+  MOCK_REVIEW_LOG="${TEST_DIR}/review-calls.log"
+  export MOCK_REVIEW_VERDICT MOCK_FAILING_REVIEWER MOCK_REVIEW_LOG
+}
+
 cleanup_test_project() {
   cd /
   if [ -d "${TEST_DIR}/main/.git" ]; then
@@ -478,6 +526,433 @@ test_land_allows_no_reviews() {
   return $RESULT
 }
 
+test_land_without_check_config_does_not_require_formatter() {
+  setup_test_project
+  RUN_ID="run-no-check-config"
+  setup_run_with_worktree "$RUN_ID" pass
+
+  MOCK_BIN="${TEST_DIR}/bin"
+  mkdir -p "$MOCK_BIN"
+  cat > "${MOCK_BIN}/cargo" <<'EOF'
+#!/usr/bin/env bash
+printf 'cargo should not run without factory check config\n' >&2
+exit 99
+EOF
+  chmod +x "${MOCK_BIN}/cargo"
+
+  set +e
+  PATH="${MOCK_BIN}:$PATH" "$BINARY" land "$RUN_ID" > "${TEST_DIR}/land.out" 2>&1
+  EXIT_CODE=$?
+  set -e
+
+  RESULT=0
+  if [ "$EXIT_CODE" -ne 0 ]; then
+    printf '    FAIL: land should succeed without check config, exit code %d\n' "$EXIT_CODE"
+    printf '    Output: %s\n' "$(cat "${TEST_DIR}/land.out")"
+    RESULT=1
+  fi
+  if [ -d "${TEST_DIR}/${RUN_ID}-wt" ]; then
+    printf '    FAIL: land should still remove the worktree\n'
+    RESULT=1
+  fi
+
+  cleanup_test_project
+  return $RESULT
+}
+
+test_land_runs_blocking_check_in_worktree() {
+  setup_test_project
+  RUN_ID="run-check-pwd"
+  setup_run_with_worktree "$RUN_ID" pass
+  WT_PATH="${TEST_DIR}/${RUN_ID}-wt"
+
+  write_check_config <<EOF
+[checks.probe]
+command = "printf '%s' \"\$PWD\" > '${TEST_DIR}/check-pwd'"
+run_before_land = true
+EOF
+
+  set +e
+  OUTPUT="$("$BINARY" land "$RUN_ID" 2>&1)"
+  EXIT_CODE=$?
+  set -e
+
+  RESULT=0
+  if [ "$EXIT_CODE" -ne 0 ]; then
+    printf '    FAIL: land should succeed when the configured check passes\n'
+    printf '    Output: %s\n' "$OUTPUT"
+    RESULT=1
+  fi
+  if [ ! -f "${TEST_DIR}/check-pwd" ]; then
+    printf '    FAIL: check did not write its marker\n'
+    RESULT=1
+  else
+    CHECK_PWD="$(cat "${TEST_DIR}/check-pwd")"
+    if [ "${CHECK_PWD#/private}" != "${WT_PATH#/private}" ]; then
+      printf '    FAIL: check ran in %s, expected %s\n' "$CHECK_PWD" "$WT_PATH"
+      RESULT=1
+    fi
+  fi
+
+  cleanup_test_project
+  return $RESULT
+}
+
+test_land_failed_check_keeps_worktree_and_reports_details() {
+  setup_test_project
+  RUN_ID="run-check-fails"
+  setup_run_with_worktree "$RUN_ID" pass
+  WT_PATH="${TEST_DIR}/${RUN_ID}-wt"
+
+  write_check_config <<'EOF'
+[checks.quality]
+command = "printf 'quality output'; exit 42"
+fix_command = "printf fix-command"
+autofix = false
+run_before_land = true
+EOF
+
+  set +e
+  OUTPUT="$("$BINARY" land "$RUN_ID" 2>&1)"
+  EXIT_CODE=$?
+  set -e
+
+  RESULT=0
+  if [ "$EXIT_CODE" -eq 0 ]; then
+    printf '    FAIL: land should exit non-zero when a blocking check fails\n'
+    RESULT=1
+  fi
+  if [ ! -d "$WT_PATH" ]; then
+    printf '    FAIL: worktree should remain after check failure\n'
+    RESULT=1
+  fi
+  if ! git branch --list "$RUN_ID" | grep -q "$RUN_ID"; then
+    printf '    FAIL: run branch should remain unlanded after check failure\n'
+    RESULT=1
+  fi
+  if ! printf '%s' "$OUTPUT" | grep -q "quality"; then
+    printf '    FAIL: output should include check name, got: %s\n' "$OUTPUT"
+    RESULT=1
+  fi
+  if ! printf '%s' "$OUTPUT" | grep -q "quality output"; then
+    printf '    FAIL: output should include check output, got: %s\n' "$OUTPUT"
+    RESULT=1
+  fi
+  if ! printf '%s' "$OUTPUT" | grep -q "printf 'quality output'; exit 42"; then
+    printf '    FAIL: output should include failed command, got: %s\n' "$OUTPUT"
+    RESULT=1
+  fi
+  if ! printf '%s' "$OUTPUT" | grep -q "printf fix-command"; then
+    printf '    FAIL: output should include configured fix command, got: %s\n' "$OUTPUT"
+    RESULT=1
+  fi
+
+  cleanup_test_project
+  return $RESULT
+}
+
+test_land_autofix_commits_reruns_checks_and_reviewers() {
+  setup_test_project
+  RUN_ID="run-autofix-pass"
+  setup_run_with_worktree "$RUN_ID" pass
+  WT_PATH="${TEST_DIR}/${RUN_ID}-wt"
+
+  printf 'needs fix\n' > "${WT_PATH}/format.txt"
+  git -C "$WT_PATH" add format.txt
+  git -C "$WT_PATH" commit -m "add unformatted file" > /dev/null 2>&1
+
+  write_mock_reviewer pass
+  write_check_config <<EOF
+[checks.format]
+command = "printf check >> '${TEST_DIR}/check-count'; grep -q fixed format.txt"
+fix_command = "printf fixed > format.txt"
+autofix = true
+run_before_land = true
+EOF
+
+  set +e
+  OUTPUT="$(PATH="${MOCK_BIN}:$PATH" "$BINARY" land "$RUN_ID" 2>&1)"
+  EXIT_CODE=$?
+  set -e
+
+  RESULT=0
+  if [ "$EXIT_CODE" -ne 0 ]; then
+    printf '    FAIL: land should succeed after autofix and passing reviews, exit code %d\n' "$EXIT_CODE"
+    printf '    Output: %s\n' "$OUTPUT"
+    RESULT=1
+  fi
+  if [ -d "$WT_PATH" ]; then
+    printf '    FAIL: worktree should be removed after successful autofix land\n'
+    RESULT=1
+  fi
+  if ! grep -q "fixed" format.txt 2>/dev/null; then
+    printf '    FAIL: autofix change should be merged into main\n'
+    RESULT=1
+  fi
+  if [ ! -f "${TEST_DIR}/check-count" ] || [ "$(wc -c < "${TEST_DIR}/check-count")" -lt 10 ]; then
+    printf '    FAIL: pre-land check should run before and after autofix\n'
+    RESULT=1
+  fi
+  if [ ! -f "${TEST_DIR}/review-calls.log" ] || [ "$(wc -l < "${TEST_DIR}/review-calls.log")" -lt 5 ]; then
+    printf '    FAIL: reviewers should rerun after autofix\n'
+    RESULT=1
+  fi
+  if ! printf '%s' "$OUTPUT" | grep -q "Rerunning reviewers after autofix"; then
+    printf '    FAIL: output should report reviewer rerun after autofix, got: %s\n' "$OUTPUT"
+    RESULT=1
+  fi
+  if ! grep -q "Mock reviewer passed" ".factory/runs/${RUN_ID}/reviews/review-tests.md" 2>/dev/null; then
+    printf '    FAIL: rerun review artifacts should be copied back to the source run\n'
+    RESULT=1
+  fi
+
+  cleanup_test_project
+  return $RESULT
+}
+
+test_land_autofix_requires_clean_worktree() {
+  setup_test_project
+  RUN_ID="run-autofix-dirty"
+  setup_run_with_worktree "$RUN_ID" pass
+  WT_PATH="${TEST_DIR}/${RUN_ID}-wt"
+
+  printf 'dirty user change\n' > "${WT_PATH}/dirty.txt"
+
+  write_check_config <<EOF
+[checks.format]
+command = "printf check-output; exit 1"
+fix_command = "printf fixed > '${TEST_DIR}/fix-ran'"
+autofix = true
+run_before_land = true
+EOF
+
+  set +e
+  OUTPUT="$("$BINARY" land "$RUN_ID" 2>&1)"
+  EXIT_CODE=$?
+  set -e
+
+  RESULT=0
+  if [ "$EXIT_CODE" -eq 0 ]; then
+    printf '    FAIL: land should exit non-zero when autofix needs a dirty worktree\n'
+    RESULT=1
+  fi
+  if [ -f "${TEST_DIR}/fix-ran" ]; then
+    printf '    FAIL: autofix command should not run with a dirty worktree\n'
+    RESULT=1
+  fi
+  if [ ! -d "$WT_PATH" ]; then
+    printf '    FAIL: worktree should remain when autofix refuses a dirty worktree\n'
+    RESULT=1
+  fi
+  if [ "$(cat ".factory/runs/${RUN_ID}/status")" = "landed" ]; then
+    printf '    FAIL: run should not be marked landed when autofix refuses a dirty worktree\n'
+    RESULT=1
+  fi
+  if ! printf '%s' "$OUTPUT" | grep -qi "uncommitted changes"; then
+    printf '    FAIL: output should explain that autofix requires no uncommitted changes, got: %s\n' "$OUTPUT"
+    RESULT=1
+  fi
+
+  cleanup_test_project
+  return $RESULT
+}
+
+test_land_autofix_command_failure_keeps_worktree() {
+  setup_test_project
+  RUN_ID="run-autofix-command-fails"
+  setup_run_with_worktree "$RUN_ID" pass
+  WT_PATH="${TEST_DIR}/${RUN_ID}-wt"
+
+  write_check_config <<'EOF'
+[checks.format]
+command = "printf check-output; exit 1"
+fix_command = "printf fix-output; exit 2"
+autofix = true
+run_before_land = true
+EOF
+
+  set +e
+  OUTPUT="$("$BINARY" land "$RUN_ID" 2>&1)"
+  EXIT_CODE=$?
+  set -e
+
+  RESULT=0
+  if [ "$EXIT_CODE" -eq 0 ]; then
+    printf '    FAIL: land should exit non-zero when autofix command fails\n'
+    RESULT=1
+  fi
+  if [ ! -d "$WT_PATH" ]; then
+    printf '    FAIL: worktree should remain after autofix command failure\n'
+    RESULT=1
+  fi
+  if ! git branch --list "$RUN_ID" | grep -q "$RUN_ID"; then
+    printf '    FAIL: run branch should remain after autofix command failure\n'
+    RESULT=1
+  fi
+  if [ "$(cat ".factory/runs/${RUN_ID}/status")" = "landed" ]; then
+    printf '    FAIL: run should not be marked landed after autofix command failure\n'
+    RESULT=1
+  fi
+  if ! printf '%s' "$OUTPUT" | grep -q "fix-output"; then
+    printf '    FAIL: output should include failed fix command output, got: %s\n' "$OUTPUT"
+    RESULT=1
+  fi
+  if ! printf '%s' "$OUTPUT" | grep -q "printf fix-output; exit 2"; then
+    printf '    FAIL: output should include failed fix command, got: %s\n' "$OUTPUT"
+    RESULT=1
+  fi
+
+  cleanup_test_project
+  return $RESULT
+}
+
+test_land_autofix_rerun_failure_keeps_worktree() {
+  setup_test_project
+  RUN_ID="run-autofix-rerun-fails"
+  setup_run_with_worktree "$RUN_ID" pass
+  WT_PATH="${TEST_DIR}/${RUN_ID}-wt"
+
+  printf 'needs fix\n' > "${WT_PATH}/format.txt"
+  git -C "$WT_PATH" add format.txt
+  git -C "$WT_PATH" commit -m "add unformatted file" > /dev/null 2>&1
+
+  write_check_config <<EOF
+[checks.format]
+command = "printf check >> '${TEST_DIR}/check-count'; grep -q fixed format.txt && grep -q approved format.txt"
+fix_command = "printf fixed > format.txt"
+autofix = true
+run_before_land = true
+EOF
+
+  set +e
+  OUTPUT="$("$BINARY" land "$RUN_ID" 2>&1)"
+  EXIT_CODE=$?
+  set -e
+
+  RESULT=0
+  if [ "$EXIT_CODE" -eq 0 ]; then
+    printf '    FAIL: land should exit non-zero when checks fail after autofix\n'
+    RESULT=1
+  fi
+  if [ ! -d "$WT_PATH" ]; then
+    printf '    FAIL: worktree should remain after post-autofix check failure\n'
+    RESULT=1
+  fi
+  if ! git branch --list "$RUN_ID" | grep -q "$RUN_ID"; then
+    printf '    FAIL: run branch should remain after post-autofix check failure\n'
+    RESULT=1
+  fi
+  if [ "$(cat ".factory/runs/${RUN_ID}/status")" = "landed" ]; then
+    printf '    FAIL: run should not be marked landed after post-autofix check failure\n'
+    RESULT=1
+  fi
+  if [ ! -f "${TEST_DIR}/check-count" ] || [ "$(wc -c < "${TEST_DIR}/check-count")" -lt 10 ]; then
+    printf '    FAIL: check should run before and after autofix failure\n'
+    RESULT=1
+  fi
+  if ! grep -q "fixed" "${WT_PATH}/format.txt"; then
+    printf '    FAIL: autofix change should remain in the worktree for diagnosis\n'
+    RESULT=1
+  fi
+  if [ -n "$(git -C "$WT_PATH" status --porcelain -- format.txt)" ]; then
+    printf '    FAIL: autofix change should be committed before the rerun failure\n'
+    RESULT=1
+  fi
+  if ! printf '%s' "$OUTPUT" | grep -q "grep -q fixed format.txt"; then
+    printf '    FAIL: output should include the failed rerun command, got: %s\n' "$OUTPUT"
+    RESULT=1
+  fi
+
+  cleanup_test_project
+  return $RESULT
+}
+
+test_land_autofix_review_failure_keeps_worktree() {
+  setup_test_project
+  RUN_ID="run-autofix-review-fails"
+  setup_run_with_worktree "$RUN_ID" pass
+  WT_PATH="${TEST_DIR}/${RUN_ID}-wt"
+
+  printf 'needs fix\n' > "${WT_PATH}/format.txt"
+  git -C "$WT_PATH" add format.txt
+  git -C "$WT_PATH" commit -m "add unformatted file" > /dev/null 2>&1
+
+  write_mock_reviewer fail tests
+  write_check_config <<EOF
+[checks.format]
+command = "grep -q fixed format.txt"
+fix_command = "printf fixed > format.txt"
+autofix = true
+run_before_land = true
+EOF
+
+  set +e
+  OUTPUT="$(PATH="${MOCK_BIN}:$PATH" "$BINARY" land "$RUN_ID" 2>&1)"
+  EXIT_CODE=$?
+  set -e
+
+  RESULT=0
+  if [ "$EXIT_CODE" -eq 0 ]; then
+    printf '    FAIL: land should exit non-zero when reviewers fail after autofix\n'
+    RESULT=1
+  fi
+  if [ ! -d "$WT_PATH" ]; then
+    printf '    FAIL: worktree should remain after autofix reviewer failure\n'
+    RESULT=1
+  fi
+  if ! git branch --list "$RUN_ID" | grep -q "$RUN_ID"; then
+    printf '    FAIL: run branch should remain unlanded after autofix reviewer failure\n'
+    RESULT=1
+  fi
+  if [ "$(cat ".factory/runs/${RUN_ID}/status")" = "landed" ]; then
+    printf '    FAIL: run should not be marked landed after autofix reviewer failure\n'
+    RESULT=1
+  fi
+  if ! grep -q "Verdict: fail" ".factory/runs/${RUN_ID}/reviews/review-tests.md" 2>/dev/null; then
+    printf '    FAIL: failing rerun review artifact should be copied back to the source run\n'
+    RESULT=1
+  fi
+  if ! printf '%s' "$OUTPUT" | grep -qi "review"; then
+    printf '    FAIL: output should mention reviewer failure, got: %s\n' "$OUTPUT"
+    RESULT=1
+  fi
+
+  cleanup_test_project
+  return $RESULT
+}
+
+test_factory_config_defines_format_check() {
+  RESULT=0
+  CONFIG="${PROJECT_DIR}/.factory/config.toml"
+
+  if [ ! -f "$CONFIG" ]; then
+    printf '    FAIL: .factory/config.toml should exist\n'
+    return 1
+  fi
+  if ! grep -q '^\[checks\.format\]' "$CONFIG"; then
+    printf '    FAIL: config should define checks.format\n'
+    RESULT=1
+  fi
+  if ! grep -q '^command = "cargo fmt --all -- --check"' "$CONFIG"; then
+    printf '    FAIL: format check should run cargo fmt --all -- --check\n'
+    RESULT=1
+  fi
+  if ! grep -q '^fix_command = "cargo fmt --all"' "$CONFIG"; then
+    printf '    FAIL: format check should autofix with cargo fmt --all\n'
+    RESULT=1
+  fi
+  if ! grep -q '^autofix = true' "$CONFIG"; then
+    printf '    FAIL: format check should enable autofix\n'
+    RESULT=1
+  fi
+  if ! grep -q '^run_before_land = true' "$CONFIG"; then
+    printf '    FAIL: format check should run before land\n'
+    RESULT=1
+  fi
+
+  return $RESULT
+}
+
 # -------------------------------------------------------------------------
 # Run all tests
 # -------------------------------------------------------------------------
@@ -493,6 +968,15 @@ run_test "land deletes run branch" test_land_deletes_branch
 run_test "land merges run commits into main" test_land_merges_to_main
 run_test "land fails on rebase conflict" test_land_fails_on_rebase_conflict
 run_test "land allows run with no reviews" test_land_allows_no_reviews
+run_test "land without check config does not require formatter" test_land_without_check_config_does_not_require_formatter
+run_test "land runs blocking check in worktree" test_land_runs_blocking_check_in_worktree
+run_test "land failed check keeps worktree and reports details" test_land_failed_check_keeps_worktree_and_reports_details
+run_test "land autofix commits, reruns checks, and reruns reviewers" test_land_autofix_commits_reruns_checks_and_reviewers
+run_test "land autofix requires clean worktree" test_land_autofix_requires_clean_worktree
+run_test "land autofix command failure keeps worktree" test_land_autofix_command_failure_keeps_worktree
+run_test "land autofix rerun failure keeps worktree" test_land_autofix_rerun_failure_keeps_worktree
+run_test "land autofix reviewer failure keeps worktree" test_land_autofix_review_failure_keeps_worktree
+run_test "this repo defines a pre-land format check" test_factory_config_defines_format_check
 run_test "shell: land rejects non-complete run (exit code)" test_shell_land_rejects_non_complete_status
 run_test "shell: land full workflow" test_shell_land_full_workflow
 

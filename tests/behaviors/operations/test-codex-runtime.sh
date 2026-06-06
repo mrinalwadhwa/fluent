@@ -116,17 +116,17 @@ MOCK_SCRIPT
 write_mock_codex_complete() {
   cat > "${MOCK_BIN}/codex" << 'MOCK_SCRIPT'
 #!/usr/bin/env bash
-printf '%s\n' "$*" > .codex-args
 if [ -n "${CODEX_ARGS_LOG:-}" ]; then
   {
     printf '%s\n' '---'
     printf '%s\n' "$*"
   } >> "$CODEX_ARGS_LOG"
 fi
-echo "CODEX_LAUNCHED=1" > .codex-launched
 echo '{"type":"result","subtype":"success","result":"done","session_id":"mock"}'
 if [ -f .factory/active-run ]; then
   RID="$(cat .factory/active-run)"
+  printf '%s\n' "$*" > ".factory/runs/${RID}/codex-args"
+  echo "CODEX_LAUNCHED=1" > ".factory/runs/${RID}/codex-launched"
   printf 'complete' > ".factory/runs/${RID}/status"
 fi
 MOCK_SCRIPT
@@ -134,14 +134,14 @@ MOCK_SCRIPT
 }
 
 assert_contains() {
-  if ! printf '%s' "$1" | grep -q -- "$2"; then
+  if ! grep -q -- "$2" <<< "$1"; then
     printf '    FAIL: output does not contain "%s"\n' "$2"
     return 1
   fi
 }
 
 assert_not_contains() {
-  if printf '%s' "$1" | grep -q -- "$2"; then
+  if grep -q -- "$2" <<< "$1"; then
     printf '    FAIL: output should not contain "%s"\n' "$2"
     return 1
   fi
@@ -150,8 +150,8 @@ assert_not_contains() {
 assert_before() {
   local haystack="$1" first="$2" second="$3"
   local pos_first pos_second
-  pos_first="$(printf '%s' "$haystack" | grep -bo -- "$first" | head -1 | cut -d: -f1)"
-  pos_second="$(printf '%s' "$haystack" | grep -bo -- "$second" | head -1 | cut -d: -f1)"
+  pos_first="$(grep -m1 -bo -- "$first" <<< "$haystack" | cut -d: -f1)"
+  pos_second="$(grep -m1 -bo -- "$second" <<< "$haystack" | cut -d: -f1)"
   if [ -z "$pos_first" ] || [ -z "$pos_second" ]; then
     printf '    FAIL: could not locate "%s" or "%s"\n' "$first" "$second"
     return 1
@@ -194,8 +194,10 @@ test_sandboxed_codex_uses_workspace_write() {
     RESULT=1
   else
     ARGS="$(cat "${WT}/.codex-args")"
+    EXPECTED_ROOT="$(cd "$TEST_DIR" && pwd -P)"
     assert_contains "$ARGS" "exec" || RESULT=1
     assert_contains "$ARGS" "--sandbox workspace-write" || RESULT=1
+    assert_contains "$ARGS" "--add-dir $EXPECTED_ROOT" || RESULT=1
     assert_contains "$ARGS" "--ask-for-approval never" || RESULT=1
     assert_before "$ARGS" "--ask-for-approval" "exec" || RESULT=1
     assert_not_contains "$ARGS" "--dangerously-bypass-approvals-and-sandbox" || RESULT=1
@@ -302,8 +304,10 @@ PLAN
     printf '    FAIL: mock codex did not run for parallel children\n'
     RESULT=1
   else
+    EXPECTED_ROOT="$(cd "$TEST_DIR" && pwd -P)"
     assert_contains "$CHILD_ARGS" "exec" || RESULT=1
     assert_contains "$CHILD_ARGS" "--sandbox workspace-write" || RESULT=1
+    assert_contains "$CHILD_ARGS" "--add-dir $EXPECTED_ROOT" || RESULT=1
     assert_contains "$CHILD_ARGS" "--ask-for-approval never" || RESULT=1
     assert_before "$CHILD_ARGS" "--ask-for-approval" "exec" || RESULT=1
     assert_not_contains "$CHILD_ARGS" "--dangerously-bypass-approvals-and-sandbox" || RESULT=1

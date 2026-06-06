@@ -81,9 +81,31 @@ project/
     src/                     ← agent works here
 ```
 
-When done, `factory land` copies artifacts back from the worktree,
-removes the worktree, rebases the run branch onto the source branch,
-fast-forward merges, deletes the branch, and sets the status to `landed`.
+When done, landing a worktree run loads project checks from
+`.factory/config.toml`, runs enabled pre-land checks in the worktree,
+copies artifacts back from the worktree, removes the worktree, rebases
+the run branch onto the source branch, fast-forward merges, deletes the
+branch, and sets the status to `landed`. This policy applies to normal
+`factory land` runs and to child runs that the parallel orchestrator
+lands after each group completes.
+
+Projects opt into checks with this shape:
+
+```toml
+[checks.format]
+command = "cargo fmt --all -- --check"
+fix_command = "cargo fmt --all"
+autofix = true
+run_before_land = true
+```
+
+Factory treats checks generically. If a pre-land check fails without
+autofix, land stops before any destructive step. If a check has
+`autofix = true` and a `fix_command`, Factory first requires no
+uncommitted changes outside `.factory`, runs the fix command, commits
+changes outside `.factory` when the fix changes project files, reruns
+checks, reruns reviewers after an autofix commit, and continues only
+when the required checks and reviews pass.
 
 ### Run state
 
@@ -159,7 +181,7 @@ for each group in plan:
     else: run children one at a time
     wait for all children to complete
     if any child failed: set parent to failed, stop
-    merge each child's branch into parent branch
+    run pre-land checks and merge each child's branch into parent branch
     set each child's status to landed
 record children list in parent run dir
 set parent status to complete
@@ -239,9 +261,11 @@ and receive the factory system prompt prepended to the session prompt
 because the Codex CLI has no Claude-style append-system-prompt flag.
 `--ask-for-approval` is a top-level Codex option and must appear before
 `exec`. For sandboxed local runs, Factory also passes
-`--sandbox workspace-write` (an exec subcommand option) instead of
-wrapping the Codex process in `sandbox-exec`. This gives the autonomous run one
-Codex-managed sandbox boundary. In bare mode, Codex runs with
+`--sandbox workspace-write` and `--add-dir <workspace-parent>` as exec
+subcommand options instead of wrapping the Codex process in
+`sandbox-exec`. The worktree remains Codex's working root, while the
+workspace parent is writable so linked worktrees can update git metadata
+under the source worktree's `.git`. In bare mode, Codex runs with
 `--dangerously-bypass-approvals-and-sandbox`.
 
 Fargate currently supports only Claude because its container entrypoint

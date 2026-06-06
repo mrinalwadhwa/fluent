@@ -88,10 +88,7 @@ impl Event {
                     .map(|l| format!("  {l}"))
                     .collect();
                 if lines.len() > max_lines {
-                    result.push(format!(
-                        "  ... ({} more lines)",
-                        lines.len() - max_lines
-                    ));
+                    result.push(format!("  ... ({} more lines)", lines.len() - max_lines));
                 }
                 result
             }
@@ -106,10 +103,7 @@ impl Event {
                 let cost = cost_usd
                     .map(|c| format!("${c:.4}"))
                     .unwrap_or_else(|| "?".into());
-                vec![
-                    String::new(),
-                    format!("Session complete ({dur}, {cost})"),
-                ]
+                vec![String::new(), format!("Session complete ({dur}, {cost})")]
             }
             Event::Unknown { event_type } => vec![format!("({event_type})")],
         }
@@ -138,10 +132,7 @@ pub fn parse_line(line: &str) -> Vec<Event> {
             let subtype = val["subtype"].as_str().unwrap_or("");
             if subtype == "init" {
                 vec![Event::SessionInit {
-                    session_id: val["session_id"]
-                        .as_str()
-                        .unwrap_or("")
-                        .to_string(),
+                    session_id: val["session_id"].as_str().unwrap_or("").to_string(),
                     model: val["model"].as_str().unwrap_or("unknown").to_string(),
                 }]
             } else {
@@ -160,14 +151,8 @@ pub fn parse_line(line: &str) -> Vec<Event> {
                 let block_type = block["type"].as_str().unwrap_or("");
                 match block_type {
                     "tool_use" => {
-                        let id = block["id"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
-                        let name = block["name"]
-                            .as_str()
-                            .unwrap_or("?")
-                            .to_string();
+                        let id = block["id"].as_str().unwrap_or("").to_string();
+                        let name = block["name"].as_str().unwrap_or("?").to_string();
                         let summary = summarize_tool_input(&name, &block["input"]);
                         events.push(Event::ToolUse { id, name, summary });
                     }
@@ -178,10 +163,7 @@ pub fn parse_line(line: &str) -> Vec<Event> {
                         }
                     }
                     "thinking" => {
-                        let text = block["thinking"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
+                        let text = block["thinking"].as_str().unwrap_or("").to_string();
                         events.push(Event::Thinking { text });
                     }
                     _ => {}
@@ -197,10 +179,7 @@ pub fn parse_line(line: &str) -> Vec<Event> {
             let mut events = Vec::new();
             for block in blocks {
                 if block["type"].as_str() == Some("tool_result") {
-                    let id = block["tool_use_id"]
-                        .as_str()
-                        .unwrap_or("")
-                        .to_string();
+                    let id = block["tool_use_id"].as_str().unwrap_or("").to_string();
                     let content = extract_tool_result_content(block);
                     events.push(Event::ToolResult {
                         tool_use_id: id,
@@ -213,7 +192,9 @@ pub fn parse_line(line: &str) -> Vec<Event> {
         "rate_limit_event" => vec![Event::RateLimit],
         "result" => vec![Event::Result {
             duration_ms: val["duration_ms"].as_u64(),
-            cost_usd: val["cost_usd"].as_f64().or_else(|| val["total_cost_usd"].as_f64()),
+            cost_usd: val["cost_usd"]
+                .as_f64()
+                .or_else(|| val["total_cost_usd"].as_f64()),
         }],
         "thread.started" => vec![Event::SessionInit {
             session_id: val["thread_id"].as_str().unwrap_or("").to_string(),
@@ -276,7 +257,9 @@ fn extract_tool_result_content(block: &serde_json::Value) -> String {
     } else if let Some(arr) = block["content"].as_array() {
         arr.iter()
             .filter_map(|item| {
-                if item["type"].as_str() == Some("tool_result") || item["type"].as_str() == Some("text") {
+                if item["type"].as_str() == Some("tool_result")
+                    || item["type"].as_str() == Some("text")
+                {
                     item["text"].as_str().map(|s| s.to_string())
                 } else {
                     None
@@ -286,10 +269,7 @@ fn extract_tool_result_content(block: &serde_json::Value) -> String {
             .join("\n")
     } else if block.get("is_error") == Some(&serde_json::Value::Bool(true)) {
         // Error results
-        block["content"]
-            .as_str()
-            .unwrap_or("(error)")
-            .to_string()
+        block["content"].as_str().unwrap_or("(error)").to_string()
     } else {
         String::new()
     }
@@ -298,18 +278,9 @@ fn extract_tool_result_content(block: &serde_json::Value) -> String {
 /// Summarize tool input for display.
 fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
     match tool_name {
-        "Read" => input["file_path"]
-            .as_str()
-            .unwrap_or("")
-            .to_string(),
-        "Edit" => input["file_path"]
-            .as_str()
-            .unwrap_or("")
-            .to_string(),
-        "Write" => input["file_path"]
-            .as_str()
-            .unwrap_or("")
-            .to_string(),
+        "Read" => input["file_path"].as_str().unwrap_or("").to_string(),
+        "Edit" => input["file_path"].as_str().unwrap_or("").to_string(),
+        "Write" => input["file_path"].as_str().unwrap_or("").to_string(),
         "Bash" => {
             let cmd = input["command"].as_str().unwrap_or("");
             let desc = input["description"].as_str().unwrap_or("");
@@ -442,7 +413,8 @@ mod tests {
 
     #[test]
     fn test_parse_system_init() {
-        let line = r#"{"type":"system","subtype":"init","session_id":"abc","model":"claude-opus-4-6"}"#;
+        let line =
+            r#"{"type":"system","subtype":"init","session_id":"abc","model":"claude-opus-4-6"}"#;
         let events = parse_line(line);
         assert_eq!(events.len(), 1);
         match &events[0] {
@@ -470,7 +442,8 @@ mod tests {
 
     #[test]
     fn test_parse_text() {
-        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello world"}]}}"#;
+        let line =
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello world"}]}}"#;
         let events = parse_line(line);
         assert_eq!(events.len(), 1);
         match &events[0] {
@@ -481,7 +454,8 @@ mod tests {
 
     #[test]
     fn test_parse_thinking() {
-        let line = r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hmm"}]}}"#;
+        let line =
+            r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hmm"}]}}"#;
         let events = parse_line(line);
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], Event::Thinking { .. }));
@@ -529,7 +503,8 @@ mod tests {
 
     #[test]
     fn test_parse_tool_result_is_silent() {
-        let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"123"}]}}"#;
+        let line =
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"123"}]}}"#;
         let events = parse_line(line);
         assert_eq!(events.len(), 1);
         // Tool results have empty summary
@@ -563,15 +538,13 @@ mod tests {
 
     #[test]
     fn test_grep_summary() {
-        let input: serde_json::Value =
-            serde_json::json!({"pattern": "fn main"});
+        let input: serde_json::Value = serde_json::json!({"pattern": "fn main"});
         assert_eq!(summarize_tool_input("Grep", &input), "/fn main/");
     }
 
     #[test]
     fn test_glob_summary() {
-        let input: serde_json::Value =
-            serde_json::json!({"pattern": "**/*.rs"});
+        let input: serde_json::Value = serde_json::json!({"pattern": "**/*.rs"});
         assert_eq!(summarize_tool_input("Glob", &input), "**/*.rs");
     }
 
@@ -587,15 +560,13 @@ mod tests {
 
     #[test]
     fn test_edit_summary_shows_full_path() {
-        let input: serde_json::Value =
-            serde_json::json!({"file_path": "/a/b/c/d.rs"});
+        let input: serde_json::Value = serde_json::json!({"file_path": "/a/b/c/d.rs"});
         assert_eq!(summarize_tool_input("Edit", &input), "/a/b/c/d.rs");
     }
 
     #[test]
     fn test_write_summary_shows_full_path() {
-        let input: serde_json::Value =
-            serde_json::json!({"file_path": "/a/b/c/d.rs"});
+        let input: serde_json::Value = serde_json::json!({"file_path": "/a/b/c/d.rs"});
         assert_eq!(summarize_tool_input("Write", &input), "/a/b/c/d.rs");
     }
 
@@ -801,5 +772,4 @@ mod tests {
         let latest = find_latest_transcript(tmp.path()).unwrap();
         assert!(latest.to_string_lossy().contains("session-3"));
     }
-
 }
