@@ -572,8 +572,13 @@ Test: dashboard::tests::test_discover_agents_resets_archived_review_round_verdic
 
 WHILE a run is actively executing (author or reviewers running),
 THE SYSTEM SHALL show a visual indicator that distinguishes "active"
-from "idle" at a glance.
-Test: dashboard::tests::test_header_spinner_advances_with_tick, dashboard::tests::test_agent_tab_running_shows_spinner_symbol, dashboard::tests::test_header_author_executing_shows_spinner, tests/behaviors/operations/test-dashboard-activity.sh (no crash when run is actively executing, no crash when reviewers are running)
+from "idle" at a glance in the header, agent tabs, and run tabs.
+Test: dashboard::tests::test_header_spinner_advances_with_tick, dashboard::tests::test_agent_tab_running_shows_spinner_symbol, dashboard::tests::test_header_author_executing_shows_spinner, dashboard::tests::test_run_tabs_show_active_status_marker, dashboard::tests::test_run_tabs_active_status_marker_advances, tests/behaviors/operations/test-dashboard-activity.sh (no crash when run is actively executing, no crash when reviewers are running)
+
+WHEN the dashboard polls run state,
+THE SYSTEM SHALL keep actionable runs sorted before terminal runs, keep
+cleaned terminal runs last, and preserve the selected run by run ID.
+Test: dashboard::tests::test_app_poll_sorts_actionable_runs_first, dashboard::tests::test_app_new_prefers_actionable_run_over_cleaned_terminal_run
 
 WHEN everything is done (no processes running, terminal status),
 THE SYSTEM SHALL stop showing the spinner animation in the header and

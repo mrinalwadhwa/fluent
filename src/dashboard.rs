@@ -517,9 +517,10 @@ impl App {
     }
 
     fn poll(&mut self) {
+        let selected_id = self.runs.get(self.selected_run).map(|v| v.run.id.clone());
+        let selected_index = self.selected_run;
+
         if let Ok(all_runs) = run::list_runs(&self.search_root) {
-            let selected_id = self.runs.get(self.selected_run).map(|v| v.run.id.clone());
-            let selected_index = self.selected_run;
             let current_ids: Vec<String> = all_runs.iter().map(|r| r.id.clone()).collect();
 
             self.runs.retain(|v| current_ids.contains(&v.run.id));
@@ -529,21 +530,22 @@ impl App {
                     self.runs.push(RunView::new(r));
                 }
             }
-
-            self.selected_run = selected_id
-                .and_then(|id| self.runs.iter().position(|v| v.run.id == id))
-                .unwrap_or_else(|| {
-                    if self.runs.is_empty() {
-                        0
-                    } else {
-                        selected_index.min(self.runs.len() - 1)
-                    }
-                });
         }
 
         for view in &mut self.runs {
             view.poll();
         }
+
+        sort_views_for_dashboard(&mut self.runs);
+        self.selected_run = selected_id
+            .and_then(|id| self.runs.iter().position(|v| v.run.id == id))
+            .unwrap_or_else(|| {
+                if self.runs.is_empty() {
+                    0
+                } else {
+                    selected_index.min(self.runs.len() - 1)
+                }
+            });
     }
 
     fn current_view_mut(&mut self) -> &mut RunView {
@@ -872,16 +874,30 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, view: &RunView, tick: u64) {
 }
 
 /// Build the display label for a single run tab.
-fn run_tab_label(v: &RunView) -> (String, Color) {
+fn run_tab_label(v: &RunView, tick: u64) -> (String, Color) {
     let status = &v.cached_status;
     let color = match status.as_str() {
         "executing" => Color::Green,
+        "reviewing" | "planned" => Color::Cyan,
+        "rate-limited" => Color::Magenta,
         "complete" => Color::Blue,
         "failed" => Color::Red,
         "needs-user" => Color::Yellow,
         _ => Color::White,
     };
-    (format!(" {} [{}] ", v.run.id, status), color)
+    let marker = run_tab_status_marker(status, tick);
+    (format!(" {} [{marker}{status}] ", v.run.id), color)
+}
+
+fn run_tab_status_marker(status: &str, tick: u64) -> String {
+    match status {
+        "executing" | "reviewing" | "rate-limited" => {
+            let frame = SPINNER_FRAMES[(tick % SPINNER_FRAMES.len() as u64) as usize];
+            format!("{frame} ")
+        }
+        "planned" => "… ".into(),
+        _ => String::new(),
+    }
 }
 
 /// Compute which tabs are visible starting from `offset` within `content_width`.
@@ -924,7 +940,11 @@ fn clamp_run_tab_offset(app: &mut App, content_width: usize) {
         return;
     }
 
-    let labels: Vec<String> = app.runs.iter().map(|v| run_tab_label(v).0).collect();
+    let labels: Vec<String> = app
+        .runs
+        .iter()
+        .map(|v| run_tab_label(v, app.tick).0)
+        .collect();
 
     // Ensure selected is at least at offset
     if app.selected_run < app.run_tab_offset {
@@ -949,7 +969,11 @@ fn draw_run_tabs(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
     clamp_run_tab_offset(app, content_width);
 
     let has_left = app.run_tab_offset > 0;
-    let labels: Vec<(String, Color)> = app.runs.iter().map(|v| run_tab_label(v)).collect();
+    let labels: Vec<(String, Color)> = app
+        .runs
+        .iter()
+        .map(|v| run_tab_label(v, app.tick))
+        .collect();
     let label_strings: Vec<String> = labels.iter().map(|(s, _)| s.clone()).collect();
 
     let (visible_end, _) = visible_tab_range(
@@ -2297,8 +2321,50 @@ mod tests {
 
         let text = render_run_tabs_text(&mut app, 80);
 
-        assert!(text.contains("live-run [executing]"));
+        assert!(text.contains("live-run ["));
+        assert!(text.contains("executing]"));
         assert!(!text.contains("[planned]"));
+    }
+
+    #[test]
+    fn test_run_tabs_show_active_status_marker() {
+        let mut app = make_app_with_runs(&["live-run"], 0);
+        app.runs[0].cached_status = "executing".to_string();
+        app.tick = 0;
+
+        let text = render_run_tabs_text(&mut app, 80);
+
+        assert!(text.contains("live-run [⠋ executing]"));
+    }
+
+    #[test]
+    fn test_run_tabs_active_status_marker_advances() {
+        let mut app = make_app_with_runs(&["live-run"], 0);
+        app.runs[0].cached_status = "reviewing".to_string();
+        app.tick = 0;
+        let text_0 = render_run_tabs_text(&mut app, 80);
+
+        app.tick = 1;
+        let text_1 = render_run_tabs_text(&mut app, 80);
+
+        assert!(text_0.contains("live-run [⠋ reviewing]"));
+        assert!(text_1.contains("live-run [⠙ reviewing]"));
+    }
+
+    #[test]
+    fn test_app_poll_sorts_actionable_runs_first() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let runs_dir = tmp.path().join(".factory/runs");
+        make_filesystem_run(&runs_dir.join("a-complete"), "a-complete", "complete");
+        make_filesystem_run(&runs_dir.join("b-executing"), "b-executing", "executing");
+        make_filesystem_run(&runs_dir.join("c-failed"), "c-failed", "failed");
+
+        let mut app = App::new(tmp.path(), Some("a-complete")).unwrap();
+        app.poll();
+
+        let ids: Vec<&str> = app.runs.iter().map(|v| v.run.id.as_str()).collect();
+        assert_eq!(ids, vec!["b-executing", "c-failed", "a-complete"]);
+        assert_eq!(app.runs[app.selected_run].run.id, "a-complete");
     }
 
     #[test]
