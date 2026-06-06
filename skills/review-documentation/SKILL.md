@@ -87,7 +87,20 @@ For each finding, record:
 - The file, location, and the specific text
 - Which quality issue it is (pitch voice, AI tell, vague claim, etc.)
 
-### Phase 4 — Check completeness
+### Phase 4 — Check vocabulary consistency
+
+Compare terms used in documentation with terms used by the code,
+behaviors, architecture docs, commands, tests, and dashboard copy.
+Report meaningful drift:
+- The same concept has multiple names that could confuse a reader
+- A user-facing term conflicts with a code or behavior term
+- A new term appears without a clear reason or definition
+- A renamed concept leaves older terminology behind
+
+Make vocabulary findings advisory unless the inconsistency would cause
+users, authors, or reviewers to misunderstand behavior.
+
+### Phase 5 — Check completeness
 
 **Run-scoped:** Check whether code changes in the run are reflected in
 the documentation. Look for:
@@ -105,7 +118,7 @@ For each gap, record:
 - What exists in the code but not in the docs
 - Where in the docs it should be covered
 
-### Phase 5 — Produce verdict and findings
+### Phase 6 — Produce verdict and findings
 
 Write the review artifact to `.factory/runs/[run-id]/reviews/review-documentation.md`.
 
@@ -134,9 +147,13 @@ Verdict: [pass | fail | uncertain]
 2. [file:location] — [the text] — [which issue: pitch voice, AI tell,
    vague claim, etc.]
 
+### Vocabulary consistency
+
+3. [file:location] — [term drift and why it could confuse readers]
+
 ### Completeness
 
-3. [what exists in code but not in docs] — [where it should be covered]
+4. [what exists in code but not in docs] — [where it should be covered]
 ```
 
 Each finding should have enough context for the author to act on it
@@ -163,3 +180,6 @@ without re-reading the entire review.
 - **Don't over-report style.** A document with one "furthermore" is
   fine. A document with ten AI tells is a pattern worth reporting.
   Report patterns, not individual word choices unless they're egregious.
+- **Nudge vocabulary consistency.** Report term drift when it affects
+  reader understanding or conflicts with established project vocabulary.
+  Do not turn harmless synonyms into churn.

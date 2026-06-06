@@ -82,6 +82,10 @@ testable? Can they be changed without rippling?
 **Boundaries:** Are boundaries explicit? Are contracts clear between
 components?
 
+**Vocabulary:** Do code, architecture docs, behaviors, tests, and user
+conversation use the same terms for the same concepts? Is a term being
+introduced that conflicts with the system's domain model?
+
 **Coupling:** Is there unnecessary coupling? Check for the
 shared-utils trap, deep import paths, circular dependencies.
 
@@ -93,6 +97,11 @@ For each finding, record:
 - Which principle it relates to
 - Why it matters — what problem it causes or will cause
 - Severity — is this blocking or advisory?
+
+Treat vocabulary findings as architectural findings when inconsistent
+terms obscure component boundaries, domain concepts, or contracts. Make
+them advisory unless the mismatch would cause real ambiguity for users,
+authors, or future reviewers.
 
 ### Phase 4 — Check architecture documentation
 
@@ -157,6 +166,9 @@ the concern and decide how to address it.
   of review to the scope of the change.
 - **Viewpoints are lenses, not checklists.** Apply the viewpoints
   that are relevant. Don't force every viewpoint on every review.
+- **Nudge vocabulary consistency.** Check for domain terms that drift
+  across code, documentation, behaviors, tests, and dashboard copy.
+  Report meaningful drift, not harmless wording differences.
 - **Severity matters.** A circular dependency that prevents deployment
   is blocking. A function that could be slightly simpler is advisory.
   Lead with the findings that matter most.
