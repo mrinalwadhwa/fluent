@@ -5,6 +5,11 @@
 #   - Dashboard exits gracefully with no runs
 #   - Dashboard handles invalid run-id
 #   - Dashboard does not modify run state
+#   - Run tabs show status from the live run directory
+#   - Initial run selection prefers live active status
+#   - Polling removes deleted source run directories
+#   - Polling selects an existing run when the selected run is removed
+#   - Polling renders the empty state when all runs are removed
 #   - Completed runs show report.md by default
 #   - Completed runs without report.md show transcript activity
 #   - Active runs show transcript activity even when report.md exists
@@ -70,6 +75,51 @@ capture_dashboard() {
 
   cat "$OUTPUT_FILE"
   rm -f "$OUTPUT_FILE"
+}
+
+capture_dashboard_default() {
+  PROJECT_PATH="$1"
+  OUTPUT_FILE="$(mktemp -t factory-dashboard-output-XXXXXX)"
+
+  (
+    sleep 1
+    printf 'q'
+  ) | FACTORY_DASH_BIN="$FACTORY_BIN" \
+      FACTORY_DASH_PROJECT="$PROJECT_PATH" \
+      TERM=xterm \
+      script -q "$OUTPUT_FILE" sh -c 'stty rows 30 cols 120; "$FACTORY_DASH_BIN" dashboard "$FACTORY_DASH_PROJECT"' >/dev/null 2>&1 || true
+
+  cat "$OUTPUT_FILE"
+  rm -f "$OUTPUT_FILE"
+}
+
+capture_dashboard_after_poll_mutation() {
+  PROJECT_PATH="$1"
+  RUN_ID="$2"
+  MUTATION="$3"
+  OUTPUT_FILE="$(mktemp -t factory-dashboard-output-XXXXXX)"
+
+  (
+    sleep 1
+    eval "$MUTATION"
+    sleep 4
+    printf 'q'
+  ) | FACTORY_DASH_BIN="$FACTORY_BIN" \
+      FACTORY_DASH_PROJECT="$PROJECT_PATH" \
+      FACTORY_DASH_RUN="$RUN_ID" \
+      TERM=xterm \
+      script -q "$OUTPUT_FILE" sh -c 'stty rows 30 cols 120; "$FACTORY_DASH_BIN" dashboard --run-id "$FACTORY_DASH_RUN" "$FACTORY_DASH_PROJECT"' >/dev/null 2>&1 || true
+
+  cat "$OUTPUT_FILE"
+  rm -f "$OUTPUT_FILE"
+}
+
+clean_dashboard_output_tail() {
+  clean_dashboard_output | tail -c 1000
+}
+
+clean_dashboard_output() {
+  perl -pe 's/\e\[[0-9;?]*[ -\/]*[@-~]//g; s/\r/\n/g'
 }
 
 write_transcript() {
@@ -152,6 +202,147 @@ test_dashboard_does_not_modify_run_state() {
   RESULT=0
   if [ "$BEFORE" != "$AFTER" ]; then
     printf '    FAIL: dashboard modified run state files\n'
+    RESULT=1
+  fi
+
+  rm -rf "$TEST_DIR"
+  return $RESULT
+}
+
+test_run_tabs_show_live_status() {
+  TEST_DIR="$(mktemp -d -t factory-test-dash-XXXXXX)"
+  WORKTREE_DIR="$(mktemp -d -t factory-test-dash-wt-XXXXXX)"
+  mkdir -p "${TEST_DIR}/.factory/runs/live-run"
+  mkdir -p "${WORKTREE_DIR}/.factory/runs/live-run"
+  printf 'planned' > "${TEST_DIR}/.factory/runs/live-run/status"
+  printf 'Live brief' > "${TEST_DIR}/.factory/runs/live-run/brief.md"
+  printf 'executing' > "${WORKTREE_DIR}/.factory/runs/live-run/status"
+  printf 'Live brief' > "${WORKTREE_DIR}/.factory/runs/live-run/brief.md"
+  printf '%s' "$WORKTREE_DIR" > "${TEST_DIR}/.factory/runs/live-run/worktree"
+
+  OUTPUT="$(capture_dashboard "$TEST_DIR" live-run)"
+
+  RESULT=0
+  if ! echo "$OUTPUT" | grep -q "live-run \\[executing\\]"; then
+    printf '    FAIL: expected run tab to show live status [executing]\n'
+    RESULT=1
+  fi
+  if echo "$OUTPUT" | grep -q "live-run \\[planned\\]"; then
+    printf '    FAIL: run tab showed stale source status [planned]\n'
+    RESULT=1
+  fi
+
+  rm -rf "$TEST_DIR" "$WORKTREE_DIR"
+  return $RESULT
+}
+
+test_initial_run_prefers_live_active_status() {
+  TEST_DIR="$(mktemp -d -t factory-test-dash-XXXXXX)"
+  WORKTREE_DIR="$(mktemp -d -t factory-test-dash-wt-XXXXXX)"
+  mkdir -p "${TEST_DIR}/.factory/runs/live-active"
+  mkdir -p "${TEST_DIR}/.factory/runs/source-complete"
+  mkdir -p "${WORKTREE_DIR}/.factory/runs/live-active"
+  printf 'complete' > "${TEST_DIR}/.factory/runs/live-active/status"
+  printf 'Live active brief' > "${TEST_DIR}/.factory/runs/live-active/brief.md"
+  printf 'executing' > "${WORKTREE_DIR}/.factory/runs/live-active/status"
+  printf 'Live active brief' > "${WORKTREE_DIR}/.factory/runs/live-active/brief.md"
+  printf '%s' "$WORKTREE_DIR" > "${TEST_DIR}/.factory/runs/live-active/worktree"
+  printf 'complete' > "${TEST_DIR}/.factory/runs/source-complete/status"
+  printf 'Complete brief' > "${TEST_DIR}/.factory/runs/source-complete/brief.md"
+
+  OUTPUT="$(capture_dashboard_default "$TEST_DIR")"
+  CLEAN_OUTPUT="$(printf '%s' "$OUTPUT" | clean_dashboard_output)"
+
+  RESULT=0
+  if ! echo "$CLEAN_OUTPUT" | grep -q "Run: live-active"; then
+    printf '    FAIL: expected initial selection to prefer live-active\n'
+    RESULT=1
+  fi
+  if ! echo "$CLEAN_OUTPUT" | grep -q "live-active \\[executing\\]"; then
+    printf '    FAIL: expected live-active tab to show [executing]\n'
+    RESULT=1
+  fi
+
+  rm -rf "$TEST_DIR" "$WORKTREE_DIR"
+  return $RESULT
+}
+
+test_poll_removes_deleted_source_run() {
+  TEST_DIR="$(mktemp -d -t factory-test-dash-XXXXXX)"
+  mkdir -p "${TEST_DIR}/.factory/runs/delete-me"
+  mkdir -p "${TEST_DIR}/.factory/runs/keep-me"
+  printf 'complete' > "${TEST_DIR}/.factory/runs/delete-me/status"
+  printf 'Delete brief' > "${TEST_DIR}/.factory/runs/delete-me/brief.md"
+  printf 'planned' > "${TEST_DIR}/.factory/runs/keep-me/status"
+  printf 'Keep brief' > "${TEST_DIR}/.factory/runs/keep-me/brief.md"
+
+  OUTPUT="$(capture_dashboard_after_poll_mutation "$TEST_DIR" keep-me "rm -rf '${TEST_DIR}/.factory/runs/delete-me'")"
+  FINAL_OUTPUT="$(printf '%s' "$OUTPUT" | clean_dashboard_output_tail)"
+
+  RESULT=0
+  if echo "$OUTPUT" | grep -qi "panic"; then
+    printf '    FAIL: dashboard panicked after deleting a source run\n'
+    RESULT=1
+  fi
+  if echo "$FINAL_OUTPUT" | grep -q "delete-me"; then
+    printf '    FAIL: deleted source run remained in the polled dashboard state\n'
+    RESULT=1
+  fi
+  if ! echo "$FINAL_OUTPUT" | grep -q "keep-me \\[planned\\]"; then
+    printf '    FAIL: expected remaining run to stay visible after poll\n'
+    RESULT=1
+  fi
+
+  rm -rf "$TEST_DIR"
+  return $RESULT
+}
+
+test_poll_selects_existing_run_when_selected_removed() {
+  TEST_DIR="$(mktemp -d -t factory-test-dash-XXXXXX)"
+  mkdir -p "${TEST_DIR}/.factory/runs/remove-me"
+  mkdir -p "${TEST_DIR}/.factory/runs/keep-me"
+  printf 'executing' > "${TEST_DIR}/.factory/runs/remove-me/status"
+  printf 'Remove brief' > "${TEST_DIR}/.factory/runs/remove-me/brief.md"
+  printf 'planned' > "${TEST_DIR}/.factory/runs/keep-me/status"
+  printf 'Keep brief' > "${TEST_DIR}/.factory/runs/keep-me/brief.md"
+
+  OUTPUT="$(capture_dashboard_after_poll_mutation "$TEST_DIR" remove-me "rm -rf '${TEST_DIR}/.factory/runs/remove-me'")"
+  FINAL_OUTPUT="$(printf '%s' "$OUTPUT" | clean_dashboard_output_tail)"
+
+  RESULT=0
+  if echo "$OUTPUT" | grep -qi "panic"; then
+    printf '    FAIL: dashboard panicked after selected run was removed\n'
+    RESULT=1
+  fi
+  if ! echo "$FINAL_OUTPUT" | grep -q "keep-me"; then
+    printf '    FAIL: expected dashboard to select an existing run\n'
+    RESULT=1
+  fi
+
+  rm -rf "$TEST_DIR"
+  return $RESULT
+}
+
+test_poll_renders_empty_state_when_all_runs_removed() {
+  TEST_DIR="$(mktemp -d -t factory-test-dash-XXXXXX)"
+  mkdir -p "${TEST_DIR}/.factory/runs/remove-me"
+  printf 'executing' > "${TEST_DIR}/.factory/runs/remove-me/status"
+  printf 'Remove brief' > "${TEST_DIR}/.factory/runs/remove-me/brief.md"
+
+  OUTPUT="$(capture_dashboard_after_poll_mutation "$TEST_DIR" remove-me "rm -rf '${TEST_DIR}/.factory/runs/remove-me'")"
+  FINAL_OUTPUT="$(printf '%s' "$OUTPUT" | clean_dashboard_output_tail)"
+
+  RESULT=0
+  if echo "$OUTPUT" | grep -qi "panic"; then
+    printf '    FAIL: dashboard panicked after all runs were removed\n'
+    RESULT=1
+  fi
+  if ! echo "$FINAL_OUTPUT" | grep -q "No runs found"; then
+    printf '    FAIL: expected empty-state header after all runs were removed\n'
+    RESULT=1
+  fi
+  if ! echo "$FINAL_OUTPUT" | grep -q "No runs in this project"; then
+    printf '    FAIL: expected empty-state body after all runs were removed\n'
     RESULT=1
   fi
 
@@ -259,6 +450,11 @@ printf 'test-dashboard\n\n'
 run_test "dashboard exits gracefully with no runs" test_dashboard_exits_gracefully_with_no_runs
 run_test "dashboard handles invalid run-id" test_dashboard_handles_invalid_run_id
 run_test "dashboard does not modify run state" test_dashboard_does_not_modify_run_state
+run_test "run tabs show live status" test_run_tabs_show_live_status
+run_test "initial run prefers live active status" test_initial_run_prefers_live_active_status
+run_test "poll removes deleted source run" test_poll_removes_deleted_source_run
+run_test "poll selects existing run when selected removed" test_poll_selects_existing_run_when_selected_removed
+run_test "poll renders empty state when all runs removed" test_poll_renders_empty_state_when_all_runs_removed
 run_test "completed run with report shows report by default" test_completed_run_with_report_shows_report_by_default
 run_test "completed run without report shows transcript" test_completed_run_without_report_shows_transcript
 run_test "active run with report shows transcript" test_active_run_with_report_shows_transcript
