@@ -286,3 +286,9 @@ marked the run complete, but left the worktree dirty. Factory compared
 no-code-changes report. The session loop should require or verify a clean
 committed worktree before `complete`, or Factory should detect dirty
 worktrees and fail/needs-user instead of skipping reviews.
+
+2026-06-05 — Add a `factory version` command that prints the installed
+binary version plus the Git commit ID it was built from. After upgrading
+or installing Factory, users need a quick way to confirm which source
+commit the active binary corresponds to, especially when smoke-testing
+recently landed fixes from `~/.local/bin/factory`.
