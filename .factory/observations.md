@@ -11,13 +11,6 @@ steps that are potentially automatable and may not need a human in
 the loop. The factory should learn from these patterns to reduce
 unnecessary pauses.
 
-2026-05-12 — The define-behaviors skill should read existing behaviors
-from documentation/behaviors.md before writing new ones. This would
-calibrate the level of behavioral definition (what's too detailed,
-what's too abstract) and avoid duplicating behaviors that already exist.
-Currently the skill only reads the brief and codebase, not the existing
-behavioral contract.
-
 2026-05-12 — Consider whether there are other interactive git operations
 that could block headless agents beyond commit signing (merge conflict
 resolution, gpg passphrase prompts, interactive rebase).
@@ -74,14 +67,6 @@ for resumes, reports, invoices, or any structured document that
 needs PDF output. Reference Claude Code history for threads that use
 Typst.
 
-2026-06-05 — The plan phase identifies parallelizable steps but
-the factory has no mechanism to execute them in parallel. A plan
-that says "step 1a, 1b, 1c are independent" still runs as a single
-serial session. The factory should support decomposing a plan into
-parallel child runs — create separate run directories for each
-parallel step, launch them simultaneously, and gate the next step
-on all completing.
-
 2026-06-05 — How does the factory learn? Expertise files are
 manually written. Observations are manually captured. Decisions
 are manually recorded. There's no mechanism for the system to
@@ -105,13 +90,6 @@ Also, reviewer tabs show stale verdicts from the previous round
 instead of resetting to "running" when a new review round starts.
 The dashboard needs to detect that review artifacts have been
 archived (moved to round-N/) and reset reviewer status accordingly.
-
-2026-06-05 — When a run completes, the dashboard should show the
-run's report (report.md) in the activity feed or a dedicated pane.
-Currently a completed run shows the last author session's transcript
-which ends with "Session complete." The report summarizes what
-happened across all sessions and review rounds — that's what the
-user wants to see when checking on a finished run.
 
 2026-06-05 — The author-reviewer loop can be faster without
 skipping reviewers. All reviewers still run every round, but
@@ -143,12 +121,6 @@ indicator in the dashboard title bar when any run is active.
 The dashboard should feel alive when work is happening and
 completely still when everything is done.
 
-2026-06-05 — The dashboard never removes runs that were deleted
-from disk. App::poll discovers new runs but never prunes stale
-ones. If a run directory is removed while the dashboard is open,
-the run stays in the list with "[-]" status forever. Poll should
-remove runs whose directories no longer exist.
-
 2026-06-05 — The factory should be able to visually observe terminal
 UIs during testing. Launch the dashboard (or any TUI) in a tmux
 session, capture the screen with tmux capture-pane, and evaluate
@@ -157,13 +129,6 @@ visual bugs (missing animation, stale status, rendering glitches)
 without a human looking at screenshots. This should be a skill —
 distributable expertise on how to test terminal user interfaces
 using tmux capture and VT100 rendering.
-
-2026-06-05 — The run tab shows "[planned]" for runs that are
-actively executing. The source run directory keeps the original
-status while the worktree has the current status. The run tab
-reads from the source dir, not the worktree. The live_dir fix
-applies to the selected run's header but not to the run tab
-labels — those read from run.status() which uses the source dir.
 
 2026-06-05 — The dashboard animation still feels sluggish despite
 the 100ms render interval. The spinner needs to cycle faster to
@@ -196,15 +161,6 @@ notification should tell the user things paused but aren't broken,
 (3) the session loop should respect Retry-After headers rather
 than using a fixed 5-minute wait, (4) multiple concurrent runs
 should stagger retries to avoid thundering herd on the rate limit.
-
-2026-06-05 — Codex sandbox support needs a focused verification run.
-The implementation can wrap Codex with the existing macOS Seatbelt
-profile, but this should not be treated as secure until tested end to
-end: Codex auth/config access, JSON transcript output, write access
-limited to the worktree, no writes outside the sandbox root, and no
-regression in credential handling. The Codex CLI also has its own
-sandbox/approval model, so the interaction between Codex flags and
-outer `sandbox-exec` needs explicit validation.
 
 2026-06-05 — Fargate Codex support is intentionally not implemented
 yet. The Fargate path is still Claude-specific: container image,
@@ -239,23 +195,6 @@ same inputs to generate concise overall-run updates across all agents:
 what phase the run is in, which agents are active or failed, what just
 changed, which checks passed, and what remains before landing.
 
-2026-06-05 — The dashboard can show inconsistent and noisy state while a
-run is being fixed after review. In one screenshot, the header showed the
-active run as `executing` while the run tab still showed the same run as
-`[planned]`. The author transcript also rendered command-output styling
-artifacts such as `Msh]` and `Mpt:` around `git status`/diff output. The
-dashboard should derive the selected run's tab status from the same
-effective status used by the header and should sanitize transcript style
-fragments so command output remains readable.
-
-2026-06-05 — Formatter churn should be prevented by process, not cleaned
-up after the fact. Factory should run the repo's formatter consistently
-before merge, ideally as an explicit pre-merge or review gate, so commits
-do not carry incidental broad formatting changes from whichever agent or
-developer happened to run `cargo fmt` locally. When a run requires
-formatting, the formatted diff should be deliberate and reviewer-visible
-rather than mixed into unrelated implementation changes.
-
 2026-06-05 — After landing the Codex approval-flag fix, installed smoke
 run `20260605-codex-installed-smoke-3` verified the fixed command shape.
 The installed Factory binary launched installed Codex without the
@@ -271,14 +210,6 @@ gap: the worktree run status was `failed`, while the source run
 directory still showed `planned` because failed worktree artifacts were
 not copied back.
 
-2026-06-05 — Run `20260605-193223` addressed the dashboard stale-status
-and deleted-run observations: run tabs now use the same cached live
-status as the header, initial selection prefers live active runs, polling
-removes source run directories that disappeared, and the dashboard falls
-back to an existing run or the empty state when the selected run is
-removed. The run added unit coverage and external dashboard behavior
-coverage for those cases.
-
 2026-06-05 — Factory review detection is commit-based. During run
 `20260605-193223`, an author wrote valid implementation changes and
 marked the run complete, but left the worktree dirty. Factory compared
@@ -286,12 +217,6 @@ marked the run complete, but left the worktree dirty. Factory compared
 no-code-changes report. The session loop should require or verify a clean
 committed worktree before `complete`, or Factory should detect dirty
 worktrees and fail/needs-user instead of skipping reviews.
-
-2026-06-05 — Add a `factory version` command that prints the installed
-binary version plus the Git commit ID it was built from. After upgrading
-or installing Factory, users need a quick way to confirm which source
-commit the active binary corresponds to, especially when smoke-testing
-recently landed fixes from `~/.local/bin/factory`.
 
 2026-06-05 — Consider turning the `build-in-the-factory` skill into a
 slash command or command-style entrypoint. The workflow is now project
@@ -301,17 +226,6 @@ available across agents that support commands. This may reduce drift
 between Claude, Codex, and future coders by giving each agent the same
 Factory-native starting point instead of relying on whether it loaded the
 skill text into context.
-
-2026-06-05 — Local run filesystem sandboxing should allow exactly the
-run worktree plus the source repository's common git directory, not the
-entire workspace parent. Factory currently needs the agent to write
-linked-worktree git metadata under the source repo's `.git/worktrees`
-while working from the run worktree. Granting the whole parent directory
-is pragmatic but too broad because it can also expose `main/` and sibling
-runs. A focused run should compute the common git dir, render Seatbelt
-and Codex writable roots from `run worktree + common git dir`, and add
-behavior tests proving sandboxed Claude and Codex runs can commit without
-being able to write unrelated sibling worktrees.
 
 2026-06-05 — Network policy is a separate sandbox design axis from
 filesystem roots. Local Seatbelt currently allows outbound network, but
@@ -385,3 +299,16 @@ surface where any observing human can act on a cue. That likely needs a
 permission model over time, so different humans can be allowed to
 observe, triage, approve runs, restart runs, resolve needs-user items,
 or land changes at different levels.
+
+2026-06-06 — Stale run artifacts need a first-class cleanup policy rather
+than manual deletion. Landed and reported runs should remain queryable but
+should not dominate the default dashboard view. Superseded planned,
+complete, or failed smoke runs need an explicit abandoned/superseded
+status, archive marker, or `factory cleanup` command that preserves the
+reason and removes registered git worktrees safely. The leftover Codex
+smoke worktrees (`20260605-codex-installed-smoke`,
+`20260606-codex-installed-ca-smoke`, and
+`20260606-codex-installed-seatbelt-smoke`) point at commits already
+contained in `main`, but this session could not remove their sibling
+worktree directories because Git could not validate those paths under the
+current filesystem permissions.

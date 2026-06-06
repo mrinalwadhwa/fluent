@@ -109,3 +109,79 @@ Rust binary. Test added. First run completed using the Rust binary.
 have no useful content — you know something happened but not what.
 → Resolved: 31bf063 (notification now includes run ID, status, brief
 summary, session count, review verdict, and handoff open questions)
+
+2026-05-12 — The define-behaviors skill should read existing behaviors
+from documentation/behaviors.md before writing new ones. This would
+calibrate the level of behavioral definition and avoid duplicating
+behaviors that already exist.
+→ Resolved: 1237508 (define-behaviors reads documentation/behaviors.md
+and writes behaviors.diff.md as an increment over existing behavior)
+
+2026-06-05 — The plan phase identifies parallelizable steps but the
+factory has no mechanism to execute them in parallel. The factory should
+support decomposing a plan into parallel child runs, launch them
+simultaneously, and gate later work on completion.
+→ Resolved: e49d797, 9d62538, 2014fff, 992930e (structured parallel
+plans create child runs, launch parallel groups, gate sequential groups,
+and land completed child branches)
+
+2026-06-05 — When a run completes, the dashboard should show the run's
+report (report.md) in the activity feed or a dedicated pane. The report
+summarizes what happened across all sessions and review rounds.
+→ Resolved: df6bdb9, 014ade6, 8291d76 (dashboard shows report.md by
+default for completed runs and keeps transcript tabs accessible)
+
+2026-06-05 — The dashboard never removes runs that were deleted from
+disk. App::poll discovers new runs but never prunes stale ones, leaving
+removed runs in the list with "[-]" status.
+→ Resolved: 1fc4b8c (dashboard polling removes deleted source runs and
+selects an existing run or the empty state)
+
+2026-06-05 — The run tab shows "[planned]" for runs that are actively
+executing because the tab reads source run status instead of live
+worktree status.
+→ Resolved: 1fc4b8c (run tabs use cached live status from the same
+live_dir source as the header)
+
+2026-06-05 — Codex sandbox support needs a focused verification run.
+The implementation should verify Codex auth/config access, JSON
+transcript output, worktree-limited writes, no sibling writes, and
+credential handling under the Factory Seatbelt wrapper.
+→ Resolved: 77aeddd, 11d0313, d50b2c3 (Codex runs inside the Factory
+Seatbelt profile, uses a Codex-specific profile layer, disables Codex's
+inner sandbox under Factory control, and receives a file-based CA bundle
+when needed)
+
+2026-06-05 — The dashboard can show inconsistent state while a run is
+being fixed after review. The header showed the selected run as
+`executing` while the tab showed `[planned]`.
+→ Resolved: 1fc4b8c (dashboard uses live run status consistently for
+header selection and run tabs)
+
+2026-06-05 — Formatter churn should be prevented by process, not cleaned
+up after the fact. Factory should run the repo's formatter consistently
+before merge so formatting diffs are deliberate and reviewer-visible.
+→ Resolved: 42531ff (Factory supports configurable pre-land checks with
+autofix commands)
+
+2026-06-05 — Run `20260605-193223` addressed the dashboard stale-status
+and deleted-run observations: run tabs now use the same cached live
+status as the header, initial selection prefers live active runs, polling
+removes source run directories that disappeared, and the dashboard falls
+back to an existing run or the empty state when the selected run is
+removed.
+→ Resolved: 1fc4b8c, c83bf1b (implementation and behavior coverage
+landed for live dashboard run state refresh)
+
+2026-06-05 — Add a `factory version` command that prints the installed
+binary version plus the Git commit ID it was built from so users can
+confirm which source commit the active binary corresponds to.
+→ Resolved: fc81453, 1a696f5 (factory version prints package version and
+build metadata and has behavior coverage)
+
+2026-06-05 — Local run filesystem sandboxing should allow exactly the
+run worktree plus the source repository's common git directory, not the
+entire workspace parent. The sandbox should let agents commit from linked
+worktrees without exposing unrelated sibling worktrees.
+→ Resolved: bf2f323, 77aeddd, 11d0313 (local sandbox roots were narrowed
+and Codex/Claude sandbox profiles render coder-specific writable roots)
