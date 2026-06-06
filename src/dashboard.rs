@@ -1,21 +1,21 @@
 use anyhow::Result;
 use crossterm::event::{self, Event as CEvent, KeyCode, KeyModifiers};
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
+use ratatui::Terminal;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 
 use crate::review;
-use crate::run::{self, Run, RunStatus};
+use crate::run::{self, Run};
 use crate::transcript::{self, Event, TranscriptReader};
 
 const RENDER_INTERVAL: Duration = Duration::from_millis(100);
@@ -374,12 +374,7 @@ impl App {
         } else {
             views
                 .iter()
-                .position(|v| {
-                    matches!(
-                        v.run.status().unwrap_or(RunStatus::Unknown("-".into())),
-                        RunStatus::Executing | RunStatus::Planned
-                    )
-                })
+                .position(|v| matches!(v.cached_status.as_str(), "executing" | "planned"))
                 .unwrap_or(0)
         };
 
@@ -396,14 +391,28 @@ impl App {
     }
 
     fn poll(&mut self) {
-        // Check for new runs
         if let Ok(all_runs) = run::list_runs(&self.search_root) {
-            let existing_ids: Vec<String> = self.runs.iter().map(|v| v.run.id.clone()).collect();
+            let selected_id = self.runs.get(self.selected_run).map(|v| v.run.id.clone());
+            let selected_index = self.selected_run;
+            let current_ids: Vec<String> = all_runs.iter().map(|r| r.id.clone()).collect();
+
+            self.runs.retain(|v| current_ids.contains(&v.run.id));
+
             for r in all_runs {
-                if !existing_ids.contains(&r.id) {
+                if !self.runs.iter().any(|v| v.run.id == r.id) {
                     self.runs.push(RunView::new(r));
                 }
             }
+
+            self.selected_run = selected_id
+                .and_then(|id| self.runs.iter().position(|v| v.run.id == id))
+                .unwrap_or_else(|| {
+                    if self.runs.is_empty() {
+                        0
+                    } else {
+                        selected_index.min(self.runs.len() - 1)
+                    }
+                });
         }
 
         for view in &mut self.runs {
@@ -718,11 +727,7 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, view: &RunView, tick: u64) {
 
 /// Build the display label for a single run tab.
 fn run_tab_label(v: &RunView) -> (String, Color) {
-    let status = v
-        .run
-        .status()
-        .map(|s| s.to_string())
-        .unwrap_or_else(|_| "?".into());
+    let status = &v.cached_status;
     let color = match status.as_str() {
         "executing" => Color::Green,
         "complete" => Color::Blue,
@@ -1761,11 +1766,14 @@ mod tests {
     #[test]
     fn test_split_at_width_multibyte() {
         // Each CJK char is 2 columns wide
-        let s = "\u{4e16}\u{754c}hello"; // "世界hello"
+        // "世界hello"
+        let s = "\u{4e16}\u{754c}hello";
         // 世=2cols, 界=2cols, h=1col => first 4 cols = "世界"
-        assert_eq!(split_at_width(s, 4), 6); // 2 chars * 3 bytes each
+        // 2 chars * 3 bytes each
+        assert_eq!(split_at_width(s, 4), 6);
         // 5 cols: can't fit 世界h (2+2+1=5), can fit
-        assert_eq!(split_at_width(s, 5), 7); // 世界h = 6+1 bytes
+        // 世界h = 6+1 bytes
+        assert_eq!(split_at_width(s, 5), 7);
     }
 
     #[test]
@@ -2026,6 +2034,85 @@ mod tests {
         // With a narrow width, offset must advance to show run-4
         clamp_run_tab_offset(&mut app, 30);
         assert!(app.run_tab_offset > 0);
+    }
+
+    #[test]
+    fn test_run_tabs_show_cached_live_status() {
+        let mut app = make_app_with_runs(&["live-run"], 0);
+        app.runs[0].cached_status = "executing".to_string();
+        std::fs::create_dir_all(&app.runs[0].run.dir).unwrap();
+        std::fs::write(app.runs[0].run.dir.join("status"), "planned").unwrap();
+
+        let text = render_run_tabs_text(&mut app, 80);
+
+        assert!(text.contains("live-run [executing]"));
+        assert!(!text.contains("[planned]"));
+    }
+
+    #[test]
+    fn test_app_new_selects_run_with_live_active_status() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let runs_dir = tmp.path().join(".factory/runs");
+        let worktree = tmp.path().join("worktree");
+        let live_run_dir = worktree.join(".factory/runs/a-live");
+
+        let source_live = runs_dir.join("a-live");
+        make_filesystem_run(&source_live, "a-live", "complete");
+        std::fs::write(
+            source_live.join("worktree"),
+            worktree.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        make_filesystem_run(&live_run_dir, "a-live", "executing");
+        make_filesystem_run(&runs_dir.join("b-planned"), "b-planned", "planned");
+
+        let app = App::new(tmp.path(), None).unwrap();
+
+        assert_eq!(app.runs[app.selected_run].run.id, "a-live");
+        assert_eq!(app.runs[app.selected_run].cached_status, "executing");
+    }
+
+    #[test]
+    fn test_app_poll_removes_deleted_runs_and_selects_existing_run() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let runs_dir = tmp.path().join(".factory/runs");
+        make_filesystem_run(&runs_dir.join("run-a"), "run-a", "complete");
+        make_filesystem_run(&runs_dir.join("run-b"), "run-b", "executing");
+        make_filesystem_run(&runs_dir.join("run-c"), "run-c", "complete");
+
+        let mut app = App::new(tmp.path(), Some("run-b")).unwrap();
+
+        std::fs::remove_dir_all(runs_dir.join("run-b")).unwrap();
+        app.poll();
+
+        let ids: Vec<&str> = app.runs.iter().map(|v| v.run.id.as_str()).collect();
+        assert_eq!(ids, vec!["run-a", "run-c"]);
+        assert_eq!(app.runs[app.selected_run].run.id, "run-c");
+    }
+
+    #[test]
+    fn test_app_poll_renders_empty_state_after_all_runs_removed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let runs_dir = tmp.path().join(".factory/runs");
+        make_filesystem_run(&runs_dir.join("run-a"), "run-a", "executing");
+
+        let mut app = App::new(tmp.path(), None).unwrap();
+
+        std::fs::remove_dir_all(runs_dir.join("run-a")).unwrap();
+        app.poll();
+
+        assert!(app.runs.is_empty());
+        assert_eq!(app.selected_run, 0);
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                draw_ui(f, &mut app);
+            })
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("No runs"));
     }
 
     // --- ANSI + multibyte rendering test (stray character guard) ---

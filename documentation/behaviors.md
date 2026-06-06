@@ -322,6 +322,29 @@ THE SYSTEM SHALL keep the selected run visible and indicate
 that more runs exist beyond the visible area.
 Test: tests/behaviors/operations/test-dashboard.sh (no crash with many runs), dashboard::tests::test_run_tabs_overflow_shows_right_arrow, dashboard::tests::test_run_tabs_selected_always_visible, dashboard::tests::test_clamp_run_tab_offset_keeps_selected_visible
 
+WHEN the dashboard renders run tabs,
+THE SYSTEM SHALL show each run's status from its live run directory
+when available.
+Test: dashboard::tests::test_run_tabs_show_cached_live_status
+
+WHEN `factory dashboard` chooses an initial run without `--run-id`,
+THE SYSTEM SHALL prefer runs whose live status is `executing` or
+`planned`.
+Test: dashboard::tests::test_app_new_selects_run_with_live_active_status
+
+WHEN the dashboard polls run state,
+THE SYSTEM SHALL remove runs whose source run directories no longer
+exist.
+Test: dashboard::tests::test_app_poll_removes_deleted_runs_and_selects_existing_run
+
+IF the selected run is removed during dashboard polling,
+THEN THE SYSTEM SHALL select an existing run when one remains.
+Test: dashboard::tests::test_app_poll_removes_deleted_runs_and_selects_existing_run
+
+IF all runs are removed during dashboard polling,
+THEN THE SYSTEM SHALL render the empty-state dashboard.
+Test: dashboard::tests::test_app_poll_renders_empty_state_after_all_runs_removed
+
 WHEN `factory dashboard --run-id` is invoked with a non-existent run ID,
 THE SYSTEM SHALL exit gracefully without crashing.
 Test: tests/behaviors/operations/test-dashboard.sh (dashboard handles invalid run-id)
