@@ -88,6 +88,8 @@ tests/test-run
 | Status display works with no runs | `test-status-edges`, `binary.rs` |
 | Review mode copies mode/reviewers to worktree | `test-review-phase` |
 | Resume finds `needs-user` or `failed` runs | `test-resume-resolve`, `binary.rs` |
+| Headless resume restarts a selected run | `test-headless-resume`, `binary.rs` |
+| Headless resume rejects parallel parent runs | `test-headless-resume`, `binary.rs` |
 | Status displays fargate runtime | `test-watch-and-status-edges` |
 | Status displays mixed runtimes | `test-watch-and-status-edges` |
 | Watch polls at default interval | `test-watch-and-status-edges` |

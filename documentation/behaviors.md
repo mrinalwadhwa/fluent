@@ -325,7 +325,7 @@ Test: tests/behaviors/operations/test-watch-timeout.sh (watch detects parent exi
 
 ## Resume
 
-WHEN `factory resume` is invoked,
+WHEN `factory resume` is invoked with a terminal on stdin,
 THE SYSTEM SHALL find a run with status `needs-user` or `failed` and
 launch an interactive agent session for that run.
 Test: tests/behaviors/operations/test-resume-resolve.sh
@@ -333,7 +333,11 @@ Test: tests/behaviors/operations/test-resume-resolve.sh
 WHEN `factory resume [RUN_ID]` is invoked without a terminal on stdin,
 THE SYSTEM SHALL restart the selected run's session loop without
 launching an interactive agent.
-Test: tests/binary.rs (headless_resume_restarts_selected_run_loop)
+Test: tests/binary.rs (headless_resume_restarts_selected_run_loop), tests/behaviors/operations/test-headless-resume.sh
+
+WHEN headless `factory resume [RUN_ID]` targets a parallel parent run,
+THE SYSTEM SHALL reject the resume without launching an agent.
+Test: tests/binary.rs (headless_resume_rejects_parallel_parent), tests/behaviors/operations/test-headless-resume.sh
 
 ## Land
 

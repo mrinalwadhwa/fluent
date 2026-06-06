@@ -1350,6 +1350,40 @@ exit 0
 }
 
 #[test]
+fn headless_resume_rejects_parallel_parent() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let parent_dir = main_dir.join(".factory/runs/parallel-parent");
+    fs::create_dir_all(&parent_dir).unwrap();
+    fs::write(parent_dir.join("status"), "failed").unwrap();
+    fs::write(parent_dir.join("brief.md"), "# Brief\n\nResume parent\n").unwrap();
+    fs::write(parent_dir.join("children"), "parallel-parent-1-1\n").unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_codex(
+        &bin_dir,
+        r##"#!/bin/bash
+echo "codex should not run" >&2
+exit 99
+"##,
+    );
+    write_mock_sandbox_exec(&bin_dir);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["resume", "parallel-parent", "--coder", "codex"])
+        .env("PATH", mock_path(&bin_dir))
+        .write_stdin("")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Cannot headlessly resume parallel parent run parallel-parent",
+        ))
+        .stderr(predicate::str::contains("codex should not run").not());
+}
+
+#[test]
 fn resume_skips_executing_run() {
     let tmp = TempDir::new().unwrap();
     let run_dir = tmp.path().join(".factory/runs/active-run");

@@ -372,8 +372,17 @@ directory and the run completes. No author session is launched.
 ### Resume
 
 `factory resume` finds a run with status `needs-user` or `failed` and
+then chooses the resume path from stdin. With a terminal on stdin, it
 launches an interactive agent session with the selected coder so the
 user can provide input or unblock the run.
+
+Without a terminal on stdin, `factory resume` restarts the selected
+worktree-backed run through the local session loop instead of launching
+an interactive agent. The loop uses the run worktree, captures the
+transcript, continues session numbering from existing run state, and
+keeps the normal status, handoff, and review handling. Headless resume
+rejects parallel parent runs because their session loop never executes;
+their child runs own the resumable work.
 
 ## Runtimes
 

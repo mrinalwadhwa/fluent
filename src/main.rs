@@ -492,6 +492,13 @@ fn cmd_resume_headless(
     extra_args: &[String],
     coder_kind: CoderKind,
 ) -> Result<()> {
+    if run.dir.join("children").exists() && run.worktree_dir().is_none() {
+        bail!(
+            "Cannot headlessly resume parallel parent run {}. Resume a failed child run instead.",
+            run.id
+        );
+    }
+
     os::check_prerequisites_for(coder_kind)?;
     credential::inject_credentials()?;
     credential::setup_git_signing();
