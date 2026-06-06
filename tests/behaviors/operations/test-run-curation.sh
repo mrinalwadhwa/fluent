@@ -2,7 +2,8 @@
 # test-run-curation - Verify repository-state curation behaviors.
 #
 # These checks exercise the user-visible Factory state: observation
-# queues and status output. They do not inspect implementation code.
+# queues, run artifacts, and status output. They do not inspect
+# implementation code.
 
 set -euo pipefail
 
@@ -62,7 +63,7 @@ test_resolved_observations_are_curated() {
   return $RESULT
 }
 
-test_smoke_runs_do_not_appear_pending() {
+test_smoke_runs_are_marked_non_actionable() {
   cd "$PROJECT_DIR"
 
   OUTPUT="$(cargo run --quiet -- status 2>&1)"
@@ -73,12 +74,22 @@ test_smoke_runs_do_not_appear_pending() {
     20260606-codex-installed-ca-smoke \
     20260606-codex-installed-seatbelt-smoke
   do
-    if printf '%s' "$OUTPUT" | grep -Fq "$RUN_ID"; then
-      printf '    FAIL: status output still shows %s\n' "$RUN_ID"
+    RUN_DIR=".factory/runs/${RUN_ID}"
+    if [ ! -d "$RUN_DIR" ]; then
+      printf '    FAIL: .factory/runs/%s is missing superseded artifacts\n' "$RUN_ID"
       RESULT=1
     fi
-    if [ -d ".factory/runs/${RUN_ID}" ]; then
-      printf '    FAIL: .factory/runs/%s still exists in the active run registry\n' "$RUN_ID"
+
+    assert_contains "${RUN_DIR}/status" "landed" || RESULT=1
+    assert_contains "${RUN_DIR}/handoff.md" "non-actionable" || RESULT=1
+    assert_contains "${RUN_DIR}/handoff.md" "superseded" || RESULT=1
+    assert_contains "${RUN_DIR}/report.md" "later landed verification" || RESULT=1
+
+    if printf '%s' "$OUTPUT" \
+      | grep -F "$RUN_ID" \
+      | grep -Eq 'planned|executing|reviewing|needs-user|failed'
+    then
+      printf '    FAIL: status output still shows %s as pending work\n' "$RUN_ID"
       RESULT=1
     fi
   done
@@ -120,7 +131,7 @@ test_resume_gap_is_captured() {
 printf 'test-run-curation\n\n'
 
 run_test "resolved observations are curated" test_resolved_observations_are_curated
-run_test "smoke runs do not appear pending" test_smoke_runs_do_not_appear_pending
+run_test "smoke runs are marked non-actionable" test_smoke_runs_are_marked_non_actionable
 run_test "cleanup policy direction is captured" test_cleanup_policy_direction_is_captured
 run_test "resume automation gap is captured" test_resume_gap_is_captured
 
