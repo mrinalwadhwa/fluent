@@ -340,6 +340,12 @@ THE SYSTEM SHALL restart the selected run's session loop without
 launching an interactive agent.
 Test: tests/binary.rs (headless_resume_restarts_selected_run_loop), tests/behaviors/operations/test-headless-resume.sh
 
+WHEN `factory resume` is invoked without a run ID and without a terminal
+on stdin,
+THE SYSTEM SHALL find a run with status `needs-user` or `failed` and
+restart that run's session loop without launching an interactive agent.
+Test: tests/behaviors/operations/test-headless-resume.sh
+
 WHEN headless `factory resume [RUN_ID]` targets a parallel parent run,
 THE SYSTEM SHALL reject the resume without launching an agent.
 Test: tests/binary.rs (headless_resume_rejects_parallel_parent), tests/behaviors/operations/test-headless-resume.sh

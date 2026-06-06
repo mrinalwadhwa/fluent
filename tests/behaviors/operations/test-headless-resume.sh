@@ -3,6 +3,7 @@
 #
 # Covers:
 #   - Explicit headless resume restarts the selected run's session loop
+#   - Implicit headless resume restarts a resumable run's session loop
 #   - Headless resume does not fail with "stdin is not a terminal"
 #   - Explicit resume leaves other resumable runs untouched
 #   - Headless resume rejects parallel parent runs
@@ -154,6 +155,38 @@ test_explicit_headless_resume_restarts_selected_run_loop() {
   return $RESULT
 }
 
+test_implicit_headless_resume_restarts_resumable_run_loop() {
+  setup_test_project
+  write_mock_agents
+  mkdir -p ".factory/runs/run-implicit"
+  printf 'Implicit brief' > ".factory/runs/run-implicit/brief.md"
+  printf 'failed' > ".factory/runs/run-implicit/status"
+  printf 'local' > ".factory/runs/run-implicit/runtime"
+  printf 'run-implicit' > ".factory/active-run"
+
+  PATH="${MOCK_BIN}:${PATH}" "$FACTORY_BIN" resume \
+    < /dev/null > "${TEST_DIR}/resume-implicit.out" 2>&1
+
+  RESULT=0
+  RESUME_OUTPUT="$(cat "${TEST_DIR}/resume-implicit.out")"
+  if echo "$RESUME_OUTPUT" | grep -q "stdin is not a terminal"; then
+    printf '    FAIL: implicit headless resume reported stdin is not a terminal\n'
+    RESULT=1
+  fi
+  if ! echo "$RESUME_OUTPUT" | grep -q "Resuming run run-implicit"; then
+    printf '    FAIL: implicit headless resume did not select the resumable run\n'
+    RESULT=1
+  fi
+  AGENT_COUNT="$(cat ".factory/runs/run-implicit/agent-count" 2>/dev/null || echo 0)"
+  if [ "$AGENT_COUNT" -lt 1 ]; then
+    printf '    FAIL: implicit run session loop did not restart\n'
+    RESULT=1
+  fi
+
+  cleanup_test_project
+  return $RESULT
+}
+
 test_headless_resume_rejects_parallel_parent() {
   setup_test_project
   write_mock_agents
@@ -189,6 +222,9 @@ printf 'test-headless-resume\n\n'
 
 run_test "explicit headless resume restarts selected run loop" \
   test_explicit_headless_resume_restarts_selected_run_loop
+
+run_test "implicit headless resume restarts resumable run loop" \
+  test_implicit_headless_resume_restarts_resumable_run_loop
 
 run_test "headless resume rejects parallel parent runs" \
   test_headless_resume_rejects_parallel_parent
