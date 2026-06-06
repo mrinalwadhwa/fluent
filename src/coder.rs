@@ -236,15 +236,17 @@ impl CodexCode {
     fn build_command(&self, working_dir: &Path, exec_mode: bool) -> Command {
         let mut cmd = Command::new("codex");
 
+        // --ask-for-approval is a top-level option, not an exec subcommand
+        // option, so it must appear before the `exec` subcommand.
+        if self.sandboxed && exec_mode {
+            cmd.args(["--ask-for-approval", "never"]);
+        }
         if exec_mode {
             cmd.arg("exec");
         }
         cmd.args(["--cd", &working_dir.to_string_lossy()]);
         if self.sandboxed {
             cmd.args(["--sandbox", "workspace-write"]);
-            if exec_mode {
-                cmd.args(["--ask-for-approval", "never"]);
-            }
         } else {
             cmd.args(["--dangerously-bypass-approvals-and-sandbox"]);
         }
