@@ -154,11 +154,13 @@ directory exists, prefers the live worktree artifacts for current
 status, sessions, reviews, handoff, and report presence.
 
 The summary intentionally avoids transcript or report dumps. It includes
-the run phase, brief excerpt, latest `sessions.log` entries, reviewer
-verdicts from `reviews/review-*.md`, the first actionable handoff line
-or open question, whether `report.md` exists, and a rule-based next
-action. This makes the command useful in a terminal and keeps the same
-data shape available for later dashboard or reporting-agent integration.
+the run phase, brief excerpt, author metadata from `coder`, reviewer
+activity, child run activity from `children`, latest `sessions.log`
+entries, reviewer verdicts from `reviews/review-*.md`, the first
+actionable handoff line or open question, whether `report.md` exists,
+and a rule-based next action. This makes the command useful in a
+terminal and keeps the same data shape available for later dashboard or
+reporting-agent integration.
 
 ### Session continuity
 

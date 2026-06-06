@@ -253,6 +253,7 @@ fn reviewer_name(path: &Path) -> Option<String> {
 fn handoff_context(run_dir: &Path) -> Option<String> {
     let content = fs::read_to_string(run_dir.join("handoff.md")).ok()?;
     first_open_question(&content)
+        .or_else(|| first_explicit_action_line(&content))
         .or_else(|| first_actionable_line(&content))
         .map(|line| truncate_line(&line))
 }
@@ -276,6 +277,22 @@ fn first_open_question(content: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn first_explicit_action_line(content: &str) -> Option<String> {
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            line.starts_with("Question:")
+                || line.starts_with("Next:")
+                || line.starts_with("Next step:")
+                || line.starts_with("Next steps:")
+                || line.starts_with("Action:")
+                || line.starts_with("Blocked:")
+        })
+        .map(str::to_string)
+        .find(|line| !line.is_empty())
 }
 
 fn first_actionable_line(content: &str) -> Option<String> {

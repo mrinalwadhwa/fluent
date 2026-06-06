@@ -610,6 +610,22 @@ fn summary_includes_sessions_reviews_handoff_and_report() {
 }
 
 #[test]
+fn summary_reports_active_reviewers_without_verdicts() {
+    let tmp = TempDir::new().unwrap();
+    let run_dir = tmp.path().join(".factory/runs/active-review");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "reviewing").unwrap();
+    fs::write(run_dir.join("brief.md"), "Active review\n").unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["summary", "--run-id", "active-review"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Reviewers: active"));
+}
+
+#[test]
 fn summary_prefers_live_worktree_artifacts() {
     let tmp = TempDir::new().unwrap();
     let source_run = tmp.path().join(".factory/runs/worktree-summary");
@@ -785,6 +801,46 @@ fn summary_uses_handoff_fallback_without_open_questions() {
     assert!(
         !stdout.contains("Brief: Ignore boilerplate"),
         "summary should skip handoff boilerplate: {stdout}"
+    );
+}
+
+#[test]
+fn summary_prefers_explicit_handoff_question() {
+    let tmp = TempDir::new().unwrap();
+    let run_dir = tmp.path().join(".factory/runs/handoff-question");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "needs-user").unwrap();
+    fs::write(run_dir.join("brief.md"), "Question handoff\n").unwrap();
+    fs::write(
+        run_dir.join("handoff.md"),
+        "# Handoff\n\nContext: credentials changed yesterday.\nQuestion: Which account should Factory use?\n",
+    )
+    .unwrap();
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["summary", "--run-id", "handoff-question"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "summary failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Handoff\n  Question: Which account should Factory use?"),
+        "summary should prefer the explicit question: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Handoff\n  Context: credentials changed yesterday."),
+        "summary should not prefer earlier context over the question: {stdout}"
+    );
+    assert!(
+        stdout.contains("Next\n  read handoff.md and answer the open question."),
+        "summary should include the status-derived next action: {stdout}"
     );
 }
 

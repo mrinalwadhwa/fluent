@@ -208,7 +208,11 @@ Test: tests/binary.rs (summary_includes_sessions_reviews_handoff_and_report)
 WHEN the summarized run has `handoff.md`,
 THE SYSTEM SHALL include the first actionable handoff or question
 context.
-Test: tests/binary.rs (summary_includes_sessions_reviews_handoff_and_report)
+Test: tests/binary.rs (summary_includes_sessions_reviews_handoff_and_report), tests/binary.rs (summary_prefers_explicit_handoff_question)
+
+WHEN a run summary is printed,
+THE SYSTEM SHALL include a status-derived next action.
+Test: tests/binary.rs (summary_uses_explicit_run_id), tests/binary.rs (summary_prefers_explicit_handoff_question)
 
 WHEN the summarized run has `report.md`,
 THE SYSTEM SHALL show that a report is available without printing the
