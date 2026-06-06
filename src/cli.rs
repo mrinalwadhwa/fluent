@@ -76,6 +76,17 @@ pub enum Commands {
         run_id: Option<String>,
     },
 
+    /// Clean stale run artifacts and registered worktrees
+    Cleanup {
+        /// Target a specific run ID
+        #[arg(long)]
+        run_id: Option<String>,
+
+        /// Apply cleanup changes instead of printing a dry run
+        #[arg(long)]
+        apply: bool,
+    },
+
     /// Poll status, notify on change
     Watch {
         /// Polling interval in seconds (default: 60)

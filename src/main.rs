@@ -7,6 +7,7 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
+use factory::cleanup::{self, CleanupOptions, WorktreeCleanup};
 use factory::cli::{Cli, Commands};
 use factory::coder::{CoderKind, CoderSandbox};
 use factory::content::ContentResolver;
@@ -116,6 +117,9 @@ fn main() -> Result<()> {
         Some(Commands::Summary { run_id }) => {
             let output = summary::summarize_run(&cwd, run_id.as_deref())?;
             print!("{output}");
+        }
+        Some(Commands::Cleanup { run_id, apply }) => {
+            cmd_cleanup(&cwd, run_id, apply)?;
         }
         Some(Commands::Watch { interval, timeout }) => {
             cmd_watch(&cwd, interval, timeout)?;
@@ -362,6 +366,47 @@ fn cmd_status(search_root: &Path) -> Result<()> {
         let brief = run.brief_summary();
 
         println!("{:<20} {:<16} {:<10} {}", run.id, status, runtime, brief);
+    }
+
+    Ok(())
+}
+
+fn cmd_cleanup(search_root: &Path, run_id: Option<String>, apply: bool) -> Result<()> {
+    let results = cleanup::cleanup_runs(search_root, &CleanupOptions { run_id, apply })?;
+
+    if results.is_empty() {
+        println!("No cleanup candidates found.");
+        return Ok(());
+    }
+
+    if apply {
+        println!("Cleaned runs:");
+    } else {
+        println!("Dry run. Use --apply to clean:");
+    }
+
+    for result in results {
+        let action = if result.applied {
+            "cleaned"
+        } else {
+            "would clean"
+        };
+        println!("  {} {} ({})", action, result.run_id, result.status);
+        match result.worktree {
+            WorktreeCleanup::None => {}
+            WorktreeCleanup::WouldRemove(path) => {
+                println!("    would remove registered worktree {}", path.display());
+            }
+            WorktreeCleanup::Removed(path) => {
+                println!("    removed registered worktree {}", path.display());
+            }
+            WorktreeCleanup::SkippedUnregistered(path) => {
+                println!("    skipped unregistered worktree {}", path.display());
+            }
+            WorktreeCleanup::Missing(path) => {
+                println!("    recorded worktree missing {}", path.display());
+            }
+        }
     }
 
     Ok(())

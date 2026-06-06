@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 
+use crate::cleanup;
 use crate::review;
 use crate::run::{self, Run};
 use crate::transcript::{self, Event, TranscriptReader};
@@ -485,7 +486,10 @@ impl App {
     fn new(search_root: &Path, target_run_id: Option<&str>) -> Result<Self> {
         let all_runs = run::list_runs(search_root)?;
 
-        let views: Vec<RunView> = all_runs.into_iter().map(|r| RunView::new(r)).collect();
+        let mut views: Vec<RunView> = all_runs.into_iter().map(|r| RunView::new(r)).collect();
+        if target_run_id.is_none() {
+            sort_views_for_dashboard(&mut views);
+        }
 
         // Find the index of the target run, or pick the first active one
         let selected = if let Some(id) = target_run_id {
@@ -552,6 +556,26 @@ impl App {
         self.copy_mode = !self.copy_mode;
         self.copy_mode
     }
+}
+
+fn sort_views_for_dashboard(views: &mut [RunView]) {
+    views.sort_by(|a, b| {
+        dashboard_view_priority(a)
+            .cmp(&dashboard_view_priority(b))
+            .then_with(|| a.run.id.cmp(&b.run.id))
+    });
+}
+
+fn dashboard_view_priority(view: &RunView) -> u8 {
+    if cleanup::run_is_cleaned(&view.run) {
+        return 2;
+    }
+
+    let actionable = matches!(
+        view.cached_status.as_str(),
+        "planned" | "executing" | "reviewing" | "needs-user" | "failed"
+    );
+    if actionable { 0 } else { 1 }
 }
 
 /// Launch the dashboard TUI.
@@ -2298,6 +2322,20 @@ mod tests {
 
         assert_eq!(app.runs[app.selected_run].run.id, "a-live");
         assert_eq!(app.runs[app.selected_run].cached_status, "executing");
+    }
+
+    #[test]
+    fn test_app_new_prefers_actionable_run_over_cleaned_terminal_run() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let runs_dir = tmp.path().join(".factory/runs");
+        let cleaned = runs_dir.join("a-cleaned");
+        make_filesystem_run(&cleaned, "a-cleaned", "complete");
+        std::fs::write(cleaned.join("cleaned.md"), "# Cleaned\n").unwrap();
+        make_filesystem_run(&runs_dir.join("b-active"), "b-active", "executing");
+
+        let app = App::new(tmp.path(), None).unwrap();
+
+        assert_eq!(app.runs[app.selected_run].run.id, "b-active");
     }
 
     #[test]

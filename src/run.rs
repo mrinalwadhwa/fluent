@@ -445,6 +445,18 @@ pub fn resolve_run(search_root: &Path, explicit_id: Option<&str>) -> Result<Run>
     bail!("No active run found. Create a brief and plan first.")
 }
 
+/// Resolve a run by ID without applying status rules.
+pub fn resolve_run_by_id(search_root: &Path, id: &str) -> Result<Run> {
+    let dir = search_root.join(".factory/runs").join(id);
+    if !dir.is_dir() {
+        bail!("Run directory not found: {}", dir.display());
+    }
+    Ok(Run {
+        id: id.to_string(),
+        dir,
+    })
+}
+
 /// Resolve a run that is resumable (needs-user or failed).
 pub fn resolve_resumable_run(search_root: &Path, explicit_id: Option<&str>) -> Result<Run> {
     let runs_dir = search_root.join(".factory/runs");

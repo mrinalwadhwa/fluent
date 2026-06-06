@@ -101,18 +101,21 @@ test_cleanup_policy_direction_is_captured() {
   cd "$PROJECT_DIR"
 
   RESULT=0
-  assert_contains ".factory/observations.md" "Stale run artifacts need a first-class cleanup policy" || RESULT=1
-  assert_contains ".factory/observations.md" "Cleanup should happen where the Factory state" || RESULT=1
-  assert_contains ".factory/observations.md" "resides: the source worktree's \`.factory/runs\` registry" || RESULT=1
-  assert_contains ".factory/observations.md" "source worktree's \`.factory/runs\` registry" || RESULT=1
-  assert_contains ".factory/observations.md" "should not be modeled as ordinary author" || RESULT=1
-  assert_contains ".factory/observations.md" "work inside an isolated run worktree" || RESULT=1
-  assert_contains ".factory/observations.md" "Landed and reported runs should remain" || RESULT=1
-  assert_contains ".factory/observations.md" "queryable but should not dominate" || RESULT=1
-  assert_contains ".factory/observations.md" "Superseded planned," || RESULT=1
-  assert_contains ".factory/observations.md" "or \`factory cleanup\`" || RESULT=1
-  assert_contains ".factory/observations.md" "preserves the reason in the source Factory state" || RESULT=1
-  assert_contains ".factory/observations.md" "removes registered git worktrees safely" || RESULT=1
+  assert_not_contains ".factory/observations.md" "Stale run artifacts need a first-class cleanup policy" || RESULT=1
+  assert_contains ".factory/observations-resolved.md" "Stale run artifacts need a first-class cleanup policy" || RESULT=1
+  assert_contains ".factory/observations-resolved.md" "Cleanup should happen where the Factory state" || RESULT=1
+  assert_contains ".factory/observations-resolved.md" "resides: the source worktree's \`.factory/runs\` registry" || RESULT=1
+  assert_contains ".factory/observations-resolved.md" "source worktree's \`.factory/runs\` registry" || RESULT=1
+  assert_contains ".factory/observations-resolved.md" "should not be modeled as ordinary author" || RESULT=1
+  assert_contains ".factory/observations-resolved.md" "work inside an isolated run worktree" || RESULT=1
+  assert_contains ".factory/observations-resolved.md" "Landed and reported runs should remain" || RESULT=1
+  assert_contains ".factory/observations-resolved.md" "queryable but should not dominate" || RESULT=1
+  assert_contains ".factory/observations-resolved.md" "Superseded planned," || RESULT=1
+  assert_contains ".factory/observations-resolved.md" "or \`factory cleanup\`" || RESULT=1
+  assert_contains ".factory/observations-resolved.md" "preserves the reason in the source Factory state" || RESULT=1
+  assert_contains ".factory/observations-resolved.md" "removes registered git worktrees safely" || RESULT=1
+  assert_contains ".factory/observations-resolved.md" "writes" || RESULT=1
+  assert_contains ".factory/observations-resolved.md" "\`cleaned.md\`" || RESULT=1
 
   return $RESULT
 }
