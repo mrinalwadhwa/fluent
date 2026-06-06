@@ -9,10 +9,26 @@ documentation, skill, expertise, or behavior changes, follow the
 `build-in-the-factory` skill and go through the full run lifecycle:
 brief, behaviors, approach, plan, execution, review, and land.
 
-Do not implement substantial changes directly on `main`. Direct edits are
-acceptable only for small inspection, note-taking, or explicitly
-requested mechanical changes. Use `.factory/observations.md` to record
-future work and lessons, but use Factory runs for the actual build work.
+Do not implement substantial product/code changes directly on `main`.
+Use Factory runs for delegated build work that needs isolation,
+reviewers, and landing.
+
+Conversation agents may edit Factory planning and memory state directly
+when they are collaborating with the user in the discussion loop:
+observations, briefs, behavior drafts, approaches, plans, lightweight
+curation, and similar durable notes. These edits are part of shaping
+work, not delegated run execution.
+
+Do not meddle with live run execution state directly: run branches,
+worktrees, statuses, session artifacts, child-run metadata, and landing
+state belong to the run system. Modify them only during explicit
+recovery with the user.
+
+Keep `main` available as a stable integration branch for runs to rebase
+from and merge into. If conversation-state edits could overlap with
+active runs or parent landing, make them on a lightweight discussion
+branch or worktree and land them separately instead of dirtying `main`.
+Use `.factory/observations.md` to record future work and lessons.
 
 ## Commit messages
 

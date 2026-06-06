@@ -320,3 +320,28 @@ should prevent dirty source worktrees before parent landing, preserve
 completed child state, support merge-only recovery for failed parallel
 parents, and avoid relaunching completed child work when the only failed
 step is parent-side merge/land.
+
+2026-06-06 — Clarify the boundary between conversation-state edits and
+delegated run execution. The agent that is actively collaborating with a
+user should be allowed to write discussion artifacts directly: briefs,
+observations, behavior drafts, approaches, plans, and lightweight
+curation. That keeps the human planning loop fast and avoids pushing
+work that can be done directly into unnecessary runs. The same agent
+should not meddle with live run state: run branches, worktrees, statuses,
+session artifacts, child metadata, and landing state belong to the run
+system unless the user explicitly approves recovery. To keep `main`
+available as a stable rebase and merge target, direct conversation edits
+should happen on a lightweight discussion branch or worktree whenever
+active runs or parent landing could overlap with those edits.
+
+2026-06-06 — General concurrency should not require a parent run.
+Factory currently models most parallel work as one parent plan that
+spawns child runs and owns the group merge. That is useful for
+decomposing a single large brief into dependent or synthesized pieces,
+but it is the wrong default for five unrelated observations or tasks.
+Factory should support many independent active runs as peers in the run
+queue, dashboard, and merge queue. Parent/child runs should represent
+work decomposition and dependency structure, not general scheduling.
+Independent runs need dependency metadata only when one run must start
+or land after another; otherwise they should execute and land
+independently so one parent failure cannot tangle unrelated work.
