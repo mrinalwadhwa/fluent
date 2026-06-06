@@ -20,7 +20,8 @@ from intent capture through execution and review across multiple sessions.
 │  Teaches agents the full workflow               │
 ├─────────────────────────────────────────────────┤
 │  Factory command                                │
-│  factory run / status / pull / shell / watch    │
+│  factory run / status / summary / pull / shell  │
+│  factory watch                                  │
 │  factory resume / init / dashboard / land       │
 │  factory version                                │
 │  Deterministic, operational                     │
@@ -141,6 +142,22 @@ The factory command resolves the run-id through a priority chain:
 2. `FACTORY_RUN_ID` environment variable
 3. `.factory/active-run` pointer file
 4. Scan `.factory/runs/` for active status (fallback)
+
+### Run summary
+
+`factory summary` resolves the active run through the standard run-id
+resolution chain and prints a compact text snapshot from durable run
+artifacts. `factory summary --run-id <id>` summarizes that run directly.
+The summary reads the source run directory and, when a worktree run
+directory exists, prefers the live worktree artifacts for current
+status, sessions, reviews, handoff, and report presence.
+
+The summary intentionally avoids transcript or report dumps. It includes
+the run phase, brief excerpt, latest `sessions.log` entries, reviewer
+verdicts from `reviews/review-*.md`, the first actionable handoff line
+or open question, whether `report.md` exists, and a rule-based next
+action. This makes the command useful in a terminal and keeps the same
+data shape available for later dashboard or reporting-agent integration.
 
 ### Session continuity
 
@@ -466,6 +483,7 @@ factory/main/
     report.rs                ← Report generation
     fargate.rs               ← Fargate launch, pull, shell
     dashboard.rs             ← Live TUI for run activity
+    summary.rs               ← Text run summary from durable artifacts
     transcript.rs            ← Parse stream-json transcripts incrementally
     plan.rs                  ← Parse plan.md into groups and steps
     parallel.rs              ← Parallel plan orchestrator (child runs)

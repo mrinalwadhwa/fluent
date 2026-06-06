@@ -255,6 +255,107 @@ fn status_accepts_path_argument() {
 }
 
 // -------------------------------------------------------------------------
+// Summary
+// -------------------------------------------------------------------------
+
+#[test]
+fn summary_uses_explicit_run_id() {
+    let tmp = TempDir::new().unwrap();
+    let run_dir = tmp.path().join(".factory/runs/selected-run");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("runtime"), "local").unwrap();
+    fs::write(run_dir.join("brief.md"), "# Brief\n\nSummarize this run\n").unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["summary", "--run-id", "selected-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Run\n"))
+        .stdout(predicate::str::contains("ID: selected-run"))
+        .stdout(predicate::str::contains("Status: planned"))
+        .stdout(predicate::str::contains("Summarize this run"))
+        .stdout(predicate::str::contains("start or resume the run"));
+}
+
+#[test]
+fn summary_resolves_active_run() {
+    let tmp = TempDir::new().unwrap();
+    let run_dir = tmp.path().join(".factory/runs/active-summary");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(tmp.path().join(".factory/active-run"), "active-summary").unwrap();
+    fs::write(run_dir.join("status"), "executing").unwrap();
+    fs::write(run_dir.join("brief.md"), "Active run brief\n").unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .arg("summary")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ID: active-summary"))
+        .stdout(predicate::str::contains("Status: executing"))
+        .stdout(predicate::str::contains("author work is still in progress"));
+}
+
+#[test]
+fn summary_includes_sessions_reviews_handoff_and_report() {
+    let tmp = TempDir::new().unwrap();
+    let run_dir = tmp.path().join(".factory/runs/artifact-summary");
+    fs::create_dir_all(run_dir.join("reviews")).unwrap();
+    fs::write(run_dir.join("status"), "needs-user").unwrap();
+    fs::write(run_dir.join("brief.md"), "# Brief\n\nArtifact summary\n").unwrap();
+    fs::write(
+        run_dir.join("sessions.log"),
+        "session=1 exit=0 duration=5s status=executing\nreview=1 duration=2s verdict=fail\n",
+    )
+    .unwrap();
+    fs::write(run_dir.join("reviews/review-tests.md"), "Verdict: fail").unwrap();
+    fs::write(
+        run_dir.join("reviews/review-architecture.md"),
+        "Verdict: pass",
+    )
+    .unwrap();
+    fs::write(
+        run_dir.join("handoff.md"),
+        "## Open questions\n- Should Factory retry after the failed review?\n",
+    )
+    .unwrap();
+    fs::write(run_dir.join("report.md"), "# Run Report\n").unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["summary", "--run-id", "artifact-summary"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "session=1 exit=0 duration=5s status=executing",
+        ))
+        .stdout(predicate::str::contains(
+            "review=1 duration=2s verdict=fail",
+        ))
+        .stdout(predicate::str::contains("architecture: pass"))
+        .stdout(predicate::str::contains("tests: fail"))
+        .stdout(predicate::str::contains(
+            "Should Factory retry after the failed review?",
+        ))
+        .stdout(predicate::str::contains("Available: report.md"));
+}
+
+#[test]
+fn summary_fails_without_resolved_run() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join(".factory/runs")).unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .arg("summary")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("No active run found"));
+}
+
+// -------------------------------------------------------------------------
 // Resume resolution
 // -------------------------------------------------------------------------
 

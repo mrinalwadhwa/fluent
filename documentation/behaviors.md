@@ -171,6 +171,40 @@ WHEN `factory status` is invoked and a Fargate run exists,
 THE SYSTEM SHALL check S3 for a completed workspace and query the ECS API
 for task state.
 
+## Run summary
+
+WHEN `factory summary` is invoked,
+THE SYSTEM SHALL summarize the active run using existing run artifacts
+and print the summary to stdout.
+Test: tests/binary.rs (summary_resolves_active_run)
+
+WHEN `factory summary --run-id <id>` is invoked,
+THE SYSTEM SHALL summarize that run instead of resolving the active run.
+Test: tests/binary.rs (summary_uses_explicit_run_id)
+
+WHEN the summarized run has session history,
+THE SYSTEM SHALL include the latest entries from `sessions.log`.
+Test: tests/binary.rs (summary_includes_sessions_reviews_handoff_and_report)
+
+WHEN the summarized run has review artifacts,
+THE SYSTEM SHALL include reviewer verdicts grouped by reviewer name.
+Test: tests/binary.rs (summary_includes_sessions_reviews_handoff_and_report)
+
+WHEN the summarized run has `handoff.md`,
+THE SYSTEM SHALL include the first actionable handoff or question
+context.
+Test: tests/binary.rs (summary_includes_sessions_reviews_handoff_and_report)
+
+WHEN the summarized run has `report.md`,
+THE SYSTEM SHALL show that a report is available without printing the
+entire report.
+Test: tests/binary.rs (summary_includes_sessions_reviews_handoff_and_report)
+
+WHEN no run can be resolved for `factory summary`,
+THE SYSTEM SHALL fail with a clear error instead of printing an empty
+summary.
+Test: tests/binary.rs (summary_fails_without_resolved_run)
+
 ## Workspace retrieval
 
 WHEN `factory pull` is invoked,

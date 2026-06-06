@@ -18,6 +18,7 @@ use factory::parallel;
 use factory::plan;
 use factory::run::{self, Run};
 use factory::session::{self, DefaultHooks, SandboxedHooks, SessionConfig};
+use factory::summary;
 use factory::version;
 use factory::worktree;
 
@@ -110,6 +111,10 @@ fn main() -> Result<()> {
         Some(Commands::Status { path }) => {
             let search_root = path.map(PathBuf::from).unwrap_or(cwd);
             cmd_status(&search_root)?;
+        }
+        Some(Commands::Summary { run_id }) => {
+            let output = summary::summarize_run(&cwd, run_id.as_deref())?;
+            print!("{output}");
         }
         Some(Commands::Watch { interval, timeout }) => {
             cmd_watch(&cwd, interval, timeout)?;

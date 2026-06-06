@@ -69,6 +69,13 @@ pub enum Commands {
         path: Option<String>,
     },
 
+    /// Summarize one run from durable artifacts
+    Summary {
+        /// Target a specific run ID
+        #[arg(long)]
+        run_id: Option<String>,
+    },
+
     /// Poll status, notify on change
     Watch {
         /// Polling interval in seconds (default: 60)
