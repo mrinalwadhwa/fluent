@@ -191,7 +191,8 @@ test_sandboxed_codex_uses_factory_seatbelt() {
   printf 'test ca bundle' > "$CODEX_CA_BUNDLE"
   export SANDBOX_EXEC_LOG
 
-  FACTORY_CODEX_CA_BUNDLE="$CODEX_CA_BUNDLE" PATH="$MOCK_ONLY_PATH" "$FACTORY_BIN" run --coder codex \
+  env -u SSL_CERT_FILE FACTORY_CODEX_CA_BUNDLE="$CODEX_CA_BUNDLE" PATH="$MOCK_ONLY_PATH" \
+    "$FACTORY_BIN" run --coder codex \
     --run-id "test-codex-sandboxed" > "${TEST_DIR}/factory.out" 2>&1 || true
 
   RESULT=0

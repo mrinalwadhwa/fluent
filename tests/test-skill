@@ -339,5 +339,9 @@ fi
 
 printf '\nDone. Results in %s\n' "$RUN_DIR"
 printf '  transcript.md  — full conversation\n'
-[ -f "$BRIEF_OUTPUT" ] && printf '  brief.md       — captured artifact\n'
-[ -f "${RUN_DIR}/verdict.md" ] && printf '  verdict.md     — judge scoring\n'
+if [ -f "$BRIEF_OUTPUT" ]; then
+  printf '  brief.md       — captured artifact\n'
+fi
+if [ -f "${RUN_DIR}/verdict.md" ]; then
+  printf '  verdict.md     — judge scoring\n'
+fi

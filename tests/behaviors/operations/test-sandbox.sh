@@ -479,6 +479,12 @@ if ! command -v sandbox-exec > /dev/null 2>&1; then
   exit 1
 fi
 
+if ! sandbox-exec -p '(version 1)(allow default)' true > /dev/null 2>&1; then
+  printf 'test-sandbox\n\n'
+  printf '  sandbox-exec cannot apply profiles in this environment; skipping sandbox enforcement tests\n'
+  exit 0
+fi
+
 printf 'test-sandbox\n\n'
 
 run_test "dry-run renders profile with workspace root" test_dry_run_renders_profile_with_workspace_root
