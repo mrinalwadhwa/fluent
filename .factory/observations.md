@@ -113,15 +113,6 @@ indicator in the dashboard title bar when any run is active. The
 dashboard should feel alive when work is happening and completely
 still when everything is done.
 
-2026-06-05 — The factory should be able to visually observe terminal
-UIs during testing. Launch the dashboard (or any TUI) in a tmux
-session, capture the screen with tmux capture-pane, and evaluate
-the rendered output. This enables autonomous agents to catch
-visual bugs (missing animation, stale status, rendering glitches)
-without a human looking at screenshots. This should be a skill —
-distributable expertise on how to test terminal user interfaces
-using tmux capture and VT100 rendering.
-
 2026-06-05 — Wrote expertise/terminal-ui.md without following the
 factory process. A proper run with reviewers would have caught:
 missing testing approaches for the expertise itself, unclear

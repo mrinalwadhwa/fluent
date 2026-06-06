@@ -13,7 +13,7 @@ from intent capture through execution and review across multiple sessions.
 │  review-documentation, review-behaviors,        │
 │  review-architecture, review-skills,            │
 │  review-tests, architect, write-documentation,   │
-│  write-tests                                    │
+│  write-tests, test-terminal-ui                  │
 │  Portable procedures any agent follows          │
 ├─────────────────────────────────────────────────┤
 │  build-in-the-factory skill                     │
@@ -518,6 +518,7 @@ factory/main/
     documentation.md
     shell-scripts.md
     skills.md
+    terminal-ui.md
     tests.md
   .factory/
     observations.md          ← feedback log (tracked)
@@ -553,6 +554,8 @@ factory/main/
     review-skills/references/
     review-tests/SKILL.md
     review-tests/references/
+    test-terminal-ui/SKILL.md
+    test-terminal-ui/references/
     write-documentation/SKILL.md
     write-documentation/references/
     write-tests/SKILL.md
