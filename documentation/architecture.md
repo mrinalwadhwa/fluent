@@ -371,10 +371,11 @@ directory and the run completes. No author session is launched.
 
 ### Resume
 
-`factory resume` finds a run with status `needs-user` or `failed` and
-then chooses the resume path from stdin. With a terminal on stdin, it
-launches an interactive agent session with the selected coder so the
-user can provide input or unblock the run.
+`factory resume` without a run ID finds a run with status `needs-user`
+or `failed`. `factory resume [RUN_ID]` selects the named run directly.
+After selecting a run, Factory chooses the resume path from stdin. With a
+terminal on stdin, it launches an interactive agent session with the
+selected coder so the user can provide input or unblock the run.
 
 Without a terminal on stdin, `factory resume` restarts the selected
 worktree-backed run through the local session loop instead of launching

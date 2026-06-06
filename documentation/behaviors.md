@@ -325,9 +325,14 @@ Test: tests/behaviors/operations/test-watch-timeout.sh (watch detects parent exi
 
 ## Resume
 
-WHEN `factory resume` is invoked with a terminal on stdin,
+WHEN `factory resume` is invoked without a run ID and with a terminal on
+stdin,
 THE SYSTEM SHALL find a run with status `needs-user` or `failed` and
 launch an interactive agent session for that run.
+Test: tests/behaviors/operations/test-resume-resolve.sh
+
+WHEN `factory resume [RUN_ID]` is invoked with a terminal on stdin,
+THE SYSTEM SHALL launch an interactive agent session for the named run.
 Test: tests/behaviors/operations/test-resume-resolve.sh
 
 WHEN `factory resume [RUN_ID]` is invoked without a terminal on stdin,
