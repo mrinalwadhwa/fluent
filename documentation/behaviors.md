@@ -598,7 +598,8 @@ Test: tests/behaviors/operations/test-sandbox.sh (dry-run renders profile with w
 WHEN `factory run --coder codex` is invoked with the sandboxed local runtime,
 THE SYSTEM SHALL launch Codex under `sandbox-exec` with Factory's
 Seatbelt profile, approval policy `never`, and the run worktree as
-`--cd`, while disabling Codex's own sandbox.
+`--cd`, while disabling Codex's own sandbox. The rendered profile SHALL
+include `common.sb` plus the Codex-specific `codex.sb` layer.
 Test: tests/behaviors/operations/test-codex-runtime.sh (sandboxed codex uses factory seatbelt), tests/behaviors/operations/test-codex-approval-flag.sh (approval-policy flag appears before exec)
 
 WHEN `factory run --coder codex --no-sandbox` is invoked,

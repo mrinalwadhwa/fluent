@@ -1,0 +1,15 @@
+;; ==========================================================================
+;; Codex CLI -- profile-specific Seatbelt rules
+;; ==========================================================================
+;; Concatenated after common.sb by Factory when launching Codex.
+;;
+;; NOTE: No (allow iokit*) -- Codex is a CLI tool, not a GUI app.
+;; It does not need Metal GPU enumeration or any IOKit services.
+;;
+;; Codex-specific rules should live here so common.sb can remain shared
+;; infrastructure for all local sandboxed coders.
+;; ==========================================================================
+
+;; Codex configuration, auth, sessions, and cache.
+(allow file-read*  (subpath "_HOME_/.codex"))
+(allow file-write* (subpath "_HOME_/.codex"))

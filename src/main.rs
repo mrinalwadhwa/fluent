@@ -55,7 +55,12 @@ fn main() -> Result<()> {
         let coder_kind = CoderKind::resolve(cli.coder.as_deref())?;
         os::check_prerequisites_for(coder_kind)?;
         let home = std::env::var("HOME").unwrap_or_default();
-        let profile = os::render_profile(&resolver, &home, &sandbox_root.to_string_lossy())?;
+        let profile = os::render_profile_for_roots_for_coder(
+            &resolver,
+            &home,
+            std::slice::from_ref(&sandbox_root),
+            coder_kind,
+        )?;
         println!("--- Rendered Seatbelt profile ---");
         println!("HOME         = {home}");
         println!("SANDBOX_ROOT = {}", sandbox_root.display());
@@ -535,7 +540,8 @@ fn build_coder_sandbox(
             let home = std::env::var("HOME").unwrap_or_default();
             let mut roots = vec![working_dir.to_path_buf()];
             roots.extend(additional_writable_roots.iter().cloned());
-            let profile = os::render_profile_for_roots(resolver, &home, &roots)?;
+            let profile =
+                os::render_profile_for_roots_for_coder(resolver, &home, &roots, coder_kind)?;
             let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
             Ok((sandbox, Some(profile)))
         }
@@ -543,7 +549,8 @@ fn build_coder_sandbox(
             let home = std::env::var("HOME").unwrap_or_default();
             let mut roots = vec![working_dir.to_path_buf()];
             roots.extend(additional_writable_roots.iter().cloned());
-            let profile = os::render_profile_for_roots(resolver, &home, &roots)?;
+            let profile =
+                os::render_profile_for_roots_for_coder(resolver, &home, &roots, coder_kind)?;
             let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
             Ok((sandbox, Some(profile)))
         }

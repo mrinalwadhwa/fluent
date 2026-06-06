@@ -346,6 +346,9 @@ user can provide input or unblock the run.
 
 The factory command runs the session loop on the local machine. Claude
 and Codex run inside a macOS Seatbelt sandbox rendered by Factory.
+Factory renders each sandbox from `common.sb` plus the selected coder's
+profile layer: `claude-code.sb` for Claude Code and `codex.sb` for
+Codex.
 Claude uses the Claude token refresh hook at session boundaries; Codex
 does not.
 
@@ -470,8 +473,9 @@ factory/main/
   scripts/
     factory                  ← shell script (legacy, used by Fargate entrypoint)
     assets/
-      common.sb              ← Seatbelt profile template
-      claude-code.sb         ← Seatbelt profile template
+      common.sb              ← Shared Seatbelt profile template
+      claude-code.sb         ← Claude-specific Seatbelt profile layer
+      codex.sb               ← Codex-specific Seatbelt profile layer
   skills/
     architect/SKILL.md
     architect/references/

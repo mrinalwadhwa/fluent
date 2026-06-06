@@ -285,7 +285,8 @@ fn run_child(ctx: ChildContext) -> Result<()> {
             let mut roots = vec![ctx.worktree_dir.clone()];
             roots.extend(writable_roots);
             let resolver = ContentResolver::new(Some(&ctx.worktree_dir));
-            let profile = os::render_profile_for_roots(&resolver, &home, &roots)?;
+            let profile =
+                os::render_profile_for_roots_for_coder(&resolver, &home, &roots, ctx.coder_kind)?;
             let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
             sandbox_profile = Some(profile);
             sandbox

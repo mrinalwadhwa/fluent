@@ -8,6 +8,39 @@ fn factory_cmd() -> Command {
     Command::cargo_bin("factory").unwrap()
 }
 
+#[test]
+fn dry_run_with_codex_uses_codex_profile_layer() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    write_mock_codex(&bin_dir, "#!/bin/bash\nexit 0\n");
+    write_mock_sandbox_exec(&bin_dir);
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["--dry-run", "--coder", "codex"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("SANDBOX_EXEC_LOG", tmp.path().join("sandbox-exec.log"))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "dry-run failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Codex CLI -- profile-specific Seatbelt rules"),
+        "dry-run should include Codex profile layer: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Claude Code CLI -- profile-specific Seatbelt rules"),
+        "dry-run should not include Claude profile layer for Codex: {stdout}"
+    );
+}
+
 // -------------------------------------------------------------------------
 // Init
 // -------------------------------------------------------------------------

@@ -82,6 +82,7 @@ pub fn bundled_content(relative: &str) -> Option<String> {
         "sandbox/claude-code.sb" => {
             Some(include_str!("../scripts/assets/claude-code.sb").to_string())
         }
+        "sandbox/codex.sb" => Some(include_str!("../scripts/assets/codex.sb").to_string()),
         _ => None,
     }
 }
@@ -218,6 +219,7 @@ Review run {{RUN_ID}}.
     fn test_bundled_content_sandbox() {
         assert!(bundled_content("sandbox/common.sb").is_some());
         assert!(bundled_content("sandbox/claude-code.sb").is_some());
+        assert!(bundled_content("sandbox/codex.sb").is_some());
     }
 
     #[test]

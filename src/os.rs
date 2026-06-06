@@ -11,7 +11,7 @@ pub struct SandboxProfile {
     pub path: PathBuf,
 }
 
-/// Render a Seatbelt sandbox profile with placeholder substitution.
+/// Render a Claude Seatbelt sandbox profile with placeholder substitution.
 ///
 /// Concatenates common.sb + claude-code.sb and substitutes:
 /// - `_HOME_` -> user's home directory
@@ -24,11 +24,21 @@ pub fn render_profile(
     render_profile_for_roots(resolver, home, &[PathBuf::from(sandbox_root)])
 }
 
-/// Render a Seatbelt sandbox profile with multiple writable roots.
+/// Render a Claude Seatbelt sandbox profile with multiple writable roots.
 pub fn render_profile_for_roots(
     resolver: &ContentResolver,
     home: &str,
     sandbox_roots: &[PathBuf],
+) -> Result<SandboxProfile> {
+    render_profile_for_roots_for_coder(resolver, home, sandbox_roots, CoderKind::Claude)
+}
+
+/// Render a Seatbelt sandbox profile with common rules plus the coder layer.
+pub fn render_profile_for_roots_for_coder(
+    resolver: &ContentResolver,
+    home: &str,
+    sandbox_roots: &[PathBuf],
+    coder_kind: CoderKind,
 ) -> Result<SandboxProfile> {
     if sandbox_roots.is_empty() {
         bail!("At least one sandbox root is required");
@@ -36,9 +46,10 @@ pub fn render_profile_for_roots(
     let common = resolver
         .resolve_content("sandbox/common.sb")
         .context("Common sandbox profile not found")?;
+    let specific_path = sandbox_profile_path(coder_kind);
     let specific = resolver
-        .resolve_content("sandbox/claude-code.sb")
-        .context("Claude Code sandbox profile not found")?;
+        .resolve_content(specific_path)
+        .with_context(|| format!("Sandbox profile {specific_path} not found"))?;
 
     let combined = format!("{common}\n{specific}");
     let root_rules = render_root_rules(sandbox_roots);
@@ -63,6 +74,13 @@ pub fn render_profile_for_roots(
         _temp_file: temp_file,
         path,
     })
+}
+
+fn sandbox_profile_path(coder_kind: CoderKind) -> &'static str {
+    match coder_kind {
+        CoderKind::Claude => "sandbox/claude-code.sb",
+        CoderKind::Codex => "sandbox/codex.sb",
+    }
 }
 
 fn render_root_rules(roots: &[PathBuf]) -> String {
@@ -155,5 +173,38 @@ mod tests {
             content.contains("/Users/test/workspace/main/.git"),
             "{content}"
         );
+    }
+
+    #[test]
+    fn test_render_profile_uses_codex_specific_layer() {
+        let resolver = ContentResolver::new(None);
+        let profile = render_profile_for_roots_for_coder(
+            &resolver,
+            "/Users/test",
+            &[PathBuf::from("/Users/test/workspace/run")],
+            CoderKind::Codex,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&profile.path).unwrap();
+        assert!(content.contains("Codex CLI -- profile-specific Seatbelt rules"));
+        assert!(content.contains("/Users/test/.codex"));
+        assert!(!content.contains("Claude Code CLI -- profile-specific Seatbelt rules"));
+    }
+
+    #[test]
+    fn test_render_profile_uses_claude_specific_layer() {
+        let resolver = ContentResolver::new(None);
+        let profile = render_profile_for_roots_for_coder(
+            &resolver,
+            "/Users/test",
+            &[PathBuf::from("/Users/test/workspace/run")],
+            CoderKind::Claude,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&profile.path).unwrap();
+        assert!(content.contains("Claude Code CLI -- profile-specific Seatbelt rules"));
+        assert!(!content.contains("Codex CLI -- profile-specific Seatbelt rules"));
     }
 }
