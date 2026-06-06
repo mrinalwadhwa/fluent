@@ -675,7 +675,7 @@ THE SYSTEM SHALL keep the bottom of the feed visible as new events arrive.
 ### Dashboard render and poll cadence
 
 WHILE the dashboard is running,
-THE SYSTEM SHALL render frames at ~100ms intervals for smooth animation
+THE SYSTEM SHALL render frames at ~75ms intervals for smooth animation
 and poll for new data at ~2s intervals to avoid unnecessary I/O.
 
 ## Parallel plan execution

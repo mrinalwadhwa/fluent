@@ -21,7 +21,7 @@ use crate::review;
 use crate::run::{self, Run};
 use crate::transcript::{self, Event, TranscriptReader};
 
-const RENDER_INTERVAL: Duration = Duration::from_millis(100);
+const RENDER_INTERVAL: Duration = Duration::from_millis(75);
 const DATA_POLL_INTERVAL: Duration = Duration::from_millis(2000);
 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -620,7 +620,7 @@ fn run_event_loop(
     let mut last_render = Instant::now();
 
     loop {
-        // Render at ~100ms for smooth animation
+        // Render frequently enough for spinner animation to feel responsive.
         if last_render.elapsed() >= RENDER_INTERVAL {
             terminal.draw(|f| draw_ui(f, app))?;
             last_render = Instant::now();
