@@ -18,6 +18,7 @@ WHEN `factory version` is invoked,
 THE SYSTEM SHALL print the Factory package version and build commit to
 stdout and exit successfully without requiring a Factory project.
 Test: tests/binary.rs (version_prints_package_version_and_commit)
+Test: tests/behaviors/operations/test-version.sh
 
 ## Brief capture
 

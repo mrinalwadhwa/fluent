@@ -74,6 +74,7 @@ tests/test-run
 
 | Behavior | Test |
 |---|---|
+| Version command reports package version and build metadata | `test-version.sh`, `binary.rs` |
 | Create worktree from current HEAD | `test-run` |
 | Branch from non-main branch | `test-run` |
 | Run-id resolution priority chain | `test-run` |

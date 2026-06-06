@@ -252,9 +252,10 @@ discarded during land.
 factory 0.1.0 abc1234
 ```
 
-The first field is the package version from `Cargo.toml`. The second
-field is the short Git commit captured by `build.rs` when Cargo builds
-the binary. If Git is unavailable at build time, Factory prints
+The first field is the literal `factory` command name. The second field
+is the package version from `Cargo.toml`. The third field is the short
+Git commit captured by `build.rs` when Cargo builds the binary. If Git
+is unavailable at build time, Factory prints
 `unknown` in the commit field.
 
 ## Agents
@@ -447,6 +448,7 @@ automatic token refresh using the task's IAM identity.
 ```
 factory/main/
   CLAUDE.md
+  build.rs                   ← emits build-time metadata
   Cargo.toml                 ← Rust crate definition
   Cargo.lock
   src/
@@ -467,6 +469,7 @@ factory/main/
     transcript.rs            ← Parse stream-json transcripts incrementally
     plan.rs                  ← Parse plan.md into groups and steps
     parallel.rs              ← Parallel plan orchestrator (child runs)
+    version.rs               ← Version command output format
   documentation/
     architecture.md          ← this file
     behaviors.md             ← behavioral statements (EARS)
