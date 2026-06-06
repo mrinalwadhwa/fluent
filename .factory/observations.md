@@ -247,3 +247,11 @@ artifacts such as `Msh]` and `Mpt:` around `git status`/diff output. The
 dashboard should derive the selected run's tab status from the same
 effective status used by the header and should sanitize transcript style
 fragments so command output remains readable.
+
+2026-06-05 — Formatter churn should be prevented by process, not cleaned
+up after the fact. Factory should run the repo's formatter consistently
+before merge, ideally as an explicit pre-merge or review gate, so commits
+do not carry incidental broad formatting changes from whichever agent or
+developer happened to run `cargo fmt` locally. When a run requires
+formatting, the formatted diff should be deliberate and reviewer-visible
+rather than mixed into unrelated implementation changes.
