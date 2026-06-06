@@ -209,3 +209,35 @@ the run sandbox's filesystem permissions.
 `cleaned.md` for complete and landed runs, removes only registered git
 worktrees, skips unregistered paths, and keeps cleaned runs behind
 actionable dashboard runs.
+
+2026-06-05 — Dashboard "reviewing" status shows no spinner in the
+header. compute_phase needs to map "reviewing" to animated=true.
+Also, reviewer tabs show stale verdicts from the previous round
+instead of resetting to "running" when a new review round starts.
+The dashboard needs to detect that review artifacts have been
+archived (moved to round-N/) and reset reviewer status accordingly.
+→ Resolved: 04b083a, 307c112, a6b8f8a, bae62ca, 5a46c92 (dashboard
+tracks the current review round, refreshes reviewer transcript state
+for the active round, and has deterministic behavior coverage)
+
+2026-06-05 — Factory review detection is commit-based. During run
+`20260605-193223`, an author wrote valid implementation changes and
+marked the run complete, but left the worktree dirty. Factory compared
+`main..HEAD`, saw no committed diff, skipped reviews, and produced a
+no-code-changes report. The session loop should require or verify a clean
+committed worktree before `complete`, or Factory should detect dirty
+worktrees and fail/needs-user instead of skipping reviews.
+→ Resolved: cfba7c3 (dirty worktrees count as changed so completed
+author work cannot bypass review because it was not committed)
+
+2026-06-06 — `factory resume` should support non-interactive automation
+or provide a separate headless resume path. During run curation,
+`factory resume 20260606-run-curation --coder codex` failed with
+`stdin is not a terminal`, while `factory run --run-id
+20260606-run-curation --coder codex` could continue the run. Automation
+should not have to know that distinction, and a resume path should be
+usable from scripts, agents, or other non-TTY orchestrators when the
+intent is to restart the session loop rather than attach interactively.
+→ Resolved: bd82a58, a2f8d84, e057ae7, c757421, 53077d6 (headless
+resume restarts selected or implicit resumable runs, rejects parallel
+parent runs, and documents the selection behavior)

@@ -85,13 +85,6 @@ agent-support work: verify sandboxed Codex, add Fargate Codex support,
 and consider whether Pi or other agents need different prompt/session
 behavior beyond the current Coder trait.
 
-2026-06-05 — Dashboard "reviewing" status shows no spinner in the
-header. compute_phase needs to map "reviewing" to animated=true.
-Also, reviewer tabs show stale verdicts from the previous round
-instead of resetting to "running" when a new review round starts.
-The dashboard needs to detect that review artifacts have been
-archived (moved to round-N/) and reset reviewer status accordingly.
-
 2026-06-05 — The author-reviewer loop can be faster without
 skipping reviewers. All reviewers still run every round, but
 with scoped prompts: reviewers that passed last round get "your
@@ -211,14 +204,6 @@ gap: the worktree run status was `failed`, while the source run
 directory still showed `planned` because failed worktree artifacts were
 not copied back.
 
-2026-06-05 — Factory review detection is commit-based. During run
-`20260605-193223`, an author wrote valid implementation changes and
-marked the run complete, but left the worktree dirty. Factory compared
-`main..HEAD`, saw no committed diff, skipped reviews, and produced a
-no-code-changes report. The session loop should require or verify a clean
-committed worktree before `complete`, or Factory should detect dirty
-worktrees and fail/needs-user instead of skipping reviews.
-
 2026-06-05 — Consider turning the `build-in-the-factory` skill into a
 slash command or command-style entrypoint. The workflow is now project
 policy, not just agent-local guidance, and a slash command could make the
@@ -324,11 +309,3 @@ matches the domain model and component boundaries, while documentation
 can check whether user-facing names stay consistent across behaviors,
 docs, tests, commands, and dashboard copy. The design question is how to
 make this a gentle review signal rather than churn over harmless wording.
-2026-06-06 — `factory resume` should support non-interactive automation
-or provide a separate headless resume path. During run curation,
-`factory resume 20260606-run-curation --coder codex` failed with
-`stdin is not a terminal`, while `factory run --run-id
-20260606-run-curation --coder codex` could continue the run. Automation
-should not have to know that distinction, and a resume path should be
-usable from scripts, agents, or other non-TTY orchestrators when the
-intent is to restart the session loop rather than attach interactively.
