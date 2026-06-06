@@ -377,9 +377,11 @@ After selecting a run, Factory chooses the resume path from stdin. With a
 terminal on stdin, it launches an interactive agent session with the
 selected coder so the user can provide input or unblock the run.
 
-Without a terminal on stdin, `factory resume` restarts the selected
-worktree-backed run through the local session loop instead of launching
-an interactive agent. The loop uses the run worktree, captures the
+Without a terminal on stdin, `factory resume` restarts the selected run
+through the local session loop instead of launching an interactive
+agent. When the run records a worktree, the loop uses that worktree and
+its copied run directory. Otherwise it falls back to the command's
+search root and the source run directory. The loop captures the
 transcript, continues session numbering from existing run state, and
 keeps the normal status, handoff, and review handling. Headless resume
 rejects parallel parent runs because their session loop never executes;

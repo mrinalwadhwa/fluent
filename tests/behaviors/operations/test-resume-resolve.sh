@@ -2,13 +2,16 @@
 # test-resume-resolve — Verify resume run-id resolution behaviors.
 #
 # Tests that `factory resume` finds runs with status `needs-user` or
-# `failed` and ignores runs with other statuses.
+# `failed`, ignores runs with other statuses, and launches interactive
+# resume when stdin is a terminal.
 #
 # Covers:
 #   - Resume finds a needs-user run
 #   - Resume finds a failed run
 #   - Resume skips complete and executing runs
 #   - Resume finds either resumable status when both exist
+#   - Terminal resume launches an interactive agent for an implicit run
+#   - Terminal resume launches an interactive agent for an explicit run
 #
 # Usage:
 #   tests/behaviors/operations/test-resume-resolve.sh
@@ -17,7 +20,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
-FACTORY="${PROJECT_DIR}/scripts/factory"
+FACTORY="${PROJECT_DIR}/target/debug/factory"
 
 PASS=0
 FAIL=0
@@ -37,6 +40,9 @@ setup_test_project() {
   git config user.name "test"
   echo "test" > README.md
   git add . && git commit -m "init" > /dev/null 2>&1
+
+  MOCK_BIN="${TEST_DIR}/bin"
+  mkdir -p "$MOCK_BIN"
 }
 
 cleanup_test_project() {
@@ -55,6 +61,33 @@ run_test() {
     FAIL=$((FAIL + 1))
     ERRORS="${ERRORS}\n  - ${TEST_NAME}"
   fi
+}
+
+write_mock_resume_agents() {
+  cat > "${MOCK_BIN}/claude" << 'MOCK_CLAUDE'
+#!/usr/bin/env bash
+RUN_ID="${EXPECTED_RUN_ID:?}"
+RUN_DIR=".factory/runs/${RUN_ID}"
+printf '%s\n' "$@" > "${RUN_DIR}/interactive-agent-args"
+printf 'called' > "${RUN_DIR}/interactive-agent-called"
+MOCK_CLAUDE
+  chmod +x "${MOCK_BIN}/claude"
+
+  cat > "${MOCK_BIN}/sandbox-exec" << 'MOCK_SANDBOX'
+#!/usr/bin/env bash
+if [ "$1" = "-f" ]; then
+  shift 2
+fi
+exec "$@"
+MOCK_SANDBOX
+  chmod +x "${MOCK_BIN}/sandbox-exec"
+}
+
+run_factory_with_terminal() {
+  script -q /dev/null env \
+    PATH="${MOCK_BIN}:${PATH}" \
+    EXPECTED_RUN_ID="$EXPECTED_RUN_ID" \
+    "$FACTORY" --no-sandbox "$@"
 }
 
 # -------------------------------------------------------------------------
@@ -148,6 +181,62 @@ test_resume_finds_either_resumable_status() {
   return $RESULT
 }
 
+test_terminal_resume_launches_interactive_agent_for_implicit_run() {
+  setup_test_project
+  write_mock_resume_agents
+
+  mkdir -p ".factory/runs/run-paused"
+  printf 'needs-user' > ".factory/runs/run-paused/status"
+  printf 'Paused run' > ".factory/runs/run-paused/brief.md"
+
+  EXPECTED_RUN_ID="run-paused" run_factory_with_terminal resume \
+    > "${TEST_DIR}/resume-terminal.out" 2>&1
+
+  RESULT=0
+  if [ ! -f ".factory/runs/run-paused/interactive-agent-called" ]; then
+    printf '    FAIL: terminal resume did not launch interactive agent\n'
+    RESULT=1
+  fi
+  if grep -Fxq -- "-p" ".factory/runs/run-paused/interactive-agent-args" 2>/dev/null; then
+    printf '    FAIL: terminal resume used non-interactive prompt mode\n'
+    RESULT=1
+  fi
+
+  cleanup_test_project
+  return $RESULT
+}
+
+test_terminal_resume_launches_interactive_agent_for_explicit_run() {
+  setup_test_project
+  write_mock_resume_agents
+
+  mkdir -p ".factory/runs/run-explicit" ".factory/runs/run-other"
+  printf 'needs-user' > ".factory/runs/run-explicit/status"
+  printf 'Explicit run' > ".factory/runs/run-explicit/brief.md"
+  printf 'failed' > ".factory/runs/run-other/status"
+  printf 'Other run' > ".factory/runs/run-other/brief.md"
+
+  EXPECTED_RUN_ID="run-explicit" run_factory_with_terminal resume run-explicit \
+    > "${TEST_DIR}/resume-explicit-terminal.out" 2>&1
+
+  RESULT=0
+  if [ ! -f ".factory/runs/run-explicit/interactive-agent-called" ]; then
+    printf '    FAIL: explicit terminal resume did not launch interactive agent\n'
+    RESULT=1
+  fi
+  if [ -f ".factory/runs/run-other/interactive-agent-called" ]; then
+    printf '    FAIL: explicit terminal resume touched another run\n'
+    RESULT=1
+  fi
+  if grep -Fxq -- "-p" ".factory/runs/run-explicit/interactive-agent-args" 2>/dev/null; then
+    printf '    FAIL: explicit terminal resume used non-interactive prompt mode\n'
+    RESULT=1
+  fi
+
+  cleanup_test_project
+  return $RESULT
+}
+
 # -------------------------------------------------------------------------
 # Run all tests
 # -------------------------------------------------------------------------
@@ -158,6 +247,10 @@ run_test "resume finds needs-user run" test_resume_finds_needs_user
 run_test "resume finds failed run" test_resume_finds_failed
 run_test "resume skips complete and executing runs" test_resume_skips_complete_and_executing
 run_test "resume finds either resumable status" test_resume_finds_either_resumable_status
+run_test "terminal resume launches interactive agent for implicit run" \
+  test_terminal_resume_launches_interactive_agent_for_implicit_run
+run_test "terminal resume launches interactive agent for explicit run" \
+  test_terminal_resume_launches_interactive_agent_for_explicit_run
 
 printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
 

@@ -132,7 +132,14 @@ fn main() -> Result<()> {
             extra_args,
         }) => {
             let coder_kind = CoderKind::resolve(coder.as_deref().or(cli.coder.as_deref()))?;
-            cmd_resume(&cwd, run_id.as_deref(), &resolver, &extra_args, coder_kind)?;
+            cmd_resume(
+                &cwd,
+                run_id.as_deref(),
+                &resolver,
+                &extra_args,
+                coder_kind,
+                cli.no_sandbox,
+            )?;
         }
         Some(Commands::Init) => {
             cmd_init(&cwd)?;
@@ -460,20 +467,27 @@ fn cmd_resume(
     resolver: &ContentResolver,
     extra_args: &[String],
     coder_kind: CoderKind,
+    no_sandbox: bool,
 ) -> Result<()> {
     let run = run::resolve_resumable_run(search_root, run_id)?;
 
     eprintln!("  Resuming run {}", run.id);
 
     if !std::io::stdin().is_terminal() {
-        return cmd_resume_headless(search_root, &run, resolver, extra_args, coder_kind);
+        return cmd_resume_headless(search_root, &run, resolver, extra_args, coder_kind, no_sandbox);
     }
 
     os::check_prerequisites_for(coder_kind)?;
     credential::inject_credentials()?;
     credential::setup_git_signing();
 
-    let (sandbox, _sandbox_profile) = build_coder_sandbox(coder_kind, resolver, search_root, &[])?;
+    let sandbox = if no_sandbox {
+        CoderSandbox::None
+    } else {
+        let (sandbox, _sandbox_profile) =
+            build_coder_sandbox(coder_kind, resolver, search_root, &[])?;
+        sandbox
+    };
     let system_prompt = resolver
         .resolve_content("prompts/author.md")
         .unwrap_or_default();
@@ -491,6 +505,7 @@ fn cmd_resume_headless(
     resolver: &ContentResolver,
     extra_args: &[String],
     coder_kind: CoderKind,
+    no_sandbox: bool,
 ) -> Result<()> {
     if run.dir.join("children").exists() && run.worktree_dir().is_none() {
         bail!(
@@ -514,8 +529,13 @@ fn cmd_resume_headless(
     }
 
     let worktree_resolver = ContentResolver::new(Some(&working_dir));
-    let (sandbox, _sandbox_profile) =
-        build_coder_sandbox(coder_kind, resolver, &working_dir, &extra_roots)?;
+    let sandbox = if no_sandbox {
+        CoderSandbox::None
+    } else {
+        let (sandbox, _sandbox_profile) =
+            build_coder_sandbox(coder_kind, resolver, &working_dir, &extra_roots)?;
+        sandbox
+    };
     let system_prompt = worktree_resolver
         .resolve_content("prompts/author.md")
         .unwrap_or_default();
@@ -535,7 +555,7 @@ fn cmd_resume_headless(
     };
 
     let author = coder_kind.boxed(sandbox);
-    if coder_kind == CoderKind::Claude {
+    if coder_kind == CoderKind::Claude && !no_sandbox {
         session::run_session_loop(&*author, &config, &SandboxedHooks, coder_kind)?;
     } else {
         session::run_session_loop(&*author, &config, &DefaultHooks, coder_kind)?;
