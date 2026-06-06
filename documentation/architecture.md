@@ -20,8 +20,8 @@ from intent capture through execution and review across multiple sessions.
 │  Teaches agents the full workflow               │
 ├─────────────────────────────────────────────────┤
 │  Factory command                                │
-│  factory run / status / summary / pull / shell  │
-│  factory watch                                  │
+│  factory run / status / summary / cleanup       │
+│  factory pull / shell / watch                   │
 │  factory resume / init / dashboard / land       │
 │  factory version                                │
 │  Deterministic, operational                     │
@@ -130,6 +130,7 @@ when the required checks and reviews pass.
 | `scope` | Review focus targeting (optional) |
 | `sessions.log` | Per-session metadata: `{timestamp} session=N exit=CODE duration=Xs status=STATUS` and review-phase entries: `{timestamp} review=N duration=Xs verdict=VERDICT` |
 | `report.md` | Generated run report |
+| `cleaned.md` | Cleanup context written after `factory cleanup --apply` preserves the run directory and status |
 | `reviews/` | Current review artifacts, transcripts (`transcript-{name}.jsonl`), and prior round archives (`round-N/`) |
 | `children` | Child run IDs, one per line (written by the parallel orchestrator for parent runs) |
 | `parent` | Parent run ID (written for each child run) |

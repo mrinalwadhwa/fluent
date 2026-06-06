@@ -30,13 +30,14 @@ pub struct CleanupResult {
 }
 
 pub fn cleanup_runs(search_root: &Path, options: &CleanupOptions) -> Result<Vec<CleanupResult>> {
-    let candidates = cleanup_candidates(search_root, options.run_id.as_deref())?;
-    let registered = registered_worktrees(search_root)?;
+    let source_root = cleanup_source_root(search_root)?;
+    let candidates = cleanup_candidates(&source_root, options.run_id.as_deref())?;
+    let registered = registered_worktrees(&source_root)?;
     let mut results = Vec::new();
 
     for run in candidates {
         let status = run.status()?;
-        let worktree = cleanup_worktree(search_root, &run, &registered, options.apply)?;
+        let worktree = cleanup_worktree(&source_root, &run, &registered, options.apply)?;
         if options.apply {
             write_cleaned_marker(&run, &status, &worktree)?;
         }
@@ -53,6 +54,78 @@ pub fn cleanup_runs(search_root: &Path, options: &CleanupOptions) -> Result<Vec<
 
 pub fn run_is_cleaned(run: &Run) -> bool {
     run.dir.join("cleaned.md").exists()
+}
+
+fn cleanup_source_root(search_root: &Path) -> Result<PathBuf> {
+    let search_root = fs::canonicalize(search_root).unwrap_or_else(|_| search_root.to_path_buf());
+    let current_worktree = git_worktree_root(&search_root).unwrap_or_else(|| search_root.clone());
+    let registered = registered_worktrees(&search_root)?;
+
+    for candidate in registered {
+        if candidate == current_worktree {
+            continue;
+        }
+        if registry_points_to_worktree(&candidate, &current_worktree)? {
+            return Ok(candidate);
+        }
+    }
+
+    Ok(search_root)
+}
+
+fn git_worktree_root(search_root: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args(["-C", &search_root.to_string_lossy()])
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
+}
+
+fn registry_points_to_worktree(registry_root: &Path, worktree_root: &Path) -> Result<bool> {
+    let runs_dir = registry_root.join(".factory/runs");
+    if !runs_dir.is_dir() {
+        return Ok(false);
+    }
+
+    let canonical_worktree = worktree_root.canonicalize().ok();
+    for entry in fs::read_dir(runs_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let recorded = match fs::read_to_string(path.join("worktree")) {
+            Ok(content) => content.trim().to_string(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err).context("Failed to read run worktree path"),
+        };
+        if recorded.is_empty() {
+            continue;
+        }
+        let recorded_path = PathBuf::from(recorded);
+        if recorded_path == worktree_root {
+            return Ok(true);
+        }
+        if let (Some(worktree), Ok(recorded)) = (&canonical_worktree, recorded_path.canonicalize())
+        {
+            if recorded == *worktree {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
 }
 
 fn cleanup_candidates(search_root: &Path, run_id: Option<&str>) -> Result<Vec<Run>> {
@@ -81,7 +154,7 @@ fn ensure_cleanable(run: &Run) -> Result<()> {
     let status = run.status()?;
     if !is_cleanable_status(&status) {
         bail!(
-            "Run {} has status '{}', expected complete, failed, or landed",
+            "Run {} has status '{}', expected complete or landed",
             run.id,
             status
         );
@@ -90,10 +163,7 @@ fn ensure_cleanable(run: &Run) -> Result<()> {
 }
 
 fn is_cleanable_status(status: &RunStatus) -> bool {
-    matches!(
-        status,
-        RunStatus::Complete | RunStatus::Failed | RunStatus::Landed
-    )
+    matches!(status, RunStatus::Complete | RunStatus::Landed)
 }
 
 fn cleanup_worktree(
@@ -263,6 +333,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         create_run(tmp.path(), "planned-run", "planned");
         create_run(tmp.path(), "needs-user-run", "needs-user");
+        create_run(tmp.path(), "failed-run", "failed");
 
         let results = cleanup_runs(
             tmp.path(),

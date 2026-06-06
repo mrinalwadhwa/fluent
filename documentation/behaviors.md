@@ -167,6 +167,11 @@ THE SYSTEM SHALL display all runs with their status, runtime, and brief
 summary.
 Test: tests/test-run (test_status_display), tests/behaviors/operations/test-run-state.sh
 
+WHEN `factory status` is invoked after cleanup,
+THE SYSTEM SHALL list cleaned runs with their existing run status and
+without a cleanup-specific status.
+Test: tests/behaviors/operations/test-cleanup.sh (status lists cleaned runs with original status)
+
 WHEN `factory status` is invoked and a Fargate run exists,
 THE SYSTEM SHALL check S3 for a completed workspace and query the ECS API
 for task state.
@@ -209,7 +214,7 @@ Test: tests/binary.rs (summary_fails_without_resolved_run)
 
 WHEN `factory cleanup` is invoked,
 THE SYSTEM SHALL scan the source `.factory/runs` registry and select
-stale terminal runs by default.
+stale complete and landed runs by default.
 Test: tests/binary.rs (cleanup_dry_run_reports_without_changes)
 
 WHEN `factory cleanup --apply` cleans a run,
@@ -217,20 +222,25 @@ THE SYSTEM SHALL preserve the run directory and status while writing
 cleanup context to `cleaned.md`.
 Test: src/cleanup.rs (apply_writes_marker_without_status_change), tests/binary.rs (cleanup_apply_writes_marker_without_changing_status)
 
-WHEN `factory cleanup --run-id <id>` targets an active or needs-user run,
+WHEN `factory cleanup --run-id <id>` targets an active, needs-user, or
+failed run,
 THE SYSTEM SHALL fail without writing cleanup artifacts.
-Test: tests/binary.rs (cleanup_refuses_active_run)
+Test: tests/binary.rs (cleanup_refuses_active_run, cleanup_refuses_failed_run)
 
 WHEN cleanup sees a registered git worktree for a selected run,
 THE SYSTEM SHALL remove that worktree through git worktree operations.
 Test: tests/binary.rs (cleanup_apply_removes_registered_worktree)
+
+WHEN cleanup runs without `--apply`,
+THE SYSTEM SHALL report registered worktree removal without removing it.
+Test: tests/binary.rs (cleanup_dry_run_keeps_registered_worktree)
 
 WHEN cleanup sees a recorded worktree path that git does not register,
 THE SYSTEM SHALL leave the path in place and report that it was skipped.
 Test: src/cleanup.rs (unregistered_worktree_path_is_not_removed), tests/binary.rs (cleanup_skips_unregistered_worktree_path)
 
 WHEN the dashboard opens without an explicit run,
-THE SYSTEM SHALL prefer actionable runs over cleaned terminal runs.
+THE SYSTEM SHALL prefer actionable runs over cleaned runs.
 Test: src/dashboard.rs (test_app_new_prefers_actionable_run_over_cleaned_terminal_run)
 
 ## Workspace retrieval

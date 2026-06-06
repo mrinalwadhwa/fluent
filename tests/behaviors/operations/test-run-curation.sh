@@ -110,10 +110,12 @@ test_cleanup_policy_direction_is_captured() {
   assert_contains ".factory/observations-resolved.md" "work inside an isolated run worktree" || RESULT=1
   assert_contains ".factory/observations-resolved.md" "Landed and reported runs should remain" || RESULT=1
   assert_contains ".factory/observations-resolved.md" "queryable but should not dominate" || RESULT=1
-  assert_contains ".factory/observations-resolved.md" "Superseded planned," || RESULT=1
-  assert_contains ".factory/observations-resolved.md" "or \`factory cleanup\`" || RESULT=1
-  assert_contains ".factory/observations-resolved.md" "preserves the reason in the source Factory state" || RESULT=1
-  assert_contains ".factory/observations-resolved.md" "removes registered git worktrees safely" || RESULT=1
+  assert_contains ".factory/observations-resolved.md" "Complete and landed stale runs need a \`factory cleanup\` command" || RESULT=1
+  assert_contains ".factory/observations-resolved.md" "preserves the cleanup reason in the source Factory state" || RESULT=1
+  assert_contains ".factory/observations-resolved.md" "registered git worktrees safely" || RESULT=1
+  assert_contains ".factory/observations-resolved.md" "Superseded planned runs, failed smoke" || RESULT=1
+  assert_contains ".factory/observations-resolved.md" "outside the current" || RESULT=1
+  assert_contains ".factory/observations-resolved.md" "cleanup command scope" || RESULT=1
   assert_contains ".factory/observations-resolved.md" "writes" || RESULT=1
   assert_contains ".factory/observations-resolved.md" "\`cleaned.md\`" || RESULT=1
 

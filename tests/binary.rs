@@ -310,9 +310,24 @@ fn cleanup_refuses_active_run() {
         .args(["cleanup", "--run-id", "active-run", "--apply"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "expected complete, failed, or landed",
-        ));
+        .stderr(predicate::str::contains("expected complete or landed"));
+
+    assert!(!run_dir.join("cleaned.md").exists());
+}
+
+#[test]
+fn cleanup_refuses_failed_run() {
+    let tmp = TempDir::new().unwrap();
+    let run_dir = tmp.path().join(".factory/runs/failed-run");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "failed").unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["cleanup", "--run-id", "failed-run", "--apply"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("expected complete or landed"));
 
     assert!(!run_dir.join("cleaned.md").exists());
 }
@@ -369,6 +384,94 @@ fn cleanup_apply_removes_registered_worktree() {
 
     assert!(!worktree_dir.exists());
     assert!(run_dir.join("cleaned.md").exists());
+}
+
+#[test]
+fn cleanup_dry_run_keeps_registered_worktree() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let run_id = "cleanup-dry-worktree";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "complete").unwrap();
+
+    let worktree_dir = tmp.path().join(run_id);
+    StdCommand::new("git")
+        .args([
+            "worktree",
+            "add",
+            worktree_dir.to_str().unwrap(),
+            "-b",
+            run_id,
+        ])
+        .current_dir(&main_dir)
+        .output()
+        .unwrap();
+    fs::write(run_dir.join("worktree"), worktree_dir.to_str().unwrap()).unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .arg("cleanup")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("would remove registered worktree"));
+
+    assert!(worktree_dir.is_dir());
+    assert!(!run_dir.join("cleaned.md").exists());
+
+    StdCommand::new("git")
+        .args([
+            "worktree",
+            "remove",
+            "--force",
+            worktree_dir.to_str().unwrap(),
+        ])
+        .current_dir(&main_dir)
+        .output()
+        .unwrap();
+}
+
+#[test]
+fn cleanup_from_run_worktree_uses_source_registry() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let run_id = "cleanup-source-registry";
+    let source_run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&source_run_dir).unwrap();
+    fs::write(source_run_dir.join("status"), "complete").unwrap();
+
+    let worktree_dir = tmp.path().join(run_id);
+    StdCommand::new("git")
+        .args([
+            "worktree",
+            "add",
+            worktree_dir.to_str().unwrap(),
+            "-b",
+            run_id,
+        ])
+        .current_dir(&main_dir)
+        .output()
+        .unwrap();
+    fs::write(
+        source_run_dir.join("worktree"),
+        worktree_dir.to_str().unwrap(),
+    )
+    .unwrap();
+
+    let copied_run_dir = worktree_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&copied_run_dir).unwrap();
+    fs::write(copied_run_dir.join("status"), "complete").unwrap();
+
+    factory_cmd()
+        .current_dir(&worktree_dir)
+        .args(["cleanup", "--run-id", run_id, "--apply"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cleaned cleanup-source-registry"));
+
+    assert!(source_run_dir.join("cleaned.md").exists());
+    assert!(!copied_run_dir.join("cleaned.md").exists());
+    assert!(!worktree_dir.exists());
 }
 
 // -------------------------------------------------------------------------

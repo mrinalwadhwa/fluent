@@ -187,6 +187,7 @@ Run state lives in `.factory/runs/[run-id]/`:
 | `sessions/` | Per-session transcript directories |
 | `sessions.log` | Per-session metadata log |
 | `report.md` | Generated run report |
+| `cleaned.md` | Cleanup context for complete or landed runs cleaned by `factory cleanup` |
 | `reviews/` | Review artifacts |
 | `children` | Child run IDs, one per line (parallel runs only, written by the factory) |
 | `parent` | Parent run ID (child runs only, written by the factory) |
@@ -211,6 +212,8 @@ factory watch                        # poll status, notify on change
 factory pull                         # download completed workspace from S3
 factory shell                        # interactive shell into running task
 factory resume                       # restart a paused run
+factory cleanup                      # dry-run stale complete/landed cleanup
+factory cleanup --apply              # clean selected runs and registered worktrees
 ```
 
 For interactive stages, do not call these commands. Follow the skills
