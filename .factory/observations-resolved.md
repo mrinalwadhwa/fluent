@@ -241,3 +241,10 @@ intent is to restart the session loop rather than attach interactively.
 → Resolved: bd82a58, a2f8d84, e057ae7, c757421, 53077d6 (headless
 resume restarts selected or implicit resumable runs, rejects parallel
 parent runs, and documents the selection behavior)
+
+2026-06-05 — The dashboard animation still feels sluggish despite
+the 100ms render interval. The spinner needs to cycle faster to
+feel responsive — consider 50-80ms or a different animation style
+that communicates activity more clearly at lower frame rates.
+→ Resolved: fff24a9 (dashboard render cadence now uses a 75ms interval
+and the behavior documentation reflects the faster animation target)

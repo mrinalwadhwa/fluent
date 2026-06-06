@@ -122,11 +122,6 @@ without a human looking at screenshots. This should be a skill —
 distributable expertise on how to test terminal user interfaces
 using tmux capture and VT100 rendering.
 
-2026-06-05 — The dashboard animation still feels sluggish despite
-the 100ms render interval. The spinner needs to cycle faster to
-feel responsive — consider 50-80ms or a different animation style
-that communicates activity more clearly at lower frame rates.
-
 2026-06-05 — Wrote expertise/terminal-ui.md without following the
 factory process. A proper run with reviewers would have caught:
 missing testing approaches for the expertise itself, unclear
