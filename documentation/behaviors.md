@@ -133,6 +133,10 @@ OAuth token, then re-read the token from Keychain into the process
 environment.
 Test: src/session.rs (test_loop_calls_pre_session_before_each_session, test_loop_stops_when_pre_session_returns_error), tests/behaviors/operations/test-sandbox.sh (sandboxed run uses sandbox-exec)
 
+WHEN a new Codex session starts on the sandboxed local runtime,
+THE SYSTEM SHALL NOT run the Claude credential refresh hook.
+Test: tests/behaviors/operations/test-codex-runtime.sh (codex does not run claude refresh hook, parallel codex does not run claude refresh hook)
+
 ## Fargate execution
 
 WHEN `factory run --runtime fargate` is invoked,
@@ -508,10 +512,10 @@ Test: tests/behaviors/operations/test-parallel-runs.sh (sequential groups run in
 
 ## Sandbox (local)
 
-WHILE running on the local runtime,
-THE SYSTEM SHALL execute the selected agent inside a sandbox with
+WHILE running Claude on the sandboxed local runtime,
+THE SYSTEM SHALL execute Claude inside a macOS Seatbelt sandbox with
 filesystem access restricted to the workspace root.
-Test: tests/behaviors/operations/test-sandbox.sh (dry-run renders profile with workspace root, sandbox enforces filesystem boundary, sandbox blocks write outside workspace, sandboxed run uses sandbox-exec), tests/binary.rs (run_with_codex_uses_workspace_write_sandbox)
+Test: tests/behaviors/operations/test-sandbox.sh (dry-run renders profile with workspace root, sandbox enforces filesystem boundary, sandbox blocks write outside workspace, sandboxed run uses sandbox-exec)
 
 WHEN `factory run --coder codex` is invoked with the sandboxed local runtime,
 THE SYSTEM SHALL launch Codex with its `workspace-write` sandbox and

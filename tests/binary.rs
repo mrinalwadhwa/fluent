@@ -298,14 +298,6 @@ fn write_mock_codex(bin_dir: &Path, script: &str) {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&codex_path, fs::Permissions::from_mode(0o755)).unwrap();
     }
-
-    let sandbox_path = bin_dir.join("sandbox-exec");
-    fs::write(&sandbox_path, "#!/bin/bash\nexit 1\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&sandbox_path, fs::Permissions::from_mode(0o755)).unwrap();
-    }
 }
 
 struct WorktreeGuard {
