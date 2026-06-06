@@ -301,6 +301,30 @@ permission model over time, so different humans can be allowed to
 observe, triage, approve runs, restart runs, resolve needs-user items,
 or land changes at different levels.
 
+Learning capture should happen at every level of this system, not only
+as an after-the-fact human note. Individual agents can record local
+learnings from their session: codebase facts discovered, wrong
+assumptions corrected, tool failures, review misunderstandings, and
+what they would do differently. A run-level observer or reporting agent
+can synthesize learnings across author and reviewer sessions: why the
+run looped, which artifacts were missing, which tests or environments
+behaved differently, and what should change in Factory process. Across
+runs, the land command or merge queue can detect recurring patterns and
+turn them into durable observations, expertise, behavior mappings,
+checks, or decisions. Any time work bubbles back up to the human
+operator or coordinating agent, that is itself a signal: Factory lacked
+enough automation, context, policy, artifact quality, or recovery logic
+to finish autonomously, and the event should be captured as input for
+improving the system.
+
+One review role or expertise file should also nudge changes toward
+vocabulary consistency. This may belong in architecture expertise,
+documentation expertise, or both: architecture can check whether a term
+matches the domain model and component boundaries, while documentation
+can check whether user-facing names stay consistent across behaviors,
+docs, tests, commands, and dashboard copy. The design question is how to
+make this a gentle review signal rather than churn over harmless wording.
+
 2026-06-06 — Stale run artifacts need a first-class cleanup policy rather
 than manual deletion. Cleanup should happen where the Factory state
 resides: the source worktree's `.factory/runs` registry and its
