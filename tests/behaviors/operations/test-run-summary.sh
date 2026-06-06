@@ -7,6 +7,7 @@
 # Covers:
 #   - factory summary resolves the active run and prints a summary
 #   - --run-id selects a specific run
+#   - phase and agent activity appear from durable artifacts
 #   - sessions.log entries appear in the summary
 #   - review verdicts appear grouped by reviewer name
 #   - handoff context appears without boilerplate
@@ -49,6 +50,7 @@ create_summary_fixture() {
 
   printf 'executing' > .factory/runs/run-alpha/status
   printf 'local' > .factory/runs/run-alpha/runtime
+  printf 'codex' > .factory/runs/run-alpha/coder
   printf 'Summarize alpha run behavior' > .factory/runs/run-alpha/brief.md
   {
     printf '2026-06-06T09:00:00Z session=1 exit=0 duration=12s status=executing\n'
@@ -76,6 +78,7 @@ create_summary_fixture() {
 
   printf 'planned' > .factory/runs/run-beta/status
   printf 'local' > .factory/runs/run-beta/runtime
+  printf 'claude' > .factory/runs/run-beta/coder
   printf 'Summarize beta run behavior' > .factory/runs/run-beta/brief.md
 }
 
@@ -117,6 +120,8 @@ test_summary_resolves_active_run() {
   RESULT=0
   assert_contains "$OUTPUT" "ID: run-alpha" || RESULT=1
   assert_contains "$OUTPUT" "Status: executing" || RESULT=1
+  assert_contains "$OUTPUT" "Phase: authoring" || RESULT=1
+  assert_contains "$OUTPUT" "Author: codex (active)" || RESULT=1
   assert_contains "$OUTPUT" "Summarize alpha run behavior" || RESULT=1
   assert_not_contains "$OUTPUT" "run-beta" || RESULT=1
 
@@ -133,6 +138,8 @@ test_summary_uses_explicit_run_id() {
   RESULT=0
   assert_contains "$OUTPUT" "ID: run-beta" || RESULT=1
   assert_contains "$OUTPUT" "Status: planned" || RESULT=1
+  assert_contains "$OUTPUT" "Phase: ready to run" || RESULT=1
+  assert_contains "$OUTPUT" "Author: claude (pending)" || RESULT=1
   assert_contains "$OUTPUT" "Summarize beta run behavior" || RESULT=1
   assert_not_contains "$OUTPUT" "run-alpha" || RESULT=1
 
@@ -164,6 +171,7 @@ test_summary_includes_review_verdicts() {
 
   RESULT=0
   assert_contains "$OUTPUT" "Reviewer verdicts" || RESULT=1
+  assert_contains "$OUTPUT" "Reviewers: recent (2 verdicts)" || RESULT=1
   assert_contains "$OUTPUT" "behaviors: pass" || RESULT=1
   assert_contains "$OUTPUT" "tests: fail" || RESULT=1
 

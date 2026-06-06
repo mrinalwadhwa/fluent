@@ -485,6 +485,7 @@ fn summary_uses_explicit_run_id() {
     fs::create_dir_all(&run_dir).unwrap();
     fs::write(run_dir.join("status"), "planned").unwrap();
     fs::write(run_dir.join("runtime"), "local").unwrap();
+    fs::write(run_dir.join("coder"), "codex").unwrap();
     fs::write(run_dir.join("brief.md"), "# Brief\n\nSummarize this run\n").unwrap();
 
     factory_cmd()
@@ -495,6 +496,8 @@ fn summary_uses_explicit_run_id() {
         .stdout(predicate::str::contains("Run\n"))
         .stdout(predicate::str::contains("ID: selected-run"))
         .stdout(predicate::str::contains("Status: planned"))
+        .stdout(predicate::str::contains("Phase: ready to run"))
+        .stdout(predicate::str::contains("Author: codex (pending)"))
         .stdout(predicate::str::contains("Summarize this run"))
         .stdout(predicate::str::contains("start or resume the run"));
 }
@@ -506,6 +509,7 @@ fn summary_resolves_active_run() {
     fs::create_dir_all(&run_dir).unwrap();
     fs::write(tmp.path().join(".factory/active-run"), "active-summary").unwrap();
     fs::write(run_dir.join("status"), "executing").unwrap();
+    fs::write(run_dir.join("coder"), "claude").unwrap();
     fs::write(run_dir.join("brief.md"), "Active run brief\n").unwrap();
 
     factory_cmd()
@@ -515,6 +519,8 @@ fn summary_resolves_active_run() {
         .success()
         .stdout(predicate::str::contains("ID: active-summary"))
         .stdout(predicate::str::contains("Status: executing"))
+        .stdout(predicate::str::contains("Phase: authoring"))
+        .stdout(predicate::str::contains("Author: claude (active)"))
         .stdout(predicate::str::contains("author work is still in progress"));
 }
 
@@ -524,6 +530,7 @@ fn summary_includes_sessions_reviews_handoff_and_report() {
     let run_dir = tmp.path().join(".factory/runs/artifact-summary");
     fs::create_dir_all(run_dir.join("reviews")).unwrap();
     fs::write(run_dir.join("status"), "needs-user").unwrap();
+    fs::write(run_dir.join("coder"), "codex").unwrap();
     fs::write(run_dir.join("brief.md"), "# Brief\n\nArtifact summary\n").unwrap();
     fs::write(
         run_dir.join("sessions.log"),
@@ -560,6 +567,18 @@ fn summary_includes_sessions_reviews_handoff_and_report() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Phase: needs user"),
+        "summary should include the phase: {stdout}"
+    );
+    assert!(
+        stdout.contains("Author: codex (blocked)"),
+        "summary should include the author state: {stdout}"
+    );
+    assert!(
+        stdout.contains("Reviewers: recent (2 verdicts)"),
+        "summary should include reviewer activity: {stdout}"
+    );
     assert!(
         stdout.contains("session=1 exit=0 duration=5s status=executing"),
         "summary should include session entries: {stdout}"
@@ -686,6 +705,51 @@ fn summary_limits_sessions_to_latest_entries() {
     assert!(!stdout.contains("session=1 old entry"), "{stdout}");
     assert!(stdout.contains("session=2 retained entry"), "{stdout}");
     assert!(stdout.contains("session=6 newest entry"), "{stdout}");
+}
+
+#[test]
+fn summary_includes_child_activity() {
+    let tmp = TempDir::new().unwrap();
+    let parent_dir = tmp.path().join(".factory/runs/parent-summary");
+    let child_one_dir = tmp.path().join(".factory/runs/parent-summary-1-1");
+    let child_two_dir = tmp.path().join(".factory/runs/parent-summary-1-2");
+    fs::create_dir_all(&parent_dir).unwrap();
+    fs::create_dir_all(&child_one_dir).unwrap();
+    fs::create_dir_all(&child_two_dir).unwrap();
+    fs::write(parent_dir.join("status"), "executing").unwrap();
+    fs::write(parent_dir.join("coder"), "codex").unwrap();
+    fs::write(parent_dir.join("brief.md"), "Parent summary\n").unwrap();
+    fs::write(
+        parent_dir.join("children"),
+        "parent-summary-1-1\nparent-summary-1-2\n",
+    )
+    .unwrap();
+    fs::write(child_one_dir.join("status"), "executing").unwrap();
+    fs::write(child_one_dir.join("brief.md"), "First child step\n").unwrap();
+    fs::write(child_two_dir.join("status"), "complete").unwrap();
+    fs::write(child_two_dir.join("brief.md"), "Second child step\n").unwrap();
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["summary", "--run-id", "parent-summary"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "summary failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Child parent-summary-1-1: executing - First child step"),
+        "summary should include active child activity: {stdout}"
+    );
+    assert!(
+        stdout.contains("Child parent-summary-1-2: complete - Second child step"),
+        "summary should include recent child activity: {stdout}"
+    );
 }
 
 #[test]

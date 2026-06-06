@@ -18,6 +18,7 @@ pub fn summarize_run(search_root: &Path, run_id: Option<&str>) -> Result<String>
     output.push_str("Run\n");
     output.push_str(&format!("  ID: {}\n", run.id));
     output.push_str(&format!("  Status: {status}\n"));
+    output.push_str(&format!("  Phase: {}\n", phase_label(&status)));
     output.push_str(&format!("  Runtime: {}\n", run.runtime()));
     if live_dir != run.dir {
         output.push_str(&format!("  Artifacts: {}\n", live_dir.display()));
@@ -26,6 +27,12 @@ pub fn summarize_run(search_root: &Path, run_id: Option<&str>) -> Result<String>
 
     output.push_str("Brief\n");
     for line in brief_lines(&run.dir) {
+        output.push_str(&format!("  {line}\n"));
+    }
+    output.push('\n');
+
+    output.push_str("Agents\n");
+    for line in agent_lines(&run, &live_dir, &status) {
         output.push_str(&format!("  {line}\n"));
     }
     output.push('\n');
@@ -73,6 +80,97 @@ pub fn summarize_run(search_root: &Path, run_id: Option<&str>) -> Result<String>
     output.push_str(&format!("  {}\n", next_action(&status)));
 
     Ok(output)
+}
+
+fn phase_label(status: &RunStatus) -> &'static str {
+    match status {
+        RunStatus::Briefed => "brief captured",
+        RunStatus::BehaviorsDefined => "behaviors defined",
+        RunStatus::ApproachDesigned => "approach designed",
+        RunStatus::Planned => "ready to run",
+        RunStatus::Executing => "authoring",
+        RunStatus::Reviewing => "reviewing",
+        RunStatus::RateLimited => "rate limited",
+        RunStatus::NeedsUser => "needs user",
+        RunStatus::Complete => "complete",
+        RunStatus::Failed => "failed",
+        RunStatus::Landed => "landed",
+        RunStatus::Unknown(_) => "unknown",
+    }
+}
+
+fn agent_lines(run: &run::Run, live_dir: &Path, status: &RunStatus) -> Vec<String> {
+    let mut lines = Vec::new();
+    let coder = read_trimmed(&live_dir.join("coder"))
+        .or_else(|| read_trimmed(&run.dir.join("coder")))
+        .unwrap_or_else(|| "unknown".to_string());
+    lines.push(format!("Author: {coder} ({})", author_state(status)));
+
+    if let Some(verdicts) = reviewer_verdicts(live_dir).or_else(|| reviewer_verdicts(&run.dir)) {
+        lines.push(format!("Reviewers: recent ({} verdicts)", verdicts.len()));
+    } else if matches!(status, RunStatus::Reviewing) {
+        lines.push("Reviewers: active".to_string());
+    }
+
+    for child in child_lines(run) {
+        lines.push(child);
+    }
+
+    lines
+}
+
+fn read_trimmed(path: &Path) -> Option<String> {
+    fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn author_state(status: &RunStatus) -> &'static str {
+    match status {
+        RunStatus::Briefed
+        | RunStatus::BehaviorsDefined
+        | RunStatus::ApproachDesigned
+        | RunStatus::Planned => "pending",
+        RunStatus::Executing => "active",
+        RunStatus::Reviewing => "waiting for review",
+        RunStatus::RateLimited => "rate limited",
+        RunStatus::NeedsUser => "blocked",
+        RunStatus::Complete | RunStatus::Landed => "recent",
+        RunStatus::Failed => "stopped",
+        RunStatus::Unknown(_) => "unknown",
+    }
+}
+
+fn child_lines(run: &run::Run) -> Vec<String> {
+    let Some(children) = read_trimmed(&run.dir.join("children")) else {
+        return Vec::new();
+    };
+    let project_root = run.project_root();
+    children
+        .lines()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .take(5)
+        .filter_map(|id| {
+            let child_dir = project_root.join(format!(".factory/runs/{id}"));
+            if !child_dir.is_dir() {
+                return None;
+            }
+            let child = run::Run {
+                id: id.to_string(),
+                dir: child_dir,
+            };
+            let status = child
+                .effective_status()
+                .map(|status| status.to_string())
+                .unwrap_or_else(|_| "unknown".to_string());
+            Some(format!(
+                "Child {id}: {status} - {}",
+                truncate_line(&child.brief_summary())
+            ))
+        })
+        .collect()
 }
 
 fn brief_lines(run_dir: &Path) -> Vec<String> {
