@@ -301,3 +301,24 @@ available across agents that support commands. This may reduce drift
 between Claude, Codex, and future coders by giving each agent the same
 Factory-native starting point instead of relying on whether it loaded the
 skill text into context.
+
+2026-06-05 — Local run filesystem sandboxing should allow exactly the
+run worktree plus the source repository's common git directory, not the
+entire workspace parent. Factory currently needs the agent to write
+linked-worktree git metadata under the source repo's `.git/worktrees`
+while working from the run worktree. Granting the whole parent directory
+is pragmatic but too broad because it can also expose `main/` and sibling
+runs. A focused run should compute the common git dir, render Seatbelt
+and Codex writable roots from `run worktree + common git dir`, and add
+behavior tests proving sandboxed Claude and Codex runs can commit without
+being able to write unrelated sibling worktrees.
+
+2026-06-05 — Network policy is a separate sandbox design axis from
+filesystem roots. Local Seatbelt currently allows outbound network, but
+stricter modes or Codex's internal sandbox may deny or constrain network
+access. That can break dependency workflows such as package install,
+registry metadata lookup, crate/npm/pip downloads, and tool/model
+bootstrap. Explore whether Factory should support project-configurable
+network policy, dependency-cache writable/read-only mounts, allowlisted
+install phases, or explicit dependency setup runs so agents can build
+projects without silently weakening credential and filesystem isolation.
