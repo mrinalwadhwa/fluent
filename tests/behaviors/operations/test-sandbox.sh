@@ -481,8 +481,9 @@ fi
 
 if ! sandbox-exec -p '(version 1)(allow default)' true > /dev/null 2>&1; then
   printf 'test-sandbox\n\n'
-  printf '  sandbox-exec cannot apply profiles in this environment; skipping sandbox enforcement tests\n'
-  exit 0
+  printf 'ERROR: sandbox-exec cannot apply profiles in this environment\n'
+  printf 'Sandbox behavior coverage requires a working Seatbelt runtime.\n'
+  exit 1
 fi
 
 printf 'test-sandbox\n\n'

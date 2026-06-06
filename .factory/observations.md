@@ -105,13 +105,13 @@ not faster ones. Reviewers should always view what the author
 says with skepticism — the author's explanation of what changed
 is context, not evidence. The reviewer verifies independently.
 
-2026-06-05 — The dashboard needs much more animation to signal
-activity. Currently only the header phase label animates. Should
-also animate active runs in the run tabs (spinner next to status).
-Active runs and agents should sort first in their respective lists.
-Consider a global activity indicator in the dashboard title bar when
-any run is active. The dashboard should feel alive when work is
-happening and completely still when everything is done.
+2026-06-05 — The dashboard should surface more activity beyond the
+header phase label and active agent tabs. Add active run indicators
+in the run tabs (spinner next to status), sort active runs and agents
+first in their respective lists, and consider a global activity
+indicator in the dashboard title bar when any run is active. The
+dashboard should feel alive when work is happening and completely
+still when everything is done.
 
 2026-06-05 — The factory should be able to visually observe terminal
 UIs during testing. Launch the dashboard (or any TUI) in a tmux
