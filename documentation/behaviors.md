@@ -43,9 +43,11 @@ with the run-id.
 WHEN the user invokes the define-behaviors skill,
 THE SYSTEM SHALL read the brief and existing behaviors, elaborate into
 EARS-format behavioral statements, and write behaviors.diff.md.
+Test: tests/behaviors/skills/run-summary-behaviors.md (test-skill)
 
 WHEN behaviors are approved by the user,
 THE SYSTEM SHALL set status to `behaviors-defined`.
+Test: tests/behaviors/skills/run-summary-behaviors.md (test-skill)
 
 ## Approach design
 
@@ -572,8 +574,9 @@ Test: dashboard::tests::test_discover_agents_resets_archived_review_round_verdic
 
 WHILE a run is actively executing (author or reviewers running),
 THE SYSTEM SHALL show a visual indicator that distinguishes "active"
-from "idle" at a glance in the header, agent tabs, and run tabs.
-Test: dashboard::tests::test_header_spinner_advances_with_tick, dashboard::tests::test_agent_tab_running_shows_spinner_symbol, dashboard::tests::test_header_author_executing_shows_spinner, dashboard::tests::test_run_tabs_show_active_status_marker, dashboard::tests::test_run_tabs_active_status_marker_advances, tests/behaviors/operations/test-dashboard-activity.sh (no crash when run is actively executing, no crash when reviewers are running)
+from "idle" at a glance in the selected-run header, dashboard title,
+agent tabs, and run tabs.
+Test: dashboard::tests::test_header_spinner_advances_with_tick, dashboard::tests::test_dashboard_title_shows_global_activity, dashboard::tests::test_run_view_has_activity_from_status, dashboard::tests::test_run_view_has_activity_from_running_reviewer, dashboard::tests::test_agent_tab_running_shows_spinner_symbol, dashboard::tests::test_header_author_executing_shows_spinner, dashboard::tests::test_run_tabs_show_active_status_marker, dashboard::tests::test_run_tabs_active_status_marker_advances, tests/behaviors/operations/test-dashboard-activity.sh (no crash when run is actively executing, no crash when reviewers are running)
 
 WHEN the dashboard polls run state,
 THE SYSTEM SHALL keep actionable runs sorted before terminal runs, keep

@@ -53,8 +53,8 @@ tests/test-run
 
 | Behavior | Scenarios |
 |---|---|
-| Read brief + existing behaviors, write behaviors.diff.md | (needs define-behaviors scenarios) |
-| Set status to `behaviors-defined` | (needs define-behaviors scenarios) |
+| Read brief + existing behaviors, write behaviors.diff.md | `run-summary-behaviors` |
+| Set status to `behaviors-defined` | `run-summary-behaviors` |
 
 ### Approach design
 

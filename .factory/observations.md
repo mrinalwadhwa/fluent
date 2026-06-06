@@ -36,12 +36,13 @@ structural_guidance.md) with much more detail than what was captured
 into write-documentation. May want to pull more in later, especially
 the sentence corrections as concrete examples.
 
-2026-05-16 — Interactive skills (capture-brief, define-behaviors,
-design-approach, plan-execution) have no test scenarios. These are
-non-trivial skills that drive the planning phase. Testing them requires
-designing scenario-based tests that simulate the interview flow and
-verify outputs. Tracked in behaviors.md as "(needs scenarios)" but
-warrants its own run.
+2026-05-16 — Interactive planning skills still need more scenario
+coverage. `capture-brief` has multiple scenarios, and
+`define-behaviors` now has an initial run-summary scenario. The remaining
+gap is focused coverage for `design-approach` and `plan-execution`, plus
+deeper define-behaviors cases that verify final artifact quality instead
+of only conversation structure. These skills drive the planning phase, so
+scenario tests should simulate the interview flow and verify outputs.
 
 2026-05-16 — The notification system (macOS osascript notifications
 from factory watch) needs a purpose review. What value do notifications
@@ -104,14 +105,6 @@ could affect its domain. The goal is better-informed reviewers,
 not faster ones. Reviewers should always view what the author
 says with skepticism — the author's explanation of what changed
 is context, not evidence. The reviewer verifies independently.
-
-2026-06-05 — The dashboard should surface more activity beyond the
-header phase label and active agent tabs. Add active run indicators
-in the run tabs (spinner next to status), sort active runs and agents
-first in their respective lists, and consider a global activity
-indicator in the dashboard title bar when any run is active. The
-dashboard should feel alive when work is happening and completely
-still when everything is done.
 
 2026-06-05 — Wrote expertise/terminal-ui.md without following the
 factory process. A proper run with reviewers would have caught:

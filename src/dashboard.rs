@@ -781,7 +781,8 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut App) {
         ])
         .split(size);
 
-    draw_header(f, main_chunks[0], &app.runs[idx], tick);
+    let any_activity = app.runs.iter().any(run_view_has_activity);
+    draw_header(f, main_chunks[0], &app.runs[idx], tick, any_activity);
     draw_run_tabs(f, main_chunks[1], app);
     draw_agent_tabs(f, main_chunks[2], &app.runs[idx]);
     draw_activity_feed(f, main_chunks[4], &mut app.runs[idx]);
@@ -834,7 +835,7 @@ fn compute_phase(view: &RunView, status: &str) -> (String, Color, bool) {
     }
 }
 
-fn draw_header(f: &mut ratatui::Frame, area: Rect, view: &RunView, tick: u64) {
+fn draw_header(f: &mut ratatui::Frame, area: Rect, view: &RunView, tick: u64, any_activity: bool) {
     let (phase_text, phase_color, animated) = compute_phase(view, &view.cached_status);
 
     let spinner = if animated {
@@ -867,10 +868,26 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, view: &RunView, tick: u64) {
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Factory Dashboard "),
+            .title(dashboard_title(tick, any_activity)),
     );
 
     f.render_widget(header, area);
+}
+
+fn dashboard_title(tick: u64, any_activity: bool) -> String {
+    if any_activity {
+        let frame = SPINNER_FRAMES[(tick % SPINNER_FRAMES.len() as u64) as usize];
+        format!(" Factory Dashboard {frame} ")
+    } else {
+        " Factory Dashboard ".into()
+    }
+}
+
+fn run_view_has_activity(view: &RunView) -> bool {
+    matches!(
+        view.cached_status.as_str(),
+        "executing" | "reviewing" | "rate-limited"
+    ) || view.agents.iter().any(|agent| agent.status == "running")
 }
 
 /// Build the display label for a single run tab.
@@ -1303,7 +1320,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                draw_header(f, f.area(), view, tick);
+                draw_header(f, f.area(), view, tick, false);
             })
             .unwrap();
         buffer_text(terminal.backend().buffer())
@@ -1406,7 +1423,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                draw_header(f, f.area(), view, tick);
+                draw_header(f, f.area(), view, tick, false);
             })
             .unwrap();
         terminal.backend().buffer().clone()
@@ -1776,6 +1793,40 @@ mod tests {
         // Both should contain "Executing"
         assert!(text_t0.contains("Executing"));
         assert!(text_t1.contains("Executing"));
+    }
+
+    #[test]
+    fn test_dashboard_title_shows_global_activity() {
+        assert_eq!(dashboard_title(0, false), " Factory Dashboard ");
+        assert_eq!(dashboard_title(0, true), " Factory Dashboard ⠋ ");
+        assert_eq!(dashboard_title(1, true), " Factory Dashboard ⠙ ");
+    }
+
+    #[test]
+    fn test_run_view_has_activity_from_status() {
+        let executing =
+            make_run_view_with_status("run-active", vec![AgentView::new("author")], "executing");
+        let reviewing =
+            make_run_view_with_status("run-review", vec![AgentView::new("author")], "reviewing");
+        let complete =
+            make_run_view_with_status("run-complete", vec![AgentView::new("author")], "complete");
+
+        assert!(run_view_has_activity(&executing));
+        assert!(run_view_has_activity(&reviewing));
+        assert!(!run_view_has_activity(&complete));
+    }
+
+    #[test]
+    fn test_run_view_has_activity_from_running_reviewer() {
+        let mut reviewer = AgentView::new("tests");
+        reviewer.status = "running".into();
+        let view = make_run_view_with_status(
+            "run-complete",
+            vec![AgentView::new("author"), reviewer],
+            "complete",
+        );
+
+        assert!(run_view_has_activity(&view));
     }
 
     #[test]
