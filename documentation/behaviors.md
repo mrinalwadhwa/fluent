@@ -330,6 +330,11 @@ THE SYSTEM SHALL find a run with status `needs-user` or `failed` and
 launch an interactive agent session for that run.
 Test: tests/behaviors/operations/test-resume-resolve.sh
 
+WHEN `factory resume [RUN_ID]` is invoked without a terminal on stdin,
+THE SYSTEM SHALL restart the selected run's session loop without
+launching an interactive agent.
+Test: tests/binary.rs (headless_resume_restarts_selected_run_loop)
+
 ## Land
 
 WHEN `factory land` is invoked and the run status is not `complete`,

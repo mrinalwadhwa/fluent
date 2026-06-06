@@ -1258,6 +1258,98 @@ fn resume_with_explicit_run_id() {
 }
 
 #[test]
+fn headless_resume_restarts_selected_run_loop() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let run_id = "20260606-headless-resume";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("brief.md"), "# Brief\n\nResume headlessly\n").unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_codex(
+        &bin_dir,
+        r##"#!/bin/bash
+WORKING_DIR="$(pwd)"
+RUN_ID=$(ls "$WORKING_DIR/.factory/runs/" 2>/dev/null | head -1)
+RUN_DIR="$WORKING_DIR/.factory/runs/$RUN_ID"
+CALL_FILE="$RUN_DIR/codex-call-count"
+COUNT=$(cat "$CALL_FILE" 2>/dev/null || echo "0")
+COUNT=$((COUNT + 1))
+echo "$COUNT" > "$CALL_FILE"
+if [ "$COUNT" -eq 1 ]; then
+  printf '%s\n' "$@" > "$RUN_DIR/initial-codex-args"
+  echo "needs-user" > "$RUN_DIR/status"
+  printf '## Handoff\nContinue.\n' > "$RUN_DIR/handoff.md"
+else
+  printf '%s\n' "$@" > "$RUN_DIR/resume-codex-args"
+  echo "complete" > "$RUN_DIR/status"
+fi
+exit 0
+"##,
+    );
+    write_mock_sandbox_exec(&bin_dir);
+    let _guard = worktree_guard(&main_dir, run_id);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "run",
+            "--no-sandbox",
+            "--coder",
+            "codex",
+            "--run-id",
+            run_id,
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
+    let wt_run_dir = Path::new(wt_path_str.trim()).join(format!(".factory/runs/{run_id}"));
+
+    let output = factory_cmd()
+        .current_dir(&main_dir)
+        .args(["resume", run_id, "--coder", "codex"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("SANDBOX_EXEC_LOG", tmp.path().join("sandbox-exec.log"))
+        .write_stdin("")
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "resume failed: {stderr}");
+    assert!(
+        stderr.contains("session loop (run: 20260606-headless-resume)"),
+        "headless resume should restart the session loop: {stderr}"
+    );
+    assert!(
+        !stderr.contains("stdin is not a terminal"),
+        "headless resume should not invoke an interactive agent: {stderr}"
+    );
+
+    let args = fs::read_to_string(wt_run_dir.join("resume-codex-args")).unwrap();
+    assert!(
+        args.lines().any(|line| line == "exec"),
+        "headless resume should use codex exec: {args}"
+    );
+    assert!(
+        args.lines().any(|line| line == "--json"),
+        "headless resume should capture JSON output: {args}"
+    );
+
+    let status = fs::read_to_string(wt_run_dir.join("status")).unwrap();
+    assert_eq!(status.trim(), "complete");
+    let sessions_log = fs::read_to_string(wt_run_dir.join("sessions.log")).unwrap();
+    assert!(
+        sessions_log.contains("session=2"),
+        "resumed loop should continue session numbering: {sessions_log}"
+    );
+}
+
+#[test]
 fn resume_skips_executing_run() {
     let tmp = TempDir::new().unwrap();
     let run_dir = tmp.path().join(".factory/runs/active-run");

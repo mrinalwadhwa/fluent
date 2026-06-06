@@ -1,6 +1,7 @@
 use anyhow::{Result, bail};
 use clap::Parser;
 use std::fs;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -464,6 +465,10 @@ fn cmd_resume(
 
     eprintln!("  Resuming run {}", run.id);
 
+    if !std::io::stdin().is_terminal() {
+        return cmd_resume_headless(search_root, &run, resolver, extra_args, coder_kind);
+    }
+
     os::check_prerequisites_for(coder_kind)?;
     credential::inject_credentials()?;
     credential::setup_git_signing();
@@ -477,6 +482,57 @@ fn cmd_resume(
 
     let author = coder_kind.boxed(sandbox);
     author.run_interactive(&system_prompt, search_root, extra_args)?;
+    Ok(())
+}
+
+fn cmd_resume_headless(
+    search_root: &Path,
+    run: &Run,
+    resolver: &ContentResolver,
+    extra_args: &[String],
+    coder_kind: CoderKind,
+) -> Result<()> {
+    os::check_prerequisites_for(coder_kind)?;
+    credential::inject_credentials()?;
+    credential::setup_git_signing();
+
+    let working_dir = run
+        .worktree_dir()
+        .unwrap_or_else(|| search_root.to_path_buf());
+    let run_dir = run.worktree_run_dir().unwrap_or_else(|| run.dir.clone());
+
+    let mut extra_roots = Vec::new();
+    if worktree::is_git_repo(&working_dir) {
+        extra_roots.push(worktree::git_common_dir(&working_dir)?);
+    }
+
+    let worktree_resolver = ContentResolver::new(Some(&working_dir));
+    let (sandbox, _sandbox_profile) =
+        build_coder_sandbox(coder_kind, resolver, &working_dir, &extra_roots)?;
+    let system_prompt = worktree_resolver
+        .resolve_content("prompts/author.md")
+        .unwrap_or_default();
+
+    eprintln!("  Factory           session loop (run: {})", run.id);
+    eprintln!("  Worktree          {}", working_dir.display());
+
+    let config = SessionConfig {
+        run: Run {
+            id: run.id.clone(),
+            dir: run_dir,
+        },
+        system_prompt,
+        working_dir,
+        extra_args: extra_args.to_vec(),
+        resolver: worktree_resolver,
+    };
+
+    let author = coder_kind.boxed(sandbox);
+    if coder_kind == CoderKind::Claude {
+        session::run_session_loop(&*author, &config, &SandboxedHooks, coder_kind)?;
+    } else {
+        session::run_session_loop(&*author, &config, &DefaultHooks, coder_kind)?;
+    }
     Ok(())
 }
 

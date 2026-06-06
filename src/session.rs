@@ -102,7 +102,7 @@ pub fn run_session_loop(
         )
     };
 
-    let mut session_count: u32 = 0;
+    let mut session_count = run.session_count() as u32;
     let mut consecutive_failures: u32 = 0;
     let mut prompt = initial_prompt;
 
