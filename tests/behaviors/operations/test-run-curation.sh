@@ -53,6 +53,8 @@ test_resolved_observations_are_curated() {
   assert_not_contains ".factory/observations.md" "The dashboard never removes runs that were deleted" || RESULT=1
   assert_not_contains ".factory/observations.md" "Codex sandbox support needs a focused verification run" || RESULT=1
   assert_not_contains ".factory/observations.md" "Dashboard \"reviewing\" status shows no spinner" || RESULT=1
+  assert_not_contains ".factory/observations.md" "active agents in the agent tabs (spinner next to" || RESULT=1
+  assert_not_contains ".factory/observations.md" "and the \"reviewing\" status" || RESULT=1
   assert_not_contains ".factory/observations.md" "Factory review detection is commit-based" || RESULT=1
   assert_not_contains ".factory/observations.md" "\`factory resume\` should support non-interactive automation" || RESULT=1
 
