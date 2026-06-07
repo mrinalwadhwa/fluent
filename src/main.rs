@@ -579,12 +579,10 @@ fn cmd_resume(
     credential::inject_credentials()?;
     credential::setup_git_signing();
 
-    let sandbox = if no_sandbox {
-        CoderSandbox::None
+    let (sandbox, _sandbox_profile) = if no_sandbox {
+        (CoderSandbox::None, None)
     } else {
-        let (sandbox, _sandbox_profile) =
-            build_coder_sandbox(coder_kind, resolver, search_root, &[])?;
-        sandbox
+        build_coder_sandbox(coder_kind, resolver, search_root, &[])?
     };
     let system_prompt = resolver
         .resolve_content("prompts/author.md")
@@ -627,12 +625,10 @@ fn cmd_resume_headless(
     }
 
     let worktree_resolver = ContentResolver::new(Some(&working_dir));
-    let sandbox = if no_sandbox {
-        CoderSandbox::None
+    let (sandbox, _sandbox_profile) = if no_sandbox {
+        (CoderSandbox::None, None)
     } else {
-        let (sandbox, _sandbox_profile) =
-            build_coder_sandbox(coder_kind, resolver, &working_dir, &extra_roots)?;
-        sandbox
+        build_coder_sandbox(coder_kind, resolver, &working_dir, &extra_roots)?
     };
     let system_prompt = worktree_resolver
         .resolve_content("prompts/author.md")
