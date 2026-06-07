@@ -29,11 +29,14 @@ tests/test-skill tests/behaviors/skills/timeout-flag.md skills/capture-brief/SKI
 
 ## Operational behaviors
 
-Tested via `tests/test-run` — creates a temp project, runs
-factory commands, asserts file system state.
+Tested through the Rust binary integration tests, operation scripts, and
+the remaining `tests/test-run` harness. These tests create temp projects,
+run factory commands, and assert terminal output plus file system state.
 
 ```sh
+cargo test --test binary
 tests/test-run
+for test in tests/behaviors/operations/*.sh; do bash "$test"; done
 ```
 
 ## Behavior mapping
@@ -70,7 +73,7 @@ tests/test-run
 | Break approach into steps, write plan.md | (needs plan-execution scenarios) |
 | Set status to `planned` | (needs plan-execution scenarios) |
 
-### Operational (tested by test-run, test-run-state, and others)
+### Operational (tested by test-run, binary.rs, and others)
 
 | Behavior | Test |
 |---|---|
@@ -78,15 +81,15 @@ tests/test-run
 | Create worktree from current HEAD | `test-run` |
 | Branch from non-main branch | `test-run` |
 | Run-id resolution priority chain | `test-run` |
-| Worktree copies all run state files | `test-run-state` |
-| Worktree records source-branch and worktree path | `test-run-state` |
-| Run-id scan ignores completed runs | `test-run-state` |
-| Status display includes runtime and brief | `test-run-state` |
-| Worktree copies scope file | `test-run-state`, `binary.rs` |
-| Run-id scan treats `executing` as active | `test-run-state`, `binary.rs` |
-| Run-id scan skips `needs-user` and `failed` | `test-run-state`, `binary.rs` |
+| Worktree copies all run state files | `binary.rs` |
+| Worktree records source-branch and worktree path | `binary.rs` |
+| Run-id scan ignores completed runs | `binary.rs` |
+| Status display includes runtime and brief | `binary.rs` |
+| Worktree copies scope file | `binary.rs` |
+| Run-id scan treats `executing` as active | `binary.rs` |
+| Run-id scan skips `needs-user` and `failed` | `binary.rs` |
 | Status display works with no runs | `test-status-edges`, `binary.rs` |
-| Review mode copies mode/reviewers to worktree | `test-review-phase` |
+| Review mode copies mode/reviewers to worktree | `binary.rs` |
 | Resume finds `needs-user` or `failed` runs | `test-resume-resolve`, `binary.rs` |
 | Headless resume restarts a selected run | `test-headless-resume`, `binary.rs` |
 | Headless resume rejects parallel parent runs | `test-headless-resume`, `binary.rs` |
@@ -99,12 +102,12 @@ tests/test-run
 | Complete notification includes session count and review verdict | `test-notification-content` |
 | Needs-user notification includes handoff content | `test-notification-content` |
 
-### Session loop (tested by binary.rs and test-session-loop.sh)
+### Session loop (tested by binary.rs and src/session.rs)
 
 | Behavior | Test |
 |---|---|
-| Session loop restarts on `executing` | `binary.rs`, `test-session-loop` |
-| Session loop stops on terminal status | `binary.rs`, `test-session-loop` |
+| Session loop restarts on `executing` | `binary.rs`, `src/session.rs` |
+| Session loop stops on terminal status | `binary.rs`, `src/session.rs` |
 | Consecutive failure guard (3 strikes) | `binary.rs` |
 | Max session limit (50) | `binary.rs` |
 | Session loop uses handoff prompt | `binary.rs` |

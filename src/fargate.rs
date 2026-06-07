@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -65,7 +65,7 @@ pub fn launch(source_root: &Path, run_id: Option<&str>) -> Result<()> {
 
     // Upload worktree to S3
     eprintln!("  Uploading worktree to S3...");
-    let tar_child = Command::new("tar")
+    let mut tar_child = Command::new("tar")
         .args([
             "cf",
             "-",
@@ -76,14 +76,27 @@ pub fn launch(source_root: &Path, run_id: Option<&str>) -> Result<()> {
         .stdout(std::process::Stdio::piped())
         .spawn()?;
 
-    Command::new("aws")
+    let tar_stdout = tar_child
+        .stdout
+        .take()
+        .context("Failed to capture workspace archive output")?;
+    let upload_status = Command::new("aws")
         .args(["s3", "cp", "--region", &config.region])
         .args([
             "-",
             &format!("s3://{}/runs/{}/workspace-in.tar", config.s3_bucket, run.id),
         ])
-        .stdin(tar_child.stdout.unwrap())
+        .stdin(tar_stdout)
         .status()?;
+    let tar_status = tar_child
+        .wait()
+        .context("Failed to wait for workspace archive command")?;
+    if !upload_status.success() {
+        anyhow::bail!("Failed to upload workspace to S3");
+    }
+    if !tar_status.success() {
+        anyhow::bail!("Failed to archive workspace for upload");
+    }
 
     // Start ECS task
     eprintln!("  Starting Fargate task...");
@@ -117,8 +130,15 @@ pub fn launch(source_root: &Path, run_id: Option<&str>) -> Result<()> {
         .args(["--query", "tasks[0].taskArn"])
         .args(["--output", "text"])
         .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to start Fargate task: {}", stderr.trim());
+    }
 
     let task_arn = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if task_arn.is_empty() || task_arn == "None" {
+        anyhow::bail!("Failed to start Fargate task: no task ARN returned");
+    }
     eprintln!("  Task: {task_arn}");
 
     fs::write(run.dir.join("runtime"), "fargate")?;

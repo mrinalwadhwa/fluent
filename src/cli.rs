@@ -54,6 +54,10 @@ pub enum Commands {
         #[arg(long)]
         no_sandbox: bool,
 
+        /// Run the session loop in the current workspace without creating a worktree
+        #[arg(long, hide = true)]
+        in_place: bool,
+
         /// Coding agent to launch: claude or codex
         #[arg(long)]
         coder: Option<String>,

@@ -6,6 +6,7 @@
 #   - Status when brief.md is missing
 #   - Status with all known status values
 #   - Status with review-mode run
+#   - Status for Fargate run does not query AWS
 #   - Status with no runs
 #
 # Usage:
@@ -124,6 +125,42 @@ test_status_with_review_run() {
   return $RESULT
 }
 
+test_status_fargate_uses_local_state_without_aws() {
+  TEST_DIR="$(mktemp -d -t factory-test-status-edge-XXXXXX)"
+
+  mkdir -p "${TEST_DIR}/.factory/runs/run-fg-local" "${TEST_DIR}/bin"
+  printf 'executing' > "${TEST_DIR}/.factory/runs/run-fg-local/status"
+  printf 'Fargate local status' > "${TEST_DIR}/.factory/runs/run-fg-local/brief.md"
+  printf 'fargate' > "${TEST_DIR}/.factory/runs/run-fg-local/runtime"
+  printf 'arn:aws:ecs:us-west-2:123:task/cluster/task-local' > "${TEST_DIR}/.factory/runs/run-fg-local/handle"
+
+  cat > "${TEST_DIR}/bin/aws" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf 'unexpected aws invocation: %s\n' "$*" >> "$AWS_LOG"
+exit 1
+SH
+  chmod +x "${TEST_DIR}/bin/aws"
+  AWS_LOG="${TEST_DIR}/aws.log"
+  export AWS_LOG
+
+  OUTPUT="$(cd "$TEST_DIR" && PATH="${TEST_DIR}/bin:${PATH}" "$FACTORY_BIN" status 2>&1)"
+
+  RESULT=0
+  assert_output_contains "$OUTPUT" "run-fg-local" || RESULT=1
+  assert_output_contains "$OUTPUT" "executing" || RESULT=1
+  assert_output_contains "$OUTPUT" "fargate" || RESULT=1
+  assert_output_contains "$OUTPUT" "Fargate local status" || RESULT=1
+  if [ -s "$AWS_LOG" ]; then
+    printf '    FAIL: status queried AWS for local Fargate state\n'
+    RESULT=1
+  fi
+
+  rm -rf "$TEST_DIR"
+  return $RESULT
+}
+
 test_status_with_no_runs() {
   TEST_DIR="$(mktemp -d -t factory-test-status-edge-XXXXXX)"
 
@@ -152,6 +189,7 @@ run_test "status with missing runtime file" test_status_missing_runtime_file
 run_test "status with missing brief file" test_status_missing_brief_file
 run_test "status displays all known status values" test_status_all_known_statuses
 run_test "status with review-mode run" test_status_with_review_run
+run_test "status fargate uses local state without AWS" test_status_fargate_uses_local_state_without_aws
 run_test "status with no runs" test_status_with_no_runs
 
 printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"

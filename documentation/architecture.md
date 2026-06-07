@@ -312,7 +312,10 @@ caller-provided `SSL_CERT_FILE`. In bare mode, Codex also runs with
 `sandbox-exec`.
 
 Fargate currently supports only Claude because its container entrypoint
-and credential path remain Claude-specific.
+and credential path remain Claude-specific. The Fargate run image builds
+the Rust Factory binary during the Docker image build and copies it to
+`/usr/local/bin/factory`; the task entrypoint uses that binary to enter
+the shared Rust session loop.
 
 Sandboxed local Claude runs refresh Claude OAuth credentials outside the
 sandbox at session boundaries. Sandboxed local Codex runs do not use that
@@ -422,6 +425,12 @@ runs with `--dangerously-bypass-approvals-and-sandbox`.
 
 Single-container model on AWS ECS Fargate.
 
+`infrastructure/setup.sh` builds the run image from the repository root
+with `infrastructure/run/Dockerfile`. The Dockerfile compiles the Rust
+Factory binary in a builder stage and copies it into the task image at
+`/usr/local/bin/factory`, so task startup only transfers the workspace
+and invokes the binary.
+
 ```
 Local machine                    Fargate task
 ─────────────                    ────────────
@@ -429,10 +438,14 @@ Local machine                    Fargate task
 2. upload worktree → S3
 3. start task ────────────►
                                  4. pull workspace from S3
-                                 5. session loop (claude -p)
-                                 6. ...hours pass...
-                                 7. upload workspace → S3
-factory status ──────────► (ECS API + S3 check)
+                                 5. /usr/local/bin/factory run
+                                    --runtime local
+                                    --no-sandbox --in-place
+                                    --coder claude
+                                 6. Rust session loop launches Claude
+                                 7. ...hours pass...
+                                 8. upload workspace → S3
+factory status ──────────► (local run artifacts)
 factory shell ───────────► (ECS Exec into container)
 factory pull ────────────► (download from S3 into worktree)
 ```
@@ -532,7 +545,6 @@ factory/main/
     review-skills.md
     review-tests.md
   scripts/
-    factory                  ← shell script (legacy, used by Fargate entrypoint)
     assets/
       common.sb              ← Shared Seatbelt profile template
       claude-code.sb         ← Claude-specific Seatbelt profile layer

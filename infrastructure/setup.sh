@@ -110,7 +110,12 @@ aws ecr get-login-password --region "$REGION" | \
   "${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
 
 printf '\nBuilding run image...\n'
-docker build --platform linux/amd64 --load -t "${REPO_URI}:latest" "${SCRIPT_DIR}/run/"
+docker build \
+  --platform linux/amd64 \
+  --load \
+  -f "${SCRIPT_DIR}/run/Dockerfile" \
+  -t "${REPO_URI}:latest" \
+  "${SCRIPT_DIR}/.."
 
 printf '\nPushing image...\n'
 docker push "${REPO_URI}:latest"
@@ -133,4 +138,4 @@ FACTORY_REGION=${REGION}
 EOF
 
 printf '\n  Config written to %s/fargate.env\n' "$FACTORY_CONFIG"
-printf '\nSetup complete. Run: factory run --backend fargate\n'
+printf '\nSetup complete. Run: factory run --runtime fargate\n'

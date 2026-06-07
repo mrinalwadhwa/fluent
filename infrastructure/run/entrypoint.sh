@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # entrypoint.sh — Single-container Fargate entrypoint for factory runs.
 #
-# Pull workspace from S3, source the factory script for shared functions,
-# run the session loop, upload completed workspace to S3.
+# Pull workspace from S3, run the Rust session loop, upload completed
+# workspace to S3.
 #
 # Environment variables (passed as task overrides):
 #   FACTORY_RUN_ID         — the run identifier
@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-WORKSPACE=/workspace
+WORKSPACE="${WORKSPACE:-/workspace}"
 
 die() { printf 'factory-run: %s\n' "$1" >&2; exit 1; }
 
@@ -49,40 +49,29 @@ RUN_DIR="${WORKSPACE}/.factory/runs/${FACTORY_RUN_ID}"
 printf '%s' "$FACTORY_RUN_ID" > "${WORKSPACE}/.factory/active-run"
 
 # --------------------------------------------------------------------------
-# Source factory script for shared functions
-# --------------------------------------------------------------------------
-
-FACTORY_SCRIPT="${WORKSPACE}/scripts/factory"
-[ -f "$FACTORY_SCRIPT" ] || die "Factory script not found: $FACTORY_SCRIPT"
-
-PROMPTS_DIR="${WORKSPACE}/prompts"
-FACTORY_LIB=1 . "$FACTORY_SCRIPT"
-
-# Set variables the shared functions expect
-RUN_ID="$FACTORY_RUN_ID"
-
-# --------------------------------------------------------------------------
-# Define how this backend launches the author
-# --------------------------------------------------------------------------
-
-launch_author() {
-  LAUNCH_PROMPT="$1"; shift
-  claude \
-    --dangerously-skip-permissions \
-    --append-system-prompt "$FACTORY_SYSTEM_PROMPT" \
-    -p "$LAUNCH_PROMPT" \
-    "$@"
-}
-
-# No per-session hook on Fargate
-PRE_SESSION_HOOK=""
-
-# --------------------------------------------------------------------------
-# Run the session loop (from factory script)
+# Run the Rust session loop
 # --------------------------------------------------------------------------
 
 cd "$WORKSPACE"
-run_session_loop
+
+if [ -n "${FACTORY_BIN:-}" ]; then
+  [ -x "$FACTORY_BIN" ] || die "FACTORY_BIN is not executable: $FACTORY_BIN"
+elif [ -x "/usr/local/bin/factory" ]; then
+  FACTORY_BIN="/usr/local/bin/factory"
+elif [ -x "${WORKSPACE}/target/release/factory" ]; then
+  FACTORY_BIN="${WORKSPACE}/target/release/factory"
+elif command -v factory >/dev/null 2>&1; then
+  FACTORY_BIN="$(command -v factory)"
+else
+  die "no factory binary available"
+fi
+
+"$FACTORY_BIN" run \
+  --runtime local \
+  --no-sandbox \
+  --in-place \
+  --coder claude \
+  --run-id "$FACTORY_RUN_ID"
 
 # --------------------------------------------------------------------------
 # Upload workspace to S3

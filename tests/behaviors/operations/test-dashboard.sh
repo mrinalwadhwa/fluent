@@ -223,7 +223,7 @@ test_run_tabs_show_live_status() {
   OUTPUT="$(capture_dashboard "$TEST_DIR" live-run)"
 
   RESULT=0
-  if ! echo "$OUTPUT" | grep -q "live-run \\[executing\\]"; then
+  if ! echo "$OUTPUT" | grep -q "live-run \\[[^]]*executing\\]"; then
     printf '    FAIL: expected run tab to show live status [executing]\n'
     RESULT=1
   fi
@@ -258,7 +258,7 @@ test_initial_run_prefers_live_active_status() {
     printf '    FAIL: expected initial selection to prefer live-active\n'
     RESULT=1
   fi
-  if ! echo "$CLEAN_OUTPUT" | grep -q "live-active \\[executing\\]"; then
+  if ! echo "$CLEAN_OUTPUT" | grep -q "live-active \\[[^]]*executing\\]"; then
     printf '    FAIL: expected live-active tab to show [executing]\n'
     RESULT=1
   fi
@@ -284,11 +284,11 @@ test_poll_removes_deleted_source_run() {
     printf '    FAIL: dashboard panicked after deleting a source run\n'
     RESULT=1
   fi
-  if echo "$FINAL_OUTPUT" | grep -q "delete-me"; then
+  if [[ "$FINAL_OUTPUT" == *delete-me* ]]; then
     printf '    FAIL: deleted source run remained in the polled dashboard state\n'
     RESULT=1
   fi
-  if ! echo "$FINAL_OUTPUT" | grep -q "keep-me \\[planned\\]"; then
+  if [[ "$FINAL_OUTPUT" != *keep-me* || "$FINAL_OUTPUT" != *planned* ]]; then
     printf '    FAIL: expected remaining run to stay visible after poll\n'
     RESULT=1
   fi

@@ -218,7 +218,7 @@ something new), this is a lightweight run:
   list (e.g., `documentation,behaviors`)
 - If the user wants to focus on specific areas, write
   `.factory/runs/[run-id]/scope` with the paths or description
-  (e.g., `skills/`, `scripts/factory`, `the session loop logic`)
+  (e.g., `skills/`, `src/session.rs`, `the session loop logic`)
 - Set status directly to `planned` — skip define-behaviors,
   design-approach, and plan-execution (there are no new behaviors
   to define or approaches to design)

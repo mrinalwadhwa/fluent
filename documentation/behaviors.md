@@ -73,7 +73,7 @@ THE SYSTEM SHALL set status to `planned`.
 WHEN `factory run` is invoked,
 THE SYSTEM SHALL create a git worktree branched from the current HEAD,
 copy the run's state into it, and execute within the worktree.
-Test: src/worktree.rs (setup_run_worktree tests), tests/binary.rs (worktree creates and copies state), tests/behaviors/operations/test-run-state.sh
+Test: src/worktree.rs (setup_run_worktree tests), tests/binary.rs (worktree creates and copies state)
 
 WHEN `factory run` is invoked from a non-main branch,
 THE SYSTEM SHALL branch the worktree from that branch and record it as
@@ -85,7 +85,7 @@ Test: tests/test-run (setup_run_worktree from non-main branch)
 WHEN `factory run` is invoked with the local runtime,
 THE SYSTEM SHALL launch the selected coder in non-interactive mode with
 the brief or handoff as the initial prompt.
-Test: tests/behaviors/operations/test-session-loop.sh (initial prompt uses brief, initial prompt uses handoff)
+Test: src/session.rs (test_loop_initial_prompt_uses_brief, test_loop_initial_prompt_uses_handoff), tests/binary.rs (run_uses_handoff_prompt_when_handoff_exists)
 
 WHEN `factory run --coder codex` is invoked with the local runtime,
 THE SYSTEM SHALL launch Codex with `codex exec --json`, prepend the
@@ -99,23 +99,23 @@ Test: tests/binary.rs (run_unknown_coder_fails)
 
 WHEN the agent exits with status `executing`,
 THE SYSTEM SHALL restart the agent.
-Test: tests/behaviors/operations/test-session-loop.sh (loop restarts on executing)
+Test: src/session.rs (test_loop_restarts_on_executing), tests/binary.rs (run_session_loop_restarts_on_executing)
 
 WHEN the agent exits with status `needs-user`, `complete`, or `failed`,
 THE SYSTEM SHALL stop the loop.
-Test: tests/behaviors/operations/test-session-loop.sh (loop stops on needs-user, loop stops on failed), tests/behaviors/operations/test-review-phase.sh (complete with passing reviews stops loop)
+Test: src/session.rs (test_loop_stops_on_needs_user, test_loop_stops_on_failed), tests/binary.rs (run_session_loop_stops_on_complete, run_session_loop_stops_on_needs_user)
 
 WHEN the agent exits with status `rate-limited`,
 THE SYSTEM SHALL wait 5 minutes and restart the agent.
-Test: tests/behaviors/operations/test-session-loop.sh (loop restarts on rate-limited)
+Test: src/session.rs (test_loop_restarts_on_rate_limited)
 
 IF the agent exits with a non-zero exit code 3 consecutive times,
 THEN THE SYSTEM SHALL set status to `failed` and stop the loop.
-Test: tests/behaviors/operations/test-session-loop.sh (consecutive failures set failed, success resets failure counter)
+Test: src/session.rs (test_loop_consecutive_failures_set_failed, test_loop_success_resets_failure_counter), tests/binary.rs (run_session_loop_consecutive_failures)
 
 IF the session count exceeds 50,
 THEN THE SYSTEM SHALL set status to `failed` and stop the loop.
-Test: tests/behaviors/operations/test-session-loop.sh (max sessions sets failed)
+Test: src/session.rs (test_loop_max_sessions_sets_failed)
 
 ## Session observability
 
@@ -157,24 +157,30 @@ Test: tests/behaviors/operations/test-codex-runtime.sh (codex does not run claud
 ## Fargate execution
 
 WHEN `factory run --runtime fargate` is invoked,
-THE SYSTEM SHALL upload the worktree to S3 and start an ECS Fargate task.
+THE SYSTEM SHALL upload the worktree to S3, start an ECS Fargate task,
+record `runtime=fargate`, and record the ECS task handle in the source
+run directory.
+Test: tests/binary.rs (run_fargate_launch_uploads_workspace_and_records_task_handle), tests/behaviors/operations/test-fargate-launch.sh
 
 WHEN `factory run --runtime fargate --coder codex` is invoked,
 THE SYSTEM SHALL fail with a clear unsupported-coder error.
 Test: tests/binary.rs (run_fargate_with_codex_fails_before_config)
 
 WHEN the Fargate task starts,
-THE SYSTEM SHALL pull the workspace from S3 and run the session loop.
+THE SYSTEM SHALL pull the workspace from S3 and run the Rust session loop
+in the downloaded workspace.
+Test: tests/behaviors/operations/test-fargate-entrypoint.sh
 
 WHEN the Fargate task reaches a terminal status,
 THE SYSTEM SHALL upload the workspace to S3.
+Test: tests/behaviors/operations/test-fargate-entrypoint.sh
 
 ## Status reporting
 
 WHEN `factory status` is invoked,
 THE SYSTEM SHALL display all runs with their status, runtime, and brief
 summary.
-Test: tests/test-run (test_status_display), tests/behaviors/operations/test-run-state.sh
+Test: tests/binary.rs (status display tests)
 
 WHEN `factory status` is invoked after cleanup,
 THE SYSTEM SHALL list cleaned runs with their existing run status and
@@ -182,8 +188,9 @@ without a cleanup-specific status.
 Test: tests/behaviors/operations/test-cleanup.sh (status lists cleaned runs with original status)
 
 WHEN `factory status` is invoked and a Fargate run exists,
-THE SYSTEM SHALL check S3 for a completed workspace and query the ECS API
-for task state.
+THE SYSTEM SHALL display the locally recorded run status, runtime, and
+brief summary without querying AWS.
+Test: tests/behaviors/operations/test-status-edges.sh (status fargate uses local state without AWS)
 
 ## Run summary
 
@@ -319,18 +326,18 @@ THE SYSTEM SHALL set status to `reviewing`, run all reviewers in parallel,
 and restore status to `complete` if all pass or `executing` if any fail,
 unless the run qualifies for the no-change skip or still has dirty
 worktree content after passing review.
-Test: tests/behaviors/operations/test-review-phase.sh (complete with passing reviews stops loop, review failure restarts author), tests/behaviors/operations/test-reviewing-status.sh (status is reviewing while reviewers run, status transitions to complete when all pass, status is executing before author restarts on failure)
+Test: src/session.rs (review phase tests), tests/binary.rs (run_archives_review_rounds, run_reviews_when_complete_worktree_is_dirty)
 
 WHEN all reviewers return verdict `pass`,
 THE SYSTEM SHALL accept the run as complete and stop the loop when the
 run worktree has no tracked changes, staged changes, or untracked
 non-ignored files outside `.factory`.
-Test: tests/behaviors/operations/test-review-phase.sh (all reviewers pass returns zero, complete with passing reviews stops loop)
+Test: src/review.rs (verdict tests), src/session.rs (review phase tests)
 
 WHEN any reviewer returns verdict `fail` or `uncertain`,
 THE SYSTEM SHALL set status back to `executing` and restart the author
 with the review findings.
-Test: tests/behaviors/operations/test-review-phase.sh (reviewer fail returns non-zero, reviewer uncertain returns non-zero, review failure restarts author)
+Test: src/review.rs (test_extract_verdict_fail, test_extract_verdict_uncertain), tests/binary.rs (run_archives_review_rounds)
 
 ## Review runs
 
@@ -338,7 +345,7 @@ WHEN `factory run` is invoked and the run's mode is `review`,
 THE SYSTEM SHALL set status to `reviewing`, run reviewers with
 full-codebase scope, and produce findings. No author session is
 launched; the run completes after one review round.
-Test: tests/behaviors/operations/test-review-phase.sh (review run all pass completes without author)
+Test: src/session.rs (review-only mode tests)
 
 WHEN `factory run` is invoked and the run has a `scope` file,
 THE SYSTEM SHALL copy the scope file into the worktree.
@@ -347,7 +354,7 @@ Test: src/worktree.rs (test_worktree_copies_scope_file)
 WHEN a review run completes its single review round,
 THE SYSTEM SHALL set status to `complete` and stop without launching
 the author, regardless of reviewer verdict.
-Test: tests/behaviors/operations/test-review-phase.sh (review run all pass completes without author)
+Test: src/session.rs (review-only mode tests)
 
 ## Watch timeout
 
@@ -382,7 +389,7 @@ IF the review-fix cycle has run 10 times,
 THEN THE SYSTEM SHALL accept the current state, generate a report, and
 complete the run when the worktree has no tracked changes, staged
 changes, or untracked non-ignored files outside `.factory`.
-Test: tests/behaviors/operations/test-review-round-limit.sh (review round limit completes after 10 cycles)
+Test: src/session.rs (test_loop_review_limit_dirty_worktree_restarts_author)
 
 ## Parent death detection
 

@@ -545,6 +545,69 @@ mod tests {
         }
     }
 
+    fn make_project_config(run: &Run, project: &Path) -> SessionConfig {
+        SessionConfig {
+            run: run.clone(),
+            system_prompt: "test".to_string(),
+            working_dir: project.to_path_buf(),
+            extra_args: vec![],
+            resolver: ContentResolver::new(Some(project)),
+        }
+    }
+
+    fn write_executable(path: &Path, content: &str) {
+        fs::write(path, content).unwrap();
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
+    fn setup_review_mode_run(verdict: &str) -> (TempDir, PathBuf, Run, PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        let run_id = "test-loop";
+        let run_dir = project.join(format!(".factory/runs/{run_id}"));
+        let prompts_dir = project.join(".factory/prompts");
+        fs::create_dir_all(&run_dir).unwrap();
+        fs::create_dir_all(&prompts_dir).unwrap();
+        fs::write(run_dir.join("brief.md"), "Review the codebase.").unwrap();
+        fs::write(run_dir.join("status"), "planned").unwrap();
+        fs::write(run_dir.join("mode"), "review").unwrap();
+        fs::write(run_dir.join("reviewers"), "tests").unwrap();
+        fs::write(
+            prompts_dir.join("review-tests.md"),
+            "[system]\nTest reviewer.\n[changes]\nChanges scope marker.\n[full]\nFull scope marker.\n",
+        )
+        .unwrap();
+
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        write_executable(
+            &bin_dir.join("claude"),
+            &format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+RUN_DIR=".factory/runs/{run_id}"
+mkdir -p "$RUN_DIR/reviews"
+cat "$RUN_DIR/status" > "$RUN_DIR/review-status-seen"
+printf '%s\n' "$*" > "$RUN_DIR/review-args"
+case "$*" in
+  *"Full scope marker"*) ;;
+  *) exit 42 ;;
+esac
+printf 'Verdict: {verdict}\n\nReview findings.\n' > "$RUN_DIR/reviews/review-tests.md"
+printf '{{"type":"result"}}\n'
+"#
+            ),
+        );
+
+        let run = Run {
+            id: run_id.to_string(),
+            dir: run_dir,
+        };
+        (tmp, project, run, bin_dir)
+    }
+
     fn run_git(dir: &Path, args: &[&str]) {
         let output = std::process::Command::new("git")
             .args(args)
@@ -664,6 +727,50 @@ mod tests {
     }
 
     #[test]
+    fn review_mode_runs_full_scope_review_without_author() {
+        let _env_guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let (_tmp, project, run, bin_dir) = setup_review_mode_run("pass");
+        let _path_guard = prepend_path(&bin_dir);
+        let author = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
+            panic!("review-only runs must not launch the author")
+        });
+
+        let config = make_project_config(&run, &project);
+        run_session_loop(&author, &config, &NoopHooks, CoderKind::Claude).unwrap();
+
+        assert_eq!(author.call_count.load(Ordering::SeqCst), 0);
+        assert_eq!(run.status().unwrap(), RunStatus::Complete);
+        assert_eq!(
+            fs::read_to_string(run.dir.join("review-status-seen")).unwrap(),
+            "reviewing"
+        );
+        let review = fs::read_to_string(run.dir.join("reviews/review-tests.md")).unwrap();
+        assert!(review.contains("Verdict: pass"));
+        let args = fs::read_to_string(run.dir.join("review-args")).unwrap();
+        assert!(args.contains("Full scope marker"));
+        assert!(!args.contains("Changes scope marker"));
+        assert!(run.dir.join("report.md").exists());
+    }
+
+    #[test]
+    fn review_mode_completes_after_failing_findings() {
+        let _env_guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let (_tmp, project, run, bin_dir) = setup_review_mode_run("fail");
+        let _path_guard = prepend_path(&bin_dir);
+        let author = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
+            panic!("review-only runs must not launch the author")
+        });
+
+        let config = make_project_config(&run, &project);
+        run_session_loop(&author, &config, &NoopHooks, CoderKind::Claude).unwrap();
+
+        assert_eq!(author.call_count.load(Ordering::SeqCst), 0);
+        assert_eq!(run.status().unwrap(), RunStatus::Complete);
+        let review = fs::read_to_string(run.dir.join("reviews/review-tests.md")).unwrap();
+        assert!(review.contains("Verdict: fail"));
+    }
+
+    #[test]
     fn test_loop_review_limit_dirty_worktree_restarts_author() {
         let _env_guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let (_tmp, repo, run_dir) = setup_change_detection_repo();
@@ -678,14 +785,10 @@ mod tests {
         let bin_dir = repo.join("bin");
         fs::create_dir_all(&bin_dir).unwrap();
         let fake_claude = bin_dir.join("claude");
-        fs::write(
+        write_executable(
             &fake_claude,
             "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p .factory/runs/test-run/reviews\nprintf 'Verdict: fail\\n\\nAlways failing.\\n' > .factory/runs/test-run/reviews/review-tests.md\nprintf '{\"type\":\"result\"}\\n'\n",
-        )
-        .unwrap();
-        let mut permissions = fs::metadata(&fake_claude).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&fake_claude, permissions).unwrap();
+        );
         let _path_guard = prepend_path(&bin_dir);
 
         let run_dir = run.dir.clone();

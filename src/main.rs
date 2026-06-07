@@ -78,12 +78,21 @@ fn main() -> Result<()> {
             run_id,
             runtime,
             no_sandbox,
+            in_place,
             coder,
             extra_args,
         }) => match runtime.as_str() {
             "local" => {
                 let coder_kind = CoderKind::resolve(coder.as_deref().or(cli.coder.as_deref()))?;
-                if no_sandbox || cli.no_sandbox {
+                if in_place {
+                    cmd_run_in_place(
+                        &sandbox_root,
+                        run_id.as_deref(),
+                        &resolver,
+                        &extra_args,
+                        coder_kind,
+                    )?;
+                } else if no_sandbox || cli.no_sandbox {
                     cmd_run_bare(
                         &sandbox_root,
                         run_id.as_deref(),
@@ -331,6 +340,38 @@ fn cmd_run_bare(
         working_dir: working_dir.clone(),
         extra_args: extra_args.to_vec(),
         resolver: ContentResolver::new(Some(&working_dir)),
+    };
+
+    let author = coder_kind.boxed(CoderSandbox::None);
+    session::run_session_loop(&*author, &config, &DefaultHooks, coder_kind)?;
+    Ok(())
+}
+
+fn cmd_run_in_place(
+    workspace: &Path,
+    run_id: Option<&str>,
+    resolver: &ContentResolver,
+    extra_args: &[String],
+    coder_kind: CoderKind,
+) -> Result<()> {
+    let run = run::resolve_run(workspace, run_id)?;
+
+    fs::write(run.dir.join("runtime"), "local")?;
+    fs::write(run.dir.join("handle"), std::process::id().to_string())?;
+    fs::write(run.dir.join("coder"), coder_kind.as_str())?;
+
+    eprintln!("factory: in-place session loop (run: {})", run.id);
+
+    let system_prompt = resolver
+        .resolve_content("prompts/author.md")
+        .unwrap_or_default();
+
+    let config = SessionConfig {
+        run,
+        system_prompt,
+        working_dir: workspace.to_path_buf(),
+        extra_args: extra_args.to_vec(),
+        resolver: ContentResolver::new(Some(workspace)),
     };
 
     let author = coder_kind.boxed(CoderSandbox::None);

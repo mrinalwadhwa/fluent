@@ -13,7 +13,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
-FACTORY="${PROJECT_DIR}/scripts/factory"
+FACTORY="${PROJECT_DIR}/target/debug/factory"
+
+if [ ! -x "$FACTORY" ]; then
+  (cd "$PROJECT_DIR" && cargo build --quiet)
+fi
 
 PASS=0
 FAIL=0

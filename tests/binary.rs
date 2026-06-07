@@ -977,6 +977,18 @@ fn write_mock_codex(bin_dir: &Path, script: &str) {
     }
 }
 
+fn write_mock_executable(bin_dir: &Path, name: &str, script: &str) {
+    fs::create_dir_all(bin_dir).unwrap();
+
+    let path = bin_dir.join(name);
+    fs::write(&path, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
 const CODEX_SSL_CERT_FILE_RECORDER: &str = r##"#!/bin/bash
 WORKING_DIR="$(pwd)"
 RUN_ID=$(ls "$WORKING_DIR/.factory/runs/" 2>/dev/null | head -1)
@@ -1070,6 +1082,59 @@ exit 0
         .success()
         .stderr(predicate::str::contains("Session 1"))
         .stderr(predicate::str::contains("Run status: complete"));
+}
+
+#[test]
+fn run_in_place_uses_current_workspace() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let run_id = "20260606-in-place";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("brief.md"), "# Brief\n\nRun here\n").unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+WORKING_DIR="$(pwd)"
+RUN_ID=$(ls "$WORKING_DIR/.factory/runs/" 2>/dev/null | head -1)
+RUN_DIR="$WORKING_DIR/.factory/runs/$RUN_ID"
+printf '%s' "$WORKING_DIR" > "$RUN_DIR/working-dir"
+printf 'complete' > "$RUN_DIR/status"
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "run",
+            "--runtime",
+            "local",
+            "--no-sandbox",
+            "--in-place",
+            "--coder",
+            "claude",
+            "--run-id",
+            run_id,
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("in-place session loop"));
+
+    let status = fs::read_to_string(run_dir.join("status")).unwrap();
+    assert_eq!(status.trim(), "complete");
+    assert!(!run_dir.join("worktree").exists());
+
+    let working_dir = fs::read_to_string(run_dir.join("working-dir")).unwrap();
+    assert_eq!(
+        fs::canonicalize(Path::new(working_dir.trim())).unwrap(),
+        fs::canonicalize(&main_dir).unwrap()
+    );
 }
 
 #[test]
@@ -1882,6 +1947,360 @@ fn run_fargate_with_codex_fails_before_config() {
         .stderr(predicate::str::contains(
             "Fargate runtime currently supports only the claude coder",
         ));
+}
+
+#[test]
+fn run_fargate_launch_uploads_workspace_and_records_task_handle() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let run_id = "20260606-fargate-launch";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("brief.md"), "Launch Fargate\n").unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_executable(
+        &bin_dir,
+        "aws",
+        r##"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${AWS_LOG:?}"
+
+case "$1 $2" in
+  "s3 cp")
+    cat > "${UPLOADED_WORKSPACE:?}"
+    ;;
+  "ecs run-task")
+    printf 'arn:aws:ecs:us-west-2:123:task/cluster/task-abc\n'
+    ;;
+  *)
+    printf 'unexpected aws command: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+"##,
+    );
+
+    let aws_log = tmp.path().join("aws.log");
+    let uploaded_workspace = tmp.path().join("workspace-in.tar");
+    let _guard = worktree_guard(&main_dir, run_id);
+
+    let output = factory_cmd()
+        .current_dir(&main_dir)
+        .args(["run", "--runtime", "fargate", "--run-id", run_id])
+        .env("PATH", mock_path(&bin_dir))
+        .env("HOME", tmp.path())
+        .env("AWS_ACCESS_KEY_ID", "mock")
+        .env("AWS_SECRET_ACCESS_KEY", "mock")
+        .env("BRAVE_SEARCH_API_KEY", "mock")
+        .env("CLAUDE_CODE_OAUTH_TOKEN", "mock-claude-token")
+        .env("FACTORY_CLUSTER", "cluster-arn")
+        .env("FACTORY_RUN_TASK", "task-def")
+        .env("FACTORY_S3_BUCKET", "bucket")
+        .env("FACTORY_SUBNETS", "subnet-a,subnet-b")
+        .env("FACTORY_SECURITY_GROUP", "sg-123")
+        .env("FACTORY_REGION", "us-west-2")
+        .env("AWS_LOG", &aws_log)
+        .env("UPLOADED_WORKSPACE", &uploaded_workspace)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "fargate launch failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let log = fs::read_to_string(&aws_log).unwrap();
+    assert!(
+        log.contains(
+            "s3 cp --region us-west-2 - s3://bucket/runs/20260606-fargate-launch/workspace-in.tar"
+        ),
+        "S3 upload should target the run input archive: {log}"
+    );
+    assert!(
+        log.contains("ecs run-task --region us-west-2"),
+        "launch should start an ECS task: {log}"
+    );
+    assert!(
+        log.contains("--cluster cluster-arn"),
+        "missing cluster: {log}"
+    );
+    assert!(
+        log.contains("--task-definition task-def"),
+        "missing task definition: {log}"
+    );
+    assert!(
+        log.contains("--network-configuration awsvpcConfiguration={subnets=[subnet-a,subnet-b],securityGroups=[sg-123],assignPublicIp=ENABLED}"),
+        "missing network configuration: {log}"
+    );
+    assert!(
+        log.contains("FACTORY_RUN_ID") && log.contains(run_id),
+        "overrides should include the run ID: {log}"
+    );
+    assert!(
+        log.contains("CLAUDE_CODE_OAUTH_TOKEN") && log.contains("mock-claude-token"),
+        "overrides should include the Claude token: {log}"
+    );
+    assert!(
+        fs::metadata(&uploaded_workspace)
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false),
+        "workspace upload tar should be written"
+    );
+    assert_eq!(
+        fs::read_to_string(run_dir.join("runtime")).unwrap(),
+        "fargate"
+    );
+    assert_eq!(
+        fs::read_to_string(run_dir.join("handle")).unwrap(),
+        "arn:aws:ecs:us-west-2:123:task/cluster/task-abc"
+    );
+}
+
+#[test]
+fn run_fargate_launch_fails_when_workspace_upload_fails() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let run_id = "20260606-fargate-upload-fail";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("brief.md"), "Launch Fargate\n").unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_executable(
+        &bin_dir,
+        "aws",
+        r##"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${AWS_LOG:?}"
+
+case "$1 $2" in
+  "s3 cp")
+    cat >/dev/null
+    printf 'upload denied\n' >&2
+    exit 42
+    ;;
+  "ecs run-task")
+    printf 'ecs should not run after upload failure\n' >&2
+    exit 1
+    ;;
+  *)
+    printf 'unexpected aws command: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+"##,
+    );
+
+    let aws_log = tmp.path().join("aws.log");
+    let _guard = worktree_guard(&main_dir, run_id);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["run", "--runtime", "fargate", "--run-id", run_id])
+        .env("PATH", mock_path(&bin_dir))
+        .env("HOME", tmp.path())
+        .env("AWS_ACCESS_KEY_ID", "mock")
+        .env("AWS_SECRET_ACCESS_KEY", "mock")
+        .env("BRAVE_SEARCH_API_KEY", "mock")
+        .env("CLAUDE_CODE_OAUTH_TOKEN", "mock-claude-token")
+        .env("FACTORY_CLUSTER", "cluster-arn")
+        .env("FACTORY_RUN_TASK", "task-def")
+        .env("FACTORY_S3_BUCKET", "bucket")
+        .env("FACTORY_SUBNETS", "subnet-a,subnet-b")
+        .env("FACTORY_SECURITY_GROUP", "sg-123")
+        .env("FACTORY_REGION", "us-west-2")
+        .env("AWS_LOG", &aws_log)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Failed to upload workspace to S3"));
+
+    let log = fs::read_to_string(&aws_log).unwrap();
+    assert!(
+        log.contains("s3 cp --region us-west-2 - s3://bucket/runs/20260606-fargate-upload-fail/workspace-in.tar"),
+        "launch should attempt the workspace upload: {log}"
+    );
+    assert!(
+        !log.contains("ecs run-task"),
+        "launch should not start ECS after upload failure: {log}"
+    );
+    assert!(
+        !run_dir.join("runtime").exists(),
+        "failed launch should not record fargate runtime"
+    );
+    assert!(
+        !run_dir.join("handle").exists(),
+        "failed launch should not record a task handle"
+    );
+}
+
+#[test]
+fn run_fargate_launch_fails_when_ecs_run_task_fails() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let run_id = "20260606-fargate-ecs-fail";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("brief.md"), "Launch Fargate\n").unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_executable(
+        &bin_dir,
+        "aws",
+        r##"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${AWS_LOG:?}"
+
+case "$1 $2" in
+  "s3 cp")
+    cat > "${UPLOADED_WORKSPACE:?}"
+    ;;
+  "ecs run-task")
+    printf 'task definition not found\n' >&2
+    exit 43
+    ;;
+  *)
+    printf 'unexpected aws command: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+"##,
+    );
+
+    let aws_log = tmp.path().join("aws.log");
+    let uploaded_workspace = tmp.path().join("workspace-in.tar");
+    let _guard = worktree_guard(&main_dir, run_id);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["run", "--runtime", "fargate", "--run-id", run_id])
+        .env("PATH", mock_path(&bin_dir))
+        .env("HOME", tmp.path())
+        .env("AWS_ACCESS_KEY_ID", "mock")
+        .env("AWS_SECRET_ACCESS_KEY", "mock")
+        .env("BRAVE_SEARCH_API_KEY", "mock")
+        .env("CLAUDE_CODE_OAUTH_TOKEN", "mock-claude-token")
+        .env("FACTORY_CLUSTER", "cluster-arn")
+        .env("FACTORY_RUN_TASK", "task-def")
+        .env("FACTORY_S3_BUCKET", "bucket")
+        .env("FACTORY_SUBNETS", "subnet-a,subnet-b")
+        .env("FACTORY_SECURITY_GROUP", "sg-123")
+        .env("FACTORY_REGION", "us-west-2")
+        .env("AWS_LOG", &aws_log)
+        .env("UPLOADED_WORKSPACE", &uploaded_workspace)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Failed to start Fargate task"));
+
+    let log = fs::read_to_string(&aws_log).unwrap();
+    assert!(
+        log.contains(
+            "s3 cp --region us-west-2 - s3://bucket/runs/20260606-fargate-ecs-fail/workspace-in.tar"
+        ),
+        "launch should upload before starting ECS: {log}"
+    );
+    assert!(
+        log.contains("ecs run-task --region us-west-2"),
+        "launch should attempt ECS start: {log}"
+    );
+    assert!(
+        !run_dir.join("runtime").exists(),
+        "failed launch should not record fargate runtime"
+    );
+    assert!(
+        !run_dir.join("handle").exists(),
+        "failed launch should not record a task handle"
+    );
+}
+
+#[test]
+fn run_fargate_launch_fails_when_ecs_returns_no_task_arn() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let run_id = "20260606-fargate-no-task-arn";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("brief.md"), "Launch Fargate\n").unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_executable(
+        &bin_dir,
+        "aws",
+        r##"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${AWS_LOG:?}"
+
+case "$1 $2" in
+  "s3 cp")
+    cat > "${UPLOADED_WORKSPACE:?}"
+    ;;
+  "ecs run-task")
+    printf 'None\n'
+    ;;
+  *)
+    printf 'unexpected aws command: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+"##,
+    );
+
+    let aws_log = tmp.path().join("aws.log");
+    let uploaded_workspace = tmp.path().join("workspace-in.tar");
+    let _guard = worktree_guard(&main_dir, run_id);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["run", "--runtime", "fargate", "--run-id", run_id])
+        .env("PATH", mock_path(&bin_dir))
+        .env("HOME", tmp.path())
+        .env("AWS_ACCESS_KEY_ID", "mock")
+        .env("AWS_SECRET_ACCESS_KEY", "mock")
+        .env("BRAVE_SEARCH_API_KEY", "mock")
+        .env("CLAUDE_CODE_OAUTH_TOKEN", "mock-claude-token")
+        .env("FACTORY_CLUSTER", "cluster-arn")
+        .env("FACTORY_RUN_TASK", "task-def")
+        .env("FACTORY_S3_BUCKET", "bucket")
+        .env("FACTORY_SUBNETS", "subnet-a,subnet-b")
+        .env("FACTORY_SECURITY_GROUP", "sg-123")
+        .env("FACTORY_REGION", "us-west-2")
+        .env("AWS_LOG", &aws_log)
+        .env("UPLOADED_WORKSPACE", &uploaded_workspace)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Failed to start Fargate task: no task ARN returned",
+        ));
+
+    let log = fs::read_to_string(&aws_log).unwrap();
+    assert!(
+        log.contains("ecs run-task --region us-west-2"),
+        "launch should attempt ECS start: {log}"
+    );
+    assert!(
+        fs::metadata(&uploaded_workspace)
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false),
+        "workspace upload tar should be written before ECS response validation"
+    );
+    assert!(
+        !run_dir.join("runtime").exists(),
+        "failed launch should not record fargate runtime"
+    );
+    assert!(
+        !run_dir.join("handle").exists(),
+        "failed launch should not record a task handle"
+    );
 }
 
 #[test]

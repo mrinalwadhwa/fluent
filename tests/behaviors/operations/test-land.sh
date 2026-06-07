@@ -400,7 +400,7 @@ test_land_fails_on_rebase_conflict() {
 }
 
 test_shell_land_rejects_non_complete_status() {
-  FACTORY="${PROJECT_DIR}/scripts/factory"
+  FACTORY="$BINARY"
   setup_test_project
 
   RUN_ID="run-shell-not-complete"
@@ -416,7 +416,7 @@ test_shell_land_rejects_non_complete_status() {
 
   RESULT=0
   if [ "$EXIT_CODE" -eq 0 ]; then
-    printf '    FAIL: shell land should exit non-zero for non-complete run, got exit 0\n'
+    printf '    FAIL: land should exit non-zero for non-complete run, got exit 0\n'
     RESULT=1
   fi
 
@@ -425,7 +425,7 @@ test_shell_land_rejects_non_complete_status() {
 }
 
 test_shell_land_full_workflow() {
-  FACTORY="${PROJECT_DIR}/scripts/factory"
+  FACTORY="$BINARY"
   setup_test_project
   RUN_ID="run-shell-full"
   setup_run_with_worktree "$RUN_ID" pass
@@ -439,7 +439,7 @@ test_shell_land_full_workflow() {
 
   RESULT=0
   if [ "$EXIT_CODE" -ne 0 ]; then
-    printf '    FAIL: shell land should succeed, exit code %d\n' "$EXIT_CODE"
+    printf '    FAIL: land should succeed, exit code %d\n' "$EXIT_CODE"
     printf '    Output: %s\n' "$OUTPUT"
     RESULT=1
   fi
