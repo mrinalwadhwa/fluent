@@ -40,8 +40,25 @@ pub fn generate_report(run_dir: &Path, run_id: &str, session_count: u32) -> Resu
     }
 
     report.push_str("## Reviewer verdicts\n\n");
+    let review_state = review::read_review_state(run_dir).and_then(Result::ok);
+    if let Some(state) = &review_state {
+        report.push_str(&format!(
+            "State: {} ({})\n\n",
+            state.state.as_str(),
+            state.source.as_str()
+        ));
+    }
     let reviews_dir = run_dir.join("reviews");
-    if reviews_dir.is_dir() {
+    if let Some(state) = review_state {
+        if state.verdicts.is_empty() {
+            report.push_str("(no reviews)\n");
+        } else {
+            for (name, verdict) in state.verdicts {
+                report.push_str(&format!("- **{name}**: {}\n", verdict_str(&verdict)));
+            }
+        }
+        report.push('\n');
+    } else if reviews_dir.is_dir() {
         let mut has_reviews = false;
         if let Ok(entries) = fs::read_dir(&reviews_dir) {
             for entry in entries.flatten() {
@@ -58,14 +75,7 @@ pub fn generate_report(run_dir: &Path, run_id: &str, session_count: u32) -> Resu
                 has_reviews = true;
                 let verdict_str = fs::read_to_string(&path)
                     .ok()
-                    .map(|c| {
-                        let v = review::extract_verdict(&c);
-                        match v {
-                            review::Verdict::Pass => "pass".to_string(),
-                            review::Verdict::Fail => "fail".to_string(),
-                            review::Verdict::Uncertain => "uncertain".to_string(),
-                        }
-                    })
+                    .map(|c| verdict_str(&review::extract_verdict(&c)).to_string())
                     .unwrap_or_else(|| "no verdict".into());
                 report.push_str(&format!("- **{name}**: {verdict_str}\n"));
             }
@@ -165,6 +175,14 @@ pub fn generate_report(run_dir: &Path, run_id: &str, session_count: u32) -> Resu
     Ok(())
 }
 
+fn verdict_str(verdict: &review::Verdict) -> &'static str {
+    match verdict {
+        review::Verdict::Pass => "pass",
+        review::Verdict::Fail => "fail",
+        review::Verdict::Uncertain => "uncertain",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,6 +239,36 @@ mod tests {
         let report = fs::read_to_string(run_dir.join("report.md")).unwrap();
         assert!(report.contains("## Sessions"));
         assert!(report.contains("session=1 exit=0 duration=42s status=complete"));
+    }
+
+    #[test]
+    fn test_generate_report_prefers_review_state() {
+        let tmp = TempDir::new().unwrap();
+        let run_dir = tmp.path();
+        fs::write(run_dir.join("status"), "complete").unwrap();
+        fs::create_dir(run_dir.join("reviews")).unwrap();
+        fs::write(run_dir.join("reviews/review-tests.md"), "Verdict: fail").unwrap();
+        fs::write(
+            run_dir.join("review-state.json"),
+            r#"{
+  "state": "accepted-review-limit",
+  "round": 11,
+  "source": "review-limit",
+  "verdicts": {
+    "tests": "fail"
+  },
+  "max_rounds": 10,
+  "reason": "Review round limit reached with a clean worktree."
+}
+"#,
+        )
+        .unwrap();
+
+        generate_report(run_dir, "test-run", 1).unwrap();
+
+        let report = fs::read_to_string(run_dir.join("report.md")).unwrap();
+        assert!(report.contains("State: accepted-review-limit (review-limit)"));
+        assert!(report.contains("- **tests**: fail"));
     }
 
     #[test]

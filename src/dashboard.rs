@@ -332,6 +332,13 @@ impl RunView {
         &self.agents[self.selected_agent]
     }
 
+    fn review_state_summary(&self) -> Option<String> {
+        review::read_review_state(&self.live_dir)
+            .or_else(|| review::read_review_state(&self.run.dir))
+            .and_then(Result::ok)
+            .map(|state| format!("{} ({})", state.state.as_str(), state.source.as_str()))
+    }
+
     fn select_next_agent(&mut self) {
         if self.agents.is_empty() {
             return;
@@ -873,8 +880,9 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, view: &RunView, tick: u64, an
 
     let session_count = view.agents[0].last_session;
     let event_count = view.current_agent().events.len();
+    let review_state = view.review_state_summary();
 
-    let header = Paragraph::new(Line::from(vec![
+    let mut spans = vec![
         Span::styled("Run: ", Style::default().fg(Color::DarkGray)),
         Span::styled(&view.run.id, Style::default().add_modifier(Modifier::BOLD)),
         Span::raw("  "),
@@ -890,8 +898,17 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, view: &RunView, tick: u64, an
         Span::raw("  "),
         Span::styled("Events: ", Style::default().fg(Color::DarkGray)),
         Span::styled(format!("{event_count}"), Style::default()),
-    ]))
-    .block(
+    ];
+    if let Some(review_state) = review_state {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            "Review: ",
+            Style::default().fg(Color::DarkGray),
+        ));
+        spans.push(Span::styled(review_state, Style::default().fg(Color::Blue)));
+    }
+
+    let header = Paragraph::new(Line::from(spans)).block(
         Block::default()
             .borders(Borders::ALL)
             .title(dashboard_title(tick, any_activity)),
@@ -1315,6 +1332,7 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
+    use tempfile::TempDir;
 
     // --- Helpers for rendering tests ---
 
@@ -1362,6 +1380,50 @@ mod tests {
             })
             .unwrap();
         buffer_text(terminal.backend().buffer())
+    }
+
+    #[test]
+    fn test_run_view_review_state_summary_prefers_state_file() {
+        let tmp = TempDir::new().unwrap();
+        let run_dir = tmp.path().join(".factory/runs/test-run");
+        std::fs::create_dir_all(run_dir.join("reviews")).unwrap();
+        std::fs::write(run_dir.join("status"), "complete").unwrap();
+        std::fs::write(run_dir.join("reviews/review-tests.md"), "Verdict: fail").unwrap();
+        std::fs::write(
+            run_dir.join("review-state.json"),
+            r#"{
+  "state": "accepted-review-limit",
+  "round": 11,
+  "source": "review-limit",
+  "verdicts": {
+    "tests": "fail"
+  },
+  "max_rounds": 10,
+  "reason": "Review round limit reached with a clean worktree."
+}
+"#,
+        )
+        .unwrap();
+
+        let view = RunView {
+            run: Run {
+                id: "test-run".to_string(),
+                dir: run_dir.clone(),
+            },
+            live_dir: run_dir,
+            agents: vec![AgentView::new("author")],
+            selected_agent: 0,
+            agent_selection_touched: false,
+            scroll_offset: 0,
+            auto_scroll: true,
+            wrapped_total: 0,
+            cached_status: "complete".to_string(),
+        };
+
+        assert_eq!(
+            view.review_state_summary(),
+            Some("accepted-review-limit (review-limit)".to_string())
+        );
     }
 
     fn render_activity_feed_text(view: &mut RunView) -> String {

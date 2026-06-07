@@ -132,6 +132,7 @@ when the required checks and reviews pass.
 | `report.md` | Generated run report |
 | `cleaned.md` | Cleanup context written after `factory cleanup --apply` preserves the run directory and status |
 | `reviews/` | Current review artifacts, transcripts (`transcript-{name}.jsonl`), and prior round archives (`round-N/`) |
+| `review-state.json` | Effective outcome of the latest review phase |
 | `children` | Child run IDs, one per line (written by the parallel orchestrator for parent runs) |
 | `parent` | Parent run ID (written for each child run) |
 
@@ -380,8 +381,12 @@ status to `complete`. It skips run-scoped reviews only when the user did
 not request an explicit review scope and the run worktree has no
 committed, staged, unstaged, or untracked non-ignored changes. Otherwise
 reviewers run in parallel, each producing an artifact in
-`.factory/runs/[run-id]/reviews/`. The loop parses each reviewer's
-verdict:
+`.factory/runs/[run-id]/reviews/`. The review lifecycle records the
+effective outcome in `.factory/runs/[run-id]/review-state.json` with the
+state, round, source, and per-reviewer verdicts. Consumers use that file
+as the review boundary when it exists; old runs without it fall back to
+top-level `reviews/review-*.md` verdicts. The loop parses each
+reviewer's verdict:
 
 - All pass: the run completes only if the worktree is clean; if
   uncommitted changes remain outside `.factory`, the loop writes a
@@ -393,13 +398,16 @@ verdict:
   exits, missing review artifacts, reviewer errors, and reviewer thread
   panics count as non-passing review results. The review lifecycle
   writes a current-round `reviews/review-[name].md` artifact with
-  `Verdict: fail` for each operational reviewer failure so run summaries,
-  dashboards, restart prompts, and landing checks read the same durable
-  review-state boundary.
+  `Verdict: fail` for each operational reviewer failure, then records
+  the effective non-passing outcome in `review-state.json`.
 
 If the run exceeds the review-round limit, the loop accepts the current
 review state with the same clean-worktree guard: clean work completes,
 while uncommitted work receives a handoff and returns to `executing`.
+Clean review-limit completion records `state:
+accepted-review-limit`, `source: review-limit`, `max_rounds`, and a
+short reason in `review-state.json`. Dirty review-limit completion does
+not write that acceptance state.
 
 When a new review round starts, the review lifecycle moves the previous
 round's top-level `review-*.md` and `transcript-*.jsonl` files into

@@ -3888,6 +3888,46 @@ fn land_rejects_failed_reviews() {
 }
 
 #[test]
+fn land_accepts_review_limit_state_with_stale_fail_artifact() {
+    let tmp = TempDir::new().unwrap();
+    let (main_dir, run_id) = setup_completed_run(&tmp);
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
+    let wt_run_dir = Path::new(wt_path_str.trim()).join(format!(".factory/runs/{run_id}"));
+
+    fs::write(
+        wt_run_dir.join("reviews/review-tests.md"),
+        "Verdict: fail\n\nStale finding.\n",
+    )
+    .unwrap();
+    fs::write(
+        wt_run_dir.join("review-state.json"),
+        r#"{
+  "state": "accepted-review-limit",
+  "round": 11,
+  "source": "review-limit",
+  "verdicts": {
+    "tests": "fail"
+  },
+  "max_rounds": 10,
+  "reason": "Review round limit reached with a clean worktree."
+}
+"#,
+    )
+    .unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["land", &run_id])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("landed successfully"));
+
+    let status = fs::read_to_string(run_dir.join("status")).unwrap();
+    assert_eq!(status.trim(), "landed");
+}
+
+#[test]
 fn land_rejects_live_failed_reviews() {
     let tmp = TempDir::new().unwrap();
     let (main_dir, run_id) = setup_completed_run(&tmp);
@@ -3900,6 +3940,19 @@ fn land_rejects_live_failed_reviews() {
     fs::write(
         wt_run_dir.join("reviews/review-tests.md"),
         "Verdict: fail\n\nLive review failed.\n",
+    )
+    .unwrap();
+    fs::write(
+        wt_run_dir.join("review-state.json"),
+        r#"{
+  "state": "failed",
+  "round": 1,
+  "source": "reviewers",
+  "verdicts": {
+    "tests": "fail"
+  }
+}
+"#,
     )
     .unwrap();
 

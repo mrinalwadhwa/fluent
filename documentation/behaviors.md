@@ -361,6 +361,11 @@ THE SYSTEM SHALL set status back to `executing` and restart the author
 with the review findings.
 Test: src/review.rs (test_extract_verdict_fail, test_extract_verdict_uncertain), tests/binary.rs (run_archives_review_rounds)
 
+WHEN a review phase completes,
+THE SYSTEM SHALL write `review-state.json` with the effective state,
+round, source, and per-reviewer verdicts for that phase.
+Test: src/review.rs (review-state tests), src/session.rs (review-only mode tests)
+
 WHEN a reviewer prompt is missing, fails to launch, exits non-zero,
 returns an error, panics, or fails to write its review artifact,
 THE SYSTEM SHALL treat the reviewer result as non-passing and make the
@@ -424,7 +429,40 @@ IF the review-fix cycle has run 10 times,
 THEN THE SYSTEM SHALL accept the current state, generate a report, and
 complete the run when the worktree has no tracked changes, staged
 changes, or untracked non-ignored files outside `.factory`.
-Test: src/session.rs (complete_or_continue_dirty_completes_review_limit_clean_run)
+Test: src/session.rs (complete_or_continue_dirty_completes_review_limit_clean_run, test_loop_review_limit_clean_worktree_records_acceptance)
+
+IF the review-fix cycle has run 10 times and the worktree is clean,
+THEN THE SYSTEM SHALL write `review-state.json` with state
+`accepted-review-limit`, source `review-limit`, `max_rounds`, and a
+short reason.
+Test: src/session.rs (test_loop_review_limit_clean_worktree_records_acceptance)
+
+IF the review-fix cycle has run 10 times and the worktree is dirty,
+THEN THE SYSTEM SHALL NOT write `accepted-review-limit`.
+Test: src/session.rs (test_loop_review_limit_dirty_worktree_restarts_author)
+
+## Effective review state
+
+WHEN `factory land` validates a complete run with `review-state.json`,
+THE SYSTEM SHALL use that file as the effective review state before
+consulting current review artifacts.
+Test: src/run.rs (review-state tests), tests/binary.rs (land_accepts_review_limit_state_with_stale_fail_artifact)
+
+WHEN `factory land` validates a complete run with review state `passed`
+or `accepted-review-limit`,
+THE SYSTEM SHALL treat the review state as accepted.
+Test: src/run.rs (test_reviews_passed_prefers_review_state), tests/binary.rs (land_accepts_review_limit_state_with_stale_fail_artifact)
+
+WHEN `factory land` validates a complete run with review state `failed`,
+`uncertain`, or malformed JSON,
+THE SYSTEM SHALL refuse to land.
+Test: src/run.rs (test_reviews_passed_rejects_failed_review_state, test_reviews_passed_rejects_malformed_review_state)
+
+WHEN `factory summary`, the generated run report, or the dashboard shows
+a run with `review-state.json`,
+THE SYSTEM SHALL use the recorded review state when presenting the run's
+effective review outcome.
+Test: src/summary.rs (summarize_prefers_review_state), src/report.rs (test_generate_report_prefers_review_state), src/dashboard.rs (test_run_view_review_state_summary_prefers_state_file)
 
 ## Parent death detection
 

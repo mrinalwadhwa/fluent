@@ -1,4 +1,6 @@
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -18,7 +20,8 @@ pub const REVIEWERS: &[&str] = &[
 ];
 
 /// Verdict from a single reviewer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Verdict {
     Pass,
     Fail,
@@ -37,6 +40,148 @@ impl Verdict {
     pub fn is_passing(&self) -> bool {
         matches!(self, Self::Pass)
     }
+}
+
+/// Effective review outcome for a run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewState {
+    pub state: ReviewStateKind,
+    pub round: u32,
+    pub source: ReviewStateSource,
+    pub verdicts: BTreeMap<String, Verdict>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_rounds: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl ReviewState {
+    pub fn from_verdicts(round: u32, verdicts: BTreeMap<String, Verdict>) -> Self {
+        let state = if verdicts.values().all(Verdict::is_passing) {
+            ReviewStateKind::Passed
+        } else if verdicts
+            .values()
+            .any(|verdict| matches!(verdict, Verdict::Fail))
+        {
+            ReviewStateKind::Failed
+        } else {
+            ReviewStateKind::Uncertain
+        };
+        Self {
+            state,
+            round,
+            source: ReviewStateSource::Reviewers,
+            verdicts,
+            max_rounds: None,
+            reason: None,
+        }
+    }
+
+    pub fn accepted_review_limit(
+        round: u32,
+        max_rounds: u32,
+        verdicts: BTreeMap<String, Verdict>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            state: ReviewStateKind::AcceptedReviewLimit,
+            round,
+            source: ReviewStateSource::ReviewLimit,
+            verdicts,
+            max_rounds: Some(max_rounds),
+            reason: Some(reason.into()),
+        }
+    }
+
+    pub fn is_accepted(&self) -> bool {
+        matches!(
+            self.state,
+            ReviewStateKind::Passed | ReviewStateKind::AcceptedReviewLimit
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReviewStateKind {
+    Passed,
+    Failed,
+    Uncertain,
+    AcceptedReviewLimit,
+}
+
+impl ReviewStateKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Uncertain => "uncertain",
+            Self::AcceptedReviewLimit => "accepted-review-limit",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReviewStateSource {
+    Reviewers,
+    ReviewLimit,
+}
+
+impl ReviewStateSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Reviewers => "reviewers",
+            Self::ReviewLimit => "review-limit",
+        }
+    }
+}
+
+pub fn write_review_state(run_dir: &Path, state: &ReviewState) -> Result<()> {
+    let content = serde_json::to_string_pretty(state)?;
+    fs::write(run_dir.join("review-state.json"), format!("{content}\n"))?;
+    Ok(())
+}
+
+pub fn read_review_state(run_dir: &Path) -> Option<Result<ReviewState>> {
+    let path = run_dir.join("review-state.json");
+    if !path.exists() {
+        return None;
+    }
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) => return Some(Err(error.into())),
+    };
+    Some(serde_json::from_str(&content).map_err(Into::into))
+}
+
+pub fn current_review_verdicts(run_dir: &Path) -> BTreeMap<String, Verdict> {
+    let reviews_dir = run_dir.join("reviews");
+    let mut verdicts = BTreeMap::new();
+    let Ok(entries) = fs::read_dir(&reviews_dir) else {
+        return verdicts;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| stem.strip_prefix("review-"))
+        else {
+            continue;
+        };
+        if !path
+            .file_name()
+            .and_then(|file_name| file_name.to_str())
+            .map(|file_name| file_name.ends_with(".md"))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let content = fs::read_to_string(&path).unwrap_or_default();
+        verdicts.insert(name.to_string(), extract_verdict(&content));
+    }
+    verdicts
 }
 
 /// Run a single reviewer. Returns the verdict.
@@ -244,40 +389,40 @@ pub fn run_reviews(
         ));
     }
 
-    let mut all_pass = true;
+    let mut verdicts = BTreeMap::new();
     for (reviewer, handle) in handles {
-        record_reviewer_result(&mut all_pass, run_dir, &reviewer, handle.join())?;
+        let verdict = record_reviewer_result(run_dir, &reviewer, handle.join())?;
+        verdicts.insert(reviewer, verdict);
     }
+
+    let state = ReviewState::from_verdicts(review_round, verdicts);
+    let all_pass = state.is_accepted();
+    write_review_state(run_dir, &state)?;
 
     Ok(all_pass)
 }
 
 fn record_reviewer_result(
-    all_pass: &mut bool,
     run_dir: &Path,
     reviewer_name: &str,
     result: thread::Result<Result<Verdict>>,
-) -> Result<()> {
-    match result {
-        Ok(Ok(verdict)) => {
-            if !verdict.is_passing() {
-                *all_pass = false;
-            }
-        }
+) -> Result<Verdict> {
+    let verdict = match result {
+        Ok(Ok(verdict)) => verdict,
         Ok(Err(e)) => {
             let message = format!("Reviewer returned an error: {e}.");
             eprintln!("  [{reviewer_name}] {message}");
             write_failure_review_artifact(run_dir, reviewer_name, &message)?;
-            *all_pass = false;
+            Verdict::Fail
         }
         Err(_) => {
             let message = "Reviewer thread panicked.".to_string();
             eprintln!("  [{reviewer_name}] {message}");
             write_failure_review_artifact(run_dir, reviewer_name, &message)?;
-            *all_pass = false;
+            Verdict::Fail
         }
-    }
-    Ok(())
+    };
+    Ok(verdict)
 }
 
 /// Extract verdict from review file content.
@@ -353,6 +498,70 @@ mod tests {
         assert!(Verdict::Pass.is_passing());
         assert!(!Verdict::Fail.is_passing());
         assert!(!Verdict::Uncertain.is_passing());
+    }
+
+    #[test]
+    fn test_review_state_round_trip() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut verdicts = BTreeMap::new();
+        verdicts.insert("architecture".to_string(), Verdict::Pass);
+        verdicts.insert("tests".to_string(), Verdict::Pass);
+        let state = ReviewState::from_verdicts(2, verdicts);
+
+        write_review_state(tmp.path(), &state).unwrap();
+
+        let parsed = read_review_state(tmp.path()).unwrap().unwrap();
+        assert_eq!(parsed.state, ReviewStateKind::Passed);
+        assert_eq!(parsed.round, 2);
+        assert_eq!(parsed.source, ReviewStateSource::Reviewers);
+        assert!(parsed.is_accepted());
+    }
+
+    #[test]
+    fn test_review_state_aggregates_non_passing_verdicts() {
+        let mut verdicts = BTreeMap::new();
+        verdicts.insert("architecture".to_string(), Verdict::Pass);
+        verdicts.insert("tests".to_string(), Verdict::Uncertain);
+        let state = ReviewState::from_verdicts(1, verdicts);
+        assert_eq!(state.state, ReviewStateKind::Uncertain);
+        assert!(!state.is_accepted());
+
+        let mut verdicts = BTreeMap::new();
+        verdicts.insert("architecture".to_string(), Verdict::Fail);
+        verdicts.insert("tests".to_string(), Verdict::Uncertain);
+        let state = ReviewState::from_verdicts(1, verdicts);
+        assert_eq!(state.state, ReviewStateKind::Failed);
+        assert!(!state.is_accepted());
+    }
+
+    #[test]
+    fn test_review_state_accepts_review_limit() {
+        let mut verdicts = BTreeMap::new();
+        verdicts.insert("tests".to_string(), Verdict::Fail);
+
+        let state = ReviewState::accepted_review_limit(
+            11,
+            10,
+            verdicts,
+            "Review round limit reached with a clean worktree.",
+        );
+
+        assert_eq!(state.state, ReviewStateKind::AcceptedReviewLimit);
+        assert_eq!(state.source, ReviewStateSource::ReviewLimit);
+        assert_eq!(state.max_rounds, Some(10));
+        assert!(state.is_accepted());
+    }
+
+    #[test]
+    fn test_read_review_state_rejects_malformed_json() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("review-state.json"),
+            "{\"state\":\"unknown\"}",
+        )
+        .unwrap();
+
+        assert!(read_review_state(tmp.path()).unwrap().is_err());
     }
 
     #[test]
@@ -568,25 +777,23 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let (_project, run_dir) = make_run_dir(&tmp);
 
-        let mut all_pass = true;
-        record_reviewer_result(&mut all_pass, &run_dir, "tests", Ok(Ok(Verdict::Pass))).unwrap();
-        assert!(all_pass);
+        let verdict = record_reviewer_result(&run_dir, "tests", Ok(Ok(Verdict::Pass))).unwrap();
+        assert_eq!(verdict, Verdict::Pass);
 
-        record_reviewer_result(
-            &mut all_pass,
-            &run_dir,
-            "tests",
-            Ok(Err(anyhow!("reviewer failed"))),
-        )
-        .unwrap();
-        assert!(!all_pass);
+        let verdict =
+            record_reviewer_result(&run_dir, "tests", Ok(Err(anyhow!("reviewer failed")))).unwrap();
+        assert_eq!(verdict, Verdict::Fail);
         let review = fs::read_to_string(run_dir.join("reviews/review-tests.md")).unwrap();
         assert!(review.contains("Verdict: fail"));
         assert!(review.contains("reviewer failed"));
 
-        let mut all_pass = true;
-        record_reviewer_result(&mut all_pass, &run_dir, "tests", Err(Box::new("panic"))).unwrap();
-        assert!(!all_pass);
+        let verdict = record_reviewer_result(
+            &run_dir,
+            "tests",
+            Err(Box::new("panic") as Box<dyn std::any::Any + Send>),
+        )
+        .unwrap();
+        assert_eq!(verdict, Verdict::Fail);
         let review = fs::read_to_string(run_dir.join("reviews/review-tests.md")).unwrap();
         assert!(review.contains("Reviewer thread panicked"));
     }

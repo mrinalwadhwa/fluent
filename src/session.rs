@@ -208,6 +208,14 @@ pub fn run_session_loop(
                         &config.working_dir,
                         "Review limit reached, but the worktree still has uncommitted changes.",
                     )? {
+                        let verdicts = review::current_review_verdicts(run_dir);
+                        let state = review::ReviewState::accepted_review_limit(
+                            review_round,
+                            MAX_REVIEW_ROUNDS,
+                            verdicts,
+                            "Review round limit reached with a clean worktree.",
+                        );
+                        review::write_review_state(run_dir, &state)?;
                         report::generate_report(run_dir, &run.id, session_count)?;
                         eprintln!("\n  Run {} completed (review limit).", run.id);
                         break;
@@ -809,6 +817,7 @@ printf '{{"type":"result"}}\n'
         fs::write(run_dir.join("brief.md"), "Test brief").unwrap();
         fs::write(run_dir.join("status"), "planned").unwrap();
         fs::write(run_dir.join("reviewers"), "tests").unwrap();
+        fs::write(run_dir.join("scope"), "Force review-limit test").unwrap();
         let run = Run {
             id: "test-run".to_string(),
             dir: run_dir,
@@ -863,6 +872,53 @@ printf '{{"type":"result"}}\n'
         let handoff = fs::read_to_string(run.dir.join("handoff.md")).unwrap();
         assert!(handoff.contains("Review limit reached"));
         assert!(handoff.contains("tracked.txt"));
+        let state = review::read_review_state(&run.dir).unwrap().unwrap();
+        assert_eq!(state.state, review::ReviewStateKind::Failed);
+    }
+
+    #[test]
+    fn test_loop_review_limit_clean_worktree_records_acceptance() {
+        let _env_guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let (tmp, repo, run_dir) = setup_change_detection_repo();
+        fs::write(run_dir.join("brief.md"), "Test brief").unwrap();
+        fs::write(run_dir.join("status"), "planned").unwrap();
+        fs::write(run_dir.join("reviewers"), "tests").unwrap();
+        fs::write(run_dir.join("scope"), "Force review-limit test").unwrap();
+        let run = Run {
+            id: "test-run".to_string(),
+            dir: run_dir,
+        };
+
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let fake_claude = bin_dir.join("claude");
+        write_executable(
+            &fake_claude,
+            "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p .factory/runs/test-run/reviews\nprintf 'Verdict: fail\\n\\nAlways failing.\\n' > .factory/runs/test-run/reviews/review-tests.md\nprintf '{\"type\":\"result\"}\\n'\n",
+        );
+        let _path_guard = prepend_path(&bin_dir);
+
+        let run_dir = run.dir.clone();
+        let author = TestAgent::new(move |_prompt: &str, _n: u32, _: &Path| {
+            fs::write(run_dir.join("status"), "complete").unwrap();
+            0
+        });
+
+        let config = SessionConfig {
+            run: run.clone(),
+            system_prompt: "test".to_string(),
+            working_dir: repo,
+            extra_args: vec![],
+            resolver: ContentResolver::new(None),
+        };
+        run_session_loop(&author, &config, &NoopHooks, CoderKind::Claude).unwrap();
+
+        assert_eq!(run.status().unwrap(), RunStatus::Complete);
+        let state = review::read_review_state(&run.dir).unwrap().unwrap();
+        assert_eq!(state.state, review::ReviewStateKind::AcceptedReviewLimit);
+        assert_eq!(state.source, review::ReviewStateSource::ReviewLimit);
+        assert_eq!(state.max_rounds, Some(MAX_REVIEW_ROUNDS));
+        assert_eq!(state.verdicts.get("tests"), Some(&review::Verdict::Fail));
     }
 
     #[test]

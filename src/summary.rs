@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::review::{self, Verdict};
+use crate::review::{self, ReviewState, Verdict};
 use crate::run::{self, RunStatus};
 
 const RECENT_SESSION_LIMIT: usize = 5;
@@ -50,7 +50,18 @@ pub fn summarize_run(search_root: &Path, run_id: Option<&str>) -> Result<String>
     output.push('\n');
 
     output.push_str("Reviewer verdicts\n");
-    let verdicts = reviewer_verdicts(&live_dir).or_else(|| reviewer_verdicts(&run.dir));
+    let review_state = read_review_state(&live_dir).or_else(|| read_review_state(&run.dir));
+    if let Some(state) = &review_state {
+        output.push_str(&format!(
+            "  State: {} ({})\n",
+            state.state.as_str(),
+            state.source.as_str()
+        ));
+    }
+    let verdicts = review_state
+        .map(|state| state.verdicts)
+        .or_else(|| reviewer_verdicts(&live_dir))
+        .or_else(|| reviewer_verdicts(&run.dir));
     match verdicts {
         Some(verdicts) => {
             for (reviewer, verdict) in verdicts {
@@ -106,7 +117,15 @@ fn agent_lines(run: &run::Run, live_dir: &Path, status: &RunStatus) -> Vec<Strin
         .unwrap_or_else(|| "unknown".to_string());
     lines.push(format!("Author: {coder} ({})", author_state(status)));
 
-    if let Some(verdicts) = reviewer_verdicts(live_dir).or_else(|| reviewer_verdicts(&run.dir)) {
+    if let Some(state) = read_review_state(live_dir).or_else(|| read_review_state(&run.dir)) {
+        lines.push(format!(
+            "Reviewers: {} ({})",
+            state.state.as_str(),
+            state.source.as_str()
+        ));
+    } else if let Some(verdicts) =
+        reviewer_verdicts(live_dir).or_else(|| reviewer_verdicts(&run.dir))
+    {
         lines.push(format!("Reviewers: recent ({} verdicts)", verdicts.len()));
     } else if matches!(status, RunStatus::Reviewing) {
         lines.push("Reviewers: active".to_string());
@@ -224,6 +243,10 @@ fn reviewer_verdicts(run_dir: &Path) -> Option<BTreeMap<String, Verdict>> {
     } else {
         Some(verdicts)
     }
+}
+
+fn read_review_state(run_dir: &Path) -> Option<ReviewState> {
+    review::read_review_state(run_dir).and_then(Result::ok)
 }
 
 fn review_files(reviews_dir: &Path) -> Vec<PathBuf> {
@@ -381,5 +404,38 @@ mod tests {
         assert!(summary.contains("Should we land this?"));
         assert!(summary.contains("Available: report.md"));
         assert!(summary.contains("read handoff.md"));
+    }
+
+    #[test]
+    fn summarize_prefers_review_state() {
+        let tmp = TempDir::new().unwrap();
+        let run_dir = tmp.path().join(".factory/runs/test-run");
+        fs::create_dir_all(run_dir.join("reviews")).unwrap();
+        fs::write(tmp.path().join(".factory/active-run"), "test-run").unwrap();
+        fs::write(run_dir.join("status"), "complete").unwrap();
+        fs::write(run_dir.join("runtime"), "local").unwrap();
+        fs::write(run_dir.join("brief.md"), "# Brief\n\nBuild a summary").unwrap();
+        fs::write(run_dir.join("reviews/review-tests.md"), "Verdict: fail").unwrap();
+        fs::write(
+            run_dir.join("review-state.json"),
+            r#"{
+  "state": "accepted-review-limit",
+  "round": 11,
+  "source": "review-limit",
+  "verdicts": {
+    "tests": "fail"
+  },
+  "max_rounds": 10,
+  "reason": "Review round limit reached with a clean worktree."
+}
+"#,
+        )
+        .unwrap();
+
+        let summary = summarize_run(tmp.path(), None).unwrap();
+
+        assert!(summary.contains("Reviewers: accepted-review-limit (review-limit)"));
+        assert!(summary.contains("State: accepted-review-limit (review-limit)"));
+        assert!(summary.contains("tests: fail"));
     }
 }

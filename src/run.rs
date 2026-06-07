@@ -198,11 +198,14 @@ impl Run {
             .unwrap_or(0)
     }
 
-    /// Check whether all review artifacts have a passing verdict.
+    /// Check whether the effective review state is accepted.
     ///
-    /// Returns `Some(false)` if any review file has a non-pass verdict
-    /// or is missing a verdict line entirely.
+    /// `review-state.json` is the durable source of truth when present.
+    /// Without it, old runs fall back to current review artifacts.
     pub fn reviews_passed(&self) -> Option<bool> {
+        if let Some(state) = review::read_review_state(&self.dir) {
+            return Some(state.map(|state| state.is_accepted()).unwrap_or(false));
+        }
         let reviews_dir = self.dir.join("reviews");
         if !reviews_dir.is_dir() {
             return None;
@@ -320,10 +323,11 @@ impl Run {
         self.status()
     }
 
-    /// Check whether reviews passed, preferring live worktree artifacts.
+    /// Check whether reviews are accepted, preferring live worktree artifacts.
     ///
-    /// Returns `None` when neither location has review files (no reviews
-    /// ran). Returns `Some(true)` only when reviews exist and all pass.
+    /// Returns `None` when neither location has review state or review
+    /// files. Returns `Some(true)` for passed reviews and explicit
+    /// review-limit acceptance.
     pub fn effective_reviews_passed(&self) -> Option<bool> {
         if let Some(wt_run_dir) = self.worktree_run_dir() {
             let wt_run = Run {
@@ -1068,6 +1072,76 @@ mod tests {
 
         let run = Run {
             id: "run-rf".into(),
+            dir: run_dir,
+        };
+        assert_eq!(run.reviews_passed(), Some(false));
+    }
+
+    #[test]
+    fn test_reviews_passed_prefers_review_state() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-rs", "complete");
+        let run_dir = tmp.path().join(".factory/runs/run-rs");
+        fs::create_dir_all(run_dir.join("reviews")).unwrap();
+        fs::write(run_dir.join("reviews/review-tests.md"), "Verdict: fail").unwrap();
+        fs::write(
+            run_dir.join("review-state.json"),
+            r#"{
+  "state": "accepted-review-limit",
+  "round": 11,
+  "source": "review-limit",
+  "verdicts": {
+    "tests": "fail"
+  },
+  "max_rounds": 10,
+  "reason": "Review round limit reached with a clean worktree."
+}
+"#,
+        )
+        .unwrap();
+
+        let run = Run {
+            id: "run-rs".into(),
+            dir: run_dir,
+        };
+        assert_eq!(run.reviews_passed(), Some(true));
+    }
+
+    #[test]
+    fn test_reviews_passed_rejects_failed_review_state() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-rsf", "complete");
+        let run_dir = tmp.path().join(".factory/runs/run-rsf");
+        fs::write(
+            run_dir.join("review-state.json"),
+            r#"{
+  "state": "failed",
+  "round": 1,
+  "source": "reviewers",
+  "verdicts": {
+    "tests": "fail"
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        let run = Run {
+            id: "run-rsf".into(),
+            dir: run_dir,
+        };
+        assert_eq!(run.reviews_passed(), Some(false));
+    }
+
+    #[test]
+    fn test_reviews_passed_rejects_malformed_review_state() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-rsm", "complete");
+        let run_dir = tmp.path().join(".factory/runs/run-rsm");
+        fs::write(run_dir.join("review-state.json"), "{\"state\":\"unknown\"}").unwrap();
+
+        let run = Run {
+            id: "run-rsm".into(),
             dir: run_dir,
         };
         assert_eq!(run.reviews_passed(), Some(false));
