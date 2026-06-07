@@ -16,6 +16,9 @@ tests/behaviors/
 
 Tested via `tests/test-skill` — simulated two-agent conversations.
 Each scenario exercises one or more behaviors from `documentation/behaviors.md`.
+The harness disables tools, so these scenarios verify that a skill asks
+for or discusses the right codebase context and produces the right
+artifact shape; they do not verify actual file or code research.
 
 Run a single scenario:
 ```sh
@@ -50,28 +53,41 @@ for test in tests/behaviors/operations/*.sh; do bash "$test"; done
 | Adapt depth — trivial request gets light pass | `fix-status-bug` |
 | Adapt depth — vague idea gets sharpened | `parallel-runs`, `session-snapshots-not-useful` |
 | Probe mechanics for partially clear requests | `code-reviewer`, `timeout-flag` |
-| Research codebase before follow-ups | All capture-brief scenarios |
+| Ask for or discuss needed codebase context before follow-ups | All capture-brief scenarios |
 
 ### Behavior definition
 
 | Behavior | Scenarios |
 |---|---|
-| Read brief + existing behaviors, write behaviors.diff.md | `run-summary-behaviors` |
-| Set status to `behaviors-defined` | `run-summary-behaviors` |
+| Read brief + existing behaviors, write behaviors.diff.md | `run-summary-behaviors`, `format-check-behaviors` |
+| Establish vocabulary before drafting behaviors | `run-summary-behaviors`, `format-check-behaviors` |
+| Map actors, events, and states before EARS statements | `run-summary-behaviors`, `format-check-behaviors` |
+| Produce observable EARS-style behavior increments | `run-summary-behaviors`, `format-check-behaviors` |
+| Keep implementation choices out of behavior statements | `run-summary-behaviors`, `format-check-behaviors` |
+| Set status to `behaviors-defined` | `run-summary-behaviors`, `format-check-behaviors` |
 
 ### Approach design
 
 | Behavior | Scenarios |
 |---|---|
-| Research, evaluate options, write approach.md | (needs design-approach scenarios) |
-| Set status to `approach-designed` | (needs design-approach scenarios) |
+| Research, evaluate options, write approach.md | `format-check-approach` |
+| Load and cite relevant expertise references | `format-check-approach` |
+| Present options with trade-offs and rejected alternatives | `format-check-approach` |
+| Avoid manufacturing unnecessary design decisions | `format-check-approach` |
+| Describe direction and boundaries without over-specifying internals | `format-check-approach` |
+| Set status to `approach-designed` | `format-check-approach` |
 
 ### Execution planning
 
 | Behavior | Scenarios |
 |---|---|
-| Break approach into steps, write plan.md | (needs plan-execution scenarios) |
-| Set status to `planned` | (needs plan-execution scenarios) |
+| Break approach into steps, write plan.md | `format-check-plan` |
+| Assess single run versus child-run decomposition | `format-check-plan` |
+| Start with a walking skeleton | `format-check-plan` |
+| Phrase steps as observable states with verification | `format-check-plan` |
+| Map every behavior to a step or explicit TBD | `format-check-plan` |
+| Identify scope trades and risks | `format-check-plan` |
+| Set status to `planned` | `format-check-plan` |
 
 ### Operational (tested by test-run, binary.rs, and others)
 

@@ -53,6 +53,8 @@ FAKE_CLAUDE
 
 run_skill_harness() {
   artifact_mode="$1"
+  skill_path="$2"
+  shift
   shift
 
   write_fake_claude
@@ -60,7 +62,7 @@ run_skill_harness() {
     FACTORY_FAKE_CLAUDE_ARTIFACT="$artifact_mode" \
       PATH="${FAKE_BIN}:$PATH" \
       tests/test-skill tests/behaviors/skills/timeout-flag.md \
-        skills/capture-brief/SKILL.md "$@" 2>&1
+        "$skill_path" "$@" 2>&1
   )"
   RESULT_DIR="$(printf '%s\n' "$OUTPUT" | awk '
     /^Done[.] Results in / { print substr($0, 18); exit }
@@ -121,7 +123,7 @@ EOF_ARTIFACTS
 test_skill_harness_prints_existing_artifacts() {
   cd "$PROJECT_DIR"
 
-  run_skill_harness 1 --judge
+  run_skill_harness 1 skills/capture-brief/SKILL.md --judge
 
   RESULT=0
   assert_result_dir_exists || return 1
@@ -136,7 +138,7 @@ test_skill_harness_prints_existing_artifacts() {
 test_skill_harness_omits_brief_without_artifact() {
   cd "$PROJECT_DIR"
 
-  run_skill_harness 0 --judge
+  run_skill_harness 0 skills/capture-brief/SKILL.md --judge
 
   RESULT=0
   assert_result_dir_exists || return 1
@@ -151,7 +153,7 @@ test_skill_harness_omits_brief_without_artifact() {
 test_skill_harness_omits_verdict_without_judge() {
   cd "$PROJECT_DIR"
 
-  run_skill_harness 1
+  run_skill_harness 1 skills/capture-brief/SKILL.md
 
   RESULT=0
   assert_result_dir_exists || return 1
@@ -163,11 +165,38 @@ test_skill_harness_omits_verdict_without_judge() {
   return $RESULT
 }
 
+test_skill_harness_names_planning_artifacts() {
+  cd "$PROJECT_DIR"
+
+  RESULT=0
+
+  run_skill_harness 1 skills/define-behaviors/SKILL.md --judge
+  assert_result_dir_exists || return 1
+  assert_printed_artifact "behaviors.diff.md" "define-behaviors artifact" || RESULT=1
+  assert_not_printed_artifact "brief.md" "capture-brief artifact" || RESULT=1
+  assert_printed_artifacts_exist || RESULT=1
+
+  run_skill_harness 1 skills/design-approach/SKILL.md --judge
+  assert_result_dir_exists || return 1
+  assert_printed_artifact "approach.md" "design-approach artifact" || RESULT=1
+  assert_not_printed_artifact "brief.md" "capture-brief artifact" || RESULT=1
+  assert_printed_artifacts_exist || RESULT=1
+
+  run_skill_harness 1 skills/plan-execution/SKILL.md --judge
+  assert_result_dir_exists || return 1
+  assert_printed_artifact "plan.md" "plan-execution artifact" || RESULT=1
+  assert_not_printed_artifact "brief.md" "capture-brief artifact" || RESULT=1
+  assert_printed_artifacts_exist || RESULT=1
+
+  return $RESULT
+}
+
 printf 'test-skill-harness-artifacts\n\n'
 
 run_test "skill harness prints existing artifacts" test_skill_harness_prints_existing_artifacts
 run_test "skill harness omits brief without artifact" test_skill_harness_omits_brief_without_artifact
 run_test "skill harness omits verdict without judge" test_skill_harness_omits_verdict_without_judge
+run_test "skill harness names planning artifacts" test_skill_harness_names_planning_artifacts
 
 printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
 

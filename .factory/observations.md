@@ -36,14 +36,6 @@ structural_guidance.md) with much more detail than what was captured
 into write-documentation. May want to pull more in later, especially
 the sentence corrections as concrete examples.
 
-2026-05-16 — Interactive planning skills still need more scenario
-coverage. `capture-brief` has multiple scenarios, and
-`define-behaviors` now has an initial run-summary scenario. The remaining
-gap is focused coverage for `design-approach` and `plan-execution`, plus
-deeper define-behaviors cases that verify final artifact quality instead
-of only conversation structure. These skills drive the planning phase, so
-scenario tests should simulate the interview flow and verify outputs.
-
 2026-05-16 — The notification system (macOS osascript notifications
 from factory watch) needs a purpose review. What value do notifications
 add to the workflow? When are they useful vs noise? Should they be
@@ -297,6 +289,11 @@ worktrees are cleaned. Treat them as a backlog, not one monolithic patch:
   `define-behaviors` producing `behaviors.diff.md` and the mismatch
   where the text-only skill harness is credited with testing codebase
   research even though it disables file/tool access.
+  → Resolved: added behavior, approach, and planning scenarios for
+  project checks; `tests/test-skill` now stores planning artifacts under
+  `behaviors.diff.md`, `approach.md`, and `plan.md`; the behavior map now
+  labels text-only harness coverage as conversation/artifact coverage,
+  not real codebase research.
 - Remove or relabel `tests/test-run` shell-function coverage so the
   behavior map reflects the Rust binary that actually ships.
   → Landed in `557b6a2`.

@@ -28,7 +28,7 @@
 #
 # Output goes to a temp directory (printed at start). Each run produces:
 #   transcript.md  — full conversation with evaluation criteria appended
-#   brief.md       — extracted artifact (if the skill produced one)
+#   <artifact>.md  — extracted artifact (if the skill produced one)
 #   verdict.md     — judge scoring (if --judge was passed)
 #
 # With --judge, a third Claude session reads the transcript and evaluation
@@ -82,7 +82,14 @@ SCENARIO_CONTENT="$(cat "$SCENARIO")"
 SKILL_CONTENT="$(cat "$SKILL_PATH")"
 
 TRANSCRIPT="${RUN_DIR}/transcript.md"
-BRIEF_OUTPUT="${RUN_DIR}/brief.md"
+case "$SKILL_NAME" in
+  capture-brief) ARTIFACT_NAME="brief.md" ;;
+  define-behaviors) ARTIFACT_NAME="behaviors.diff.md" ;;
+  design-approach) ARTIFACT_NAME="approach.md" ;;
+  plan-execution) ARTIFACT_NAME="plan.md" ;;
+  *) ARTIFACT_NAME="artifact.md" ;;
+esac
+ARTIFACT_OUTPUT="${RUN_DIR}/${ARTIFACT_NAME}"
 
 # Initialize transcript
 cat > "$TRANSCRIPT" <<EOF
@@ -197,8 +204,8 @@ Agent: ${RESPONSE}"
     ARTIFACT_FOUND=0
     if printf '%s' "$RESPONSE" | grep -qF 'ARTIFACT START'; then
       printf '%s' "$RESPONSE" | sed -n '/ARTIFACT START/,/ARTIFACT END/p' | \
-        grep -vF 'ARTIFACT' > "$BRIEF_OUTPUT"
-      printf '  [Artifact captured to %s]\n' "$BRIEF_OUTPUT"
+        grep -vF 'ARTIFACT' > "$ARTIFACT_OUTPUT"
+      printf '  [Artifact captured to %s]\n' "$ARTIFACT_OUTPUT"
       ARTIFACT_FOUND=1
     fi
 
@@ -339,8 +346,8 @@ fi
 
 printf '\nDone. Results in %s\n' "$RUN_DIR"
 printf '  transcript.md  — full conversation\n'
-if [ -f "$BRIEF_OUTPUT" ]; then
-  printf '  brief.md       — captured artifact\n'
+if [ -f "$ARTIFACT_OUTPUT" ]; then
+  printf '  %-13s — captured artifact\n' "$ARTIFACT_NAME"
 fi
 if [ -f "${RUN_DIR}/verdict.md" ]; then
   printf '  verdict.md     — judge scoring\n'
