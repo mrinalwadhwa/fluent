@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+SKILL="$ROOT/skills/build-in-the-factory/SKILL.md"
+
+extract_reference() {
+  awk '
+    /^## Factory commands$/ { in_section = 1; next }
+    in_section && /^```sh$/ { in_block = 1; next }
+    in_block && /^```$/ { exit }
+    in_block { print }
+  ' "$SKILL"
+}
+
+reference="$(extract_reference)"
+help_text="$(factory --help)"
+failures=0
+
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+
+  command="$(awk '{ print $2 }' <<<"$line")"
+  description="${line#*# }"
+
+  if [ "$description" = "$line" ]; then
+    echo "factory ${command} lacks an inline description" >&2
+    failures=$((failures + 1))
+    continue
+  fi
+
+  if [ "${#description}" -gt 64 ]; then
+    echo "factory ${command} description is not concise: ${description}" >&2
+    failures=$((failures + 1))
+  fi
+
+  if ! grep -Eq "^  ${command}[[:space:]]" <<<"$help_text"; then
+    echo "factory ${command} is not present in factory --help" >&2
+    failures=$((failures + 1))
+  fi
+done <<<"$reference"
+
+if [ "$failures" -ne 0 ]; then
+  exit 1
+fi
