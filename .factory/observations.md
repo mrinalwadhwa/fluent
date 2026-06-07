@@ -335,7 +335,14 @@ checks, or decisions. Any time work bubbles back up to the human
 operator or coordinating agent, that is itself a signal: Factory lacked
 enough automation, context, policy, artifact quality, or recovery logic
 to finish autonomously, and the event should be captured as input for
-improving the system.
+improving the system. The agent focused on learning capture should look
+at full transcripts from multiple agents and, when synthesizing broader
+patterns, multiple runs. Final reports and handoffs are useful summaries,
+but full transcripts preserve false starts, reviewer/author
+disagreements, tool failures, and repeated human interventions that can
+disappear from polished artifacts. Learning synthesis should cite which
+transcripts or runs informed it and distinguish single-run lessons from
+cross-run patterns.
 
 One review role or expertise file should also nudge changes toward
 vocabulary consistency. This may belong in architecture expertise,
