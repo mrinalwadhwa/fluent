@@ -85,11 +85,11 @@ Follow the project's existing test patterns if they exist. Look at
 existing behavior tests referenced in `documentation/behaviors.md` for
 format, conventions, and where tests live.
 
-If no existing test patterns exist, check the run's brief and plan
-for any testing approach discussed during the interactive stages. If
-none was discussed, use the simplest format that can exercise the
-system's external interface (shell scripts for CLIs, HTTP requests
-for APIs, etc.).
+If no existing test patterns exist, check the run's brief for any
+testing approach discussed during the interactive stages. If none was
+discussed, use the simplest format that can exercise the system's
+external interface (shell scripts for CLIs, HTTP requests for APIs,
+etc.).
 
 ### Phase 3 — Run new tests
 
