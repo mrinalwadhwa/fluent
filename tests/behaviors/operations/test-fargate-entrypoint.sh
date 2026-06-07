@@ -85,6 +85,7 @@ run_entrypoint_case() {
       FACTORY_RUN_ID="run-fg" \
       FACTORY_S3_BUCKET="bucket" \
       FACTORY_REGION="us-west-1" \
+      FACTORY_TASK_ARN="arn:aws:ecs:us-west-1:123:task/cluster/${name}" \
       FACTORY_BIN="$MOCK_BIN/factory" \
       CLAUDE_CODE_OAUTH_TOKEN="token" \
       MOCK_WORKSPACE_IN="$workspace_in" \
@@ -99,6 +100,7 @@ run_entrypoint_case() {
         FACTORY_RUN_ID="run-fg" \
         FACTORY_S3_BUCKET="bucket" \
         FACTORY_REGION="us-west-1" \
+        FACTORY_TASK_ARN="arn:aws:ecs:us-west-1:123:task/cluster/${name}" \
         CLAUDE_CODE_OAUTH_TOKEN="token" \
         MOCK_WORKSPACE_IN="$workspace_in" \
         MOCK_WORKSPACE_OUT="$workspace_out" \
@@ -117,6 +119,7 @@ run_entrypoint_case() {
   assert_file_contains "$factory_args" "local"
   assert_file_contains "$factory_args" "--no-sandbox"
   assert_file_contains "$factory_args" "--in-place"
+  assert_file_contains "$factory_args" "--preserve-run-metadata"
   assert_file_contains "$factory_args" "--coder"
   assert_file_contains "$factory_args" "claude"
   assert_file_contains "$factory_args" "--run-id"
@@ -124,6 +127,8 @@ run_entrypoint_case() {
 
   tar xf "$workspace_out" -C "$output"
   assert_file_contains "$output/.factory/runs/run-fg/status" "complete"
+  assert_file_contains "$output/.factory/runs/run-fg/runtime" "fargate"
+  assert_file_contains "$output/.factory/runs/run-fg/handle" "arn:aws:ecs:us-west-1:123:task/cluster/${name}"
   assert_file_contains "$output/.factory/active-run" "run-fg"
 }
 

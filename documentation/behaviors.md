@@ -168,8 +168,9 @@ Test: tests/binary.rs (run_fargate_with_codex_fails_before_config)
 
 WHEN the Fargate task starts,
 THE SYSTEM SHALL pull the workspace from S3 and run the Rust session loop
-in the downloaded workspace.
-Test: tests/behaviors/operations/test-fargate-entrypoint.sh
+in the downloaded workspace while preserving `runtime=fargate` and the
+ECS task handle in the run directory.
+Test: tests/binary.rs (run_in_place_can_preserve_run_metadata), tests/behaviors/operations/test-fargate-entrypoint.sh
 
 WHEN the Fargate task reaches a terminal status,
 THE SYSTEM SHALL upload the workspace to S3.

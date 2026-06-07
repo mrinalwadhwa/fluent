@@ -79,6 +79,7 @@ fn main() -> Result<()> {
             runtime,
             no_sandbox,
             in_place,
+            preserve_run_metadata,
             coder,
             extra_args,
         }) => match runtime.as_str() {
@@ -91,6 +92,7 @@ fn main() -> Result<()> {
                         &resolver,
                         &extra_args,
                         coder_kind,
+                        preserve_run_metadata,
                     )?;
                 } else if no_sandbox || cli.no_sandbox {
                     cmd_run_bare(
@@ -353,11 +355,14 @@ fn cmd_run_in_place(
     resolver: &ContentResolver,
     extra_args: &[String],
     coder_kind: CoderKind,
+    preserve_run_metadata: bool,
 ) -> Result<()> {
     let run = run::resolve_run(workspace, run_id)?;
 
-    fs::write(run.dir.join("runtime"), "local")?;
-    fs::write(run.dir.join("handle"), std::process::id().to_string())?;
+    if !preserve_run_metadata {
+        fs::write(run.dir.join("runtime"), "local")?;
+        fs::write(run.dir.join("handle"), std::process::id().to_string())?;
+    }
     fs::write(run.dir.join("coder"), coder_kind.as_str())?;
 
     eprintln!("factory: in-place session loop (run: {})", run.id);

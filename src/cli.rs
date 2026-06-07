@@ -58,6 +58,10 @@ pub enum Commands {
         #[arg(long, hide = true)]
         in_place: bool,
 
+        /// Preserve existing runtime and handle metadata while running in place
+        #[arg(long, hide = true)]
+        preserve_run_metadata: bool,
+
         /// Coding agent to launch: claude or codex
         #[arg(long)]
         coder: Option<String>,

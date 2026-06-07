@@ -16,6 +16,25 @@ WORKSPACE="${WORKSPACE:-/workspace}"
 
 die() { printf 'factory-run: %s\n' "$1" >&2; exit 1; }
 
+resolve_task_handle() {
+  if [ -n "${FACTORY_TASK_ARN:-}" ]; then
+    printf '%s' "$FACTORY_TASK_ARN"
+    return 0
+  fi
+
+  if [ -n "${ECS_CONTAINER_METADATA_URI_V4:-}" ] &&
+    command -v curl >/dev/null 2>&1 &&
+    command -v jq >/dev/null 2>&1; then
+    local task_json
+    if task_json="$(curl -fsS "${ECS_CONTAINER_METADATA_URI_V4}/task" 2>/dev/null)"; then
+      printf '%s' "$task_json" | jq -r '.TaskARN // empty'
+    fi
+    return 0
+  fi
+
+  printf ''
+}
+
 [ -n "${FACTORY_RUN_ID:-}" ] || die "FACTORY_RUN_ID not set"
 [ -n "${FACTORY_S3_BUCKET:-}" ] || die "FACTORY_S3_BUCKET not set"
 [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || die "No Claude auth token"
@@ -48,6 +67,16 @@ RUN_DIR="${WORKSPACE}/.factory/runs/${FACTORY_RUN_ID}"
 # Write active-run pointer
 printf '%s' "$FACTORY_RUN_ID" > "${WORKSPACE}/.factory/active-run"
 
+# Preserve Fargate as the durable runtime identity while the container reuses
+# the local Rust session loop internally.
+printf 'fargate' > "${RUN_DIR}/runtime"
+TASK_HANDLE="$(resolve_task_handle)"
+if [ -n "$TASK_HANDLE" ]; then
+  printf '%s' "$TASK_HANDLE" > "${RUN_DIR}/handle"
+else
+  printf 'factory-run: warning: task handle unavailable from ECS metadata\n' >&2
+fi
+
 # --------------------------------------------------------------------------
 # Run the Rust session loop
 # --------------------------------------------------------------------------
@@ -70,6 +99,7 @@ fi
   --runtime local \
   --no-sandbox \
   --in-place \
+  --preserve-run-metadata \
   --coder claude \
   --run-id "$FACTORY_RUN_ID"
 

@@ -315,7 +315,9 @@ Fargate currently supports only Claude because its container entrypoint
 and credential path remain Claude-specific. The Fargate run image builds
 the Rust Factory binary during the Docker image build and copies it to
 `/usr/local/bin/factory`; the task entrypoint uses that binary to enter
-the shared Rust session loop.
+the shared Rust session loop. The Fargate wrapper owns durable runtime
+metadata, so the in-place local loop does not rewrite `runtime` or
+`handle` while it runs inside the task.
 
 Sandboxed local Claude runs refresh Claude OAuth credentials outside the
 sandbox at session boundaries. Sandboxed local Codex runs do not use that
@@ -438,13 +440,15 @@ Local machine                    Fargate task
 2. upload worktree → S3
 3. start task ────────────►
                                  4. pull workspace from S3
-                                 5. /usr/local/bin/factory run
+                                 5. write runtime=fargate and task handle
+                                 6. /usr/local/bin/factory run
                                     --runtime local
                                     --no-sandbox --in-place
+                                    --preserve-run-metadata
                                     --coder claude
-                                 6. Rust session loop launches Claude
-                                 7. ...hours pass...
-                                 8. upload workspace → S3
+                                 7. Rust session loop launches Claude
+                                 8. ...hours pass...
+                                 9. upload workspace → S3
 factory status ──────────► (local run artifacts)
 factory shell ───────────► (ECS Exec into container)
 factory pull ────────────► (download from S3 into worktree)

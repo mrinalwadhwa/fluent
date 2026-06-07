@@ -1138,6 +1138,67 @@ exit 0
 }
 
 #[test]
+fn run_in_place_can_preserve_run_metadata() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let run_id = "20260606-in-place-preserve-metadata";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("brief.md"), "# Brief\n\nRun here\n").unwrap();
+    fs::write(run_dir.join("runtime"), "fargate").unwrap();
+    fs::write(
+        run_dir.join("handle"),
+        "arn:aws:ecs:us-west-1:123:task/cluster/task-abc",
+    )
+    .unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+WORKING_DIR="$(pwd)"
+RUN_ID=$(ls "$WORKING_DIR/.factory/runs/" 2>/dev/null | head -1)
+printf 'complete' > "$WORKING_DIR/.factory/runs/$RUN_ID/status"
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "run",
+            "--runtime",
+            "local",
+            "--no-sandbox",
+            "--in-place",
+            "--preserve-run-metadata",
+            "--coder",
+            "claude",
+            "--run-id",
+            run_id,
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("in-place session loop"));
+
+    assert_eq!(
+        fs::read_to_string(run_dir.join("runtime")).unwrap(),
+        "fargate"
+    );
+    assert_eq!(
+        fs::read_to_string(run_dir.join("handle")).unwrap(),
+        "arn:aws:ecs:us-west-1:123:task/cluster/task-abc"
+    );
+    assert_eq!(
+        fs::read_to_string(run_dir.join("status")).unwrap(),
+        "complete"
+    );
+}
+
+#[test]
 fn run_session_loop_stops_on_needs_user() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
