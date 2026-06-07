@@ -47,6 +47,40 @@ The agent follows skills directly.
 Autonomous stages don't need the user. The factory command manages the
 session loop and can run locally or on Fargate.
 
+## Core work model
+
+Factory is growing toward a queue-based model with these durable nouns:
+Work Item, Attempt, Task, Workspace, and Merge Candidate. This model is
+documented and represented in Rust so later scheduling work can use the
+same vocabulary.
+
+The current `.factory/runs` lifecycle remains the execution
+implementation. `factory run`, `resume`, `summary`, `dashboard`,
+`review`, `land`, and cleanup continue to read and write existing run
+state. The first version does not migrate run directories and does not
+replace the session loop.
+
+| Concept | Meaning |
+|---|---|
+| Work Item | Planned Factory work. Planning operates on work items. |
+| Attempt | One execution history branch under a work item. Attempts are visible state and history, but they are usually not their own queue. |
+| Task | Schedulable unit of work. Task kinds stay generic: `write`, `review`, `merge`, `report`, `learn`, and `probe`. Roles carry prompt and domain behavior. |
+| Workspace | Factory-managed filesystem/git context. A task may read many workspaces and write at most one. |
+| Merge Candidate | Candidate result prepared for merge. Its review state is separate from attempt review state. |
+
+Review tasks are read-only with respect to candidate workspaces. They may
+write task artifacts, such as findings or scratch notes, but concrete
+reviewer fixes become follow-up `write` tasks. Sandboxed delegated tasks
+produce learning artifacts in task artifact areas; Factory can later
+ingest those artifacts into project-local expertise after review.
+
+Project-local `.factory/observations.md` and `.factory/expertise/*` are
+durable Factory memory that belongs in normal repository history. Runtime
+state remains under `.factory/runs` and related run artifacts. Keeping
+these concepts separate lets learning and planning land through the same
+reviewed workflow as code without treating transient session state as
+project knowledge.
+
 ## The run
 
 The core recursive unit of work.
@@ -578,6 +612,7 @@ factory/main/
     dashboard.rs             ← Live TUI for run activity
     summary.rs               ← Text run summary from durable artifacts
     transcript.rs            ← Parse stream-json transcripts incrementally
+    work_model.rs            ← Core Work Item / Attempt / Task model
     plan.rs                  ← Parse plan.md into groups and steps
     parallel.rs              ← Parallel plan orchestrator (child runs)
     version.rs               ← Version command output format

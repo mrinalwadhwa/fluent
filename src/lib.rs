@@ -18,4 +18,5 @@ pub mod session;
 pub mod summary;
 pub mod transcript;
 pub mod version;
+pub mod work_model;
 pub mod worktree;
