@@ -286,6 +286,7 @@ worktrees are cleaned. Treat them as a backlog, not one monolithic patch:
   boundary.
 - Centralize the "prefer live worktree run state over source run state"
   rule so status, summary, dashboard, resume, and land agree.
+  → Landed in `a861477` and `1a13dba`.
 - Make reviewer launch failures operationally visible instead of
   collapsing missing/failed reviewers into pass-like behavior.
   → Landed in `5989e94`.
