@@ -198,33 +198,9 @@ impl Run {
             .unwrap_or(0)
     }
 
-    /// Check whether the effective review state is accepted.
-    ///
-    /// `review-state.json` is the durable source of truth when present.
-    /// Without it, old runs fall back to current review artifacts.
+    /// Check whether reviews for this run directory are accepted.
     pub fn reviews_passed(&self) -> Option<bool> {
-        if let Some(state) = review::read_review_state(&self.dir) {
-            return Some(state.map(|state| state.is_accepted()).unwrap_or(false));
-        }
-        let reviews_dir = self.dir.join("reviews");
-        if !reviews_dir.is_dir() {
-            return None;
-        }
-        let mut found_any = false;
-        let entries = fs::read_dir(&reviews_dir).ok()?;
-        for entry in entries.filter_map(|e| e.ok()) {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if name_str.starts_with("review-") && name_str.ends_with(".md") {
-                found_any = true;
-                let content = fs::read_to_string(entry.path()).unwrap_or_default();
-                let verdict = review::extract_verdict(&content);
-                if !verdict.is_passing() {
-                    return Some(false);
-                }
-            }
-        }
-        if found_any { Some(true) } else { None }
+        review::reviews_accepted_at(&self.dir)
     }
 
     /// Extract what the agent needs from the handoff file.
@@ -330,15 +306,9 @@ impl Run {
     /// review-limit acceptance.
     pub fn effective_reviews_passed(&self) -> Option<bool> {
         if let Some(wt_run_dir) = self.worktree_run_dir() {
-            let wt_run = Run {
-                id: self.id.clone(),
-                dir: wt_run_dir,
-            };
-            if let Some(result) = wt_run.reviews_passed() {
-                return Some(result);
-            }
+            return review::effective_reviews_accepted(&wt_run_dir, &self.dir);
         }
-        self.reviews_passed()
+        review::reviews_accepted_at(&self.dir)
     }
 
     /// Get the source run directory.

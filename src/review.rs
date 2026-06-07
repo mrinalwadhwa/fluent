@@ -176,6 +176,35 @@ pub fn effective_review_state(primary_dir: &Path, fallback_dir: &Path) -> Review
     }
 }
 
+/// Determine whether reviews at a run artifact directory are accepted.
+///
+/// `review-state.json` is the durable review subsystem source of truth
+/// when present. Older runs without review state fall back to top-level
+/// `reviews/review-*.md` artifacts.
+pub fn reviews_accepted_at(run_dir: &Path) -> Option<bool> {
+    if let Some(state) = read_review_state(run_dir) {
+        return Some(state.map(|state| state.is_accepted()).unwrap_or(false));
+    }
+
+    let verdicts = current_review_verdicts(run_dir);
+    if verdicts.is_empty() {
+        return None;
+    }
+
+    Some(verdicts.values().all(Verdict::is_passing))
+}
+
+/// Determine effective review acceptance using a live directory first.
+pub fn effective_reviews_accepted(primary_dir: &Path, fallback_dir: &Path) -> Option<bool> {
+    reviews_accepted_at(primary_dir).or_else(|| {
+        if primary_dir == fallback_dir {
+            None
+        } else {
+            reviews_accepted_at(fallback_dir)
+        }
+    })
+}
+
 pub fn current_review_verdicts(run_dir: &Path) -> BTreeMap<String, Verdict> {
     let reviews_dir = run_dir.join("reviews");
     let mut verdicts = BTreeMap::new();
@@ -583,6 +612,61 @@ mod tests {
         .unwrap();
 
         assert!(read_review_state(tmp.path()).unwrap().is_err());
+    }
+
+    #[test]
+    fn test_reviews_accepted_prefers_review_state() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join("reviews")).unwrap();
+        fs::write(tmp.path().join("reviews/review-tests.md"), "Verdict: fail").unwrap();
+        let mut verdicts = BTreeMap::new();
+        verdicts.insert("tests".to_string(), Verdict::Fail);
+        write_review_state(
+            tmp.path(),
+            &ReviewState::accepted_review_limit(
+                10,
+                10,
+                verdicts,
+                "Review round limit reached with a clean worktree.",
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(reviews_accepted_at(tmp.path()), Some(true));
+    }
+
+    #[test]
+    fn test_reviews_accepted_falls_back_to_artifacts() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join("reviews")).unwrap();
+        fs::write(tmp.path().join("reviews/review-tests.md"), "Verdict: pass").unwrap();
+        fs::write(
+            tmp.path().join("reviews/review-architecture.md"),
+            "Verdict: pass",
+        )
+        .unwrap();
+
+        assert_eq!(reviews_accepted_at(tmp.path()), Some(true));
+
+        fs::write(
+            tmp.path().join("reviews/review-architecture.md"),
+            "Verdict: uncertain",
+        )
+        .unwrap();
+        assert_eq!(reviews_accepted_at(tmp.path()), Some(false));
+    }
+
+    #[test]
+    fn test_effective_reviews_accepted_uses_primary_first() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let primary = tmp.path().join("live");
+        let fallback = tmp.path().join("source");
+        fs::create_dir_all(primary.join("reviews")).unwrap();
+        fs::create_dir_all(fallback.join("reviews")).unwrap();
+        fs::write(primary.join("reviews/review-tests.md"), "Verdict: pass").unwrap();
+        fs::write(fallback.join("reviews/review-tests.md"), "Verdict: fail").unwrap();
+
+        assert_eq!(effective_reviews_accepted(&primary, &fallback), Some(true));
     }
 
     #[test]

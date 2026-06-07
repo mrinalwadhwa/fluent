@@ -388,8 +388,17 @@ reviewers run in parallel, each producing an artifact in
 effective outcome in `.factory/runs/[run-id]/review-state.json` with the
 state, round, source, and per-reviewer verdicts. Consumers use that file
 as the review boundary when it exists; old runs without it fall back to
-top-level `reviews/review-*.md` verdicts. The loop parses each
-reviewer's verdict:
+top-level `reviews/review-*.md` verdicts.
+
+The review subsystem owns verdict parsing and acceptance rules:
+`review.rs` reads `review-state.json`, falls back to current
+`reviews/review-*.md` artifacts for old runs, and decides whether the
+effective review outcome is accepted. `run.rs` does not interpret review
+verdicts directly; it resolves source versus live worktree artifact
+locations and delegates review acceptance to `review.rs`. This keeps
+durable run status (`status`) separate from review outcome semantics.
+
+The loop parses each reviewer's verdict:
 
 - All pass: the run completes only if the worktree is clean; if
   uncommitted changes remain outside `.factory`, the loop writes a
@@ -553,8 +562,12 @@ factory/main/
     lib.rs                   ← public API for tests
     coder.rs                 ← Coder trait + Claude/Codex implementations
     cli.rs                   ← CLI argument types
+    checks.rs                ← Project check execution and autofix commits
+    cleanup.rs               ← Cleanup of terminal run worktrees
+    config.rs                ← .factory/config.toml parsing
     content.rs               ← Runtime content resolution (project → user → bundled)
     credential.rs            ← Keychain credential injection
+    land.rs                  ← Landing policy and pre-land check orchestration
     run.rs                   ← Run state, resolution, status
     session.rs               ← Session loop orchestration
     review.rs                ← Review loop, verdict parsing
@@ -631,6 +644,73 @@ factory/main/
       skills/                ← scenario cards for test-skill
       README.md              ← behavior-to-test mapping
 ```
+
+## Active module responsibilities
+
+Several modules own operational policy that would otherwise blur across
+the CLI, run model, and git helpers.
+
+### Project configuration and checks
+
+`config.rs` is the parser for project-owned Factory configuration at
+`.factory/config.toml`. Today it exposes configured project checks. A
+check has a stable name, a shell `command`, optional `fix_command`,
+`autofix`, and `run_before_land`. Projects opt into checks; absence of
+`.factory/config.toml` means landing proceeds without project checks.
+
+`checks.rs` executes those configured checks in the run worktree. It
+returns structured pass/fail results with command output, stops at the
+first failing pre-land check, formats actionable failure messages, and
+can run an autofix command for checks that explicitly opt in. Autofix
+requires a clean worktree outside `.factory`, runs the configured fix
+command, stages project changes outside `.factory`, and commits them as
+`Apply project check autofix` when the fix changed files.
+
+### Landing
+
+`land.rs` owns the policy that happens immediately before a run branch is
+merged. It loads project config from the source root, filters checks with
+`run_before_land = true`, runs them against the recorded run worktree,
+and calls the worktree landing implementation only after checks pass. If
+an enabled check fails with autofix configured, `land.rs` asks
+`checks.rs` to apply the fix, reruns checks, reruns reviewers after an
+autofix commit, copies updated run artifacts back to the source run
+directory, and lands only when checks and reviewers pass.
+
+The lower-level git mechanics remain in `worktree.rs`: copying run
+artifacts, checking dirty worktrees, rebasing the run branch onto the
+source branch, fast-forward merging, deleting the run branch, removing
+the worktree, and setting status to `landed`.
+
+### Cleanup
+
+`cleanup.rs` owns cleanup of terminal run artifacts. Cleanup selects
+`complete` and `landed` runs by default, rejects non-terminal targets,
+and preserves the source run directory. Applying cleanup writes
+`cleaned.md` with the original status, cleanup time, and worktree
+outcome. If a run records a git-registered worktree, cleanup removes it
+through `git worktree remove --force`; if the path is missing or is not a
+registered worktree, cleanup records that outcome instead of deleting
+arbitrary directories.
+
+Cleanup resolves source Factory state even when invoked from a run
+worktree by finding the registered worktree that points back to the
+current checkout. That keeps cleanup state beside `.factory/runs/` in
+the source repository instead of scattering cleanup markers into run
+worktrees.
+
+### Model selection environment
+
+`coder.rs` owns model-selection environment variables. Claude uses
+`FACTORY_CLAUDE_MODEL` first, falls back to `FACTORY_MODEL`, then uses
+the built-in default `claude-opus-4-6`. Codex uses
+`FACTORY_CODEX_MODEL` when set; otherwise Factory leaves Codex model
+selection to the Codex CLI default. `FACTORY_CODER` selects the default
+coder when the CLI does not pass `--coder`.
+
+`FACTORY_CODEX_CA_BUNDLE` is not a model selector, but it lives beside
+Codex launch configuration: for sandboxed Codex runs it overrides the
+CA bundle path that Factory sets as `SSL_CERT_FILE`.
 
 ## Skills, expertise, and documentation
 

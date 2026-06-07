@@ -275,6 +275,10 @@ worktrees are cleaned. Treat them as a backlog, not one monolithic patch:
 - Move review verdict interpretation out of the durable run-state model
   and into the review subsystem, or otherwise define a clear run/review
   boundary.
+  → Resolved: `review.rs` owns review acceptance interpretation from
+  `review-state.json` and legacy current-round review artifacts; `run.rs`
+  delegates to the review subsystem after resolving source/live artifact
+  directories, and architecture docs capture the boundary.
 - Centralize the "prefer live worktree run state over source run state"
   rule so status, summary, dashboard, resume, and land agree.
   → Landed in `a861477` and `1a13dba`.
@@ -283,8 +287,17 @@ worktrees are cleaned. Treat them as a backlog, not one monolithic patch:
   → Landed in `5989e94`.
 - Decide whether skills and expertise are filesystem-only or part of the
   `ContentResolver` project/user/bundled chain, then align docs and code.
+  → Resolved in `20260607-001118`: `ContentResolver` is documented and
+  tested as runtime content resolution for prompts and sandbox profiles
+  only; skills and expertise remain filesystem/agent-managed content
+  outside the project/user/bundled resolver chain.
 - Update architecture docs for active modules (`checks`, `config`,
   `cleanup`, `land`) and document model-selection environment variables.
+  → Resolved: architecture now documents active module responsibilities
+  for `config.rs`, `checks.rs`, `land.rs`, `cleanup.rs`, and `coder.rs`,
+  including `FACTORY_CLAUDE_MODEL`, `FACTORY_MODEL`,
+  `FACTORY_CODEX_MODEL`, `FACTORY_CODER`, and
+  `FACTORY_CODEX_CA_BUNDLE`; behavior scripts assert those docs remain.
 - Improve planning-skill behavior coverage, especially
   `define-behaviors` producing `behaviors.diff.md` and the mismatch
   where the text-only skill harness is credited with testing codebase
