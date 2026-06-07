@@ -1,0 +1,28 @@
+{
+  "id": "write-fixes",
+  "kind": "write",
+  "role": "author",
+  "work_item_id": "work-1",
+  "attempt_id": "attempt-1",
+  "workspace_access": {
+    "reads": [
+      {
+        "id": "main",
+        "path": "."
+      }
+    ],
+    "writes": [
+      {
+        "id": "candidate-a",
+        "path": "../run-a"
+      },
+      {
+        "id": "candidate-b",
+        "path": "../run-b"
+      }
+    ]
+  },
+  "artifact_area": {
+    "path": ".factory/tasks/write-fixes"
+  }
+}

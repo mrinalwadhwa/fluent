@@ -1,0 +1,24 @@
+{
+  "id": "review-architecture",
+  "kind": "review",
+  "role": "architecture-reviewer",
+  "work_item_id": "work-1",
+  "attempt_id": "attempt-1",
+  "workspace_access": {
+    "reads": [
+      {
+        "id": "candidate",
+        "path": "../run-work-1"
+      }
+    ],
+    "writes": [
+      {
+        "id": "candidate",
+        "path": "../run-work-1"
+      }
+    ]
+  },
+  "artifact_area": {
+    "path": ".factory/tasks/review-architecture"
+  }
+}

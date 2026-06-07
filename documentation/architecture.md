@@ -68,6 +68,44 @@ replace the session loop.
 | Workspace | Factory-managed filesystem/git context. A task may read many workspaces and write at most one. |
 | Merge Candidate | Candidate result prepared for merge. Its review state is separate from attempt review state. |
 
+When artifacts or tests need to exchange a standalone task definition,
+use the serialized `Task` shape from `factory::work_model` and call
+`Task::validate` after parsing. This shape is an exchange contract for
+the core model; current run commands do not submit these tasks to a
+scheduler.
+
+```json
+{
+  "id": "review-architecture",
+  "kind": "review",
+  "role": "architecture-reviewer",
+  "work_item_id": "work-1",
+  "attempt_id": "attempt-1",
+  "workspace_access": {
+    "reads": [
+      {
+        "id": "candidate",
+        "path": "../run-work-1"
+      },
+      {
+        "id": "main",
+        "path": "."
+      }
+    ],
+    "writes": []
+  },
+  "artifact_area": {
+    "path": ".factory/tasks/review-architecture"
+  }
+}
+```
+
+The `kind` field accepts only `write`, `review`, `merge`, `report`,
+`learn`, or `probe`. `workspace_access.reads` may list any number of
+workspaces. `workspace_access.writes` may be empty or contain one
+workspace. A `review` task must keep `writes` empty; reviewers write
+findings and notes under `artifact_area`.
+
 Review tasks are read-only with respect to candidate workspaces. They may
 write task artifacts, such as findings or scratch notes, but concrete
 reviewer fixes become follow-up `write` tasks. Sandboxed delegated tasks
