@@ -21,7 +21,7 @@ from intent capture through execution and review across multiple sessions.
 ├─────────────────────────────────────────────────┤
 │  Factory command                                │
 │  factory run / status / summary / cleanup       │
-│  factory pull / shell / watch                   │
+│  factory review / pull / shell / watch          │
 │  factory resume / init / dashboard / land       │
 │  factory version                                │
 │  Deterministic, operational                     │
@@ -500,7 +500,13 @@ represents only the current review round; archived `round-N/` contents
 remain historical records and do not drive current dashboard reviewer
 tabs or verdicts.
 
-Review runs (mode=review) produce findings only. Reviewers run with
+`factory review` creates or reuses a review run. It writes `status` as
+`planned`, `mode` as `review`, updates `.factory/active-run`, and writes
+optional `reviewers` and `brief.md` files from `--reviewers` and
+`--brief`. After preparing that state, it enters the normal local run
+loop for the selected coder and sandbox mode.
+
+Review runs (`mode=review`) produce findings only. Reviewers run with
 full-codebase scope. Their findings are written to the reviews/
 directory. Passing review-only runs set status to `complete`;
 non-passing review-only runs set status to `failed`. No author session
