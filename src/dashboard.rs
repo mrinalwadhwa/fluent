@@ -2511,6 +2511,34 @@ mod tests {
     }
 
     #[test]
+    fn test_app_poll_switches_to_live_status_when_worktree_run_appears() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let runs_dir = tmp.path().join(".factory/runs");
+        let worktree = tmp.path().join("worktree");
+        let source_live = runs_dir.join("a-live");
+        let live_run_dir = worktree.join(".factory/runs/a-live");
+
+        make_filesystem_run(&source_live, "a-live", "complete");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            source_live.join("worktree"),
+            worktree.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+
+        let mut app = App::new(tmp.path(), Some("a-live")).unwrap();
+        assert_eq!(app.runs[app.selected_run].cached_status, "complete");
+        assert_eq!(app.runs[app.selected_run].live_dir, source_live);
+
+        make_filesystem_run(&live_run_dir, "a-live", "needs-user");
+        app.poll();
+
+        assert_eq!(app.runs[app.selected_run].run.id, "a-live");
+        assert_eq!(app.runs[app.selected_run].cached_status, "needs-user");
+        assert_eq!(app.runs[app.selected_run].live_dir, live_run_dir);
+    }
+
+    #[test]
     fn test_app_new_prefers_actionable_run_over_cleaned_terminal_run() {
         let tmp = tempfile::TempDir::new().unwrap();
         let runs_dir = tmp.path().join(".factory/runs");

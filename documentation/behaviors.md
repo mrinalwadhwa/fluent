@@ -178,10 +178,22 @@ Test: tests/behaviors/operations/test-fargate-entrypoint.sh
 
 ## Status reporting
 
+WHEN Factory reads current run status for a run whose `worktree` file
+points at an existing worktree containing `.factory/runs/[run-id]/`,
+THE SYSTEM SHALL read status from that live worktree run directory before
+falling back to the source run directory.
+Test: tests/behaviors/operations/test-live-run-state.sh (current run status prefers live worktree), tests/binary.rs (status_prefers_live_worktree_status)
+
+IF a run's `worktree` file is missing, empty, invalid, or points at a
+worktree without `.factory/runs/[run-id]/`,
+THEN THE SYSTEM SHALL continue to read current run artifacts from the
+source run directory.
+Test: tests/behaviors/operations/test-live-run-state.sh (invalid worktree falls back to source)
+
 WHEN `factory status` is invoked,
 THE SYSTEM SHALL display all runs with their status, runtime, and brief
 summary.
-Test: tests/binary.rs (status display tests)
+Test: tests/binary.rs (status display tests, status_prefers_live_worktree_status), tests/behaviors/operations/test-live-run-state.sh (status lists live status)
 
 WHEN `factory status` is invoked after cleanup,
 THE SYSTEM SHALL list cleaned runs with their existing run status and
@@ -203,6 +215,12 @@ Test: tests/binary.rs (summary_resolves_active_run)
 WHEN `factory summary --run-id <id>` is invoked,
 THE SYSTEM SHALL summarize that run instead of resolving the active run.
 Test: tests/binary.rs (summary_uses_explicit_run_id)
+
+WHEN `factory summary --run-id <id>` is invoked for a run with a live
+worktree run directory,
+THE SYSTEM SHALL prefer live status, sessions, review verdicts, handoff,
+and report presence before falling back to source artifacts.
+Test: tests/binary.rs (summary_prefers_live_worktree_artifacts), tests/behaviors/operations/test-live-run-state.sh (summary reads live artifacts)
 
 WHEN a run summary is printed,
 THE SYSTEM SHALL include the run's current phase derived from existing
@@ -421,7 +439,7 @@ WHEN `factory resume` is invoked without a run ID and with a terminal on
 stdin,
 THE SYSTEM SHALL find a run with status `needs-user` or `failed` and
 launch an interactive agent session for that run.
-Test: tests/behaviors/operations/test-resume-resolve.sh
+Test: tests/behaviors/operations/test-resume-resolve.sh, tests/binary.rs (resume_finds_live_needs_user_run)
 
 WHEN `factory resume [RUN_ID]` is invoked with a terminal on stdin,
 THE SYSTEM SHALL launch an interactive agent session for the named run.
@@ -438,6 +456,12 @@ THE SYSTEM SHALL find a run with status `needs-user` or `failed` and
 restart that run's session loop without launching an interactive agent.
 Test: tests/behaviors/operations/test-headless-resume.sh
 
+WHEN `factory resume` selects or resumes a run,
+THE SYSTEM SHALL use the live status rule to identify `needs-user` or
+`failed` runs and to restart headless runs from the live worktree run
+directory when it exists.
+Test: tests/binary.rs (resume_finds_live_needs_user_run, headless_resume_restarts_selected_run_loop), tests/behaviors/operations/test-live-run-state.sh (resume uses live status rule)
+
 WHEN headless `factory resume [RUN_ID]` targets a parallel parent run,
 THE SYSTEM SHALL reject the resume without launching an agent.
 Test: tests/binary.rs (headless_resume_rejects_parallel_parent), tests/behaviors/operations/test-headless-resume.sh
@@ -451,7 +475,13 @@ Test: tests/behaviors/operations/test-land.sh (land rejects non-complete run), t
 WHEN `factory land` is invoked and any review has verdict `fail`,
 `uncertain`, or is missing a verdict line,
 THE SYSTEM SHALL refuse and exit non-zero.
-Test: tests/behaviors/operations/test-land.sh (land rejects fail review verdict, land rejects uncertain review verdict), tests/binary.rs (land_rejects_failed_reviews)
+Test: tests/behaviors/operations/test-land.sh (land rejects fail review verdict, land rejects uncertain review verdict), tests/binary.rs (land_rejects_failed_reviews, land_rejects_live_failed_reviews)
+
+WHEN `factory land [RUN_ID]` validates status and review artifacts before
+landing,
+THE SYSTEM SHALL prefer live worktree status and review artifacts before
+falling back to source run artifacts.
+Test: tests/binary.rs (land_rejects_live_failed_reviews), tests/behaviors/operations/test-live-run-state.sh (land uses live status and reviews)
 
 WHEN the project has no `.factory/config.toml`,
 THE SYSTEM SHALL run `factory land` without requiring project checks.

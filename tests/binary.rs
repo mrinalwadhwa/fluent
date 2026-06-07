@@ -682,6 +682,7 @@ fn summary_prefers_live_worktree_artifacts() {
         "source handoff should not print\n",
     )
     .unwrap();
+    fs::write(source_run.join("report.md"), "# Source report\n").unwrap();
 
     fs::write(live_run.join("status"), "complete").unwrap();
     fs::write(live_run.join("sessions.log"), "live session should print\n").unwrap();
@@ -717,6 +718,7 @@ fn summary_prefers_live_worktree_artifacts() {
         !stdout.contains("source handoff should not print"),
         "{stdout}"
     );
+    assert!(!stdout.contains("Source report"), "{stdout}");
 }
 
 #[test]
@@ -1670,6 +1672,46 @@ fn watch_detects_status_change_and_notifies() {
 }
 
 #[test]
+fn watch_detects_live_status_change_and_notifies() {
+    let tmp = TempDir::new().unwrap();
+    let source_run = tmp.path().join(".factory/runs/live-watch");
+    let worktree_root = tmp.path().join("worktree");
+    let live_run = worktree_root.join(".factory/runs/live-watch");
+    fs::create_dir_all(&source_run).unwrap();
+    fs::create_dir_all(&live_run).unwrap();
+    fs::write(source_run.join("status"), "executing").unwrap();
+    fs::write(source_run.join("brief.md"), "Brief\n").unwrap();
+    fs::write(source_run.join("worktree"), worktree_root.to_str().unwrap()).unwrap();
+    fs::write(live_run.join("status"), "executing").unwrap();
+
+    let bin = assert_cmd::cargo::cargo_bin("factory");
+    let child = std::process::Command::new(&bin)
+        .current_dir(tmp.path())
+        .args(["watch", "1", "--timeout", "5"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    fs::write(live_run.join("status"), "complete").unwrap();
+
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success(), "watch failed: stderr={stderr}");
+    assert!(
+        stdout.contains("live-watch") && stdout.contains("complete"),
+        "watch should print the live status change: stdout={stdout}"
+    );
+    assert!(
+        stderr.contains("[NOTIFY] Run live-watch: complete"),
+        "watch should notify from live status: stderr={stderr}"
+    );
+}
+
+#[test]
 fn watch_exits_on_timeout() {
     let tmp = TempDir::new().unwrap();
     fs::create_dir_all(tmp.path().join(".factory/runs")).unwrap();
@@ -1897,6 +1939,55 @@ fn resume_skips_executing_run() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("No run found needing resume"));
+}
+
+#[test]
+fn resume_finds_live_needs_user_run() {
+    let tmp = TempDir::new().unwrap();
+    let source_run = tmp.path().join(".factory/runs/live-resume");
+    let worktree_root = setup_git_project(&tmp);
+    let live_run = worktree_root.join(".factory/runs/live-resume");
+    fs::create_dir_all(&source_run).unwrap();
+    fs::create_dir_all(&live_run).unwrap();
+    fs::write(source_run.join("status"), "complete").unwrap();
+    fs::write(source_run.join("brief.md"), "Brief\n").unwrap();
+    fs::write(source_run.join("worktree"), worktree_root.to_str().unwrap()).unwrap();
+    fs::write(live_run.join("status"), "needs-user").unwrap();
+    fs::write(live_run.join("source-branch"), "main").unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_codex(
+        &bin_dir,
+        r##"#!/bin/bash
+WORKING_DIR="$(pwd)"
+RUN_DIR="$WORKING_DIR/.factory/runs/live-resume"
+printf '%s\n' "$@" > "$RUN_DIR/resume-codex-args"
+echo "complete" > "$RUN_DIR/status"
+exit 0
+"##,
+    );
+    write_mock_sandbox_exec(&bin_dir);
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["resume", "--coder", "codex"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("SANDBOX_EXEC_LOG", tmp.path().join("sandbox-exec.log"))
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "resume failed: {stderr}");
+    assert!(
+        stderr.contains("Resuming run live-resume"),
+        "should resolve the live needs-user run exactly: stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("session loop (run: live-resume)"),
+        "should restart the live run headlessly: stderr={stderr}"
+    );
+    let status = fs::read_to_string(live_run.join("status")).unwrap();
+    assert_eq!(status.trim(), "complete");
 }
 
 // -------------------------------------------------------------------------
@@ -3794,6 +3885,35 @@ fn land_rejects_failed_reviews() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("reviews did not pass"));
+}
+
+#[test]
+fn land_rejects_live_failed_reviews() {
+    let tmp = TempDir::new().unwrap();
+    let (main_dir, run_id) = setup_completed_run(&tmp);
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
+    let wt_run_dir = Path::new(wt_path_str.trim()).join(format!(".factory/runs/{run_id}"));
+
+    fs::create_dir_all(run_dir.join("reviews")).unwrap();
+    fs::write(run_dir.join("reviews/review-tests.md"), "Verdict: pass").unwrap();
+    fs::write(
+        wt_run_dir.join("reviews/review-tests.md"),
+        "Verdict: fail\n\nLive review failed.\n",
+    )
+    .unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["land", &run_id])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("reviews did not pass"));
+
+    assert!(
+        wt_run_dir.is_dir(),
+        "landing failure should keep the worktree run artifacts"
+    );
 }
 
 #[test]

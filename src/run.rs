@@ -1276,6 +1276,18 @@ mod tests {
 
     #[test]
     #[serial]
+    fn test_resolve_resumable_uses_live_status() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-source-complete", "complete");
+        create_live_run(tmp.path(), "run-source-complete", "needs-user");
+
+        let run = resolve_resumable_run(tmp.path(), None).unwrap();
+
+        assert_eq!(run.id, "run-source-complete");
+    }
+
+    #[test]
+    #[serial]
     fn test_resolve_landable_explicit_id_complete() {
         let tmp = setup_test_project();
         create_run(tmp.path(), "run-land", "complete");
@@ -1407,6 +1419,25 @@ mod tests {
             dir: run_dir,
         };
         assert_eq!(run.effective_reviews_passed(), Some(true));
+    }
+
+    #[test]
+    fn test_effective_reviews_passed_rejects_live_failure() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-elf", "complete");
+        let run_dir = tmp.path().join(".factory/runs/run-elf");
+        fs::create_dir_all(run_dir.join("reviews")).unwrap();
+        fs::write(run_dir.join("reviews/review-tests.md"), "Verdict: pass").unwrap();
+
+        let wt_run_dir = create_live_run(tmp.path(), "run-elf", "complete");
+        fs::create_dir_all(wt_run_dir.join("reviews")).unwrap();
+        fs::write(wt_run_dir.join("reviews/review-tests.md"), "Verdict: fail").unwrap();
+
+        let run = Run {
+            id: "run-elf".into(),
+            dir: run_dir,
+        };
+        assert_eq!(run.effective_reviews_passed(), Some(false));
     }
 
     #[test]

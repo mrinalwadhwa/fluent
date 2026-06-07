@@ -135,6 +135,27 @@ when the required checks and reviews pass.
 | `children` | Child run IDs, one per line (written by the parallel orchestrator for parent runs) |
 | `parent` | Parent run ID (written for each child run) |
 
+### Source and live artifacts
+
+The source run directory under `.factory/runs/<id>` remains the registry
+for known runs and durable metadata such as `worktree`, `runtime`,
+`coder`, `source-branch`, landing records, and cleanup records. When the
+source run directory has a `worktree` file that points at an existing
+worktree containing `.factory/runs/<id>/`, Factory treats that worktree
+run directory as the live artifact directory for current session-loop
+state.
+
+Commands that read current run progress ask the run model for effective
+artifacts. Effective reads prefer the live worktree run directory for
+`status`, `sessions.log`, `sessions/`, `reviews/`, `handoff.md`, and
+`report.md`, then fall back to the source run directory when the live
+artifact does not exist or the worktree pointer is invalid. This shared
+rule covers status listings, watch notifications, summaries, implicit
+resume selection, headless resume, landable-run scans, and review checks
+before landing. Dashboard views use the effective status rule and fall
+back from live `report.md` to source `report.md`; transcript and current
+reviewer tabs list artifacts from the resolved live artifact directory.
+
 ### Run-id resolution
 
 The factory command resolves the run-id through a priority chain:
@@ -149,8 +170,7 @@ The factory command resolves the run-id through a priority chain:
 `factory summary` resolves the active run through the standard run-id
 resolution chain and prints a compact text snapshot from durable run
 artifacts. `factory summary --run-id <id>` summarizes that run directly.
-The summary reads the source run directory and, when a worktree run
-directory exists, prefers the live worktree artifacts for current
+The summary uses the shared source-and-live artifact rule for current
 status, sessions, reviews, handoff, and report presence.
 
 The summary intentionally avoids transcript or report dumps. It includes
