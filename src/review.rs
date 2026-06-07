@@ -155,6 +155,27 @@ pub fn read_review_state(run_dir: &Path) -> Option<Result<ReviewState>> {
     Some(serde_json::from_str(&content).map_err(Into::into))
 }
 
+pub enum ReviewStateRead {
+    Missing,
+    Present(ReviewState),
+    Invalid(String),
+}
+
+pub fn review_state_at(run_dir: &Path) -> ReviewStateRead {
+    match read_review_state(run_dir) {
+        Some(Ok(state)) => ReviewStateRead::Present(state),
+        Some(Err(error)) => ReviewStateRead::Invalid(error.to_string()),
+        None => ReviewStateRead::Missing,
+    }
+}
+
+pub fn effective_review_state(primary_dir: &Path, fallback_dir: &Path) -> ReviewStateRead {
+    match review_state_at(primary_dir) {
+        ReviewStateRead::Missing if primary_dir != fallback_dir => review_state_at(fallback_dir),
+        state => state,
+    }
+}
+
 pub fn current_review_verdicts(run_dir: &Path) -> BTreeMap<String, Verdict> {
     let reviews_dir = run_dir.join("reviews");
     let mut verdicts = BTreeMap::new();

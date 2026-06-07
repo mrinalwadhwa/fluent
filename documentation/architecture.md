@@ -148,14 +148,15 @@ state.
 
 Commands that read current run progress ask the run model for effective
 artifacts. Effective reads prefer the live worktree run directory for
-`status`, `sessions.log`, `sessions/`, `reviews/`, `handoff.md`, and
-`report.md`, then fall back to the source run directory when the live
-artifact does not exist or the worktree pointer is invalid. This shared
-rule covers status listings, watch notifications, summaries, implicit
-resume selection, headless resume, landable-run scans, and review checks
-before landing. Dashboard views use the effective status rule and fall
-back from live `report.md` to source `report.md`; transcript and current
-reviewer tabs list artifacts from the resolved live artifact directory.
+`status`, `sessions.log`, `sessions/`, `reviews/`, `review-state.json`,
+`handoff.md`, and `report.md`, then fall back to the source run
+directory when the live artifact does not exist or the worktree pointer
+is invalid. This shared rule covers status listings, watch
+notifications, summaries, implicit resume selection, headless resume,
+landable-run scans, and review checks before landing. Dashboard views
+use the effective status and review-state rules and fall back from live
+`report.md` to source `report.md`; transcript and current reviewer tabs
+list artifacts from the resolved live artifact directory.
 
 ### Run-id resolution
 
@@ -177,10 +178,12 @@ status, sessions, reviews, handoff, and report presence.
 The summary intentionally avoids transcript or report dumps. It includes
 the run phase, brief excerpt, author metadata from `coder`, reviewer
 activity, child run activity from `children`, latest `sessions.log`
-entries, reviewer verdicts from `reviews/review-*.md`, the first
+entries, the effective review state from `review-state.json`, the first
 actionable handoff line or open question, whether `report.md` exists,
-and a rule-based next action. This makes the command useful in a
-terminal and keeps the same data shape available for later dashboard or
+and a rule-based next action. When `review-state.json` is absent, the
+summary falls back to top-level `reviews/review-*.md` verdicts so old
+runs remain readable. This makes the command useful in a terminal and
+keeps the same data shape available for later dashboard or
 reporting-agent integration.
 
 ### Session continuity

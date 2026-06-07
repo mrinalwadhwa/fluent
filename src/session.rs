@@ -785,6 +785,11 @@ printf '{{"type":"result"}}\n'
         );
         let review = fs::read_to_string(run.dir.join("reviews/review-tests.md")).unwrap();
         assert!(review.contains("Verdict: pass"));
+        let state = review::read_review_state(&run.dir).unwrap().unwrap();
+        assert_eq!(state.state, review::ReviewStateKind::Passed);
+        assert_eq!(state.round, 1);
+        assert_eq!(state.source, review::ReviewStateSource::Reviewers);
+        assert_eq!(state.verdicts.get("tests"), Some(&review::Verdict::Pass));
         let args = fs::read_to_string(run.dir.join("review-args")).unwrap();
         assert!(args.contains("Full scope marker"));
         assert!(!args.contains("Changes scope marker"));

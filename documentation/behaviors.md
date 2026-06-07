@@ -433,8 +433,8 @@ Test: src/session.rs (complete_or_continue_dirty_completes_review_limit_clean_ru
 
 IF the review-fix cycle has run 10 times and the worktree is clean,
 THEN THE SYSTEM SHALL write `review-state.json` with state
-`accepted-review-limit`, source `review-limit`, `max_rounds`, and a
-short reason.
+`accepted-review-limit`, source `review-limit`, per-reviewer verdicts,
+`max_rounds`, and a short reason.
 Test: src/session.rs (test_loop_review_limit_clean_worktree_records_acceptance)
 
 IF the review-fix cycle has run 10 times and the worktree is dirty,
@@ -510,8 +510,9 @@ WHEN `factory land` is invoked and the run status is not `complete`,
 THE SYSTEM SHALL refuse and exit non-zero.
 Test: tests/behaviors/operations/test-land.sh (land rejects non-complete run), tests/binary.rs (land_rejects_non_complete_run)
 
-WHEN `factory land` is invoked and any review has verdict `fail`,
-`uncertain`, or is missing a verdict line,
+WHEN `factory land` is invoked for a run without `review-state.json` and
+any current review artifact has verdict `fail`, `uncertain`, or is
+missing a verdict line,
 THE SYSTEM SHALL refuse and exit non-zero.
 Test: tests/behaviors/operations/test-land.sh (land rejects fail review verdict, land rejects uncertain review verdict), tests/binary.rs (land_rejects_failed_reviews, land_rejects_live_failed_reviews)
 

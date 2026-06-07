@@ -333,10 +333,15 @@ impl RunView {
     }
 
     fn review_state_summary(&self) -> Option<String> {
-        review::read_review_state(&self.live_dir)
-            .or_else(|| review::read_review_state(&self.run.dir))
-            .and_then(Result::ok)
-            .map(|state| format!("{} ({})", state.state.as_str(), state.source.as_str()))
+        match review::effective_review_state(&self.live_dir, &self.run.dir) {
+            review::ReviewStateRead::Present(state) => Some(format!(
+                "{} ({})",
+                state.state.as_str(),
+                state.source.as_str()
+            )),
+            review::ReviewStateRead::Invalid(_) => Some("invalid review-state.json".to_string()),
+            review::ReviewStateRead::Missing => None,
+        }
     }
 
     fn select_next_agent(&mut self) {
@@ -1423,6 +1428,36 @@ mod tests {
         assert_eq!(
             view.review_state_summary(),
             Some("accepted-review-limit (review-limit)".to_string())
+        );
+    }
+
+    #[test]
+    fn test_run_view_review_state_summary_reports_invalid_state_file() {
+        let tmp = TempDir::new().unwrap();
+        let run_dir = tmp.path().join(".factory/runs/test-run");
+        std::fs::create_dir_all(run_dir.join("reviews")).unwrap();
+        std::fs::write(run_dir.join("status"), "complete").unwrap();
+        std::fs::write(run_dir.join("reviews/review-tests.md"), "Verdict: pass").unwrap();
+        std::fs::write(run_dir.join("review-state.json"), r#"{"state":"unknown"}"#).unwrap();
+
+        let view = RunView {
+            run: Run {
+                id: "test-run".to_string(),
+                dir: run_dir.clone(),
+            },
+            live_dir: run_dir,
+            agents: vec![AgentView::new("author")],
+            selected_agent: 0,
+            agent_selection_touched: false,
+            scroll_offset: 0,
+            auto_scroll: true,
+            wrapped_total: 0,
+            cached_status: "complete".to_string(),
+        };
+
+        assert_eq!(
+            view.review_state_summary(),
+            Some("invalid review-state.json".to_string())
         );
     }
 

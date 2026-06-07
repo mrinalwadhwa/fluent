@@ -3923,6 +3923,10 @@ fn land_accepts_review_limit_state_with_stale_fail_artifact() {
         .success()
         .stderr(predicate::str::contains("landed successfully"));
 
+    let landed_state = fs::read_to_string(run_dir.join("review-state.json")).unwrap();
+    assert!(landed_state.contains(r#""state": "accepted-review-limit""#));
+    assert!(landed_state.contains(r#""tests": "fail""#));
+
     let status = fs::read_to_string(run_dir.join("status")).unwrap();
     assert_eq!(status.trim(), "landed");
 }

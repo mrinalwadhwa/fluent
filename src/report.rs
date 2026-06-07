@@ -40,52 +40,57 @@ pub fn generate_report(run_dir: &Path, run_id: &str, session_count: u32) -> Resu
     }
 
     report.push_str("## Reviewer verdicts\n\n");
-    let review_state = review::read_review_state(run_dir).and_then(Result::ok);
-    if let Some(state) = &review_state {
-        report.push_str(&format!(
-            "State: {} ({})\n\n",
-            state.state.as_str(),
-            state.source.as_str()
-        ));
-    }
     let reviews_dir = run_dir.join("reviews");
-    if let Some(state) = review_state {
-        if state.verdicts.is_empty() {
-            report.push_str("(no reviews)\n");
-        } else {
-            for (name, verdict) in state.verdicts {
-                report.push_str(&format!("- **{name}**: {}\n", verdict_str(&verdict)));
-            }
-        }
-        report.push('\n');
-    } else if reviews_dir.is_dir() {
-        let mut has_reviews = false;
-        if let Ok(entries) = fs::read_dir(&reviews_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let name = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .strip_prefix("review-")
-                    .unwrap_or("");
-                if name.is_empty() {
-                    continue;
+    match review::review_state_at(run_dir) {
+        review::ReviewStateRead::Present(state) => {
+            report.push_str(&format!(
+                "State: {} ({})\n\n",
+                state.state.as_str(),
+                state.source.as_str()
+            ));
+            if state.verdicts.is_empty() {
+                report.push_str("(no reviews)\n");
+            } else {
+                for (name, verdict) in state.verdicts {
+                    report.push_str(&format!("- **{name}**: {}\n", verdict_str(&verdict)));
                 }
-                has_reviews = true;
-                let verdict_str = fs::read_to_string(&path)
-                    .ok()
-                    .map(|c| verdict_str(&review::extract_verdict(&c)).to_string())
-                    .unwrap_or_else(|| "no verdict".into());
-                report.push_str(&format!("- **{name}**: {verdict_str}\n"));
             }
+            report.push('\n');
         }
-        if !has_reviews {
-            report.push_str("(no reviews)\n");
+        review::ReviewStateRead::Invalid(error) => {
+            report.push_str(&format!("State: invalid review-state.json ({error})\n\n"));
+            report.push_str("(no reviews)\n\n");
         }
-        report.push('\n');
-    } else {
-        report.push_str("(no reviews)\n\n");
+        review::ReviewStateRead::Missing if reviews_dir.is_dir() => {
+            let mut has_reviews = false;
+            if let Ok(entries) = fs::read_dir(&reviews_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let name = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .strip_prefix("review-")
+                        .unwrap_or("");
+                    if name.is_empty() {
+                        continue;
+                    }
+                    has_reviews = true;
+                    let verdict_str = fs::read_to_string(&path)
+                        .ok()
+                        .map(|c| verdict_str(&review::extract_verdict(&c)).to_string())
+                        .unwrap_or_else(|| "no verdict".into());
+                    report.push_str(&format!("- **{name}**: {verdict_str}\n"));
+                }
+            }
+            if !has_reviews {
+                report.push_str("(no reviews)\n");
+            }
+            report.push('\n');
+        }
+        review::ReviewStateRead::Missing => {
+            report.push_str("(no reviews)\n\n");
+        }
     }
 
     report.push_str("## Key findings\n\n");
@@ -269,6 +274,22 @@ mod tests {
         let report = fs::read_to_string(run_dir.join("report.md")).unwrap();
         assert!(report.contains("State: accepted-review-limit (review-limit)"));
         assert!(report.contains("- **tests**: fail"));
+    }
+
+    #[test]
+    fn test_generate_report_shows_invalid_review_state_without_artifact_fallback() {
+        let tmp = TempDir::new().unwrap();
+        let run_dir = tmp.path();
+        fs::write(run_dir.join("status"), "complete").unwrap();
+        fs::create_dir(run_dir.join("reviews")).unwrap();
+        fs::write(run_dir.join("reviews/review-tests.md"), "Verdict: pass").unwrap();
+        fs::write(run_dir.join("review-state.json"), r#"{"state":"unknown"}"#).unwrap();
+
+        generate_report(run_dir, "test-run", 1).unwrap();
+
+        let report = fs::read_to_string(run_dir.join("report.md")).unwrap();
+        assert!(report.contains("State: invalid review-state.json"));
+        assert!(!report.contains("- **tests**: pass"));
     }
 
     #[test]

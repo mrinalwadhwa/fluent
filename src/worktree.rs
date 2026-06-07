@@ -140,7 +140,14 @@ fn git_current_branch(dir: &Path) -> Result<String> {
 }
 
 /// Artifacts to copy back from the worktree run directory before cleanup.
-const RUN_ARTIFACTS: &[&str] = &["sessions", "sessions.log", "reviews", "report.md", "status"];
+const RUN_ARTIFACTS: &[&str] = &[
+    "sessions",
+    "sessions.log",
+    "reviews",
+    "review-state.json",
+    "report.md",
+    "status",
+];
 
 /// Land a completed run: copy artifacts back, remove the worktree,
 /// rebase onto the source branch, fast-forward merge, and delete the
