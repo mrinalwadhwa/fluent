@@ -119,6 +119,44 @@ these concepts separate lets learning and planning land through the same
 reviewed workflow as code without treating transient session state as
 project knowledge.
 
+Durable work model state lives under `.factory/work/`. This tree is
+separate from `.factory/runs`, which still stores live run execution
+state, session artifacts, reviewer state, worktree handles, and status
+files. Existing commands keep supporting `.factory/runs` without requiring
+`.factory/work/`; the coexistence is a compatibility bridge while queue
+work grows around the model.
+
+The first storage contract is:
+
+```
+.factory/work/
+  items/
+    <work-item-id>.json
+```
+
+Each file in `items/` stores one serialized `WorkItem` from
+`factory::work_model`. The `WorkItem` contains its Attempts, and each
+Attempt contains its Tasks. Workspace references stay inside task
+`workspace_access.reads` and `workspace_access.writes`; Factory does not
+keep a standalone workspace registry in this first contract. Merge
+Candidates use the public `MergeCandidate` shape, but queue work has not
+yet introduced a separate candidate collection.
+
+Code that reads `.factory/work/items/*.json` must parse into the public
+Rust model and validate every embedded task before using the object.
+The `WorkItem.id` inside each file must match the file stem, so
+`.factory/work/items/work-1.json` must contain `"id": "work-1"`.
+Work item IDs must not be empty, `.`, `..`, or contain `/` or `\`,
+because Factory uses each ID directly as one file name under `items/`.
+Each stored Attempt must set `work_item_id` to the containing
+`WorkItem.id`. Each stored Task must set `work_item_id` to the
+containing `WorkItem.id`, and must set `attempt_id` to the containing
+Attempt id even though the public Task shape allows `attempt_id` to be
+absent before a task joins an Attempt. Invalid JSON, ID mismatches,
+invalid work item IDs, and model validation failures must report the file
+path or object that failed. Code that writes work items must use
+deterministic pretty JSON and must not write invalid model state.
+
 ## The run
 
 The core recursive unit of work.

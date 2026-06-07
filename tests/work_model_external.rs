@@ -1,4 +1,48 @@
-use factory::work_model::{Task, TaskKind, WorkModelError, from_json};
+use factory::work_model::{
+    Attempt, AttemptReviewState, AttemptStatus, Task, TaskArtifactArea, TaskKind, WorkItem,
+    WorkModelError, WorkModelStorageError, WorkModelStore, WorkspaceAccess, WorkspaceRef,
+    from_json,
+};
+use std::fs;
+
+fn workspace(id: &str) -> WorkspaceRef {
+    WorkspaceRef {
+        id: id.to_string(),
+        path: format!("../workspaces/{id}"),
+    }
+}
+
+fn task(kind: TaskKind) -> Task {
+    Task {
+        id: "write-code".to_string(),
+        kind,
+        role: "author".to_string(),
+        work_item_id: "work-1".to_string(),
+        attempt_id: Some("attempt-1".to_string()),
+        workspace_access: WorkspaceAccess {
+            reads: vec![workspace("main")],
+            writes: vec![workspace("candidate")],
+        },
+        artifact_area: Some(TaskArtifactArea {
+            path: ".factory/work/artifacts/write-code".to_string(),
+        }),
+    }
+}
+
+fn work_item() -> WorkItem {
+    WorkItem {
+        id: "work-1".to_string(),
+        title: "Add durable model storage".to_string(),
+        attempts: vec![Attempt {
+            id: "attempt-1".to_string(),
+            work_item_id: "work-1".to_string(),
+            status: AttemptStatus::Complete,
+            tasks: vec![task(TaskKind::Write)],
+            review_state: Some(AttemptReviewState::Passed),
+            artifacts: Vec::new(),
+        }],
+    }
+}
 
 #[test]
 fn documented_task_kinds_parse_from_json() {
@@ -52,4 +96,295 @@ fn documented_review_task_rejects_workspace_writes() {
             task_id: "review-architecture".to_string(),
         }
     );
+}
+
+#[test]
+fn work_model_store_writes_and_lists_documented_layout() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    let work_item = work_item();
+
+    store.write_work_item(&work_item).unwrap();
+
+    let path = temp.path().join(".factory/work/items/work-1.json");
+    assert!(path.exists());
+    assert!(!temp.path().join(".factory/runs").exists());
+    assert_eq!(store.read_work_item("work-1").unwrap(), work_item);
+    assert_eq!(store.list_work_items().unwrap(), vec![work_item]);
+}
+
+#[test]
+fn work_model_store_keeps_existing_run_state_separate() {
+    let temp = tempfile::tempdir().unwrap();
+    let run_dir = temp.path().join(".factory/runs/run-legacy");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "complete").unwrap();
+    fs::write(run_dir.join("sessions.log"), "legacy session\n").unwrap();
+
+    let store = WorkModelStore::new(temp.path());
+    let work_item = work_item();
+
+    store.write_work_item(&work_item).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(run_dir.join("status")).unwrap(),
+        "complete"
+    );
+    assert_eq!(
+        fs::read_to_string(run_dir.join("sessions.log")).unwrap(),
+        "legacy session\n"
+    );
+    assert!(temp.path().join(".factory/work/items/work-1.json").exists());
+    assert_eq!(store.read_work_item("work-1").unwrap(), work_item);
+}
+
+#[test]
+fn work_model_store_rejects_file_name_id_mismatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    store.write_work_item(&work_item()).unwrap();
+
+    let path = temp.path().join(".factory/work/items/work-1.json");
+    let invalid = fs::read_to_string(&path)
+        .unwrap()
+        .replace(r#""id": "work-1""#, r#""id": "work-2""#);
+    fs::write(&path, invalid).unwrap();
+
+    let error = store.read_work_item("work-1").unwrap_err();
+
+    match error {
+        WorkModelStorageError::WorkItemIdMismatch {
+            path: actual,
+            expected,
+            actual: id,
+        } => {
+            assert_eq!(actual, path);
+            assert_eq!(expected, "work-1");
+            assert_eq!(id, "work-2");
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+
+    assert!(matches!(
+        store.list_work_items().unwrap_err(),
+        WorkModelStorageError::WorkItemIdMismatch { .. }
+    ));
+}
+
+#[test]
+fn work_model_store_rejects_ids_that_cannot_name_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+
+    for id in ["", ".", "..", "nested/work", r"nested\work"] {
+        assert!(matches!(
+            store.work_item_path(id).unwrap_err(),
+            WorkModelStorageError::InvalidWorkItemId { .. }
+        ));
+        assert!(matches!(
+            store.read_work_item(id).unwrap_err(),
+            WorkModelStorageError::InvalidWorkItemId { .. }
+        ));
+
+        let mut work_item = work_item();
+        work_item.id = id.to_string();
+        assert!(matches!(
+            store.write_work_item(&work_item).unwrap_err(),
+            WorkModelStorageError::InvalidWorkItemId { .. }
+        ));
+    }
+}
+
+#[test]
+fn work_model_store_writes_deterministic_pretty_json() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+
+    store.write_work_item(&work_item()).unwrap();
+
+    let path = temp.path().join(".factory/work/items/work-1.json");
+    let content = fs::read_to_string(path).unwrap();
+    assert_eq!(
+        content,
+        r#"{
+  "id": "work-1",
+  "title": "Add durable model storage",
+  "attempts": [
+    {
+      "id": "attempt-1",
+      "work_item_id": "work-1",
+      "status": "complete",
+      "tasks": [
+        {
+          "id": "write-code",
+          "kind": "write",
+          "role": "author",
+          "work_item_id": "work-1",
+          "attempt_id": "attempt-1",
+          "workspace_access": {
+            "reads": [
+              {
+                "id": "main",
+                "path": "../workspaces/main"
+              }
+            ],
+            "writes": [
+              {
+                "id": "candidate",
+                "path": "../workspaces/candidate"
+              }
+            ]
+          },
+          "artifact_area": {
+            "path": ".factory/work/artifacts/write-code"
+          }
+        }
+      ],
+      "review_state": "passed",
+      "artifacts": []
+    }
+  ]
+}
+"#
+    );
+}
+
+#[test]
+fn work_model_store_returns_empty_list_without_work_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+
+    assert!(store.list_work_items().unwrap().is_empty());
+}
+
+#[test]
+fn work_model_store_reports_file_for_invalid_json() {
+    let temp = tempfile::tempdir().unwrap();
+    let items = temp.path().join(".factory/work/items");
+    fs::create_dir_all(&items).unwrap();
+    let path = items.join("work-1.json");
+    fs::write(&path, "{").unwrap();
+
+    let error = WorkModelStore::new(temp.path())
+        .read_work_item("work-1")
+        .unwrap_err();
+
+    match error {
+        WorkModelStorageError::ParseFile { path: actual, .. } => assert_eq!(actual, path),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn work_model_store_reports_file_for_invalid_task_model() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    let mut invalid = work_item();
+    invalid.attempts[0].tasks[0].kind = TaskKind::Review;
+
+    let error = store.write_work_item(&invalid).unwrap_err();
+
+    match error {
+        WorkModelStorageError::InvalidModel { path, source } => {
+            assert_eq!(path, temp.path().join(".factory/work/items/work-1.json"));
+            assert_eq!(
+                source,
+                WorkModelError::ReviewTaskWritesWorkspace {
+                    task_id: "write-code".to_string()
+                }
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn work_item_validate_rejects_attempt_with_wrong_work_item() {
+    let mut invalid = work_item();
+    invalid.attempts[0].work_item_id = "work-2".to_string();
+
+    assert_eq!(
+        invalid.validate().unwrap_err(),
+        WorkModelError::AttemptWorkItemMismatch {
+            attempt_id: "attempt-1".to_string(),
+            expected: "work-1".to_string(),
+            actual: "work-2".to_string(),
+        }
+    );
+}
+
+#[test]
+fn work_item_validate_rejects_task_with_wrong_work_item() {
+    let mut invalid = work_item();
+    invalid.attempts[0].tasks[0].work_item_id = "work-2".to_string();
+
+    assert_eq!(
+        invalid.validate().unwrap_err(),
+        WorkModelError::TaskWorkItemMismatch {
+            task_id: "write-code".to_string(),
+            expected: "work-1".to_string(),
+            actual: "work-2".to_string(),
+        }
+    );
+}
+
+#[test]
+fn work_item_validate_rejects_task_without_attempt() {
+    let mut invalid = work_item();
+    invalid.attempts[0].tasks[0].attempt_id = None;
+
+    assert_eq!(
+        invalid.validate().unwrap_err(),
+        WorkModelError::TaskAttemptMismatch {
+            task_id: "write-code".to_string(),
+            expected: "attempt-1".to_string(),
+            actual: None,
+        }
+    );
+}
+
+#[test]
+fn work_item_validate_rejects_task_with_wrong_attempt() {
+    let mut invalid = work_item();
+    invalid.attempts[0].tasks[0].attempt_id = Some("attempt-2".to_string());
+
+    assert_eq!(
+        invalid.validate().unwrap_err(),
+        WorkModelError::TaskAttemptMismatch {
+            task_id: "write-code".to_string(),
+            expected: "attempt-1".to_string(),
+            actual: Some("attempt-2".to_string()),
+        }
+    );
+}
+
+#[test]
+fn work_model_store_reports_file_for_invalid_model_read_from_disk() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    store.write_work_item(&work_item()).unwrap();
+
+    let path = temp.path().join(".factory/work/items/work-1.json");
+    let invalid = fs::read_to_string(&path)
+        .unwrap()
+        .replace(r#""kind": "write""#, r#""kind": "review""#);
+    fs::write(&path, invalid).unwrap();
+
+    let error = store.read_work_item("work-1").unwrap_err();
+
+    match error {
+        WorkModelStorageError::InvalidModel {
+            path: actual,
+            source,
+        } => {
+            assert_eq!(actual, path);
+            assert_eq!(
+                source,
+                WorkModelError::ReviewTaskWritesWorkspace {
+                    task_id: "write-code".to_string(),
+                }
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
 }

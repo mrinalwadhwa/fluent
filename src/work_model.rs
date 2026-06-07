@@ -1,7 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
+
+pub const WORK_MODEL_DIR: &str = ".factory/work";
+pub const WORK_ITEMS_DIR: &str = "items";
 
 /// Durable unit of planned Factory work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -10,6 +16,22 @@ pub struct WorkItem {
     pub title: String,
     #[serde(default)]
     pub attempts: Vec<Attempt>,
+}
+
+impl WorkItem {
+    pub fn validate(&self) -> Result<(), WorkModelError> {
+        for attempt in &self.attempts {
+            if attempt.work_item_id != self.id {
+                return Err(WorkModelError::AttemptWorkItemMismatch {
+                    attempt_id: attempt.id.clone(),
+                    expected: self.id.clone(),
+                    actual: attempt.work_item_id.clone(),
+                });
+            }
+            attempt.validate(&self.id)?;
+        }
+        Ok(())
+    }
 }
 
 /// One execution history branch for a work item.
@@ -24,6 +46,29 @@ pub struct Attempt {
     pub review_state: Option<AttemptReviewState>,
     #[serde(default)]
     pub artifacts: Vec<ArtifactRef>,
+}
+
+impl Attempt {
+    pub fn validate(&self, work_item_id: &str) -> Result<(), WorkModelError> {
+        for task in &self.tasks {
+            if task.work_item_id != work_item_id {
+                return Err(WorkModelError::TaskWorkItemMismatch {
+                    task_id: task.id.clone(),
+                    expected: work_item_id.to_string(),
+                    actual: task.work_item_id.clone(),
+                });
+            }
+            if task.attempt_id.as_deref() != Some(self.id.as_str()) {
+                return Err(WorkModelError::TaskAttemptMismatch {
+                    task_id: task.id.clone(),
+                    expected: self.id.clone(),
+                    actual: task.attempt_id.clone(),
+                });
+            }
+            task.validate()?;
+        }
+        Ok(())
+    }
 }
 
 /// Coarse attempt lifecycle state.
@@ -195,9 +240,30 @@ pub enum MergeCandidateReviewState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkModelError {
-    MultipleWriteWorkspaces { count: usize },
-    ReviewTaskWritesWorkspace { task_id: String },
-    ReviewTaskMissingArtifactArea { task_id: String },
+    MultipleWriteWorkspaces {
+        count: usize,
+    },
+    ReviewTaskWritesWorkspace {
+        task_id: String,
+    },
+    ReviewTaskMissingArtifactArea {
+        task_id: String,
+    },
+    AttemptWorkItemMismatch {
+        attempt_id: String,
+        expected: String,
+        actual: String,
+    },
+    TaskWorkItemMismatch {
+        task_id: String,
+        expected: String,
+        actual: String,
+    },
+    TaskAttemptMismatch {
+        task_id: String,
+        expected: String,
+        actual: Option<String>,
+    },
 }
 
 impl fmt::Display for WorkModelError {
@@ -212,11 +278,269 @@ impl fmt::Display for WorkModelError {
             Self::ReviewTaskMissingArtifactArea { task_id } => {
                 write!(f, "review task {task_id} must declare an artifact area")
             }
+            Self::AttemptWorkItemMismatch {
+                attempt_id,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "attempt {attempt_id} belongs to work item {actual}; expected {expected}"
+                )
+            }
+            Self::TaskWorkItemMismatch {
+                task_id,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "task {task_id} belongs to work item {actual}; expected {expected}"
+                )
+            }
+            Self::TaskAttemptMismatch {
+                task_id,
+                expected,
+                actual,
+            } => match actual {
+                Some(actual) => {
+                    write!(
+                        f,
+                        "task {task_id} belongs to attempt {actual}; expected {expected}"
+                    )
+                }
+                None => write!(f, "task {task_id} must belong to attempt {expected}"),
+            },
         }
     }
 }
 
 impl Error for WorkModelError {}
+
+#[derive(Debug)]
+pub enum WorkModelStorageError {
+    InvalidWorkItemId {
+        id: String,
+    },
+    CreateDirectory {
+        path: PathBuf,
+        source: io::Error,
+    },
+    ReadDirectory {
+        path: PathBuf,
+        source: io::Error,
+    },
+    ReadFile {
+        path: PathBuf,
+        source: io::Error,
+    },
+    WriteFile {
+        path: PathBuf,
+        source: io::Error,
+    },
+    ParseFile {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+    WorkItemIdMismatch {
+        path: PathBuf,
+        expected: String,
+        actual: String,
+    },
+    InvalidModel {
+        path: PathBuf,
+        source: WorkModelError,
+    },
+}
+
+impl WorkModelStorageError {
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            Self::InvalidWorkItemId { .. } => None,
+            Self::CreateDirectory { path, .. }
+            | Self::ReadDirectory { path, .. }
+            | Self::ReadFile { path, .. }
+            | Self::WriteFile { path, .. }
+            | Self::ParseFile { path, .. }
+            | Self::WorkItemIdMismatch { path, .. }
+            | Self::InvalidModel { path, .. } => Some(path),
+        }
+    }
+}
+
+impl fmt::Display for WorkModelStorageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidWorkItemId { id } => {
+                write!(f, "work item id {id:?} cannot be used as a file name")
+            }
+            Self::CreateDirectory { path, source } => {
+                write!(f, "failed to create {}: {source}", path.display())
+            }
+            Self::ReadDirectory { path, source } => {
+                write!(f, "failed to read {}: {source}", path.display())
+            }
+            Self::ReadFile { path, source } => {
+                write!(f, "failed to read {}: {source}", path.display())
+            }
+            Self::WriteFile { path, source } => {
+                write!(f, "failed to write {}: {source}", path.display())
+            }
+            Self::ParseFile { path, source } => {
+                write!(f, "failed to parse {}: {source}", path.display())
+            }
+            Self::WorkItemIdMismatch {
+                path,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "work item file {} contains id {actual}; expected {expected}",
+                    path.display()
+                )
+            }
+            Self::InvalidModel { path, source } => {
+                write!(f, "invalid work model in {}: {source}", path.display())
+            }
+        }
+    }
+}
+
+impl Error for WorkModelStorageError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidWorkItemId { .. } => None,
+            Self::CreateDirectory { source, .. }
+            | Self::ReadDirectory { source, .. }
+            | Self::ReadFile { source, .. }
+            | Self::WriteFile { source, .. } => Some(source),
+            Self::ParseFile { source, .. } => Some(source),
+            Self::WorkItemIdMismatch { .. } => None,
+            Self::InvalidModel { source, .. } => Some(source),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkModelStore {
+    project_root: PathBuf,
+}
+
+impl WorkModelStore {
+    pub fn new(project_root: impl Into<PathBuf>) -> Self {
+        Self {
+            project_root: project_root.into(),
+        }
+    }
+
+    pub fn work_dir(&self) -> PathBuf {
+        self.project_root.join(WORK_MODEL_DIR)
+    }
+
+    pub fn work_items_dir(&self) -> PathBuf {
+        self.work_dir().join(WORK_ITEMS_DIR)
+    }
+
+    pub fn work_item_path(&self, id: &str) -> Result<PathBuf, WorkModelStorageError> {
+        work_item_file_name(id).map(|file_name| self.work_items_dir().join(file_name))
+    }
+
+    pub fn list_work_items(&self) -> Result<Vec<WorkItem>, WorkModelStorageError> {
+        let dir = self.work_items_dir();
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut paths = Vec::new();
+        let entries =
+            fs::read_dir(&dir).map_err(|source| WorkModelStorageError::ReadDirectory {
+                path: dir.clone(),
+                source,
+            })?;
+        for entry in entries {
+            let entry = entry.map_err(|source| WorkModelStorageError::ReadDirectory {
+                path: dir.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                paths.push(path);
+            }
+        }
+        paths.sort();
+
+        paths
+            .into_iter()
+            .map(|path| self.read_work_item_file(&path))
+            .collect()
+    }
+
+    pub fn read_work_item(&self, id: &str) -> Result<WorkItem, WorkModelStorageError> {
+        let path = self.work_item_path(id)?;
+        self.read_work_item_file(&path)
+    }
+
+    pub fn write_work_item(&self, work_item: &WorkItem) -> Result<(), WorkModelStorageError> {
+        let path = self.work_item_path(&work_item.id)?;
+        work_item
+            .validate()
+            .map_err(|source| WorkModelStorageError::InvalidModel {
+                path: path.clone(),
+                source,
+            })?;
+
+        let dir = self.work_items_dir();
+        fs::create_dir_all(&dir)
+            .map_err(|source| WorkModelStorageError::CreateDirectory { path: dir, source })?;
+
+        let json =
+            to_json_pretty(work_item).map_err(|source| WorkModelStorageError::ParseFile {
+                path: path.clone(),
+                source,
+            })?;
+        fs::write(&path, json).map_err(|source| WorkModelStorageError::WriteFile { path, source })
+    }
+
+    fn read_work_item_file(&self, path: &Path) -> Result<WorkItem, WorkModelStorageError> {
+        let content =
+            fs::read_to_string(path).map_err(|source| WorkModelStorageError::ReadFile {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        let work_item: WorkItem =
+            from_json(&content).map_err(|source| WorkModelStorageError::ParseFile {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        if let Some(expected) = path.file_stem().and_then(|stem| stem.to_str()) {
+            if work_item.id != expected {
+                return Err(WorkModelStorageError::WorkItemIdMismatch {
+                    path: path.to_path_buf(),
+                    expected: expected.to_string(),
+                    actual: work_item.id.clone(),
+                });
+            }
+        }
+        work_item
+            .validate()
+            .map_err(|source| WorkModelStorageError::InvalidModel {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        Ok(work_item)
+    }
+}
+
+fn work_item_file_name(id: &str) -> Result<String, WorkModelStorageError> {
+    if id.is_empty() || id == "." || id == ".." || id.contains('/') || id.contains('\\') {
+        return Err(WorkModelStorageError::InvalidWorkItemId { id: id.to_string() });
+    }
+    Ok(format!("{id}.json"))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseTaskKindError(String);
