@@ -213,7 +213,7 @@ factory watch                        # poll status, notify on change
 factory dashboard                    # open the live run dashboard
 factory pull                         # download completed workspace from S3
 factory shell                        # interactive shell into running task
-factory resume                       # restart a paused run
+factory resume                       # restart a paused or failed run
 factory land                         # land a completed run
 factory cleanup                      # dry-run stale complete/landed cleanup
 factory cleanup --apply              # clean selected runs and registered worktrees
