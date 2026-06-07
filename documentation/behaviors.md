@@ -285,12 +285,15 @@ Test: src/dashboard.rs (test_app_new_prefers_actionable_run_over_cleaned_termina
 WHEN `factory pull` is invoked,
 THE SYSTEM SHALL download the completed workspace from S3 into the run's
 worktree directory.
+Test: tests/binary.rs (pull_downloads_workspace_to_recorded_worktree,
+pull_downloads_workspace_to_fallback_target)
 
 ## Interactive access
 
 WHEN `factory shell` is invoked,
 THE SYSTEM SHALL open an interactive shell into the running Fargate
 container via ECS Exec.
+Test: tests/binary.rs (shell_opens_ecs_exec_for_recorded_task)
 
 ## Watch and notification
 
@@ -389,7 +392,7 @@ IF the review-fix cycle has run 10 times,
 THEN THE SYSTEM SHALL accept the current state, generate a report, and
 complete the run when the worktree has no tracked changes, staged
 changes, or untracked non-ignored files outside `.factory`.
-Test: src/session.rs (test_loop_review_limit_dirty_worktree_restarts_author)
+Test: src/session.rs (complete_or_continue_dirty_completes_review_limit_clean_run)
 
 ## Parent death detection
 

@@ -89,7 +89,7 @@ for test in tests/behaviors/operations/*.sh; do bash "$test"; done
 | Run-id scan treats `executing` as active | `binary.rs` |
 | Run-id scan skips `needs-user` and `failed` | `binary.rs` |
 | Status display works with no runs | `test-status-edges`, `binary.rs` |
-| Review mode copies mode/reviewers to worktree | `binary.rs` |
+| Review mode copies mode/reviewers to worktree | `src/worktree.rs` |
 | Resume finds `needs-user` or `failed` runs | `test-resume-resolve`, `binary.rs` |
 | Headless resume restarts a selected run | `test-headless-resume`, `binary.rs` |
 | Headless resume rejects parallel parent runs | `test-headless-resume`, `binary.rs` |

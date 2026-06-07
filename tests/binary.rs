@@ -1845,6 +1845,161 @@ fn pull_no_fargate_run() {
         .stderr(predicate::str::contains("No fargate run found"));
 }
 
+#[test]
+fn pull_downloads_workspace_to_recorded_worktree() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path().join("project");
+    let worktree = tmp.path().join("worktree");
+    let run_dir = project.join(".factory/runs/pull-run");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::create_dir_all(&worktree).unwrap();
+    fs::write(run_dir.join("runtime"), "fargate").unwrap();
+    fs::write(
+        run_dir.join("worktree"),
+        worktree.to_string_lossy().as_ref(),
+    )
+    .unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_executable(
+        &bin_dir,
+        "aws",
+        r##"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${AWS_LOG:?}"
+case "$1 $2" in
+  "s3 cp")
+    printf 'mock workspace archive\n'
+    ;;
+  *)
+    printf 'unexpected aws command: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+"##,
+    );
+    write_mock_executable(
+        &bin_dir,
+        "tar",
+        r##"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${TAR_LOG:?}"
+cat > "${TAR_STDIN:?}"
+"##,
+    );
+
+    let aws_log = tmp.path().join("aws.log");
+    let tar_log = tmp.path().join("tar.log");
+    let tar_stdin = tmp.path().join("tar.stdin");
+
+    let output = factory_cmd()
+        .current_dir(&project)
+        .arg("pull")
+        .env("PATH", mock_path(&bin_dir))
+        .env("HOME", tmp.path())
+        .env("FACTORY_CLUSTER", "cluster-arn")
+        .env("FACTORY_S3_BUCKET", "bucket")
+        .env("FACTORY_SUBNETS", "subnet-a")
+        .env("FACTORY_SECURITY_GROUP", "sg-123")
+        .env("FACTORY_REGION", "us-west-2")
+        .env("AWS_LOG", &aws_log)
+        .env("TAR_LOG", &tar_log)
+        .env("TAR_STDIN", &tar_stdin)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "pull failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let aws = fs::read_to_string(&aws_log).unwrap();
+    assert!(
+        aws.contains("s3 cp --region us-west-2 s3://bucket/runs/pull-run/workspace.tar -"),
+        "pull should download the run workspace archive: {aws}"
+    );
+
+    let tar = fs::read_to_string(&tar_log).unwrap();
+    assert!(
+        tar.contains(&format!("xf - -C {}", worktree.display())),
+        "pull should extract into the recorded worktree: {tar}"
+    );
+    assert_eq!(
+        fs::read_to_string(&tar_stdin).unwrap(),
+        "mock workspace archive\n"
+    );
+}
+
+#[test]
+fn pull_downloads_workspace_to_fallback_target() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path().join("project");
+    let run_dir = project.join(".factory/runs/pull-run");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("runtime"), "fargate").unwrap();
+    fs::write(
+        run_dir.join("worktree"),
+        tmp.path().join("missing").to_string_lossy().as_ref(),
+    )
+    .unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_executable(
+        &bin_dir,
+        "aws",
+        r##"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${AWS_LOG:?}"
+printf 'mock workspace archive\n'
+"##,
+    );
+    write_mock_executable(
+        &bin_dir,
+        "tar",
+        r##"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${TAR_LOG:?}"
+cat >/dev/null
+"##,
+    );
+
+    let aws_log = tmp.path().join("aws.log");
+    let tar_log = tmp.path().join("tar.log");
+    let fallback = tmp.path().join("pull-run");
+
+    let output = factory_cmd()
+        .current_dir(&project)
+        .args(["pull", "pull-run"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("HOME", tmp.path())
+        .env("FACTORY_CLUSTER", "cluster-arn")
+        .env("FACTORY_S3_BUCKET", "bucket")
+        .env("FACTORY_SUBNETS", "subnet-a")
+        .env("FACTORY_SECURITY_GROUP", "sg-123")
+        .env("FACTORY_REGION", "us-west-2")
+        .env("AWS_LOG", &aws_log)
+        .env("TAR_LOG", &tar_log)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "pull failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(fallback.is_dir(), "pull should create the fallback target");
+    let canonical_fallback = fallback.canonicalize().unwrap();
+
+    let tar = fs::read_to_string(&tar_log).unwrap();
+    assert!(
+        tar.contains(&format!("xf - -C {}", canonical_fallback.display())),
+        "pull should extract into the fallback target: {tar}"
+    );
+}
+
 // -------------------------------------------------------------------------
 // Shell (Fargate)
 // -------------------------------------------------------------------------
@@ -1889,6 +2044,80 @@ fn shell_fails_without_handle() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("No task handle found"));
+}
+
+#[test]
+fn shell_opens_ecs_exec_for_recorded_task() {
+    let tmp = TempDir::new().unwrap();
+    let run_dir = tmp.path().join(".factory/runs/shell-run");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "executing").unwrap();
+    fs::write(
+        run_dir.join("handle"),
+        "arn:aws:ecs:us-west-2:123:task/cluster/task-abc",
+    )
+    .unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_executable(
+        &bin_dir,
+        "aws",
+        r##"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${AWS_LOG:?}"
+case "$1 $2" in
+  "ecs execute-command")
+    exit 0
+    ;;
+  *)
+    printf 'unexpected aws command: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+"##,
+    );
+
+    let aws_log = tmp.path().join("aws.log");
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["shell", "shell-run"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("HOME", tmp.path())
+        .env("FACTORY_CLUSTER", "cluster-arn")
+        .env("FACTORY_S3_BUCKET", "bucket")
+        .env("FACTORY_SUBNETS", "subnet-a")
+        .env("FACTORY_SECURITY_GROUP", "sg-123")
+        .env("FACTORY_REGION", "us-west-2")
+        .env("AWS_LOG", &aws_log)
+        .assert()
+        .success();
+
+    let log = fs::read_to_string(&aws_log).unwrap();
+    assert!(
+        log.contains("ecs execute-command --region us-west-2"),
+        "shell should invoke ECS Exec in the configured region: {log}"
+    );
+    assert!(
+        log.contains("--cluster cluster-arn"),
+        "shell should use the configured cluster: {log}"
+    );
+    assert!(
+        log.contains("--task arn:aws:ecs:us-west-2:123:task/cluster/task-abc"),
+        "shell should use the recorded task handle: {log}"
+    );
+    assert!(
+        log.contains("--container run"),
+        "shell should target the run container: {log}"
+    );
+    assert!(
+        log.contains("--command /bin/bash"),
+        "shell should open bash: {log}"
+    );
+    assert!(
+        log.contains("--interactive"),
+        "shell should request an interactive session: {log}"
+    );
 }
 
 // -------------------------------------------------------------------------

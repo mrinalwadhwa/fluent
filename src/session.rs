@@ -727,6 +727,29 @@ printf '{{"type":"result"}}\n'
     }
 
     #[test]
+    fn complete_or_continue_dirty_completes_review_limit_clean_run() {
+        let (_tmp, repo, run_dir) = setup_change_detection_repo();
+        let run = Run {
+            id: "test-run".to_string(),
+            dir: run_dir,
+        };
+
+        let completed = complete_or_continue_dirty(
+            &run,
+            &repo,
+            "Review limit reached, but the worktree still has uncommitted changes.",
+        )
+        .unwrap();
+
+        assert!(completed);
+        assert_eq!(run.status().unwrap(), RunStatus::Complete);
+        assert!(
+            !run.dir.join("handoff.md").exists(),
+            "clean review-limit completion should not write a dirty handoff"
+        );
+    }
+
+    #[test]
     fn review_mode_runs_full_scope_review_without_author() {
         let _env_guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let (_tmp, project, run, bin_dir) = setup_review_mode_run("pass");
