@@ -208,12 +208,17 @@ factory run --run-id <id>            # target a specific run
 factory run --coder codex            # run locally with OpenAI Codex
 factory run --runtime fargate        # run on Fargate
 factory status                       # show all runs and their state
+factory summary                      # summarize one run from artifacts
 factory watch                        # poll status, notify on change
+factory dashboard                    # open the live run dashboard
 factory pull                         # download completed workspace from S3
 factory shell                        # interactive shell into running task
 factory resume                       # restart a paused run
+factory land                         # land a completed run
 factory cleanup                      # dry-run stale complete/landed cleanup
 factory cleanup --apply              # clean selected runs and registered worktrees
+factory init                         # initialize .factory/ directories
+factory version                      # print version and build commit
 ```
 
 For interactive stages, do not call these commands. Follow the skills
