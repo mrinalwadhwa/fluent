@@ -229,46 +229,58 @@ impl RunView {
             }
         }
 
-        // Discover reviewer transcripts
+        // Discover current-round reviewer artifacts.
         let reviews_dir = self.live_dir.join("reviews");
         if reviews_dir.is_dir() {
             let mut current_reviewers = BTreeSet::new();
             if let Ok(entries) = std::fs::read_dir(&reviews_dir) {
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    if name.starts_with("transcript-") && name.ends_with(".jsonl") {
-                        let transcript_path = entry.path();
-                        let transcript_source = TranscriptSource::from_path(&transcript_path);
-                        let reviewer = name
-                            .strip_prefix("transcript-")
-                            .and_then(|s| s.strip_suffix(".jsonl"))
-                            .unwrap_or(&name)
-                            .to_string();
-                        current_reviewers.insert(reviewer.clone());
-
-                        // Add reviewer if not already tracked
-                        if let Some(agent) = self.agents.iter_mut().find(|a| a.name == reviewer) {
-                            if !agent_transcript_matches(agent, &transcript_path) {
-                                *agent =
-                                    reviewer_agent(&reviewer, &transcript_path, transcript_source);
-                                update_reviewer_status(agent, &reviews_dir, &reviewer);
-                            } else {
-                                agent.transcript_source = transcript_source;
-                                update_reviewer_status(agent, &reviews_dir, &reviewer);
-                            }
-                        } else {
-                            let mut agent = AgentView::new(&reviewer);
-                            agent.readers.push(TranscriptReader::new(transcript_path));
-                            agent.transcript_source = transcript_source;
-                            update_reviewer_status(&mut agent, &reviews_dir, &reviewer);
-                            self.agents.push(agent);
-                        }
+                    if let Some(reviewer) = reviewer_from_transcript_name(&name)
+                        .or_else(|| reviewer_from_review_name(&name))
+                    {
+                        current_reviewers.insert(reviewer);
                     }
                 }
+            }
+            for reviewer in &current_reviewers {
+                self.sync_reviewer_agent(&reviews_dir, reviewer);
             }
             self.retain_current_reviewers(&current_reviewers);
         } else {
             self.retain_current_reviewers(&BTreeSet::new());
+        }
+    }
+
+    fn sync_reviewer_agent(&mut self, reviews_dir: &Path, reviewer: &str) {
+        let transcript_path = reviews_dir.join(format!("transcript-{reviewer}.jsonl"));
+        let review_path = reviews_dir.join(format!("review-{reviewer}.md"));
+
+        if transcript_path.exists() {
+            let transcript_source = TranscriptSource::from_path(&transcript_path);
+            if let Some(agent) = self.agents.iter_mut().find(|a| a.name == reviewer) {
+                if !agent_transcript_matches(agent, &transcript_path) {
+                    *agent = reviewer_agent(reviewer, &transcript_path, transcript_source);
+                } else {
+                    agent.transcript_source = transcript_source;
+                }
+                update_reviewer_status(agent, reviews_dir, reviewer);
+            } else {
+                let mut agent = reviewer_agent(reviewer, &transcript_path, transcript_source);
+                update_reviewer_status(&mut agent, reviews_dir, reviewer);
+                self.agents.push(agent);
+            }
+            return;
+        }
+
+        if review_path.exists() {
+            let mut agent = reviewer_review_agent(reviewer, &review_path);
+            update_reviewer_status(&mut agent, reviews_dir, reviewer);
+            if let Some(existing) = self.agents.iter_mut().find(|a| a.name == reviewer) {
+                *existing = agent;
+            } else {
+                self.agents.push(agent);
+            }
         }
     }
 
@@ -444,6 +456,23 @@ fn reviewer_agent(
         .push(TranscriptReader::new(transcript_path.to_path_buf()));
     agent.transcript_source = transcript_source;
     agent
+}
+
+fn reviewer_review_agent(reviewer: &str, review_path: &Path) -> AgentView {
+    let content = std::fs::read_to_string(review_path).unwrap_or_default();
+    AgentView::new_static(reviewer, &content)
+}
+
+fn reviewer_from_transcript_name(name: &str) -> Option<String> {
+    name.strip_prefix("transcript-")
+        .and_then(|s| s.strip_suffix(".jsonl"))
+        .map(str::to_string)
+}
+
+fn reviewer_from_review_name(name: &str) -> Option<String> {
+    name.strip_prefix("review-")
+        .and_then(|s| s.strip_suffix(".md"))
+        .map(str::to_string)
 }
 
 fn agent_transcript_matches(agent: &AgentView, transcript_path: &Path) -> bool {
@@ -1968,6 +1997,49 @@ mod tests {
         // Second discover: review file exists → status updates to "pass"
         view.discover_agents();
         assert_eq!(view.agents[1].status, "pass");
+    }
+
+    #[test]
+    fn test_discover_agents_includes_review_without_transcript() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let run_dir = tmp.path().to_path_buf();
+        let reviews_dir = run_dir.join("reviews");
+        fs::create_dir_all(&reviews_dir).unwrap();
+        fs::write(
+            reviews_dir.join("review-architecture.md"),
+            "Verdict: fail\n\nReviewer failed to launch.",
+        )
+        .unwrap();
+
+        let mut view = RunView {
+            run: Run {
+                id: "test-run".to_string(),
+                dir: run_dir.clone(),
+            },
+            live_dir: run_dir,
+            agents: vec![AgentView::new("author")],
+            selected_agent: 0,
+            agent_selection_touched: false,
+            scroll_offset: 0,
+            auto_scroll: true,
+            wrapped_total: 0,
+            cached_status: "executing".to_string(),
+        };
+
+        view.discover_agents();
+
+        assert_eq!(view.agents.len(), 2);
+        assert_eq!(view.agents[1].name, "architecture");
+        assert_eq!(view.agents[1].status, "fail");
+        assert!(
+            view.agents[1]
+                .cached_lines
+                .iter()
+                .any(|line| line.contains("Reviewer failed to launch."))
+        );
     }
 
     #[test]

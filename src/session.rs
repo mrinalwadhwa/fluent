@@ -77,7 +77,7 @@ pub fn run_session_loop(
         eprintln!("  Mode: review (reviewers only)");
         run.set_status(&RunStatus::Reviewing)?;
         review_round += 1;
-        review::run_reviews(
+        let all_pass = review::run_reviews(
             run_dir,
             &run.id,
             &reviewer_filter,
@@ -86,9 +86,17 @@ pub fn run_session_loop(
             review_round,
             coder_kind,
         )?;
-        run.set_status(&RunStatus::Complete)?;
+        if all_pass {
+            run.set_status(&RunStatus::Complete)?;
+        } else {
+            run.set_status(&RunStatus::Failed)?;
+        }
         report::generate_report(run_dir, &run.id, 0)?;
-        eprintln!("\n  Run {} completed (review only).", run.id);
+        if all_pass {
+            eprintln!("\n  Run {} completed (review only).", run.id);
+        } else {
+            eprintln!("\n  Run {} failed review (review only).", run.id);
+        }
         return Ok(());
     } else if run.has_handoff() {
         format!(
@@ -776,7 +784,7 @@ printf '{{"type":"result"}}\n'
     }
 
     #[test]
-    fn review_mode_completes_after_failing_findings() {
+    fn review_mode_fails_after_non_passing_review() {
         let _env_guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let (_tmp, project, run, bin_dir) = setup_review_mode_run("fail");
         let _path_guard = prepend_path(&bin_dir);
@@ -788,9 +796,10 @@ printf '{{"type":"result"}}\n'
         run_session_loop(&author, &config, &NoopHooks, CoderKind::Claude).unwrap();
 
         assert_eq!(author.call_count.load(Ordering::SeqCst), 0);
-        assert_eq!(run.status().unwrap(), RunStatus::Complete);
+        assert_eq!(run.status().unwrap(), RunStatus::Failed);
         let review = fs::read_to_string(run.dir.join("reviews/review-tests.md")).unwrap();
         assert!(review.contains("Verdict: fail"));
+        assert!(run.dir.join("report.md").exists());
     }
 
     #[test]

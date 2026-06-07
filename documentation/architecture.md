@@ -258,11 +258,12 @@ An author-session run can only finish as `complete` with a clean
 worktree. If reviewers pass while staged, unstaged, or untracked
 non-ignored files remain, the session loop writes a handoff and moves
 the run back to `executing` so the next author session can commit,
-revert, or intentionally ignore the remaining work. Review-only runs
-complete after reviewers finish because they do not launch an author to
-modify the worktree. The landing path also rejects dirty completed
-worktrees before removing them, so uncommitted author output is not
-discarded during land.
+revert, or intentionally ignore the remaining work. Review-only runs do
+not launch an author to modify the worktree; passing review-only runs
+set status to `complete`, and non-passing review-only runs set status to
+`failed`. The landing path also rejects dirty completed worktrees before
+removing them, so uncommitted author output is not discarded during
+land.
 
 ## Version Metadata
 
@@ -368,6 +369,13 @@ verdict:
   resolve them.
 - Any fail or uncertain: status resets to `executing`, the author
   restarts with instructions to read and address the review findings.
+- Reviewer execution failure: missing prompts, launch errors, non-zero
+  exits, missing review artifacts, reviewer errors, and reviewer thread
+  panics count as non-passing review results. The review lifecycle
+  writes a current-round `reviews/review-[name].md` artifact with
+  `Verdict: fail` for each operational reviewer failure so run summaries,
+  dashboards, restart prompts, and landing checks read the same durable
+  review-state boundary.
 
 If the run exceeds the review-round limit, the loop accepts the current
 review state with the same clean-worktree guard: clean work completes,
@@ -382,7 +390,9 @@ tabs or verdicts.
 
 Review runs (mode=review) produce findings only. Reviewers run with
 full-codebase scope. Their findings are written to the reviews/
-directory and the run completes. No author session is launched.
+directory. Passing review-only runs set status to `complete`;
+non-passing review-only runs set status to `failed`. No author session
+is launched.
 
 ### Resume
 

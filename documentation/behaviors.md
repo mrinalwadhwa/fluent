@@ -343,21 +343,34 @@ THE SYSTEM SHALL set status back to `executing` and restart the author
 with the review findings.
 Test: src/review.rs (test_extract_verdict_fail, test_extract_verdict_uncertain), tests/binary.rs (run_archives_review_rounds)
 
+WHEN a reviewer prompt is missing, fails to launch, exits non-zero,
+returns an error, panics, or fails to write its review artifact,
+THE SYSTEM SHALL treat the reviewer result as non-passing and make the
+review phase fail with a `reviews/review-[name].md` artifact that
+records `Verdict: fail`.
+Test: src/review.rs (reviewer execution failure tests)
+
 ## Review runs
 
 WHEN `factory run` is invoked and the run's mode is `review`,
 THE SYSTEM SHALL set status to `reviewing`, run reviewers with
-full-codebase scope, and produce findings. No author session is
-launched; the run completes after one review round.
+full-codebase scope, and produce findings. No author session is launched.
 Test: src/session.rs (review-only mode tests)
 
 WHEN `factory run` is invoked and the run has a `scope` file,
 THE SYSTEM SHALL copy the scope file into the worktree.
 Test: src/worktree.rs (test_worktree_copies_scope_file)
 
-WHEN a review run completes its single review round,
+WHEN a review run completes its single review round and all reviewers
+pass,
 THE SYSTEM SHALL set status to `complete` and stop without launching
-the author, regardless of reviewer verdict.
+the author.
+Test: src/session.rs (review-only mode tests)
+
+WHEN a review run completes its single review round and any reviewer
+does not pass,
+THE SYSTEM SHALL set status to `failed` and stop without launching the
+author.
 Test: src/session.rs (review-only mode tests)
 
 ## Watch timeout
@@ -624,13 +637,13 @@ THE SYSTEM SHALL exit the dashboard and restore the terminal.
 
 WHEN the user presses Tab,
 THE SYSTEM SHALL select the next agent tab within the current run,
-display that tab's transcript or report content in the activity feed,
-reset the scroll position, and re-enable auto-scroll.
+display that tab's transcript, report, or review artifact content in the
+activity feed, reset the scroll position, and re-enable auto-scroll.
 
 WHEN the user presses Shift-Tab,
 THE SYSTEM SHALL select the previous agent tab within the current run,
-display that tab's transcript or report content in the activity feed,
-reset the scroll position, and re-enable auto-scroll.
+display that tab's transcript, report, or review artifact content in the
+activity feed, reset the scroll position, and re-enable auto-scroll.
 
 WHEN the user presses ← or →,
 THE SYSTEM SHALL select the previous or next run and display that run's

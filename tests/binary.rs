@@ -3363,6 +3363,7 @@ fn setup_completed_run(tmp: &TempDir) -> (std::path::PathBuf, String) {
     fs::create_dir_all(&run_dir).unwrap();
     fs::write(run_dir.join("status"), "planned").unwrap();
     fs::write(run_dir.join("brief.md"), "# Brief\n\nTest landing\n").unwrap();
+    fs::write(run_dir.join("reviewers"), "tests").unwrap();
 
     let bin_dir = tmp.path().join("bin");
     write_mock_claude(
