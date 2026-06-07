@@ -268,9 +268,12 @@ worktrees are cleaned. Treat them as a backlog, not one monolithic patch:
 - Remove the legacy `scripts/factory` shell implementation and stop using
   it as the Fargate task runtime. Fargate should share the Rust session
   lifecycle rather than routing through a separate shell implementation.
+  → Landed in `557b6a2`, `dd5f361`, and `453f01c`.
 - Add Fargate success-path coverage for launch command construction,
   workspace upload/download, task status, `factory pull`, and
   `factory shell`; current coverage is mostly negative paths.
+  → Launch, entrypoint, pull, shell, and metadata preservation coverage
+  landed in `dd5f361` and `453f01c`.
 - Fix the dashboard behavior regressions in `test-dashboard.sh`: live
   run status in tabs, initial active-run selection, and polling after
   source run deletion.
@@ -300,6 +303,20 @@ worktrees are cleaned. Treat them as a backlog, not one monolithic patch:
   research even though it disables file/tool access.
 - Remove or relabel `tests/test-run` shell-function coverage so the
   behavior map reflects the Rust binary that actually ships.
+  → Landed in `557b6a2`.
+
+2026-06-06 — Review-limit completion and land currently disagree. Run
+`20260606-180035` reached the maximum review rounds, fixed the latest
+blocking architecture finding, committed a clean worktree, and the
+session loop accepted the run as complete. `factory land` still rejected
+it because the top-level `review-architecture.md` artifact from the
+previous review round still had verdict `fail`. Recovery archived that
+stale review artifact before landing. Factory should make this contract
+explicit: either review-limit completion must rerun or clear stale
+top-level verdicts before completing, or `land` must understand an
+accepted review-limit completion marker. The source of truth for review
+verdicts should live in the review subsystem, not leak as ambiguous
+durable run state.
 surface where any observing human can act on a cue. That likely needs a
 permission model over time, so different humans can be allowed to
 observe, triage, approve runs, restart runs, resolve needs-user items,
