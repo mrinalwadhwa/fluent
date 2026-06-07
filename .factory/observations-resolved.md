@@ -281,3 +281,13 @@ preserve stable author/report/reviewer tab positions.
 now lists the current core Factory CLI commands, describes `resume` as
 supporting paused or failed runs, and has behavior tests that compare
 the skill command block against this checkout's Factory binary)
+
+2026-06-07 — Fix skill review findings: `review-behaviors` should not
+tell reviewers to read `plan.md` unless the allowed-read boundary
+explicitly includes it, and `design-approach` should use
+`references/...` for expertise files instead of direct `expertise/...`
+paths.
+→ Resolved: 6168a98, 2a95f3a (review-behaviors guidance now matches its
+visibility boundary, design-approach uses skill-local expertise
+references, the design-approach skill packages all references advertised
+by its index, and focused behavior tests cover both contracts)

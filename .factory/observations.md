@@ -294,10 +294,6 @@ worktrees are cleaned. Treat them as a backlog, not one monolithic patch:
   `ContentResolver` project/user/bundled chain, then align docs and code.
 - Update architecture docs for active modules (`checks`, `config`,
   `cleanup`, `land`) and document model-selection environment variables.
-- Fix skill review findings: `review-behaviors` should not tell reviewers
-  to read `plan.md` unless the allowed-read boundary explicitly includes
-  it, and `design-approach` should use `references/...` for expertise
-  files instead of direct `expertise/...` paths.
 - Improve planning-skill behavior coverage, especially
   `define-behaviors` producing `behaviors.diff.md` and the mismatch
   where the text-only skill harness is credited with testing codebase
