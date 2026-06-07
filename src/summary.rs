@@ -11,7 +11,7 @@ const RECENT_SESSION_LIMIT: usize = 5;
 /// Build a deterministic operator summary for one run.
 pub fn summarize_run(search_root: &Path, run_id: Option<&str>) -> Result<String> {
     let run = run::resolve_run(search_root, run_id)?;
-    let live_dir = run.worktree_run_dir().unwrap_or_else(|| run.dir.clone());
+    let live_dir = run.live_artifact_dir();
     let status = run.effective_status()?;
 
     let mut output = String::new();

@@ -179,7 +179,7 @@ impl Run {
     }
 
     pub fn has_handoff(&self) -> bool {
-        self.dir.join("handoff.md").exists()
+        self.artifact_path("handoff.md").exists()
     }
 
     /// Count the number of session directories under this run.
@@ -260,7 +260,7 @@ impl Run {
     pub fn notification_body(&self) -> String {
         let brief = self.brief_summary();
         let status = self
-            .status()
+            .effective_status()
             .map(|s| s.to_string())
             .unwrap_or_else(|_| "unknown".into());
 
@@ -271,18 +271,18 @@ impl Run {
 
         match status.as_str() {
             "complete" => {
-                let sessions = self.session_count();
+                let sessions = self.effective_session_count();
                 if sessions > 0 {
                     body.push_str(&format!("\n{sessions} sessions"));
                 }
-                match self.reviews_passed() {
+                match self.effective_reviews_passed() {
                     Some(true) => body.push_str(", reviews passed"),
                     Some(false) => body.push_str(", reviews failed"),
                     None => {}
                 }
             }
             "needs-user" => {
-                if let Some(need) = self.handoff_need() {
+                if let Some(need) = self.effective_handoff_need() {
                     body.push_str(&format!("\n{need}"));
                 }
             }
@@ -306,53 +306,82 @@ impl Run {
             .map(|s| s.trim().to_string())
     }
 
-    /// Check if the run is complete, looking at both source and worktree.
+    /// Check if the effective run status is complete.
     pub fn is_complete(&self) -> Result<bool> {
-        if self.status()? == RunStatus::Complete {
-            return Ok(true);
-        }
-        if let Some(wt_run_dir) = self.worktree_run_dir() {
-            let wt_status_path = wt_run_dir.join("status");
-            if let Ok(s) = fs::read_to_string(&wt_status_path) {
-                if RunStatus::parse(&s) == RunStatus::Complete {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
+        Ok(self.effective_status()? == RunStatus::Complete)
     }
 
     /// Get the effective status, preferring the worktree status.
     pub fn effective_status(&self) -> Result<RunStatus> {
-        if let Some(wt_run_dir) = self.worktree_run_dir() {
-            let wt_status_path = wt_run_dir.join("status");
-            if let Ok(s) = fs::read_to_string(&wt_status_path) {
-                return Ok(RunStatus::parse(&s));
-            }
+        let status_path = self.artifact_path("status");
+        if let Ok(s) = fs::read_to_string(&status_path) {
+            return Ok(RunStatus::parse(&s));
         }
         self.status()
     }
 
-    /// Check whether reviews passed, checking both source and worktree.
+    /// Check whether reviews passed, preferring live worktree artifacts.
     ///
     /// Returns `None` when neither location has review files (no reviews
     /// ran). Returns `Some(true)` only when reviews exist and all pass.
     pub fn effective_reviews_passed(&self) -> Option<bool> {
-        match self.reviews_passed() {
-            Some(false) => Some(false),
-            Some(true) => Some(true),
-            None => {
-                if let Some(wt_run_dir) = self.worktree_run_dir() {
-                    let wt_run = Run {
-                        id: self.id.clone(),
-                        dir: wt_run_dir,
-                    };
-                    wt_run.reviews_passed()
-                } else {
-                    None
-                }
+        if let Some(wt_run_dir) = self.worktree_run_dir() {
+            let wt_run = Run {
+                id: self.id.clone(),
+                dir: wt_run_dir,
+            };
+            if let Some(result) = wt_run.reviews_passed() {
+                return Some(result);
             }
         }
+        self.reviews_passed()
+    }
+
+    /// Get the source run directory.
+    pub fn source_artifact_dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Get the current artifact directory, preferring a live worktree copy.
+    pub fn live_artifact_dir(&self) -> PathBuf {
+        self.worktree_run_dir().unwrap_or_else(|| self.dir.clone())
+    }
+
+    /// Resolve an artifact path, preferring the live worktree copy.
+    pub fn artifact_path(&self, name: &str) -> PathBuf {
+        let live_path = self.live_artifact_dir().join(name);
+        if live_path.exists() {
+            live_path
+        } else {
+            self.dir.join(name)
+        }
+    }
+
+    pub fn effective_session_count(&self) -> usize {
+        if let Some(wt_run_dir) = self.worktree_run_dir() {
+            let wt_run = Run {
+                id: self.id.clone(),
+                dir: wt_run_dir,
+            };
+            let count = wt_run.session_count();
+            if count > 0 {
+                return count;
+            }
+        }
+        self.session_count()
+    }
+
+    pub fn effective_handoff_need(&self) -> Option<String> {
+        if let Some(wt_run_dir) = self.worktree_run_dir() {
+            let wt_run = Run {
+                id: self.id.clone(),
+                dir: wt_run_dir,
+            };
+            if let Some(need) = wt_run.handoff_need() {
+                return Some(need);
+            }
+        }
+        self.handoff_need()
     }
 
     /// Get the run directory inside the worktree, if one exists.
@@ -482,17 +511,16 @@ pub fn resolve_resumable_run(search_root: &Path, explicit_id: Option<&str>) -> R
             if !path.is_dir() {
                 continue;
             }
-            let status_path = path.join("status");
-            if status_path.exists() {
-                let s = fs::read_to_string(&status_path).unwrap_or_default();
-                let status = RunStatus::parse(&s);
+            if path.join("status").exists() {
                 let id = entry.file_name().to_string_lossy().to_string();
+                let run = Run { id, dir: path };
+                let status = run.effective_status()?;
                 match status {
                     RunStatus::NeedsUser if needs_user.is_none() => {
-                        needs_user = Some(Run { id, dir: path });
+                        needs_user = Some(run);
                     }
                     RunStatus::Failed if failed.is_none() => {
-                        failed = Some(Run { id, dir: path });
+                        failed = Some(run);
                     }
                     _ => {}
                 }
@@ -517,13 +545,11 @@ fn scan_active_run(runs_dir: &Path) -> Result<Option<Run>> {
         if !path.is_dir() {
             continue;
         }
-        let status_path = path.join("status");
-        if status_path.exists() {
-            let s = fs::read_to_string(&status_path).unwrap_or_default();
-            let status = RunStatus::parse(&s);
-            if status.is_active() {
-                let id = entry.file_name().to_string_lossy().to_string();
-                found = Some(Run { id, dir: path });
+        if path.join("status").exists() {
+            let id = entry.file_name().to_string_lossy().to_string();
+            let run = Run { id, dir: path };
+            if run.effective_status()?.is_active() {
+                found = Some(run);
             }
         }
     }
@@ -620,6 +646,20 @@ mod tests {
         fs::write(run_dir.join("brief.md"), format!("Brief for {id}")).unwrap();
     }
 
+    fn create_live_run(root: &Path, id: &str, status: &str) -> PathBuf {
+        let run_dir = root.join(format!(".factory/runs/{id}"));
+        let worktree = root.join("worktree");
+        let live_run_dir = worktree.join(format!(".factory/runs/{id}"));
+        fs::create_dir_all(&live_run_dir).unwrap();
+        fs::write(
+            run_dir.join("worktree"),
+            worktree.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        fs::write(live_run_dir.join("status"), status).unwrap();
+        live_run_dir
+    }
+
     #[test]
     fn test_run_status_parse() {
         assert_eq!(RunStatus::parse("planned"), RunStatus::Planned);
@@ -706,6 +746,18 @@ mod tests {
 
         let run = resolve_run(tmp.path(), None).unwrap();
         assert_eq!(run.id, "run-exec");
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_scan_prefers_live_active_status() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-live-active", "complete");
+        create_live_run(tmp.path(), "run-live-active", "executing");
+
+        let run = resolve_run(tmp.path(), None).unwrap();
+
+        assert_eq!(run.id, "run-live-active");
     }
 
     #[test]
@@ -1266,6 +1318,18 @@ mod tests {
 
     #[test]
     #[serial]
+    fn test_resolve_landable_scan_prefers_live_complete_status() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-live-complete", "planned");
+        create_live_run(tmp.path(), "run-live-complete", "complete");
+
+        let run = resolve_landable_run(tmp.path(), None).unwrap();
+
+        assert_eq!(run.id, "run-live-complete");
+    }
+
+    #[test]
+    #[serial]
     fn test_resolve_landable_scan_no_complete() {
         let tmp = setup_test_project();
         create_run(tmp.path(), "run-exec", "executing");
@@ -1321,6 +1385,25 @@ mod tests {
 
         let run = Run {
             id: "run-ewt".into(),
+            dir: run_dir,
+        };
+        assert_eq!(run.effective_reviews_passed(), Some(true));
+    }
+
+    #[test]
+    fn test_effective_reviews_passed_prefers_live_worktree() {
+        let tmp = setup_test_project();
+        create_run(tmp.path(), "run-elr", "complete");
+        let run_dir = tmp.path().join(".factory/runs/run-elr");
+        fs::create_dir_all(run_dir.join("reviews")).unwrap();
+        fs::write(run_dir.join("reviews/review-tests.md"), "Verdict: fail").unwrap();
+
+        let wt_run_dir = create_live_run(tmp.path(), "run-elr", "complete");
+        fs::create_dir_all(wt_run_dir.join("reviews")).unwrap();
+        fs::write(wt_run_dir.join("reviews/review-tests.md"), "Verdict: pass").unwrap();
+
+        let run = Run {
+            id: "run-elr".into(),
             dir: run_dir,
         };
         assert_eq!(run.effective_reviews_passed(), Some(true));

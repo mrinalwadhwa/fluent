@@ -170,6 +170,41 @@ fn status_shows_runs_with_correct_fields() {
 }
 
 #[test]
+fn status_prefers_live_worktree_status() {
+    let tmp = TempDir::new().unwrap();
+    let source_run = tmp.path().join(".factory/runs/live-status");
+    let worktree_root = tmp.path().join("worktree");
+    let live_run = worktree_root.join(".factory/runs/live-status");
+    fs::create_dir_all(&source_run).unwrap();
+    fs::create_dir_all(&live_run).unwrap();
+    fs::write(source_run.join("status"), "planned").unwrap();
+    fs::write(source_run.join("runtime"), "local").unwrap();
+    fs::write(source_run.join("brief.md"), "Live status\n").unwrap();
+    fs::write(source_run.join("worktree"), worktree_root.to_str().unwrap()).unwrap();
+    fs::write(live_run.join("status"), "complete").unwrap();
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .arg("status")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "status failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .find(|line| line.contains("live-status"))
+        .unwrap();
+    assert!(line.contains("complete"), "{stdout}");
+    assert!(!line.contains("planned"), "{stdout}");
+}
+
+#[test]
 fn status_trims_runtime_with_trailing_newline() {
     let tmp = TempDir::new().unwrap();
     let run_dir = tmp.path().join(".factory/runs/trim-test");

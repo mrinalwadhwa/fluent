@@ -145,8 +145,11 @@ struct RunView {
 
 impl RunView {
     fn new(run: Run) -> Self {
-        let live_dir = run.worktree_run_dir().unwrap_or_else(|| run.dir.clone());
-        let cached_status = Self::read_status(&live_dir, &run.dir);
+        let live_dir = run.live_artifact_dir();
+        let cached_status = run
+            .effective_status()
+            .map(|status| status.to_string())
+            .unwrap_or_else(|_| "?".into());
         let mut view = Self {
             run,
             live_dir,
@@ -162,13 +165,6 @@ impl RunView {
         view.sync_report_view();
         view.poll();
         view
-    }
-
-    fn read_status(live_dir: &Path, source_dir: &Path) -> String {
-        std::fs::read_to_string(live_dir.join("status"))
-            .or_else(|_| std::fs::read_to_string(source_dir.join("status")))
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| "?".into())
     }
 
     fn report_path(&self) -> Option<PathBuf> {
@@ -313,14 +309,15 @@ impl RunView {
 
     fn poll(&mut self) {
         // Re-resolve live_dir in case a worktree was created since startup
-        let resolved = self
-            .run
-            .worktree_run_dir()
-            .unwrap_or_else(|| self.run.dir.clone());
+        let resolved = self.run.live_artifact_dir();
         if resolved != self.live_dir {
             self.live_dir = resolved;
         }
-        self.cached_status = Self::read_status(&self.live_dir, &self.run.dir);
+        self.cached_status = self
+            .run
+            .effective_status()
+            .map(|status| status.to_string())
+            .unwrap_or_else(|_| "?".into());
         self.discover_agents();
         self.sync_report_view();
         for agent in &mut self.agents {

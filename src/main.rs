@@ -405,7 +405,7 @@ fn cmd_status(search_root: &Path) -> Result<()> {
 
     for run in &runs {
         let status = run
-            .status()
+            .effective_status()
             .map(|s| s.to_string())
             .unwrap_or_else(|_| "-".into());
         let runtime = run.runtime();
@@ -501,7 +501,7 @@ fn cmd_watch(search_root: &Path, interval: u64, timeout: u64) -> Result<()> {
 
         for run in &runs {
             let status = run
-                .status()
+                .effective_status()
                 .map(|s| s.to_string())
                 .unwrap_or_else(|_| "-".into());
             let runtime = run.runtime();
@@ -515,7 +515,10 @@ fn cmd_watch(search_root: &Path, interval: u64, timeout: u64) -> Result<()> {
         if current_output != last_output && !last_output.is_empty() {
             // Check for notification-worthy changes
             for run in &runs {
-                let status_str = run.status().map(|s| s.to_string()).unwrap_or_default();
+                let status_str = run
+                    .effective_status()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
                 match status_str.as_str() {
                     "complete" | "needs-user" | "failed" => {
                         let key = (run.id.clone(), status_str.clone());
@@ -617,7 +620,7 @@ fn cmd_resume_headless(
     let working_dir = run
         .worktree_dir()
         .unwrap_or_else(|| search_root.to_path_buf());
-    let run_dir = run.worktree_run_dir().unwrap_or_else(|| run.dir.clone());
+    let run_dir = run.live_artifact_dir();
 
     let mut extra_roots = Vec::new();
     if worktree::is_git_repo(&working_dir) {
@@ -675,7 +678,7 @@ fn cmd_init(cwd: &Path) -> Result<()> {
 fn cmd_land(search_root: &Path, run_id: Option<&str>) -> Result<()> {
     let run = run::resolve_landable_run(search_root, run_id)?;
 
-    // Verify reviews passed — check both source and worktree run dirs
+    // Verify reviews passed using the same live artifact rule as status.
     if run.effective_reviews_passed() == Some(false) {
         bail!("Cannot land run {}: reviews did not pass", run.id);
     }
