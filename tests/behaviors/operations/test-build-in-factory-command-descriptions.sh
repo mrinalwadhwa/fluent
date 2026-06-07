@@ -3,6 +3,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SKILL="$ROOT/skills/build-in-the-factory/SKILL.md"
+FACTORY_BIN="$ROOT/target/debug/factory"
+
+if [ ! -x "$FACTORY_BIN" ]; then
+  (cd "$ROOT" && cargo build --quiet)
+fi
 
 extract_reference() {
   awk '
@@ -14,7 +19,7 @@ extract_reference() {
 }
 
 reference="$(extract_reference)"
-help_text="$(factory --help)"
+help_text="$("$FACTORY_BIN" --help)"
 failures=0
 
 while IFS= read -r line; do

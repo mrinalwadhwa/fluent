@@ -3,6 +3,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SKILL="$ROOT/skills/build-in-the-factory/SKILL.md"
+FACTORY_BIN="$ROOT/target/debug/factory"
+
+if [ ! -x "$FACTORY_BIN" ]; then
+  (cd "$ROOT" && cargo build --quiet)
+fi
 
 extract_reference() {
   awk '
@@ -39,7 +44,7 @@ for command in "${required_commands[@]}"; do
   fi
 done
 
-if ! factory --help | grep -Eq '^  dashboard[[:space:]]'; then
+if ! "$FACTORY_BIN" --help | grep -Eq '^  dashboard[[:space:]]'; then
   echo "factory --help did not expose dashboard command" >&2
   failures=$((failures + 1))
 fi
