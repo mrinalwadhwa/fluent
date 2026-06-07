@@ -258,6 +258,48 @@ In that architecture, the Factory dashboard becomes the observability
 surface for all of these queues: observation inflow, planning state, run
 capacity, review loops, merge readiness, needs-user items, telemetry
 signals, and landed learnings. It may also become the intervention
+surface for humans with permission to unblock or steer the appropriate
+queue.
+
+2026-06-06 — Full-codebase review run `20260606-161051` produced a set
+of findings that are all worth fixing and should not be lost when review
+worktrees are cleaned. Treat them as a backlog, not one monolithic patch:
+
+- Remove the legacy `scripts/factory` shell implementation and stop using
+  it as the Fargate task runtime. Fargate should share the Rust session
+  lifecycle rather than routing through a separate shell implementation.
+- Add Fargate success-path coverage for launch command construction,
+  workspace upload/download, task status, `factory pull`, and
+  `factory shell`; current coverage is mostly negative paths.
+- Fix the dashboard behavior regressions in `test-dashboard.sh`: live
+  run status in tabs, initial active-run selection, and polling after
+  source run deletion.
+- Split or clarify the dashboard module boundary so filesystem state,
+  transcript loading, event handling, rendering, and tests are easier to
+  change independently.
+- Move review verdict interpretation out of the durable run-state model
+  and into the review subsystem, or otherwise define a clear run/review
+  boundary.
+- Centralize the "prefer live worktree run state over source run state"
+  rule so status, summary, dashboard, resume, and land agree.
+- Make reviewer launch failures operationally visible instead of
+  collapsing missing/failed reviewers into pass-like behavior.
+- Decide whether skills and expertise are filesystem-only or part of the
+  `ContentResolver` project/user/bundled chain, then align docs and code.
+- Update architecture docs for active modules (`checks`, `config`,
+  `cleanup`, `land`) and document model-selection environment variables.
+- Update `build-in-the-factory` command reference to include `summary`,
+  `dashboard`, `land`, `init`, and `version`.
+- Fix skill review findings: `review-behaviors` should not tell reviewers
+  to read `plan.md` unless the allowed-read boundary explicitly includes
+  it, and `design-approach` should use `references/...` for expertise
+  files instead of direct `expertise/...` paths.
+- Improve planning-skill behavior coverage, especially
+  `define-behaviors` producing `behaviors.diff.md` and the mismatch
+  where the text-only skill harness is credited with testing codebase
+  research even though it disables file/tool access.
+- Remove or relabel `tests/test-run` shell-function coverage so the
+  behavior map reflects the Rust binary that actually ships.
 surface where any observing human can act on a cue. That likely needs a
 permission model over time, so different humans can be allowed to
 observe, triage, approve runs, restart runs, resolve needs-user items,
