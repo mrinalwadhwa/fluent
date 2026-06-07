@@ -327,6 +327,15 @@ run summary, learning synthesis, and so on. Primary authoring and
 follow-up writing are the same `write` machinery; they differ mostly in
 prompt, inputs, and scope.
 
+In the new model, a `write` task must never move forward with
+uncommitted changes in its writable workspace. Completing a write task
+means the task produced an explicit commit, or explicitly failed/needs
+user. Dirty workspace state is not a valid boundary between write and
+review/merge because it blurs provenance, makes review inputs unstable,
+and lets later automation accidentally reinterpret unfinished work. The
+current `.factory/runs` dirty-complete review behavior is a compatibility
+bridge, not the target behavior for Work Item / Attempt / Task execution.
+
 Separate distributed Factory source knowledge from project-local Factory
 state. Expertise in the Factory source tree ships with Factory and is
 available to projects Factory manages, so changes to source-level
