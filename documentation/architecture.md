@@ -553,7 +553,7 @@ factory/main/
     lib.rs                   ← public API for tests
     coder.rs                 ← Coder trait + Claude/Codex implementations
     cli.rs                   ← CLI argument types
-    content.rs               ← Content resolution (project → user → bundled)
+    content.rs               ← Runtime content resolution (project → user → bundled)
     credential.rs            ← Keychain credential injection
     run.rs                   ← Run state, resolution, status
     session.rs               ← Session loop orchestration
@@ -648,12 +648,23 @@ in `.factory/expertise/`.
 
 ## Content resolution
 
-The factory resolves prompts, sandbox profiles, skills, and expertise
-files through a three-tier search chain. First match wins, no merging:
+`ContentResolver` resolves runtime content that the Factory binary reads
+while executing commands. The implemented runtime content categories are
+prompts under `prompts/` and sandbox profiles under `sandbox/`.
+
+Runtime content uses a three-tier search chain. First match wins, no
+merging:
 
 1. **Project-local**: `<project>/.factory/<relative_path>`
 2. **User config**: `~/.config/factory/<relative_path>`
 3. **Bundled defaults**: compiled into the binary at build time
 
-This lets projects override any default content without modifying the
-binary, and lets users set personal defaults across projects.
+For example, a project can override the author prompt with
+`<project>/.factory/prompts/author.md`, or a user can set a personal
+default at `~/.config/factory/prompts/author.md`.
+
+Skills and expertise are outside this resolver boundary. Agents read
+skills from the repository or installed skill locations, and read
+expertise from `expertise/`, `.factory/expertise/`, or skill
+`references/` directories. Factory does not currently bundle or resolve
+skills and expertise through `ContentResolver`.

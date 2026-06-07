@@ -1,6 +1,10 @@
 use std::path::{Path, PathBuf};
 
-/// Resolve content by checking project .factory/ -> user config -> bundled defaults.
+/// Resolve runtime content the Factory binary reads directly.
+///
+/// The implemented bundled categories are prompts and sandbox profiles.
+/// Skills and expertise stay in repository or installed skill layouts
+/// and are read by agents, not by this resolver.
 ///
 /// The resolution chain:
 /// 1. Project-local: `<project_root>/.factory/<relative_path>`
@@ -61,7 +65,7 @@ fn dirs_config_path() -> PathBuf {
     }
 }
 
-/// Bundled content compiled into the binary.
+/// Bundled runtime content compiled into the binary.
 pub fn bundled_content(relative: &str) -> Option<String> {
     // Prompts
     match relative {
@@ -220,6 +224,13 @@ Review run {{RUN_ID}}.
         assert!(bundled_content("sandbox/common.sb").is_some());
         assert!(bundled_content("sandbox/claude-code.sb").is_some());
         assert!(bundled_content("sandbox/codex.sb").is_some());
+    }
+
+    #[test]
+    fn test_bundled_content_does_not_include_agent_managed_content() {
+        assert!(bundled_content("skills/build-in-the-factory/SKILL.md").is_none());
+        assert!(bundled_content("expertise/architecture.md").is_none());
+        assert!(bundled_content(".factory/expertise/testing.md").is_none());
     }
 
     #[test]
