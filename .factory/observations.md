@@ -319,7 +319,9 @@ explicit: either review-limit completion must rerun or clear stale
 top-level verdicts before completing, or `land` must understand an
 accepted review-limit completion marker. The source of truth for review
 verdicts should live in the review subsystem, not leak as ambiguous
-durable run state.
+durable run state. In addition to tightening that contract, Factory may
+need to raise or tune the review-round limit so useful runs do not hit
+the ceiling while they are still making productive progress.
 surface where any observing human can act on a cue. That likely needs a
 permission model over time, so different humans can be allowed to
 observe, triage, approve runs, restart runs, resolve needs-user items,
