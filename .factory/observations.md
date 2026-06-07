@@ -287,6 +287,7 @@ worktrees are cleaned. Treat them as a backlog, not one monolithic patch:
   rule so status, summary, dashboard, resume, and land agree.
 - Make reviewer launch failures operationally visible instead of
   collapsing missing/failed reviewers into pass-like behavior.
+  → Landed in `5989e94`.
 - Decide whether skills and expertise are filesystem-only or part of the
   `ContentResolver` project/user/bundled chain, then align docs and code.
 - Update architecture docs for active modules (`checks`, `config`,
