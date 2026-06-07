@@ -277,6 +277,7 @@ worktrees are cleaned. Treat them as a backlog, not one monolithic patch:
 - Fix the dashboard behavior regressions in `test-dashboard.sh`: live
   run status in tabs, initial active-run selection, and polling after
   source run deletion.
+  → Verified on `main`: `test-dashboard.sh` passes all 12 cases.
 - Split or clarify the dashboard module boundary so filesystem state,
   transcript loading, event handling, rendering, and tests are easier to
   change independently.
