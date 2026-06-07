@@ -529,6 +529,18 @@ available as a stable rebase and merge target, direct conversation edits
 should happen on a lightweight discussion branch or worktree whenever
 active runs or parent landing could overlap with those edits.
 
+2026-06-07 — Factory needs a workflow to start a conversation-focused
+Codex coordinator with the right operational permissions up front. The
+coordinating instance should be able to create Factory runs, resume
+them, install rebuilt binaries, and perform normal local orchestration
+without repeatedly asking the human for permission after the initial
+trust decision. This is distinct from loosening permissions for delegated
+run agents: delegated runs should still execute inside their intended
+sandbox/runtime boundaries. The missing workflow is a trusted,
+conversation-facing launcher or profile for the human-agent planning
+loop, so the coordinator can use Factory effectively while run execution
+remains isolated.
+
 2026-06-06 — General concurrency should not require a parent run.
 Factory currently models most parallel work as one parent plan that
 spawns child runs and owns the group merge. That is useful for
