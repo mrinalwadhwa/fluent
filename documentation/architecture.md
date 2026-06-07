@@ -590,6 +590,7 @@ factory/main/
     capture-brief/SKILL.md
     define-behaviors/SKILL.md
     design-approach/SKILL.md
+    design-approach/references/
     plan-execution/SKILL.md
     review-architecture/SKILL.md
     review-architecture/references/   ← symlinks to expertise/ (dereferenced on install)
