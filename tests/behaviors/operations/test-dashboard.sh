@@ -115,7 +115,7 @@ capture_dashboard_after_poll_mutation() {
 }
 
 clean_dashboard_output_tail() {
-  clean_dashboard_output | tail -c 1000
+  clean_dashboard_output | perl -0777 -ne '$i = rindex($_, "FactoryDashboard"); $i = rindex($_, "Factory Dashboard") if $i < 0; print $i >= 0 ? substr($_, $i) : $_'
 }
 
 clean_dashboard_output() {

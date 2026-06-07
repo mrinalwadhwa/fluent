@@ -104,7 +104,7 @@ The `kind` field accepts only `write`, `review`, `merge`, `report`,
 `learn`, or `probe`. `workspace_access.reads` may list any number of
 workspaces. `workspace_access.writes` may be empty or contain one
 workspace. A `review` task must keep `writes` empty; reviewers write
-findings and notes under `artifact_area`.
+findings and notes under a required `artifact_area`.
 
 Review tasks are read-only with respect to candidate workspaces. They may
 write task artifacts, such as findings or scratch notes, but concrete

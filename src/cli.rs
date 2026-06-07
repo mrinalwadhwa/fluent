@@ -71,6 +71,33 @@ pub enum Commands {
         extra_args: Vec<String>,
     },
 
+    /// Run reviewers against the current codebase
+    Review {
+        /// Target run ID to create or reuse
+        #[arg(long)]
+        run_id: Option<String>,
+
+        /// Reviewer filter, such as "tests" or "architecture,tests"
+        #[arg(long)]
+        reviewers: Option<String>,
+
+        /// Brief text for a newly created review run
+        #[arg(long)]
+        brief: Option<String>,
+
+        /// Disable sandbox
+        #[arg(long)]
+        no_sandbox: bool,
+
+        /// Coding agent to launch: claude or codex
+        #[arg(long)]
+        coder: Option<String>,
+
+        /// Extra args passed through to the agent
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra_args: Vec<String>,
+    },
+
     /// Show run state for a project
     Status {
         /// Path to check (default: current directory)

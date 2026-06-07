@@ -5,7 +5,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use factory::cleanup::{self, CleanupOptions, WorktreeCleanup};
 use factory::cli::{Cli, Commands};
@@ -121,6 +121,26 @@ fn main() -> Result<()> {
             }
             other => bail!("Unknown runtime '{other}'. Available: local, fargate."),
         },
+        Some(Commands::Review {
+            run_id,
+            reviewers,
+            brief,
+            no_sandbox,
+            coder,
+            extra_args,
+        }) => {
+            let coder_kind = CoderKind::resolve(coder.as_deref().or(cli.coder.as_deref()))?;
+            cmd_review(
+                &sandbox_root,
+                run_id.as_deref(),
+                reviewers.as_deref(),
+                brief.as_deref(),
+                &resolver,
+                &extra_args,
+                coder_kind,
+                no_sandbox || cli.no_sandbox,
+            )?;
+        }
         Some(Commands::Status { path }) => {
             let search_root = path.map(PathBuf::from).unwrap_or(cwd);
             cmd_status(&search_root)?;
@@ -382,6 +402,66 @@ fn cmd_run_in_place(
     let author = coder_kind.boxed(CoderSandbox::None);
     session::run_session_loop(&*author, &config, &DefaultHooks, coder_kind)?;
     Ok(())
+}
+
+fn cmd_review(
+    search_root: &Path,
+    run_id: Option<&str>,
+    reviewers: Option<&str>,
+    brief: Option<&str>,
+    resolver: &ContentResolver,
+    extra_args: &[String],
+    coder_kind: CoderKind,
+    no_sandbox: bool,
+) -> Result<()> {
+    let run_id = prepare_review_run(search_root, run_id, reviewers, brief)?;
+    if no_sandbox {
+        cmd_run_bare(search_root, Some(&run_id), resolver, extra_args, coder_kind)
+    } else {
+        cmd_run_local(search_root, Some(&run_id), resolver, extra_args, coder_kind)
+    }
+}
+
+fn prepare_review_run(
+    search_root: &Path,
+    run_id: Option<&str>,
+    reviewers: Option<&str>,
+    brief: Option<&str>,
+) -> Result<String> {
+    let factory_dir = search_root.join(".factory");
+    let runs_dir = factory_dir.join("runs");
+    fs::create_dir_all(&runs_dir)?;
+
+    let id = run_id
+        .filter(|id| !id.trim().is_empty())
+        .map(|id| id.trim().to_string())
+        .unwrap_or_else(default_review_run_id);
+    let run_dir = runs_dir.join(&id);
+    fs::create_dir_all(&run_dir)?;
+
+    let brief_path = run_dir.join("brief.md");
+    if !brief_path.exists() || brief.is_some() {
+        fs::write(
+            &brief_path,
+            brief.unwrap_or("Review the current codebase.").trim(),
+        )?;
+    }
+    fs::write(run_dir.join("status"), "planned")?;
+    fs::write(run_dir.join("mode"), "review")?;
+    if let Some(reviewers) = reviewers {
+        fs::write(run_dir.join("reviewers"), reviewers.trim())?;
+    }
+    fs::write(factory_dir.join("active-run"), &id)?;
+
+    Ok(id)
+}
+
+fn default_review_run_id() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    format!("review-{seconds}")
 }
 
 fn cmd_status(search_root: &Path) -> Result<()> {

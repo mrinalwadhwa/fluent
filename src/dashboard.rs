@@ -746,14 +746,17 @@ fn run_event_loop(
             }
         }
 
-        if app.should_quit {
-            break;
-        }
-
         // Periodic poll for new data at a slower cadence
         if last_data_poll.elapsed() >= DATA_POLL_INTERVAL {
             app.poll();
             last_data_poll = Instant::now();
+        }
+
+        if app.should_quit {
+            app.poll();
+            terminal.clear()?;
+            terminal.draw(|f| draw_ui(f, app))?;
+            break;
         }
     }
 

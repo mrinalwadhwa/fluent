@@ -97,6 +97,12 @@ test_status_summary_dashboard_and_cleanup_without_work_item_state() {
   assert_contains "$SUMMARY_OUTPUT" "Status: complete" || RESULT=1
   assert_contains "$SUMMARY_OUTPUT" "Legacy run without Work Item state" || RESULT=1
 
+  HELP_OUTPUT="$("$FACTORY_BIN" --help 2>&1)"
+  assert_contains "$HELP_OUTPUT" "review" || RESULT=1
+
+  REVIEW_HELP_OUTPUT="$("$FACTORY_BIN" review --help 2>&1)"
+  assert_contains "$REVIEW_HELP_OUTPUT" "Run reviewers against the current codebase" || RESULT=1
+
   DASHBOARD_OUTPUT="$(capture_dashboard "$PWD" run-legacy)"
   assert_contains "$DASHBOARD_OUTPUT" "run-legacy" || RESULT=1
   assert_contains "$DASHBOARD_OUTPUT" "complete" || RESULT=1

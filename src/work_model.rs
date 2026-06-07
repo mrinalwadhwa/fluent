@@ -70,6 +70,11 @@ impl Task {
                 task_id: self.id.clone(),
             });
         }
+        if self.kind == TaskKind::Review && self.artifact_area.is_none() {
+            return Err(WorkModelError::ReviewTaskMissingArtifactArea {
+                task_id: self.id.clone(),
+            });
+        }
         Ok(())
     }
 }
@@ -192,6 +197,7 @@ pub enum MergeCandidateReviewState {
 pub enum WorkModelError {
     MultipleWriteWorkspaces { count: usize },
     ReviewTaskWritesWorkspace { task_id: String },
+    ReviewTaskMissingArtifactArea { task_id: String },
 }
 
 impl fmt::Display for WorkModelError {
@@ -202,6 +208,9 @@ impl fmt::Display for WorkModelError {
             }
             Self::ReviewTaskWritesWorkspace { task_id } => {
                 write!(f, "review task {task_id} cannot write a workspace")
+            }
+            Self::ReviewTaskMissingArtifactArea { task_id } => {
+                write!(f, "review task {task_id} must declare an artifact area")
             }
         }
     }
@@ -306,6 +315,19 @@ mod tests {
         assert_eq!(
             review_task.validate().unwrap_err(),
             WorkModelError::ReviewTaskWritesWorkspace {
+                task_id: "task-1".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn review_task_requires_artifact_area() {
+        let mut review_task = task(TaskKind::Review, Vec::new());
+        review_task.artifact_area = None;
+
+        assert_eq!(
+            review_task.validate().unwrap_err(),
+            WorkModelError::ReviewTaskMissingArtifactArea {
                 task_id: "task-1".to_string()
             }
         );
