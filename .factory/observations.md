@@ -294,8 +294,6 @@ worktrees are cleaned. Treat them as a backlog, not one monolithic patch:
   `ContentResolver` project/user/bundled chain, then align docs and code.
 - Update architecture docs for active modules (`checks`, `config`,
   `cleanup`, `land`) and document model-selection environment variables.
-- Update `build-in-the-factory` command reference to include `summary`,
-  `dashboard`, `land`, `init`, and `version`.
 - Fix skill review findings: `review-behaviors` should not tell reviewers
   to read `plan.md` unless the allowed-read boundary explicitly includes
   it, and `design-approach` should use `references/...` for expertise
