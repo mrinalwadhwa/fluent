@@ -311,6 +311,13 @@ should receive focused context about the work item, attempt history,
 diffs, and relevant changes so they do not have to review the entire
 codebase from scratch, but the full reviewer set remains the safety gate.
 
+The first implementation can keep backward compatibility with the
+existing `.factory/runs` lifecycle as a temporary bridge. Long term, once
+the new Work Item / Attempt / Task model is working, Factory should
+remove that compatibility layer instead of carrying both models
+indefinitely. The compatibility bridge is useful for incremental landing,
+but it should not become permanent architecture.
+
 Use small generic task kinds with domain-specific roles. Core task kinds
 should stay close to scheduler capabilities: `write`, `review`, `merge`,
 `report`, `learn`, and `probe`. Roles and prompts carry the specific
