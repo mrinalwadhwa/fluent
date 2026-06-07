@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::review;
 
@@ -460,6 +461,49 @@ pub fn resolve_run_by_id(search_root: &Path, id: &str) -> Result<Run> {
     })
 }
 
+/// Create or reuse a review-mode run and make it the active run.
+pub fn prepare_review_run(
+    search_root: &Path,
+    run_id: Option<&str>,
+    reviewers: Option<&str>,
+    brief: Option<&str>,
+) -> Result<String> {
+    let factory_dir = search_root.join(".factory");
+    let runs_dir = factory_dir.join("runs");
+    fs::create_dir_all(&runs_dir)?;
+
+    let id = run_id
+        .filter(|id| !id.trim().is_empty())
+        .map(|id| id.trim().to_string())
+        .unwrap_or_else(default_review_run_id);
+    let run_dir = runs_dir.join(&id);
+    fs::create_dir_all(&run_dir)?;
+
+    let brief_path = run_dir.join("brief.md");
+    if !brief_path.exists() || brief.is_some() {
+        fs::write(
+            &brief_path,
+            brief.unwrap_or("Review the current codebase.").trim(),
+        )?;
+    }
+    fs::write(run_dir.join("status"), RunStatus::Planned.as_str())?;
+    fs::write(run_dir.join("mode"), "review")?;
+    if let Some(reviewers) = reviewers {
+        fs::write(run_dir.join("reviewers"), reviewers.trim())?;
+    }
+    fs::write(factory_dir.join("active-run"), &id)?;
+
+    Ok(id)
+}
+
+fn default_review_run_id() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    format!("review-{seconds}")
+}
+
 /// Resolve a run that is resumable (needs-user or failed).
 pub fn resolve_resumable_run(search_root: &Path, explicit_id: Option<&str>) -> Result<Run> {
     let runs_dir = search_root.join(".factory/runs");
@@ -688,6 +732,59 @@ mod tests {
         let tmp = setup_test_project();
         let result = resolve_run(tmp.path(), Some("nonexistent"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_prepare_review_run_writes_review_state() {
+        let tmp = TempDir::new().unwrap();
+
+        let id = prepare_review_run(
+            tmp.path(),
+            Some("review-run"),
+            Some("architecture,tests"),
+            Some("Review this branch."),
+        )
+        .unwrap();
+
+        let run_dir = tmp.path().join(".factory/runs/review-run");
+        assert_eq!(id, "review-run");
+        assert_eq!(
+            fs::read_to_string(run_dir.join("brief.md")).unwrap(),
+            "Review this branch."
+        );
+        assert_eq!(
+            fs::read_to_string(run_dir.join("status")).unwrap(),
+            "planned"
+        );
+        assert_eq!(fs::read_to_string(run_dir.join("mode")).unwrap(), "review");
+        assert_eq!(
+            fs::read_to_string(run_dir.join("reviewers")).unwrap(),
+            "architecture,tests"
+        );
+        assert_eq!(
+            fs::read_to_string(tmp.path().join(".factory/active-run")).unwrap(),
+            "review-run"
+        );
+    }
+
+    #[test]
+    fn test_prepare_review_run_preserves_existing_brief() {
+        let tmp = setup_test_project();
+        let run_dir = tmp.path().join(".factory/runs/review-run");
+        fs::create_dir_all(&run_dir).unwrap();
+        fs::write(run_dir.join("brief.md"), "Existing brief.").unwrap();
+
+        prepare_review_run(tmp.path(), Some("review-run"), None, None).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(run_dir.join("brief.md")).unwrap(),
+            "Existing brief."
+        );
+        assert_eq!(
+            fs::read_to_string(run_dir.join("status")).unwrap(),
+            "planned"
+        );
+        assert_eq!(fs::read_to_string(run_dir.join("mode")).unwrap(), "review");
     }
 
     #[test]
