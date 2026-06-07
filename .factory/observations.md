@@ -58,16 +58,7 @@ symlinks with its review counterpart.
 
 2026-05-18 — Create a skill for browsing the web using agent-browser
 as a fallback when WebFetch/curl fail (Medium, paywalled sites,
-JS-rendered pages). Also create a skill for fetching YouTube video
-transcripts using yt-dlp (fetch auto-generated captions, clean VTT
-into readable text).
-
-2026-06-05 — Create a skill for generating PDFs using Typst. Typst
-is a modern typesetting system (alternative to LaTeX) that compiles
-markup to PDF. A skill could teach agents to write Typst documents
-for resumes, reports, invoices, or any structured document that
-needs PDF output. Reference Claude Code history for threads that use
-Typst.
+JS-rendered pages).
 
 2026-06-05 — How does the factory learn? Expertise files are
 manually written. Observations are manually captured. Decisions
@@ -397,3 +388,8 @@ work decomposition and dependency structure, not general scheduling.
 Independent runs need dependency metadata only when one run must start
 or land after another; otherwise they should execute and land
 independently so one parent failure cannot tangle unrelated work.
+The PDF/YouTube expertise work moved to a separate conversation thread
+because Factory does not yet let the coordinating agent trigger several
+independent peer runs in parallel from one planning conversation. That is
+a workflow smell: separate chat threads are being used as a substitute
+for a first-class independent run queue.
