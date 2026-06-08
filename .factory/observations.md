@@ -336,20 +336,21 @@ and lets later automation accidentally reinterpret unfinished work. The
 current `.factory/runs` dirty-complete review behavior is a compatibility
 bridge, not the target behavior for Work Item / Attempt / Task execution.
 
-Run `20260607-130441-work-model-storage` reinforced several parts of
-this boundary. The old `.factory/runs` loop let review-owned tests enter
-the candidate workspace, then had to restart the author to commit the
-reviewed dirty state before completing. In the new model, review tasks
-should write only review artifacts and create follow-up writer tasks for
-durable code/test changes. The run also showed source run state can
-remain stale (`planned`) while the live worktree has completed state;
-new scheduling and landing should rely on one durable Work Item/Attempt
-source of truth instead of copying status across run directories. Finally,
-behavior review briefly treated a broad `cargo test --test binary` hang
-as an uncertain verdict because the suite launched a real nested agent
-session. Review/regression checks should use hermetic test doubles or
-explicit timeouts for nested agent/session behavior so autonomous runs do
-not stall on an accidental real coder invocation.
+Runs `20260607-130441-work-model-storage` and
+`20260607-164512-work-cli` reinforced several parts of this boundary. The
+old `.factory/runs` loop let review-owned tests enter the candidate
+workspace, then had to restart the author to commit the reviewed dirty
+state before completing. In the new model, review tasks should write only
+review artifacts and create follow-up writer tasks for durable code/test
+changes. The runs also showed source run state can remain stale
+(`planned`) while the live worktree has completed state; new scheduling
+and landing should rely on one durable Work Item/Attempt source of truth
+instead of copying status across run directories. Finally, behavior
+review briefly treated a broad `cargo test --test binary` hang as an
+uncertain verdict because the suite launched a real nested agent session.
+Review/regression checks should use hermetic test doubles or explicit
+timeouts for nested agent/session behavior so autonomous runs do not
+stall on an accidental real coder invocation.
 
 Separate distributed Factory source knowledge from project-local Factory
 state. Expertise in the Factory source tree ships with Factory and is
