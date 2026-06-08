@@ -165,6 +165,26 @@ that make sense?" or "Should we use this as the default?" lets the user
 answer "yes" and keep momentum, while broad questions often force the
 user to reconstruct the whole design context before responding.
 
+2026-06-07 — Running Factory Codex child sessions from inside a Codex
+conversation still fails when the outer Codex session is launched with
+restricted network/app-server permissions, even if the filesystem roots
+allow sibling worktrees. `factory --no-sandbox resume
+20260607-183819-attempt-intake --coder codex` bypassed Factory's
+Seatbelt wrapper, but nested `codex exec` failed immediately with
+`failed to initialize in-process app-server client: Operation not
+permitted`. `codex doctor` in the same shell reported restricted
+network, unreachable ChatGPT endpoints, and an idle app-server. This is
+separate from worktree permissions: the conversation-hosted Codex agent
+needs a launch mode that allows the delegated Codex runtime to initialize
+and reach the model endpoint, or Factory needs a different Codex
+execution surface for nested runs.
+
+Related CLI footgun: `factory resume --no-sandbox ...` currently treats
+`--no-sandbox` as an extra agent argument because `resume` only reads the
+top-level `factory --no-sandbox resume ...` flag. `resume` should accept
+the same local runtime flags as `run` so recovery commands do what users
+expect.
+
 2026-06-05 — After landing the Codex approval-flag fix, installed smoke
 run `20260605-codex-installed-smoke-3` verified the fixed command shape.
 The installed Factory binary launched installed Codex without the
