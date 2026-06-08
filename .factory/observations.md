@@ -712,11 +712,17 @@ Progress:
   candidates record source/target workspace and branch provenance, the
   Work model enforces one candidate per passed Attempt, and users can
   inspect candidates with `factory work merge-candidate`.
+- `9852155` added Merge Candidate execution through `factory work merge`.
+  Merge execution now validates candidate provenance and clean workspaces,
+  rebases against the target branch, runs configured checks, runs the full
+  merge-time reviewer set, fast-forwards the target branch, records
+  durable merge status and artifacts, and cleans managed candidate
+  workspaces after landing.
 
-The next slice should implement merge queue execution. Merge Candidates
-should become the only path to `main`: rebase the candidate, run
-configured checks, run the full required reviewer set, fast-forward land,
-record reporting/learning artifacts, and clean workspaces.
+The next slice should update dashboard and status surfaces around Work
+Items, Attempts, Tasks, Workspaces, review artifacts, Merge Candidates,
+and needs-user items. The old Runs view should disappear or become an
+Attempts-oriented view during the transition.
 
 2026-06-07 — Authors are increasingly using expertise, especially when
 the approach lists specific expertise files, but Factory should make this
