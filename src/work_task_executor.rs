@@ -266,6 +266,15 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         candidate_heads.push((workspace_path.clone(), head_commit(workspace_path)?));
     }
     fs::create_dir_all(&artifact_dir)?;
+    if review_path.is_file() {
+        fs::remove_file(&review_path)?;
+    } else if review_path.exists() {
+        bail!(
+            "Review Task {:?} artifact path exists but is not a file: {}",
+            config.task_id,
+            review_path.display()
+        );
+    }
 
     item.attempts[attempt_index].status = AttemptStatus::Reviewing;
     item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Executing;

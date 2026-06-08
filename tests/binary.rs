@@ -1166,6 +1166,54 @@ fn work_task_run_fails_review_task_without_artifact() {
 }
 
 #[test]
+fn work_task_run_ignores_stale_review_artifact() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let review_dir = main_dir.join(".factory/work/artifacts/attempt-1/attempt-1-review-tests");
+    let review_path = review_dir.join("review.md");
+    fs::create_dir_all(&review_dir).unwrap();
+    fs::write(&review_path, "Verdict: pass\n\nstale\n").unwrap();
+
+    let bin_dir = tmp.path().join("bin-review");
+    write_mock_claude(&bin_dir, "#!/bin/bash\nexit 0\n");
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-review-tests",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("without writing"));
+
+    assert!(!review_path.exists());
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let review_task = value["attempts"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "attempt-1-review-tests")
+        .unwrap();
+    assert_eq!(value["attempts"][0]["status"], "failed");
+    assert_eq!(review_task["status"], "failed");
+}
+
+#[test]
 fn work_task_run_rejects_unmanaged_review_artifact_area_path() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);

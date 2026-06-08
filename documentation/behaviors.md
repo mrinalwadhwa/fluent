@@ -173,6 +173,7 @@ IF a review Task coder exits successfully but does not write `review.md`,
 THEN THE SYSTEM SHALL mark the Attempt and Task as `failed` and report
 that the review artifact was not written.
 Test: tests/binary.rs (work_task_run_fails_review_task_without_artifact)
+Test: tests/binary.rs (work_task_run_ignores_stale_review_artifact)
 Test: tests/behaviors/operations/test-work-task-run.sh (review Task missing artifact fails)
 
 IF a review Task coder exits non-zero,
