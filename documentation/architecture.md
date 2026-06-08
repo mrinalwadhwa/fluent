@@ -91,11 +91,12 @@ next planned write or review Task through the same Task executor, then
 reloads stored state before deciding the next transition. After write
 output completes it plans review Tasks with the existing review policy.
 After a completed review round it interprets review artifacts with the
-review subsystem verdict parser: all pass marks the Attempt review state
-as passed and stops before Merge Candidate creation, any fail creates a
+review subsystem verdict parser. All pass marks the Attempt review state
+as passed and stops before Merge Candidate creation. Any fail creates a
 planned follow-up write Task with the failed review artifacts as Task
-inputs, and uncertain or missing verdicts mark the Attempt `needs-user`
-with a handoff under `.factory/work/artifacts/<attempt-id>/`.
+inputs. When no review artifact fails, uncertain or missing verdicts
+mark the Attempt `needs-user` with a handoff under
+`.factory/work/artifacts/<attempt-id>/`.
 `factory work list` and `factory work show <id>` expose the same durable
 Work Item model for inspection. These commands use `.factory/work/items/`
 through the Rust storage model and validate stored objects. This keeps
@@ -154,7 +155,12 @@ workspace id and path, the source branch resolved from the project root
 when the Task run started, and the commit that contains the Task output.
 Planned review Tasks include `review_context`, copied from that write
 output, with the candidate workspace id and path, source branch, and
-candidate commit. Incomplete Tasks do not carry output. Attempt
+candidate commit. Follow-up write Tasks include `input_artifacts` when
+reviewers fail an Attempt; each entry names the producing review Task
+and the artifact path, such as
+`.factory/work/artifacts/attempt-1/attempt-1-review-tests/review.md`.
+JSON omits `input_artifacts` when the list is empty. Incomplete Tasks do
+not carry output. Attempt
 completion is derived from its Tasks; a complete Attempt must not contain
 unfinished Tasks, and completing one Task does not by itself complete an
 Attempt that still has unfinished Tasks. Completed review Tasks record

@@ -115,6 +115,7 @@ impl WorkItem {
         let Some(write_output) = attempt
             .tasks
             .iter()
+            .rev()
             .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
             .and_then(|task| task.output.as_ref())
             .cloned()
@@ -1172,6 +1173,47 @@ mod tests {
     }
 
     #[test]
+    fn review_tasks_use_latest_completed_write_output() {
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Review latest candidate".to_string(),
+            attempts: vec![Attempt {
+                id: "attempt-1".to_string(),
+                work_item_id: "work-1".to_string(),
+                status: AttemptStatus::Planned,
+                tasks: vec![
+                    completed_write_task("attempt-1-write", "original"),
+                    completed_write_task("attempt-1-followup-1", "followup"),
+                ],
+                review_state: Some(AttemptReviewState::Failed),
+                artifacts: Vec::new(),
+            }],
+        };
+
+        work_item
+            .add_next_review_tasks("attempt-1", &["tests"])
+            .unwrap();
+
+        let review_task = work_item.attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.id == "attempt-1-review-tests")
+            .unwrap();
+        assert_eq!(
+            review_task
+                .review_context
+                .as_ref()
+                .unwrap()
+                .candidate_commit,
+            "commit-followup"
+        );
+        assert_eq!(
+            review_task.workspace_access.reads[0].path,
+            ".factory/work/workspaces/attempt-1-followup"
+        );
+    }
+
+    #[test]
     fn attempt_artifacts_round_trip_with_work_item() {
         let work_item = WorkItem {
             id: "work-1".to_string(),
@@ -1219,5 +1261,32 @@ mod tests {
 
         assert_eq!(attempt.review_state, Some(AttemptReviewState::Uncertain));
         assert_eq!(candidate.review_state, MergeCandidateReviewState::Passed);
+    }
+
+    fn completed_write_task(id: &str, suffix: &str) -> Task {
+        Task {
+            id: id.to_string(),
+            kind: TaskKind::Write,
+            status: TaskStatus::Complete,
+            role: "author".to_string(),
+            work_item_id: "work-1".to_string(),
+            attempt_id: Some("attempt-1".to_string()),
+            workspace_access: WorkspaceAccess {
+                reads: Vec::new(),
+                writes: vec![WorkspaceRef {
+                    id: "candidate".to_string(),
+                    path: format!(".factory/work/workspaces/attempt-1-{suffix}"),
+                }],
+            },
+            artifact_area: None,
+            review_context: None,
+            input_artifacts: Vec::new(),
+            output: Some(TaskOutput {
+                workspace_id: "candidate".to_string(),
+                workspace_path: format!(".factory/work/workspaces/attempt-1-{suffix}"),
+                source_branch: "main".to_string(),
+                commit: format!("commit-{suffix}"),
+            }),
+        }
     }
 }

@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 use std::fs;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::coder::CoderKind;
 use crate::content::ContentResolver;
@@ -203,20 +203,20 @@ fn interpret_reviews(
         .position(|attempt| attempt.id == attempt_id)
         .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", attempt_id))?;
 
-    let review_artifacts = latest_review_artifacts(&item.attempts[attempt_index].tasks);
+    let review_artifacts =
+        latest_review_artifacts(project_root, &item.attempts[attempt_index].tasks)?;
     if review_artifacts.is_empty() {
         bail!("Attempt {:?} has no completed review artifacts", attempt_id);
     }
 
     let mut failed = Vec::new();
     let mut uncertain = Vec::new();
-    for artifact in &review_artifacts {
-        let path = project_root.join(&artifact.path);
-        let content = fs::read_to_string(&path).unwrap_or_default();
+    for review_artifact in &review_artifacts {
+        let content = fs::read_to_string(&review_artifact.review_path).unwrap_or_default();
         match review::extract_verdict(&content) {
             Verdict::Pass => {}
-            Verdict::Fail => failed.push(artifact.clone()),
-            Verdict::Uncertain => uncertain.push(artifact.clone()),
+            Verdict::Fail => failed.push(review_artifact.artifact.clone()),
+            Verdict::Uncertain => uncertain.push(review_artifact.artifact.clone()),
         }
     }
 
@@ -246,20 +246,86 @@ fn interpret_reviews(
     Ok(WorkAttemptRunOutcome::ReviewsPassed)
 }
 
-fn latest_review_artifacts(tasks: &[Task]) -> Vec<ArtifactRef> {
+#[derive(Debug)]
+struct ReviewArtifact {
+    artifact: ArtifactRef,
+    review_path: PathBuf,
+}
+
+fn latest_review_artifacts(project_root: &Path, tasks: &[Task]) -> Result<Vec<ReviewArtifact>> {
     let Some(last_write_index) = tasks.iter().rposition(|task| task.kind == TaskKind::Write) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     tasks[last_write_index + 1..]
         .iter()
         .filter(|task| task.kind == TaskKind::Review && task.status == TaskStatus::Complete)
-        .filter_map(|task| {
-            task.artifact_area.as_ref().map(|area| ArtifactRef {
-                producer_id: task.id.clone(),
-                path: format!("{}/review.md", area.path),
+        .filter_map(|task| task.artifact_area.as_ref().map(|area| (task, area)))
+        .map(|(task, area)| {
+            let artifact_dir =
+                work_task_executor::resolve_managed_artifact_area_path(project_root, &area.path)?;
+            Ok(ReviewArtifact {
+                artifact: ArtifactRef {
+                    producer_id: task.id.clone(),
+                    path: format!("{}/review.md", area.path),
+                },
+                review_path: artifact_dir.join("review.md"),
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::work_model::{TaskArtifactArea, WorkspaceAccess};
+
+    #[test]
+    fn latest_review_artifacts_rejects_unmanaged_artifact_area() {
+        let tasks = vec![
+            Task {
+                id: "attempt-1-write".to_string(),
+                kind: TaskKind::Write,
+                status: TaskStatus::Complete,
+                role: "author".to_string(),
+                work_item_id: "work-1".to_string(),
+                attempt_id: Some("attempt-1".to_string()),
+                workspace_access: WorkspaceAccess {
+                    reads: Vec::new(),
+                    writes: Vec::new(),
+                },
+                artifact_area: None,
+                review_context: None,
+                input_artifacts: Vec::new(),
+                output: None,
+            },
+            Task {
+                id: "attempt-1-review-tests".to_string(),
+                kind: TaskKind::Review,
+                status: TaskStatus::Complete,
+                role: "tests".to_string(),
+                work_item_id: "work-1".to_string(),
+                attempt_id: Some("attempt-1".to_string()),
+                workspace_access: WorkspaceAccess {
+                    reads: Vec::new(),
+                    writes: Vec::new(),
+                },
+                artifact_area: Some(TaskArtifactArea {
+                    path: "../outside-review-artifacts".to_string(),
+                }),
+                review_context: None,
+                input_artifacts: Vec::new(),
+                output: None,
+            },
+        ];
+
+        let error = latest_review_artifacts(Path::new("/tmp/project"), &tasks)
+            .expect_err("unmanaged artifact area should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("Task artifact area path must stay under .factory/work/artifacts")
+        );
+    }
 }
 
 fn write_needs_user_handoff(

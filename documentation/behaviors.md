@@ -184,6 +184,12 @@ run planned review Tasks through the existing Task executor.
 Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop passes review round)
 
+WHEN `factory work attempt run <work-item-id> <attempt-id>` is invoked
+for an Attempt with planned review Tasks,
+THE SYSTEM SHALL run the planned review Tasks through the existing Task
+executor before planning later transitions.
+Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop runs planned review Tasks)
+
 WHEN all review Tasks for an Attempt review round complete and all
 review artifacts have passing verdicts,
 THE SYSTEM SHALL mark the Attempt review state as `passed`, leave the
@@ -199,17 +205,35 @@ and the failed review artifacts as Task inputs.
 Test: tests/binary.rs (work_attempt_run_plans_followup_for_failed_reviews)
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop plans follow-up write)
 
-WHEN any completed review artifact has an uncertain or missing verdict,
+WHEN no completed review artifact has a failing verdict and any completed
+review artifact has an uncertain or missing verdict,
 THE SYSTEM SHALL mark the Attempt as `needs-user`, mark the Attempt
 review state as `uncertain`, and write a durable handoff that names the
-uncertain review artifacts.
+uncertain or missing-verdict review artifacts.
 Test: tests/binary.rs (work_attempt_run_marks_uncertain_reviews_needs_user)
+Test: tests/binary.rs (work_attempt_run_marks_missing_verdict_needs_user)
+Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop marks uncertain reviews needs-user)
+Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop marks missing verdict needs-user)
 
 IF a Task executor fails while `factory work attempt run` advances an
 Attempt,
 THEN THE SYSTEM SHALL leave the Work Item state written by the Task
 executor intact and exit non-zero without planning later transitions.
 Test: tests/binary.rs (work_attempt_run_stops_when_task_executor_fails)
+
+IF `factory work attempt run <work-item-id> <attempt-id>` evaluates a
+completed review Task whose stored `artifact_area.path` points outside
+`.factory/work/artifacts/`,
+THEN THE SYSTEM SHALL exit non-zero and leave stored Work Item state
+unchanged.
+Test: tests/binary.rs (work_attempt_run_rejects_unmanaged_completed_review_artifact_area_path)
+
+IF `factory work attempt run <work-item-id> <attempt-id>` is invoked
+for a missing Work Item, invalid Work Item id, missing Attempt, or
+terminal Attempt,
+THEN THE SYSTEM SHALL exit non-zero and leave stored Work Item state
+unchanged.
+Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop invalid or terminal request leaves state unchanged)
 
 IF a review Task coder exits successfully but does not write `review.md`,
 THEN THE SYSTEM SHALL mark the Attempt and Task as `failed` and report

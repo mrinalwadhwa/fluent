@@ -1044,7 +1044,7 @@ fn work_attempt_run_plans_followup_for_failed_reviews() {
     create_completed_work_attempt(&tmp, &main_dir);
 
     let bin_dir = tmp.path().join("bin-loop-fail");
-    write_mock_claude(&bin_dir, &loop_mock_script("fail"));
+    write_mock_claude(&bin_dir, &stateful_loop_mock_script("fail"));
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -1088,6 +1088,309 @@ fn work_attempt_run_plans_followup_for_failed_reviews() {
         followup["input_artifacts"][0]["path"],
         ".factory/work/artifacts/attempt-1/attempt-1-review-documentation/review.md"
     );
+
+    let candidate_workspace = main_dir.join(".factory/work/workspaces/attempt-1");
+    let followup_commit_before = git_head(&candidate_workspace);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Completed Task attempt-1-followup-1",
+        ))
+        .stdout(predicate::str::contains(
+            "Planned 5 review Tasks for Attempt attempt-1",
+        ));
+
+    let followup_commit = git_head(&candidate_workspace);
+    assert_ne!(followup_commit, followup_commit_before);
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let attempt = &value["attempts"][0];
+    assert_eq!(attempt["status"], "planned");
+    let second_round_reviews: Vec<_> = attempt["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| {
+            task["kind"] == "review"
+                && task["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("attempt-1-review-2-"))
+        })
+        .collect();
+    assert_eq!(second_round_reviews.len(), 5);
+    let second_tests_review = second_round_reviews
+        .iter()
+        .find(|task| task["id"] == "attempt-1-review-2-tests")
+        .unwrap();
+    assert_eq!(second_tests_review["status"], "complete");
+    assert_eq!(
+        second_tests_review["review_context"]["candidate_commit"],
+        followup_commit
+    );
+    assert_eq!(
+        second_tests_review["review_context"]["candidate_workspace_path"],
+        ".factory/work/workspaces/attempt-1"
+    );
+    assert!(
+        attempt["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task["id"] == "attempt-1-followup-2")
+    );
+}
+
+#[test]
+fn work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+
+    let bin_dir = tmp.path().join("bin-loop-mixed-fail-uncertain");
+    write_mock_claude(&bin_dir, &loop_mock_script_with_mixed_verdicts());
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Planned follow-up write Task attempt-1-followup-1",
+        ));
+
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let attempt = &value["attempts"][0];
+    assert_eq!(attempt["status"], "planned");
+    assert_eq!(attempt["review_state"], "failed");
+    assert!(
+        !main_dir
+            .join(".factory/work/artifacts/attempt-1/needs-user.md")
+            .exists()
+    );
+    let followup = attempt["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "attempt-1-followup-1")
+        .unwrap();
+    let input_artifacts = followup["input_artifacts"].as_array().unwrap();
+    assert_eq!(input_artifacts.len(), 1);
+    assert_eq!(
+        input_artifacts[0]["path"],
+        ".factory/work/artifacts/attempt-1/attempt-1-review-documentation/review.md"
+    );
+}
+
+#[test]
+fn work_attempt_run_exposes_followup_input_artifacts() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+
+    let bin_dir = tmp.path().join("bin-loop-followup-inputs");
+    write_mock_claude(&bin_dir, &loop_mock_script("fail"));
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Planned follow-up write Task attempt-1-followup-1",
+        ));
+
+    let prompt_log = tmp.path().join("followup-prompt.log");
+    let sandbox_profile_log = tmp.path().join("followup-sandbox.sb");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+case "$PWD" in
+  */.factory/work/workspaces/*)
+    prompt=""
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "-p" ]; then
+        shift
+        prompt="$1"
+        break
+      fi
+      shift
+    done
+    printf '%s\n' "$prompt" > "$PROMPT_LOG"
+    artifact="$(printf '%s\n' "$prompt" | awk '/^Input artifacts:/{getline; sub(/^- /, ""); print; exit}')"
+    test -f "$artifact"
+    grep -q 'Verdict: fail' "$artifact"
+    printf 'follow-up output\n' > followup-output.txt
+    git add followup-output.txt
+    git commit -m "Add follow-up output" >/dev/null
+    ;;
+  *)
+    printf 'Verdict: pass\n\nLoop review passed.\n' > review.md
+    ;;
+esac
+exit 0
+"##,
+    );
+    write_mock_executable(
+        &bin_dir,
+        "sandbox-exec",
+        r##"#!/bin/bash
+if [ "$1" = "-f" ]; then
+  profile="$2"
+  shift 2
+  case "$PWD" in
+    */.factory/work/workspaces/*)
+      cp "$profile" "$SANDBOX_PROFILE_LOG"
+      ;;
+  esac
+fi
+exec "$@"
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "run", "work-1", "attempt-1"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("PROMPT_LOG", &prompt_log)
+        .env("SANDBOX_PROFILE_LOG", &sandbox_profile_log)
+        .env("CLAUDE_CODE_OAUTH_TOKEN", "mock-token")
+        .env("BRAVE_SEARCH_API_KEY", "mock-key")
+        .env("AWS_ACCESS_KEY_ID", "mock-access")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Completed Task attempt-1-followup-1",
+        ));
+
+    let expected_artifact = fs::canonicalize(
+        main_dir.join(".factory/work/artifacts/attempt-1/attempt-1-review-documentation/review.md"),
+    )
+    .unwrap();
+    let expected_artifact_dir = expected_artifact.parent().unwrap();
+    let prompt = fs::read_to_string(prompt_log).unwrap();
+    assert!(prompt.contains("Input artifacts:"));
+    assert!(
+        prompt.contains(&format!("- {}", expected_artifact.display())),
+        "{prompt}"
+    );
+
+    let sandbox_profile = fs::read_to_string(sandbox_profile_log).unwrap();
+    assert!(
+        sandbox_profile.contains(&format!(
+            "(allow file-read*  (subpath \"{}\"))",
+            expected_artifact_dir.display()
+        )),
+        "{sandbox_profile}"
+    );
+    assert!(
+        !sandbox_profile.contains(&format!(
+            "(allow file-write* (subpath \"{}\"))",
+            expected_artifact_dir.display()
+        )),
+        "{sandbox_profile}"
+    );
+}
+
+#[test]
+fn work_attempt_run_rejects_unmanaged_completed_review_artifact_area_path() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-review-pass");
+    write_mock_claude(
+        &bin_dir,
+        "#!/bin/bash\nprintf 'Verdict: pass\\n' > review.md\nexit 0\n",
+    );
+    for role in [
+        "documentation",
+        "behaviors",
+        "architecture",
+        "skills",
+        "tests",
+    ] {
+        factory_cmd()
+            .current_dir(&main_dir)
+            .args([
+                "work",
+                "task",
+                "run",
+                "work-1",
+                "attempt-1",
+                &format!("attempt-1-review-{role}"),
+                "--no-sandbox",
+            ])
+            .env("PATH", mock_path(&bin_dir))
+            .assert()
+            .success();
+    }
+
+    let outside_dir = tmp.path().join("outside-review-artifacts");
+    fs::create_dir_all(&outside_dir).unwrap();
+    fs::write(outside_dir.join("review.md"), "Verdict: fail\n").unwrap();
+
+    let item_path = main_dir.join(".factory/work/items/work-1.json");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
+    let review_task = value["attempts"][0]["tasks"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|task| task["id"] == "attempt-1-review-tests")
+        .unwrap();
+    review_task["artifact_area"]["path"] =
+        serde_json::Value::String("../outside-review-artifacts".to_string());
+    fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    let before = fs::read_to_string(&item_path).unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Task artifact area path must"));
+
+    assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
 }
 
 #[test]
@@ -1124,6 +1427,44 @@ fn work_attempt_run_marks_uncertain_reviews_needs_user() {
     let handoff =
         fs::read_to_string(main_dir.join(".factory/work/artifacts/attempt-1/needs-user.md"))
             .unwrap();
+    assert!(handoff.contains("attempt-1-review-tests/review.md"));
+}
+
+#[test]
+fn work_attempt_run_marks_missing_verdict_needs_user() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+
+    let bin_dir = tmp.path().join("bin-loop-missing-verdict");
+    write_mock_claude(&bin_dir, &loop_mock_script_without_verdict());
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Attempt attempt-1 needs user input: .factory/work/artifacts/attempt-1/needs-user.md",
+        ));
+
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let attempt = &value["attempts"][0];
+    assert_eq!(attempt["status"], "needs-user");
+    assert_eq!(attempt["review_state"], "uncertain");
+    let handoff =
+        fs::read_to_string(main_dir.join(".factory/work/artifacts/attempt-1/needs-user.md"))
+            .unwrap();
+    assert!(handoff.contains("uncertain or missing review verdicts"));
     assert!(handoff.contains("attempt-1-review-tests/review.md"));
 }
 
@@ -3429,6 +3770,72 @@ esac
 exit 0
 "##
     )
+}
+
+fn stateful_loop_mock_script(verdict: &str) -> String {
+    format!(
+        r##"#!/bin/bash
+case "$PWD" in
+  */.factory/work/workspaces/*)
+    count_file="$PWD/.factory-loop-write-count"
+    if [ -f "$count_file" ]; then
+      count="$(cat "$count_file")"
+    else
+      count=0
+    fi
+    count="$((count + 1))"
+    printf '%s\n' "$count" > "$count_file"
+    printf 'loop output %s\n' "$count" > "loop-output-$count.txt"
+    git add "$count_file" "loop-output-$count.txt"
+    git commit -m "Add loop output $count" >/dev/null
+    ;;
+  *)
+    printf 'Verdict: {verdict}\n\nLoop review.\n' > review.md
+    ;;
+esac
+exit 0
+"##
+    )
+}
+
+fn loop_mock_script_without_verdict() -> String {
+    r##"#!/bin/bash
+case "$PWD" in
+  */.factory/work/workspaces/*)
+    printf 'loop output\n' > loop-output.txt
+    git add loop-output.txt
+    git commit -m "Add loop output" >/dev/null
+    ;;
+  *)
+    printf 'Loop review without a verdict.\n' > review.md
+    ;;
+esac
+exit 0
+"##
+    .to_string()
+}
+
+fn loop_mock_script_with_mixed_verdicts() -> String {
+    r##"#!/bin/bash
+case "$PWD" in
+  */.factory/work/workspaces/*)
+    printf 'loop output\n' > loop-output.txt
+    git add loop-output.txt
+    git commit -m "Add loop output" >/dev/null
+    ;;
+  */attempt-1-review-documentation)
+    printf 'Verdict: fail\n\nDocumentation review failed.\n' > review.md
+    ;;
+  */attempt-1-review-tests)
+    printf 'Verdict: uncertain\n\nTests review is uncertain.\n' > review.md
+    ;;
+  *)
+    printf 'Verdict: pass\n\nLoop review passed.\n' > review.md
+    ;;
+esac
+exit 0
+"##
+    .to_string()
 }
 
 fn git_head(repo: &Path) -> String {

@@ -85,6 +85,7 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
 
     let workspace = task.workspace_access.writes[0].clone();
     let workspace_path = resolve_managed_workspace_path(config.project_root, &workspace.path)?;
+    let input_artifacts = resolve_input_artifact_paths(config.project_root, &task.input_artifacts)?;
     let source_branch = current_branch(config.project_root)?;
     let branch_name = format!(
         "work/{}/{}/{}",
@@ -110,6 +111,7 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         config.attempt_id,
         config.task_id,
         &workspace_path,
+        &input_artifacts,
         config.resolver,
         config.extra_args,
         config.coder_kind,
@@ -467,7 +469,10 @@ fn resolve_managed_task_workspace_path(
     Ok(resolve_workspace_path(project_root, path))
 }
 
-fn resolve_managed_artifact_area_path(project_root: &Path, path: &str) -> Result<PathBuf> {
+pub(crate) fn resolve_managed_artifact_area_path(
+    project_root: &Path,
+    path: &str,
+) -> Result<PathBuf> {
     let relative_path = Path::new(path);
     if relative_path.is_absolute() {
         bail!("Task artifact area path must be relative: {path}");
@@ -496,6 +501,25 @@ fn resolve_managed_artifact_area_path(project_root: &Path, path: &str) -> Result
     }
 
     Ok(resolve_workspace_path(project_root, path))
+}
+
+fn resolve_input_artifact_paths(
+    project_root: &Path,
+    input_artifacts: &[ArtifactRef],
+) -> Result<Vec<PathBuf>> {
+    let mut resolved = Vec::new();
+    for artifact in input_artifacts {
+        let path = resolve_managed_artifact_area_path(project_root, &artifact.path)?;
+        if !path.is_file() {
+            bail!(
+                "Input artifact from Task {} does not exist or is not a file: {}",
+                artifact.producer_id,
+                path.display()
+            );
+        }
+        resolved.push(path);
+    }
+    Ok(resolved)
 }
 
 fn prepare_task_worktree(
@@ -614,6 +638,7 @@ fn run_task_coder(
     attempt_id: &str,
     task_id: &str,
     workspace_path: &Path,
+    input_artifacts: &[PathBuf],
     resolver: &ContentResolver,
     extra_args: &[String],
     coder_kind: CoderKind,
@@ -632,9 +657,10 @@ fn run_task_coder(
         .and_then(|attempt| attempt.tasks.iter().find(|task| task.id == task_id))
         .ok_or_else(|| anyhow::anyhow!("Task {task_id:?} not found"))?;
     let task_json = to_json_pretty(task)?;
+    let input_artifacts_prompt = input_artifacts_instruction(input_artifacts);
     let prompt = format!(
-        "Execute this Factory write Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\nCurrent Task model:\n{}\n",
-        item.id, item.title, attempt_id, task_id, task.role, task_json
+        "Execute this Factory write Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\nInput artifacts:\n{}\n\nCurrent Task model:\n{}\n",
+        item.id, item.title, attempt_id, task_id, task.role, input_artifacts_prompt, task_json
     );
 
     let workspace_resolver = ContentResolver::new(Some(workspace_path));
@@ -645,7 +671,14 @@ fn run_task_coder(
         (CoderSandbox::None, None)
     } else {
         let common_git_dir = worktree::git_common_dir(workspace_path)?;
-        build_coder_sandbox(coder_kind, resolver, workspace_path, &[common_git_dir])?
+        let readable_roots = input_artifact_readable_roots(input_artifacts);
+        build_coder_sandbox_with_writable_and_read_only_roots(
+            coder_kind,
+            resolver,
+            workspace_path,
+            &[common_git_dir],
+            &readable_roots,
+        )?
     };
 
     eprintln!("  Factory           work task run");
@@ -661,6 +694,25 @@ fn run_task_coder(
     } else {
         bail!("Coder exited with code {exit_code}")
     }
+}
+
+fn input_artifacts_instruction(input_artifacts: &[PathBuf]) -> String {
+    if input_artifacts.is_empty() {
+        return "None.".to_string();
+    }
+
+    input_artifacts
+        .iter()
+        .map(|path| format!("- {}", path.display()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn input_artifact_readable_roots(input_artifacts: &[PathBuf]) -> Vec<PathBuf> {
+    input_artifacts
+        .iter()
+        .filter_map(|path| path.parent().map(Path::to_path_buf))
+        .collect()
 }
 
 fn run_review_coder(
@@ -799,16 +851,23 @@ fn decisions_instruction(readable_workspaces: &[PathBuf]) -> String {
         })
 }
 
-fn build_coder_sandbox(
+fn build_coder_sandbox_with_writable_and_read_only_roots(
     coder_kind: CoderKind,
     resolver: &ContentResolver,
     working_dir: &Path,
     additional_writable_roots: &[PathBuf],
+    readable_roots: &[PathBuf],
 ) -> Result<(CoderSandbox, Option<os::SandboxProfile>)> {
     let home = std::env::var("HOME").unwrap_or_default();
     let mut roots = vec![working_dir.to_path_buf()];
     roots.extend(additional_writable_roots.iter().cloned());
-    let profile = os::render_profile_for_roots_for_coder(resolver, &home, &roots, coder_kind)?;
+    let profile = os::render_profile_for_access_for_coder(
+        resolver,
+        &home,
+        &roots,
+        readable_roots,
+        coder_kind,
+    )?;
     let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
     Ok((sandbox, Some(profile)))
 }
