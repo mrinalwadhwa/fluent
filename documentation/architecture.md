@@ -20,7 +20,7 @@ from intent capture through execution and review across multiple sessions.
 │  Teaches agents the full workflow               │
 ├─────────────────────────────────────────────────┤
 │  Factory command                                │
-│  factory run / status / work / summary          │
+│  factory work / status / run / summary          │
 │  factory cleanup / review / pull / shell        │
 │  factory watch / resume / init / dashboard      │
 │  factory land / version                         │
@@ -49,18 +49,19 @@ session loop and can run locally or on Fargate.
 
 ## Core work model
 
-Factory is growing toward a queue-based model with these durable nouns:
-Work Item, Attempt, Task, Workspace, and Merge Candidate. This model is
-documented and represented in Rust so later scheduling work can use the
-same vocabulary.
+Factory's target execution lifecycle uses these durable nouns: Work
+Item, Attempt, Task, Workspace, and Merge Candidate. This model is
+documented and represented in Rust so scheduling, status, review, and
+merge paths use the same vocabulary.
 
-The current `.factory/runs` lifecycle remains the execution
-implementation. `factory run`, `resume`, `summary`, `dashboard`,
-`review`, `land`, and cleanup continue to read and write existing run
-state. The Work Item model also has a narrow Task execution bridge:
+The Work model now has an execution bridge for real delegated work.
 `factory work task run <work-item-id> <attempt-id> <task-id>` executes a
-stored write or review Task through the selected coder. This bridge does
-not migrate run directories or replace the legacy session loop.
+stored write or review Task through the selected coder, `factory work
+attempt run <work-item-id> <attempt-id>` advances an Attempt through safe
+write and review transitions, and `factory work merge <work-item-id>
+<merge-candidate-id>` executes a stored Merge Candidate. Legacy
+`.factory/runs` commands remain supported as a transitional fallback for
+capabilities the Work path has not proven or does not yet expose.
 
 `factory work create <id> --title <title>` exposes the first Work Item
 intake surface. It writes a minimal Work Item with an empty `attempts`
@@ -103,8 +104,8 @@ verdicts mark the Attempt `needs-user` with a handoff under
 `factory work list` and `factory work show <id>` expose the same durable
 Work Item model for inspection. These commands use `.factory/work/items/`
 through the Rust storage model and validate stored objects. This keeps
-Work Items and Attempts visible while the legacy
-`.factory/runs` lifecycle continues to execute full sessions.
+Work Items and Attempts visible while the legacy `.factory/runs`
+lifecycle remains available as a fallback for full session loops.
 `factory status` and `factory dashboard` read Work Items through
 `work_status.rs`, which reduces stored Work Items to operator-facing
 rows. That boundary chooses the latest Attempt, the active or waiting
@@ -211,12 +212,13 @@ these concepts separate lets learning and planning land through the same
 reviewed workflow as code without treating transient session state as
 project knowledge.
 
-Durable work model state lives under `.factory/work/`. This tree is
-separate from `.factory/runs`, which still stores live run execution
+Durable Work model state lives under `.factory/work/`. This tree is
+separate from `.factory/runs`, which still stores legacy run execution
 state, session artifacts, reviewer state, worktree handles, and status
 files. Existing commands keep supporting `.factory/runs` without requiring
-`.factory/work/`; the coexistence is a compatibility bridge while queue
-work grows around the model.
+`.factory/work/`; the coexistence is a compatibility bridge while agents
+start using Work Items, Attempts, Tasks, Workspaces, and Merge Candidates
+for new delegated build work.
 
 The first storage contract is:
 

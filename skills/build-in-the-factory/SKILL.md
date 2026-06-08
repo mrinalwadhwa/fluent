@@ -4,7 +4,7 @@ description: >
   Operate the factory workflow to build software autonomously over extended
   periods. Covers the full lifecycle: brief, behaviors, approach, plan,
   execution, and review. Teaches which stages are interactive and which are
-  autonomous, how to read and write run state, and when to pause or
+  autonomous, how to use the Work model, and when to pause or
   renegotiate rather than drift.
 ---
 
@@ -40,15 +40,37 @@ Brief  →  Behaviors →  Approach →  Plan  →  Execute →  Review
 (interactive)                               (autonomous)
 ```
 
-Each stage produces an artifact in `.factory/runs/[run-id]/`. The
-artifacts are shared context between you and the user, and between
-sessions.
+The target lifecycle is the Work model: Work Item → Attempt → Task →
+Workspace → Merge Candidate. Work Items represent planned Factory work,
+Attempts carry one execution history, Tasks are schedulable units,
+Workspaces are the filesystem contexts Tasks read or write, and Merge
+Candidates are reviewed outputs ready to land.
+
+During the bridge period, the older `.factory/runs/[run-id]/` lifecycle
+still exists. Use Work-model commands for new delegated execution when
+they can carry the work. Use legacy run artifacts as a transitional
+fallback when the Work path lacks a needed planning, review, runtime, or
+recovery capability.
 
 ---
 
 ## On session start
 
-Check `.factory/runs/` for runs that need attention:
+Check Work Items first, then legacy runs:
+
+**Work Items:** Run `factory status` or `factory work list`. If stored
+Work Items exist, inspect the relevant item with `factory work show
+<work-item-id>`. Continue the latest non-terminal Attempt when the next
+action is clear, or present the `needs-user` handoff when an Attempt or
+Merge Candidate asks for user input.
+
+**Merge Candidates:** If `factory status` shows a pending Merge
+Candidate, inspect it with `factory work merge-candidate <work-item-id>
+<merge-candidate-id>`. Land it with `factory work merge <work-item-id>
+<merge-candidate-id>` after the user accepts the candidate or the run
+policy says autonomous landing is allowed.
+
+Then check `.factory/runs/` for legacy runs that need attention:
 
 **Completed runs with reports:** Scan for runs with status `complete`
 that have a `report.md` but no `reported` marker. These completed
@@ -76,7 +98,8 @@ Check the status:
 - `needs-user` — present the question from `handoff.md` and wait for the
   user's answer.
 
-**No runs needing attention** — ask the user what they want to build.
+**No Work Items or runs needing attention** — ask the user what they
+want to build.
 
 ---
 
@@ -121,10 +144,30 @@ steps. Determine if decomposition into child runs is needed. Write
 
 ## Autonomous stages (user away)
 
-Once the plan is approved, the user may invoke `factory run` and walk
-away. The factory command manages the session loop — restarting you across
-sessions as long as work remains. Write the status and handoff files;
-the loop handles the rest.
+Once the plan is approved, prefer the Work model for delegated execution:
+
+1. Create or reuse a Work Item: `factory work create <work-item-id>
+   --title <title>`.
+2. Create an Attempt: `factory work attempt <work-item-id>
+   <attempt-id>`.
+3. Run the Attempt: `factory work attempt <work-item-id> <attempt-id>
+   run`.
+4. Inspect status with `factory status` or `factory work show
+   <work-item-id>`.
+5. When the Attempt creates a Merge Candidate, inspect it and land with
+   `factory work merge <work-item-id> <merge-candidate-id>`.
+
+`factory work attempt run` advances the next safe transition by running
+planned write and review Tasks through the existing Task executor. It
+reloads stored Work Item state between transitions, creates follow-up
+write Tasks after failed reviews, and records `needs-user` when the
+review state cannot be resolved autonomously.
+
+Use legacy `factory run` only as a transitional fallback when the Work
+model cannot yet express the work, such as full review-only runs,
+Fargate-only execution, parallel child-run decomposition, or recovery of
+existing `.factory/runs` state. The fallback still manages the session
+loop by restarting agents across sessions as long as work remains.
 
 ### 5. Execute
 
@@ -139,9 +182,12 @@ significant deviations, pause and renegotiate via `needs-user`.
 
 ### 6. Review
 
-Reviewers evaluate your output. Review results go in the `reviews/`
-directory of the run. Verdicts: pass (done), fail (revise), uncertain
-(ask user).
+Reviewers evaluate your output. In the Work model, review Tasks write
+artifacts under `.factory/work/artifacts/<attempt-id>/<task-id>/`, and
+Attempt review state decides whether to create a Merge Candidate,
+schedule follow-up write Tasks, or ask the user. In the legacy fallback,
+review results go in the run's `reviews/` directory. Verdicts: pass
+(done), fail (revise), uncertain (ask user).
 
 ---
 
@@ -163,9 +209,23 @@ Do NOT pause for:
 
 ---
 
-## Run state
+## Work state
 
-Run state lives in `.factory/runs/[run-id]/`:
+Work model state lives under `.factory/work/`:
+
+| Path | Purpose |
+|---|---|
+| `.factory/work/items/<work-item-id>.json` | Stored Work Item with Attempts, Tasks, and Merge Candidates |
+| `.factory/work/workspaces/<attempt-id>` | Managed candidate workspace for write Tasks |
+| `.factory/work/artifacts/<attempt-id>/<task-id>/` | Task artifacts such as review output |
+| `.factory/work/artifacts/<attempt-id>/<candidate-id>/merge/` | Merge-time review and execution artifacts |
+
+Use `factory work show <work-item-id>` for the durable object. Use
+`factory status` or `factory dashboard` for operator-facing summaries.
+
+## Legacy run state
+
+Legacy run state lives in `.factory/runs/[run-id]/`:
 
 | File | Purpose |
 |---|---|
@@ -192,10 +252,10 @@ Run state lives in `.factory/runs/[run-id]/`:
 | `children` | Child run IDs, one per line (parallel runs only, written by the factory) |
 | `parent` | Parent run ID (child runs only, written by the factory) |
 
-Each run executes in its own git worktree (a sibling of the source
-worktree). The factory command creates the worktree at launch time.
-When done, `factory land` rebases the worktree branch onto the source
-branch, fast-forward merges, captures artifacts, and removes the
+Each legacy run executes in its own git worktree (a sibling of the
+source worktree). The factory command creates the worktree at launch
+time. When done, `factory land` rebases the worktree branch onto the
+source branch, fast-forward merges, captures artifacts, and removes the
 worktree.
 
 ---
@@ -203,18 +263,27 @@ worktree.
 ## Factory commands
 
 ```sh
-factory run                          # start the local session loop
-factory run --run-id <id>            # target a specific run
-factory run --coder codex            # run locally with OpenAI Codex
-factory run --runtime fargate        # run on Fargate
+factory work create <id> --title <t> # create a stored Work Item
+factory work list                    # list stored Work Items
+factory work show <id>               # show one Work Item as JSON
+factory work attempt <id> <attempt>  # add an Attempt with a write Task
+factory work attempt <id> <attempt> run # advance an Attempt
+factory work review <id> <attempt>   # plan review Tasks
+factory work task run <id> <attempt> <task> # run one Task
+factory work merge-candidate <id> <candidate> # show a Merge Candidate
+factory work merge <id> <candidate>  # execute a Merge Candidate
 factory status                       # show all runs and their state
-factory summary                      # summarize one run from artifacts
+factory dashboard                    # open the live dashboard
+factory run                          # fallback legacy session loop
+factory run --run-id <id>            # target a legacy run
+factory run --coder codex            # run legacy path with Codex
+factory run --runtime fargate        # run legacy path on Fargate
+factory summary                      # summarize one legacy run
 factory watch                        # poll status, notify on change
-factory dashboard                    # open the live run dashboard
-factory pull                         # download completed workspace from S3
-factory shell                        # interactive shell into running task
-factory resume                       # restart a paused or failed run
-factory land                         # land a completed run
+factory pull                         # download legacy workspace from S3
+factory shell                        # shell into a legacy remote task
+factory resume                       # restart a paused legacy run
+factory land                         # land a completed legacy run
 factory cleanup                      # dry-run stale complete/landed cleanup
 factory cleanup --apply              # clean selected runs and registered worktrees
 factory init                         # initialize .factory/ directories
@@ -233,6 +302,10 @@ directly in your session.
   full run history wastes context and risks confusion from stale state.
 
 - Never call `factory run` from within an interactive session. The
-  factory command launches a session loop that manages your process.
+  legacy command launches a session loop that manages your process.
   Calling it from inside a session creates a nested loop. If you need
-  to start a run, tell the user to run it from their terminal.
+  the legacy fallback, tell the user to run it from their terminal.
+
+- Do not default to `.factory/runs` just because planning skills still
+  mention run artifacts. Treat those files as bridge context unless the
+  Work model lacks the capability you need.

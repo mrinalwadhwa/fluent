@@ -21,6 +21,7 @@ extract_reference() {
 reference="$(extract_reference)"
 
 required_commands=(
+  work
   run
   status
   watch

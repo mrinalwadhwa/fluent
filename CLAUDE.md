@@ -6,12 +6,15 @@ These instructions define how Coding Agents should assist with this project.
 
 Use the factory to build the factory. For non-trivial code,
 documentation, skill, expertise, or behavior changes, follow the
-`build-in-the-factory` skill and go through the full run lifecycle:
-brief, behaviors, approach, plan, execution, review, and land.
+`build-in-the-factory` skill and go through the Factory lifecycle:
+brief, behaviors, approach, plan, execution, review, and land. Prefer
+the Work model path for new delegated build work: Work Item, Attempt,
+Task, Workspace, and Merge Candidate.
 
 Do not implement substantial product/code changes directly on `main`.
-Use Factory runs for delegated build work that needs isolation,
-reviewers, and landing.
+Use Factory Work Items and Attempts for delegated build work that needs
+isolation, reviewers, and landing. Use legacy `factory run` only as a
+transitional fallback when the Work path cannot yet carry the work.
 
 Conversation agents may edit Factory planning and memory state directly
 when they are collaborating with the user in the discussion loop:

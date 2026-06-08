@@ -392,12 +392,20 @@ Test: tests/behaviors/operations/test-work-attempt-intake-review.sh (invalid ids
 
 WHEN the user invokes the capture-brief skill,
 THE SYSTEM SHALL interview the user, research the codebase, and write
-a brief.md to `.factory/runs/[run-id]/`.
+a brief for a Work Item, using `.factory/runs/[run-id]/brief.md` only
+as a legacy fallback or bridge planning artifact.
 Test: tests/behaviors/skills/code-reviewer.md (test-skill)
 
+WHEN the user invokes the build-in-the-factory skill for new delegated
+build work,
+THE SYSTEM SHALL teach Work Items, Attempts, Tasks, Workspaces, and Merge
+Candidates as the target lifecycle and describe legacy `factory run` as a
+transitional fallback.
+Test: tests/behaviors/operations/test-build-in-factory-work-model-guidance.sh
+
 WHEN the brief is confirmed by the user,
-THE SYSTEM SHALL set status to `briefed` and write `.factory/active-run`
-with the run-id.
+THE SYSTEM SHALL leave the Work Item available for later planning and set
+legacy status to `briefed` only when using the legacy fallback.
 
 ## Behavior definition
 

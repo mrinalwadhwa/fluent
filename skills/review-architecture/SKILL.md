@@ -24,12 +24,12 @@ architecture documentation.
 ### Phase 1 — Read the inputs and load expertise
 
 Read the architectural expertise:
-- `references/architecture.md` — core principles, viewpoints,
+- `expertise/architecture.md` — core principles, viewpoints,
   anti-patterns
 
 If the codebase uses a specific language, check for language-specific
-references. Read `references/{language}.md` if it exists (e.g.,
-`references/shell-scripts.md`).
+expertise. Read `expertise/{language}.md` if it exists (e.g.,
+`expertise/shell-scripts.md`).
 
 Read the system context:
 - `documentation/architecture.md` — how the system is built today
@@ -157,7 +157,7 @@ the concern and decide how to address it.
 ## Rules
 
 - **Read the expertise.** Evaluate against the principles in
-  `references/architecture.md`, not your own assumptions.
+  `expertise/architecture.md`, not your own assumptions.
   The expertise captures the project's architectural values.
 - **Findings, not rewrites.** Report what concerns you and why.
   The author determines the fix.

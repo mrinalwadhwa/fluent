@@ -26,19 +26,21 @@ was actually built.
 ### Phase 1 — Read the inputs
 
 Read:
-- `.factory/runs/[run-id]/brief.md` — the intent
-- `.factory/runs/[run-id]/behaviors.diff.md` — what the system must do
+- Work Item context from `factory work show <work-item-id>`, or
+  `.factory/runs/[run-id]/brief.md` in the legacy fallback — the intent
+- `behaviors.diff.md` from the active planning context — what the system
+  must do
 - `documentation/architecture.md` — how the system is built today
-- `references/INDEX.md` — available expertise files and when to load
+- `expertise/INDEX.md` — available expertise files and when to load
   them
-- `references/architecture.md` — architectural principles for
+- `expertise/architecture.md` — architectural principles for
   evaluating structural decisions
 - Open questions deferred from define-behaviors
 
 Understand the gap between the current architecture and what the new
 behaviors require.
 
-Use `references/INDEX.md` to decide which expertise files are relevant
+Use `expertise/INDEX.md` to decide which expertise files are relevant
 to this run. Load the ones that apply before evaluating options. Track
 which files informed the approach so the executing agent can load the
 same context without rediscovering it.
@@ -173,8 +175,8 @@ Brief: [one-line summary]
 
 ## Expertise
 
-- `[references/file.md]` — [why this expertise applies]
-- `[references/architecture.md]` — [why architectural principles apply]
+- `[expertise/file.md]` — [why this expertise applies]
+- `[expertise/architecture.md]` — [why architectural principles apply]
 
 ## Key decisions
 

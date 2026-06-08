@@ -96,7 +96,7 @@ Focus on patterns, not individual word choices.
 For each skill in scope:
 
 - **Expertise references.** If the skill references expertise files
-  (e.g., `references/architecture.md`), verify the referenced file
+  (e.g., `expertise/architecture.md`), verify the referenced file
   exists and resolves correctly.
 - **Internal references.** If the skill references its own
   `references/`, `scripts/`, or `assets/` files, verify they exist.

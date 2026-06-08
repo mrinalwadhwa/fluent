@@ -4,7 +4,7 @@ description: >
   Capture the user's intent for a new piece of work through a structured
   interview. Adapt depth to the clarity of the idea — sharpen vague ideas,
   ground clear ones in the codebase. Produce a brief.md that starts a
-  factory run.
+  Factory Work Item or legacy run.
 ---
 
 # Capture Brief
@@ -194,10 +194,18 @@ note it as an unknown. The define-behaviors stage will resolve it.
 
 ### Phase 6 — Write the brief
 
-Generate a run-id using the format `YYYYMMDD-HHMMSS` (e.g.,
-`20260507-143022`).
+Generate a work-id using the format `YYYYMMDD-HHMMSS-kebab-title`
+(e.g., `20260507-143022-cache-status`) and a matching legacy run-id
+using the timestamp prefix when fallback artifacts are needed.
 
-Create the run directory and write the brief:
+Prefer the Work model for new delegated build work:
+
+```sh
+factory work create <work-id> --title "<short title>"
+```
+
+Until Work Items store rich planning text directly, write bridge planning
+artifacts only when the later skills need them:
 
 ```
 .factory/runs/[run-id]/
@@ -205,7 +213,8 @@ Create the run directory and write the brief:
   status          ← write "briefed"
 ```
 
-Write `.factory/active-run` containing the run-id.
+Write `.factory/active-run` containing the run-id only for the legacy
+fallback path.
 
 **Review runs:** If the brief is a full-codebase review request (the
 user wants to run reviewers against the existing codebase, not build

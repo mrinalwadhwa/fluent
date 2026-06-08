@@ -45,6 +45,19 @@ while IFS= read -r line; do
   fi
 done <<<"$reference"
 
+for required_phrase in \
+  "factory work create" \
+  "factory work attempt" \
+  "factory work task run" \
+  "factory work merge-candidate" \
+  "factory work merge"
+do
+  if ! grep -Fq "$required_phrase" <<<"$reference"; then
+    echo "build-in-the-factory command reference lacks ${required_phrase}" >&2
+    failures=$((failures + 1))
+  fi
+done
+
 if [ "$failures" -ne 0 ]; then
   exit 1
 fi

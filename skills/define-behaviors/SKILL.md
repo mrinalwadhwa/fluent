@@ -24,7 +24,8 @@ in `documentation/behaviors.md`, not a restatement.
 ### Phase 1 — Read the inputs
 
 Read:
-- `.factory/runs/[run-id]/brief.md` — the intent
+- Work Item context from `factory work show <work-item-id>`, or
+  `.factory/runs/[run-id]/brief.md` in the legacy fallback — the intent
 - `documentation/behaviors.md` — what the system already does
 - Relevant code in the areas the brief describes
 

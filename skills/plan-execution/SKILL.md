@@ -21,10 +21,13 @@ the executing agent but is expected to evolve during implementation.
 ### Phase 1 — Read the inputs
 
 Read:
-- `.factory/runs/[run-id]/brief.md` — the intent
-- `.factory/runs/[run-id]/behaviors.diff.md` — what the system must do
-- `.factory/runs/[run-id]/approach.md` — how the system should do it
-- `references/architecture.md` — architectural principles,
+- Work Item context from `factory work show <work-item-id>`, or
+  `.factory/runs/[run-id]/brief.md` in the legacy fallback — the intent
+- `behaviors.diff.md` from the active planning context — what the system
+  must do
+- `approach.md` from the active planning context — how the system should
+  do it
+- `expertise/architecture.md` — architectural principles,
   especially the sections on simplicity and viewpoints, to inform
   step ordering and verification
 
