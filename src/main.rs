@@ -237,6 +237,23 @@ fn cmd_work(project_root: &Path, command: WorkCommands) -> Result<()> {
             }
             Err(error) => return Err(error.into()),
         },
+        WorkCommands::Attempt {
+            work_item_id,
+            attempt_id,
+        } => {
+            let mut item = match store.read_work_item(&work_item_id) {
+                Ok(item) => item,
+                Err(WorkModelStorageError::ReadFile { source, .. })
+                    if source.kind() == ErrorKind::NotFound =>
+                {
+                    bail!("Work Item {work_item_id:?} not found");
+                }
+                Err(error) => return Err(error.into()),
+            };
+            item.add_initial_attempt(attempt_id.clone())?;
+            store.write_work_item(&item)?;
+            println!("Created Attempt {attempt_id} for Work Item {work_item_id}");
+        }
     }
     Ok(())
 }

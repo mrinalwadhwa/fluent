@@ -104,6 +104,8 @@ for test in tests/behaviors/operations/*.sh; do bash "$test"; done
 | Work Item show reports missing items | `binary.rs`, `test-work-inspection.sh` |
 | Work Item inspection reports invalid stored state | `binary.rs`, `test-work-inspection.sh` |
 | Work Item intake and inspection are independent from legacy runs | `binary.rs`, `test-work-inspection.sh` |
+| Work Item attempt command adds planned Attempt and initial write Task | `work_model_external.rs`, `binary.rs`, `test-work-attempt-intake-review.sh` |
+| Work Item attempt command rejects missing, duplicate, and invalid ids without changing state | `work_model_external.rs`, `binary.rs`, `test-work-attempt-intake-review.sh` |
 | Create worktree from current HEAD | `test-run` |
 | Branch from non-main branch | `test-run` |
 | Run-id resolution priority chain | `test-run` |

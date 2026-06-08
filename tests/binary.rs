@@ -412,6 +412,171 @@ fn work_create_is_independent_from_legacy_runs() {
 }
 
 #[test]
+fn work_attempt_adds_planned_attempt_with_initial_write_task() {
+    let tmp = TempDir::new().unwrap();
+    write_work_item_json(tmp.path(), "work-1", "Attempt intake");
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Created Attempt attempt-1 for Work Item work-1",
+        ));
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "show", "work-1"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "work show failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let attempt = &value["attempts"][0];
+    assert_eq!(attempt["id"], "attempt-1");
+    assert_eq!(attempt["work_item_id"], "work-1");
+    assert_eq!(attempt["status"], "planned");
+    assert_eq!(attempt["tasks"][0]["id"], "attempt-1-write");
+    assert_eq!(attempt["tasks"][0]["kind"], "write");
+    assert_eq!(attempt["tasks"][0]["role"], "author");
+    assert_eq!(attempt["tasks"][0]["work_item_id"], "work-1");
+    assert_eq!(attempt["tasks"][0]["attempt_id"], "attempt-1");
+    assert_eq!(
+        attempt["tasks"][0]["workspace_access"]["writes"][0]["id"],
+        "candidate"
+    );
+    assert_eq!(
+        attempt["tasks"][0]["workspace_access"]["writes"][0]["path"],
+        ".factory/work/workspaces/attempt-1"
+    );
+    assert!(
+        attempt["tasks"][0]["workspace_access"]["reads"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !tmp.path()
+            .join(".factory/work/workspaces/attempt-1")
+            .exists()
+    );
+}
+
+#[test]
+fn work_attempt_appends_to_existing_attempts() {
+    let tmp = TempDir::new().unwrap();
+    write_work_item_json(tmp.path(), "work-1", "Attempt intake");
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "attempt", "work-1", "attempt-2"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Created Attempt attempt-2 for Work Item work-1",
+        ));
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "show", "work-1"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "work show failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let attempts = value["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0]["id"], "attempt-1");
+    assert_eq!(attempts[1]["id"], "attempt-2");
+    assert_eq!(attempts[1]["tasks"].as_array().unwrap().len(), 1);
+    assert_eq!(attempts[1]["tasks"][0]["id"], "attempt-2-write");
+    assert_eq!(attempts[1]["tasks"][0]["attempt_id"], "attempt-2");
+    assert_eq!(
+        attempts[1]["tasks"][0]["workspace_access"]["writes"][0]["path"],
+        ".factory/work/workspaces/attempt-2"
+    );
+}
+
+#[test]
+fn work_attempt_missing_work_item_reports_not_found() {
+    let tmp = TempDir::new().unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "attempt", "missing-work", "attempt-1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Work Item \"missing-work\" not found",
+        ));
+
+    assert!(!tmp.path().join(".factory/work/items").exists());
+}
+
+#[test]
+fn work_attempt_duplicate_attempt_id_fails_without_changes() {
+    let tmp = TempDir::new().unwrap();
+    write_work_item_json(tmp.path(), "work-1", "Attempt intake");
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+    let before = fs::read_to_string(tmp.path().join(".factory/work/items/work-1.json")).unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Attempt \"attempt-1\" already exists",
+        ));
+
+    let after = fs::read_to_string(tmp.path().join(".factory/work/items/work-1.json")).unwrap();
+    assert_eq!(after, before);
+}
+
+#[test]
+fn work_attempt_rejects_invalid_attempt_id_without_changes() {
+    let tmp = TempDir::new().unwrap();
+    write_work_item_json(tmp.path(), "work-1", "Attempt intake");
+    let before = fs::read_to_string(tmp.path().join(".factory/work/items/work-1.json")).unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "attempt", "work-1", "../escape"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "attempt id \"../escape\" cannot be used as a file name",
+        ));
+
+    let after = fs::read_to_string(tmp.path().join(".factory/work/items/work-1.json")).unwrap();
+    assert_eq!(after, before);
+}
+
+#[test]
 fn work_list_outputs_stored_work_items() {
     let tmp = TempDir::new().unwrap();
     write_work_item_json(tmp.path(), "work-beta", "Second work item");

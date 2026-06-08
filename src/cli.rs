@@ -208,4 +208,13 @@ pub enum WorkCommands {
         /// Work Item ID
         id: String,
     },
+
+    /// Create a planned Attempt with an initial write Task
+    Attempt {
+        /// Work Item ID
+        work_item_id: String,
+
+        /// Attempt ID
+        attempt_id: String,
+    },
 }

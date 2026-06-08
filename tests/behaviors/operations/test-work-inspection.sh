@@ -155,6 +155,62 @@ test_work_create_item_is_visible() {
   return $RESULT
 }
 
+test_work_attempt_adds_initial_write_task() {
+  setup_test_project
+  write_work_item "work-1" "Attempt intake"
+
+  RESULT=0
+  OUTPUT="$("$FACTORY_BIN" work attempt work-1 attempt-1 2>&1)"
+  assert_contains "$OUTPUT" "Created Attempt attempt-1 for Work Item work-1" || RESULT=1
+  SHOW_OUTPUT="$("$FACTORY_BIN" work show work-1 2>&1)"
+  assert_contains "$SHOW_OUTPUT" '"id": "attempt-1"' || RESULT=1
+  assert_contains "$SHOW_OUTPUT" '"work_item_id": "work-1"' || RESULT=1
+  assert_contains "$SHOW_OUTPUT" '"status": "planned"' || RESULT=1
+  assert_contains "$SHOW_OUTPUT" '"id": "attempt-1-write"' || RESULT=1
+  assert_contains "$SHOW_OUTPUT" '"kind": "write"' || RESULT=1
+  assert_contains "$SHOW_OUTPUT" '"role": "author"' || RESULT=1
+  assert_contains "$SHOW_OUTPUT" '"id": "candidate"' || RESULT=1
+  assert_contains "$SHOW_OUTPUT" '"path": ".factory/work/workspaces/attempt-1"' || RESULT=1
+
+  cleanup_test_project
+  return $RESULT
+}
+
+test_work_attempt_failure_modes_leave_item_unchanged() {
+  setup_test_project
+  write_work_item "work-1" "Attempt intake"
+
+  RESULT=0
+  BEFORE="$(cat .factory/work/items/work-1.json)"
+  assert_fails "$FACTORY_BIN" work attempt missing-work attempt-1 || RESULT=1
+  ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
+  assert_contains "$ERROR_OUTPUT" "missing-work" || RESULT=1
+  assert_contains "$ERROR_OUTPUT" "not found" || RESULT=1
+  assert_fails "$FACTORY_BIN" work attempt work-1 ../escape || RESULT=1
+  ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
+  assert_contains "$ERROR_OUTPUT" "attempt id" || RESULT=1
+  assert_contains "$ERROR_OUTPUT" "cannot be used as a file name" || RESULT=1
+  AFTER="$(cat .factory/work/items/work-1.json)"
+  if [ "$AFTER" != "$BEFORE" ]; then
+    printf '    FAIL: failing attempt command changed Work Item\n'
+    RESULT=1
+  fi
+
+  "$FACTORY_BIN" work attempt work-1 attempt-1 > /dev/null
+  BEFORE="$(cat .factory/work/items/work-1.json)"
+  assert_fails "$FACTORY_BIN" work attempt work-1 attempt-1 || RESULT=1
+  ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
+  assert_contains "$ERROR_OUTPUT" "already exists" || RESULT=1
+  AFTER="$(cat .factory/work/items/work-1.json)"
+  if [ "$AFTER" != "$BEFORE" ]; then
+    printf '    FAIL: duplicate attempt changed Work Item\n'
+    RESULT=1
+  fi
+
+  cleanup_test_project
+  return $RESULT
+}
+
 test_work_list_empty_state_succeeds() {
   setup_test_project
 
@@ -292,6 +348,8 @@ run_test "work create writes minimal Work Item" test_work_create_writes_minimal_
 run_test "work create existing item fails" test_work_create_existing_item_fails
 run_test "work create invalid id fails" test_work_create_invalid_id_fails
 run_test "work create item is visible" test_work_create_item_is_visible
+run_test "work attempt adds initial write Task" test_work_attempt_adds_initial_write_task
+run_test "work attempt failures leave item unchanged" test_work_attempt_failure_modes_leave_item_unchanged
 run_test "work list prints stored Work Items" test_work_list_outputs_stored_items
 run_test "work list prints empty state" test_work_list_empty_state_succeeds
 run_test "work show prints pretty JSON" test_work_show_outputs_pretty_json

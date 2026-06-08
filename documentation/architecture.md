@@ -62,12 +62,17 @@ replace the session loop.
 
 `factory work create <id> --title <title>` exposes the first Work Item
 intake surface. It writes a minimal Work Item with an empty `attempts`
-list and does not create Attempts, create Tasks, schedule work, or mutate
-legacy run state. `factory work list` and `factory work show <id>` expose
-the same durable Work Item model for inspection. These commands use
-`.factory/work/items/` through the Rust storage model and validate stored
-objects. This keeps Work Items visible without changing the legacy
-`.factory/runs` lifecycle that still executes sessions.
+list and does not schedule work or mutate legacy run state. `factory work
+attempt <work-item-id> <attempt-id>` creates the first operational
+transition from intake: it appends a planned Attempt with one initial
+`write` Task. The Task declares role `author` and one writable workspace
+reference at `.factory/work/workspaces/<attempt-id>`, but this slice does
+not create the workspace or execute the Task. `factory work list` and
+`factory work show <id>` expose the same durable Work Item model for
+inspection. These commands use `.factory/work/items/` through the Rust
+storage model and validate stored objects. This keeps Work Items and
+Attempts visible without changing the legacy `.factory/runs` lifecycle
+that still executes sessions.
 
 | Concept | Meaning |
 |---|---|

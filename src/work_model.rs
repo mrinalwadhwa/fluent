@@ -19,6 +19,43 @@ pub struct WorkItem {
 }
 
 impl WorkItem {
+    pub fn add_initial_attempt(
+        &mut self,
+        attempt_id: impl Into<String>,
+    ) -> Result<(), WorkModelError> {
+        let attempt_id = attempt_id.into();
+        validate_id("attempt", &attempt_id)?;
+        if self.attempts.iter().any(|attempt| attempt.id == attempt_id) {
+            return Err(WorkModelError::AttemptAlreadyExists { id: attempt_id });
+        }
+
+        let task_id = format!("{attempt_id}-write");
+        self.attempts.push(Attempt {
+            id: attempt_id.clone(),
+            work_item_id: self.id.clone(),
+            status: AttemptStatus::Planned,
+            tasks: vec![Task {
+                id: task_id,
+                kind: TaskKind::Write,
+                role: "author".to_string(),
+                work_item_id: self.id.clone(),
+                attempt_id: Some(attempt_id.clone()),
+                workspace_access: WorkspaceAccess {
+                    reads: Vec::new(),
+                    writes: vec![WorkspaceRef {
+                        id: "candidate".to_string(),
+                        path: format!(".factory/work/workspaces/{attempt_id}"),
+                    }],
+                },
+                artifact_area: None,
+            }],
+            review_state: None,
+            artifacts: Vec::new(),
+        });
+
+        self.validate()
+    }
+
     pub fn validate(&self) -> Result<(), WorkModelError> {
         for attempt in &self.attempts {
             if attempt.work_item_id != self.id {
@@ -240,6 +277,13 @@ pub enum MergeCandidateReviewState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkModelError {
+    InvalidId {
+        kind: &'static str,
+        id: String,
+    },
+    AttemptAlreadyExists {
+        id: String,
+    },
     MultipleWriteWorkspaces {
         count: usize,
     },
@@ -269,6 +313,12 @@ pub enum WorkModelError {
 impl fmt::Display for WorkModelError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidId { kind, id } => {
+                write!(f, "{kind} id {id:?} cannot be used as a file name")
+            }
+            Self::AttemptAlreadyExists { id } => {
+                write!(f, "Attempt {id:?} already exists")
+            }
             Self::MultipleWriteWorkspaces { count } => {
                 write!(f, "task writes {count} workspaces; at most one is allowed")
             }
@@ -581,10 +631,24 @@ impl WorkModelStore {
 }
 
 fn work_item_file_name(id: &str) -> Result<String, WorkModelStorageError> {
-    if id.is_empty() || id == "." || id == ".." || id.contains('/') || id.contains('\\') {
+    if !is_file_safe_id(id) {
         return Err(WorkModelStorageError::InvalidWorkItemId { id: id.to_string() });
     }
     Ok(format!("{id}.json"))
+}
+
+fn validate_id(kind: &'static str, id: &str) -> Result<(), WorkModelError> {
+    if !is_file_safe_id(id) {
+        return Err(WorkModelError::InvalidId {
+            kind,
+            id: id.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn is_file_safe_id(id: &str) -> bool {
+    !(id.is_empty() || id == "." || id == ".." || id.contains('/') || id.contains('\\'))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

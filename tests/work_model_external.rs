@@ -347,6 +347,105 @@ fn work_model_store_reports_file_for_invalid_task_model() {
 }
 
 #[test]
+fn work_item_add_initial_attempt_creates_scheduler_facing_write_task() {
+    let mut work_item = WorkItem {
+        id: "work-1".to_string(),
+        title: "Add attempt intake".to_string(),
+        attempts: Vec::new(),
+    };
+
+    work_item.add_initial_attempt("attempt-1").unwrap();
+
+    assert_eq!(work_item.attempts.len(), 1);
+    let attempt = &work_item.attempts[0];
+    assert_eq!(attempt.id, "attempt-1");
+    assert_eq!(attempt.work_item_id, "work-1");
+    assert_eq!(attempt.status, AttemptStatus::Planned);
+    assert_eq!(attempt.review_state, None);
+    assert!(attempt.artifacts.is_empty());
+    assert_eq!(attempt.tasks.len(), 1);
+
+    let task = &attempt.tasks[0];
+    assert_eq!(task.id, "attempt-1-write");
+    assert_eq!(task.kind, TaskKind::Write);
+    assert_eq!(task.role, "author");
+    assert_eq!(task.work_item_id, "work-1");
+    assert_eq!(task.attempt_id.as_deref(), Some("attempt-1"));
+    assert!(task.workspace_access.reads.is_empty());
+    assert_eq!(
+        task.workspace_access.writes,
+        vec![WorkspaceRef {
+            id: "candidate".to_string(),
+            path: ".factory/work/workspaces/attempt-1".to_string(),
+        }]
+    );
+    assert_eq!(task.artifact_area, None);
+    work_item.validate().unwrap();
+}
+
+#[test]
+fn work_item_add_initial_attempt_appends_to_existing_attempts() {
+    let mut work_item = work_item();
+    let existing = work_item.attempts[0].clone();
+
+    work_item.add_initial_attempt("attempt-2").unwrap();
+
+    assert_eq!(work_item.attempts.len(), 2);
+    assert_eq!(work_item.attempts[0], existing);
+
+    let attempt = &work_item.attempts[1];
+    assert_eq!(attempt.id, "attempt-2");
+    assert_eq!(attempt.tasks.len(), 1);
+    assert_eq!(attempt.tasks[0].id, "attempt-2-write");
+    assert_eq!(attempt.tasks[0].attempt_id.as_deref(), Some("attempt-2"));
+    assert_eq!(
+        attempt.tasks[0].workspace_access.writes,
+        vec![WorkspaceRef {
+            id: "candidate".to_string(),
+            path: ".factory/work/workspaces/attempt-2".to_string(),
+        }]
+    );
+    work_item.validate().unwrap();
+}
+
+#[test]
+fn work_item_add_initial_attempt_rejects_duplicate_attempt_id() {
+    let mut work_item = WorkItem {
+        id: "work-1".to_string(),
+        title: "Add attempt intake".to_string(),
+        attempts: Vec::new(),
+    };
+
+    work_item.add_initial_attempt("attempt-1").unwrap();
+
+    assert_eq!(
+        work_item.add_initial_attempt("attempt-1").unwrap_err(),
+        WorkModelError::AttemptAlreadyExists {
+            id: "attempt-1".to_string(),
+        }
+    );
+    assert_eq!(work_item.attempts.len(), 1);
+}
+
+#[test]
+fn work_item_add_initial_attempt_rejects_invalid_attempt_id() {
+    let mut work_item = WorkItem {
+        id: "work-1".to_string(),
+        title: "Add attempt intake".to_string(),
+        attempts: Vec::new(),
+    };
+
+    assert_eq!(
+        work_item.add_initial_attempt("../escape").unwrap_err(),
+        WorkModelError::InvalidId {
+            kind: "attempt",
+            id: "../escape".to_string(),
+        }
+    );
+    assert!(work_item.attempts.is_empty());
+}
+
+#[test]
 fn work_item_validate_rejects_attempt_with_wrong_work_item() {
     let mut invalid = work_item();
     invalid.attempts[0].work_item_id = "work-2".to_string();

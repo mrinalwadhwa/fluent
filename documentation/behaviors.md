@@ -94,6 +94,37 @@ Test: tests/binary.rs (work_list_empty_state_succeeds_without_work_items)
 Test: tests/binary.rs (work_create_is_independent_from_legacy_runs)
 Test: tests/behaviors/operations/test-work-inspection.sh (legacy runs and work inspection are independent)
 
+WHEN `factory work attempt <work-item-id> <attempt-id>` is invoked for a
+stored Work Item,
+THE SYSTEM SHALL append a planned Attempt under that Work Item and create
+one initial scheduler-facing `write` Task for the Attempt.
+Test: tests/binary.rs (work_attempt_adds_planned_attempt_with_initial_write_task)
+Test: tests/behaviors/operations/test-work-attempt-intake-review.sh (attempt adds planned Attempt)
+Test: tests/behaviors/operations/test-work-attempt-intake-review.sh (attempt adds one initial write Task)
+
+WHEN `factory work attempt <work-item-id> <attempt-id>` creates the
+initial `write` Task,
+THE SYSTEM SHALL give the Task role `author`, id `<attempt-id>-write`,
+the matching Work Item and Attempt ids, and exactly one writable
+workspace reference at `.factory/work/workspaces/<attempt-id>` without
+creating or executing that workspace.
+Test: tests/work_model_external.rs (work_item_add_initial_attempt_creates_scheduler_facing_write_task)
+Test: tests/binary.rs (work_attempt_adds_planned_attempt_with_initial_write_task)
+Test: tests/behaviors/operations/test-work-attempt-intake-review.sh (initial write Task has ids and one writable workspace)
+Test: tests/behaviors/operations/test-work-attempt-intake-review.sh (work show prints Attempt and Task as pretty JSON)
+
+IF `factory work attempt <work-item-id> <attempt-id>` is invoked for a
+missing Work Item, an invalid Work Item id, a duplicate Attempt id, or
+an invalid Attempt id,
+THEN THE SYSTEM SHALL exit non-zero and leave stored Work Item state
+unchanged.
+Test: tests/binary.rs (work_attempt_missing_work_item_reports_not_found)
+Test: tests/binary.rs (work_attempt_duplicate_attempt_id_fails_without_changes)
+Test: tests/binary.rs (work_attempt_rejects_invalid_attempt_id_without_changes)
+Test: tests/behaviors/operations/test-work-attempt-intake-review.sh (missing Work Item does not create state)
+Test: tests/behaviors/operations/test-work-attempt-intake-review.sh (duplicate Attempt id leaves item unchanged)
+Test: tests/behaviors/operations/test-work-attempt-intake-review.sh (invalid ids leave Work Item state unchanged)
+
 ## Brief capture
 
 WHEN the user invokes the capture-brief skill,
