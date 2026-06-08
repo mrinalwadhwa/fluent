@@ -34,6 +34,7 @@ fn documented_work_item() -> WorkItem {
                 artifact_area: Some(TaskArtifactArea {
                     path: ".factory/work/artifacts/write-review".to_string(),
                 }),
+                review_context: None,
                 output: Some(TaskOutput {
                     workspace_id: "candidate".to_string(),
                     workspace_path: "../workspaces/candidate".to_string(),

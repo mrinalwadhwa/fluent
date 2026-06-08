@@ -28,10 +28,26 @@ pub struct WorkTaskRunConfig<'a> {
 
 pub struct WorkTaskRunResult {
     pub task_id: String,
-    pub commit: String,
+    pub output: String,
 }
 
-pub fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
+pub fn run_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
+    let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+    let (attempt_index, task_index) =
+        find_attempt_task_indexes(&item, config.attempt_id, config.task_id)
+            .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", config.task_id))?;
+
+    match item.attempts[attempt_index].tasks[task_index].kind {
+        TaskKind::Write => run_write_task(config),
+        TaskKind::Review => run_review_task(config),
+        kind => bail!(
+            "Task {:?} is kind {kind}; unsupported by task run",
+            config.task_id
+        ),
+    }
+}
+
+fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     let mut item = read_work_item_or_not_found(config.store, config.work_item_id)?;
     let attempt_index = item
         .attempts
@@ -178,7 +194,169 @@ pub fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult
 
     Ok(WorkTaskRunResult {
         task_id: config.task_id.to_string(),
-        commit,
+        output: commit,
+    })
+}
+
+fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
+    let mut item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+    let (attempt_index, task_index) =
+        find_attempt_task_indexes(&item, config.attempt_id, config.task_id)
+            .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", config.task_id))?;
+
+    let task = &item.attempts[attempt_index].tasks[task_index];
+    if task.status != TaskStatus::Planned {
+        bail!(
+            "Task {:?} is {}; expected planned",
+            config.task_id,
+            task.status
+        );
+    }
+    if !task.workspace_access.writes.is_empty() {
+        bail!("Review Task {:?} cannot write a workspace", config.task_id);
+    }
+    if task.workspace_access.reads.is_empty() {
+        bail!(
+            "Review Task {:?} must declare at least one readable candidate workspace",
+            config.task_id
+        );
+    }
+    let artifact_area = task
+        .artifact_area
+        .as_ref()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Review Task {:?} must declare an artifact area",
+                config.task_id
+            )
+        })?
+        .path
+        .clone();
+    let review_context = task.review_context.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Review Task {:?} must declare review context",
+            config.task_id
+        )
+    })?;
+    let artifact_dir = resolve_managed_artifact_area_path(config.project_root, &artifact_area)?;
+    let review_path = artifact_dir.join("review.md");
+
+    let readable_workspaces = task
+        .workspace_access
+        .reads
+        .iter()
+        .map(|workspace| {
+            resolve_managed_readable_workspace_path(config.project_root, &workspace.path)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if !task.workspace_access.reads.iter().any(|workspace| {
+        workspace.id == review_context.candidate_workspace_id
+            && workspace.path == review_context.candidate_workspace_path
+    }) {
+        bail!(
+            "Review Task {:?} review context candidate must match a readable workspace",
+            config.task_id
+        );
+    }
+    let mut candidate_heads = Vec::new();
+    for workspace_path in &readable_workspaces {
+        ensure_same_git_repository(config.project_root, workspace_path)?;
+        ensure_registered_worktree(config.project_root, workspace_path)?;
+        ensure_clean_worktree(workspace_path)?;
+        candidate_heads.push((workspace_path.clone(), head_commit(workspace_path)?));
+    }
+    fs::create_dir_all(&artifact_dir)?;
+
+    item.attempts[attempt_index].status = AttemptStatus::Reviewing;
+    item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Executing;
+    item.attempts[attempt_index].tasks[task_index].output = None;
+    config.store.write_work_item(&item)?;
+
+    let run_result = run_review_coder(
+        &item,
+        config.attempt_id,
+        config.task_id,
+        &artifact_dir,
+        &review_path,
+        &readable_workspaces,
+        config.resolver,
+        config.extra_args,
+        config.coder_kind,
+        config.no_sandbox,
+    );
+
+    for (workspace_path, baseline_head) in &candidate_heads {
+        if let Err(error) = ensure_head_unchanged(workspace_path, baseline_head) {
+            mark_task_failed(
+                config.store,
+                config.work_item_id,
+                config.attempt_id,
+                config.task_id,
+            )?;
+            return Err(error);
+        }
+    }
+    for workspace_path in &readable_workspaces {
+        if let Err(error) = ensure_clean_worktree(workspace_path) {
+            mark_task_failed(
+                config.store,
+                config.work_item_id,
+                config.attempt_id,
+                config.task_id,
+            )?;
+            return Err(error);
+        }
+    }
+
+    if let Err(error) = run_result {
+        mark_task_failed(
+            config.store,
+            config.work_item_id,
+            config.attempt_id,
+            config.task_id,
+        )?;
+        return Err(error);
+    }
+
+    if !review_path.is_file() {
+        mark_task_failed(
+            config.store,
+            config.work_item_id,
+            config.attempt_id,
+            config.task_id,
+        )?;
+        bail!(
+            "Review Task {:?} completed without writing {}",
+            config.task_id,
+            review_path.display()
+        );
+    }
+
+    let mut completed_item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+    let (attempt_index, task_index) =
+        find_attempt_task_indexes(&completed_item, config.attempt_id, config.task_id)
+            .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", config.task_id))?;
+    completed_item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Complete;
+    completed_item.attempts[attempt_index]
+        .artifacts
+        .push(ArtifactRef {
+            producer_id: config.task_id.to_string(),
+            path: path_for_model(config.project_root, &review_path),
+        });
+    completed_item.attempts[attempt_index].status = if completed_item.attempts[attempt_index]
+        .tasks
+        .iter()
+        .all(|task| task.status == TaskStatus::Complete)
+    {
+        AttemptStatus::Complete
+    } else {
+        AttemptStatus::Reviewing
+    };
+    config.store.write_work_item(&completed_item)?;
+
+    Ok(WorkTaskRunResult {
+        task_id: config.task_id.to_string(),
+        output: path_for_model(config.project_root, &review_path),
     })
 }
 
@@ -236,9 +414,21 @@ fn resolve_workspace_path(project_root: &Path, path: &str) -> PathBuf {
 }
 
 fn resolve_managed_workspace_path(project_root: &Path, path: &str) -> Result<PathBuf> {
+    resolve_managed_task_workspace_path(project_root, path, "writable")
+}
+
+fn resolve_managed_readable_workspace_path(project_root: &Path, path: &str) -> Result<PathBuf> {
+    resolve_managed_task_workspace_path(project_root, path, "readable")
+}
+
+fn resolve_managed_task_workspace_path(
+    project_root: &Path,
+    path: &str,
+    access_kind: &str,
+) -> Result<PathBuf> {
     let relative_path = Path::new(path);
     if relative_path.is_absolute() {
-        bail!("Task writable workspace path must be relative: {path}");
+        bail!("Task {access_kind} workspace path must be relative: {path}");
     }
 
     let mut components = Vec::new();
@@ -246,7 +436,7 @@ fn resolve_managed_workspace_path(project_root: &Path, path: &str) -> Result<Pat
         match component {
             Component::Normal(part) => components.push(part.to_owned()),
             _ => bail!(
-                "Task writable workspace path must stay under .factory/work/workspaces: {path}"
+                "Task {access_kind} workspace path must stay under .factory/work/workspaces: {path}"
             ),
         }
     }
@@ -262,7 +452,38 @@ fn resolve_managed_workspace_path(project_root: &Path, path: &str) -> Result<Pat
             .zip(managed_prefix.iter())
             .all(|(actual, expected)| actual == expected)
     {
-        bail!("Task writable workspace path must stay under .factory/work/workspaces: {path}");
+        bail!("Task {access_kind} workspace path must stay under .factory/work/workspaces: {path}");
+    }
+
+    Ok(resolve_workspace_path(project_root, path))
+}
+
+fn resolve_managed_artifact_area_path(project_root: &Path, path: &str) -> Result<PathBuf> {
+    let relative_path = Path::new(path);
+    if relative_path.is_absolute() {
+        bail!("Task artifact area path must be relative: {path}");
+    }
+
+    let mut components = Vec::new();
+    for component in relative_path.components() {
+        match component {
+            Component::Normal(part) => components.push(part.to_owned()),
+            _ => bail!("Task artifact area path must stay under .factory/work/artifacts: {path}"),
+        }
+    }
+
+    let managed_prefix = [
+        std::ffi::OsStr::new(".factory"),
+        std::ffi::OsStr::new("work"),
+        std::ffi::OsStr::new("artifacts"),
+    ];
+    if components.len() <= managed_prefix.len()
+        || !components
+            .iter()
+            .zip(managed_prefix.iter())
+            .all(|(actual, expected)| actual == expected)
+    {
+        bail!("Task artifact area path must stay under .factory/work/artifacts: {path}");
     }
 
     Ok(resolve_workspace_path(project_root, path))
@@ -433,6 +654,142 @@ fn run_task_coder(
     }
 }
 
+fn run_review_coder(
+    item: &WorkItem,
+    attempt_id: &str,
+    task_id: &str,
+    artifact_dir: &Path,
+    review_path: &Path,
+    readable_workspaces: &[PathBuf],
+    resolver: &ContentResolver,
+    extra_args: &[String],
+    coder_kind: CoderKind,
+    no_sandbox: bool,
+) -> Result<()> {
+    if !no_sandbox {
+        os::check_prerequisites_for(coder_kind)?;
+        credential::inject_credentials()?;
+        credential::setup_git_signing();
+    }
+
+    let task = item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == attempt_id)
+        .and_then(|attempt| attempt.tasks.iter().find(|task| task.id == task_id))
+        .ok_or_else(|| anyhow::anyhow!("Task {task_id:?} not found"))?;
+    let task_json = to_json_pretty(task)?;
+    let review_context = task
+        .review_context
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Review Task {task_id:?} must declare review context"))?;
+    let review_skill_instruction = review_skill_instruction(&task.role, readable_workspaces);
+    let decisions_instruction = decisions_instruction(readable_workspaces);
+    let read_paths = task
+        .workspace_access
+        .reads
+        .iter()
+        .zip(readable_workspaces.iter())
+        .map(|(workspace, resolved_path)| {
+            format!("- {}: {}", workspace.id, resolved_path.display())
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let prompt = format!(
+        "Execute this Factory review Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\nReadable candidate workspaces:\n{}\n\nReview context:\n- Candidate workspace: {} ({})\n- Source branch: {}\n- Candidate commit: {}\n- Review diff: git -C <candidate-workspace> diff {}..{}\n\nWrite the review artifact to exactly this path:\n{}\n\nThe Task completes when that artifact exists. The artifact may contain Verdict: pass, Verdict: fail, or Verdict: uncertain; do not edit candidate workspaces.\n\nCurrent Task model:\n{}\n",
+        item.id,
+        item.title,
+        attempt_id,
+        task_id,
+        task.role,
+        read_paths,
+        review_context.candidate_workspace_id,
+        review_context.candidate_workspace_path,
+        review_context.source_branch,
+        review_context.candidate_commit,
+        review_context.source_branch,
+        review_context.candidate_commit,
+        review_path.display(),
+        task_json
+    );
+
+    let system_prompt = format!(
+        "You are a Factory {} reviewer operating as a Work model review Task.\n{}\nRead candidate workspaces only; do not edit or commit in them.\nWrite the review artifact only to {} with a verdict (pass, fail, or uncertain) and findings.\n{} Do not flag findings that contradict a recorded decision.",
+        task.role,
+        review_skill_instruction,
+        review_path.display(),
+        decisions_instruction
+    );
+    let (sandbox, _sandbox_profile) = if no_sandbox {
+        (CoderSandbox::None, None)
+    } else {
+        let readable_roots = review_readable_sandbox_roots(readable_workspaces)?;
+        build_coder_sandbox_with_read_only_roots(
+            coder_kind,
+            resolver,
+            artifact_dir,
+            &readable_roots,
+        )?
+    };
+
+    eprintln!("  Factory           work task run");
+    eprintln!("  Work Item         {}", item.id);
+    eprintln!("  Attempt           {attempt_id}");
+    eprintln!("  Task              {task_id}");
+    eprintln!("  Artifact area     {}", artifact_dir.display());
+
+    let coder = coder_kind.boxed(sandbox);
+    let exit_code = coder.run(&prompt, &system_prompt, artifact_dir, extra_args, None)?;
+    if exit_code == 0 {
+        Ok(())
+    } else {
+        bail!("Coder exited with code {exit_code}")
+    }
+}
+
+fn review_readable_sandbox_roots(readable_workspaces: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut roots = Vec::new();
+    for workspace in readable_workspaces {
+        roots.push(workspace.clone());
+        let common_git_dir = worktree::git_common_dir(workspace)?;
+        if !roots.iter().any(|root| root == &common_git_dir) {
+            roots.push(common_git_dir);
+        }
+    }
+    Ok(roots)
+}
+
+fn review_skill_instruction(role: &str, readable_workspaces: &[PathBuf]) -> String {
+    let relative = format!("skills/review-{role}/SKILL.md");
+    readable_workspaces
+        .iter()
+        .map(|workspace| workspace.join(&relative))
+        .find(|path| path.is_file())
+        .map(|path| format!("Follow the review-{role} skill at {}.", path.display()))
+        .unwrap_or_else(|| {
+            format!(
+                "No review-{role} skill file was found in the readable candidate workspaces; apply the Task role directly."
+            )
+        })
+}
+
+fn decisions_instruction(readable_workspaces: &[PathBuf]) -> String {
+    let relative = Path::new(".factory/expertise/decisions.md");
+    readable_workspaces
+        .iter()
+        .map(|workspace| workspace.join(relative))
+        .find(|path| path.is_file())
+        .map(|path| {
+            format!(
+                "Read recorded decisions at {} if it exists.",
+                path.display()
+            )
+        })
+        .unwrap_or_else(|| {
+            "No project decision file was found in the readable candidate workspaces.".to_string()
+        })
+}
+
 fn build_coder_sandbox(
     coder_kind: CoderKind,
     resolver: &ContentResolver,
@@ -443,6 +800,25 @@ fn build_coder_sandbox(
     let mut roots = vec![working_dir.to_path_buf()];
     roots.extend(additional_writable_roots.iter().cloned());
     let profile = os::render_profile_for_roots_for_coder(resolver, &home, &roots, coder_kind)?;
+    let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
+    Ok((sandbox, Some(profile)))
+}
+
+fn build_coder_sandbox_with_read_only_roots(
+    coder_kind: CoderKind,
+    resolver: &ContentResolver,
+    working_dir: &Path,
+    readable_roots: &[PathBuf],
+) -> Result<(CoderSandbox, Option<os::SandboxProfile>)> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let writable_roots = vec![working_dir.to_path_buf()];
+    let profile = os::render_profile_for_access_for_coder(
+        resolver,
+        &home,
+        &writable_roots,
+        readable_roots,
+        coder_kind,
+    )?;
     let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
     Ok((sandbox, Some(profile)))
 }
@@ -466,6 +842,41 @@ fn ensure_clean_worktree(workspace_path: &Path) -> Result<()> {
             String::from_utf8_lossy(&output.stdout)
         )
     }
+}
+
+fn ensure_head_unchanged(workspace_path: &Path, baseline_head: &str) -> Result<()> {
+    let current_head = head_commit(workspace_path)?;
+    if current_head == baseline_head {
+        Ok(())
+    } else {
+        reset_worktree_head(workspace_path, baseline_head)?;
+        bail!(
+            "Review Task changed readable candidate workspace HEAD from {baseline_head} to {current_head}: {}",
+            workspace_path.display()
+        )
+    }
+}
+
+fn reset_worktree_head(workspace_path: &Path, target: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["-C", &workspace_path.to_string_lossy()])
+        .args(["reset", "--hard", target])
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        bail!(
+            "Failed to restore readable candidate workspace HEAD: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    }
+}
+
+fn path_for_model(project_root: &Path, path: &Path) -> String {
+    path.strip_prefix(project_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .to_string()
 }
 
 fn commits_ahead(workspace_path: &Path, source_ref: &str) -> Result<u32> {

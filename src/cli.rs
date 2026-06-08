@@ -218,6 +218,15 @@ pub enum WorkCommands {
         attempt_id: String,
     },
 
+    /// Plan review Tasks for a completed Attempt
+    Review {
+        /// Work Item ID
+        work_item_id: String,
+
+        /// Attempt ID
+        attempt_id: String,
+    },
+
     /// Execute stored Work Item Tasks
     Task {
         #[command(subcommand)]
@@ -227,7 +236,7 @@ pub enum WorkCommands {
 
 #[derive(Subcommand)]
 pub enum WorkTaskCommands {
-    /// Run an existing write Task
+    /// Run an existing Task
     Run {
         /// Work Item ID
         work_item_id: String,

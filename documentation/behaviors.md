@@ -145,6 +145,51 @@ Test: tests/binary.rs (work_task_run_rejects_success_without_commits)
 Test: tests/binary.rs (work_task_run_rejects_reused_workspace_without_new_commit)
 Test: tests/behaviors/operations/test-work-task-run.sh (success without new commit fails with guidance)
 
+WHEN `factory work review <work-item-id> <attempt-id>` is invoked for an
+Attempt with completed write output,
+THE SYSTEM SHALL append planned `review` Tasks that read the candidate
+workspace, declare no writable workspace, and declare artifact areas
+under `.factory/work/artifacts/<attempt-id>/<task-id>/`.
+Test: tests/binary.rs (work_review_plans_review_tasks_for_completed_attempt)
+Test: tests/behaviors/operations/test-work-task-run.sh (review planning adds read-only Task without changing candidate)
+
+IF `factory work review <work-item-id> <attempt-id>` is invoked for an
+Attempt without completed write output,
+THEN THE SYSTEM SHALL exit non-zero and leave stored Work Item state
+unchanged.
+Test: tests/binary.rs (work_review_requires_completed_write_output)
+Test: tests/behaviors/operations/test-work-task-run.sh (review planning requires completed write output)
+
+WHEN `factory work task run <work-item-id> <attempt-id> <task-id>` is
+invoked for a planned `review` Task,
+THE SYSTEM SHALL complete the Task after the reviewer writes `review.md`
+under the Task artifact area, even when that artifact contains
+`Verdict: fail` or `Verdict: uncertain`.
+Test: tests/binary.rs (work_task_run_completes_review_task_with_fail_verdict_artifact)
+Test: tests/behaviors/operations/test-work-task-run.sh (review Task with fail verdict completes)
+Test: tests/behaviors/operations/test-work-task-run.sh (review Task with uncertain verdict completes)
+
+IF a review Task coder exits successfully but does not write `review.md`,
+THEN THE SYSTEM SHALL mark the Attempt and Task as `failed` and report
+that the review artifact was not written.
+Test: tests/binary.rs (work_task_run_fails_review_task_without_artifact)
+Test: tests/behaviors/operations/test-work-task-run.sh (review Task missing artifact fails)
+
+IF a review Task coder exits non-zero,
+THEN THE SYSTEM SHALL mark the Attempt and Task as `failed`, leave Task
+output unset, and report the coder failure.
+Test: tests/binary.rs (work_task_run_marks_review_task_failed_when_coder_exits_nonzero)
+Test: tests/behaviors/operations/test-work-task-run.sh (review coder failure marks Task failed)
+
+IF a review Task mutates a readable candidate workspace,
+THEN THE SYSTEM SHALL restore any committed candidate `HEAD` change, mark
+the Attempt and Task as `failed`, and report the candidate workspace
+mutation.
+Test: tests/binary.rs (work_task_run_fails_review_task_that_dirties_candidate_workspace)
+Test: tests/binary.rs (work_task_run_fails_review_task_that_dirties_candidate_workspace_and_exits_nonzero)
+Test: tests/binary.rs (work_task_run_fails_review_task_that_commits_to_candidate_workspace)
+Test: tests/binary.rs (work_task_run_restores_committed_review_mutation_before_dirty_failure)
+
 IF the write Task coder exits non-zero,
 THEN THE SYSTEM SHALL mark the Attempt and Task as `failed`, leave Task
 output unset, and report the coder failure.
@@ -152,17 +197,24 @@ Test: tests/binary.rs (work_task_run_marks_task_failed_when_coder_exits_nonzero)
 Test: tests/behaviors/operations/test-work-task-run.sh (coder failure marks Task failed)
 
 IF the requested Task is missing, belongs to a different Attempt or Work
-Item, is not planned, is not a `write` Task, has zero or multiple
-writable workspaces, declares a writable workspace outside
-`.factory/work/workspaces/`, or points to an existing directory that is
-not a registered git worktree,
+Item, is not planned, has an unsupported kind, has zero or multiple
+writable workspaces for a write Task, declares a writable workspace outside
+`.factory/work/workspaces/`, points to an existing directory that is not a
+registered git worktree, or is a review Task that declares writable
+workspaces, lacks an artifact area, declares no readable workspaces,
+lacks review context, declares review context whose candidate is not a
+readable workspace, declares an unmanaged artifact area path, or declares
+an unmanaged readable workspace path,
 THEN THE SYSTEM SHALL exit non-zero without creating an unmanaged
 workspace or mutating Task completion state.
 Test: tests/binary.rs (work_task_run_rejects_task_that_is_not_planned)
 Test: tests/binary.rs (work_task_run_rejects_non_write_task)
 Test: tests/binary.rs (work_task_run_requires_one_writable_workspace)
 Test: tests/binary.rs (work_task_run_rejects_unmanaged_writable_workspace_path)
+Test: tests/binary.rs (work_task_run_rejects_malformed_review_context)
 Test: tests/binary.rs (work_task_run_rejects_existing_directory_that_is_not_worktree)
+Test: tests/binary.rs (work_task_run_rejects_unmanaged_review_artifact_area_path)
+Test: tests/binary.rs (work_task_run_rejects_unmanaged_review_read_workspace_path)
 Test: tests/binary.rs (work_task_run_missing_ids_leave_work_item_unchanged)
 Test: tests/behaviors/operations/test-work-task-run.sh (invalid task requests do not complete or mutate)
 

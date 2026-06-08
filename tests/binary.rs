@@ -1,7 +1,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use tempfile::TempDir;
 
@@ -714,6 +714,849 @@ exit 0
 }
 
 #[test]
+fn work_review_plans_review_tasks_for_completed_attempt() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review", "work-1", "attempt-1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Planned 5 review Tasks for Attempt attempt-1",
+        ))
+        .stdout(predicate::str::contains("attempt-1-review-tests"));
+
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let attempt = &value["attempts"][0];
+    assert_eq!(attempt["status"], "reviewing");
+    assert_eq!(attempt["review_state"], "not-reviewed");
+    assert_eq!(attempt["tasks"].as_array().unwrap().len(), 6);
+
+    let review_task = attempt["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "attempt-1-review-tests")
+        .unwrap();
+    assert_eq!(review_task["kind"], "review");
+    assert_eq!(review_task["role"], "tests");
+    assert_eq!(
+        review_task["workspace_access"]["reads"][0]["id"],
+        "candidate"
+    );
+    assert_eq!(
+        review_task["workspace_access"]["reads"][0]["path"],
+        ".factory/work/workspaces/attempt-1"
+    );
+    assert!(
+        review_task["workspace_access"]["writes"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        review_task["artifact_area"]["path"],
+        ".factory/work/artifacts/attempt-1/attempt-1-review-tests"
+    );
+    assert_eq!(
+        review_task["review_context"]["candidate_workspace_id"],
+        "candidate"
+    );
+    assert_eq!(
+        review_task["review_context"]["candidate_workspace_path"],
+        ".factory/work/workspaces/attempt-1"
+    );
+    assert_eq!(review_task["review_context"]["source_branch"], "main");
+    assert_eq!(
+        review_task["review_context"]["candidate_commit"],
+        git_head(&main_dir.join(".factory/work/workspaces/attempt-1"))
+    );
+}
+
+#[test]
+fn work_review_requires_completed_write_output() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Review too early"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+    let item_path = main_dir.join(".factory/work/items/work-1.json");
+    let before = fs::read_to_string(&item_path).unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review", "work-1", "attempt-1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("completed write Task"));
+
+    assert_eq!(fs::read_to_string(item_path).unwrap(), before);
+}
+
+#[test]
+fn work_task_run_completes_review_task_with_fail_verdict_artifact() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    fs::create_dir_all(main_dir.join("skills/review-tests")).unwrap();
+    fs::write(
+        main_dir.join("skills/review-tests/SKILL.md"),
+        "# Review tests\n\nCheck tests.\n",
+    )
+    .unwrap();
+    StdCommand::new("git")
+        .args(["add", "skills/review-tests/SKILL.md"])
+        .current_dir(&main_dir)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "Add review tests skill"])
+        .current_dir(&main_dir)
+        .output()
+        .unwrap();
+    create_completed_work_attempt(&tmp, &main_dir);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-review");
+    let prompt_log = tmp.path().join("review-prompt.log");
+    let system_log = tmp.path().join("review-system.log");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--append-system-prompt" ]; then
+    shift
+    printf '%s\n' "$1" > "$SYSTEM_LOG"
+  fi
+  if [ "$1" = "-p" ]; then
+    shift
+    printf '%s\n' "$1" > "$PROMPT_LOG"
+    break
+  fi
+  shift
+done
+printf 'Verdict: fail\n\nFinding remains.\n' > review.md
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-review-tests",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("PROMPT_LOG", &prompt_log)
+        .env("SYSTEM_LOG", &system_log)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Completed Task attempt-1-review-tests",
+        ));
+
+    let review_path =
+        main_dir.join(".factory/work/artifacts/attempt-1/attempt-1-review-tests/review.md");
+    assert!(
+        fs::read_to_string(&review_path)
+            .unwrap()
+            .contains("Verdict: fail")
+    );
+    let prompt = fs::read_to_string(prompt_log).unwrap();
+    assert!(prompt.contains("Execute this Factory review Task"));
+    assert!(prompt.contains("Readable candidate workspaces:"));
+    let candidate_workspace =
+        fs::canonicalize(main_dir.join(".factory/work/workspaces/attempt-1")).unwrap();
+    assert!(prompt.contains(&format!("- candidate: {}", candidate_workspace.display())));
+    assert!(!prompt.contains("- candidate: .factory/work/workspaces/attempt-1"));
+    assert!(prompt.contains("Review context:"));
+    assert!(prompt.contains("- Source branch: main"));
+    assert!(prompt.contains("- Review diff: git -C <candidate-workspace> diff main.."));
+    assert!(prompt.contains(&review_path.to_string_lossy().to_string()));
+    let system = fs::read_to_string(system_log).unwrap();
+    assert!(system.contains("Factory tests reviewer"));
+    let candidate_skill =
+        main_dir.join(".factory/work/workspaces/attempt-1/skills/review-tests/SKILL.md");
+    assert!(system.contains(&candidate_skill.to_string_lossy().to_string()));
+    assert!(system.contains(&review_path.to_string_lossy().to_string()));
+    assert!(!system.contains(".factory/runs/{{RUN_ID}}/reviews"));
+
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let review_task = value["attempts"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "attempt-1-review-tests")
+        .unwrap();
+    assert_eq!(review_task["status"], "complete");
+    assert!(review_task.get("output").is_none());
+    assert_eq!(value["attempts"][0]["status"], "reviewing");
+    assert_eq!(
+        value["attempts"][0]["artifacts"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["path"],
+        ".factory/work/artifacts/attempt-1/attempt-1-review-tests/review.md"
+    );
+}
+
+#[test]
+fn work_task_run_completes_attempt_after_all_review_tasks_complete() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-review");
+    write_mock_claude(
+        &bin_dir,
+        "#!/bin/bash\nprintf 'Verdict: pass\\n' > review.md\nexit 0\n",
+    );
+
+    for role in [
+        "documentation",
+        "behaviors",
+        "architecture",
+        "skills",
+        "tests",
+    ] {
+        factory_cmd()
+            .current_dir(&main_dir)
+            .args([
+                "work",
+                "task",
+                "run",
+                "work-1",
+                "attempt-1",
+                &format!("attempt-1-review-{role}"),
+                "--no-sandbox",
+            ])
+            .env("PATH", mock_path(&bin_dir))
+            .assert()
+            .success();
+    }
+
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let attempt = &value["attempts"][0];
+    assert_eq!(attempt["status"], "complete");
+    for task in attempt["tasks"].as_array().unwrap() {
+        assert_eq!(task["status"], "complete");
+    }
+    for role in [
+        "documentation",
+        "behaviors",
+        "architecture",
+        "skills",
+        "tests",
+    ] {
+        assert!(
+            main_dir
+                .join(format!(
+                    ".factory/work/artifacts/attempt-1/attempt-1-review-{role}/review.md"
+                ))
+                .exists()
+        );
+    }
+}
+
+#[test]
+fn work_task_run_rejects_unmanaged_review_read_workspace_path() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let item_path = main_dir.join(".factory/work/items/work-1.json");
+    let planned = fs::read_to_string(&item_path).unwrap();
+    let outside_absolute = tmp.path().join("outside-review-read");
+    let outside_absolute = outside_absolute.to_string_lossy().to_string();
+    for path in [
+        "../outside-review-read",
+        ".factory/work/workspaces",
+        ".factory/work/workspaces/../outside-review-read",
+        outside_absolute.as_str(),
+    ] {
+        let mut value: serde_json::Value = serde_json::from_str(&planned).unwrap();
+        let review_task = value["attempts"][0]["tasks"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|task| task["id"] == "attempt-1-review-tests")
+            .unwrap();
+        review_task["workspace_access"]["reads"][0]["path"] =
+            serde_json::Value::String(path.to_string());
+        review_task["review_context"]["candidate_workspace_path"] =
+            serde_json::Value::String(path.to_string());
+        fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+        let before = fs::read_to_string(&item_path).unwrap();
+
+        factory_cmd()
+            .current_dir(&main_dir)
+            .args([
+                "work",
+                "task",
+                "run",
+                "work-1",
+                "attempt-1",
+                "attempt-1-review-tests",
+                "--no-sandbox",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "Task readable workspace path must",
+            ));
+
+        assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
+    }
+    assert!(
+        !main_dir
+            .join(".factory/work/artifacts/attempt-1/attempt-1-review-tests")
+            .exists()
+    );
+}
+
+#[test]
+fn work_task_run_rejects_malformed_review_context() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let item_path = main_dir.join(".factory/work/items/work-1.json");
+    let planned = fs::read_to_string(&item_path).unwrap();
+    for (mutation, expected) in [
+        (
+            "delete",
+            "review task attempt-1-review-tests must declare review context",
+        ),
+        (
+            "id",
+            "review task attempt-1-review-tests review context candidate must match a readable workspace",
+        ),
+        (
+            "path",
+            "review task attempt-1-review-tests review context candidate must match a readable workspace",
+        ),
+    ] {
+        let mut value: serde_json::Value = serde_json::from_str(&planned).unwrap();
+        let review_task = value["attempts"][0]["tasks"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|task| task["id"] == "attempt-1-review-tests")
+            .unwrap();
+        match mutation {
+            "delete" => {
+                review_task
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("review_context");
+            }
+            "id" => {
+                review_task["review_context"]["candidate_workspace_id"] =
+                    serde_json::Value::String("other-candidate".to_string());
+            }
+            "path" => {
+                review_task["review_context"]["candidate_workspace_path"] =
+                    serde_json::Value::String(".factory/work/workspaces/other".to_string());
+            }
+            _ => unreachable!(),
+        }
+        fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+        let before = fs::read_to_string(&item_path).unwrap();
+
+        factory_cmd()
+            .current_dir(&main_dir)
+            .args([
+                "work",
+                "task",
+                "run",
+                "work-1",
+                "attempt-1",
+                "attempt-1-review-tests",
+                "--no-sandbox",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(expected));
+
+        assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
+    }
+    assert!(
+        !main_dir
+            .join(".factory/work/artifacts/attempt-1/attempt-1-review-tests")
+            .exists()
+    );
+}
+
+#[test]
+fn work_task_run_fails_review_task_without_artifact() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+    let bin_dir = tmp.path().join("bin-review");
+    write_mock_claude(&bin_dir, "#!/bin/bash\nexit 0\n");
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-review-tests",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("without writing"));
+
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let review_task = value["attempts"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "attempt-1-review-tests")
+        .unwrap();
+    assert_eq!(value["attempts"][0]["status"], "failed");
+    assert_eq!(review_task["status"], "failed");
+}
+
+#[test]
+fn work_task_run_rejects_unmanaged_review_artifact_area_path() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let item_path = main_dir.join(".factory/work/items/work-1.json");
+    let planned = fs::read_to_string(&item_path).unwrap();
+    let outside_absolute = tmp.path().join("outside-review-absolute");
+    let outside_absolute = outside_absolute.to_string_lossy().to_string();
+    for path in [
+        "../outside-review-artifacts",
+        ".factory/work/artifacts",
+        ".factory/work/artifacts/../outside-review-artifacts",
+        outside_absolute.as_str(),
+    ] {
+        let mut value: serde_json::Value = serde_json::from_str(&planned).unwrap();
+        let review_task = value["attempts"][0]["tasks"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|task| task["id"] == "attempt-1-review-tests")
+            .unwrap();
+        review_task["artifact_area"]["path"] = serde_json::Value::String(path.to_string());
+        fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+        let before = fs::read_to_string(&item_path).unwrap();
+
+        factory_cmd()
+            .current_dir(&main_dir)
+            .args([
+                "work",
+                "task",
+                "run",
+                "work-1",
+                "attempt-1",
+                "attempt-1-review-tests",
+                "--no-sandbox",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("Task artifact area path must"));
+
+        assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
+    }
+
+    assert!(!main_dir.join("../outside-review-artifacts").exists());
+    assert!(
+        !main_dir
+            .join(".factory/work/outside-review-artifacts")
+            .exists()
+    );
+    assert!(!Path::new(&outside_absolute).exists());
+}
+
+#[test]
+fn work_task_run_marks_review_task_failed_when_coder_exits_nonzero() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-review");
+    write_mock_claude(&bin_dir, "#!/bin/bash\nexit 7\n");
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-review-tests",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Coder exited with code 7"));
+
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let review_task = value["attempts"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "attempt-1-review-tests")
+        .unwrap();
+    assert_eq!(value["attempts"][0]["status"], "failed");
+    assert_eq!(review_task["status"], "failed");
+}
+
+#[test]
+fn work_task_run_fails_review_task_that_dirties_candidate_workspace() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-review");
+    let candidate = main_dir.join(".factory/work/workspaces/attempt-1");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+printf 'Verdict: pass\n' > review.md
+printf 'review mutation\n' > "$CANDIDATE/dirty-review.txt"
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-review-tests",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("CANDIDATE", &candidate)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("uncommitted changes"));
+
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let review_task = value["attempts"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "attempt-1-review-tests")
+        .unwrap();
+    assert_eq!(value["attempts"][0]["status"], "failed");
+    assert_eq!(review_task["status"], "failed");
+}
+
+#[test]
+fn work_task_run_fails_review_task_that_dirties_candidate_workspace_and_exits_nonzero() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-review");
+    let candidate = main_dir.join(".factory/work/workspaces/attempt-1");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+printf 'review mutation\n' > "$CANDIDATE/dirty-review.txt"
+exit 7
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-review-tests",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("CANDIDATE", &candidate)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("uncommitted changes"));
+
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let review_task = value["attempts"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "attempt-1-review-tests")
+        .unwrap();
+    assert_eq!(value["attempts"][0]["status"], "failed");
+    assert_eq!(review_task["status"], "failed");
+}
+
+#[test]
+fn work_task_run_fails_review_task_that_commits_to_candidate_workspace() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-review");
+    let candidate = main_dir.join(".factory/work/workspaces/attempt-1");
+    let baseline_head = git_head(&candidate);
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+printf 'Verdict: pass\n' > review.md
+printf 'committed review mutation\n' > "$CANDIDATE/committed-review.txt"
+git -C "$CANDIDATE" add committed-review.txt
+git -C "$CANDIDATE" commit -m "Commit review mutation" >/dev/null
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-review-tests",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("CANDIDATE", &candidate)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "changed readable candidate workspace HEAD",
+        ));
+
+    assert_eq!(git_head(&candidate), baseline_head);
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let review_task = value["attempts"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "attempt-1-review-tests")
+        .unwrap();
+    assert_eq!(value["attempts"][0]["status"], "failed");
+    assert_eq!(review_task["status"], "failed");
+}
+
+#[test]
+fn work_task_run_restores_committed_review_mutation_before_dirty_failure() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-review");
+    let candidate = main_dir.join(".factory/work/workspaces/attempt-1");
+    let baseline_head = git_head(&candidate);
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+printf 'Verdict: pass\n' > review.md
+printf 'committed review mutation\n' > "$CANDIDATE/committed-review.txt"
+git -C "$CANDIDATE" add committed-review.txt
+git -C "$CANDIDATE" commit -m "Commit review mutation" >/dev/null
+printf 'dirty review mutation\n' > "$CANDIDATE/dirty-review.txt"
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-review-tests",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("CANDIDATE", &candidate)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "changed readable candidate workspace HEAD",
+        ));
+
+    assert_eq!(git_head(&candidate), baseline_head);
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let review_task = value["attempts"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "attempt-1-review-tests")
+        .unwrap();
+    assert_eq!(value["attempts"][0]["status"], "failed");
+    assert_eq!(review_task["status"], "failed");
+}
+
+#[test]
+fn work_task_run_sandboxes_review_with_read_only_candidate() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-review");
+    let profile_copy = tmp.path().join("review-sandbox.sb");
+    write_mock_claude(
+        &bin_dir,
+        "#!/bin/bash\nprintf 'Verdict: pass\\n' > review.md\nexit 0\n",
+    );
+    write_mock_executable(
+        &bin_dir,
+        "sandbox-exec",
+        "#!/bin/bash\ncp \"$2\" \"${SANDBOX_PROFILE_COPY:?}\"\nshift 2\nexec \"$@\"\n",
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-review-tests",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("SANDBOX_PROFILE_COPY", &profile_copy)
+        .assert()
+        .success();
+
+    let profile = fs::read_to_string(profile_copy).unwrap();
+    let candidate = fs::canonicalize(main_dir.join(".factory/work/workspaces/attempt-1")).unwrap();
+    let common_git_dir = fs::canonicalize(git_common_dir(&candidate)).unwrap();
+    let artifact_dir =
+        fs::canonicalize(main_dir.join(".factory/work/artifacts/attempt-1/attempt-1-review-tests"))
+            .unwrap();
+    assert!(
+        profile.contains(&format!(
+            "(allow file-read*  (subpath \"{}\"))",
+            candidate.display()
+        )),
+        "{profile}"
+    );
+    assert!(
+        profile.contains(&format!(
+            "(allow file-read*  (subpath \"{}\"))",
+            common_git_dir.display()
+        )),
+        "{profile}"
+    );
+    assert!(
+        !profile.contains(&format!(
+            "(allow file-write* (subpath \"{}\"))",
+            candidate.display()
+        )),
+        "{profile}"
+    );
+    assert!(
+        profile.contains(&format!(
+            "(allow file-write* (subpath \"{}\"))",
+            artifact_dir.display()
+        )),
+        "{profile}"
+    );
+}
+
+#[test]
 fn work_task_run_does_not_complete_attempt_with_unfinished_tasks() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
@@ -1172,7 +2015,7 @@ fn work_task_run_rejects_non_write_task() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("expected write"));
+        .stderr(predicate::str::contains("unsupported by task run"));
 
     assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
     assert!(!main_dir.join(".factory/work/workspaces/attempt-1").exists());
@@ -2299,6 +3142,78 @@ fn setup_git_project(tmp: &TempDir) -> std::path::PathBuf {
         .unwrap();
 
     main_dir
+}
+
+fn create_completed_work_attempt(tmp: &TempDir, main_dir: &Path) {
+    let bin_dir = tmp.path().join("bin-write");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+printf 'task output\n' > task-output.txt
+git add task-output.txt
+git commit -m "Add task output" >/dev/null
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(main_dir)
+        .args(["work", "create", "work-1", "--title", "Run review"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+}
+
+fn git_head(repo: &Path) -> String {
+    let output = StdCommand::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git rev-parse failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+fn git_common_dir(repo: &Path) -> PathBuf {
+    let output = StdCommand::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git rev-parse --git-common-dir failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let path = String::from_utf8(output.stdout).unwrap();
+    let path = PathBuf::from(path.trim());
+    if path.is_absolute() {
+        path
+    } else {
+        repo.join(path)
+    }
 }
 
 fn write_mock_claude(bin_dir: &Path, script: &str) {

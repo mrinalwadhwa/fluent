@@ -19,5 +19,11 @@
   },
   "artifact_area": {
     "path": ".factory/tasks/review-architecture"
+  },
+  "review_context": {
+    "candidate_workspace_id": "candidate",
+    "candidate_workspace_path": "../run-work-1",
+    "source_branch": "main",
+    "candidate_commit": "abc123"
   }
 }

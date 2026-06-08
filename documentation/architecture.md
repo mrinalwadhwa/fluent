@@ -59,8 +59,8 @@ implementation. `factory run`, `resume`, `summary`, `dashboard`,
 `review`, `land`, and cleanup continue to read and write existing run
 state. The Work Item model also has a narrow Task execution bridge:
 `factory work task run <work-item-id> <attempt-id> <task-id>` executes a
-stored write Task through the selected coder. This bridge does not
-migrate run directories or replace the legacy session loop.
+stored write or review Task through the selected coder. This bridge does
+not migrate run directories or replace the legacy session loop.
 
 `factory work create <id> --title <title>` exposes the first Work Item
 intake surface. It writes a minimal Work Item with an empty `attempts`
@@ -74,6 +74,17 @@ the coder there, and completes the Task only after the workspace is clean
 and contains a new commit produced after Factory bound the workspace for
 that Task run. The bridge rejects writable Task workspace paths outside
 `.factory/work/workspaces/` before it creates or binds a worktree.
+`factory work review <work-item-id> <attempt-id>` appends planned
+`review` Tasks for the default reviewer set after a completed write Task
+exists. Each review Task reads the candidate workspace, carries review
+context copied from the write output, and writes only under
+`.factory/work/artifacts/<attempt-id>/<task-id>/`. The review context
+names the candidate workspace, source branch, and candidate commit so a
+reviewer can inspect the scoped diff without rediscovering the author
+Task. Running a review Task requires `review.md` in that artifact area;
+the Task can complete even when that artifact says `Verdict: fail` or
+`Verdict: uncertain` because verdict acceptance belongs to later review
+or merge policy.
 `factory work list` and `factory work show <id>` expose the same durable
 Work Item model for inspection. These commands use `.factory/work/items/`
 through the Rust storage model and validate stored objects. This keeps
@@ -130,13 +141,21 @@ findings and notes under a required `artifact_area`.
 JSON. Completed write Tasks include `output`, which records the writable
 workspace id and path, the source branch resolved from the project root
 when the Task run started, and the commit that contains the Task output.
-Incomplete Tasks do not carry output. Attempt completion is derived from
-its Tasks; a complete Attempt must not contain unfinished Tasks, and
-completing one Task does not by itself complete an Attempt that still has
-unfinished Tasks.
+Planned review Tasks include `review_context`, copied from that write
+output, with the candidate workspace id and path, source branch, and
+candidate commit. Incomplete Tasks do not carry output. Attempt
+completion is derived from its Tasks; a complete Attempt must not contain
+unfinished Tasks, and completing one Task does not by itself complete an
+Attempt that still has unfinished Tasks. Completed review Tasks record
+artifact references under the Attempt and do not set `output`; their
+markdown verdict remains data, not Task execution status.
 
-Review tasks are read-only with respect to candidate workspaces. They may
-write task artifacts, such as findings or scratch notes, but concrete
+Review tasks are read-only with respect to candidate workspaces,
+including managed candidate workspaces under `.factory/work/workspaces/`.
+Factory grants sandboxed review Tasks read-only access to candidate
+worktrees and their shared git metadata so standard commands such as
+`git diff <source>..<candidate>` work from the candidate workspace. They
+may write task artifacts, such as findings or scratch notes, but concrete
 reviewer fixes become follow-up `write` tasks. Sandboxed delegated tasks
 produce learning artifacts in task artifact areas; Factory can later
 ingest those artifacts into project-local expertise after review.

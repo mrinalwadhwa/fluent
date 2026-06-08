@@ -27,6 +27,7 @@ fn task(kind: TaskKind) -> Task {
         artifact_area: Some(TaskArtifactArea {
             path: ".factory/work/artifacts/write-code".to_string(),
         }),
+        review_context: None,
         output: Some(TaskOutput {
             workspace_id: "candidate".to_string(),
             workspace_path: "../workspaces/candidate".to_string(),
@@ -79,6 +80,9 @@ fn documented_review_task_reads_candidate_workspace() {
     assert_eq!(task.workspace_access.reads.len(), 2);
     assert!(task.workspace_access.writes.is_empty());
     assert!(task.artifact_area.is_some());
+    let review_context = task.review_context.unwrap();
+    assert_eq!(review_context.candidate_workspace_id, "candidate");
+    assert_eq!(review_context.candidate_workspace_path, "../run-work-1");
 }
 
 #[test]
@@ -100,6 +104,37 @@ fn documented_review_task_rejects_workspace_writes() {
     assert_eq!(
         task.validate().unwrap_err(),
         WorkModelError::ReviewTaskWritesWorkspace {
+            task_id: "review-architecture".to_string(),
+        }
+    );
+}
+
+#[test]
+fn documented_review_task_rejects_missing_context() {
+    let content = include_str!("fixtures/core-work-model/task-review-read-only.json");
+    let mut value: serde_json::Value = serde_json::from_str(content).unwrap();
+    value.as_object_mut().unwrap().remove("review_context");
+    let task: Task = serde_json::from_value(value).unwrap();
+
+    assert_eq!(
+        task.validate().unwrap_err(),
+        WorkModelError::ReviewTaskMissingContext {
+            task_id: "review-architecture".to_string(),
+        }
+    );
+}
+
+#[test]
+fn documented_review_task_rejects_context_candidate_mismatch() {
+    let content = include_str!("fixtures/core-work-model/task-review-read-only.json");
+    let mut value: serde_json::Value = serde_json::from_str(content).unwrap();
+    value["review_context"]["candidate_workspace_path"] =
+        serde_json::Value::String("../other-workspace".to_string());
+    let task: Task = serde_json::from_value(value).unwrap();
+
+    assert_eq!(
+        task.validate().unwrap_err(),
+        WorkModelError::ReviewTaskContextCandidateNotReadable {
             task_id: "review-architecture".to_string(),
         }
     );

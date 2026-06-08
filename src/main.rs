@@ -19,6 +19,7 @@ use factory::land;
 use factory::os;
 use factory::parallel;
 use factory::plan;
+use factory::review;
 use factory::run::{self, Run};
 use factory::session::{self, DefaultHooks, SandboxedHooks, SessionConfig};
 use factory::summary;
@@ -267,6 +268,29 @@ fn cmd_work(
             store.write_work_item(&item)?;
             println!("Created Attempt {attempt_id} for Work Item {work_item_id}");
         }
+        WorkCommands::Review {
+            work_item_id,
+            attempt_id,
+        } => {
+            let mut item = match store.read_work_item(&work_item_id) {
+                Ok(item) => item,
+                Err(WorkModelStorageError::ReadFile { source, .. })
+                    if source.kind() == ErrorKind::NotFound =>
+                {
+                    bail!("Work Item {work_item_id:?} not found");
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let task_ids = item.add_review_tasks(&attempt_id, review::REVIEWERS)?;
+            store.write_work_item(&item)?;
+            println!(
+                "Planned {} review Tasks for Attempt {attempt_id}",
+                task_ids.len()
+            );
+            for task_id in task_ids {
+                println!("{task_id}");
+            }
+        }
         WorkCommands::Task { command } => match command {
             WorkTaskCommands::Run {
                 work_item_id,
@@ -277,7 +301,7 @@ fn cmd_work(
                 extra_args,
             } => {
                 let coder_kind = CoderKind::resolve(coder.as_deref().or(global_coder))?;
-                let result = work_task_executor::run_write_task(WorkTaskRunConfig {
+                let result = work_task_executor::run_task(WorkTaskRunConfig {
                     project_root,
                     store: &store,
                     work_item_id: &work_item_id,
@@ -288,7 +312,7 @@ fn cmd_work(
                     coder_kind,
                     no_sandbox: no_sandbox || global_no_sandbox,
                 })?;
-                println!("Completed Task {} at {}", result.task_id, result.commit);
+                println!("Completed Task {} at {}", result.task_id, result.output);
             }
         },
     }

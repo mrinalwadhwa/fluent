@@ -40,8 +40,19 @@ pub fn render_profile_for_roots_for_coder(
     sandbox_roots: &[PathBuf],
     coder_kind: CoderKind,
 ) -> Result<SandboxProfile> {
-    if sandbox_roots.is_empty() {
-        bail!("At least one sandbox root is required");
+    render_profile_for_access_for_coder(resolver, home, sandbox_roots, &[], coder_kind)
+}
+
+/// Render a Seatbelt sandbox profile with writable and read-only roots.
+pub fn render_profile_for_access_for_coder(
+    resolver: &ContentResolver,
+    home: &str,
+    writable_roots: &[PathBuf],
+    readable_roots: &[PathBuf],
+    coder_kind: CoderKind,
+) -> Result<SandboxProfile> {
+    if writable_roots.is_empty() {
+        bail!("At least one writable sandbox root is required");
     }
     let common = resolver
         .resolve_content("sandbox/common.sb")
@@ -52,8 +63,8 @@ pub fn render_profile_for_roots_for_coder(
         .with_context(|| format!("Sandbox profile {specific_path} not found"))?;
 
     let combined = format!("{common}\n{specific}");
-    let root_rules = render_root_rules(sandbox_roots);
-    let primary_root = sandbox_roots[0].to_string_lossy();
+    let root_rules = render_root_rules(writable_roots, readable_roots);
+    let primary_root = writable_roots[0].to_string_lossy();
     let combined = if combined.contains("_SANDBOX_ROOT_RULES_") {
         combined.replace("_SANDBOX_ROOT_RULES_", &root_rules)
     } else {
@@ -83,13 +94,24 @@ fn sandbox_profile_path(coder_kind: CoderKind) -> &'static str {
     }
 }
 
-fn render_root_rules(roots: &[PathBuf]) -> String {
-    roots
+fn render_root_rules(writable_roots: &[PathBuf], readable_roots: &[PathBuf]) -> String {
+    let writable_rules = writable_roots
         .iter()
         .map(|root| {
             let root = sbpl_string(root);
             format!("(allow file-read*  (subpath {root}))\n(allow file-write* (subpath {root}))")
         })
+        .collect::<Vec<_>>();
+    let readable_rules = readable_roots
+        .iter()
+        .map(|root| {
+            let root = sbpl_string(root);
+            format!("(allow file-read*  (subpath {root}))")
+        })
+        .collect::<Vec<_>>();
+    writable_rules
+        .into_iter()
+        .chain(readable_rules)
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -171,6 +193,35 @@ mod tests {
         assert!(content.contains("/Users/test/workspace/run"), "{content}");
         assert!(
             content.contains("/Users/test/workspace/main/.git"),
+            "{content}"
+        );
+    }
+
+    #[test]
+    fn test_render_profile_contains_read_only_roots() {
+        let resolver = ContentResolver::new(None);
+        let writable_root = PathBuf::from("/Users/test/workspace/artifacts");
+        let readable_root = PathBuf::from("/Users/test/workspace/candidate");
+        let profile = render_profile_for_access_for_coder(
+            &resolver,
+            "/Users/test",
+            std::slice::from_ref(&writable_root),
+            std::slice::from_ref(&readable_root),
+            CoderKind::Claude,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&profile.path).unwrap();
+        assert!(
+            content.contains("(allow file-write* (subpath \"/Users/test/workspace/artifacts\"))"),
+            "{content}"
+        );
+        assert!(
+            content.contains("(allow file-read*  (subpath \"/Users/test/workspace/candidate\"))"),
+            "{content}"
+        );
+        assert!(
+            !content.contains("(allow file-write* (subpath \"/Users/test/workspace/candidate\"))"),
             "{content}"
         );
     }

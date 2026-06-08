@@ -8,6 +8,7 @@ use std::str::FromStr;
 
 pub const WORK_MODEL_DIR: &str = ".factory/work";
 pub const WORK_ITEMS_DIR: &str = "items";
+pub const WORK_ARTIFACTS_DIR: &str = ".factory/work/artifacts";
 
 /// Durable unit of planned Factory work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +50,7 @@ impl WorkItem {
                     }],
                 },
                 artifact_area: None,
+                review_context: None,
                 output: None,
             }],
             review_state: None,
@@ -56,6 +58,73 @@ impl WorkItem {
         });
 
         self.validate()
+    }
+
+    pub fn add_review_tasks(
+        &mut self,
+        attempt_id: &str,
+        roles: &[&str],
+    ) -> Result<Vec<String>, WorkModelError> {
+        let Some(attempt) = self
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.id == attempt_id)
+        else {
+            return Err(WorkModelError::AttemptNotFound {
+                id: attempt_id.to_string(),
+            });
+        };
+
+        let Some(write_output) = attempt
+            .tasks
+            .iter()
+            .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+            .and_then(|task| task.output.as_ref())
+            .cloned()
+        else {
+            return Err(WorkModelError::AttemptMissingCompletedWriteTask {
+                attempt_id: attempt_id.to_string(),
+            });
+        };
+
+        let candidate = WorkspaceRef {
+            id: write_output.workspace_id.clone(),
+            path: write_output.workspace_path.clone(),
+        };
+        let mut task_ids = Vec::new();
+        for role in roles {
+            validate_id("review role", role)?;
+            let task_id = format!("{attempt_id}-review-{role}");
+            validate_id("task", &task_id)?;
+            if attempt.tasks.iter().any(|task| task.id == task_id) {
+                return Err(WorkModelError::TaskAlreadyExists { id: task_id });
+            }
+            attempt.tasks.push(Task {
+                id: task_id.clone(),
+                kind: TaskKind::Review,
+                status: TaskStatus::Planned,
+                role: (*role).to_string(),
+                work_item_id: self.id.clone(),
+                attempt_id: Some(attempt_id.to_string()),
+                workspace_access: WorkspaceAccess::read_only(vec![candidate.clone()]),
+                artifact_area: Some(TaskArtifactArea {
+                    path: format!("{WORK_ARTIFACTS_DIR}/{attempt_id}/{task_id}"),
+                }),
+                review_context: Some(ReviewContext {
+                    candidate_workspace_id: write_output.workspace_id.clone(),
+                    candidate_workspace_path: write_output.workspace_path.clone(),
+                    source_branch: write_output.source_branch.clone(),
+                    candidate_commit: write_output.commit.clone(),
+                }),
+                output: None,
+            });
+            task_ids.push(task_id);
+        }
+        attempt.status = AttemptStatus::Reviewing;
+        attempt.review_state = Some(AttemptReviewState::NotReviewed);
+
+        self.validate()?;
+        Ok(task_ids)
     }
 
     pub fn validate(&self) -> Result<(), WorkModelError> {
@@ -154,6 +223,8 @@ pub struct Task {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_area: Option<TaskArtifactArea>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_context: Option<ReviewContext>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<TaskOutput>,
 }
 
@@ -181,6 +252,27 @@ impl Task {
             return Err(WorkModelError::ReviewTaskMissingArtifactArea {
                 task_id: self.id.clone(),
             });
+        }
+        if self.kind == TaskKind::Review && self.workspace_access.reads.is_empty() {
+            return Err(WorkModelError::ReviewTaskMissingReadableWorkspace {
+                task_id: self.id.clone(),
+            });
+        }
+        if self.kind == TaskKind::Review {
+            let review_context = self.review_context.as_ref().ok_or_else(|| {
+                WorkModelError::ReviewTaskMissingContext {
+                    task_id: self.id.clone(),
+                }
+            })?;
+            let candidate_is_readable = self.workspace_access.reads.iter().any(|workspace| {
+                workspace.id == review_context.candidate_workspace_id
+                    && workspace.path == review_context.candidate_workspace_path
+            });
+            if !candidate_is_readable {
+                return Err(WorkModelError::ReviewTaskContextCandidateNotReadable {
+                    task_id: self.id.clone(),
+                });
+            }
         }
         Ok(())
     }
@@ -307,6 +399,15 @@ pub struct TaskArtifactArea {
     pub path: String,
 }
 
+/// Review scope derived from the write Task that produced a candidate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewContext {
+    pub candidate_workspace_id: String,
+    pub candidate_workspace_path: String,
+    pub source_branch: String,
+    pub candidate_commit: String,
+}
+
 /// Durable output produced by a completed task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskOutput {
@@ -352,6 +453,15 @@ pub enum WorkModelError {
     AttemptAlreadyExists {
         id: String,
     },
+    AttemptNotFound {
+        id: String,
+    },
+    AttemptMissingCompletedWriteTask {
+        attempt_id: String,
+    },
+    TaskAlreadyExists {
+        id: String,
+    },
     MultipleWriteWorkspaces {
         count: usize,
     },
@@ -359,6 +469,15 @@ pub enum WorkModelError {
         task_id: String,
     },
     ReviewTaskMissingArtifactArea {
+        task_id: String,
+    },
+    ReviewTaskMissingReadableWorkspace {
+        task_id: String,
+    },
+    ReviewTaskMissingContext {
+        task_id: String,
+    },
+    ReviewTaskContextCandidateNotReadable {
         task_id: String,
     },
     AttemptWorkItemMismatch {
@@ -399,6 +518,18 @@ impl fmt::Display for WorkModelError {
             Self::AttemptAlreadyExists { id } => {
                 write!(f, "Attempt {id:?} already exists")
             }
+            Self::AttemptNotFound { id } => {
+                write!(f, "Attempt {id:?} not found")
+            }
+            Self::AttemptMissingCompletedWriteTask { attempt_id } => {
+                write!(
+                    f,
+                    "Attempt {attempt_id:?} needs a completed write Task before review Tasks can be planned"
+                )
+            }
+            Self::TaskAlreadyExists { id } => {
+                write!(f, "Task {id:?} already exists")
+            }
             Self::MultipleWriteWorkspaces { count } => {
                 write!(f, "task writes {count} workspaces; at most one is allowed")
             }
@@ -407,6 +538,21 @@ impl fmt::Display for WorkModelError {
             }
             Self::ReviewTaskMissingArtifactArea { task_id } => {
                 write!(f, "review task {task_id} must declare an artifact area")
+            }
+            Self::ReviewTaskMissingReadableWorkspace { task_id } => {
+                write!(
+                    f,
+                    "review task {task_id} must declare at least one readable workspace"
+                )
+            }
+            Self::ReviewTaskMissingContext { task_id } => {
+                write!(f, "review task {task_id} must declare review context")
+            }
+            Self::ReviewTaskContextCandidateNotReadable { task_id } => {
+                write!(
+                    f,
+                    "review task {task_id} review context candidate must match a readable workspace"
+                )
             }
             Self::AttemptWorkItemMismatch {
                 attempt_id,
@@ -778,6 +924,12 @@ mod tests {
     }
 
     fn task(kind: TaskKind, writes: Vec<WorkspaceRef>) -> Task {
+        let review_context = (kind == TaskKind::Review).then(|| ReviewContext {
+            candidate_workspace_id: "candidate".to_string(),
+            candidate_workspace_path: "/workspaces/candidate".to_string(),
+            source_branch: "main".to_string(),
+            candidate_commit: "abc123".to_string(),
+        });
         Task {
             id: "task-1".to_string(),
             kind,
@@ -792,6 +944,7 @@ mod tests {
             artifact_area: Some(TaskArtifactArea {
                 path: ".factory/tasks/task-1".to_string(),
             }),
+            review_context,
             output: None,
         }
     }
@@ -859,6 +1012,50 @@ mod tests {
         assert_eq!(
             review_task.validate().unwrap_err(),
             WorkModelError::ReviewTaskMissingArtifactArea {
+                task_id: "task-1".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn review_task_requires_readable_workspace() {
+        let mut review_task = task(TaskKind::Review, Vec::new());
+        review_task.workspace_access.reads = Vec::new();
+
+        assert_eq!(
+            review_task.validate().unwrap_err(),
+            WorkModelError::ReviewTaskMissingReadableWorkspace {
+                task_id: "task-1".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn review_task_requires_review_context() {
+        let mut review_task = task(TaskKind::Review, Vec::new());
+        review_task.review_context = None;
+
+        assert_eq!(
+            review_task.validate().unwrap_err(),
+            WorkModelError::ReviewTaskMissingContext {
+                task_id: "task-1".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn review_task_requires_context_candidate_to_be_readable() {
+        let mut review_task = task(TaskKind::Review, Vec::new());
+        review_task.review_context = Some(ReviewContext {
+            candidate_workspace_id: "other".to_string(),
+            candidate_workspace_path: "/workspaces/other".to_string(),
+            source_branch: "main".to_string(),
+            candidate_commit: "abc123".to_string(),
+        });
+
+        assert_eq!(
+            review_task.validate().unwrap_err(),
+            WorkModelError::ReviewTaskContextCandidateNotReadable {
                 task_id: "task-1".to_string()
             }
         );
