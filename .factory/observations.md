@@ -680,8 +680,9 @@ Adopt the new model in this sequence:
    workspaces.
 7. Update dashboard/status around Work Items, Attempts, Tasks,
    Workspaces, Review artifacts, Merge Candidates, and Needs-user items.
-   The old Runs view should disappear or become an Attempts view during
-   the transition.
+   The first adoption slice should preserve legacy Runs while exposing
+   Work state; a later breaking slice can remove the old Runs view or
+   replace it with an Attempts-oriented view.
 8. Rewrite skills and documentation to use the new vocabulary. Briefs,
    behaviors, approaches, and plans attach to Work Items and Attempts.
    Execution happens through Tasks. Landing happens through Merge
@@ -718,11 +719,18 @@ Progress:
   merge-time reviewer set, fast-forwards the target branch, records
   durable merge status and artifacts, and cleans managed candidate
   workspaces after landing.
+- `1630e30`, `11fa927`, `25cb457`, `a80d021`, and `605475d` added Work
+  status/dashboard visibility. `factory status` now shows Work Items
+  beside legacy Runs, and the dashboard has a Work Items view with
+  Attempts, selected Tasks, Merge Candidates, merge state, needs-user
+  state, read errors, polling refresh, and actionable/error counts.
 
-The next slice should update dashboard and status surfaces around Work
-Items, Attempts, Tasks, Workspaces, review artifacts, Merge Candidates,
-and needs-user items. The old Runs view should disappear or become an
-Attempts-oriented view during the transition.
+The next adoption slices should update skills and documentation to make
+Work Items, Attempts, Tasks, Workspaces, and Merge Candidates the default
+vocabulary; enforce the new task/review boundaries in normal workflow;
+clean up Work workspaces and artifacts; and then delete legacy
+`.factory/runs` compatibility once the Work execution path is used end to
+end.
 
 2026-06-07 — Authors are increasingly using expertise, especially when
 the approach lists specific expertise files, but Factory should make this
