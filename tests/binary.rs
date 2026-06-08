@@ -4298,6 +4298,107 @@ fn cleanup_from_run_worktree_uses_source_registry() {
     assert!(!worktree_dir.exists());
 }
 
+#[test]
+fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Cleanup work"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-active", "--title", "Active work"])
+        .assert()
+        .success();
+
+    let item_path = main_dir.join(".factory/work/items/work-1.json");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
+    value["attempts"][0]["status"] = serde_json::Value::String("complete".to_string());
+    value["attempts"][0]["tasks"][0]["status"] = serde_json::Value::String("complete".to_string());
+    value["attempts"][0]["tasks"][0]["artifact_area"] = serde_json::json!({
+        "path": ".factory/work/artifacts/attempt-1/attempt-1-write"
+    });
+    value["attempts"][0]["tasks"][0]["output"] = serde_json::json!({
+        "workspace_id": "candidate",
+        "workspace_path": "../work-6-work-1-attempt-1",
+        "source_branch": "main",
+        "commit": git_head(&main_dir)
+    });
+    fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+    let artifact_dir = main_dir.join(".factory/work/artifacts/attempt-1/attempt-1-write");
+    fs::create_dir_all(&artifact_dir).unwrap();
+    fs::write(artifact_dir.join("result.md"), "artifact").unwrap();
+
+    let worktree_dir = main_dir.join("../work-6-work-1-attempt-1");
+    let branch_name = "work/work-1/attempt-1/attempt-1-write";
+    StdCommand::new("git")
+        .args([
+            "worktree",
+            "add",
+            worktree_dir.to_str().unwrap(),
+            "-b",
+            branch_name,
+            "HEAD",
+        ])
+        .current_dir(&main_dir)
+        .output()
+        .unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .arg("cleanup")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("would clean Work Item work-1"))
+        .stdout(predicate::str::contains("would remove registered worktree"))
+        .stdout(predicate::str::contains("would remove Work branch"))
+        .stdout(predicate::str::contains("would remove Work artifact"))
+        .stdout(predicate::str::contains("work-active").not());
+
+    assert!(item_path.exists());
+    assert!(worktree_dir.is_dir());
+    assert!(artifact_dir.is_dir());
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["cleanup", "--apply"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cleaned Work Item work-1"))
+        .stdout(predicate::str::contains("removed registered worktree"))
+        .stdout(predicate::str::contains("removed Work branch"));
+
+    assert!(!item_path.exists());
+    assert!(
+        main_dir
+            .join(".factory/work/items/work-active.json")
+            .exists()
+    );
+    assert!(!worktree_dir.exists());
+    assert!(!artifact_dir.exists());
+
+    let branch_check = StdCommand::new("git")
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch_name}"),
+        ])
+        .current_dir(&main_dir)
+        .status()
+        .unwrap();
+    assert!(!branch_check.success());
+}
+
 // -------------------------------------------------------------------------
 // Summary
 // -------------------------------------------------------------------------

@@ -8,7 +8,7 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-use factory::cleanup::{self, CleanupOptions, WorktreeCleanup};
+use factory::cleanup::{self, CleanupOptions, WorkBranchCleanup, WorktreeCleanup};
 use factory::cli::{Cli, Commands, WorkAttemptCommands, WorkCommands, WorkTaskCommands};
 use factory::coder::{CoderKind, CoderSandbox};
 use factory::content::ContentResolver;
@@ -702,20 +702,22 @@ fn cmd_status(search_root: &Path) -> Result<()> {
 }
 
 fn cmd_cleanup(search_root: &Path, run_id: Option<String>, apply: bool) -> Result<()> {
-    let results = cleanup::cleanup_runs(search_root, &CleanupOptions { run_id, apply })?;
+    let options = CleanupOptions { run_id, apply };
+    let run_results = cleanup::cleanup_runs(search_root, &options)?;
+    let work_results = cleanup::cleanup_work_items(search_root, &options)?;
 
-    if results.is_empty() {
+    if run_results.is_empty() && work_results.is_empty() {
         println!("No cleanup candidates found.");
         return Ok(());
     }
 
     if apply {
-        println!("Cleaned runs:");
+        println!("Cleaned:");
     } else {
         println!("Dry run. Use --apply to clean:");
     }
 
-    for result in results {
+    for result in run_results {
         let action = if result.applied {
             "cleaned"
         } else {
@@ -735,6 +737,58 @@ fn cmd_cleanup(search_root: &Path, run_id: Option<String>, apply: bool) -> Resul
             }
             WorktreeCleanup::Missing(path) => {
                 println!("    recorded worktree missing {}", path.display());
+            }
+        }
+    }
+
+    for result in work_results {
+        let action = if result.applied {
+            "cleaned Work Item"
+        } else {
+            "would clean Work Item"
+        };
+        println!("  {} {}", action, result.work_item_id);
+        if result.applied {
+            println!("    removed Work Item state {}", result.item_path.display());
+        } else {
+            println!(
+                "    would remove Work Item state {}",
+                result.item_path.display()
+            );
+        }
+        for worktree in result.worktrees {
+            match worktree {
+                WorktreeCleanup::None => {}
+                WorktreeCleanup::WouldRemove(path) => {
+                    println!("    would remove registered worktree {}", path.display());
+                }
+                WorktreeCleanup::Removed(path) => {
+                    println!("    removed registered worktree {}", path.display());
+                }
+                WorktreeCleanup::SkippedUnregistered(path) => {
+                    println!("    skipped unregistered worktree {}", path.display());
+                }
+                WorktreeCleanup::Missing(path) => {
+                    println!("    managed worktree missing {}", path.display());
+                }
+            }
+        }
+        for branch in result.branches {
+            match branch {
+                WorkBranchCleanup::WouldRemove(branch) => {
+                    println!("    would remove Work branch {branch}");
+                }
+                WorkBranchCleanup::Removed(branch) => {
+                    println!("    removed Work branch {branch}");
+                }
+                WorkBranchCleanup::Missing(_) => {}
+            }
+        }
+        for artifact in result.artifacts {
+            if result.applied {
+                println!("    removed Work artifact {}", artifact.display());
+            } else {
+                println!("    would remove Work artifact {}", artifact.display());
             }
         }
     }

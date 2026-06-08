@@ -117,7 +117,7 @@ pub enum Commands {
         run_id: Option<String>,
     },
 
-    /// Clean stale run artifacts and registered worktrees
+    /// Clean stale run and Work Item artifacts and registered worktrees
     Cleanup {
         /// Target a specific run ID
         #[arg(long)]

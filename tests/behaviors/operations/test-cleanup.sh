@@ -224,6 +224,92 @@ test_dashboard_prefers_actionable_run_over_cleaned_run() {
   return $RESULT
 }
 
+test_cleanup_work_items_dry_run_and_apply() {
+  create_project
+  "$FACTORY_BIN" work create work-1 --title "Cleanup work" >/dev/null
+  "$FACTORY_BIN" work attempt work-1 attempt-1 >/dev/null
+  "$FACTORY_BIN" work create work-active --title "Active work" >/dev/null
+
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+path = Path(".factory/work/items/work-1.json")
+data = json.loads(path.read_text())
+task = data["attempts"][0]["tasks"][0]
+data["attempts"][0]["status"] = "complete"
+task["status"] = "complete"
+task["artifact_area"] = {
+    "path": ".factory/work/artifacts/attempt-1/attempt-1-write"
+}
+task["output"] = {
+    "workspace_id": "candidate",
+    "workspace_path": "../work-6-work-1-attempt-1",
+    "source_branch": "main",
+    "commit": "HEAD"
+}
+path.write_text(json.dumps(data, indent=2) + "\n")
+PY
+
+  ARTIFACT_DIR=".factory/work/artifacts/attempt-1/attempt-1-write"
+  mkdir -p "$ARTIFACT_DIR"
+  printf 'artifact' > "$ARTIFACT_DIR/result.md"
+
+  WORKTREE_DIR="$(cd .. && pwd)/work-6-work-1-attempt-1"
+  BRANCH_NAME="work/work-1/attempt-1/attempt-1-write"
+  git worktree add -q -b "$BRANCH_NAME" "$WORKTREE_DIR" HEAD
+
+  OUTPUT="$("$FACTORY_BIN" cleanup 2>&1)"
+
+  RESULT=0
+  assert_output_contains "$OUTPUT" "would clean Work Item work-1" || RESULT=1
+  assert_output_contains "$OUTPUT" "would remove registered worktree" || RESULT=1
+  assert_output_contains "$OUTPUT" "would remove Work branch" || RESULT=1
+  assert_output_contains "$OUTPUT" "would remove Work artifact" || RESULT=1
+  assert_output_not_contains "$OUTPUT" "work-active" || RESULT=1
+  if [ ! -f ".factory/work/items/work-1.json" ]; then
+    printf '    FAIL: dry run removed Work Item state\n'
+    RESULT=1
+  fi
+  if [ ! -d "$WORKTREE_DIR" ]; then
+    printf '    FAIL: dry run removed Work worktree\n'
+    RESULT=1
+  fi
+  if [ ! -d "$ARTIFACT_DIR" ]; then
+    printf '    FAIL: dry run removed Work artifact\n'
+    RESULT=1
+  fi
+
+  APPLY_OUTPUT="$("$FACTORY_BIN" cleanup --apply 2>&1)"
+  assert_output_contains "$APPLY_OUTPUT" "cleaned Work Item work-1" || RESULT=1
+  assert_output_contains "$APPLY_OUTPUT" "removed registered worktree" || RESULT=1
+  assert_output_contains "$APPLY_OUTPUT" "removed Work branch" || RESULT=1
+  if [ -f ".factory/work/items/work-1.json" ]; then
+    printf '    FAIL: apply kept Work Item state\n'
+    RESULT=1
+  fi
+  if [ ! -f ".factory/work/items/work-active.json" ]; then
+    printf '    FAIL: apply removed active Work Item state\n'
+    RESULT=1
+  fi
+  if [ -d "$WORKTREE_DIR" ]; then
+    printf '    FAIL: apply kept Work worktree\n'
+    RESULT=1
+  fi
+  if [ -d "$ARTIFACT_DIR" ]; then
+    printf '    FAIL: apply kept Work artifact\n'
+    RESULT=1
+  fi
+  if git show-ref --verify --quiet "refs/heads/${BRANCH_NAME}"; then
+    printf '    FAIL: apply kept Work branch\n'
+    RESULT=1
+  fi
+
+  git worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1 || true
+  rm -rf "$TEST_DIR" "$WORKTREE_DIR"
+  return $RESULT
+}
+
 printf 'test-cleanup\n\n'
 
 run_test "cleanup selects stale complete and landed runs by default" \
@@ -240,6 +326,8 @@ run_test "status lists cleaned runs with original status" \
   test_status_lists_cleaned_runs_with_original_status
 run_test "dashboard prefers actionable run over cleaned run" \
   test_dashboard_prefers_actionable_run_over_cleaned_run
+run_test "cleanup handles Work Items with dry run and apply" \
+  test_cleanup_work_items_dry_run_and_apply
 
 printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
 

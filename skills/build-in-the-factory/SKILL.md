@@ -231,6 +231,10 @@ Managed candidate worktrees live beside the source checkout as
 
 Use `factory work show <work-item-id>` for the durable object. Use
 `factory status` or `factory dashboard` for operator-facing summaries.
+Use `factory cleanup` for a dry-run cleanup report after terminal Work
+Items land or fail; add `--apply` to remove terminal Work Item state,
+referenced artifacts, managed candidate worktrees, and Work branches.
+Cleanup skips active Attempts, Tasks, and Merge Candidates.
 
 ## Legacy run state
 
@@ -258,6 +262,10 @@ Legacy run state lives in `.factory/runs/[run-id]/`:
 | `report.md` | Generated run report |
 | `cleaned.md` | Cleanup context for complete or landed runs cleaned by `factory cleanup` |
 | `reviews/` | Review artifacts |
+
+`factory cleanup` also handles complete or landed legacy runs. It
+defaults to a dry run and requires `--apply` before removing registered
+run worktrees or writing cleanup markers.
 | `children` | Child run IDs, one per line (parallel runs only, written by the factory) |
 | `parent` | Parent run ID (child runs only, written by the factory) |
 

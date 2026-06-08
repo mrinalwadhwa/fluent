@@ -1,10 +1,15 @@
 use anyhow::{Context, Result, bail};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::run::{self, Run, RunStatus};
+use crate::work_model::{
+    Attempt, AttemptStatus, MergeCandidate, MergeCandidateMergeStatus, MergeCandidateReviewState,
+    Task, TaskStatus, WORK_ARTIFACTS_DIR, WorkItem, WorkModelStore,
+    resolve_expected_candidate_workspace_path,
+};
 
 #[derive(Debug, Clone)]
 pub struct CleanupOptions {
@@ -29,6 +34,23 @@ pub struct CleanupResult {
     pub worktree: WorktreeCleanup,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkBranchCleanup {
+    WouldRemove(String),
+    Removed(String),
+    Missing(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkCleanupResult {
+    pub work_item_id: String,
+    pub applied: bool,
+    pub item_path: PathBuf,
+    pub artifacts: Vec<PathBuf>,
+    pub worktrees: Vec<WorktreeCleanup>,
+    pub branches: Vec<WorkBranchCleanup>,
+}
+
 pub fn cleanup_runs(search_root: &Path, options: &CleanupOptions) -> Result<Vec<CleanupResult>> {
     let source_root = cleanup_source_root(search_root)?;
     let candidates = cleanup_candidates(&source_root, options.run_id.as_deref())?;
@@ -47,6 +69,31 @@ pub fn cleanup_runs(search_root: &Path, options: &CleanupOptions) -> Result<Vec<
             applied: options.apply,
             worktree,
         });
+    }
+
+    Ok(results)
+}
+
+pub fn cleanup_work_items(
+    search_root: &Path,
+    options: &CleanupOptions,
+) -> Result<Vec<WorkCleanupResult>> {
+    if options.run_id.is_some() {
+        return Ok(Vec::new());
+    }
+
+    let source_root = cleanup_source_root(search_root)?;
+    let store = WorkModelStore::new(&source_root);
+    let candidates = cleanup_work_item_candidates(&store)?;
+    let registered = registered_worktrees(&source_root)?;
+    let mut results = Vec::new();
+
+    for work_item in candidates {
+        let plan = work_cleanup_plan(&source_root, &store, &work_item, &registered, options.apply)?;
+        if options.apply {
+            apply_work_item_cleanup(&plan)?;
+        }
+        results.push(plan);
     }
 
     Ok(results)
@@ -166,6 +213,328 @@ fn is_cleanable_status(status: &RunStatus) -> bool {
     matches!(status, RunStatus::Complete | RunStatus::Landed)
 }
 
+fn cleanup_work_item_candidates(store: &WorkModelStore) -> Result<Vec<WorkItem>> {
+    let mut candidates = Vec::new();
+    for work_item in store.list_work_items()? {
+        if work_item_is_cleanable(&work_item) {
+            candidates.push(work_item);
+        }
+    }
+    Ok(candidates)
+}
+
+fn work_item_is_cleanable(work_item: &WorkItem) -> bool {
+    !work_item.attempts.is_empty()
+        && work_item.attempts.iter().all(attempt_is_terminal)
+        && work_item
+            .merge_candidates
+            .iter()
+            .all(merge_candidate_is_terminal)
+}
+
+fn attempt_is_terminal(attempt: &Attempt) -> bool {
+    matches!(
+        attempt.status,
+        AttemptStatus::Complete | AttemptStatus::Failed
+    ) && !attempt.tasks.is_empty()
+        && attempt.tasks.iter().all(task_is_terminal)
+}
+
+fn task_is_terminal(task: &Task) -> bool {
+    matches!(task.status, TaskStatus::Complete | TaskStatus::Failed)
+}
+
+fn merge_candidate_is_terminal(candidate: &MergeCandidate) -> bool {
+    matches!(
+        candidate.merge_state.status,
+        MergeCandidateMergeStatus::Landed | MergeCandidateMergeStatus::Failed
+    ) || matches!(candidate.review_state, MergeCandidateReviewState::Failed)
+}
+
+fn work_cleanup_plan(
+    source_root: &Path,
+    store: &WorkModelStore,
+    work_item: &WorkItem,
+    registered: &[PathBuf],
+    apply: bool,
+) -> Result<WorkCleanupResult> {
+    let mut worktrees = Vec::new();
+    let mut branches = Vec::new();
+
+    for attempt in &work_item.attempts {
+        for task in &attempt.tasks {
+            for workspace in task
+                .workspace_access
+                .writes
+                .iter()
+                .chain(task.workspace_access.reads.iter())
+            {
+                let Ok(path) = resolve_expected_candidate_workspace_path(
+                    source_root,
+                    &workspace.path,
+                    &work_item.id,
+                    &attempt.id,
+                    "Work cleanup",
+                ) else {
+                    continue;
+                };
+                push_unique_worktree(
+                    &mut worktrees,
+                    cleanup_managed_worktree(source_root, &path, registered, apply)?,
+                );
+            }
+
+            let branch_name = format!("work/{}/{}/{}", work_item.id, attempt.id, task.id);
+            push_unique_branch(
+                &mut branches,
+                cleanup_work_branch(source_root, &branch_name, apply)?,
+            );
+        }
+    }
+
+    for candidate in &work_item.merge_candidates {
+        if let Ok(path) = resolve_expected_candidate_workspace_path(
+            source_root,
+            &candidate.source_workspace.path,
+            &work_item.id,
+            &candidate.attempt_id,
+            "Work cleanup",
+        ) {
+            push_unique_worktree(
+                &mut worktrees,
+                cleanup_managed_worktree(source_root, &path, registered, apply)?,
+            );
+        }
+    }
+
+    let item_path = store.work_item_path(&work_item.id)?;
+    let artifacts = work_item_artifact_paths(source_root, work_item);
+
+    Ok(WorkCleanupResult {
+        work_item_id: work_item.id.clone(),
+        applied: apply,
+        item_path,
+        artifacts,
+        worktrees,
+        branches,
+    })
+}
+
+fn push_unique_worktree(worktrees: &mut Vec<WorktreeCleanup>, cleanup: WorktreeCleanup) {
+    let cleanup_path = match &cleanup {
+        WorktreeCleanup::None => return,
+        WorktreeCleanup::WouldRemove(path)
+        | WorktreeCleanup::Removed(path)
+        | WorktreeCleanup::SkippedUnregistered(path)
+        | WorktreeCleanup::Missing(path) => path,
+    };
+    if worktrees.iter().any(|existing| match existing {
+        WorktreeCleanup::None => false,
+        WorktreeCleanup::WouldRemove(path)
+        | WorktreeCleanup::Removed(path)
+        | WorktreeCleanup::SkippedUnregistered(path)
+        | WorktreeCleanup::Missing(path) => path == cleanup_path,
+    }) {
+        return;
+    }
+    worktrees.push(cleanup);
+}
+
+fn push_unique_branch(branches: &mut Vec<WorkBranchCleanup>, cleanup: WorkBranchCleanup) {
+    let branch_name = match &cleanup {
+        WorkBranchCleanup::WouldRemove(branch)
+        | WorkBranchCleanup::Removed(branch)
+        | WorkBranchCleanup::Missing(branch) => branch,
+    };
+    if branches.iter().any(|existing| match existing {
+        WorkBranchCleanup::WouldRemove(branch)
+        | WorkBranchCleanup::Removed(branch)
+        | WorkBranchCleanup::Missing(branch) => branch == branch_name,
+    }) {
+        return;
+    }
+    branches.push(cleanup);
+}
+
+fn cleanup_managed_worktree(
+    search_root: &Path,
+    path: &Path,
+    registered: &[PathBuf],
+    apply: bool,
+) -> Result<WorktreeCleanup> {
+    if !path.exists() {
+        return Ok(WorktreeCleanup::Missing(path.to_path_buf()));
+    }
+
+    if !path_is_registered(path, registered) {
+        return Ok(WorktreeCleanup::SkippedUnregistered(path.to_path_buf()));
+    }
+
+    if !apply {
+        return Ok(WorktreeCleanup::WouldRemove(path.to_path_buf()));
+    }
+
+    remove_registered_worktree(search_root, path)?;
+    Ok(WorktreeCleanup::Removed(path.to_path_buf()))
+}
+
+fn cleanup_work_branch(
+    source_root: &Path,
+    branch_name: &str,
+    apply: bool,
+) -> Result<WorkBranchCleanup> {
+    if !git_branch_exists(source_root, branch_name)? {
+        return Ok(WorkBranchCleanup::Missing(branch_name.to_string()));
+    }
+
+    if !apply {
+        return Ok(WorkBranchCleanup::WouldRemove(branch_name.to_string()));
+    }
+
+    let output = Command::new("git")
+        .args(["-C", &source_root.to_string_lossy()])
+        .args(["branch", "-D", branch_name])
+        .output()
+        .context("Failed to remove Work branch")?;
+    if !output.status.success() {
+        bail!(
+            "Failed to remove Work branch {branch_name:?}:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    Ok(WorkBranchCleanup::Removed(branch_name.to_string()))
+}
+
+fn git_branch_exists(source_root: &Path, branch_name: &str) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["-C", &source_root.to_string_lossy()])
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch_name}"),
+        ])
+        .output()
+        .context("Failed to check Work branch")?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => bail!(
+            "Failed to check Work branch {branch_name:?}:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    }
+}
+
+fn work_item_artifact_paths(source_root: &Path, work_item: &WorkItem) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for attempt in &work_item.attempts {
+        for task in &attempt.tasks {
+            if let Some(area) = &task.artifact_area {
+                push_unique_artifact_path(source_root, &mut paths, &area.path);
+            }
+        }
+        for artifact in &attempt.artifacts {
+            push_unique_artifact_path(source_root, &mut paths, &artifact.path);
+        }
+    }
+    for candidate in &work_item.merge_candidates {
+        for artifact in candidate
+            .merge_state
+            .check_artifacts
+            .iter()
+            .chain(candidate.merge_state.review_artifacts.iter())
+        {
+            push_unique_artifact_path(source_root, &mut paths, &artifact.path);
+        }
+    }
+    paths.sort();
+    paths
+}
+
+fn push_unique_artifact_path(source_root: &Path, paths: &mut Vec<PathBuf>, path: &str) {
+    let artifact_root = source_root.join(WORK_ARTIFACTS_DIR);
+    let resolved = match resolve_managed_artifact_path(source_root, path) {
+        Some(path) => path,
+        None => return,
+    };
+    if resolved == artifact_root || paths.iter().any(|existing| existing == &resolved) {
+        return;
+    }
+    paths.push(resolved);
+}
+
+fn resolve_managed_artifact_path(source_root: &Path, path: &str) -> Option<PathBuf> {
+    let relative_path = Path::new(path);
+    if relative_path.is_absolute() {
+        return None;
+    }
+    if relative_path
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return None;
+    }
+    let resolved = source_root.join(relative_path);
+    let artifact_root = source_root.join(WORK_ARTIFACTS_DIR);
+    if resolved.starts_with(&artifact_root) {
+        Some(resolved)
+    } else {
+        None
+    }
+}
+
+fn apply_work_item_cleanup(plan: &WorkCleanupResult) -> Result<()> {
+    for artifact in &plan.artifacts {
+        remove_artifact_path(artifact)?;
+    }
+    prune_empty_artifact_parents(plan)?;
+
+    match fs::remove_file(&plan.item_path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err).context("Failed to remove Work Item state"),
+    }
+
+    Ok(())
+}
+
+fn remove_artifact_path(path: &Path) -> Result<()> {
+    if path.is_dir() {
+        fs::remove_dir_all(path).context("Failed to remove Work artifact directory")?;
+    } else {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err).context("Failed to remove Work artifact file"),
+        }
+    }
+    Ok(())
+}
+
+fn prune_empty_artifact_parents(plan: &WorkCleanupResult) -> Result<()> {
+    let Some(work_dir) = plan.item_path.parent().and_then(Path::parent) else {
+        return Ok(());
+    };
+    let artifact_root = work_dir.join("artifacts");
+    for artifact in &plan.artifacts {
+        let mut current = artifact.parent();
+        while let Some(dir) = current {
+            if dir == artifact_root || !dir.starts_with(&artifact_root) {
+                break;
+            }
+            match fs::remove_dir(dir) {
+                Ok(()) => current = dir.parent(),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => current = dir.parent(),
+                Err(err) if err.kind() == std::io::ErrorKind::DirectoryNotEmpty => break,
+                Err(err) => return Err(err).context("Failed to prune Work artifact directory"),
+            }
+        }
+    }
+    Ok(())
+}
+
 fn cleanup_worktree(
     search_root: &Path,
     run: &Run,
@@ -188,6 +557,12 @@ fn cleanup_worktree(
         return Ok(WorktreeCleanup::WouldRemove(path));
     }
 
+    remove_registered_worktree(search_root, &path)?;
+
+    Ok(WorktreeCleanup::Removed(path))
+}
+
+fn remove_registered_worktree(search_root: &Path, path: &Path) -> Result<()> {
     let output = Command::new("git")
         .args(["-C", &search_root.to_string_lossy()])
         .args(["worktree", "remove", "--force", &path.to_string_lossy()])
@@ -202,7 +577,7 @@ fn cleanup_worktree(
         );
     }
 
-    Ok(WorktreeCleanup::Removed(path))
+    Ok(())
 }
 
 fn recorded_worktree_path(run: &Run) -> Result<Option<PathBuf>> {
