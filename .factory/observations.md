@@ -352,6 +352,18 @@ Review/regression checks should use hermetic test doubles or explicit
 timeouts for nested agent/session behavior so autonomous runs do not
 stall on an accidental real coder invocation.
 
+Run `20260607-173454-work-intake` reinforced the same invariant with a
+cleaner example. The author repeatedly marked the run complete while the
+candidate worktree still had uncommitted product changes. Reviewers then
+had to compensate for `git diff main...HEAD` being empty by inspecting
+the working-tree diff directly; some reviewers handled that, but the
+review input was unstable and slower than necessary. The dirty-complete
+compatibility guard eventually restarted the author, produced commit
+`c4478c9`, and reran reviews successfully before landing. In the new
+Work Item / Attempt / Task model, Factory should enforce this earlier:
+a `write` task cannot enter review until its writable workspace is clean
+and its candidate changes are represented by one or more commits.
+
 Separate distributed Factory source knowledge from project-local Factory
 state. Expertise in the Factory source tree ships with Factory and is
 available to projects Factory manages, so changes to source-level
