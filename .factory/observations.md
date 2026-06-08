@@ -617,3 +617,64 @@ Scheduling should combine live `/status` remaining/reset data with
 run-cost estimates so the run queue can burst when the 5-hour window is
 healthy, preserve weekly budget when pacing is low, and switch to
 planning/curation/reporting work when Codex capacity is scarce.
+
+2026-06-07 — New model adoption should be a breaking redesign, not a
+permanent compatibility bridge. The target operational model is Work
+Item, Attempt, Task, Workspace, and Merge Candidate. `.factory/runs`
+should stop being a first-class execution model once the replacement
+works; old run/session-loop code, run-centric docs, run-centric tests,
+and run-centric dashboard concepts should be deleted rather than carried
+indefinitely.
+
+Adopt the new model in this sequence:
+
+1. Define the target state in code and docs. Work Items hold durable
+   intent and planning artifact versions. Attempts represent bounded
+   tries or phases to satisfy a Work Item. Tasks are schedulable units:
+   `write`, `review`, `merge`, `report`, `learn`, and `probe`.
+   Workspaces are Factory-managed filesystem/git contexts. Merge
+   Candidates are reviewed results waiting to land.
+2. Extend durable storage under `.factory/work/` beyond
+   `.factory/work/items/`. Avoid making one nested Work Item JSON file
+   carry all live operational state once tasks are running. Store live
+   objects in separate collections, with references between Work Items,
+   Attempts, Tasks, Workspaces, and Merge Candidates.
+3. Replace run creation with Work Item and Attempt operations. Add the
+   missing transition from `WorkItem -> Attempt -> initial write Task`.
+   Existing command names may stay only if they map fully to the new
+   concepts; otherwise prefer explicit `work`, `attempt`, `task`, and
+   merge-candidate commands.
+4. Implement task execution. Start with `write` tasks: allocate a
+   workspace, run the selected coder, require clean committed output
+   before task completion, and record produced commits/artifacts. Then
+   implement `review` tasks as read-only candidate-workspace tasks that
+   write only task artifacts and create follow-up `write` tasks for
+   concrete fixes.
+5. Implement the Attempt loop. An Attempt creates an initial write task,
+   runs review tasks from explicit review policy, creates follow-up write
+   tasks for failed reviews, moves uncertain review output to
+   `needs-user`, and creates a Merge Candidate only after review passes.
+6. Implement the Merge queue. Merge Candidates become the only path to
+   `main`: rebase, run checks, run the full required reviewer set,
+   fast-forward land, record reporting/learning artifacts, and clean
+   workspaces.
+7. Update dashboard/status around Work Items, Attempts, Tasks,
+   Workspaces, Review artifacts, Merge Candidates, and Needs-user items.
+   The old Runs view should disappear or become an Attempts view during
+   the transition.
+8. Rewrite skills and documentation to use the new vocabulary. Briefs,
+   behaviors, approaches, and plans attach to Work Items and Attempts.
+   Execution happens through Tasks. Landing happens through Merge
+   Candidates.
+9. Delete the old model after the new execution/review/merge path works:
+   remove `.factory/runs` readers/writers, legacy run/session-loop code,
+   old run tests, run-centric docs, and compatibility language.
+10. Iterate from the new base: independent task scheduling,
+   Codex/Claude capacity planning, Fargate task execution, learning
+   capture, dashboard interventions, and team permissions.
+
+The first implementation slice should create an Attempt plus initial
+write Task from an existing Work Item, without executing the task yet.
+That establishes the first operational transition in the new model:
+`WorkItem -> Attempt -> Task`. The next slice should run a `write` task
+with the clean committed workspace invariant.
