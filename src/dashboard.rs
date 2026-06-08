@@ -2746,6 +2746,44 @@ mod tests {
     }
 
     #[test]
+    fn test_work_view_counts_errors() {
+        let mut app = App {
+            runs: Vec::new(),
+            work_status: WorkStatus {
+                rows: vec![work_status::WorkItemStatus {
+                    id: "work-1".to_string(),
+                    title: "Build status view".to_string(),
+                    attempt: "attempt-1 [planned]".to_string(),
+                    task: "write:attempt-1-write [planned]".to_string(),
+                    review: "-".to_string(),
+                    merge_candidate: "-".to_string(),
+                    merge: "-".to_string(),
+                    action: "task-ready".to_string(),
+                }],
+                errors: vec![
+                    "invalid Work Item file .factory/work/items/broken-work.json".to_string(),
+                ],
+            },
+            show_work: true,
+            selected_run: 0,
+            search_root: PathBuf::from("/tmp"),
+            should_quit: false,
+            feed_height: 20,
+            tick: 0,
+            run_tab_offset: 0,
+            copy_mode: false,
+        };
+
+        let text = render_app_text(&mut app);
+
+        assert!(text.contains("Work Items: 1"));
+        assert!(text.contains("Actionable: 1"));
+        assert!(text.contains("Errors: 1"));
+        assert!(text.contains("Work Item read errors"));
+        assert!(text.contains(".factory/work/items/broken-work.json"));
+    }
+
+    #[test]
     fn test_app_poll_refreshes_work_items() {
         let tmp = tempfile::TempDir::new().unwrap();
         write_work_item(tmp.path(), "work-before", "Before poll");

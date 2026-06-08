@@ -229,6 +229,29 @@ test_dashboard_lists_work_items() {
   return $RESULT
 }
 
+test_dashboard_shows_work_items_alongside_legacy_runs() {
+  setup_test_project
+  trap cleanup_test_project RETURN
+  mkdir -p .factory/runs/run-legacy
+  printf 'executing' > .factory/runs/run-legacy/status
+  printf 'local' > .factory/runs/run-legacy/runtime
+  printf 'Legacy run' > .factory/runs/run-legacy/brief.md
+  create_planned_work_item
+
+  RESULT=0
+  RUN_OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)"
+  assert_contains "$RUN_OUTPUT" "Runs (1)" || RESULT=1
+  assert_contains "$RUN_OUTPUT" "run-legacy" || RESULT=1
+  assert_contains "$RUN_OUTPUT" "Work Items (1)" || RESULT=1
+
+  WORK_OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" "w" | clean_dashboard_output)"
+  assert_contains "$WORK_OUTPUT" "Runs (1)" || RESULT=1
+  assert_contains "$WORK_OUTPUT" "Work Items (1)" || RESULT=1
+  assert_contains "$WORK_OUTPUT" "work-visible - Visible Work" || RESULT=1
+  assert_contains "$WORK_OUTPUT" "Attempt: attempt-visible [planned]" || RESULT=1
+  return $RESULT
+}
+
 test_dashboard_refreshes_work_items_on_poll() {
   setup_test_project
   trap cleanup_test_project RETURN
@@ -257,6 +280,22 @@ test_dashboard_surfaces_actionable_work() {
   return $RESULT
 }
 
+test_dashboard_reports_work_read_errors() {
+  setup_test_project
+  trap cleanup_test_project RETURN
+  create_planned_work_item
+  printf '{ invalid json\n' > .factory/work/items/broken-work.json
+
+  RESULT=0
+  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)"
+  assert_contains "$OUTPUT" "Work Items: 1" || RESULT=1
+  assert_contains "$OUTPUT" "Errors: 1" || RESULT=1
+  assert_contains "$OUTPUT" "Work Item read errors" || RESULT=1
+  assert_contains "$OUTPUT" "failed to parse" || RESULT=1
+  assert_contains "$OUTPUT" "work-visible - Visible Work" || RESULT=1
+  return $RESULT
+}
+
 test_dashboard_shows_empty_work_view() {
   setup_test_project
   trap cleanup_test_project RETURN
@@ -275,8 +314,10 @@ run_test "status prints Work summary without legacy runs" test_status_prints_wor
 run_test "status summarizes Work model vocabulary" test_status_summarizes_work_model_vocabulary
 run_test "status reports invalid Work without hiding valid state" test_status_reports_invalid_work_without_hiding_valid_state
 run_test "dashboard lists Work Items" test_dashboard_lists_work_items
+run_test "dashboard shows Work Items alongside legacy runs" test_dashboard_shows_work_items_alongside_legacy_runs
 run_test "dashboard refreshes Work Items on poll" test_dashboard_refreshes_work_items_on_poll
 run_test "dashboard surfaces actionable Work" test_dashboard_surfaces_actionable_work
+run_test "dashboard reports Work read errors" test_dashboard_reports_work_read_errors
 run_test "dashboard shows empty Work view" test_dashboard_shows_empty_work_view
 
 printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
