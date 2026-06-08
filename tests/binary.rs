@@ -986,6 +986,189 @@ fn work_task_run_completes_attempt_after_all_review_tasks_complete() {
 }
 
 #[test]
+fn work_attempt_run_drives_write_reviews_and_passes() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Attempt loop"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-loop-pass");
+    write_mock_claude(&bin_dir, &loop_mock_script("pass"));
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Completed Task attempt-1-write"))
+        .stdout(predicate::str::contains(
+            "Planned 5 review Tasks for Attempt attempt-1",
+        ))
+        .stdout(predicate::str::contains(
+            "Attempt attempt-1 reviews passed; Merge Candidate creation is not implemented yet",
+        ));
+
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let attempt = &value["attempts"][0];
+    assert_eq!(attempt["status"], "complete");
+    assert_eq!(attempt["review_state"], "passed");
+    assert_eq!(attempt["tasks"].as_array().unwrap().len(), 6);
+    assert!(
+        main_dir
+            .join(".factory/work/artifacts/attempt-1/attempt-1-review-tests/review.md")
+            .exists()
+    );
+}
+
+#[test]
+fn work_attempt_run_plans_followup_for_failed_reviews() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+
+    let bin_dir = tmp.path().join("bin-loop-fail");
+    write_mock_claude(&bin_dir, &loop_mock_script("fail"));
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Planned 5 review Tasks for Attempt attempt-1",
+        ))
+        .stdout(predicate::str::contains(
+            "Planned follow-up write Task attempt-1-followup-1",
+        ));
+
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let attempt = &value["attempts"][0];
+    assert_eq!(attempt["status"], "planned");
+    assert_eq!(attempt["review_state"], "failed");
+    let followup = attempt["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "attempt-1-followup-1")
+        .unwrap();
+    assert_eq!(followup["kind"], "write");
+    assert_eq!(followup["workspace_access"]["writes"][0]["id"], "candidate");
+    assert_eq!(
+        followup["workspace_access"]["writes"][0]["path"],
+        ".factory/work/workspaces/attempt-1"
+    );
+    assert_eq!(followup["input_artifacts"].as_array().unwrap().len(), 5);
+    assert_eq!(
+        followup["input_artifacts"][0]["path"],
+        ".factory/work/artifacts/attempt-1/attempt-1-review-documentation/review.md"
+    );
+}
+
+#[test]
+fn work_attempt_run_marks_uncertain_reviews_needs_user() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+
+    let bin_dir = tmp.path().join("bin-loop-uncertain");
+    write_mock_claude(&bin_dir, &loop_mock_script("uncertain"));
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Attempt attempt-1 needs user input: .factory/work/artifacts/attempt-1/needs-user.md",
+        ));
+
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let attempt = &value["attempts"][0];
+    assert_eq!(attempt["status"], "needs-user");
+    assert_eq!(attempt["review_state"], "uncertain");
+    let handoff =
+        fs::read_to_string(main_dir.join(".factory/work/artifacts/attempt-1/needs-user.md"))
+            .unwrap();
+    assert!(handoff.contains("attempt-1-review-tests/review.md"));
+}
+
+#[test]
+fn work_attempt_run_stops_when_task_executor_fails() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Attempt loop"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-loop-failure");
+    write_mock_claude(&bin_dir, "#!/bin/bash\nexit 7\n");
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Coder exited with code 7"));
+
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let attempt = &value["attempts"][0];
+    assert_eq!(attempt["status"], "failed");
+    assert_eq!(attempt["tasks"][0]["status"], "failed");
+    assert_eq!(attempt["tasks"].as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn work_task_run_rejects_unmanaged_review_read_workspace_path() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
@@ -3228,6 +3411,24 @@ exit 0
         .env("PATH", mock_path(&bin_dir))
         .assert()
         .success();
+}
+
+fn loop_mock_script(verdict: &str) -> String {
+    format!(
+        r##"#!/bin/bash
+case "$PWD" in
+  */.factory/work/workspaces/*)
+    printf 'loop output\n' > loop-output.txt
+    git add loop-output.txt
+    git commit -m "Add loop output" >/dev/null
+    ;;
+  *)
+    printf 'Verdict: {verdict}\n\nLoop review.\n' > review.md
+    ;;
+esac
+exit 0
+"##
+    )
 }
 
 fn git_head(repo: &Path) -> String {

@@ -28,6 +28,7 @@ fn task(kind: TaskKind) -> Task {
             path: ".factory/work/artifacts/write-code".to_string(),
         }),
         review_context: None,
+        input_artifacts: Vec::new(),
         output: Some(TaskOutput {
             workspace_id: "candidate".to_string(),
             workspace_path: "../workspaces/candidate".to_string(),

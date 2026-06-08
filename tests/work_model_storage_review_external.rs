@@ -35,6 +35,7 @@ fn documented_work_item() -> WorkItem {
                     path: ".factory/work/artifacts/write-review".to_string(),
                 }),
                 review_context: None,
+                input_artifacts: Vec::new(),
                 output: Some(TaskOutput {
                     workspace_id: "candidate".to_string(),
                     workspace_path: "../workspaces/candidate".to_string(),

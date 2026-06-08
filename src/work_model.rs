@@ -51,6 +51,7 @@ impl WorkItem {
                 },
                 artifact_area: None,
                 review_context: None,
+                input_artifacts: Vec::new(),
                 output: None,
             }],
             review_state: None,
@@ -64,6 +65,42 @@ impl WorkItem {
         &mut self,
         attempt_id: &str,
         roles: &[&str],
+    ) -> Result<Vec<String>, WorkModelError> {
+        self.add_review_tasks_with_round(attempt_id, roles, None)
+    }
+
+    pub fn add_next_review_tasks(
+        &mut self,
+        attempt_id: &str,
+        roles: &[&str],
+    ) -> Result<Vec<String>, WorkModelError> {
+        if roles.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(attempt) = self
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+        else {
+            return Err(WorkModelError::AttemptNotFound {
+                id: attempt_id.to_string(),
+            });
+        };
+        let existing_review_tasks = attempt
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Review)
+            .count();
+        let next_round = existing_review_tasks / roles.len() + 1;
+        let round = (next_round > 1).then_some(next_round);
+        self.add_review_tasks_with_round(attempt_id, roles, round)
+    }
+
+    fn add_review_tasks_with_round(
+        &mut self,
+        attempt_id: &str,
+        roles: &[&str],
+        round: Option<usize>,
     ) -> Result<Vec<String>, WorkModelError> {
         let Some(attempt) = self
             .attempts
@@ -94,7 +131,10 @@ impl WorkItem {
         let mut task_ids = Vec::new();
         for role in roles {
             validate_id("review role", role)?;
-            let task_id = format!("{attempt_id}-review-{role}");
+            let task_id = match round {
+                Some(round) => format!("{attempt_id}-review-{round}-{role}"),
+                None => format!("{attempt_id}-review-{role}"),
+            };
             validate_id("task", &task_id)?;
             if attempt.tasks.iter().any(|task| task.id == task_id) {
                 return Err(WorkModelError::TaskAlreadyExists { id: task_id });
@@ -116,6 +156,7 @@ impl WorkItem {
                     source_branch: write_output.source_branch.clone(),
                     candidate_commit: write_output.commit.clone(),
                 }),
+                input_artifacts: Vec::new(),
                 output: None,
             });
             task_ids.push(task_id);
@@ -125,6 +166,72 @@ impl WorkItem {
 
         self.validate()?;
         Ok(task_ids)
+    }
+
+    pub fn add_followup_write_task(
+        &mut self,
+        attempt_id: &str,
+        input_artifacts: Vec<ArtifactRef>,
+    ) -> Result<String, WorkModelError> {
+        let Some(attempt) = self
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.id == attempt_id)
+        else {
+            return Err(WorkModelError::AttemptNotFound {
+                id: attempt_id.to_string(),
+            });
+        };
+
+        let Some(write_output) = attempt
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+            .and_then(|task| task.output.as_ref())
+            .cloned()
+        else {
+            return Err(WorkModelError::AttemptMissingCompletedWriteTask {
+                attempt_id: attempt_id.to_string(),
+            });
+        };
+
+        let next = attempt
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Write && task.id.contains("-followup-"))
+            .count()
+            + 1;
+        let task_id = format!("{attempt_id}-followup-{next}");
+        validate_id("task", &task_id)?;
+        if attempt.tasks.iter().any(|task| task.id == task_id) {
+            return Err(WorkModelError::TaskAlreadyExists { id: task_id });
+        }
+
+        attempt.tasks.push(Task {
+            id: task_id.clone(),
+            kind: TaskKind::Write,
+            status: TaskStatus::Planned,
+            role: "author".to_string(),
+            work_item_id: self.id.clone(),
+            attempt_id: Some(attempt_id.to_string()),
+            workspace_access: WorkspaceAccess {
+                reads: Vec::new(),
+                writes: vec![WorkspaceRef {
+                    id: write_output.workspace_id,
+                    path: write_output.workspace_path,
+                }],
+            },
+            artifact_area: None,
+            review_context: None,
+            input_artifacts,
+            output: None,
+        });
+        attempt.status = AttemptStatus::Planned;
+        attempt.review_state = Some(AttemptReviewState::Failed);
+
+        self.validate()?;
+        Ok(task_id)
     }
 
     pub fn validate(&self) -> Result<(), WorkModelError> {
@@ -224,6 +331,8 @@ pub struct Task {
     pub artifact_area: Option<TaskArtifactArea>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub review_context: Option<ReviewContext>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_artifacts: Vec<ArtifactRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<TaskOutput>,
 }
@@ -945,6 +1054,7 @@ mod tests {
                 path: ".factory/tasks/task-1".to_string(),
             }),
             review_context,
+            input_artifacts: Vec::new(),
             output: None,
         }
     }

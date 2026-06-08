@@ -169,6 +169,48 @@ Test: tests/binary.rs (work_task_run_completes_review_task_with_fail_verdict_art
 Test: tests/behaviors/operations/test-work-task-run.sh (review Task with fail verdict completes)
 Test: tests/behaviors/operations/test-work-task-run.sh (review Task with uncertain verdict completes)
 
+WHEN `factory work attempt run <work-item-id> <attempt-id>` is invoked
+for an Attempt with a planned write Task,
+THE SYSTEM SHALL run the write Task through the existing Task executor,
+then reload stored Work Item state before planning later transitions.
+Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
+Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop passes review round)
+
+WHEN `factory work attempt run <work-item-id> <attempt-id>` advances an
+Attempt whose write output has completed and no review round is planned
+for that write output,
+THE SYSTEM SHALL plan review Tasks using the existing review policy and
+run planned review Tasks through the existing Task executor.
+Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
+Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop passes review round)
+
+WHEN all review Tasks for an Attempt review round complete and all
+review artifacts have passing verdicts,
+THE SYSTEM SHALL mark the Attempt review state as `passed`, leave the
+Attempt `complete`, and stop before creating a Merge Candidate.
+Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
+Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop passes review round)
+
+WHEN any completed review artifact has a failing verdict,
+THE SYSTEM SHALL mark the Attempt review state as `failed` and create a
+planned follow-up write Task with deterministic id
+`<attempt-id>-followup-<n>`, the candidate workspace as writable access,
+and the failed review artifacts as Task inputs.
+Test: tests/binary.rs (work_attempt_run_plans_followup_for_failed_reviews)
+Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop plans follow-up write)
+
+WHEN any completed review artifact has an uncertain or missing verdict,
+THE SYSTEM SHALL mark the Attempt as `needs-user`, mark the Attempt
+review state as `uncertain`, and write a durable handoff that names the
+uncertain review artifacts.
+Test: tests/binary.rs (work_attempt_run_marks_uncertain_reviews_needs_user)
+
+IF a Task executor fails while `factory work attempt run` advances an
+Attempt,
+THEN THE SYSTEM SHALL leave the Work Item state written by the Task
+executor intact and exit non-zero without planning later transitions.
+Test: tests/binary.rs (work_attempt_run_stops_when_task_executor_fails)
+
 IF a review Task coder exits successfully but does not write `review.md`,
 THEN THE SYSTEM SHALL mark the Attempt and Task as `failed` and report
 that the review artifact was not written.

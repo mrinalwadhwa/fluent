@@ -111,6 +111,8 @@ for test in tests/behaviors/operations/*.sh; do bash "$test"; done
 | Work Task run rejects dirty, no-output, coder-failure, and invalid Task requests without completing | `binary.rs`, `test-work-task-run.sh` |
 | Work review plans read-only review Tasks with artifact areas | `binary.rs`, `test-work-task-run.sh` |
 | Work Task run completes review Tasks from durable artifacts while preserving verdict boundaries | `binary.rs`, `test-work-task-run.sh` |
+| Work Attempt run advances planned Tasks, plans reviews, and interprets review outcomes | `binary.rs`, `test-work-attempt-loop.sh` |
+| Work Attempt run creates follow-up writes or needs-user handoffs at review boundaries | `binary.rs`, `test-work-attempt-loop.sh` |
 | Create worktree from current HEAD | `test-run` |
 | Branch from non-main branch | `test-run` |
 | Run-id resolution priority chain | `test-run` |

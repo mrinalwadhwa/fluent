@@ -9,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use factory::cleanup::{self, CleanupOptions, WorktreeCleanup};
-use factory::cli::{Cli, Commands, WorkCommands, WorkTaskCommands};
+use factory::cli::{Cli, Commands, WorkAttemptCommands, WorkCommands, WorkTaskCommands};
 use factory::coder::{CoderKind, CoderSandbox};
 use factory::content::ContentResolver;
 use factory::credential;
@@ -24,6 +24,7 @@ use factory::run::{self, Run};
 use factory::session::{self, DefaultHooks, SandboxedHooks, SessionConfig};
 use factory::summary;
 use factory::version;
+use factory::work_attempt_loop::{self, WorkAttemptRunConfig, WorkAttemptRunOutcome};
 use factory::work_model::{WorkItem, WorkModelStorageError, WorkModelStore, to_json_pretty};
 use factory::work_task_executor::{self, WorkTaskRunConfig};
 use factory::worktree;
@@ -252,22 +253,75 @@ fn cmd_work(
             Err(error) => return Err(error.into()),
         },
         WorkCommands::Attempt {
+            command,
             work_item_id,
             attempt_id,
-        } => {
-            let mut item = match store.read_work_item(&work_item_id) {
-                Ok(item) => item,
-                Err(WorkModelStorageError::ReadFile { source, .. })
-                    if source.kind() == ErrorKind::NotFound =>
-                {
-                    bail!("Work Item {work_item_id:?} not found");
+        } => match command {
+            Some(WorkAttemptCommands::Run {
+                work_item_id,
+                attempt_id,
+                no_sandbox,
+                coder,
+                extra_args,
+            }) => {
+                let coder_kind = CoderKind::resolve(coder.as_deref().or(global_coder))?;
+                let result = work_attempt_loop::run_attempt(WorkAttemptRunConfig {
+                    project_root,
+                    store: &store,
+                    work_item_id: &work_item_id,
+                    attempt_id: &attempt_id,
+                    resolver,
+                    extra_args: &extra_args,
+                    coder_kind,
+                    no_sandbox: no_sandbox || global_no_sandbox,
+                })?;
+                for outcome in result.outcomes {
+                    match outcome {
+                        WorkAttemptRunOutcome::RanTask { task_id, output } => {
+                            println!("Completed Task {task_id} at {output}");
+                        }
+                        WorkAttemptRunOutcome::PlannedReviews { task_ids } => {
+                            println!(
+                                "Planned {} review Tasks for Attempt {attempt_id}",
+                                task_ids.len()
+                            );
+                            for task_id in task_ids {
+                                println!("{task_id}");
+                            }
+                        }
+                        WorkAttemptRunOutcome::ReviewsPassed => {
+                            println!(
+                                "Attempt {attempt_id} reviews passed; Merge Candidate creation is not implemented yet"
+                            );
+                        }
+                        WorkAttemptRunOutcome::PlannedFollowup { task_id } => {
+                            println!("Planned follow-up write Task {task_id}");
+                        }
+                        WorkAttemptRunOutcome::NeedsUser { handoff_path } => {
+                            println!("Attempt {attempt_id} needs user input: {handoff_path}");
+                        }
+                    }
                 }
-                Err(error) => return Err(error.into()),
-            };
-            item.add_initial_attempt(attempt_id.clone())?;
-            store.write_work_item(&item)?;
-            println!("Created Attempt {attempt_id} for Work Item {work_item_id}");
-        }
+            }
+            None => {
+                let work_item_id =
+                    work_item_id.ok_or_else(|| anyhow::anyhow!("work item id is required"))?;
+                let attempt_id =
+                    attempt_id.ok_or_else(|| anyhow::anyhow!("attempt id is required"))?;
+                let mut item = match store.read_work_item(&work_item_id) {
+                    Ok(item) => item,
+                    Err(WorkModelStorageError::ReadFile { source, .. })
+                        if source.kind() == ErrorKind::NotFound =>
+                    {
+                        bail!("Work Item {work_item_id:?} not found");
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                item.add_initial_attempt(attempt_id.clone())?;
+                store.write_work_item(&item)?;
+                println!("Created Attempt {attempt_id} for Work Item {work_item_id}");
+            }
+        },
         WorkCommands::Review {
             work_item_id,
             attempt_id,

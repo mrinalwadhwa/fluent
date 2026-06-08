@@ -85,6 +85,17 @@ Task. Running a review Task requires `review.md` in that artifact area;
 the Task can complete even when that artifact says `Verdict: fail` or
 `Verdict: uncertain` because verdict acceptance belongs to later review
 or merge policy.
+`factory work attempt run <work-item-id> <attempt-id>` is the first
+Attempt-level orchestration path. It advances one Attempt by running the
+next planned write or review Task through the same Task executor, then
+reloads stored state before deciding the next transition. After write
+output completes it plans review Tasks with the existing review policy.
+After a completed review round it interprets review artifacts with the
+review subsystem verdict parser: all pass marks the Attempt review state
+as passed and stops before Merge Candidate creation, any fail creates a
+planned follow-up write Task with the failed review artifacts as Task
+inputs, and uncertain or missing verdicts mark the Attempt `needs-user`
+with a handoff under `.factory/work/artifacts/<attempt-id>/`.
 `factory work list` and `factory work show <id>` expose the same durable
 Work Item model for inspection. These commands use `.factory/work/items/`
 through the Rust storage model and validate stored objects. This keeps
@@ -743,6 +754,7 @@ factory/main/
     summary.rs               ← Text run summary from durable artifacts
     transcript.rs            ← Parse stream-json transcripts incrementally
     work_model.rs            ← Core Work Item / Attempt / Task model
+    work_attempt_loop.rs     ← Advance one Work model Attempt
     plan.rs                  ← Parse plan.md into groups and steps
     parallel.rs              ← Parallel plan orchestrator (child runs)
     version.rs               ← Version command output format

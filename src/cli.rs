@@ -211,11 +211,14 @@ pub enum WorkCommands {
 
     /// Create a planned Attempt with an initial write Task
     Attempt {
+        #[command(subcommand)]
+        command: Option<WorkAttemptCommands>,
+
         /// Work Item ID
-        work_item_id: String,
+        work_item_id: Option<String>,
 
         /// Attempt ID
-        attempt_id: String,
+        attempt_id: Option<String>,
     },
 
     /// Plan review Tasks for a completed Attempt
@@ -231,6 +234,30 @@ pub enum WorkCommands {
     Task {
         #[command(subcommand)]
         command: WorkTaskCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum WorkAttemptCommands {
+    /// Advance an Attempt through the next safe transitions
+    Run {
+        /// Work Item ID
+        work_item_id: String,
+
+        /// Attempt ID
+        attempt_id: String,
+
+        /// Disable sandbox
+        #[arg(long)]
+        no_sandbox: bool,
+
+        /// Coding agent to launch: claude or codex
+        #[arg(long)]
+        coder: Option<String>,
+
+        /// Extra args passed through to the agent
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra_args: Vec<String>,
     },
 }
 
