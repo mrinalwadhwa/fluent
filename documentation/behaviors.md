@@ -124,6 +124,7 @@ initial `write` Task for a Work Item with instructions,
 THE SYSTEM SHALL copy those instructions to the Task so Task execution
 can build the coder prompt from durable Work model state.
 Test: tests/binary.rs (work_create_persists_instructions_and_attempt_copies_them_to_write_task)
+Test: tests/behaviors/operations/test-work-task-instructions.sh (attempt copies instructions to initial write Task)
 
 WHEN `factory work task run <work-item-id> <attempt-id> <task-id>` is
 invoked for an existing planned `write` Task with exactly one writable
