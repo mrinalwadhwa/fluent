@@ -577,6 +577,808 @@ fn work_attempt_rejects_invalid_attempt_id_without_changes() {
 }
 
 #[test]
+fn work_task_run_completes_write_task_with_committed_output() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+printf 'task output\n' > task-output.txt
+git add task-output.txt
+git commit -m "Add task output" >/dev/null
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Run task"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let output = factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "work task run failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Completed Task attempt-1-write"));
+
+    let workspace = main_dir.join(".factory/work/workspaces/attempt-1");
+    assert!(workspace.join("task-output.txt").is_file());
+    let head = StdCommand::new("git")
+        .args(["-C", &workspace.to_string_lossy()])
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    let head = String::from_utf8(head.stdout).unwrap().trim().to_string();
+
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let attempt = &value["attempts"][0];
+    let task = &attempt["tasks"][0];
+    assert_eq!(attempt["status"], "complete");
+    assert_eq!(task["status"], "complete");
+    assert_eq!(task["output"]["workspace_id"], "candidate");
+    assert_eq!(
+        task["output"]["workspace_path"],
+        ".factory/work/workspaces/attempt-1"
+    );
+    assert_eq!(task["output"]["source_branch"], "main");
+    assert_eq!(task["output"]["commit"], head);
+    assert_eq!(attempt["artifacts"][0]["producer_id"], "attempt-1-write");
+    assert_eq!(attempt["artifacts"][0]["path"], head);
+}
+
+#[test]
+fn work_task_run_passes_task_context_to_coder_prompt() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin");
+    let prompt_log = tmp.path().join("prompt.log");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-p" ]; then
+    shift
+    printf '%s\n' "$1" > "$PROMPT_LOG"
+    break
+  fi
+  shift
+done
+printf 'task output\n' > task-output.txt
+git add task-output.txt
+git commit -m "Add task output" >/dev/null
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Prompt contract"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("PROMPT_LOG", &prompt_log)
+        .assert()
+        .success();
+
+    let prompt = fs::read_to_string(prompt_log).unwrap();
+    assert!(prompt.contains("Work Item: work-1 - Prompt contract"));
+    assert!(prompt.contains("Attempt: attempt-1"));
+    assert!(prompt.contains("Task: attempt-1-write"));
+    assert!(prompt.contains("Role: author"));
+    assert!(prompt.contains("Current Task model:"));
+    assert!(prompt.contains(r#""id": "attempt-1-write""#));
+    assert!(prompt.contains(r#""kind": "write""#));
+    assert!(prompt.contains(r#""workspace_access""#));
+}
+
+#[test]
+fn work_task_run_does_not_complete_attempt_with_unfinished_tasks() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+printf 'task output\n' > task-output.txt
+git add task-output.txt
+git commit -m "Add task output" >/dev/null
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Run task"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let item_path = main_dir.join(".factory/work/items/work-1.json");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
+    value["attempts"][0]["tasks"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": "attempt-1-report",
+            "kind": "report",
+            "role": "reporter",
+            "work_item_id": "work-1",
+            "attempt_id": "attempt-1",
+            "workspace_access": {
+                "reads": [],
+                "writes": []
+            }
+        }));
+    fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let json = fs::read_to_string(item_path).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["attempts"][0]["status"], "executing");
+    assert_eq!(value["attempts"][0]["tasks"][0]["status"], "complete");
+    assert!(value["attempts"][0]["tasks"][1].get("status").is_none());
+}
+
+#[test]
+fn work_task_run_rejects_dirty_successful_workspace() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+printf 'uncommitted\n' > dirty-output.txt
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Run task"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "commit or remove them before completing",
+        ));
+
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let attempt = &value["attempts"][0];
+    let task = &attempt["tasks"][0];
+    assert_eq!(attempt["status"], "failed");
+    assert_eq!(task["status"], "failed");
+    assert!(task.get("output").is_none());
+}
+
+#[test]
+fn work_task_run_marks_task_failed_when_coder_exits_nonzero() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+printf 'partial task output\n' > partial-output.txt
+exit 7
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Run task"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Coder exited with code 7"));
+
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let attempt = &value["attempts"][0];
+    let task = &attempt["tasks"][0];
+    assert_eq!(attempt["status"], "failed");
+    assert_eq!(task["status"], "failed");
+    assert!(task.get("output").is_none());
+}
+
+#[test]
+fn work_task_run_rejects_success_without_commits() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(&bin_dir, "#!/bin/bash\nexit 0\n");
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Run task"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no committed Task output"));
+
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["attempts"][0]["status"], "failed");
+    assert_eq!(value["attempts"][0]["tasks"][0]["status"], "failed");
+    assert!(value["attempts"][0]["tasks"][0].get("output").is_none());
+}
+
+#[test]
+fn work_task_run_rejects_reused_workspace_without_new_commit() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(&bin_dir, "#!/bin/bash\nexit 0\n");
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Run task"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let workspace = main_dir.join(".factory/work/workspaces/attempt-1");
+    StdCommand::new("git")
+        .args([
+            "-C",
+            &main_dir.to_string_lossy(),
+            "worktree",
+            "add",
+            "-b",
+            "precreated-task-workspace",
+            &workspace.to_string_lossy(),
+            "HEAD",
+        ])
+        .output()
+        .unwrap();
+    fs::write(workspace.join("stale-output.txt"), "stale").unwrap();
+    StdCommand::new("git")
+        .args([
+            "-C",
+            &workspace.to_string_lossy(),
+            "add",
+            "stale-output.txt",
+        ])
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args([
+            "-C",
+            &workspace.to_string_lossy(),
+            "commit",
+            "-m",
+            "Add stale output",
+        ])
+        .output()
+        .unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no committed Task output"));
+
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["attempts"][0]["status"], "failed");
+    assert_eq!(value["attempts"][0]["tasks"][0]["status"], "failed");
+    assert!(value["attempts"][0]["tasks"][0].get("output").is_none());
+}
+
+#[test]
+fn work_task_run_rejects_existing_directory_that_is_not_worktree() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(&bin_dir, "#!/bin/bash\nexit 0\n");
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Run task"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let workspace = main_dir.join(".factory/work/workspaces/attempt-1");
+    fs::create_dir_all(&workspace).unwrap();
+    let item_path = main_dir.join(".factory/work/items/work-1.json");
+    let before = fs::read_to_string(&item_path).unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "exists but is not a registered git worktree",
+        ));
+
+    assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
+}
+
+#[test]
+fn work_task_run_rejects_existing_task_branch_without_workspace() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(&bin_dir, "#!/bin/bash\nexit 0\n");
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Run task"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    StdCommand::new("git")
+        .args([
+            "-C",
+            &main_dir.to_string_lossy(),
+            "branch",
+            "work/work-1/attempt-1/attempt-1-write",
+            "HEAD",
+        ])
+        .output()
+        .unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists but workspace"));
+
+    let item_path = main_dir.join(".factory/work/items/work-1.json");
+    let json = fs::read_to_string(item_path).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert!(value["attempts"][0]["tasks"][0].get("status").is_none());
+    assert!(value["attempts"][0]["tasks"][0].get("output").is_none());
+    assert!(!main_dir.join(".factory/work/workspaces/attempt-1").exists());
+}
+
+#[test]
+fn work_task_run_rejects_task_that_is_not_planned() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Run task"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let item_path = main_dir.join(".factory/work/items/work-1.json");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
+    value["attempts"][0]["tasks"][0]["status"] = serde_json::Value::String("failed".to_string());
+    fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    let before = fs::read_to_string(&item_path).unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write",
+            "--no-sandbox",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("expected planned"));
+
+    assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
+    assert!(!main_dir.join(".factory/work/workspaces/attempt-1").exists());
+}
+
+#[test]
+fn work_task_run_rejects_non_write_task() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Run task"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let item_path = main_dir.join(".factory/work/items/work-1.json");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
+    value["attempts"][0]["tasks"][0]["kind"] = serde_json::Value::String("probe".to_string());
+    fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    let before = fs::read_to_string(&item_path).unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write",
+            "--no-sandbox",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("expected write"));
+
+    assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
+    assert!(!main_dir.join(".factory/work/workspaces/attempt-1").exists());
+}
+
+#[test]
+fn work_task_run_requires_one_writable_workspace() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Run task"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let item_path = main_dir.join(".factory/work/items/work-1.json");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
+    value["attempts"][0]["tasks"][0]["workspace_access"]["writes"] =
+        serde_json::Value::Array(Vec::new());
+    fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    let before = fs::read_to_string(&item_path).unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write",
+            "--no-sandbox",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "must declare exactly one writable workspace",
+        ));
+
+    assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
+    assert!(!main_dir.join(".factory/work/workspaces/attempt-1").exists());
+
+    let mut value: serde_json::Value = serde_json::from_str(&before).unwrap();
+    value["attempts"][0]["tasks"][0]["workspace_access"]["writes"] = serde_json::json!([
+        {"id": "candidate", "path": ".factory/work/workspaces/attempt-1"},
+        {"id": "other", "path": ".factory/work/workspaces/other"}
+    ]);
+    fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    let before = fs::read_to_string(&item_path).unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write",
+            "--no-sandbox",
+        ])
+        .assert()
+        .failure();
+
+    assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
+    assert!(!main_dir.join(".factory/work/workspaces/attempt-1").exists());
+}
+
+#[test]
+fn work_task_run_rejects_unmanaged_writable_workspace_path() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Run task"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let item_path = main_dir.join(".factory/work/items/work-1.json");
+    let outside_absolute = tmp.path().join("outside-absolute");
+    let outside_absolute = outside_absolute.to_string_lossy().to_string();
+    for path in [
+        "../outside-workspace",
+        ".factory/work/workspaces/../outside",
+        outside_absolute.as_str(),
+    ] {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
+        value["attempts"][0]["tasks"][0]["workspace_access"]["writes"][0]["path"] =
+            serde_json::Value::String(path.to_string());
+        fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+        let before = fs::read_to_string(&item_path).unwrap();
+
+        factory_cmd()
+            .current_dir(&main_dir)
+            .args([
+                "work",
+                "task",
+                "run",
+                "work-1",
+                "attempt-1",
+                "attempt-1-write",
+                "--no-sandbox",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "Task writable workspace path must",
+            ));
+
+        assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
+    }
+
+    assert!(!main_dir.join("../outside-workspace").exists());
+    assert!(!main_dir.join(".factory/work/outside").exists());
+    assert!(!Path::new(&outside_absolute).exists());
+}
+
+#[test]
+fn work_task_run_missing_ids_leave_work_item_unchanged() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Run task"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-2"])
+        .assert()
+        .success();
+
+    let item_path = main_dir.join(".factory/work/items/work-1.json");
+    let before = fs::read_to_string(&item_path).unwrap();
+
+    for args in [
+        [
+            "work",
+            "task",
+            "run",
+            "missing-work",
+            "attempt-1",
+            "attempt-1-write",
+            "--no-sandbox",
+        ],
+        [
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "missing-attempt",
+            "attempt-1-write",
+            "--no-sandbox",
+        ],
+        [
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "missing-task",
+            "--no-sandbox",
+        ],
+        [
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-2",
+            "attempt-1-write",
+            "--no-sandbox",
+        ],
+    ] {
+        factory_cmd()
+            .current_dir(&main_dir)
+            .args(args)
+            .assert()
+            .failure();
+    }
+
+    assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
+    assert!(!main_dir.join(".factory/work/workspaces/attempt-1").exists());
+    assert!(!main_dir.join(".factory/work/workspaces/attempt-2").exists());
+}
+
+#[test]
 fn work_list_outputs_stored_work_items() {
     let tmp = TempDir::new().unwrap();
     write_work_item_json(tmp.path(), "work-beta", "Second work item");

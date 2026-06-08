@@ -37,6 +37,7 @@ impl WorkItem {
             tasks: vec![Task {
                 id: task_id,
                 kind: TaskKind::Write,
+                status: TaskStatus::Planned,
                 role: "author".to_string(),
                 work_item_id: self.id.clone(),
                 attempt_id: Some(attempt_id.clone()),
@@ -48,6 +49,7 @@ impl WorkItem {
                     }],
                 },
                 artifact_area: None,
+                output: None,
             }],
             review_state: None,
             artifacts: Vec::new(),
@@ -103,6 +105,13 @@ impl Attempt {
                 });
             }
             task.validate()?;
+            if self.status == AttemptStatus::Complete && task.status != TaskStatus::Complete {
+                return Err(WorkModelError::CompleteAttemptHasIncompleteTask {
+                    attempt_id: self.id.clone(),
+                    task_id: task.id.clone(),
+                    task_status: task.status.clone(),
+                });
+            }
         }
         Ok(())
     }
@@ -135,6 +144,8 @@ pub enum AttemptReviewState {
 pub struct Task {
     pub id: String,
     pub kind: TaskKind,
+    #[serde(default, skip_serializing_if = "task_status_is_planned")]
+    pub status: TaskStatus,
     pub role: String,
     pub work_item_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -142,11 +153,25 @@ pub struct Task {
     pub workspace_access: WorkspaceAccess,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_area: Option<TaskArtifactArea>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<TaskOutput>,
 }
 
 impl Task {
     pub fn validate(&self) -> Result<(), WorkModelError> {
         self.workspace_access.validate()?;
+        if self.status == TaskStatus::Complete {
+            if self.kind == TaskKind::Write && self.output.is_none() {
+                return Err(WorkModelError::CompleteWriteTaskMissingOutput {
+                    task_id: self.id.clone(),
+                });
+            }
+        } else if self.output.is_some() {
+            return Err(WorkModelError::IncompleteTaskHasOutput {
+                task_id: self.id.clone(),
+                status: self.status.clone(),
+            });
+        }
         if self.kind == TaskKind::Review && !self.workspace_access.writes.is_empty() {
             return Err(WorkModelError::ReviewTaskWritesWorkspace {
                 task_id: self.id.clone(),
@@ -159,6 +184,40 @@ impl Task {
         }
         Ok(())
     }
+}
+
+/// Coarse task lifecycle state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum TaskStatus {
+    #[default]
+    Planned,
+    Executing,
+    Complete,
+    Failed,
+    NeedsUser,
+}
+
+impl TaskStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Planned => "planned",
+            Self::Executing => "executing",
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+            Self::NeedsUser => "needs-user",
+        }
+    }
+}
+
+impl fmt::Display for TaskStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+fn task_status_is_planned(status: &TaskStatus) -> bool {
+    *status == TaskStatus::Planned
 }
 
 /// Generic scheduler-facing task kind.
@@ -248,6 +307,15 @@ pub struct TaskArtifactArea {
     pub path: String,
 }
 
+/// Durable output produced by a completed task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskOutput {
+    pub workspace_id: String,
+    pub workspace_path: String,
+    pub source_branch: String,
+    pub commit: String,
+}
+
 /// Pointer to durable output from a task or attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactRef {
@@ -308,6 +376,18 @@ pub enum WorkModelError {
         expected: String,
         actual: Option<String>,
     },
+    CompleteWriteTaskMissingOutput {
+        task_id: String,
+    },
+    IncompleteTaskHasOutput {
+        task_id: String,
+        status: TaskStatus,
+    },
+    CompleteAttemptHasIncompleteTask {
+        attempt_id: String,
+        task_id: String,
+        task_status: TaskStatus,
+    },
 }
 
 impl fmt::Display for WorkModelError {
@@ -361,6 +441,22 @@ impl fmt::Display for WorkModelError {
                 }
                 None => write!(f, "task {task_id} must belong to attempt {expected}"),
             },
+            Self::CompleteWriteTaskMissingOutput { task_id } => {
+                write!(f, "completed write task {task_id} must record output")
+            }
+            Self::IncompleteTaskHasOutput { task_id, status } => {
+                write!(f, "task {task_id} has output but status is {status}")
+            }
+            Self::CompleteAttemptHasIncompleteTask {
+                attempt_id,
+                task_id,
+                task_status,
+            } => {
+                write!(
+                    f,
+                    "complete attempt {attempt_id} contains task {task_id} with status {task_status}"
+                )
+            }
         }
     }
 }
@@ -685,6 +781,7 @@ mod tests {
         Task {
             id: "task-1".to_string(),
             kind,
+            status: TaskStatus::Planned,
             role: "author".to_string(),
             work_item_id: "work-1".to_string(),
             attempt_id: Some("attempt-1".to_string()),
@@ -695,6 +792,7 @@ mod tests {
             artifact_area: Some(TaskArtifactArea {
                 path: ".factory/tasks/task-1".to_string(),
             }),
+            output: None,
         }
     }
 

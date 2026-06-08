@@ -1,6 +1,7 @@
 use factory::work_model::{
-    Attempt, AttemptReviewState, AttemptStatus, Task, TaskArtifactArea, TaskKind, WorkItem,
-    WorkModelError, WorkModelStorageError, WorkModelStore, WorkspaceAccess, WorkspaceRef,
+    Attempt, AttemptReviewState, AttemptStatus, Task, TaskArtifactArea, TaskKind, TaskOutput,
+    TaskStatus, WorkItem, WorkModelError, WorkModelStorageError, WorkModelStore, WorkspaceAccess,
+    WorkspaceRef,
 };
 use std::fs;
 
@@ -22,6 +23,7 @@ fn documented_work_item() -> WorkItem {
             tasks: vec![Task {
                 id: "write-review".to_string(),
                 kind: TaskKind::Write,
+                status: TaskStatus::Complete,
                 role: "author".to_string(),
                 work_item_id: "work-review".to_string(),
                 attempt_id: Some("attempt-review".to_string()),
@@ -31,6 +33,12 @@ fn documented_work_item() -> WorkItem {
                 },
                 artifact_area: Some(TaskArtifactArea {
                     path: ".factory/work/artifacts/write-review".to_string(),
+                }),
+                output: Some(TaskOutput {
+                    workspace_id: "candidate".to_string(),
+                    workspace_path: "../workspaces/candidate".to_string(),
+                    source_branch: "main".to_string(),
+                    commit: "abc123".to_string(),
                 }),
             }],
             review_state: Some(AttemptReviewState::Passed),
@@ -58,6 +66,7 @@ fn reviewer_storage_reads_documented_layout() {
         {
           "id": "write-review",
           "kind": "write",
+          "status": "complete",
           "role": "author",
           "work_item_id": "work-review",
           "attempt_id": "attempt-review",
@@ -77,6 +86,12 @@ fn reviewer_storage_reads_documented_layout() {
           },
           "artifact_area": {
             "path": ".factory/work/artifacts/write-review"
+          },
+          "output": {
+            "workspace_id": "candidate",
+            "workspace_path": "../workspaces/candidate",
+            "source_branch": "main",
+            "commit": "abc123"
           }
         }
       ],
@@ -161,6 +176,7 @@ fn reviewer_storage_writes_documented_deterministic_json() {
         {
           "id": "write-review",
           "kind": "write",
+          "status": "complete",
           "role": "author",
           "work_item_id": "work-review",
           "attempt_id": "attempt-review",
@@ -180,6 +196,12 @@ fn reviewer_storage_writes_documented_deterministic_json() {
           },
           "artifact_area": {
             "path": ".factory/work/artifacts/write-review"
+          },
+          "output": {
+            "workspace_id": "candidate",
+            "workspace_path": "../workspaces/candidate",
+            "source_branch": "main",
+            "commit": "abc123"
           }
         }
       ],

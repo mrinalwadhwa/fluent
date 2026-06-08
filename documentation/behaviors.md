@@ -106,12 +106,65 @@ WHEN `factory work attempt <work-item-id> <attempt-id>` creates the
 initial `write` Task,
 THE SYSTEM SHALL give the Task role `author`, id `<attempt-id>-write`,
 the matching Work Item and Attempt ids, and exactly one writable
-workspace reference at `.factory/work/workspaces/<attempt-id>` without
-creating or executing that workspace.
+workspace reference at `.factory/work/workspaces/<attempt-id>`, without
+creating or executing that workspace during Attempt creation.
 Test: tests/work_model_external.rs (work_item_add_initial_attempt_creates_scheduler_facing_write_task)
 Test: tests/binary.rs (work_attempt_adds_planned_attempt_with_initial_write_task)
 Test: tests/behaviors/operations/test-work-attempt-intake-review.sh (initial write Task has ids and one writable workspace)
 Test: tests/behaviors/operations/test-work-attempt-intake-review.sh (work show prints Attempt and Task as pretty JSON)
+
+WHEN `factory work task run <work-item-id> <attempt-id> <task-id>` is
+invoked for an existing planned `write` Task with exactly one writable
+workspace,
+THE SYSTEM SHALL create or reuse a registered git worktree at that
+workspace path and launch the selected coder in that workspace.
+Test: tests/binary.rs (work_task_run_completes_write_task_with_committed_output)
+Test: tests/behaviors/operations/test-work-task-run.sh (run reuses worktree and launches coder there)
+
+WHEN a write Task coder exits successfully,
+THE SYSTEM SHALL complete the Task only if the writable workspace is
+clean and contains at least one commit produced after Factory created or
+bound the workspace for that Task run.
+Test: tests/binary.rs (work_task_run_completes_write_task_with_committed_output)
+Test: tests/binary.rs (work_task_run_rejects_reused_workspace_without_new_commit)
+Test: tests/behaviors/operations/test-work-task-run.sh (clean committed Task completes)
+Test: tests/behaviors/operations/test-work-task-run.sh (success without new commit fails with guidance)
+
+IF the write Task coder exits successfully but the writable workspace has
+uncommitted changes,
+THEN THE SYSTEM SHALL leave the Task incomplete and report that the Task
+must commit or remove the dirty changes.
+Test: tests/binary.rs (work_task_run_rejects_dirty_successful_workspace)
+Test: tests/behaviors/operations/test-work-task-run.sh (dirty successful Task fails with guidance)
+
+IF the write Task coder exits successfully but the writable workspace has
+no committed Task output produced by that run,
+THEN THE SYSTEM SHALL leave the Task incomplete and report that there is
+no committed Task output.
+Test: tests/binary.rs (work_task_run_rejects_success_without_commits)
+Test: tests/binary.rs (work_task_run_rejects_reused_workspace_without_new_commit)
+Test: tests/behaviors/operations/test-work-task-run.sh (success without new commit fails with guidance)
+
+IF the write Task coder exits non-zero,
+THEN THE SYSTEM SHALL mark the Attempt and Task as `failed`, leave Task
+output unset, and report the coder failure.
+Test: tests/binary.rs (work_task_run_marks_task_failed_when_coder_exits_nonzero)
+Test: tests/behaviors/operations/test-work-task-run.sh (coder failure marks Task failed)
+
+IF the requested Task is missing, belongs to a different Attempt or Work
+Item, is not planned, is not a `write` Task, has zero or multiple
+writable workspaces, declares a writable workspace outside
+`.factory/work/workspaces/`, or points to an existing directory that is
+not a registered git worktree,
+THEN THE SYSTEM SHALL exit non-zero without creating an unmanaged
+workspace or mutating Task completion state.
+Test: tests/binary.rs (work_task_run_rejects_task_that_is_not_planned)
+Test: tests/binary.rs (work_task_run_rejects_non_write_task)
+Test: tests/binary.rs (work_task_run_requires_one_writable_workspace)
+Test: tests/binary.rs (work_task_run_rejects_unmanaged_writable_workspace_path)
+Test: tests/binary.rs (work_task_run_rejects_existing_directory_that_is_not_worktree)
+Test: tests/binary.rs (work_task_run_missing_ids_leave_work_item_unchanged)
+Test: tests/behaviors/operations/test-work-task-run.sh (invalid task requests do not complete or mutate)
 
 IF `factory work attempt <work-item-id> <attempt-id>` is invoked for a
 missing Work Item, an invalid Work Item id, a duplicate Attempt id, or

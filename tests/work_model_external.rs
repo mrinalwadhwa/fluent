@@ -1,7 +1,7 @@
 use factory::work_model::{
-    Attempt, AttemptReviewState, AttemptStatus, Task, TaskArtifactArea, TaskKind, WorkItem,
-    WorkModelError, WorkModelStorageError, WorkModelStore, WorkspaceAccess, WorkspaceRef,
-    from_json,
+    Attempt, AttemptReviewState, AttemptStatus, Task, TaskArtifactArea, TaskKind, TaskOutput,
+    TaskStatus, WorkItem, WorkModelError, WorkModelStorageError, WorkModelStore, WorkspaceAccess,
+    WorkspaceRef, from_json,
 };
 use std::fs;
 
@@ -16,6 +16,7 @@ fn task(kind: TaskKind) -> Task {
     Task {
         id: "write-code".to_string(),
         kind,
+        status: TaskStatus::Complete,
         role: "author".to_string(),
         work_item_id: "work-1".to_string(),
         attempt_id: Some("attempt-1".to_string()),
@@ -25,6 +26,12 @@ fn task(kind: TaskKind) -> Task {
         },
         artifact_area: Some(TaskArtifactArea {
             path: ".factory/work/artifacts/write-code".to_string(),
+        }),
+        output: Some(TaskOutput {
+            workspace_id: "candidate".to_string(),
+            workspace_path: "../workspaces/candidate".to_string(),
+            source_branch: "main".to_string(),
+            commit: "abc123".to_string(),
         }),
     }
 }
@@ -266,6 +273,7 @@ fn work_model_store_writes_deterministic_pretty_json() {
         {
           "id": "write-code",
           "kind": "write",
+          "status": "complete",
           "role": "author",
           "work_item_id": "work-1",
           "attempt_id": "attempt-1",
@@ -285,6 +293,12 @@ fn work_model_store_writes_deterministic_pretty_json() {
           },
           "artifact_area": {
             "path": ".factory/work/artifacts/write-code"
+          },
+          "output": {
+            "workspace_id": "candidate",
+            "workspace_path": "../workspaces/candidate",
+            "source_branch": "main",
+            "commit": "abc123"
           }
         }
       ],
@@ -339,6 +353,80 @@ fn work_model_store_reports_file_for_invalid_task_model() {
                 source,
                 WorkModelError::ReviewTaskWritesWorkspace {
                     task_id: "write-code".to_string()
+                }
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn work_model_store_rejects_complete_write_task_without_output() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    let mut invalid = work_item();
+    invalid.attempts[0].tasks[0].output = None;
+
+    let error = store.write_work_item(&invalid).unwrap_err();
+
+    match error {
+        WorkModelStorageError::InvalidModel { path, source } => {
+            assert_eq!(path, temp.path().join(".factory/work/items/work-1.json"));
+            assert_eq!(
+                source,
+                WorkModelError::CompleteWriteTaskMissingOutput {
+                    task_id: "write-code".to_string()
+                }
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn work_model_store_rejects_output_on_incomplete_task() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    let mut invalid = work_item();
+    invalid.attempts[0].status = AttemptStatus::Executing;
+    invalid.attempts[0].tasks[0].status = TaskStatus::Executing;
+
+    let error = store.write_work_item(&invalid).unwrap_err();
+
+    match error {
+        WorkModelStorageError::InvalidModel { path, source } => {
+            assert_eq!(path, temp.path().join(".factory/work/items/work-1.json"));
+            assert_eq!(
+                source,
+                WorkModelError::IncompleteTaskHasOutput {
+                    task_id: "write-code".to_string(),
+                    status: TaskStatus::Executing,
+                }
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn work_model_store_rejects_complete_attempt_with_incomplete_task() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    let mut invalid = work_item();
+    invalid.attempts[0].tasks[0].status = TaskStatus::Failed;
+    invalid.attempts[0].tasks[0].output = None;
+
+    let error = store.write_work_item(&invalid).unwrap_err();
+
+    match error {
+        WorkModelStorageError::InvalidModel { path, source } => {
+            assert_eq!(path, temp.path().join(".factory/work/items/work-1.json"));
+            assert_eq!(
+                source,
+                WorkModelError::CompleteAttemptHasIncompleteTask {
+                    attempt_id: "attempt-1".to_string(),
+                    task_id: "write-code".to_string(),
+                    task_status: TaskStatus::Failed,
                 }
             );
         }

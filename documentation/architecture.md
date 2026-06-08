@@ -57,8 +57,10 @@ same vocabulary.
 The current `.factory/runs` lifecycle remains the execution
 implementation. `factory run`, `resume`, `summary`, `dashboard`,
 `review`, `land`, and cleanup continue to read and write existing run
-state. The first version does not migrate run directories and does not
-replace the session loop.
+state. The Work Item model also has a narrow Task execution bridge:
+`factory work task run <work-item-id> <attempt-id> <task-id>` executes a
+stored write Task through the selected coder. This bridge does not
+migrate run directories or replace the legacy session loop.
 
 `factory work create <id> --title <title>` exposes the first Work Item
 intake surface. It writes a minimal Work Item with an empty `attempts`
@@ -66,13 +68,17 @@ list and does not schedule work or mutate legacy run state. `factory work
 attempt <work-item-id> <attempt-id>` creates the first operational
 transition from intake: it appends a planned Attempt with one initial
 `write` Task. The Task declares role `author` and one writable workspace
-reference at `.factory/work/workspaces/<attempt-id>`, but this slice does
-not create the workspace or execute the Task. `factory work list` and
-`factory work show <id>` expose the same durable Work Item model for
-inspection. These commands use `.factory/work/items/` through the Rust
-storage model and validate stored objects. This keeps Work Items and
-Attempts visible without changing the legacy `.factory/runs` lifecycle
-that still executes sessions.
+reference at `.factory/work/workspaces/<attempt-id>`. `factory work task
+run` creates or reuses that writable workspace as a git worktree, runs
+the coder there, and completes the Task only after the workspace is clean
+and contains a new commit produced after Factory bound the workspace for
+that Task run. The bridge rejects writable Task workspace paths outside
+`.factory/work/workspaces/` before it creates or binds a worktree.
+`factory work list` and `factory work show <id>` expose the same durable
+Work Item model for inspection. These commands use `.factory/work/items/`
+through the Rust storage model and validate stored objects. This keeps
+Work Items and Attempts visible while the legacy
+`.factory/runs` lifecycle continues to execute full sessions.
 
 | Concept | Meaning |
 |---|---|
@@ -85,31 +91,30 @@ that still executes sessions.
 When artifacts or tests need to exchange a standalone task definition,
 use the serialized `Task` shape from `factory::work_model` and call
 `Task::validate` after parsing. This shape is an exchange contract for
-the core model; current run commands do not submit these tasks to a
-scheduler.
+the core model.
 
 ```json
 {
-  "id": "review-architecture",
-  "kind": "review",
-  "role": "architecture-reviewer",
+  "id": "attempt-1-write",
+  "kind": "write",
+  "role": "author",
   "work_item_id": "work-1",
   "attempt_id": "attempt-1",
   "workspace_access": {
-    "reads": [
+    "reads": [],
+    "writes": [
       {
         "id": "candidate",
-        "path": "../run-work-1"
-      },
-      {
-        "id": "main",
-        "path": "."
+        "path": ".factory/work/workspaces/attempt-1"
       }
-    ],
-    "writes": []
+    ]
   },
-  "artifact_area": {
-    "path": ".factory/tasks/review-architecture"
+  "status": "complete",
+  "output": {
+    "workspace_id": "candidate",
+    "workspace_path": ".factory/work/workspaces/attempt-1",
+    "source_branch": "main",
+    "commit": "0123456789abcdef"
   }
 }
 ```
@@ -119,6 +124,16 @@ The `kind` field accepts only `write`, `review`, `merge`, `report`,
 workspaces. `workspace_access.writes` may be empty or contain one
 workspace. A `review` task must keep `writes` empty; reviewers write
 findings and notes under a required `artifact_area`.
+
+`status` tracks Task lifecycle state: `planned`, `executing`,
+`complete`, `failed`, or `needs-user`. Planned Tasks omit the field in
+JSON. Completed write Tasks include `output`, which records the writable
+workspace id and path, the source branch resolved from the project root
+when the Task run started, and the commit that contains the Task output.
+Incomplete Tasks do not carry output. Attempt completion is derived from
+its Tasks; a complete Attempt must not contain unfinished Tasks, and
+completing one Task does not by itself complete an Attempt that still has
+unfinished Tasks.
 
 Review tasks are read-only with respect to candidate workspaces. They may
 write task artifacts, such as findings or scratch notes, but concrete

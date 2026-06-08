@@ -106,6 +106,9 @@ for test in tests/behaviors/operations/*.sh; do bash "$test"; done
 | Work Item intake and inspection are independent from legacy runs | `binary.rs`, `test-work-inspection.sh` |
 | Work Item attempt command adds planned Attempt and initial write Task | `work_model_external.rs`, `binary.rs`, `test-work-attempt-intake-review.sh` |
 | Work Item attempt command rejects missing, duplicate, and invalid ids without changing state | `work_model_external.rs`, `binary.rs`, `test-work-attempt-intake-review.sh` |
+| Work Task run creates or reuses the writable worktree and launches the coder there | `binary.rs`, `test-work-task-run.sh` |
+| Work Task run completes only with clean committed output from the current run | `binary.rs`, `test-work-task-run.sh` |
+| Work Task run rejects dirty, no-output, coder-failure, and invalid Task requests without completing | `binary.rs`, `test-work-task-run.sh` |
 | Create worktree from current HEAD | `test-run` |
 | Branch from non-main branch | `test-run` |
 | Run-id resolution priority chain | `test-run` |

@@ -9,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use factory::cleanup::{self, CleanupOptions, WorktreeCleanup};
-use factory::cli::{Cli, Commands, WorkCommands};
+use factory::cli::{Cli, Commands, WorkCommands, WorkTaskCommands};
 use factory::coder::{CoderKind, CoderSandbox};
 use factory::content::ContentResolver;
 use factory::credential;
@@ -24,6 +24,7 @@ use factory::session::{self, DefaultHooks, SandboxedHooks, SessionConfig};
 use factory::summary;
 use factory::version;
 use factory::work_model::{WorkItem, WorkModelStorageError, WorkModelStore, to_json_pretty};
+use factory::work_task_executor::{self, WorkTaskRunConfig};
 use factory::worktree;
 
 fn main() -> Result<()> {
@@ -148,7 +149,13 @@ fn main() -> Result<()> {
             cmd_status(&search_root)?;
         }
         Some(Commands::Work { command }) => {
-            cmd_work(&cwd, command)?;
+            cmd_work(
+                &cwd,
+                command,
+                cli.coder.as_deref(),
+                cli.no_sandbox,
+                &resolver,
+            )?;
         }
         Some(Commands::Summary { run_id }) => {
             let output = summary::summarize_run(&cwd, run_id.as_deref())?;
@@ -203,7 +210,13 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn cmd_work(project_root: &Path, command: WorkCommands) -> Result<()> {
+fn cmd_work(
+    project_root: &Path,
+    command: WorkCommands,
+    global_coder: Option<&str>,
+    global_no_sandbox: bool,
+    resolver: &ContentResolver,
+) -> Result<()> {
     let store = WorkModelStore::new(project_root);
     match command {
         WorkCommands::Create { id, title } => {
@@ -254,6 +267,30 @@ fn cmd_work(project_root: &Path, command: WorkCommands) -> Result<()> {
             store.write_work_item(&item)?;
             println!("Created Attempt {attempt_id} for Work Item {work_item_id}");
         }
+        WorkCommands::Task { command } => match command {
+            WorkTaskCommands::Run {
+                work_item_id,
+                attempt_id,
+                task_id,
+                no_sandbox,
+                coder,
+                extra_args,
+            } => {
+                let coder_kind = CoderKind::resolve(coder.as_deref().or(global_coder))?;
+                let result = work_task_executor::run_write_task(WorkTaskRunConfig {
+                    project_root,
+                    store: &store,
+                    work_item_id: &work_item_id,
+                    attempt_id: &attempt_id,
+                    task_id: &task_id,
+                    resolver,
+                    extra_args: &extra_args,
+                    coder_kind,
+                    no_sandbox: no_sandbox || global_no_sandbox,
+                })?;
+                println!("Completed Task {} at {}", result.task_id, result.commit);
+            }
+        },
     }
     Ok(())
 }

@@ -217,4 +217,37 @@ pub enum WorkCommands {
         /// Attempt ID
         attempt_id: String,
     },
+
+    /// Execute stored Work Item Tasks
+    Task {
+        #[command(subcommand)]
+        command: WorkTaskCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum WorkTaskCommands {
+    /// Run an existing write Task
+    Run {
+        /// Work Item ID
+        work_item_id: String,
+
+        /// Attempt ID
+        attempt_id: String,
+
+        /// Task ID
+        task_id: String,
+
+        /// Disable sandbox
+        #[arg(long)]
+        no_sandbox: bool,
+
+        /// Coding agent to launch: claude or codex
+        #[arg(long)]
+        coder: Option<String>,
+
+        /// Extra args passed through to the agent
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra_args: Vec<String>,
+    },
 }

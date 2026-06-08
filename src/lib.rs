@@ -19,4 +19,5 @@ pub mod summary;
 pub mod transcript;
 pub mod version;
 pub mod work_model;
+pub mod work_task_executor;
 pub mod worktree;
