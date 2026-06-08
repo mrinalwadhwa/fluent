@@ -143,6 +143,14 @@ artifacts live under
 `.factory/work/artifacts/<attempt-id>/<candidate-id>/merge/`, and the
 stored Merge Candidate records whether execution is pending, executing,
 failed, needs-user, or landed.
+`factory cleanup` owns the terminal Work model cleanup lifecycle. It
+defaults to a dry run and only mutates state with `--apply`. A Work Item
+is eligible when every Attempt is terminal, every Task in those Attempts
+is terminal, and every Merge Candidate is terminal. Cleanup removes the
+stored Work Item, referenced Work artifacts, managed candidate worktrees,
+and Work task branches. It skips Work Items with active Attempts, Tasks,
+or Merge Candidates, and it only removes candidate worktrees that match
+Factory's managed sibling path and are registered git worktrees.
 
 | Concept | Meaning |
 |---|---|

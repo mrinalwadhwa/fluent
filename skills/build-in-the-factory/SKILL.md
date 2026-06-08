@@ -262,12 +262,12 @@ Legacy run state lives in `.factory/runs/[run-id]/`:
 | `report.md` | Generated run report |
 | `cleaned.md` | Cleanup context for complete or landed runs cleaned by `factory cleanup` |
 | `reviews/` | Review artifacts |
+| `children` | Child run IDs, one per line (parallel runs only, written by the factory) |
+| `parent` | Parent run ID (child runs only, written by the factory) |
 
 `factory cleanup` also handles complete or landed legacy runs. It
 defaults to a dry run and requires `--apply` before removing registered
 run worktrees or writing cleanup markers.
-| `children` | Child run IDs, one per line (parallel runs only, written by the factory) |
-| `parent` | Parent run ID (child runs only, written by the factory) |
 
 Each legacy run executes in its own git worktree (a sibling of the
 source worktree). The factory command creates the worktree at launch
@@ -303,8 +303,8 @@ factory pull                         # download legacy workspace from S3
 factory shell                        # shell into a legacy remote task
 factory resume                       # restart a paused legacy run
 factory land                         # land a completed legacy run
-factory cleanup                      # dry-run stale complete/landed cleanup
-factory cleanup --apply              # clean selected runs and registered worktrees
+factory cleanup                      # dry-run stale run and Work cleanup
+factory cleanup --apply              # clean stale runs, Work state, worktrees, and branches
 factory init                         # initialize .factory/ directories
 factory version                      # print version and build commit
 ```

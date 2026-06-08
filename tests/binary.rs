@@ -4399,6 +4399,112 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
     assert!(!branch_check.success());
 }
 
+#[test]
+fn cleanup_work_items_selects_failed_terminal_and_skips_pending_merge_candidate() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-failed", "--title", "Failed work"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-failed", "attempt-1"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "create",
+            "work-pending-merge",
+            "--title",
+            "Pending merge work",
+        ])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-pending-merge", "attempt-1"])
+        .assert()
+        .success();
+
+    let failed_item_path = main_dir.join(".factory/work/items/work-failed.json");
+    let mut failed: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&failed_item_path).unwrap()).unwrap();
+    failed["attempts"][0]["status"] = serde_json::Value::String("failed".to_string());
+    failed["attempts"][0]["tasks"][0]["status"] = serde_json::Value::String("failed".to_string());
+    fs::write(
+        &failed_item_path,
+        serde_json::to_string_pretty(&failed).unwrap(),
+    )
+    .unwrap();
+
+    let pending_item_path = main_dir.join(".factory/work/items/work-pending-merge.json");
+    let pending_workspace = "../work-18-work-pending-merge-attempt-1";
+    let head = git_head(&main_dir);
+    let mut pending: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&pending_item_path).unwrap()).unwrap();
+    pending["attempts"][0]["status"] = serde_json::Value::String("complete".to_string());
+    pending["attempts"][0]["review_state"] = serde_json::Value::String("passed".to_string());
+    pending["attempts"][0]["tasks"][0]["status"] =
+        serde_json::Value::String("complete".to_string());
+    pending["attempts"][0]["tasks"][0]["output"] = serde_json::json!({
+        "workspace_id": "candidate",
+        "workspace_path": pending_workspace,
+        "source_branch": "main",
+        "commit": head
+    });
+    pending["merge_candidates"] = serde_json::json!([
+        {
+            "id": "candidate-1",
+            "attempt_id": "attempt-1",
+            "source_workspace": {
+                "id": "candidate",
+                "path": pending_workspace
+            },
+            "target_workspace": {
+                "id": "target",
+                "path": "."
+            },
+            "source_branch": "main",
+            "target_branch": "main",
+            "candidate_commit": head,
+            "review_state": "pending",
+            "merge_state": {
+                "status": "pending"
+            }
+        }
+    ]);
+    fs::write(
+        &pending_item_path,
+        serde_json::to_string_pretty(&pending).unwrap(),
+    )
+    .unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .arg("cleanup")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "would clean Work Item work-failed",
+        ))
+        .stdout(predicate::str::contains("work-pending-merge").not());
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["cleanup", "--apply"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cleaned Work Item work-failed"))
+        .stdout(predicate::str::contains("work-pending-merge").not());
+
+    assert!(!failed_item_path.exists());
+    assert!(pending_item_path.exists());
+}
+
 // -------------------------------------------------------------------------
 // Summary
 // -------------------------------------------------------------------------
