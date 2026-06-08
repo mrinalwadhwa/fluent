@@ -198,6 +198,14 @@ pub enum WorkCommands {
         /// Work Item title
         #[arg(long)]
         title: String,
+
+        /// Rich instructions to carry into write Tasks
+        #[arg(long, conflicts_with = "instructions_file")]
+        instructions: Option<String>,
+
+        /// Read rich instructions from a file
+        #[arg(long, value_name = "PATH")]
+        instructions_file: Option<String>,
     },
 
     /// List stored Work Items

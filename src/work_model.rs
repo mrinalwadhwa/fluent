@@ -16,6 +16,8 @@ pub const WORK_ARTIFACTS_DIR: &str = ".factory/work/artifacts";
 pub struct WorkItem {
     pub id: String,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
     #[serde(default)]
     pub attempts: Vec<Attempt>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -43,6 +45,7 @@ impl WorkItem {
                 kind: TaskKind::Write,
                 status: TaskStatus::Planned,
                 role: "author".to_string(),
+                instructions: self.instructions.clone(),
                 work_item_id: self.id.clone(),
                 attempt_id: Some(attempt_id.clone()),
                 workspace_access: WorkspaceAccess {
@@ -148,6 +151,7 @@ impl WorkItem {
                 kind: TaskKind::Review,
                 status: TaskStatus::Planned,
                 role: (*role).to_string(),
+                instructions: None,
                 work_item_id: self.id.clone(),
                 attempt_id: Some(attempt_id.to_string()),
                 workspace_access: WorkspaceAccess::read_only(vec![candidate.clone()]),
@@ -217,6 +221,7 @@ impl WorkItem {
             kind: TaskKind::Write,
             status: TaskStatus::Planned,
             role: "author".to_string(),
+            instructions: self.instructions.clone(),
             work_item_id: self.id.clone(),
             attempt_id: Some(attempt_id.to_string()),
             workspace_access: WorkspaceAccess {
@@ -434,6 +439,8 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "task_status_is_planned")]
     pub status: TaskStatus,
     pub role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
     pub work_item_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attempt_id: Option<String>,
@@ -1396,6 +1403,7 @@ mod tests {
             kind,
             status: TaskStatus::Planned,
             role: "author".to_string(),
+            instructions: None,
             work_item_id: "work-1".to_string(),
             attempt_id: Some("attempt-1".to_string()),
             workspace_access: WorkspaceAccess {
@@ -1528,6 +1536,7 @@ mod tests {
         let mut work_item = WorkItem {
             id: "work-1".to_string(),
             title: "Review latest candidate".to_string(),
+            instructions: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -1570,6 +1579,7 @@ mod tests {
         let work_item = WorkItem {
             id: "work-1".to_string(),
             title: "Define the core work model".to_string(),
+            instructions: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -1599,6 +1609,7 @@ mod tests {
         let mut work_item = WorkItem {
             id: "work-1".to_string(),
             title: "Create merge candidate".to_string(),
+            instructions: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -1640,6 +1651,7 @@ mod tests {
         let mut work_item = WorkItem {
             id: "work-1".to_string(),
             title: "Create merge candidate once".to_string(),
+            instructions: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -1668,6 +1680,7 @@ mod tests {
         let mut work_item = WorkItem {
             id: "work-1".to_string(),
             title: "Keep one merge candidate per attempt".to_string(),
+            instructions: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -1698,6 +1711,7 @@ mod tests {
         let mut work_item = WorkItem {
             id: "work-1".to_string(),
             title: "Validate merge candidate attempt state".to_string(),
+            instructions: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -1740,6 +1754,7 @@ mod tests {
         let mut work_item = WorkItem {
             id: "work-1".to_string(),
             title: "Validate merge candidate provenance".to_string(),
+            instructions: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -1782,6 +1797,7 @@ mod tests {
         let mut work_item = WorkItem {
             id: "work-1".to_string(),
             title: "Preserve merge failure state".to_string(),
+            instructions: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -1824,6 +1840,7 @@ mod tests {
         let mut work_item = WorkItem {
             id: "work-1".to_string(),
             title: "Validate failed merge candidate provenance".to_string(),
+            instructions: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -1899,6 +1916,7 @@ mod tests {
             kind: TaskKind::Write,
             status: TaskStatus::Complete,
             role: "author".to_string(),
+            instructions: None,
             work_item_id: "work-1".to_string(),
             attempt_id: Some("attempt-1".to_string()),
             workspace_access: WorkspaceAccess {

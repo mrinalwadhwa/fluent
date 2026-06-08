@@ -223,10 +223,22 @@ fn cmd_work(
 ) -> Result<()> {
     let store = WorkModelStore::new(project_root);
     match command {
-        WorkCommands::Create { id, title } => {
+        WorkCommands::Create {
+            id,
+            title,
+            instructions,
+            instructions_file,
+        } => {
+            let instructions = match (instructions, instructions_file) {
+                (Some(instructions), None) => Some(instructions),
+                (None, Some(path)) => Some(fs::read_to_string(path)?),
+                (None, None) => None,
+                (Some(_), Some(_)) => unreachable!("clap rejects conflicting instruction inputs"),
+            };
             let item = WorkItem {
                 id,
                 title,
+                instructions,
                 attempts: Vec::new(),
                 merge_candidates: Vec::new(),
             };

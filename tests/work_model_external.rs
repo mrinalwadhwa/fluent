@@ -19,6 +19,7 @@ fn task(kind: TaskKind) -> Task {
         kind,
         status: TaskStatus::Complete,
         role: "author".to_string(),
+        instructions: None,
         work_item_id: "work-1".to_string(),
         attempt_id: Some("attempt-1".to_string()),
         workspace_access: WorkspaceAccess {
@@ -43,6 +44,7 @@ fn work_item() -> WorkItem {
     WorkItem {
         id: "work-1".to_string(),
         title: "Add durable model storage".to_string(),
+        instructions: None,
         attempts: vec![Attempt {
             id: "attempt-1".to_string(),
             work_item_id: "work-1".to_string(),
@@ -505,6 +507,7 @@ fn work_item_add_initial_attempt_creates_scheduler_facing_write_task() {
     let mut work_item = WorkItem {
         id: "work-1".to_string(),
         title: "Add attempt intake".to_string(),
+        instructions: None,
         attempts: Vec::new(),
         merge_candidates: Vec::new(),
     };
@@ -568,6 +571,7 @@ fn work_item_add_initial_attempt_rejects_duplicate_attempt_id() {
     let mut work_item = WorkItem {
         id: "work-1".to_string(),
         title: "Add attempt intake".to_string(),
+        instructions: None,
         attempts: Vec::new(),
         merge_candidates: Vec::new(),
     };
@@ -588,6 +592,7 @@ fn work_item_add_initial_attempt_rejects_invalid_attempt_id() {
     let mut work_item = WorkItem {
         id: "work-1".to_string(),
         title: "Add attempt intake".to_string(),
+        instructions: None,
         attempts: Vec::new(),
         merge_candidates: Vec::new(),
     };

@@ -804,10 +804,201 @@ exit 0
     assert!(prompt.contains("Attempt: attempt-1"));
     assert!(prompt.contains("Task: attempt-1-write"));
     assert!(prompt.contains("Role: author"));
+    assert!(!prompt.contains("Task instructions:"));
     assert!(prompt.contains("Current Task model:"));
     assert!(prompt.contains(r#""id": "attempt-1-write""#));
     assert!(prompt.contains(r#""kind": "write""#));
     assert!(prompt.contains(r#""workspace_access""#));
+}
+
+#[test]
+fn work_create_persists_instructions_and_attempt_copies_them_to_write_task() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let instructions_path = tmp.path().join("instructions.md");
+    fs::write(
+        &instructions_path,
+        "Brief: implement durable task instructions.\n\n- Keep extra args as flags.\n",
+    )
+    .unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "create",
+            "work-1",
+            "--title",
+            "Instruction contract",
+            "--instructions-file",
+            &instructions_path.to_string_lossy(),
+        ])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let output = factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "show", "work-1"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "work show failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value["instructions"],
+        "Brief: implement durable task instructions.\n\n- Keep extra args as flags.\n"
+    );
+    assert_eq!(
+        value["attempts"][0]["tasks"][0]["instructions"],
+        value["instructions"]
+    );
+}
+
+#[test]
+fn work_task_run_includes_task_instructions_in_coder_prompt() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin");
+    let prompt_log = tmp.path().join("prompt.log");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-p" ]; then
+    shift
+    printf '%s\n' "$1" > "$PROMPT_LOG"
+    break
+  fi
+  shift
+done
+printf 'task output\n' > task-output.txt
+git add task-output.txt
+git commit -m "Add task output" >/dev/null
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "create",
+            "work-1",
+            "--title",
+            "Prompt contract",
+            "--instructions",
+            "Implement the first slice.\nAvoid prompt smuggling.",
+        ])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("PROMPT_LOG", &prompt_log)
+        .assert()
+        .success();
+
+    let prompt = fs::read_to_string(prompt_log).unwrap();
+    assert!(prompt.contains("Task instructions:"));
+    assert!(prompt.contains("Implement the first slice."));
+    assert!(prompt.contains("Avoid prompt smuggling."));
+}
+
+#[test]
+fn work_task_run_keeps_extra_args_out_of_task_prompt() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin");
+    let args_log = tmp.path().join("args.log");
+    let prompt_log = tmp.path().join("prompt.log");
+    write_mock_codex(
+        &bin_dir,
+        r##"#!/bin/bash
+printf '%s\n' "$@" > "$ARGS_LOG"
+for arg in "$@"; do
+  case "$arg" in
+    *"Execute this Factory write Task"*)
+      printf '%s\n' "$arg" > "$PROMPT_LOG"
+      ;;
+  esac
+done
+printf 'task output\n' > task-output.txt
+git add task-output.txt
+git commit -m "Add task output" >/dev/null
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "create",
+            "work-1",
+            "--title",
+            "Extra args",
+            "--instructions",
+            "Durable instructions only.",
+        ])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write",
+            "--no-sandbox",
+            "--coder",
+            "codex",
+            "--",
+            "--config",
+            "factory_marker=\"coder-flag-only\"",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("ARGS_LOG", &args_log)
+        .env("PROMPT_LOG", &prompt_log)
+        .assert()
+        .success();
+
+    let args = fs::read_to_string(args_log).unwrap();
+    let prompt = fs::read_to_string(prompt_log).unwrap();
+    assert!(args.contains("factory_marker=\"coder-flag-only\""));
+    assert!(prompt.contains("Durable instructions only."));
+    assert!(!prompt.contains("coder-flag-only"));
 }
 
 #[test]

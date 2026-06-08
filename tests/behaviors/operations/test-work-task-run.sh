@@ -54,6 +54,13 @@ create_work_task() {
   "$FACTORY_BIN" work attempt work-1 attempt-1 > /dev/null
 }
 
+create_instructed_work_task() {
+  "$FACTORY_BIN" work create work-1 \
+    --title "Task execution" \
+    --instructions "Implement durable task instructions." > /dev/null
+  "$FACTORY_BIN" work attempt work-1 attempt-1 > /dev/null
+}
+
 json_value() {
   jq -r "$1" .factory/work/items/work-1.json
 }
@@ -205,6 +212,23 @@ test_run_passes_task_context_to_coder_prompt() {
   assert_contains "$PROMPT" "Current Task model:" || RESULT=1
   assert_contains "$PROMPT" '"id": "attempt-1-write"' || RESULT=1
   assert_contains "$PROMPT" '"kind": "write"' || RESULT=1
+
+  cleanup_test_project
+  return $RESULT
+}
+
+test_run_passes_task_instructions_to_coder_prompt() {
+  setup_test_project
+  create_instructed_work_task
+  write_mock_codex
+
+  RESULT=0
+  run_task commit > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
+
+  PROMPT="$(cat "$TEST_DIR/coder-prompt.log")"
+  assert_contains "$PROMPT" "Task instructions:" || RESULT=1
+  assert_contains "$PROMPT" "Implement durable task instructions." || RESULT=1
+  assert_contains "$PROMPT" '"instructions": "Implement durable task instructions."' || RESULT=1
 
   cleanup_test_project
   return $RESULT
@@ -642,6 +666,8 @@ run_test "run reuses worktree and launches coder there" \
   test_run_reuses_worktree_and_launches_coder_there
 run_test "run passes Task context to coder prompt" \
   test_run_passes_task_context_to_coder_prompt
+run_test "run passes Task instructions to coder prompt" \
+  test_run_passes_task_instructions_to_coder_prompt
 run_test "clean committed Task completes" test_clean_committed_task_completes
 run_test "dirty successful Task fails with guidance" \
   test_dirty_successful_task_fails_with_guidance

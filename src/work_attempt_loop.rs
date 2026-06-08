@@ -292,6 +292,7 @@ mod tests {
                 kind: TaskKind::Write,
                 status: TaskStatus::Complete,
                 role: "author".to_string(),
+                instructions: None,
                 work_item_id: "work-1".to_string(),
                 attempt_id: Some("attempt-1".to_string()),
                 workspace_access: WorkspaceAccess {
@@ -308,6 +309,7 @@ mod tests {
                 kind: TaskKind::Review,
                 status: TaskStatus::Complete,
                 role: "tests".to_string(),
+                instructions: None,
                 work_item_id: "work-1".to_string(),
                 attempt_id: Some("attempt-1".to_string()),
                 workspace_access: WorkspaceAccess {

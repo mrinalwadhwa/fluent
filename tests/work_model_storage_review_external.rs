@@ -16,6 +16,7 @@ fn documented_work_item() -> WorkItem {
     WorkItem {
         id: "work-review".to_string(),
         title: "Review durable storage".to_string(),
+        instructions: None,
         attempts: vec![Attempt {
             id: "attempt-review".to_string(),
             work_item_id: "work-review".to_string(),
@@ -25,6 +26,7 @@ fn documented_work_item() -> WorkItem {
                 kind: TaskKind::Write,
                 status: TaskStatus::Complete,
                 role: "author".to_string(),
+                instructions: None,
                 work_item_id: "work-review".to_string(),
                 attempt_id: Some("attempt-review".to_string()),
                 workspace_access: WorkspaceAccess {

@@ -55,6 +55,12 @@ THE SYSTEM SHALL make it visible through `factory work list` and
 Test: tests/binary.rs (work_create_item_is_visible_through_list_and_show)
 Test: tests/behaviors/operations/test-work-inspection.sh (work create item is visible)
 
+WHEN `factory work create` is invoked with rich instructions,
+THE SYSTEM SHALL persist those instructions in stored Work Item state and
+make them visible through `factory work show <id>`.
+Test: tests/binary.rs (work_create_persists_instructions_and_attempt_copies_them_to_write_task)
+Test: tests/behaviors/operations/test-work-inspection.sh (work create persists instructions)
+
 WHEN `factory work list` is invoked,
 THE SYSTEM SHALL read stored Work Items from `.factory/work/items/` and
 print each Work Item with its id and title.
@@ -113,6 +119,12 @@ Test: tests/binary.rs (work_attempt_adds_planned_attempt_with_initial_write_task
 Test: tests/behaviors/operations/test-work-attempt-intake-review.sh (initial write Task has ids and one writable workspace)
 Test: tests/behaviors/operations/test-work-attempt-intake-review.sh (work show prints Attempt and Task as pretty JSON)
 
+WHEN `factory work attempt <work-item-id> <attempt-id>` creates the
+initial `write` Task for a Work Item with instructions,
+THE SYSTEM SHALL copy those instructions to the Task so Task execution
+can build the coder prompt from durable Work model state.
+Test: tests/binary.rs (work_create_persists_instructions_and_attempt_copies_them_to_write_task)
+
 WHEN `factory work task run <work-item-id> <attempt-id> <task-id>` is
 invoked for an existing planned `write` Task with exactly one writable
 workspace,
@@ -120,6 +132,18 @@ THE SYSTEM SHALL create or reuse a registered git worktree at that
 workspace path and launch the selected coder in that workspace.
 Test: tests/binary.rs (work_task_run_completes_write_task_with_committed_output)
 Test: tests/behaviors/operations/test-work-task-run.sh (run reuses worktree and launches coder there)
+
+WHEN `factory work task run <work-item-id> <attempt-id> <task-id>` or
+`factory work attempt run <work-item-id> <attempt-id>` launches a
+`write` Task with stored Task instructions,
+THE SYSTEM SHALL include those instructions in the coder prompt.
+Test: tests/binary.rs (work_task_run_includes_task_instructions_in_coder_prompt)
+Test: tests/behaviors/operations/test-work-task-run.sh (run passes Task instructions to coder prompt)
+
+IF a caller passes extra args to a Work task run,
+THE SYSTEM SHALL pass those args only as coder options and SHALL NOT
+treat them as additional task prompt content.
+Test: tests/binary.rs (work_task_run_keeps_extra_args_out_of_task_prompt)
 
 WHEN a write Task coder exits successfully,
 THE SYSTEM SHALL complete the Task only if the writable workspace is

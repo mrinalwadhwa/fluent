@@ -658,9 +658,17 @@ fn run_task_coder(
         .ok_or_else(|| anyhow::anyhow!("Task {task_id:?} not found"))?;
     let task_json = to_json_pretty(task)?;
     let input_artifacts_prompt = input_artifacts_instruction(input_artifacts);
+    let task_instructions = task_instructions_prompt(task.instructions.as_deref());
     let prompt = format!(
-        "Execute this Factory write Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\nInput artifacts:\n{}\n\nCurrent Task model:\n{}\n",
-        item.id, item.title, attempt_id, task_id, task.role, input_artifacts_prompt, task_json
+        "Execute this Factory write Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\n{}Input artifacts:\n{}\n\nCurrent Task model:\n{}\n",
+        item.id,
+        item.title,
+        attempt_id,
+        task_id,
+        task.role,
+        task_instructions,
+        input_artifacts_prompt,
+        task_json
     );
 
     let workspace_resolver = ContentResolver::new(Some(workspace_path));
@@ -706,6 +714,13 @@ fn input_artifacts_instruction(input_artifacts: &[PathBuf]) -> String {
         .map(|path| format!("- {}", path.display()))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn task_instructions_prompt(instructions: Option<&str>) -> String {
+    match instructions.filter(|instructions| !instructions.trim().is_empty()) {
+        Some(instructions) => format!("Task instructions:\n{instructions}\n\n"),
+        None => String::new(),
+    }
 }
 
 fn input_artifact_readable_roots(input_artifacts: &[PathBuf]) -> Vec<PathBuf> {
