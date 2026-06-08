@@ -135,6 +135,24 @@ MOCK_SCRIPT
   chmod +x "${TEST_DIR}/bin/claude"
 }
 
+write_uncertain_mock_claude() {
+  cat > "${TEST_DIR}/bin/claude" <<'MOCK_SCRIPT'
+#!/usr/bin/env bash
+case "$PWD" in
+  */.factory/work/workspaces/*)
+    printf 'status dashboard uncertain output\n' > status-dashboard-uncertain.txt
+    git add status-dashboard-uncertain.txt
+    git commit -m "Add status dashboard uncertain output" > /dev/null 2>&1
+    ;;
+  *)
+    printf 'Verdict: uncertain\n\nStatus dashboard review needs user input.\n' > review.md
+    ;;
+esac
+exit 0
+MOCK_SCRIPT
+  chmod +x "${TEST_DIR}/bin/claude"
+}
+
 create_merge_ready_work_item() {
   write_mock_claude
   "$FACTORY_BIN" work create work-action --title "Actionable Work" > /dev/null
@@ -142,6 +160,15 @@ create_merge_ready_work_item() {
   PATH="${TEST_DIR}/bin:$PATH" \
     "$FACTORY_BIN" work attempt run work-action attempt-action --no-sandbox \
       > "$TEST_DIR/attempt-run-stdout" 2> "$TEST_DIR/attempt-run-stderr"
+}
+
+create_needs_user_work_item() {
+  write_uncertain_mock_claude
+  "$FACTORY_BIN" work create work-needs-user --title "Needs User Work" > /dev/null
+  "$FACTORY_BIN" work attempt work-needs-user attempt-needs-user > /dev/null
+  PATH="${TEST_DIR}/bin:$PATH" \
+    "$FACTORY_BIN" work attempt run work-needs-user attempt-needs-user --no-sandbox \
+      > "$TEST_DIR/needs-user-stdout" 2> "$TEST_DIR/needs-user-stderr"
 }
 
 test_status_prints_runs_and_work_summary() {
@@ -190,6 +217,19 @@ test_status_summarizes_work_model_vocabulary() {
   assert_contains "$OUTPUT" "MERGE" || RESULT=1
   assert_contains "$OUTPUT" "attempt-action-merge-candidate" || RESULT=1
   assert_contains "$OUTPUT" "pending" || RESULT=1
+  return $RESULT
+}
+
+test_status_surfaces_needs_user_state() {
+  setup_test_project
+  trap cleanup_test_project RETURN
+  create_needs_user_work_item
+
+  RESULT=0
+  OUTPUT="$("$FACTORY_BIN" status 2>&1)"
+  assert_contains "$OUTPUT" "work-needs-user" || RESULT=1
+  assert_contains "$OUTPUT" "attempt-needs-user" || RESULT=1
+  assert_contains "$OUTPUT" "needs-user" || RESULT=1
   return $RESULT
 }
 
@@ -312,6 +352,7 @@ printf 'test-work-status-dashboard\n\n'
 run_test "status prints runs and Work summary" test_status_prints_runs_and_work_summary
 run_test "status prints Work summary without legacy runs" test_status_prints_work_without_legacy_runs
 run_test "status summarizes Work model vocabulary" test_status_summarizes_work_model_vocabulary
+run_test "status surfaces needs-user state" test_status_surfaces_needs_user_state
 run_test "status reports invalid Work without hiding valid state" test_status_reports_invalid_work_without_hiding_valid_state
 run_test "dashboard lists Work Items" test_dashboard_lists_work_items
 run_test "dashboard shows Work Items alongside legacy runs" test_dashboard_shows_work_items_alongside_legacy_runs
