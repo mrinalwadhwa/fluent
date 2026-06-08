@@ -384,6 +384,16 @@ Work Item / Attempt / Task model, Factory should enforce this earlier:
 a `write` task cannot enter review until its writable workspace is clean
 and its candidate changes are represented by one or more commits.
 
+Run `20260608-131938-work-task-instructions` reinforced that the legacy
+run loop still treats dirty completion as recoverable after review rather
+than preventing it at the write-task boundary. The author added one
+review-requested documentation line, marked the run complete while that
+line was uncommitted, reviewers passed against the dirty workspace, and
+the loop then restarted the author to commit the already-reviewed change
+before the final review round. This recovery path worked, but it is noisy
+and should not be the target Work model behavior: a write task should
+produce clean committed output before any review task runs.
+
 Separate distributed Factory source knowledge from project-local Factory
 state. Expertise in the Factory source tree ships with Factory and is
 available to projects Factory manages, so changes to source-level
@@ -728,11 +738,17 @@ Progress:
   documentation to teach Work Items, Attempts, Tasks, Workspaces, and
   Merge Candidates as the target lifecycle, while keeping legacy
   `.factory/runs` commands documented as a transitional fallback.
+- `03051d8`, `0790846`, and `79444f4` added durable Work task
+  instructions. `factory work create` can now store rich Work Item
+  instructions from inline text or a file, initial and follow-up write
+  Tasks copy that context into `Task.instructions`, and write Task prompt
+  generation uses durable Work state while keeping extra CLI args as
+  coder flags.
 
-The next adoption slices should enforce the new task/review boundaries
-in normal workflow; clean up Work workspaces and artifacts; and then
-delete legacy `.factory/runs` compatibility once the Work execution path
-is used end to end.
+The next adoption slices should make the build workflow use these durable
+Work task instructions end to end; clean up Work workspaces and artifacts;
+and then delete legacy `.factory/runs` compatibility once the Work
+execution path is used end to end.
 
 2026-06-07 — Authors are increasingly using expertise, especially when
 the approach lists specific expertise files, but Factory should make this

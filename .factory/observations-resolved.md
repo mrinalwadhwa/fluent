@@ -312,6 +312,18 @@ that communicates activity more clearly at lower frame rates.
 → Resolved: fff24a9 (dashboard render cadence now uses a 75ms interval
 and the behavior documentation reflects the faster animation target)
 
+2026-06-08 — Work task execution needed a durable place for the rich
+brief, behavior expectations, approach, and plan that should guide coder
+execution. Passing that material as extra CLI args to
+`factory work attempt run` was the wrong boundary because extra args are
+coder flags and Codex treats additional positional text as invalid prompt
+input.
+→ Resolved: 03051d8, 0790846, 79444f4 (`factory work create` accepts
+inline or file-backed instructions, stores them on the Work Item,
+copies them onto initial and follow-up write Tasks, includes non-empty
+`Task.instructions` in write prompts, and preserves extra args as coder
+options)
+
 2026-06-05 — The factory should be able to visually observe terminal
 UIs during testing. Launch the dashboard (or any TUI) in a tmux
 session, capture the screen with tmux capture-pane, and evaluate
