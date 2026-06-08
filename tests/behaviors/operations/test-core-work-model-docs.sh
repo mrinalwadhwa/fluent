@@ -23,7 +23,7 @@ flat_section="$(printf '%s\n' "$section" | tr '\n' ' ' | tr -s ' ')"
 
 for phrase in \
   'Work Item, Attempt, Task, Workspace, and Merge Candidate' \
-  'The current `.factory/runs` lifecycle remains the execution implementation' \
+  'commands remain supported as a transitional fallback' \
   'does not migrate run directories' \
   'Task kinds stay generic: `write`, `review`, `merge`, `report`, `learn`, and `probe`' \
   'A task may read many workspaces and write at most one' \

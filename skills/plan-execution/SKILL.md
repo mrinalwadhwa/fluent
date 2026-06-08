@@ -27,7 +27,7 @@ Read:
   must do
 - `approach.md` from the active planning context — how the system should
   do it
-- `expertise/architecture.md` — architectural principles,
+- `references/architecture.md` — architectural principles,
   especially the sections on simplicity and viewpoints, to inform
   step ordering and verification
 
@@ -156,6 +156,20 @@ prevents parallel child runs from diverging.
 Assemble `plan.md` and show the full plan:
 
 > "Here's the complete plan. Does the full picture hold together?"
+
+After the user approves the plan, assemble
+`.factory/runs/<run-id>/execution-instructions.md` for the Work Item.
+Concatenate the approved planning files in this order:
+
+1. `.factory/runs/<run-id>/brief.md`
+2. `.factory/runs/<run-id>/behaviors.diff.md`
+3. `.factory/runs/<run-id>/approach.md`
+4. `.factory/runs/<run-id>/plan.md`
+
+Keep each file's heading and content intact, and separate files with a
+blank line. This file is the exact path passed to
+`factory work create --instructions-file`; `factory work create` only
+reads the file and stores its text.
 
 Set status to `planned`.
 

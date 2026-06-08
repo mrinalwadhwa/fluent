@@ -64,16 +64,20 @@ write and review transitions, and `factory work merge <work-item-id>
 capabilities the Work path has not proven or does not yet expose.
 
 `factory work create <id> --title <title>` exposes the first Work Item
-intake surface. It writes a minimal Work Item with an empty `attempts`
-list and does not schedule work or mutate legacy run state. `factory work
-attempt <work-item-id> <attempt-id>` creates the first operational
-transition from intake: it appends a planned Attempt with one initial
-`write` Task. The Task declares role `author` and one writable workspace
-reference at `.factory/work/workspaces/<attempt-id>`. `factory work task
-run` creates or reuses that writable workspace as a git worktree, runs
-the coder there, and completes the Task only after the workspace is clean
-and contains a new commit produced after Factory bound the workspace for
-that Task run. The bridge rejects writable Task workspace paths outside
+intake surface. It writes a Work Item with an empty `attempts` list and
+does not schedule work or mutate legacy run state. Callers may pass rich
+execution context with `--instructions <text>` or
+`--instructions-file <path>`; Factory stores that context as optional
+`WorkItem.instructions`. `factory work attempt <work-item-id>
+<attempt-id>` creates the first operational transition from intake: it
+appends a planned Attempt with one initial `write` Task. The Task
+declares role `author`, copies the Work Item instructions into optional
+`Task.instructions`, and declares one writable workspace reference at
+`.factory/work/workspaces/<attempt-id>`. `factory work task run` creates
+or reuses that writable workspace as a git worktree, runs the coder
+there, and completes the Task only after the workspace is clean and
+contains a new commit produced after Factory bound the workspace for that
+Task run. The bridge rejects writable Task workspace paths outside
 `.factory/work/workspaces/` before it creates or binds a worktree.
 `factory work review <work-item-id> <attempt-id>` appends planned
 `review` Tasks for the default reviewer set after a completed write Task
@@ -98,8 +102,9 @@ Merge Candidate for later merge execution. The Merge Candidate records
 the source candidate workspace, target workspace, source branch, target
 branch, candidate commit, and its own pending review state. Any fail
 creates a planned follow-up write Task with the failed review artifacts
-as Task inputs. When no review artifact fails, uncertain or missing
-verdicts mark the Attempt `needs-user` with a handoff under
+as Task inputs and copies the Work Item instructions into that follow-up
+Task. When no review artifact fails, uncertain or missing verdicts mark
+the Attempt `needs-user` with a handoff under
 `.factory/work/artifacts/<attempt-id>/`.
 `factory work list` and `factory work show <id>` expose the same durable
 Work Item model for inspection. These commands use `.factory/work/items/`
@@ -112,6 +117,10 @@ rows. That boundary chooses the latest Attempt, the active or waiting
 Task, the matching Merge Candidate, and a short action label. It returns
 valid rows and per-file read errors together so one bad Work Item file
 does not hide the rest of the queue.
+Write Task prompt generation reads `Task.instructions` from durable Work
+state and includes non-empty instructions in the coder prompt. Extra
+arguments passed after `--` remain coder flags only; Factory does not
+append them as additional prompt text.
 `factory work merge-candidate <work-item-id> <merge-candidate-id>` prints
 one stored Merge Candidate as pretty JSON. This command only reads the
 boundary object. `factory work merge <work-item-id> <merge-candidate-id>`
@@ -149,6 +158,7 @@ the core model.
   "id": "attempt-1-write",
   "kind": "write",
   "role": "author",
+  "instructions": "Preserve coder flags as args.\nKeep prompt content in Work state.",
   "work_item_id": "work-1",
   "attempt_id": "attempt-1",
   "workspace_access": {
@@ -175,6 +185,10 @@ The `kind` field accepts only `write`, `review`, `merge`, `report`,
 workspaces. `workspace_access.writes` may be empty or contain one
 workspace. A `review` task must keep `writes` empty; reviewers write
 findings and notes under a required `artifact_area`.
+
+Write Tasks may include optional `instructions` copied from the
+containing Work Item. JSON omits `instructions` when the Task has no
+rich execution context.
 
 `status` tracks Task lifecycle state: `planned`, `executing`,
 `complete`, `failed`, or `needs-user`. Planned Tasks omit the field in
@@ -212,13 +226,14 @@ these concepts separate lets learning and planning land through the same
 reviewed workflow as code without treating transient session state as
 project knowledge.
 
-Durable Work model state lives under `.factory/work/`. This tree is
+Durable work model state lives under `.factory/work/`. This tree is
 separate from `.factory/runs`, which still stores legacy run execution
 state, session artifacts, reviewer state, worktree handles, and status
-files. Existing commands keep supporting `.factory/runs` without requiring
-`.factory/work/`; the coexistence is a compatibility bridge while agents
-start using Work Items, Attempts, Tasks, Workspaces, and Merge Candidates
-for new delegated build work.
+files. The Work bridge does not migrate run directories. Existing commands
+keep supporting `.factory/runs` without requiring `.factory/work/`; the
+coexistence is a compatibility bridge while agents start using Work Items,
+Attempts, Tasks, Workspaces, and Merge Candidates for new delegated build
+work.
 
 The first storage contract is:
 
@@ -232,17 +247,18 @@ Each file in `items/` stores one serialized `WorkItem` from
 `factory::work_model`. The `WorkItem` contains its Attempts, and each
 Attempt contains its Tasks. The `WorkItem` also contains Merge Candidates
 created from passed Attempt reviews. Tasks store their workspace access
-under `workspace_access.reads` and `workspace_access.writes`. Merge
-Candidates store the reviewed source candidate workspace and target
-workspace directly as boundary data derived from the passed Attempt's
-latest completed write Task. Factory does not keep a standalone
-workspace registry in this first contract. Merge Candidates use the
-public `MergeCandidate` shape, but queue work has not yet introduced a
-separate candidate collection.
+under `workspace_access.reads` and `workspace_access.writes`. Workspace
+references stay inside task `workspace_access.reads` and
+`workspace_access.writes`. Merge Candidates store the reviewed source
+candidate workspace and target workspace directly as boundary data
+derived from the passed Attempt's latest completed write Task. Factory
+does not keep a standalone workspace registry in this first contract.
+Merge Candidates use the public `MergeCandidate` shape, but queue work
+has not yet introduced a separate candidate collection.
 
 Code that reads `.factory/work/items/*.json` must parse into the public
-Rust model and validate the full `WorkItem`, including embedded Tasks
-and Merge Candidates, before using the object.
+Rust model and validate every embedded task and Merge Candidate before
+using the object.
 The merge executor is the only recovery reader in this contract: it may
 load a Work Item that fails merge-execution preconditions so it can mark
 the affected Merge Candidate failed, but it must validate the candidate

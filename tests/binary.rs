@@ -2031,7 +2031,11 @@ exit 0
 fn work_attempt_run_plans_followup_for_failed_reviews() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    create_completed_work_attempt(&tmp, &main_dir);
+    create_completed_work_attempt_with_instructions(
+        &tmp,
+        &main_dir,
+        Some("Keep durable instructions on every write Task."),
+    );
 
     let bin_dir = tmp.path().join("bin-loop-fail");
     write_mock_claude(&bin_dir, &stateful_loop_mock_script("fail"));
@@ -2077,6 +2081,10 @@ fn work_attempt_run_plans_followup_for_failed_reviews() {
     assert_eq!(
         followup["input_artifacts"][0]["path"],
         ".factory/work/artifacts/attempt-1/attempt-1-review-documentation/review.md"
+    );
+    assert_eq!(
+        followup["instructions"],
+        "Keep durable instructions on every write Task."
     );
 
     let candidate_workspace = main_dir.join(".factory/work/workspaces/attempt-1");
@@ -4735,6 +4743,14 @@ fn setup_git_project(tmp: &TempDir) -> std::path::PathBuf {
 }
 
 fn create_completed_work_attempt(tmp: &TempDir, main_dir: &Path) {
+    create_completed_work_attempt_with_instructions(tmp, main_dir, None);
+}
+
+fn create_completed_work_attempt_with_instructions(
+    tmp: &TempDir,
+    main_dir: &Path,
+    instructions: Option<&str>,
+) {
     let bin_dir = tmp.path().join("bin-write");
     write_mock_claude(
         &bin_dir,
@@ -4746,9 +4762,13 @@ exit 0
 "##,
     );
 
+    let mut create_args = vec!["work", "create", "work-1", "--title", "Run review"];
+    if let Some(instructions) = instructions {
+        create_args.extend(["--instructions", instructions]);
+    }
     factory_cmd()
         .current_dir(main_dir)
-        .args(["work", "create", "work-1", "--title", "Run review"])
+        .args(create_args)
         .assert()
         .success();
     factory_cmd()

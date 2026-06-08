@@ -146,20 +146,27 @@ steps. Determine if decomposition into child runs is needed. Write
 
 Once the plan is approved, prefer the Work model for delegated execution:
 
-1. Create or reuse a Work Item: `factory work create <work-item-id>
-   --title <title>`.
-2. Create an Attempt: `factory work attempt <work-item-id>
+1. Assemble `.factory/runs/<run-id>/execution-instructions.md` from the
+   approved planning files in this order: `brief.md`,
+   `behaviors.diff.md`, `approach.md`, then `plan.md`. Keep each file's
+   heading and content intact so the executing author sees the approved
+   context as one durable instruction document.
+2. Create a Work Item with those instructions:
+   `factory work create <work-item-id> --title <title>
+   --instructions-file <execution-instructions.md>`.
+3. Create an Attempt: `factory work attempt <work-item-id>
    <attempt-id>`.
-3. Run the Attempt: `factory work attempt <work-item-id> <attempt-id>
-   run`.
-4. Inspect status with `factory status` or `factory work show
+4. Run the Attempt: `factory work attempt run <work-item-id>
+   <attempt-id>`.
+5. Inspect status with `factory status` or `factory work show
    <work-item-id>`.
-5. When the Attempt creates a Merge Candidate, inspect it and land with
+6. When the Attempt creates a Merge Candidate, inspect it and land with
    `factory work merge <work-item-id> <merge-candidate-id>`.
 
 `factory work attempt run` advances the next safe transition by running
 planned write and review Tasks through the existing Task executor. It
-reloads stored Work Item state between transitions, creates follow-up
+reloads stored Work Item state between transitions, carries Work Item
+instructions into initial and follow-up write Tasks, creates follow-up
 write Tasks after failed reviews, and records `needs-user` when the
 review state cannot be resolved autonomously.
 
@@ -264,10 +271,12 @@ worktree.
 
 ```sh
 factory work create <id> --title <t> # create a stored Work Item
+factory work create <id> --title <t> --instructions <text> # store prompt text
+factory work create <id> --title <t> --instructions-file <path> # load prompt file
 factory work list                    # list stored Work Items
 factory work show <id>               # show one Work Item as JSON
 factory work attempt <id> <attempt>  # add an Attempt with a write Task
-factory work attempt <id> <attempt> run # advance an Attempt
+factory work attempt run <id> <attempt> # advance an Attempt
 factory work review <id> <attempt>   # plan review Tasks
 factory work task run <id> <attempt> <task> # run one Task
 factory work merge-candidate <id> <candidate> # show a Merge Candidate

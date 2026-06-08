@@ -198,14 +198,24 @@ Generate a work-id using the format `YYYYMMDD-HHMMSS-kebab-title`
 (e.g., `20260507-143022-cache-status`) and a matching legacy run-id
 using the timestamp prefix when fallback artifacts are needed.
 
-Prefer the Work model for new delegated build work:
+Prefer the Work model for new delegated build work, but do not create
+the Work Item immediately after writing only the brief. Work Item
+instructions are set at `factory work create` time, and write Tasks copy
+those stored instructions later. Defer Work Item creation until the
+approved brief, behaviors, approach, and plan can be passed as one
+combined instructions file. The `plan-execution` stage assembles that
+file after the user approves `plan.md`:
 
 ```sh
-factory work create <work-id> --title "<short title>"
+factory work create <work-id> --title "<short title>" \
+  --instructions-file .factory/runs/<run-id>/execution-instructions.md
 ```
 
-Until Work Items store rich planning text directly, write bridge planning
-artifacts only when the later skills need them:
+Store rich planning text in Work Item instructions with
+`--instructions <text>` or `--instructions-file <path>` so write Tasks
+receive the context through durable Work state. Write bridge planning
+artifacts when later skills need files to review, revise, combine into
+execution instructions, or pass to legacy fallback:
 
 ```
 .factory/runs/[run-id]/

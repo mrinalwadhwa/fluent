@@ -139,11 +139,22 @@ WHEN `factory work task run <work-item-id> <attempt-id> <task-id>` or
 THE SYSTEM SHALL include those instructions in the coder prompt.
 Test: tests/binary.rs (work_task_run_includes_task_instructions_in_coder_prompt)
 Test: tests/behaviors/operations/test-work-task-run.sh (run passes Task instructions to coder prompt)
+Test: tests/behaviors/operations/test-work-task-instructions.sh (task run uses durable instructions and keeps extra args out of prompt)
+Test: tests/behaviors/operations/test-work-task-instructions.sh (attempt run uses durable instructions and keeps extra args out of prompt)
 
-IF a caller passes extra args to a Work task run,
+IF a caller passes extra args to `factory work task run` or
+`factory work attempt run`,
 THE SYSTEM SHALL pass those args only as coder options and SHALL NOT
 treat them as additional task prompt content.
 Test: tests/binary.rs (work_task_run_keeps_extra_args_out_of_task_prompt)
+Test: tests/behaviors/operations/test-work-task-instructions.sh (task run uses durable instructions and keeps extra args out of prompt)
+Test: tests/behaviors/operations/test-work-task-instructions.sh (attempt run uses durable instructions and keeps extra args out of prompt)
+
+WHEN a Work Item has no explicit instructions,
+THE SYSTEM SHALL preserve the minimal write Task prompt and SHALL NOT
+include a `Task instructions:` section.
+Test: tests/binary.rs (work_task_run_passes_task_context_to_coder_prompt)
+Test: tests/behaviors/operations/test-work-task-instructions.sh (minimal Work Item keeps minimal prompt)
 
 WHEN a write Task coder exits successfully,
 THE SYSTEM SHALL complete the Task only if the writable workspace is
@@ -316,7 +327,8 @@ WHEN any completed review artifact has a failing verdict,
 THE SYSTEM SHALL mark the Attempt review state as `failed` and create a
 planned follow-up write Task with deterministic id
 `<attempt-id>-followup-<n>`, the candidate workspace as writable access,
-and the failed review artifacts as Task inputs.
+the Work Item instructions copied into the Task instructions, and the
+failed review artifacts as Task inputs.
 Test: tests/binary.rs (work_attempt_run_plans_followup_for_failed_reviews)
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop plans follow-up write)
 

@@ -31,16 +31,16 @@ Read:
 - `behaviors.diff.md` from the active planning context — what the system
   must do
 - `documentation/architecture.md` — how the system is built today
-- `expertise/INDEX.md` — available expertise files and when to load
+- `references/INDEX.md` — available expertise files and when to load
   them
-- `expertise/architecture.md` — architectural principles for
+- `references/architecture.md` — architectural principles for
   evaluating structural decisions
 - Open questions deferred from define-behaviors
 
 Understand the gap between the current architecture and what the new
 behaviors require.
 
-Use `expertise/INDEX.md` to decide which expertise files are relevant
+Use `references/INDEX.md` to decide which expertise files are relevant
 to this run. Load the ones that apply before evaluating options. Track
 which files informed the approach so the executing agent can load the
 same context without rediscovering it.
@@ -175,8 +175,8 @@ Brief: [one-line summary]
 
 ## Expertise
 
-- `[expertise/file.md]` — [why this expertise applies]
-- `[expertise/architecture.md]` — [why architectural principles apply]
+- `[references/file.md]` — [why this expertise applies]
+- `[references/architecture.md]` — [why architectural principles apply]
 
 ## Key decisions
 
