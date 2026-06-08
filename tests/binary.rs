@@ -1021,7 +1021,7 @@ fn work_attempt_run_drives_write_reviews_and_passes() {
             "Planned 5 review Tasks for Attempt attempt-1",
         ))
         .stdout(predicate::str::contains(
-            "Attempt attempt-1 reviews passed; Merge Candidate creation is not implemented yet",
+            "Attempt attempt-1 reviews passed; Merge Candidate attempt-1-merge-candidate is ready",
         ));
 
     let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
@@ -1030,11 +1030,65 @@ fn work_attempt_run_drives_write_reviews_and_passes() {
     assert_eq!(attempt["status"], "complete");
     assert_eq!(attempt["review_state"], "passed");
     assert_eq!(attempt["tasks"].as_array().unwrap().len(), 6);
+    assert_eq!(value["merge_candidates"].as_array().unwrap().len(), 1);
+    let candidate = &value["merge_candidates"][0];
+    assert_eq!(candidate["id"], "attempt-1-merge-candidate");
+    assert_eq!(candidate["attempt_id"], "attempt-1");
+    assert_eq!(candidate["source_workspace"]["id"], "candidate");
+    assert_eq!(
+        candidate["source_workspace"]["path"],
+        ".factory/work/workspaces/attempt-1"
+    );
+    assert_eq!(candidate["target_workspace"]["id"], "target");
+    assert_eq!(candidate["target_workspace"]["path"], ".");
+    assert_eq!(candidate["source_branch"], "main");
+    assert_eq!(candidate["target_branch"], "main");
+    assert_eq!(candidate["review_state"], "pending");
     assert!(
         main_dir
             .join(".factory/work/artifacts/attempt-1/attempt-1-review-tests/review.md")
             .exists()
     );
+
+    let inspection = factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "merge-candidate",
+            "work-1",
+            "attempt-1-merge-candidate",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        inspection.status.success(),
+        "merge candidate inspection failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&inspection.stdout),
+        String::from_utf8_lossy(&inspection.stderr)
+    );
+    let inspected: serde_json::Value = serde_json::from_slice(&inspection.stdout).unwrap();
+    assert_eq!(inspected, *candidate);
+
+    let before = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Merge Candidate attempt-1-merge-candidate is ready",
+        ));
+    let after = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    assert_eq!(after, before);
 }
 
 #[test]
@@ -2903,6 +2957,34 @@ fn work_show_rejects_invalid_work_item_id() {
         .stderr(predicate::str::contains(
             "work item id \"../escape\" cannot be used as a file name",
         ));
+}
+
+#[test]
+fn work_merge_candidate_missing_item_or_candidate_reports_error() {
+    let tmp = TempDir::new().unwrap();
+    write_work_item_json(tmp.path(), "work-1", "Inspect candidate");
+    let before = fs::read_to_string(tmp.path().join(".factory/work/items/work-1.json")).unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "merge-candidate", "missing-work", "candidate-1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Work Item \"missing-work\" not found",
+        ));
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "merge-candidate", "work-1", "candidate-1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Merge Candidate \"candidate-1\" not found in Work Item \"work-1\"",
+        ));
+
+    let after = fs::read_to_string(tmp.path().join(".factory/work/items/work-1.json")).unwrap();
+    assert_eq!(after, before);
 }
 
 #[test]

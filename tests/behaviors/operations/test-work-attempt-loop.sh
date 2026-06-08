@@ -129,12 +129,69 @@ test_attempt_loop_passes_review_round() {
   setup_test_project
   trap cleanup_test_project RETURN
   write_mock_claude pass
+  MAIN_BEFORE="$(git rev-parse main)"
 
   run_attempt_loop > "$TEST_DIR/stdout"
 
-  grep -q 'Attempt attempt-1 reviews passed' "$TEST_DIR/stdout" || return 1
+  grep -q 'Merge Candidate attempt-1-merge-candidate is ready' "$TEST_DIR/stdout" || return 1
   [ "$(json_value '.attempts[0].status')" = "complete" ] || return 1
   [ "$(json_value '.attempts[0].review_state')" = "passed" ] || return 1
+  [ "$(json_value '.merge_candidates | length')" = "1" ] || return 1
+  [ "$(json_value '.merge_candidates[0].id')" = "attempt-1-merge-candidate" ] || return 1
+  [ "$(json_value '.merge_candidates[0].source_workspace.path')" = ".factory/work/workspaces/attempt-1" ] || return 1
+  [ "$(json_value '.merge_candidates[0].target_workspace.id')" = "target" ] || return 1
+  [ "$(json_value '.merge_candidates[0].target_workspace.path')" = "." ] || return 1
+  [ "$(json_value '.merge_candidates[0].source_branch')" = "main" ] || return 1
+  [ "$(json_value '.merge_candidates[0].target_branch')" = "main" ] || return 1
+  [ "$(json_value '.merge_candidates[0].review_state')" = "pending" ] || return 1
+  [ "$(json_value '.merge_candidates[0].candidate_commit')" = "$(git -C .factory/work/workspaces/attempt-1 rev-parse HEAD)" ] || return 1
+  "$FACTORY_BIN" work merge-candidate work-1 attempt-1-merge-candidate > "$TEST_DIR/candidate"
+  [ "$(jq -r '.candidate_commit' "$TEST_DIR/candidate")" = "$(json_value '.merge_candidates[0].candidate_commit')" ] || return 1
+  [ "$(jq -r '.target_workspace.path' "$TEST_DIR/candidate")" = "." ] || return 1
+  [ "$(jq -r '.source_branch' "$TEST_DIR/candidate")" = "main" ] || return 1
+  [ "$(jq -r '.target_branch' "$TEST_DIR/candidate")" = "main" ] || return 1
+  [ "$(git rev-parse main)" = "$MAIN_BEFORE" ] || return 1
+}
+
+test_work_show_includes_merge_candidate() {
+  setup_test_project
+  trap cleanup_test_project RETURN
+  write_mock_claude pass
+
+  run_attempt_loop > "$TEST_DIR/stdout"
+  "$FACTORY_BIN" work show work-1 > "$TEST_DIR/show"
+
+  [ "$(jq -r '.merge_candidates | length' "$TEST_DIR/show")" = "1" ] || return 1
+  [ "$(jq -r '.merge_candidates[0].id' "$TEST_DIR/show")" = "attempt-1-merge-candidate" ] || return 1
+  [ "$(jq -r '.merge_candidates[0].candidate_commit' "$TEST_DIR/show")" = "$(json_value '.merge_candidates[0].candidate_commit')" ] || return 1
+}
+
+test_work_merge_candidate_prints_pretty_json() {
+  setup_test_project
+  trap cleanup_test_project RETURN
+  write_mock_claude pass
+
+  run_attempt_loop > "$TEST_DIR/stdout"
+  "$FACTORY_BIN" work merge-candidate work-1 attempt-1-merge-candidate > "$TEST_DIR/candidate"
+
+  jq -e '.id == "attempt-1-merge-candidate"' "$TEST_DIR/candidate" > /dev/null || return 1
+  grep -q '^{' "$TEST_DIR/candidate" || return 1
+  grep -q '^  "id": "attempt-1-merge-candidate"' "$TEST_DIR/candidate" || return 1
+}
+
+test_work_merge_candidate_missing_requests_leave_state_unchanged() {
+  setup_test_project
+  trap cleanup_test_project RETURN
+  write_mock_claude pass
+
+  run_attempt_loop > "$TEST_DIR/stdout"
+  BEFORE="$(cat .factory/work/items/work-1.json)"
+
+  RESULT=0
+  assert_fails "$FACTORY_BIN" work merge-candidate missing-work attempt-1-merge-candidate || RESULT=1
+  assert_fails "$FACTORY_BIN" work merge-candidate work-1 missing-candidate || RESULT=1
+  [ "$(cat .factory/work/items/work-1.json)" = "$BEFORE" ] || RESULT=1
+  return $RESULT
 }
 
 test_attempt_loop_runs_planned_review_tasks() {
@@ -151,6 +208,7 @@ test_attempt_loop_runs_planned_review_tasks() {
   assert_contains "$(cat "$TEST_DIR/stdout")" "Completed Task attempt-1-review-tests" || RESULT=1
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review" and .status == "complete")] | length')" = "5" ] || RESULT=1
   [ "$(json_value '.attempts[0].review_state')" = "passed" ] || RESULT=1
+  [ "$(json_value '.merge_candidates[0].id')" = "attempt-1-merge-candidate" ] || RESULT=1
   return $RESULT
 }
 
@@ -253,13 +311,16 @@ test_attempt_loop_invalid_or_terminal_request_leaves_state_unchanged() {
 
   run_attempt_loop > "$TEST_DIR/stdout" || RESULT=1
   TERMINAL="$(cat .factory/work/items/work-1.json)"
-  assert_fails run_attempt_loop || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/stderr")" "Attempt reviews passed" || RESULT=1
+  run_attempt_loop > "$TEST_DIR/rerun-stdout" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/rerun-stdout")" "Merge Candidate attempt-1-merge-candidate is ready" || RESULT=1
   [ "$(cat .factory/work/items/work-1.json)" = "$TERMINAL" ] || RESULT=1
   return $RESULT
 }
 
 run_test "attempt loop passes review round" test_attempt_loop_passes_review_round
+run_test "work show includes Merge Candidate" test_work_show_includes_merge_candidate
+run_test "work merge-candidate prints pretty JSON" test_work_merge_candidate_prints_pretty_json
+run_test "work merge-candidate missing requests leave state unchanged" test_work_merge_candidate_missing_requests_leave_state_unchanged
 run_test "attempt loop runs planned review Tasks" test_attempt_loop_runs_planned_review_tasks
 run_test "attempt loop plans follow-up write" test_attempt_loop_plans_followup
 run_test "attempt loop plans follow-up with mixed missing review" test_attempt_loop_plans_followup_with_mixed_failed_and_missing_reviews

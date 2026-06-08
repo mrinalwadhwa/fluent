@@ -92,16 +92,23 @@ reloads stored state before deciding the next transition. After write
 output completes it plans review Tasks with the existing review policy.
 After a completed review round it interprets review artifacts with the
 review subsystem verdict parser. All pass marks the Attempt review state
-as passed and stops before Merge Candidate creation. Any fail creates a
-planned follow-up write Task with the failed review artifacts as Task
-inputs. When no review artifact fails, uncertain or missing verdicts
-mark the Attempt `needs-user` with a handoff under
+as passed, completes the Attempt, and creates or returns one durable
+Merge Candidate for later merge execution. The Merge Candidate records
+the source candidate workspace, target workspace, source branch, target
+branch, candidate commit, and its own pending review state. Any fail
+creates a planned follow-up write Task with the failed review artifacts
+as Task inputs. When no review artifact fails, uncertain or missing
+verdicts mark the Attempt `needs-user` with a handoff under
 `.factory/work/artifacts/<attempt-id>/`.
 `factory work list` and `factory work show <id>` expose the same durable
 Work Item model for inspection. These commands use `.factory/work/items/`
 through the Rust storage model and validate stored objects. This keeps
 Work Items and Attempts visible while the legacy
 `.factory/runs` lifecycle continues to execute full sessions.
+`factory work merge-candidate <work-item-id> <merge-candidate-id>` prints
+one stored Merge Candidate as pretty JSON. This command only reads the
+boundary object; merge execution, rebase, pre-land checks, merge-time
+reviews, landing, reporting, and cleanup remain future queue work.
 
 | Concept | Meaning |
 |---|---|
@@ -201,11 +208,15 @@ The first storage contract is:
 
 Each file in `items/` stores one serialized `WorkItem` from
 `factory::work_model`. The `WorkItem` contains its Attempts, and each
-Attempt contains its Tasks. Workspace references stay inside task
-`workspace_access.reads` and `workspace_access.writes`; Factory does not
-keep a standalone workspace registry in this first contract. Merge
-Candidates use the public `MergeCandidate` shape, but queue work has not
-yet introduced a separate candidate collection.
+Attempt contains its Tasks. The `WorkItem` also contains Merge Candidates
+created from passed Attempt reviews. Tasks store their workspace access
+under `workspace_access.reads` and `workspace_access.writes`. Merge
+Candidates store the reviewed source candidate workspace and target
+workspace directly as boundary data derived from the passed Attempt's
+latest completed write Task. Factory does not keep a standalone
+workspace registry in this first contract. Merge Candidates use the
+public `MergeCandidate` shape, but queue work has not yet introduced a
+separate candidate collection.
 
 Code that reads `.factory/work/items/*.json` must parse into the public
 Rust model and validate every embedded task before using the object.

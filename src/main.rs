@@ -226,6 +226,7 @@ fn cmd_work(
                 id,
                 title,
                 attempts: Vec::new(),
+                merge_candidates: Vec::new(),
             };
             store.create_work_item(&item)?;
             println!("Created Work Item {}", item.id);
@@ -289,9 +290,9 @@ fn cmd_work(
                                 println!("{task_id}");
                             }
                         }
-                        WorkAttemptRunOutcome::ReviewsPassed => {
+                        WorkAttemptRunOutcome::MergeCandidateReady { candidate_id } => {
                             println!(
-                                "Attempt {attempt_id} reviews passed; Merge Candidate creation is not implemented yet"
+                                "Attempt {attempt_id} reviews passed; Merge Candidate {candidate_id} is ready"
                             );
                         }
                         WorkAttemptRunOutcome::PlannedFollowup { task_id } => {
@@ -345,6 +346,29 @@ fn cmd_work(
                 println!("{task_id}");
             }
         }
+        WorkCommands::MergeCandidate {
+            work_item_id,
+            merge_candidate_id,
+        } => match store.read_work_item(&work_item_id) {
+            Ok(item) => {
+                let Some(candidate) = item
+                    .merge_candidates
+                    .iter()
+                    .find(|candidate| candidate.id == merge_candidate_id)
+                else {
+                    bail!(
+                        "Merge Candidate {merge_candidate_id:?} not found in Work Item {work_item_id:?}"
+                    );
+                };
+                print!("{}", to_json_pretty(candidate)?);
+            }
+            Err(WorkModelStorageError::ReadFile { source, .. })
+                if source.kind() == ErrorKind::NotFound =>
+            {
+                bail!("Work Item {work_item_id:?} not found");
+            }
+            Err(error) => return Err(error.into()),
+        },
         WorkCommands::Task { command } => match command {
             WorkTaskCommands::Run {
                 work_item_id,

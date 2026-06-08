@@ -193,9 +193,37 @@ Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop runs pl
 WHEN all review Tasks for an Attempt review round complete and all
 review artifacts have passing verdicts,
 THE SYSTEM SHALL mark the Attempt review state as `passed`, leave the
-Attempt `complete`, and stop before creating a Merge Candidate.
+Attempt `complete`, create one durable Merge Candidate, and report the
+Merge Candidate id.
 Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop passes review round)
+
+WHEN a Merge Candidate is created from a passed Attempt,
+THE SYSTEM SHALL record the source candidate workspace, target workspace,
+source branch, target branch, and candidate commit from the latest
+completed write Task, and set the Merge Candidate review state to
+pending.
+Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
+Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop passes review round)
+
+IF `factory work attempt run <work-item-id> <attempt-id>` is invoked for
+an Attempt whose reviews already passed and whose Merge Candidate already
+exists,
+THEN THE SYSTEM SHALL leave Work Item state unchanged and report the
+existing Merge Candidate.
+Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
+Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop invalid or terminal request leaves state unchanged)
+
+WHEN `factory work merge-candidate <work-item-id> <merge-candidate-id>`
+is invoked,
+THE SYSTEM SHALL print the stored Merge Candidate as pretty JSON.
+Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
+Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop passes review round)
+
+IF `factory work merge-candidate <work-item-id> <merge-candidate-id>` is
+invoked for a missing Work Item or missing Merge Candidate,
+THEN THE SYSTEM SHALL exit non-zero and leave Work Item state unchanged.
+Test: tests/binary.rs (work_merge_candidate_missing_item_or_candidate_reports_error)
 
 WHEN any completed review artifact has a failing verdict,
 THE SYSTEM SHALL mark the Attempt review state as `failed` and create a

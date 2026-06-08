@@ -17,6 +17,8 @@ pub struct WorkItem {
     pub title: String,
     #[serde(default)]
     pub attempts: Vec<Attempt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merge_candidates: Vec<MergeCandidate>,
 }
 
 impl WorkItem {
@@ -235,6 +237,84 @@ impl WorkItem {
         Ok(task_id)
     }
 
+    pub fn create_or_get_merge_candidate(
+        &mut self,
+        attempt_id: &str,
+    ) -> Result<String, WorkModelError> {
+        let candidate_id = format!("{attempt_id}-merge-candidate");
+        validate_id("merge candidate", &candidate_id)?;
+        if self
+            .merge_candidates
+            .iter()
+            .any(|candidate| candidate.id == candidate_id && candidate.attempt_id == attempt_id)
+        {
+            self.validate()?;
+            return Ok(candidate_id);
+        }
+
+        let Some(attempt) = self
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+        else {
+            return Err(WorkModelError::AttemptNotFound {
+                id: attempt_id.to_string(),
+            });
+        };
+        if attempt.status != AttemptStatus::Complete
+            || attempt.review_state != Some(AttemptReviewState::Passed)
+        {
+            return Err(WorkModelError::AttemptReviewsNotPassed {
+                attempt_id: attempt_id.to_string(),
+            });
+        }
+        let Some((write_task, write_output)) = attempt
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+            .and_then(|task| task.output.as_ref().map(|output| (task, output)))
+        else {
+            return Err(WorkModelError::AttemptMissingCompletedWriteTask {
+                attempt_id: attempt_id.to_string(),
+            });
+        };
+        let target_workspace = write_task
+            .workspace_access
+            .reads
+            .first()
+            .cloned()
+            .unwrap_or_else(|| WorkspaceRef {
+                id: "target".to_string(),
+                path: ".".to_string(),
+            });
+
+        if self
+            .merge_candidates
+            .iter()
+            .any(|candidate| candidate.id == candidate_id)
+        {
+            return Err(WorkModelError::MergeCandidateAlreadyExists { id: candidate_id });
+        }
+
+        self.merge_candidates.push(MergeCandidate {
+            id: candidate_id.clone(),
+            attempt_id: attempt_id.to_string(),
+            source_workspace: WorkspaceRef {
+                id: write_output.workspace_id.clone(),
+                path: write_output.workspace_path.clone(),
+            },
+            target_workspace,
+            source_branch: write_output.source_branch.clone(),
+            target_branch: write_output.source_branch.clone(),
+            candidate_commit: write_output.commit.clone(),
+            review_state: MergeCandidateReviewState::Pending,
+        });
+
+        self.validate()?;
+        Ok(candidate_id)
+    }
+
     pub fn validate(&self) -> Result<(), WorkModelError> {
         for attempt in &self.attempts {
             if attempt.work_item_id != self.id {
@@ -245,6 +325,9 @@ impl WorkItem {
                 });
             }
             attempt.validate(&self.id)?;
+        }
+        for candidate in &self.merge_candidates {
+            candidate.validate(self)?;
         }
         Ok(())
     }
@@ -541,7 +624,109 @@ pub struct MergeCandidate {
     pub attempt_id: String,
     pub source_workspace: WorkspaceRef,
     pub target_workspace: WorkspaceRef,
+    pub source_branch: String,
+    pub target_branch: String,
+    pub candidate_commit: String,
     pub review_state: MergeCandidateReviewState,
+}
+
+impl MergeCandidate {
+    pub fn validate(&self, work_item: &WorkItem) -> Result<(), WorkModelError> {
+        validate_id("merge candidate", &self.id)?;
+        let Some(attempt) = work_item
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == self.attempt_id)
+        else {
+            return Err(WorkModelError::MergeCandidateAttemptNotFound {
+                candidate_id: self.id.clone(),
+                attempt_id: self.attempt_id.clone(),
+            });
+        };
+        if work_item
+            .merge_candidates
+            .iter()
+            .filter(|candidate| candidate.id == self.id)
+            .count()
+            > 1
+        {
+            return Err(WorkModelError::MergeCandidateAlreadyExists {
+                id: self.id.clone(),
+            });
+        }
+        if attempt.status != AttemptStatus::Complete
+            || attempt.review_state != Some(AttemptReviewState::Passed)
+        {
+            return Err(WorkModelError::MergeCandidateAttemptReviewsNotPassed {
+                candidate_id: self.id.clone(),
+                attempt_id: self.attempt_id.clone(),
+            });
+        }
+        let Some((write_task, write_output)) = attempt
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+            .and_then(|task| task.output.as_ref().map(|output| (task, output)))
+        else {
+            return Err(WorkModelError::MergeCandidateMissingCompletedWriteTask {
+                candidate_id: self.id.clone(),
+                attempt_id: self.attempt_id.clone(),
+            });
+        };
+        let expected_target_workspace = write_task
+            .workspace_access
+            .reads
+            .first()
+            .cloned()
+            .unwrap_or_else(|| WorkspaceRef {
+                id: "target".to_string(),
+                path: ".".to_string(),
+            });
+        if self.source_workspace.id != write_output.workspace_id {
+            return Err(WorkModelError::MergeCandidateProvenanceMismatch {
+                candidate_id: self.id.clone(),
+                field: "source_workspace.id",
+            });
+        }
+        if self.source_workspace.path != write_output.workspace_path {
+            return Err(WorkModelError::MergeCandidateProvenanceMismatch {
+                candidate_id: self.id.clone(),
+                field: "source_workspace.path",
+            });
+        }
+        if self.target_workspace.id != expected_target_workspace.id {
+            return Err(WorkModelError::MergeCandidateProvenanceMismatch {
+                candidate_id: self.id.clone(),
+                field: "target_workspace.id",
+            });
+        }
+        if self.target_workspace.path != expected_target_workspace.path {
+            return Err(WorkModelError::MergeCandidateProvenanceMismatch {
+                candidate_id: self.id.clone(),
+                field: "target_workspace.path",
+            });
+        }
+        if self.source_branch != write_output.source_branch {
+            return Err(WorkModelError::MergeCandidateProvenanceMismatch {
+                candidate_id: self.id.clone(),
+                field: "source_branch",
+            });
+        }
+        if self.target_branch != write_output.source_branch {
+            return Err(WorkModelError::MergeCandidateProvenanceMismatch {
+                candidate_id: self.id.clone(),
+                field: "target_branch",
+            });
+        }
+        if self.candidate_commit != write_output.commit {
+            return Err(WorkModelError::MergeCandidateProvenanceMismatch {
+                candidate_id: self.id.clone(),
+                field: "candidate_commit",
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Review state attached to a merge candidate, not to the attempt.
@@ -569,8 +754,30 @@ pub enum WorkModelError {
     AttemptMissingCompletedWriteTask {
         attempt_id: String,
     },
+    AttemptReviewsNotPassed {
+        attempt_id: String,
+    },
     TaskAlreadyExists {
         id: String,
+    },
+    MergeCandidateAlreadyExists {
+        id: String,
+    },
+    MergeCandidateAttemptNotFound {
+        candidate_id: String,
+        attempt_id: String,
+    },
+    MergeCandidateAttemptReviewsNotPassed {
+        candidate_id: String,
+        attempt_id: String,
+    },
+    MergeCandidateMissingCompletedWriteTask {
+        candidate_id: String,
+        attempt_id: String,
+    },
+    MergeCandidateProvenanceMismatch {
+        candidate_id: String,
+        field: &'static str,
     },
     MultipleWriteWorkspaces {
         count: usize,
@@ -637,8 +844,53 @@ impl fmt::Display for WorkModelError {
                     "Attempt {attempt_id:?} needs a completed write Task before review Tasks can be planned"
                 )
             }
+            Self::AttemptReviewsNotPassed { attempt_id } => {
+                write!(
+                    f,
+                    "Attempt {attempt_id:?} must have passed reviews before creating a Merge Candidate"
+                )
+            }
             Self::TaskAlreadyExists { id } => {
                 write!(f, "Task {id:?} already exists")
+            }
+            Self::MergeCandidateAlreadyExists { id } => {
+                write!(f, "Merge Candidate {id:?} already exists")
+            }
+            Self::MergeCandidateAttemptNotFound {
+                candidate_id,
+                attempt_id,
+            } => {
+                write!(
+                    f,
+                    "Merge Candidate {candidate_id:?} references missing Attempt {attempt_id:?}"
+                )
+            }
+            Self::MergeCandidateAttemptReviewsNotPassed {
+                candidate_id,
+                attempt_id,
+            } => {
+                write!(
+                    f,
+                    "Merge Candidate {candidate_id:?} references Attempt {attempt_id:?} before reviews passed"
+                )
+            }
+            Self::MergeCandidateMissingCompletedWriteTask {
+                candidate_id,
+                attempt_id,
+            } => {
+                write!(
+                    f,
+                    "Merge Candidate {candidate_id:?} references Attempt {attempt_id:?} without a completed write Task"
+                )
+            }
+            Self::MergeCandidateProvenanceMismatch {
+                candidate_id,
+                field,
+            } => {
+                write!(
+                    f,
+                    "Merge Candidate {candidate_id:?} {field} does not match the latest completed write Task"
+                )
             }
             Self::MultipleWriteWorkspaces { count } => {
                 write!(f, "task writes {count} workspaces; at most one is allowed")
@@ -1188,6 +1440,7 @@ mod tests {
                 review_state: Some(AttemptReviewState::Failed),
                 artifacts: Vec::new(),
             }],
+            merge_candidates: Vec::new(),
         };
 
         work_item
@@ -1229,6 +1482,7 @@ mod tests {
                     path: ".factory/tasks/task-1/report.md".to_string(),
                 }],
             }],
+            merge_candidates: Vec::new(),
         };
 
         let json = to_json_pretty(&work_item).unwrap();
@@ -1238,6 +1492,157 @@ mod tests {
         assert_eq!(
             decoded.attempts[0].artifacts[0].path,
             ".factory/tasks/task-1/report.md"
+        );
+    }
+
+    #[test]
+    fn merge_candidate_uses_latest_completed_write_output() {
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Create merge candidate".to_string(),
+            attempts: vec![Attempt {
+                id: "attempt-1".to_string(),
+                work_item_id: "work-1".to_string(),
+                status: AttemptStatus::Complete,
+                tasks: vec![
+                    completed_write_task("attempt-1-write", "original"),
+                    completed_write_task("attempt-1-followup-1", "followup"),
+                ],
+                review_state: Some(AttemptReviewState::Passed),
+                artifacts: Vec::new(),
+            }],
+            merge_candidates: Vec::new(),
+        };
+
+        let candidate_id = work_item
+            .create_or_get_merge_candidate("attempt-1")
+            .unwrap();
+
+        assert_eq!(candidate_id, "attempt-1-merge-candidate");
+        assert_eq!(work_item.merge_candidates.len(), 1);
+        let candidate = &work_item.merge_candidates[0];
+        assert_eq!(candidate.attempt_id, "attempt-1");
+        assert_eq!(candidate.source_workspace.id, "candidate");
+        assert_eq!(
+            candidate.source_workspace.path,
+            ".factory/work/workspaces/attempt-1-followup"
+        );
+        assert_eq!(candidate.target_workspace.id, "target");
+        assert_eq!(candidate.target_workspace.path, ".");
+        assert_eq!(candidate.source_branch, "main");
+        assert_eq!(candidate.target_branch, "main");
+        assert_eq!(candidate.candidate_commit, "commit-followup");
+        assert_eq!(candidate.review_state, MergeCandidateReviewState::Pending);
+        work_item.validate().unwrap();
+    }
+
+    #[test]
+    fn merge_candidate_creation_is_idempotent() {
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Create merge candidate once".to_string(),
+            attempts: vec![Attempt {
+                id: "attempt-1".to_string(),
+                work_item_id: "work-1".to_string(),
+                status: AttemptStatus::Complete,
+                tasks: vec![completed_write_task("attempt-1-write", "original")],
+                review_state: Some(AttemptReviewState::Passed),
+                artifacts: Vec::new(),
+            }],
+            merge_candidates: Vec::new(),
+        };
+
+        let first = work_item
+            .create_or_get_merge_candidate("attempt-1")
+            .unwrap();
+        let second = work_item
+            .create_or_get_merge_candidate("attempt-1")
+            .unwrap();
+
+        assert_eq!(first, "attempt-1-merge-candidate");
+        assert_eq!(second, first);
+        assert_eq!(work_item.merge_candidates.len(), 1);
+    }
+
+    #[test]
+    fn merge_candidate_validation_requires_passed_attempt() {
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Validate merge candidate attempt state".to_string(),
+            attempts: vec![Attempt {
+                id: "attempt-1".to_string(),
+                work_item_id: "work-1".to_string(),
+                status: AttemptStatus::Reviewing,
+                tasks: vec![completed_write_task("attempt-1-write", "original")],
+                review_state: Some(AttemptReviewState::Uncertain),
+                artifacts: Vec::new(),
+            }],
+            merge_candidates: Vec::new(),
+        };
+        work_item.merge_candidates.push(MergeCandidate {
+            id: "attempt-1-merge-candidate".to_string(),
+            attempt_id: "attempt-1".to_string(),
+            source_workspace: WorkspaceRef {
+                id: "candidate".to_string(),
+                path: ".factory/work/workspaces/attempt-1-original".to_string(),
+            },
+            target_workspace: WorkspaceRef {
+                id: "target".to_string(),
+                path: ".".to_string(),
+            },
+            source_branch: "main".to_string(),
+            target_branch: "main".to_string(),
+            candidate_commit: "commit-original".to_string(),
+            review_state: MergeCandidateReviewState::Pending,
+        });
+
+        assert_eq!(
+            work_item.validate().unwrap_err(),
+            WorkModelError::MergeCandidateAttemptReviewsNotPassed {
+                candidate_id: "attempt-1-merge-candidate".to_string(),
+                attempt_id: "attempt-1".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn merge_candidate_validation_requires_latest_write_output() {
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Validate merge candidate provenance".to_string(),
+            attempts: vec![Attempt {
+                id: "attempt-1".to_string(),
+                work_item_id: "work-1".to_string(),
+                status: AttemptStatus::Complete,
+                tasks: vec![completed_write_task("attempt-1-write", "original")],
+                review_state: Some(AttemptReviewState::Passed),
+                artifacts: Vec::new(),
+            }],
+            merge_candidates: Vec::new(),
+        };
+        work_item.merge_candidates.push(MergeCandidate {
+            id: "attempt-1-merge-candidate".to_string(),
+            attempt_id: "attempt-1".to_string(),
+            source_workspace: WorkspaceRef {
+                id: "candidate".to_string(),
+                path: ".factory/work/workspaces/attempt-1-original".to_string(),
+            },
+            target_workspace: WorkspaceRef {
+                id: "target".to_string(),
+                path: ".".to_string(),
+            },
+            source_branch: "main".to_string(),
+            target_branch: "main".to_string(),
+            candidate_commit: "stale-commit".to_string(),
+            review_state: MergeCandidateReviewState::Pending,
+        });
+
+        assert_eq!(
+            work_item.validate().unwrap_err(),
+            WorkModelError::MergeCandidateProvenanceMismatch {
+                candidate_id: "attempt-1-merge-candidate".to_string(),
+                field: "candidate_commit",
+            }
         );
     }
 
@@ -1256,6 +1661,9 @@ mod tests {
             attempt_id: attempt.id.clone(),
             source_workspace: workspace("candidate"),
             target_workspace: workspace("main"),
+            source_branch: "main".to_string(),
+            target_branch: "main".to_string(),
+            candidate_commit: "abc123".to_string(),
             review_state: MergeCandidateReviewState::Passed,
         };
 

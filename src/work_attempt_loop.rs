@@ -27,7 +27,7 @@ pub struct WorkAttemptRunConfig<'a> {
 pub enum WorkAttemptRunOutcome {
     RanTask { task_id: String, output: String },
     PlannedReviews { task_ids: Vec<String> },
-    ReviewsPassed,
+    MergeCandidateReady { candidate_id: String },
     PlannedFollowup { task_id: String },
     NeedsUser { handoff_path: String },
 }
@@ -47,7 +47,17 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             .find(|attempt| attempt.id == config.attempt_id)
             .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", config.attempt_id))?;
 
-        reject_terminal_attempt(attempt.status.clone(), attempt.review_state.clone())?;
+        reject_terminal_attempt(attempt.status.clone())?;
+
+        if attempt.status == AttemptStatus::Complete
+            && attempt.review_state == Some(AttemptReviewState::Passed)
+        {
+            let mut item = item;
+            let candidate_id = item.create_or_get_merge_candidate(config.attempt_id)?;
+            config.store.write_work_item(&item)?;
+            outcomes.push(WorkAttemptRunOutcome::MergeCandidateReady { candidate_id });
+            return Ok(WorkAttemptRunResult { outcomes });
+        }
 
         if let Some(task) = attempt
             .tasks
@@ -116,7 +126,7 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                 interpret_reviews(config.project_root, config.store, item, config.attempt_id)?;
             let should_stop = matches!(
                 outcome,
-                WorkAttemptRunOutcome::ReviewsPassed
+                WorkAttemptRunOutcome::MergeCandidateReady { .. }
                     | WorkAttemptRunOutcome::PlannedFollowup { .. }
                     | WorkAttemptRunOutcome::NeedsUser { .. }
             );
@@ -134,16 +144,10 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
     }
 }
 
-fn reject_terminal_attempt(
-    status: AttemptStatus,
-    review_state: Option<AttemptReviewState>,
-) -> Result<()> {
-    match (status, review_state) {
-        (AttemptStatus::Failed, _) => bail!("Attempt is failed and cannot be advanced"),
-        (AttemptStatus::NeedsUser, _) => bail!("Attempt needs user input before it can advance"),
-        (AttemptStatus::Complete, Some(AttemptReviewState::Passed)) => {
-            bail!("Attempt reviews passed; Merge Candidate creation is not implemented yet")
-        }
+fn reject_terminal_attempt(status: AttemptStatus) -> Result<()> {
+    match status {
+        AttemptStatus::Failed => bail!("Attempt is failed and cannot be advanced"),
+        AttemptStatus::NeedsUser => bail!("Attempt needs user input before it can advance"),
         _ => Ok(()),
     }
 }
@@ -242,8 +246,9 @@ fn interpret_reviews(
 
     item.attempts[attempt_index].review_state = Some(AttemptReviewState::Passed);
     item.attempts[attempt_index].status = AttemptStatus::Complete;
+    let candidate_id = item.create_or_get_merge_candidate(attempt_id)?;
     store.write_work_item(&item)?;
-    Ok(WorkAttemptRunOutcome::ReviewsPassed)
+    Ok(WorkAttemptRunOutcome::MergeCandidateReady { candidate_id })
 }
 
 #[derive(Debug)]

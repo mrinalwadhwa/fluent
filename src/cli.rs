@@ -230,6 +230,15 @@ pub enum WorkCommands {
         attempt_id: String,
     },
 
+    /// Show one stored Merge Candidate as JSON
+    MergeCandidate {
+        /// Work Item ID
+        work_item_id: String,
+
+        /// Merge Candidate ID
+        merge_candidate_id: String,
+    },
+
     /// Execute stored Work Item Tasks
     Task {
         #[command(subcommand)]

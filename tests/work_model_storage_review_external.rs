@@ -46,6 +46,7 @@ fn documented_work_item() -> WorkItem {
             review_state: Some(AttemptReviewState::Passed),
             artifacts: Vec::new(),
         }],
+        merge_candidates: Vec::new(),
     }
 }
 

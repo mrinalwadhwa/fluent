@@ -1,7 +1,7 @@
 use factory::work_model::{
-    Attempt, AttemptReviewState, AttemptStatus, Task, TaskArtifactArea, TaskKind, TaskOutput,
-    TaskStatus, WorkItem, WorkModelError, WorkModelStorageError, WorkModelStore, WorkspaceAccess,
-    WorkspaceRef, from_json,
+    Attempt, AttemptReviewState, AttemptStatus, MergeCandidate, MergeCandidateReviewState, Task,
+    TaskArtifactArea, TaskKind, TaskOutput, TaskStatus, WorkItem, WorkModelError,
+    WorkModelStorageError, WorkModelStore, WorkspaceAccess, WorkspaceRef, from_json,
 };
 use std::fs;
 
@@ -50,6 +50,7 @@ fn work_item() -> WorkItem {
             review_state: Some(AttemptReviewState::Passed),
             artifacts: Vec::new(),
         }],
+        merge_candidates: Vec::new(),
     }
 }
 
@@ -348,6 +349,33 @@ fn work_model_store_writes_deterministic_pretty_json() {
 }
 
 #[test]
+fn work_model_store_writes_merge_candidates_in_work_item_json() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    let mut item = work_item();
+    item.merge_candidates.push(MergeCandidate {
+        id: "attempt-1-merge-candidate".to_string(),
+        attempt_id: "attempt-1".to_string(),
+        source_workspace: workspace("candidate"),
+        target_workspace: workspace("main"),
+        source_branch: "main".to_string(),
+        target_branch: "main".to_string(),
+        candidate_commit: "abc123".to_string(),
+        review_state: MergeCandidateReviewState::Pending,
+    });
+
+    store.write_work_item(&item).unwrap();
+
+    let content = fs::read_to_string(temp.path().join(".factory/work/items/work-1.json")).unwrap();
+    assert!(content.contains(r#""merge_candidates": ["#));
+    assert!(content.contains(r#""id": "attempt-1-merge-candidate""#));
+    assert!(content.contains(r#""target_workspace": {"#));
+    assert!(content.contains(r#""source_branch": "main""#));
+    assert!(content.contains(r#""candidate_commit": "abc123""#));
+    assert_eq!(store.read_work_item("work-1").unwrap(), item);
+}
+
+#[test]
 fn work_model_store_returns_empty_list_without_work_state() {
     let temp = tempfile::tempdir().unwrap();
     let store = WorkModelStore::new(temp.path());
@@ -476,6 +504,7 @@ fn work_item_add_initial_attempt_creates_scheduler_facing_write_task() {
         id: "work-1".to_string(),
         title: "Add attempt intake".to_string(),
         attempts: Vec::new(),
+        merge_candidates: Vec::new(),
     };
 
     work_item.add_initial_attempt("attempt-1").unwrap();
@@ -538,6 +567,7 @@ fn work_item_add_initial_attempt_rejects_duplicate_attempt_id() {
         id: "work-1".to_string(),
         title: "Add attempt intake".to_string(),
         attempts: Vec::new(),
+        merge_candidates: Vec::new(),
     };
 
     work_item.add_initial_attempt("attempt-1").unwrap();
@@ -557,6 +587,7 @@ fn work_item_add_initial_attempt_rejects_invalid_attempt_id() {
         id: "work-1".to_string(),
         title: "Add attempt intake".to_string(),
         attempts: Vec::new(),
+        merge_candidates: Vec::new(),
     };
 
     assert_eq!(
