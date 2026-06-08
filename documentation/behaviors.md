@@ -27,6 +27,46 @@ stdout and exit successfully without requiring a Factory project.
 Test: tests/binary.rs (version_prints_package_version_and_commit)
 Test: tests/behaviors/operations/test-version.sh
 
+## Work Item inspection
+
+WHEN `factory work list` is invoked,
+THE SYSTEM SHALL read stored Work Items from `.factory/work/items/` and
+print each Work Item with its id and title.
+Test: tests/binary.rs (work_list_outputs_stored_work_items)
+Test: tests/behaviors/operations/test-work-inspection.sh (work list prints stored Work Items)
+
+WHEN `factory work list` is invoked and no Work Items exist,
+THE SYSTEM SHALL print an empty-state message and exit successfully.
+Test: tests/binary.rs (work_list_empty_state_succeeds_without_work_items)
+Test: tests/behaviors/operations/test-work-inspection.sh (work list prints empty state)
+
+WHEN `factory work show <id>` is invoked for a stored Work Item,
+THE SYSTEM SHALL print the Work Item as deterministic pretty JSON.
+Test: tests/binary.rs (work_show_outputs_pretty_json_for_one_work_item)
+Test: tests/behaviors/operations/test-work-inspection.sh (work show prints pretty JSON)
+
+IF `factory work show <id>` is invoked for a missing Work Item,
+THEN THE SYSTEM SHALL exit non-zero and report that the Work Item was
+not found.
+Test: tests/binary.rs (work_show_missing_item_reports_not_found)
+Test: tests/behaviors/operations/test-work-inspection.sh (work show missing item fails)
+
+IF stored Work Item state contains invalid JSON, an invalid id, or a
+model validation error,
+THEN THE SYSTEM SHALL exit non-zero and report the invalid file or
+object.
+Test: tests/binary.rs (work_list_reports_invalid_stored_json_path)
+Test: tests/binary.rs (work_list_reports_stored_work_item_id_mismatch)
+Test: tests/binary.rs (work_list_reports_invalid_stored_work_item_id)
+Test: tests/binary.rs (work_list_reports_invalid_stored_model)
+Test: tests/behaviors/operations/test-work-inspection.sh (work list reports invalid stored state)
+
+WHEN existing `.factory/runs` state exists without Work Item state,
+THE SYSTEM SHALL keep legacy run commands working and keep Work Item
+inspection independent from `.factory/runs`.
+Test: tests/binary.rs (work_list_empty_state_succeeds_without_work_items)
+Test: tests/behaviors/operations/test-work-inspection.sh (legacy runs and work inspection are independent)
+
 ## Brief capture
 
 WHEN the user invokes the capture-brief skill,

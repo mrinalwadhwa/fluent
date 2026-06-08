@@ -196,6 +196,29 @@ fn work_model_store_rejects_ids_that_cannot_name_files() {
 }
 
 #[test]
+fn work_model_store_rejects_invalid_stored_file_stems() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    let items_dir = temp.path().join(".factory/work/items");
+    fs::create_dir_all(&items_dir).unwrap();
+    fs::write(
+        items_dir.join(r"nested\work.json"),
+        r#"{
+  "id": "nested\\work",
+  "title": "Invalid stored id",
+  "attempts": []
+}
+"#,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        store.list_work_items().unwrap_err(),
+        WorkModelStorageError::InvalidWorkItemId { .. }
+    ));
+}
+
+#[test]
 fn work_model_store_writes_deterministic_pretty_json() {
     let temp = tempfile::tempdir().unwrap();
     let store = WorkModelStore::new(temp.path());

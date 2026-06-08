@@ -517,6 +517,7 @@ impl WorkModelStore {
                 source,
             })?;
         if let Some(expected) = path.file_stem().and_then(|stem| stem.to_str()) {
+            work_item_file_name(expected)?;
             if work_item.id != expected {
                 return Err(WorkModelStorageError::WorkItemIdMismatch {
                     path: path.to_path_buf(),

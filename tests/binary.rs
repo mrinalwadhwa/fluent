@@ -290,6 +290,240 @@ fn status_accepts_path_argument() {
 }
 
 // -------------------------------------------------------------------------
+// Work Items
+// -------------------------------------------------------------------------
+
+#[test]
+fn work_list_outputs_stored_work_items() {
+    let tmp = TempDir::new().unwrap();
+    write_work_item_json(tmp.path(), "work-beta", "Second work item");
+    write_work_item_json(tmp.path(), "work-alpha", "First work item");
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "list"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "work list failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stderr, b"");
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("ID"));
+    assert!(stdout.contains("TITLE"));
+    assert!(stdout.contains("work-alpha"));
+    assert!(stdout.contains("First work item"));
+    assert!(stdout.contains("work-beta"));
+    assert!(stdout.contains("Second work item"));
+    assert!(
+        stdout.find("work-alpha").unwrap() < stdout.find("work-beta").unwrap(),
+        "work list should use storage order: {stdout}"
+    );
+}
+
+#[test]
+fn work_list_empty_state_succeeds_without_work_items() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join(".factory/runs/legacy-run")).unwrap();
+    fs::write(
+        tmp.path().join(".factory/runs/legacy-run/status"),
+        "complete",
+    )
+    .unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No Work Items found"));
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("legacy-run"));
+}
+
+#[test]
+fn work_show_outputs_pretty_json_for_one_work_item() {
+    let tmp = TempDir::new().unwrap();
+    write_work_item_json(tmp.path(), "work-1", "Inspect work item");
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "show", "work-1"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "work show failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stderr, b"");
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.starts_with("{\n"));
+    assert!(stdout.contains("  \"id\": \"work-1\""));
+    assert!(stdout.contains("  \"title\": \"Inspect work item\""));
+    assert!(stdout.ends_with('\n'));
+}
+
+#[test]
+fn work_show_missing_item_reports_not_found() {
+    let tmp = TempDir::new().unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "show", "missing-work"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Work Item \"missing-work\" not found",
+        ));
+}
+
+#[test]
+fn work_show_rejects_invalid_work_item_id() {
+    let tmp = TempDir::new().unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "show", "../escape"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "work item id \"../escape\" cannot be used as a file name",
+        ));
+}
+
+#[test]
+fn work_list_reports_invalid_stored_json_path() {
+    let tmp = TempDir::new().unwrap();
+    let items_dir = tmp.path().join(".factory/work/items");
+    fs::create_dir_all(&items_dir).unwrap();
+    fs::write(items_dir.join("bad.json"), "{").unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "list"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(".factory/work/items/bad.json"))
+        .stderr(predicate::str::contains("failed to parse"));
+}
+
+#[test]
+fn work_list_reports_stored_work_item_id_mismatch() {
+    let tmp = TempDir::new().unwrap();
+    let items_dir = tmp.path().join(".factory/work/items");
+    fs::create_dir_all(&items_dir).unwrap();
+    fs::write(
+        items_dir.join("work-1.json"),
+        r#"{
+  "id": "work-2",
+  "title": "Mismatched id",
+  "attempts": []
+}
+"#,
+    )
+    .unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "list"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(".factory/work/items/work-1.json"))
+        .stderr(predicate::str::contains("contains id work-2"))
+        .stderr(predicate::str::contains("expected work-1"));
+}
+
+#[test]
+fn work_list_reports_invalid_stored_work_item_id() {
+    let tmp = TempDir::new().unwrap();
+    let items_dir = tmp.path().join(".factory/work/items");
+    fs::create_dir_all(&items_dir).unwrap();
+    fs::write(
+        items_dir.join(r"bad\id.json"),
+        r#"{
+  "id": "bad\\id",
+  "title": "Invalid id",
+  "attempts": []
+}
+"#,
+    )
+    .unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "list"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("bad\\\\id"))
+        .stderr(predicate::str::contains("cannot be used as a file name"));
+}
+
+#[test]
+fn work_list_reports_invalid_stored_model() {
+    let tmp = TempDir::new().unwrap();
+    let items_dir = tmp.path().join(".factory/work/items");
+    fs::create_dir_all(&items_dir).unwrap();
+    fs::write(
+        items_dir.join("work-invalid.json"),
+        r#"{
+  "id": "work-invalid",
+  "title": "Invalid model",
+  "attempts": [
+    {
+      "id": "attempt-1",
+      "work_item_id": "other-work",
+      "status": "planned",
+      "tasks": []
+    }
+  ]
+}
+"#,
+    )
+    .unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "list"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            ".factory/work/items/work-invalid.json",
+        ))
+        .stderr(predicate::str::contains("invalid work model"))
+        .stderr(predicate::str::contains("expected work-invalid"));
+}
+
+fn write_work_item_json(project_root: &Path, id: &str, title: &str) {
+    let items_dir = project_root.join(".factory/work/items");
+    fs::create_dir_all(&items_dir).unwrap();
+    fs::write(
+        items_dir.join(format!("{id}.json")),
+        format!(
+            r#"{{
+  "id": "{id}",
+  "title": "{title}"
+}}
+"#
+        ),
+    )
+    .unwrap();
+}
+
+// -------------------------------------------------------------------------
 // Cleanup
 // -------------------------------------------------------------------------
 

@@ -20,10 +20,10 @@ from intent capture through execution and review across multiple sessions.
 │  Teaches agents the full workflow               │
 ├─────────────────────────────────────────────────┤
 │  Factory command                                │
-│  factory run / status / summary / cleanup       │
-│  factory review / pull / shell / watch          │
-│  factory resume / init / dashboard / land       │
-│  factory version                                │
+│  factory run / status / work / summary          │
+│  factory cleanup / review / pull / shell        │
+│  factory watch / resume / init / dashboard      │
+│  factory land / version                         │
 │  Deterministic, operational                     │
 └─────────────────────────────────────────────────┘
 ```
@@ -59,6 +59,13 @@ implementation. `factory run`, `resume`, `summary`, `dashboard`,
 `review`, `land`, and cleanup continue to read and write existing run
 state. The first version does not migrate run directories and does not
 replace the session loop.
+
+`factory work list` and `factory work show <id>` expose the durable Work
+Item model as a read-only inspection surface. They read
+`.factory/work/items/` through the Rust storage model, validate stored
+objects, and do not create, schedule, mutate, or land work. This keeps
+Work Items visible without changing the legacy `.factory/runs` lifecycle
+that still executes sessions.
 
 | Concept | Meaning |
 |---|---|

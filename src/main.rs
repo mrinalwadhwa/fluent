@@ -1,6 +1,7 @@
 use anyhow::{Result, bail};
 use clap::Parser;
 use std::fs;
+use std::io::ErrorKind;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -8,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use factory::cleanup::{self, CleanupOptions, WorktreeCleanup};
-use factory::cli::{Cli, Commands};
+use factory::cli::{Cli, Commands, WorkCommands};
 use factory::coder::{CoderKind, CoderSandbox};
 use factory::content::ContentResolver;
 use factory::credential;
@@ -22,6 +23,7 @@ use factory::run::{self, Run};
 use factory::session::{self, DefaultHooks, SandboxedHooks, SessionConfig};
 use factory::summary;
 use factory::version;
+use factory::work_model::{WorkModelStorageError, WorkModelStore, to_json_pretty};
 use factory::worktree;
 
 fn main() -> Result<()> {
@@ -145,6 +147,9 @@ fn main() -> Result<()> {
             let search_root = path.map(PathBuf::from).unwrap_or(cwd);
             cmd_status(&search_root)?;
         }
+        Some(Commands::Work { command }) => {
+            cmd_work(&cwd, command)?;
+        }
         Some(Commands::Summary { run_id }) => {
             let output = summary::summarize_run(&cwd, run_id.as_deref())?;
             print!("{output}");
@@ -195,6 +200,35 @@ fn main() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn cmd_work(project_root: &Path, command: WorkCommands) -> Result<()> {
+    let store = WorkModelStore::new(project_root);
+    match command {
+        WorkCommands::List => {
+            let items = store.list_work_items()?;
+            if items.is_empty() {
+                println!("No Work Items found");
+            } else {
+                println!("{:<24} TITLE", "ID");
+                for item in items {
+                    println!("{:<24} {}", item.id, item.title);
+                }
+            }
+        }
+        WorkCommands::Show { id } => match store.read_work_item(&id) {
+            Ok(item) => {
+                print!("{}", to_json_pretty(&item)?);
+            }
+            Err(WorkModelStorageError::ReadFile { source, .. })
+                if source.kind() == ErrorKind::NotFound =>
+            {
+                bail!("Work Item {id:?} not found");
+            }
+            Err(error) => return Err(error.into()),
+        },
+    }
     Ok(())
 }
 

@@ -104,6 +104,12 @@ pub enum Commands {
         path: Option<String>,
     },
 
+    /// Inspect stored Work Items
+    Work {
+        #[command(subcommand)]
+        command: WorkCommands,
+    },
+
     /// Summarize one run from durable artifacts
     Summary {
         /// Target a specific run ID
@@ -180,4 +186,16 @@ pub enum Commands {
 
     /// Print Factory version and build commit
     Version,
+}
+
+#[derive(Subcommand)]
+pub enum WorkCommands {
+    /// List stored Work Items
+    List,
+
+    /// Show one stored Work Item as JSON
+    Show {
+        /// Work Item ID
+        id: String,
+    },
 }
