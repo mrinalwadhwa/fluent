@@ -702,11 +702,17 @@ Progress:
 - `d699981` and `0ec8788` added review Task planning/execution,
   read-only candidate review enforcement, review artifacts, and stale
   review artifact protection.
+- `2cba3a2` and `afb28cf` added the Attempt loop. It drives one Attempt
+  through write Task execution, review Task planning/execution,
+  follow-up write Tasks for failed reviews, `needs-user` handoffs for
+  uncertain or missing verdicts, and stops at the Merge Candidate
+  boundary.
 
-The next slice should implement the Attempt loop: drive an Attempt from
-write Task execution through review Task planning/execution, convert
-failed reviews into follow-up write Tasks, move uncertain review output
-to `needs-user`, and prepare the later Merge Candidate transition.
+The next slice should implement Merge Candidate creation and merge queue
+execution. Merge Candidates should become the only path to `main`: rebase
+the candidate, run configured checks, run the full required reviewer set,
+fast-forward land, record reporting/learning artifacts, and clean
+workspaces.
 
 2026-06-07 — Authors are increasingly using expertise, especially when
 the approach lists specific expertise files, but Factory should make this
