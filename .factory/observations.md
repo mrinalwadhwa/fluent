@@ -724,13 +724,15 @@ Progress:
   beside legacy Runs, and the dashboard has a Work Items view with
   Attempts, selected Tasks, Merge Candidates, merge state, needs-user
   state, read errors, polling refresh, and actionable/error counts.
+- `8ebf4b2` updated the build workflow skills and architecture/behavior
+  documentation to teach Work Items, Attempts, Tasks, Workspaces, and
+  Merge Candidates as the target lifecycle, while keeping legacy
+  `.factory/runs` commands documented as a transitional fallback.
 
-The next adoption slices should update skills and documentation to make
-Work Items, Attempts, Tasks, Workspaces, and Merge Candidates the default
-vocabulary; enforce the new task/review boundaries in normal workflow;
-clean up Work workspaces and artifacts; and then delete legacy
-`.factory/runs` compatibility once the Work execution path is used end to
-end.
+The next adoption slices should enforce the new task/review boundaries
+in normal workflow; clean up Work workspaces and artifacts; and then
+delete legacy `.factory/runs` compatibility once the Work execution path
+is used end to end.
 
 2026-06-07 — Authors are increasingly using expertise, especially when
 the approach lists specific expertise files, but Factory should make this
