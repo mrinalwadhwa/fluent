@@ -707,12 +707,16 @@ Progress:
   follow-up write Tasks for failed reviews, `needs-user` handoffs for
   uncertain or missing verdicts, and stops at the Merge Candidate
   boundary.
+- `fc5b54a`, `208dde2`, and `4862b23` added Merge Candidate creation.
+  Passed Attempt reviews now create or return one durable Merge Candidate,
+  candidates record source/target workspace and branch provenance, the
+  Work model enforces one candidate per passed Attempt, and users can
+  inspect candidates with `factory work merge-candidate`.
 
-The next slice should implement Merge Candidate creation and merge queue
-execution. Merge Candidates should become the only path to `main`: rebase
-the candidate, run configured checks, run the full required reviewer set,
-fast-forward land, record reporting/learning artifacts, and clean
-workspaces.
+The next slice should implement merge queue execution. Merge Candidates
+should become the only path to `main`: rebase the candidate, run
+configured checks, run the full required reviewer set, fast-forward land,
+record reporting/learning artifacts, and clean workspaces.
 
 2026-06-07 — Authors are increasingly using expertise, especially when
 the approach lists specific expertise files, but Factory should make this
