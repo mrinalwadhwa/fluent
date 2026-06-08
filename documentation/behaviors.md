@@ -556,6 +556,23 @@ THE SYSTEM SHALL display all runs with their status, runtime, and brief
 summary.
 Test: tests/binary.rs (status display tests, status_prefers_live_worktree_status), tests/behaviors/operations/test-live-run-state.sh (status lists live status)
 
+WHEN `factory status` is invoked and stored Work Items exist,
+THE SYSTEM SHALL display a Work Items section with each Work Item's
+latest Attempt, selected Task, review state, Merge Candidate, merge
+state, actionable label, and title.
+Test: tests/binary.rs (status_shows_work_items_without_runs, status_shows_runs_and_work_items_together)
+
+WHEN `factory status` is invoked for a project with Work Items and no
+legacy runs,
+THE SYSTEM SHALL display the Work Items section instead of reporting
+that no runs were found.
+Test: tests/binary.rs (status_shows_work_items_without_runs)
+
+WHEN `factory status` reads one or more invalid Work Item files,
+THE SYSTEM SHALL report the invalid Work model path in a Work Item read
+errors section while still displaying valid runs and valid Work Items.
+Test: tests/binary.rs (status_reports_invalid_work_item_with_valid_state), tests/behaviors/operations/test-work-status-dashboard.sh (status reports invalid Work without hiding valid state)
+
 WHEN `factory status` is invoked after cleanup,
 THE SYSTEM SHALL list cleaned runs with their existing run status and
 without a cleanup-specific status.
@@ -949,6 +966,27 @@ THE SYSTEM SHALL display a TUI listing all runs with their status,
 an activity feed for the selected transcript or report view, and
 keyboard navigation.
 Test: tests/behaviors/operations/test-dashboard.sh
+
+WHEN `factory dashboard` is invoked and stored Work Items exist,
+THE SYSTEM SHALL provide a Work Items view that shows Work Items,
+active Attempts, selected Tasks, review state, Merge Candidates, merge
+state, and actionable labels.
+Test: dashboard::tests::test_work_view_renders_work_items_without_runs
+
+WHEN the dashboard polls Work model state,
+THE SYSTEM SHALL refresh the Work Items view from stored Work Item files
+without requiring a dashboard restart.
+Test: dashboard::tests::test_app_poll_refreshes_work_items, tests/behaviors/operations/test-work-status-dashboard.sh (dashboard refreshes Work Items on poll)
+
+WHEN Work Items need user input, have pending Merge Candidates, or have
+read errors, THE SYSTEM SHALL show top-level Work view counts for Work
+Items, actionable rows, and errors.
+Test: tests/behaviors/operations/test-work-status-dashboard.sh (dashboard surfaces actionable Work)
+
+WHEN the Work Items view is selected and no Work Items exist,
+THE SYSTEM SHALL show a Work empty state instead of the Runs empty
+state.
+Test: dashboard::tests::test_work_view_renders_empty_state_when_selected, tests/behaviors/operations/test-work-status-dashboard.sh (dashboard shows empty Work view)
 
 WHEN `factory dashboard` is invoked for a project with no runs,
 THE SYSTEM SHALL show an empty state instead of exiting with an error.

@@ -1173,6 +1173,23 @@ impl WorkModelStore {
     }
 
     pub fn list_work_items(&self) -> Result<Vec<WorkItem>, WorkModelStorageError> {
+        self.list_work_item_paths()?
+            .into_iter()
+            .map(|path| self.read_work_item_file(&path, true))
+            .collect()
+    }
+
+    pub fn list_work_item_results(
+        &self,
+    ) -> Result<Vec<Result<WorkItem, WorkModelStorageError>>, WorkModelStorageError> {
+        Ok(self
+            .list_work_item_paths()?
+            .into_iter()
+            .map(|path| self.read_work_item_file(&path, true))
+            .collect())
+    }
+
+    fn list_work_item_paths(&self) -> Result<Vec<PathBuf>, WorkModelStorageError> {
         let dir = self.work_items_dir();
         if !dir.exists() {
             return Ok(Vec::new());
@@ -1198,11 +1215,7 @@ impl WorkModelStore {
             }
         }
         paths.sort();
-
-        paths
-            .into_iter()
-            .map(|path| self.read_work_item_file(&path, true))
-            .collect()
+        Ok(paths)
     }
 
     pub fn read_work_item(&self, id: &str) -> Result<WorkItem, WorkModelStorageError> {

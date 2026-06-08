@@ -20,6 +20,7 @@ use crate::cleanup;
 use crate::review;
 use crate::run::{self, Run};
 use crate::transcript::{self, Event, TranscriptReader};
+use crate::work_status::{self, WorkStatus};
 
 const RENDER_INTERVAL: Duration = Duration::from_millis(75);
 const DATA_POLL_INTERVAL: Duration = Duration::from_millis(2000);
@@ -507,6 +508,8 @@ fn update_reviewer_status(agent: &mut AgentView, reviews_dir: &Path, reviewer: &
 /// Top-level dashboard app state.
 struct App {
     runs: Vec<RunView>,
+    work_status: WorkStatus,
+    show_work: bool,
     selected_run: usize,
     search_root: PathBuf,
     should_quit: bool,
@@ -528,6 +531,8 @@ impl App {
         if target_run_id.is_none() {
             sort_views_for_dashboard(&mut views);
         }
+        let work_status = work_status::load_work_status(search_root)?;
+        let show_work = target_run_id.is_none() && views.is_empty() && !work_status.is_empty();
 
         // Find the index of the target run, or pick the first active one
         let selected = if let Some(id) = target_run_id {
@@ -544,6 +549,8 @@ impl App {
 
         Ok(Self {
             runs: views,
+            show_work,
+            work_status,
             selected_run: selected,
             search_root: search_root.to_path_buf(),
             should_quit: false,
@@ -584,6 +591,12 @@ impl App {
                     selected_index.min(self.runs.len() - 1)
                 }
             });
+        if let Ok(work_status) = work_status::load_work_status(&self.search_root) {
+            self.work_status = work_status;
+        }
+        if self.runs.is_empty() && !self.work_status.is_empty() {
+            self.show_work = true;
+        }
     }
 
     fn current_view_mut(&mut self) -> &mut RunView {
@@ -667,9 +680,10 @@ fn run_event_loop(
         }
 
         // Update feed height from terminal size for scroll clamping
-        // Layout: header(3) + runs(3) + agents(3) + margin(1) + feed(rest) + help(1) + borders(2)
+        // Layout: header(3) + view tabs(3) + runs(3) + agents(3) + margin(1)
+        // + feed(rest) + help(1) + borders(2)
         let term_height = terminal.size()?.height as usize;
-        app.feed_height = term_height.saturating_sub(3 + 3 + 3 + 1 + 1 + 2);
+        app.feed_height = term_height.saturating_sub(3 + 3 + 3 + 3 + 1 + 1 + 2);
 
         // Sleep only for the remaining render budget. If we just rendered,
         // this is nearly RENDER_INTERVAL; if we skipped, it may be zero.
@@ -680,15 +694,17 @@ fn run_event_loop(
         if event::poll(timeout)? {
             let fh = app.feed_height;
             match event::read()? {
-                CEvent::Mouse(mouse) if !app.runs.is_empty() => match mouse.kind {
-                    crossterm::event::MouseEventKind::ScrollUp => {
-                        app.current_view_mut().mouse_scroll_up(fh);
+                CEvent::Mouse(mouse) if !app.runs.is_empty() && !app.show_work => {
+                    match mouse.kind {
+                        crossterm::event::MouseEventKind::ScrollUp => {
+                            app.current_view_mut().mouse_scroll_up(fh);
+                        }
+                        crossterm::event::MouseEventKind::ScrollDown => {
+                            app.current_view_mut().mouse_scroll_down(fh);
+                        }
+                        _ => {}
                     }
-                    crossterm::event::MouseEventKind::ScrollDown => {
-                        app.current_view_mut().mouse_scroll_down(fh);
-                    }
-                    _ => {}
-                },
+                }
                 CEvent::Key(key) => match (key.modifiers, key.code) {
                     (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Char('q')) => {
                         app.should_quit = true;
@@ -706,38 +722,52 @@ fn run_event_loop(
                             )?;
                         }
                     }
-                    (_, KeyCode::Tab) if !app.runs.is_empty() => {
+                    (_, KeyCode::Char('w')) => {
+                        app.show_work = true;
+                    }
+                    (_, KeyCode::Char('r')) if !app.runs.is_empty() => {
+                        app.show_work = false;
+                    }
+                    (_, KeyCode::Tab) if !app.runs.is_empty() && !app.show_work => {
                         app.current_view_mut().select_next_agent();
                     }
-                    (_, KeyCode::BackTab) if !app.runs.is_empty() => {
+                    (_, KeyCode::BackTab) if !app.runs.is_empty() && !app.show_work => {
                         app.current_view_mut().select_previous_agent();
                     }
-                    (_, KeyCode::Right) if !app.runs.is_empty() => {
+                    (_, KeyCode::Right) if !app.runs.is_empty() && !app.show_work => {
                         app.selected_run = (app.selected_run + 1) % app.runs.len();
                     }
-                    (_, KeyCode::Left) if !app.runs.is_empty() => {
+                    (_, KeyCode::Left) if !app.runs.is_empty() && !app.show_work => {
                         app.selected_run = if app.selected_run == 0 {
                             app.runs.len() - 1
                         } else {
                             app.selected_run - 1
                         };
                     }
-                    (_, KeyCode::Up) | (_, KeyCode::Char('k')) if !app.runs.is_empty() => {
+                    (_, KeyCode::Up) | (_, KeyCode::Char('k'))
+                        if !app.runs.is_empty() && !app.show_work =>
+                    {
                         app.current_view_mut().scroll_up(fh);
                     }
-                    (_, KeyCode::Down) | (_, KeyCode::Char('j')) if !app.runs.is_empty() => {
+                    (_, KeyCode::Down) | (_, KeyCode::Char('j'))
+                        if !app.runs.is_empty() && !app.show_work =>
+                    {
                         app.current_view_mut().scroll_down(fh);
                     }
-                    (_, KeyCode::Char('G')) | (_, KeyCode::End) if !app.runs.is_empty() => {
+                    (_, KeyCode::Char('G')) | (_, KeyCode::End)
+                        if !app.runs.is_empty() && !app.show_work =>
+                    {
                         app.current_view_mut().scroll_to_end();
                     }
-                    (_, KeyCode::Char('g')) | (_, KeyCode::Home) if !app.runs.is_empty() => {
+                    (_, KeyCode::Char('g')) | (_, KeyCode::Home)
+                        if !app.runs.is_empty() && !app.show_work =>
+                    {
                         app.current_view_mut().scroll_to_top();
                     }
-                    (_, KeyCode::PageUp) if !app.runs.is_empty() => {
+                    (_, KeyCode::PageUp) if !app.runs.is_empty() && !app.show_work => {
                         app.current_view_mut().scroll_up_page(fh);
                     }
-                    (_, KeyCode::PageDown) if !app.runs.is_empty() => {
+                    (_, KeyCode::PageDown) if !app.runs.is_empty() && !app.show_work => {
                         app.current_view_mut().scroll_down_page(fh);
                     }
                     _ => {}
@@ -777,11 +807,30 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut App) {
     let tick = app.tick;
     app.tick += 1;
 
-    if app.runs.is_empty() {
+    if app.show_work {
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3), // header
+                Constraint::Length(3), // view tabs
+                Constraint::Min(6),    // work items
+                Constraint::Length(1), // help bar
+            ])
+            .split(size);
+
+        draw_work_header(f, main_chunks[0], app);
+        draw_view_tabs(f, main_chunks[1], app);
+        draw_work_items(f, main_chunks[2], &app.work_status);
+        draw_help_bar(f, main_chunks[3], app.copy_mode, app.show_work);
+        return;
+    }
+
+    if app.runs.is_empty() && app.work_status.is_empty() {
+        let main_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // header
+                Constraint::Length(3), // view tabs
                 Constraint::Min(3),    // empty state
                 Constraint::Length(1), // help bar
             ])
@@ -797,14 +846,15 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut App) {
                 .title(" Factory Dashboard "),
         );
         f.render_widget(header, main_chunks[0]);
+        draw_view_tabs(f, main_chunks[1], app);
 
         let empty = Paragraph::new(Line::from(Span::styled(
             "No runs in this project. Create a brief to start a run.",
             Style::default().fg(Color::DarkGray),
         )))
         .block(Block::default().borders(Borders::ALL).title(" Runs "));
-        f.render_widget(empty, main_chunks[1]);
-        draw_help_bar(f, main_chunks[2], app.copy_mode);
+        f.render_widget(empty, main_chunks[2]);
+        draw_help_bar(f, main_chunks[3], app.copy_mode, app.show_work);
         return;
     }
 
@@ -814,6 +864,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // header
+            Constraint::Length(3), // view tabs
             Constraint::Length(3), // run tabs
             Constraint::Length(3), // agent tabs
             Constraint::Length(1), // margin
@@ -824,10 +875,88 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut App) {
 
     let any_activity = app.runs.iter().any(run_view_has_activity);
     draw_header(f, main_chunks[0], &app.runs[idx], tick, any_activity);
-    draw_run_tabs(f, main_chunks[1], app);
-    draw_agent_tabs(f, main_chunks[2], &app.runs[idx]);
-    draw_activity_feed(f, main_chunks[4], &mut app.runs[idx]);
-    draw_help_bar(f, main_chunks[5], app.copy_mode);
+    draw_view_tabs(f, main_chunks[1], app);
+    draw_run_tabs(f, main_chunks[2], app);
+    draw_agent_tabs(f, main_chunks[3], &app.runs[idx]);
+    draw_activity_feed(f, main_chunks[5], &mut app.runs[idx]);
+    draw_help_bar(f, main_chunks[6], app.copy_mode, app.show_work);
+}
+
+fn draw_work_header(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let rows = app.work_status.rows.len();
+    let errors = app.work_status.errors.len();
+    let actionable = app
+        .work_status
+        .rows
+        .iter()
+        .filter(|row| {
+            matches!(
+                row.action.as_str(),
+                "needs-user" | "merge-ready" | "task-ready" | "merge-failed" | "failed"
+            )
+        })
+        .count();
+    let header = Paragraph::new(Line::from(vec![
+        Span::styled("Work Items: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{rows}"),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled("Actionable: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{actionable}"), Style::default().fg(Color::Yellow)),
+        Span::raw("  "),
+        Span::styled("Errors: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{errors}"), Style::default().fg(Color::Red)),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Factory Dashboard "),
+    );
+
+    f.render_widget(header, area);
+}
+
+fn draw_view_tabs(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let runs_label = format!(" Runs ({}) ", app.runs.len());
+    let work_label = format!(" Work Items ({}) ", app.work_status.rows.len());
+    let titles = vec![
+        Line::from(Span::styled(runs_label, Style::default().fg(Color::Blue))),
+        Line::from(Span::styled(work_label, Style::default().fg(Color::Cyan))),
+    ];
+    let tabs = Tabs::new(titles)
+        .block(Block::default().borders(Borders::ALL).title(" Views "))
+        .select(usize::from(app.show_work))
+        .highlight_style(
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::REVERSED),
+        );
+    f.render_widget(tabs, area);
+}
+
+fn draw_work_items(f: &mut ratatui::Frame, area: Rect, status: &WorkStatus) {
+    let lines: Vec<Line> = work_status::format_work_dashboard_lines(status)
+        .into_iter()
+        .map(|line| {
+            let style = if line.contains("[needs-user]") || line.contains("needs-user") {
+                Style::default().fg(Color::Yellow)
+            } else if line.contains("[merge-ready]") || line.contains("merge-ready") {
+                Style::default().fg(Color::Green)
+            } else if line.contains("failed") {
+                Style::default().fg(Color::Red)
+            } else if line.starts_with("  ") {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            Line::from(Span::styled(line, style))
+        })
+        .collect();
+    let paragraph =
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Work Items "));
+    f.render_widget(paragraph, area);
 }
 
 /// Compute the phase display for the header.
@@ -1304,14 +1433,34 @@ fn style_for_line(line: &str) -> Style {
     }
 }
 
-fn draw_help_bar(f: &mut ratatui::Frame, area: Rect, copy_mode: bool) {
+fn draw_help_bar(f: &mut ratatui::Frame, area: Rect, copy_mode: bool, show_work: bool) {
     let mut spans = vec![
         Span::styled(" q", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" quit  "),
-        Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" agent  "),
-        Span::styled("←→", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" run  "),
+    ];
+    if copy_mode {
+        spans.push(Span::styled(
+            "[COPY MODE] ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans.extend([
+        Span::styled("r", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" runs  "),
+        Span::styled("w", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" work  "),
+    ]);
+    if !show_work {
+        spans.extend([
+            Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" agent  "),
+            Span::styled("←→", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" run  "),
+        ]);
+    }
+    spans.extend([
         Span::styled("j/k", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" scroll  "),
         Span::styled("G", Style::default().add_modifier(Modifier::BOLD)),
@@ -1320,16 +1469,7 @@ fn draw_help_bar(f: &mut ratatui::Frame, area: Rect, copy_mode: bool) {
         Span::raw(" top  "),
         Span::styled("c", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" copy"),
-    ];
-    if copy_mode {
-        spans.push(Span::styled(
-            "  [COPY MODE]",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-
+    ]);
     let help = Paragraph::new(Line::from(spans)).style(Style::default().fg(Color::DarkGray));
 
     f.render_widget(help, area);
@@ -1338,6 +1478,7 @@ fn draw_help_bar(f: &mut ratatui::Frame, area: Rect, copy_mode: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::work_model::{WorkItem, WorkModelStore};
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use tempfile::TempDir;
@@ -2384,6 +2525,11 @@ mod tests {
             .collect();
         App {
             runs: views,
+            work_status: WorkStatus {
+                rows: Vec::new(),
+                errors: Vec::new(),
+            },
+            show_work: false,
             selected_run: selected,
             search_root: PathBuf::from("/tmp"),
             should_quit: false,
@@ -2403,6 +2549,30 @@ mod tests {
             })
             .unwrap();
         buffer_text(terminal.backend().buffer())
+    }
+
+    fn render_app_text(app: &mut App) -> String {
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                draw_ui(f, app);
+            })
+            .unwrap();
+        buffer_text(terminal.backend().buffer())
+    }
+
+    fn write_work_item(project_root: &Path, id: &str, title: &str) {
+        let mut item = WorkItem {
+            id: id.to_string(),
+            title: title.to_string(),
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt(format!("{id}-attempt")).unwrap();
+        WorkModelStore::new(project_root)
+            .write_work_item(&item)
+            .unwrap();
     }
 
     #[test]
@@ -2493,6 +2663,11 @@ mod tests {
     fn test_run_tabs_empty_no_panic() {
         let mut app = App {
             runs: Vec::new(),
+            work_status: WorkStatus {
+                rows: Vec::new(),
+                errors: Vec::new(),
+            },
+            show_work: false,
             selected_run: 0,
             search_root: PathBuf::from("/tmp"),
             should_quit: false,
@@ -2512,6 +2687,88 @@ mod tests {
             .unwrap();
         let text = buffer_text(terminal.backend().buffer());
         assert!(text.contains("No runs"));
+    }
+
+    #[test]
+    fn test_work_view_renders_work_items_without_runs() {
+        let mut app = App {
+            runs: Vec::new(),
+            work_status: WorkStatus {
+                rows: vec![work_status::WorkItemStatus {
+                    id: "work-1".to_string(),
+                    title: "Build status view".to_string(),
+                    attempt: "attempt-1 [planned]".to_string(),
+                    task: "write:attempt-1-write [planned]".to_string(),
+                    review: "-".to_string(),
+                    merge_candidate: "-".to_string(),
+                    merge: "-".to_string(),
+                    action: "task-ready".to_string(),
+                }],
+                errors: Vec::new(),
+            },
+            show_work: true,
+            selected_run: 0,
+            search_root: PathBuf::from("/tmp"),
+            should_quit: false,
+            feed_height: 20,
+            tick: 0,
+            run_tab_offset: 0,
+            copy_mode: false,
+        };
+
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                draw_ui(f, &mut app);
+            })
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+
+        assert!(text.contains("Work Items"));
+        assert!(text.contains("work-1"));
+        assert!(text.contains("Build status view"));
+        assert!(text.contains("task-ready"));
+        assert!(text.contains("Attempt: attempt-1 [planned]"));
+    }
+
+    #[test]
+    fn test_work_view_renders_empty_state_when_selected() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = App::new(tmp.path(), None).unwrap();
+        app.show_work = true;
+
+        let text = render_app_text(&mut app);
+
+        assert!(text.contains("Work Items (0)"));
+        assert!(text.contains("No Work Items found"));
+        assert!(!text.contains("No runs in this project"));
+    }
+
+    #[test]
+    fn test_app_poll_refreshes_work_items() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_work_item(tmp.path(), "work-before", "Before poll");
+        let mut app = App::new(tmp.path(), None).unwrap();
+
+        assert!(app.show_work);
+        assert_eq!(app.work_status.rows.len(), 1);
+        assert_eq!(app.work_status.rows[0].id, "work-before");
+
+        write_work_item(tmp.path(), "work-after", "After poll");
+        app.poll();
+
+        let ids: Vec<&str> = app
+            .work_status
+            .rows
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["work-after", "work-before"]);
+        assert!(app.show_work);
+        let text = render_app_text(&mut app);
+        assert!(text.contains("Work Items (2)"));
+        assert!(text.contains("work-after - After poll"));
     }
 
     #[test]
@@ -2758,7 +3015,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                draw_help_bar(f, f.area(), false);
+                draw_help_bar(f, f.area(), false, false);
             })
             .unwrap();
         let text = buffer_text(terminal.backend().buffer());
@@ -2772,7 +3029,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                draw_help_bar(f, f.area(), true);
+                draw_help_bar(f, f.area(), true, false);
             })
             .unwrap();
         let text = buffer_text(terminal.backend().buffer());

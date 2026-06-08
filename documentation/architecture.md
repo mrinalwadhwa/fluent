@@ -105,6 +105,12 @@ Work Item model for inspection. These commands use `.factory/work/items/`
 through the Rust storage model and validate stored objects. This keeps
 Work Items and Attempts visible while the legacy
 `.factory/runs` lifecycle continues to execute full sessions.
+`factory status` and `factory dashboard` read Work Items through
+`work_status.rs`, which reduces stored Work Items to operator-facing
+rows. That boundary chooses the latest Attempt, the active or waiting
+Task, the matching Merge Candidate, and a short action label. It returns
+valid rows and per-file read errors together so one bad Work Item file
+does not hide the rest of the queue.
 `factory work merge-candidate <work-item-id> <merge-candidate-id>` prints
 one stored Merge Candidate as pretty JSON. This command only reads the
 boundary object. `factory work merge <work-item-id> <merge-candidate-id>`
@@ -792,6 +798,7 @@ factory/main/
     summary.rs               ← Text run summary from durable artifacts
     transcript.rs            ← Parse stream-json transcripts incrementally
     work_model.rs            ← Core Work Item / Attempt / Task model
+    work_status.rs           ← Summarize Work Items for status and dashboard
     work_merge_executor.rs   ← Execute Work Merge Candidates
     work_task_executor.rs    ← Execute Work Tasks
     work_attempt_loop.rs     ← Advance one Work model Attempt

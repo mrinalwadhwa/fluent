@@ -170,6 +170,103 @@ fn status_shows_runs_with_correct_fields() {
 }
 
 #[test]
+fn status_shows_work_items_without_runs() {
+    let tmp = TempDir::new().unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "create", "work-1", "--title", "Build status view"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Work Items"))
+        .stdout(predicate::str::contains("work-1"))
+        .stdout(predicate::str::contains("attempt-1 [planned]"))
+        .stdout(predicate::str::contains("write:attempt-1-write [planned]"))
+        .stdout(predicate::str::contains("task-ready"))
+        .stdout(predicate::str::contains("Build status view"))
+        .stdout(predicate::str::contains("No runs found").not());
+}
+
+#[test]
+fn status_shows_runs_and_work_items_together() {
+    let tmp = TempDir::new().unwrap();
+    let run_dir = tmp.path().join(".factory/runs/legacy-run");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "executing\n").unwrap();
+    fs::write(run_dir.join("runtime"), "local\n").unwrap();
+    fs::write(run_dir.join("brief.md"), "Legacy run\n").unwrap();
+    write_work_item_json(tmp.path(), "work-mixed", "Mixed status work");
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .arg("status")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "status failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let run_index = stdout.find("legacy-run").unwrap();
+    let work_header_index = stdout.find("Work Items").unwrap();
+    assert!(run_index < work_header_index, "{stdout}");
+    assert!(stdout.contains("executing"), "{stdout}");
+    assert!(stdout.contains("work-mixed"), "{stdout}");
+    assert!(stdout.contains("Mixed status work"), "{stdout}");
+}
+
+#[test]
+fn status_reports_invalid_work_item_with_valid_state() {
+    let tmp = TempDir::new().unwrap();
+    let run_dir = tmp.path().join(".factory/runs/valid-run");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "complete\n").unwrap();
+    fs::write(run_dir.join("runtime"), "local\n").unwrap();
+    fs::write(run_dir.join("brief.md"), "Valid run\n").unwrap();
+    write_work_item_json(tmp.path(), "work-valid", "Valid work");
+    fs::write(
+        tmp.path().join(".factory/work/items/work-broken.json"),
+        "{ invalid json\n",
+    )
+    .unwrap();
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .arg("status")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "status failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("valid-run"), "{stdout}");
+    assert!(stdout.contains("work-valid"), "{stdout}");
+    assert!(stdout.contains("Work Item read errors"), "{stdout}");
+    assert!(
+        stdout.contains(".factory/work/items/work-broken.json"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn status_prefers_live_worktree_status() {
     let tmp = TempDir::new().unwrap();
     let source_run = tmp.path().join(".factory/runs/live-status");

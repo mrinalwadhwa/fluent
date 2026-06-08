@@ -27,6 +27,7 @@ use factory::version;
 use factory::work_attempt_loop::{self, WorkAttemptRunConfig, WorkAttemptRunOutcome};
 use factory::work_merge_executor::{self, WorkMergeConfig};
 use factory::work_model::{WorkItem, WorkModelStorageError, WorkModelStore, to_json_pretty};
+use factory::work_status;
 use factory::work_task_executor::{self, WorkTaskRunConfig};
 use factory::worktree;
 
@@ -647,32 +648,42 @@ fn cmd_review(
 
 fn cmd_status(search_root: &Path) -> Result<()> {
     let runs_dir = search_root.join(".factory/runs");
+    let work_status = work_status::load_work_status(search_root)?;
 
-    if !runs_dir.is_dir() {
+    if !runs_dir.is_dir() && work_status.is_empty() {
         println!("No runs found in {}", search_root.display());
         return Ok(());
     }
 
-    let runs = run::list_runs(search_root)?;
+    if runs_dir.is_dir() {
+        let runs = run::list_runs(search_root)?;
 
-    println!(
-        "{:<20} {:<16} {:<10} {}",
-        "RUN", "STATUS", "RUNTIME", "BRIEF"
-    );
-    println!(
-        "{:<20} {:<16} {:<10} {}",
-        "---", "------", "-------", "-----"
-    );
+        println!(
+            "{:<20} {:<16} {:<10} {}",
+            "RUN", "STATUS", "RUNTIME", "BRIEF"
+        );
+        println!(
+            "{:<20} {:<16} {:<10} {}",
+            "---", "------", "-------", "-----"
+        );
 
-    for run in &runs {
-        let status = run
-            .effective_status()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|_| "-".into());
-        let runtime = run.runtime();
-        let brief = run.brief_summary();
+        for run in &runs {
+            let status = run
+                .effective_status()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|_| "-".into());
+            let runtime = run.runtime();
+            let brief = run.brief_summary();
 
-        println!("{:<20} {:<16} {:<10} {}", run.id, status, runtime, brief);
+            println!("{:<20} {:<16} {:<10} {}", run.id, status, runtime, brief);
+        }
+    }
+
+    if !work_status.is_empty() {
+        if runs_dir.is_dir() {
+            println!();
+        }
+        print!("{}", work_status::format_work_status(&work_status));
     }
 
     Ok(())

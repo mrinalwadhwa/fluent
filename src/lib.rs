@@ -21,5 +21,6 @@ pub mod version;
 pub mod work_attempt_loop;
 pub mod work_merge_executor;
 pub mod work_model;
+pub mod work_status;
 pub mod work_task_executor;
 pub mod worktree;
