@@ -72,6 +72,22 @@ clean_dashboard_output_tail() {
   clean_dashboard_output | perl -0777 -ne '$i = rindex($_, "FactoryDashboard"); print $i >= 0 ? substr($_, $i) : $_'
 }
 
+wait_for_dashboard_capture() {
+  OUTPUT_FILE="$1"
+  NEEDLE="$2"
+  ATTEMPTS="${3:-100}"
+
+  while [ "$ATTEMPTS" -gt 0 ]; do
+    if grep -Fq -- "$NEEDLE" "$OUTPUT_FILE" 2>/dev/null; then
+      return 0
+    fi
+    ATTEMPTS=$((ATTEMPTS - 1))
+    sleep 0.1
+  done
+
+  return 1
+}
+
 capture_dashboard_default() {
   PROJECT_PATH="$1"
   KEYS="${2:-}"
@@ -96,12 +112,15 @@ capture_dashboard_default() {
 capture_dashboard_after_poll_mutation() {
   PROJECT_PATH="$1"
   MUTATION="$2"
+  INITIAL_NEEDLE="$3"
+  POLLED_NEEDLE="$4"
   OUTPUT_FILE="$(mktemp -t factory-work-dashboard-output-XXXXXX)"
 
   (
-    sleep 1
-    eval "$MUTATION"
-    sleep 4
+    if wait_for_dashboard_capture "$OUTPUT_FILE" "$INITIAL_NEEDLE" 200; then
+      eval "$MUTATION"
+      wait_for_dashboard_capture "$OUTPUT_FILE" "$POLLED_NEEDLE" 120 || true
+    fi
     printf 'q'
   ) | FACTORY_DASH_BIN="$FACTORY_BIN" \
       FACTORY_DASH_PROJECT="$PROJECT_PATH" \
@@ -298,7 +317,11 @@ test_dashboard_refreshes_work_items_on_poll() {
   create_planned_work_item
 
   RESULT=0
-  OUTPUT="$(capture_dashboard_after_poll_mutation "$TEST_DIR/project" "'$FACTORY_BIN' work create work-polled --title 'Polled Work' > /dev/null")"
+  OUTPUT="$(capture_dashboard_after_poll_mutation \
+    "$TEST_DIR/project" \
+    "'$FACTORY_BIN' work create work-polled --title 'Polled Work' > /dev/null" \
+    "work-visible - Visible Work" \
+    "work-polled - Polled Work")"
   FINAL_OUTPUT="$(printf '%s' "$OUTPUT" | clean_dashboard_output_tail)"
   assert_contains "$FINAL_OUTPUT" "Work Items (2)" || RESULT=1
   assert_contains "$FINAL_OUTPUT" "work-polled - Polled Work" || RESULT=1
@@ -317,6 +340,20 @@ test_dashboard_surfaces_actionable_work() {
   assert_contains "$OUTPUT" "merge-ready" || RESULT=1
   assert_contains "$OUTPUT" "Merge Candidate: attempt-action-merge-candidate" || RESULT=1
   assert_contains "$OUTPUT" "Merge: pending review:pending" || RESULT=1
+  return $RESULT
+}
+
+test_dashboard_surfaces_needs_user_work() {
+  setup_test_project
+  trap cleanup_test_project RETURN
+  create_needs_user_work_item
+
+  RESULT=0
+  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)"
+  assert_contains "$OUTPUT" "Actionable" || RESULT=1
+  assert_contains "$OUTPUT" "work-needs-user - Needs User Work" || RESULT=1
+  assert_contains "$OUTPUT" "needs-user" || RESULT=1
+  assert_contains "$OUTPUT" "Attempt: attempt-needs-user [needs-user]" || RESULT=1
   return $RESULT
 }
 
@@ -358,6 +395,7 @@ run_test "dashboard lists Work Items" test_dashboard_lists_work_items
 run_test "dashboard shows Work Items alongside legacy runs" test_dashboard_shows_work_items_alongside_legacy_runs
 run_test "dashboard refreshes Work Items on poll" test_dashboard_refreshes_work_items_on_poll
 run_test "dashboard surfaces actionable Work" test_dashboard_surfaces_actionable_work
+run_test "dashboard surfaces needs-user Work" test_dashboard_surfaces_needs_user_work
 run_test "dashboard reports Work read errors" test_dashboard_reports_work_read_errors
 run_test "dashboard shows empty Work view" test_dashboard_shows_empty_work_view
 
