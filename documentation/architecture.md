@@ -107,8 +107,22 @@ Work Items and Attempts visible while the legacy
 `.factory/runs` lifecycle continues to execute full sessions.
 `factory work merge-candidate <work-item-id> <merge-candidate-id>` prints
 one stored Merge Candidate as pretty JSON. This command only reads the
-boundary object; merge execution, rebase, pre-land checks, merge-time
-reviews, landing, reporting, and cleanup remain future queue work.
+boundary object. `factory work merge <work-item-id> <merge-candidate-id>`
+executes a Merge Candidate that still needs to land: it rebases the
+candidate workspace against the target branch, runs configured pre-land
+checks in the candidate workspace, runs the required reviewer set with
+merge-time context, then fast-forwards the target branch to the updated
+candidate head. After it records the landed state, it removes the managed
+candidate worktree. If cleanup fails after the target branch has landed,
+merge execution prints a warning and leaves the landed Merge Candidate
+state intact. Running the command again for a Merge Candidate that already
+has merge status `landed` and a stored `landed_commit` succeeds
+idempotently and reports the stored commit without resolving workspaces,
+rerunning checks, rerunning reviewers, or moving the target branch. Merge
+artifacts live under
+`.factory/work/artifacts/<attempt-id>/<candidate-id>/merge/`, and the
+stored Merge Candidate records whether execution is pending, executing,
+failed, needs-user, or landed.
 
 | Concept | Meaning |
 |---|---|
@@ -221,6 +235,12 @@ separate candidate collection.
 Code that reads `.factory/work/items/*.json` must parse into the public
 Rust model and validate the full `WorkItem`, including embedded Tasks
 and Merge Candidates, before using the object.
+The merge executor is the only recovery reader in this contract: it may
+load a Work Item that fails merge-execution preconditions so it can mark
+the affected Merge Candidate failed, but it must validate the candidate
+before it updates a workspace or target branch. Failed Merge Candidates
+still must preserve the boundary data derived from the latest completed
+write Task; the failed state only records why merge execution stopped.
 The `WorkItem.id` inside each file must match the file stem, so
 `.factory/work/items/work-1.json` must contain `"id": "work-1"`.
 Work item IDs must not be empty, `.`, `..`, or contain `/` or `\`,
@@ -772,6 +792,8 @@ factory/main/
     summary.rs               ← Text run summary from durable artifacts
     transcript.rs            ← Parse stream-json transcripts incrementally
     work_model.rs            ← Core Work Item / Attempt / Task model
+    work_merge_executor.rs   ← Execute Work Merge Candidates
+    work_task_executor.rs    ← Execute Work Tasks
     work_attempt_loop.rs     ← Advance one Work model Attempt
     plan.rs                  ← Parse plan.md into groups and steps
     parallel.rs              ← Parallel plan orchestrator (child runs)

@@ -310,6 +310,7 @@ impl WorkItem {
             target_branch: write_output.source_branch.clone(),
             candidate_commit: write_output.commit.clone(),
             review_state: MergeCandidateReviewState::Pending,
+            merge_state: MergeCandidateMergeState::default(),
         });
 
         self.validate()?;
@@ -412,6 +413,17 @@ pub enum AttemptReviewState {
     Passed,
     Failed,
     Uncertain,
+}
+
+impl AttemptReviewState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotReviewed => "not-reviewed",
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Uncertain => "uncertain",
+        }
+    }
 }
 
 /// Schedulable unit of work.
@@ -643,6 +655,8 @@ pub struct MergeCandidate {
     pub target_branch: String,
     pub candidate_commit: String,
     pub review_state: MergeCandidateReviewState,
+    #[serde(default)]
+    pub merge_state: MergeCandidateMergeState,
 }
 
 impl MergeCandidate {
@@ -658,14 +672,6 @@ impl MergeCandidate {
                 attempt_id: self.attempt_id.clone(),
             });
         };
-        if attempt.status != AttemptStatus::Complete
-            || attempt.review_state != Some(AttemptReviewState::Passed)
-        {
-            return Err(WorkModelError::MergeCandidateAttemptReviewsNotPassed {
-                candidate_id: self.id.clone(),
-                attempt_id: self.attempt_id.clone(),
-            });
-        }
         let Some((write_task, write_output)) = attempt
             .tasks
             .iter()
@@ -729,6 +735,15 @@ impl MergeCandidate {
                 field: "candidate_commit",
             });
         }
+        if self.merge_state.status != MergeCandidateMergeStatus::Failed
+            && (attempt.status != AttemptStatus::Complete
+                || attempt.review_state != Some(AttemptReviewState::Passed))
+        {
+            return Err(WorkModelError::MergeCandidateAttemptReviewsNotPassed {
+                candidate_id: self.id.clone(),
+                attempt_id: self.attempt_id.clone(),
+            });
+        }
         Ok(())
     }
 }
@@ -741,6 +756,44 @@ pub enum MergeCandidateReviewState {
     Reviewing,
     Passed,
     Failed,
+}
+
+/// Durable merge execution state for a merge candidate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeCandidateMergeState {
+    pub status: MergeCandidateMergeStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub landed_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub check_artifacts: Vec<ArtifactRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_artifacts: Vec<ArtifactRef>,
+}
+
+impl Default for MergeCandidateMergeState {
+    fn default() -> Self {
+        Self {
+            status: MergeCandidateMergeStatus::Pending,
+            landed_commit: None,
+            failure_reason: None,
+            check_artifacts: Vec::new(),
+            review_artifacts: Vec::new(),
+        }
+    }
+}
+
+/// Coarse merge execution status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum MergeCandidateMergeStatus {
+    #[default]
+    Pending,
+    Executing,
+    Failed,
+    NeedsUser,
+    Landed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1148,13 +1201,21 @@ impl WorkModelStore {
 
         paths
             .into_iter()
-            .map(|path| self.read_work_item_file(&path))
+            .map(|path| self.read_work_item_file(&path, true))
             .collect()
     }
 
     pub fn read_work_item(&self, id: &str) -> Result<WorkItem, WorkModelStorageError> {
         let path = self.work_item_path(id)?;
-        self.read_work_item_file(&path)
+        self.read_work_item_file(&path, true)
+    }
+
+    pub(crate) fn read_work_item_for_merge_recovery(
+        &self,
+        id: &str,
+    ) -> Result<WorkItem, WorkModelStorageError> {
+        let path = self.work_item_path(id)?;
+        self.read_work_item_file(&path, false)
     }
 
     pub fn create_work_item(&self, work_item: &WorkItem) -> Result<(), WorkModelStorageError> {
@@ -1178,6 +1239,15 @@ impl WorkModelStore {
                 source,
             })?;
 
+        self.write_work_item_file_unchecked(work_item, create_new)
+    }
+
+    fn write_work_item_file_unchecked(
+        &self,
+        work_item: &WorkItem,
+        create_new: bool,
+    ) -> Result<(), WorkModelStorageError> {
+        let path = self.work_item_path(&work_item.id)?;
         let dir = self.work_items_dir();
         fs::create_dir_all(&dir)
             .map_err(|source| WorkModelStorageError::CreateDirectory { path: dir, source })?;
@@ -1213,7 +1283,11 @@ impl WorkModelStore {
         }
     }
 
-    fn read_work_item_file(&self, path: &Path) -> Result<WorkItem, WorkModelStorageError> {
+    fn read_work_item_file(
+        &self,
+        path: &Path,
+        validate: bool,
+    ) -> Result<WorkItem, WorkModelStorageError> {
         let content =
             fs::read_to_string(path).map_err(|source| WorkModelStorageError::ReadFile {
                 path: path.to_path_buf(),
@@ -1234,12 +1308,14 @@ impl WorkModelStore {
                 });
             }
         }
-        work_item
-            .validate()
-            .map_err(|source| WorkModelStorageError::InvalidModel {
-                path: path.to_path_buf(),
-                source,
-            })?;
+        if validate {
+            work_item
+                .validate()
+                .map_err(|source| WorkModelStorageError::InvalidModel {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+        }
         Ok(work_item)
     }
 }
@@ -1634,6 +1710,7 @@ mod tests {
             target_branch: "main".to_string(),
             candidate_commit: "commit-original".to_string(),
             review_state: MergeCandidateReviewState::Pending,
+            merge_state: MergeCandidateMergeState::default(),
         });
 
         assert_eq!(
@@ -1675,6 +1752,97 @@ mod tests {
             target_branch: "main".to_string(),
             candidate_commit: "stale-commit".to_string(),
             review_state: MergeCandidateReviewState::Pending,
+            merge_state: MergeCandidateMergeState::default(),
+        });
+
+        assert_eq!(
+            work_item.validate().unwrap_err(),
+            WorkModelError::MergeCandidateProvenanceMismatch {
+                candidate_id: "attempt-1-merge-candidate".to_string(),
+                field: "candidate_commit",
+            }
+        );
+    }
+
+    #[test]
+    fn failed_merge_candidate_preserves_failed_review_state() {
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Preserve merge failure state".to_string(),
+            attempts: vec![Attempt {
+                id: "attempt-1".to_string(),
+                work_item_id: "work-1".to_string(),
+                status: AttemptStatus::Reviewing,
+                tasks: vec![completed_write_task("attempt-1-write", "original")],
+                review_state: Some(AttemptReviewState::Failed),
+                artifacts: Vec::new(),
+            }],
+            merge_candidates: Vec::new(),
+        };
+        work_item.merge_candidates.push(MergeCandidate {
+            id: "attempt-1-merge-candidate".to_string(),
+            attempt_id: "attempt-1".to_string(),
+            source_workspace: WorkspaceRef {
+                id: "candidate".to_string(),
+                path: ".factory/work/workspaces/attempt-1-original".to_string(),
+            },
+            target_workspace: WorkspaceRef {
+                id: "target".to_string(),
+                path: ".".to_string(),
+            },
+            source_branch: "main".to_string(),
+            target_branch: "main".to_string(),
+            candidate_commit: "commit-original".to_string(),
+            review_state: MergeCandidateReviewState::Pending,
+            merge_state: MergeCandidateMergeState {
+                status: MergeCandidateMergeStatus::Failed,
+                landed_commit: None,
+                failure_reason: Some("Attempt review failed".to_string()),
+                check_artifacts: Vec::new(),
+                review_artifacts: Vec::new(),
+            },
+        });
+
+        work_item.validate().unwrap();
+    }
+
+    #[test]
+    fn failed_merge_candidate_still_requires_candidate_provenance() {
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Validate failed merge candidate provenance".to_string(),
+            attempts: vec![Attempt {
+                id: "attempt-1".to_string(),
+                work_item_id: "work-1".to_string(),
+                status: AttemptStatus::Complete,
+                tasks: vec![completed_write_task("attempt-1-write", "original")],
+                review_state: Some(AttemptReviewState::Passed),
+                artifacts: Vec::new(),
+            }],
+            merge_candidates: Vec::new(),
+        };
+        work_item.merge_candidates.push(MergeCandidate {
+            id: "attempt-1-merge-candidate".to_string(),
+            attempt_id: "attempt-1".to_string(),
+            source_workspace: WorkspaceRef {
+                id: "candidate".to_string(),
+                path: ".factory/work/workspaces/attempt-1-original".to_string(),
+            },
+            target_workspace: WorkspaceRef {
+                id: "target".to_string(),
+                path: ".".to_string(),
+            },
+            source_branch: "main".to_string(),
+            target_branch: "main".to_string(),
+            candidate_commit: "stale-commit".to_string(),
+            review_state: MergeCandidateReviewState::Pending,
+            merge_state: MergeCandidateMergeState {
+                status: MergeCandidateMergeStatus::Failed,
+                landed_commit: None,
+                failure_reason: Some("candidate_commit mismatch".to_string()),
+                check_artifacts: Vec::new(),
+                review_artifacts: Vec::new(),
+            },
         });
 
         assert_eq!(
@@ -1705,6 +1873,7 @@ mod tests {
             target_branch: "main".to_string(),
             candidate_commit: "abc123".to_string(),
             review_state: MergeCandidateReviewState::Passed,
+            merge_state: MergeCandidateMergeState::default(),
         };
 
         assert_eq!(attempt.review_state, Some(AttemptReviewState::Uncertain));

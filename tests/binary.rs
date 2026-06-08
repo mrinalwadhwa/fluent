@@ -1092,6 +1092,654 @@ fn work_attempt_run_drives_write_reviews_and_passes() {
 }
 
 #[test]
+fn work_merge_candidate_lands_after_merge_time_reviews() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Merge candidate"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-merge-pass");
+    write_mock_claude(&bin_dir, &loop_mock_script("pass"));
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let candidate_workspace = main_dir.join(".factory/work/workspaces/attempt-1");
+    let candidate_head = git_head(&candidate_workspace);
+    let main_before = git_head(&main_dir);
+    assert_ne!(main_before, candidate_head);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "merge",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Merged Merge Candidate attempt-1-merge-candidate",
+        ));
+
+    assert_eq!(git_head(&main_dir), candidate_head);
+    assert!(main_dir.join("loop-output.txt").is_file());
+    assert!(!candidate_workspace.exists());
+
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let candidate = &value["merge_candidates"][0];
+    assert_eq!(candidate["review_state"], "passed");
+    assert_eq!(candidate["merge_state"]["status"], "landed");
+    assert_eq!(candidate["merge_state"]["landed_commit"], candidate_head);
+    assert!(
+        candidate["merge_state"]["review_artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|artifact| artifact["producer_id"] == "merge-review-tests")
+    );
+    assert!(
+        main_dir
+            .join(
+                ".factory/work/artifacts/attempt-1/attempt-1-merge-candidate/merge/review-state.json"
+            )
+            .is_file()
+    );
+
+    fs::write(
+        main_dir.join(".factory/config.toml"),
+        r#"
+[checks.fail_if_rerun]
+command = "printf should-not-run >&2; exit 1"
+run_before_land = true
+"#,
+    )
+    .unwrap();
+    let fail_bin = tmp.path().join("bin-idempotent-should-not-run");
+    write_mock_claude(
+        &fail_bin,
+        "#!/bin/bash\nprintf 'reviewer should not rerun' >&2\nexit 42\n",
+    );
+    commit_file(
+        &main_dir,
+        "after-land.txt",
+        "target moved after landing\n",
+        "Move target after landing",
+    );
+    let target_after_landing = git_head(&main_dir);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "merge",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&fail_bin))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(candidate_head.clone()));
+
+    assert_eq!(git_head(&main_dir), target_after_landing);
+    assert!(!candidate_workspace.exists());
+    let json_after_rerun =
+        fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value_after_rerun: serde_json::Value = serde_json::from_str(&json_after_rerun).unwrap();
+    let candidate_after_rerun = &value_after_rerun["merge_candidates"][0];
+    assert_eq!(candidate_after_rerun["merge_state"]["status"], "landed");
+    assert_eq!(
+        candidate_after_rerun["merge_state"]["landed_commit"],
+        candidate_head
+    );
+}
+
+#[test]
+fn work_merge_candidate_failed_review_leaves_target_unchanged() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Merge failure"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let pass_bin = tmp.path().join("bin-attempt-pass");
+    write_mock_claude(&pass_bin, &loop_mock_script("pass"));
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&pass_bin))
+        .assert()
+        .success();
+
+    let candidate_workspace = main_dir.join(".factory/work/workspaces/attempt-1");
+    let candidate_head = git_head(&candidate_workspace);
+    let main_before = git_head(&main_dir);
+    let fail_bin = tmp.path().join("bin-merge-fail");
+    write_mock_claude(
+        &fail_bin,
+        "#!/bin/bash\nprintf 'Verdict: fail\\n\\nStill risky.\\n' > review.md\nexit 0\n",
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "merge",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&fail_bin))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Merge-time reviewers did not pass",
+        ));
+
+    assert_eq!(git_head(&main_dir), main_before);
+    assert_eq!(git_head(&candidate_workspace), candidate_head);
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let candidate = &value["merge_candidates"][0];
+    assert_eq!(candidate["review_state"], "failed");
+    assert_eq!(candidate["merge_state"]["status"], "failed");
+    assert!(
+        candidate["merge_state"]["failure_reason"]
+            .as_str()
+            .unwrap()
+            .contains("Merge-time reviewers")
+    );
+    assert!(
+        candidate["merge_state"]["review_artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|artifact| artifact["producer_id"] == "merge-review-tests")
+    );
+}
+
+#[test]
+fn work_merge_candidate_failed_check_leaves_target_unchanged() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Merge check failure"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-check-fail");
+    write_mock_claude(&bin_dir, &loop_mock_script("pass"));
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+    fs::create_dir_all(main_dir.join(".factory")).unwrap();
+    fs::write(
+        main_dir.join(".factory/config.toml"),
+        r#"
+[checks.fail]
+command = "printf check-failed >&2; exit 1"
+run_before_land = true
+"#,
+    )
+    .unwrap();
+
+    let candidate_workspace = main_dir.join(".factory/work/workspaces/attempt-1");
+    let candidate_head = git_head(&candidate_workspace);
+    let main_before = git_head(&main_dir);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "merge",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Pre-land check 'fail' failed"));
+
+    assert_eq!(git_head(&main_dir), main_before);
+    assert_eq!(git_head(&candidate_workspace), candidate_head);
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let candidate = &value["merge_candidates"][0];
+    assert_eq!(candidate["review_state"], "pending");
+    assert_eq!(candidate["merge_state"]["status"], "failed");
+    assert!(
+        candidate["merge_state"]["failure_reason"]
+            .as_str()
+            .unwrap()
+            .contains("Pre-land check")
+    );
+    assert!(
+        candidate["merge_state"]["check_artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|artifact| artifact["producer_id"] == "merge-checks")
+    );
+}
+
+#[test]
+fn work_merge_candidate_warns_when_cleanup_fails_after_landing() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Cleanup warning"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-cleanup-warning-pass");
+    write_mock_claude(&bin_dir, &loop_mock_script("pass"));
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let candidate_workspace = main_dir.join(".factory/work/workspaces/attempt-1");
+    let candidate_head = git_head(&candidate_workspace);
+    let lock_output = StdCommand::new("git")
+        .args(["worktree", "lock", &candidate_workspace.to_string_lossy()])
+        .current_dir(&main_dir)
+        .output()
+        .unwrap();
+    assert!(
+        lock_output.status.success(),
+        "git worktree lock failed: {}",
+        String::from_utf8_lossy(&lock_output.stderr)
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "merge",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("managed workspace cleanup failed"));
+
+    assert_eq!(git_head(&main_dir), candidate_head);
+    assert!(candidate_workspace.exists());
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let candidate = &value["merge_candidates"][0];
+    assert_eq!(candidate["review_state"], "passed");
+    assert_eq!(candidate["merge_state"]["status"], "landed");
+    assert_eq!(candidate["merge_state"]["landed_commit"], candidate_head);
+}
+
+#[test]
+fn work_merge_candidate_rejects_stale_stored_provenance_without_rewrite() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Stale candidate"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-stale-provenance");
+    write_mock_claude(&bin_dir, &loop_mock_script("pass"));
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let item_path = main_dir.join(".factory/work/items/work-1.json");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
+    value["merge_candidates"][0]["candidate_commit"] =
+        serde_json::Value::String("0000000000000000000000000000000000000000".to_string());
+    fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    let main_before = git_head(&main_dir);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "merge",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("candidate_commit"));
+
+    assert_eq!(git_head(&main_dir), main_before);
+    let value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
+    let candidate = &value["merge_candidates"][0];
+    assert_eq!(candidate["merge_state"]["status"], "pending");
+    assert!(candidate["merge_state"].get("failure_reason").is_none());
+}
+
+#[test]
+fn work_merge_candidate_rebases_when_target_advanced() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Rebase candidate"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-rebase-pass");
+    write_mock_claude(&bin_dir, &loop_mock_script("pass"));
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let candidate_workspace = main_dir.join(".factory/work/workspaces/attempt-1");
+    let candidate_head = git_head(&candidate_workspace);
+    commit_file(
+        &main_dir,
+        "target-only.txt",
+        "target advanced\n",
+        "Advance target",
+    );
+    let main_before_merge = git_head(&main_dir);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "merge",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let main_after_merge = git_head(&main_dir);
+    assert_ne!(main_after_merge, candidate_head);
+    assert_ne!(main_after_merge, main_before_merge);
+    assert!(main_dir.join("target-only.txt").is_file());
+    assert!(main_dir.join("loop-output.txt").is_file());
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let candidate = &value["merge_candidates"][0];
+    assert_eq!(candidate["merge_state"]["status"], "landed");
+    assert_eq!(candidate["merge_state"]["landed_commit"], main_after_merge);
+}
+
+#[test]
+fn work_merge_candidate_rejects_target_moved_during_review() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Late target move"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let pass_bin = tmp.path().join("bin-late-target-pass");
+    write_mock_claude(&pass_bin, &loop_mock_script("pass"));
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&pass_bin))
+        .assert()
+        .success();
+
+    let candidate_workspace = main_dir.join(".factory/work/workspaces/attempt-1");
+    let candidate_head = git_head(&candidate_workspace);
+    let main_before_merge = git_head(&main_dir);
+    let move_once_file = tmp.path().join("target-moved-once");
+    let review_bin = tmp.path().join("bin-late-target-review");
+    write_mock_claude(
+        &review_bin,
+        r##"#!/bin/bash
+if [ ! -f "$MOVE_ONCE_FILE" ]; then
+  printf 'target moved during review\n' > "$TARGET_REPO/target-moved-during-review.txt"
+  git -C "$TARGET_REPO" add target-moved-during-review.txt
+  git -C "$TARGET_REPO" commit -m "Move target during merge review" >/dev/null
+  printf 'done\n' > "$MOVE_ONCE_FILE"
+fi
+printf 'Verdict: pass\n\nMerge review passed.\n' > review.md
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "merge",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&review_bin))
+        .env("TARGET_REPO", &main_dir)
+        .env("MOVE_ONCE_FILE", &move_once_file)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Target branch main moved"));
+
+    let main_after_merge = git_head(&main_dir);
+    assert_ne!(main_after_merge, main_before_merge);
+    assert_ne!(main_after_merge, candidate_head);
+    assert!(main_dir.join("target-moved-during-review.txt").is_file());
+    assert!(!main_dir.join("loop-output.txt").is_file());
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let candidate = &value["merge_candidates"][0];
+    assert_eq!(candidate["review_state"], "passed");
+    assert_eq!(candidate["merge_state"]["status"], "failed");
+    assert!(
+        candidate["merge_state"]["failure_reason"]
+            .as_str()
+            .unwrap()
+            .contains("Target branch main moved")
+    );
+}
+
+#[test]
+fn work_merge_candidate_rebase_failure_leaves_target_unchanged() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Rebase conflict"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-rebase-conflict");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+case "$PWD" in
+  */.factory/work/workspaces/*)
+    printf 'candidate readme\n' > README.md
+    git add README.md
+    git commit -m "Update README from candidate" >/dev/null
+    ;;
+  *)
+    printf 'Verdict: pass\n\nLoop review passed.\n' > review.md
+    ;;
+esac
+exit 0
+"##,
+    );
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let candidate_workspace = main_dir.join(".factory/work/workspaces/attempt-1");
+    let candidate_head = git_head(&candidate_workspace);
+    commit_file(
+        &main_dir,
+        "README.md",
+        "target readme\n",
+        "Update README from target",
+    );
+    let main_before_merge = git_head(&main_dir);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "merge",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Rebase failed"));
+
+    assert_eq!(git_head(&main_dir), main_before_merge);
+    assert_eq!(git_head(&candidate_workspace), candidate_head);
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let candidate = &value["merge_candidates"][0];
+    assert_eq!(candidate["review_state"], "pending");
+    assert_eq!(candidate["merge_state"]["status"], "failed");
+    assert!(
+        candidate["merge_state"]["failure_reason"]
+            .as_str()
+            .unwrap()
+            .contains("Rebase failed")
+    );
+}
+
+#[test]
 fn work_attempt_run_plans_followup_for_failed_reviews() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
@@ -3952,6 +4600,30 @@ fn git_common_dir(repo: &Path) -> PathBuf {
     } else {
         repo.join(path)
     }
+}
+
+fn commit_file(repo: &Path, path: &str, content: &str, message: &str) {
+    fs::write(repo.join(path), content).unwrap();
+    let output = StdCommand::new("git")
+        .args(["add", path])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = StdCommand::new("git")
+        .args(["commit", "-m", message])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn write_mock_claude(bin_dir: &Path, script: &str) {

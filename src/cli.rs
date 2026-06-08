@@ -239,6 +239,27 @@ pub enum WorkCommands {
         merge_candidate_id: String,
     },
 
+    /// Execute a stored Merge Candidate
+    Merge {
+        /// Work Item ID
+        work_item_id: String,
+
+        /// Merge Candidate ID
+        merge_candidate_id: String,
+
+        /// Disable sandbox
+        #[arg(long)]
+        no_sandbox: bool,
+
+        /// Coding agent to launch: claude or codex
+        #[arg(long)]
+        coder: Option<String>,
+
+        /// Extra args passed through to the agent
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra_args: Vec<String>,
+    },
+
     /// Execute stored Work Item Tasks
     Task {
         #[command(subcommand)]

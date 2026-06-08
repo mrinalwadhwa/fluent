@@ -272,45 +272,97 @@ fn run_single_reviewer_with_coder(
     reviewer: &dyn Coder,
     transcript_path: &Path,
 ) -> Result<Verdict> {
-    let exit_code = reviewer.run(
-        review_prompt,
+    run_reviewer_with_coder(ReviewCoderRun {
+        reviewer_name,
         system_prompt,
-        project_root,
-        &[],
-        Some(transcript_path),
+        review_prompt,
+        artifact_root: run_dir,
+        review_path: &run_dir.join(format!("reviews/review-{reviewer_name}.md")),
+        working_dir: project_root,
+        extra_args: &[],
+        reviewer,
+        transcript_path: Some(transcript_path),
+    })
+}
+
+pub struct ReviewCoderRun<'a> {
+    pub reviewer_name: &'a str,
+    pub system_prompt: &'a str,
+    pub review_prompt: &'a str,
+    pub artifact_root: &'a Path,
+    pub review_path: &'a Path,
+    pub working_dir: &'a Path,
+    pub extra_args: &'a [String],
+    pub reviewer: &'a dyn Coder,
+    pub transcript_path: Option<&'a Path>,
+}
+
+pub fn run_reviewer_with_coder(config: ReviewCoderRun<'_>) -> Result<Verdict> {
+    let exit_code = config.reviewer.run(
+        config.review_prompt,
+        config.system_prompt,
+        config.working_dir,
+        config.extra_args,
+        config.transcript_path,
     );
 
     match exit_code {
         Ok(code) if code != 0 => {
             let message = format!("Reviewer session exited with code {code}.");
-            eprintln!("  [{reviewer_name}] {message} Marking review failed.");
-            write_failure_review_artifact(run_dir, reviewer_name, &message)?;
+            eprintln!(
+                "  [{}] {message} Marking review failed.",
+                config.reviewer_name
+            );
+            write_failure_review_artifact_at(
+                config.artifact_root,
+                config.review_path,
+                config.reviewer_name,
+                &message,
+            )?;
             return Ok(Verdict::Fail);
         }
         Err(e) => {
             let message = format!("Reviewer failed to launch: {e}.");
-            eprintln!("  [{reviewer_name}] {message} Marking review failed.");
-            write_failure_review_artifact(run_dir, reviewer_name, &message)?;
+            eprintln!(
+                "  [{}] {message} Marking review failed.",
+                config.reviewer_name
+            );
+            write_failure_review_artifact_at(
+                config.artifact_root,
+                config.review_path,
+                config.reviewer_name,
+                &message,
+            )?;
             return Ok(Verdict::Fail);
         }
         _ => {}
     }
 
-    // Check for review artifact
-    let review_file = run_dir.join(format!("reviews/review-{reviewer_name}.md"));
-    if !review_file.exists() {
+    if !config.review_path.exists() {
         let message = format!(
             "Reviewer completed without writing {}.",
-            review_file.display()
+            config.review_path.display()
         );
-        eprintln!("  [{reviewer_name}] {message} Marking review failed.");
-        write_failure_review_artifact(run_dir, reviewer_name, &message)?;
+        eprintln!(
+            "  [{}] {message} Marking review failed.",
+            config.reviewer_name
+        );
+        write_failure_review_artifact_at(
+            config.artifact_root,
+            config.review_path,
+            config.reviewer_name,
+            &message,
+        )?;
         return Ok(Verdict::Fail);
     }
 
-    let content = fs::read_to_string(&review_file)?;
+    let content = fs::read_to_string(config.review_path)?;
     let verdict = extract_verdict(&content);
-    eprintln!("  [{reviewer_name}] verdict: {}", verdict_str(&verdict));
+    eprintln!(
+        "  [{}] verdict: {}",
+        config.reviewer_name,
+        verdict_str(&verdict)
+    );
 
     Ok(verdict)
 }
@@ -318,7 +370,21 @@ fn run_single_reviewer_with_coder(
 fn write_failure_review_artifact(run_dir: &Path, reviewer_name: &str, message: &str) -> Result<()> {
     let reviews_dir = run_dir.join("reviews");
     fs::create_dir_all(&reviews_dir)?;
-    let mut file = fs::File::create(reviews_dir.join(format!("review-{reviewer_name}.md")))?;
+    let review_path = reviews_dir.join(format!("review-{reviewer_name}.md"));
+    write_failure_review_artifact_at(run_dir, &review_path, reviewer_name, message)
+}
+
+fn write_failure_review_artifact_at(
+    artifact_root: &Path,
+    review_path: &Path,
+    reviewer_name: &str,
+    message: &str,
+) -> Result<()> {
+    fs::create_dir_all(artifact_root)?;
+    if let Some(parent) = review_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = fs::File::create(review_path)?;
     writeln!(file, "# {reviewer_name} Review")?;
     writeln!(file)?;
     writeln!(file, "Reviewer: review-{reviewer_name}")?;

@@ -113,6 +113,11 @@ for test in tests/behaviors/operations/*.sh; do bash "$test"; done
 | Work Task run completes review Tasks from durable artifacts while preserving verdict boundaries | `binary.rs`, `test-work-task-run.sh` |
 | Work Attempt run advances planned Tasks, plans reviews, and interprets review outcomes | `binary.rs`, `test-work-attempt-loop.sh` |
 | Work Attempt run creates follow-up writes or needs-user handoffs at review boundaries | `binary.rs`, `test-work-attempt-loop.sh` |
+| Merge Candidate inspection prints stored candidate JSON without changing state | `binary.rs`, `test-work-merge-candidate.sh` |
+| Work merge executes ready Merge Candidates only after validating candidate ownership, provenance, source branch, target safety, checks, and reviewers | `binary.rs`, `test-work-merge-candidate.sh` |
+| Work merge rejects invalid stored candidate provenance without rewriting state | `binary.rs`, `test-work-merge-candidate.sh` |
+| Work merge records durable failed state for rebase, check, review, and late target-move failures | `binary.rs`, `test-work-merge-candidate.sh` |
+| Work merge records landed commit and artifacts after fast-forwarding the target branch | `binary.rs`, `test-work-merge-candidate.sh` |
 | Create worktree from current HEAD | `test-run` |
 | Branch from non-main branch | `test-run` |
 | Run-id resolution priority chain | `test-run` |

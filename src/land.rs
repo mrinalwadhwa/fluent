@@ -10,6 +10,13 @@ use crate::review;
 use crate::run::{self, Run};
 use crate::worktree;
 
+#[derive(Debug, Clone)]
+pub struct PreLandCheckRun {
+    pub results: Vec<checks::CheckRunResult>,
+    pub after_autofix: Option<Vec<checks::CheckRunResult>>,
+    pub fix_outcome: Option<FixOutcome>,
+}
+
 pub fn land_worktree_run(source_root: &Path, run: &Run) -> Result<()> {
     run_pre_land_checks(source_root, run)?;
     worktree::land_run(source_root, &run.id, &run.dir)
@@ -33,9 +40,31 @@ fn run_pre_land_checks(source_root: &Path, run: &Run) -> Result<()> {
         .context("No worktree path recorded for this run")?;
     eprintln!("  Running pre-land checks...");
 
-    let results = checks::run_pre_land_checks(&worktree_dir, &checks)?;
+    let outcome = run_pre_land_checks_for_worktree(&worktree_dir, &checks)?;
+    match outcome.fix_outcome {
+        Some(FixOutcome::Committed) => eprintln!("  Autofix changes committed."),
+        Some(FixOutcome::NoChanges) => eprintln!("  Autofix produced no changes."),
+        None => {}
+    }
+
+    if outcome.fix_outcome == Some(FixOutcome::Committed) {
+        rerun_reviews_after_autofix(source_root, run, &worktree_dir)?;
+    }
+
+    Ok(())
+}
+
+pub fn run_pre_land_checks_for_worktree(
+    worktree_dir: &Path,
+    checks: &[ProjectCheck],
+) -> Result<PreLandCheckRun> {
+    let results = checks::run_pre_land_checks(worktree_dir, checks)?;
     let Some(failed) = results.iter().find(|result| !result.passed) else {
-        return Ok(());
+        return Ok(PreLandCheckRun {
+            results,
+            after_autofix: None,
+            fix_outcome: None,
+        });
     };
 
     if !failed.check.autofix || failed.check.fix_command.is_none() {
@@ -46,22 +75,17 @@ fn run_pre_land_checks(source_root: &Path, run: &Run) -> Result<()> {
         "  Check '{}' failed; running configured autofix...",
         failed.check.name
     );
-    let fix_outcome = checks::apply_autofix(&worktree_dir, &failed.check)?;
-    match fix_outcome {
-        FixOutcome::Committed => eprintln!("  Autofix changes committed."),
-        FixOutcome::NoChanges => eprintln!("  Autofix produced no changes."),
-    }
-
-    let rerun_results = checks::run_pre_land_checks(&worktree_dir, &checks)?;
+    let fix_outcome = checks::apply_autofix(worktree_dir, &failed.check)?;
+    let rerun_results = checks::run_pre_land_checks(worktree_dir, checks)?;
     if let Some(still_failed) = rerun_results.iter().find(|result| !result.passed) {
         bail!("{}", checks::format_check_failure(still_failed));
     }
 
-    if fix_outcome == FixOutcome::Committed {
-        rerun_reviews_after_autofix(source_root, run, &worktree_dir)?;
-    }
-
-    Ok(())
+    Ok(PreLandCheckRun {
+        results,
+        after_autofix: Some(rerun_results),
+        fix_outcome: Some(fix_outcome),
+    })
 }
 
 fn rerun_reviews_after_autofix(source_root: &Path, run: &Run, worktree_dir: &Path) -> Result<()> {

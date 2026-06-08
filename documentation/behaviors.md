@@ -225,6 +225,69 @@ invoked for a missing Work Item or missing Merge Candidate,
 THEN THE SYSTEM SHALL exit non-zero and leave Work Item state unchanged.
 Test: tests/binary.rs (work_merge_candidate_missing_item_or_candidate_reports_error)
 
+WHEN `factory work merge <work-item-id> <merge-candidate-id>` is invoked
+for a stored Merge Candidate that still needs to land,
+THE SYSTEM SHALL update the candidate workspace against the target
+branch, run configured pre-land checks, run merge-time reviewers, and
+fast-forward the target branch only after those steps pass.
+Test: tests/binary.rs (work_merge_candidate_lands_after_merge_time_reviews)
+
+WHEN `factory work merge <work-item-id> <merge-candidate-id>` is invoked
+for a Merge Candidate with merge status `landed` and a stored
+`landed_commit`,
+THE SYSTEM SHALL report the stored landed commit without resolving
+workspaces, rebasing, running checks, running reviewers, or moving the
+target branch.
+Test: tests/binary.rs (work_merge_candidate_lands_after_merge_time_reviews)
+
+IF `factory work merge <work-item-id> <merge-candidate-id>` is invoked
+for a Merge Candidate whose stored provenance no longer matches the
+passed Attempt output,
+THEN THE SYSTEM SHALL leave the target branch and stored Merge Candidate
+state unchanged.
+Test: tests/binary.rs (work_merge_candidate_rejects_stale_stored_provenance_without_rewrite)
+
+WHEN the target branch has advanced since a Merge Candidate was created,
+THE SYSTEM SHALL rebase the candidate workspace against the target branch
+before checks, reviewers, and fast-forward merge.
+Test: tests/binary.rs (work_merge_candidate_rebases_when_target_advanced)
+
+IF the target branch moves after merge checks and reviewers run but
+before the fast-forward merge,
+THEN THE SYSTEM SHALL reject the merge, preserve the moved target branch,
+and record merge status `failed` with a failure reason on the stored
+Merge Candidate.
+Test: tests/binary.rs (work_merge_candidate_rejects_target_moved_during_review)
+
+IF rebasing the candidate workspace against the target branch fails while
+`factory work merge <work-item-id> <merge-candidate-id>` executes,
+THEN THE SYSTEM SHALL abort the rebase, leave the target branch
+unchanged, and record merge status `failed` with a failure reason on the
+stored Merge Candidate.
+Test: tests/binary.rs (work_merge_candidate_rebase_failure_leaves_target_unchanged)
+
+WHEN `factory work merge <work-item-id> <merge-candidate-id>` lands a
+Merge Candidate,
+THE SYSTEM SHALL record merge status `landed`, the landed commit, and
+merge-time review artifacts on the stored Merge Candidate, then remove the
+managed candidate worktree. If worktree cleanup fails after landing, the
+system shall warn without changing the landed merge state.
+Test: tests/binary.rs (work_merge_candidate_lands_after_merge_time_reviews)
+
+IF merge-time reviewers fail while `factory work merge <work-item-id>
+<merge-candidate-id>` executes,
+THEN THE SYSTEM SHALL leave the target branch unchanged and record merge
+status `failed`, review state `failed`, a failure reason, and review
+artifacts on the stored Merge Candidate.
+Test: tests/binary.rs (work_merge_candidate_failed_review_leaves_target_unchanged)
+
+IF configured pre-land checks fail while `factory work merge
+<work-item-id> <merge-candidate-id>` executes,
+THEN THE SYSTEM SHALL leave the target branch unchanged and record merge
+status `failed`, a failure reason, and check artifacts on the stored
+Merge Candidate.
+Test: tests/binary.rs (work_merge_candidate_failed_check_leaves_target_unchanged)
+
 WHEN any completed review artifact has a failing verdict,
 THE SYSTEM SHALL mark the Attempt review state as `failed` and create a
 planned follow-up write Task with deterministic id

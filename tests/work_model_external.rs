@@ -1,7 +1,8 @@
 use factory::work_model::{
-    Attempt, AttemptReviewState, AttemptStatus, MergeCandidate, MergeCandidateReviewState, Task,
-    TaskArtifactArea, TaskKind, TaskOutput, TaskStatus, WorkItem, WorkModelError,
-    WorkModelStorageError, WorkModelStore, WorkspaceAccess, WorkspaceRef, from_json,
+    Attempt, AttemptReviewState, AttemptStatus, MergeCandidate, MergeCandidateMergeState,
+    MergeCandidateReviewState, Task, TaskArtifactArea, TaskKind, TaskOutput, TaskStatus, WorkItem,
+    WorkModelError, WorkModelStorageError, WorkModelStore, WorkspaceAccess, WorkspaceRef,
+    from_json,
 };
 use std::fs;
 
@@ -362,6 +363,7 @@ fn work_model_store_writes_merge_candidates_in_work_item_json() {
         target_branch: "main".to_string(),
         candidate_commit: "abc123".to_string(),
         review_state: MergeCandidateReviewState::Pending,
+        merge_state: MergeCandidateMergeState::default(),
     });
 
     store.write_work_item(&item).unwrap();

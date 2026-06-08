@@ -25,6 +25,7 @@ use factory::session::{self, DefaultHooks, SandboxedHooks, SessionConfig};
 use factory::summary;
 use factory::version;
 use factory::work_attempt_loop::{self, WorkAttemptRunConfig, WorkAttemptRunOutcome};
+use factory::work_merge_executor::{self, WorkMergeConfig};
 use factory::work_model::{WorkItem, WorkModelStorageError, WorkModelStore, to_json_pretty};
 use factory::work_task_executor::{self, WorkTaskRunConfig};
 use factory::worktree;
@@ -369,6 +370,29 @@ fn cmd_work(
             }
             Err(error) => return Err(error.into()),
         },
+        WorkCommands::Merge {
+            work_item_id,
+            merge_candidate_id,
+            no_sandbox,
+            coder,
+            extra_args,
+        } => {
+            let coder_kind = CoderKind::resolve(coder.as_deref().or(global_coder))?;
+            let result = work_merge_executor::merge_candidate(WorkMergeConfig {
+                project_root,
+                store: &store,
+                work_item_id: &work_item_id,
+                merge_candidate_id: &merge_candidate_id,
+                resolver,
+                extra_args: &extra_args,
+                coder_kind,
+                no_sandbox: no_sandbox || global_no_sandbox,
+            })?;
+            println!(
+                "Merged Merge Candidate {} at {}",
+                result.merge_candidate_id, result.landed_commit
+            );
+        }
         WorkCommands::Task { command } => match command {
             WorkTaskCommands::Run {
                 work_item_id,
