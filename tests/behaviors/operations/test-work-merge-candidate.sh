@@ -285,6 +285,31 @@ test_work_merge_rejects_source_workspace_mismatch() {
   return $RESULT
 }
 
+test_work_merge_rejects_wrong_managed_source_workspace() {
+  setup_test_project
+  trap cleanup_test_project RETURN
+  write_mock_claude
+  create_passed_merge_candidate
+  MAIN_BEFORE="$(git rev-parse main)"
+
+  jq '
+    .merge_candidates[0].source_workspace.path = "../work-6-work-1-other-attempt" |
+    (.attempts[0].tasks[] | select(.id == "attempt-1-write").output.workspace_path) =
+      "../work-6-work-1-other-attempt"
+  ' \
+    .factory/work/items/work-1.json > "$TEST_DIR/item.json"
+  mv "$TEST_DIR/item.json" .factory/work/items/work-1.json
+
+  RESULT=0
+  assert_fails run_merge pass || RESULT=1
+  [ "$(git rev-parse main)" = "$MAIN_BEFORE" ] || RESULT=1
+  [ "$(json_value '.merge_candidates[0].merge_state.status')" = "pending" ] || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stderr")" "source workspace path" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stderr")" "../work-6-work-1-attempt-1" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stderr")" "../work-6-work-1-other-attempt" || RESULT=1
+  return $RESULT
+}
+
 test_work_merge_rejects_target_workspace_mismatch() {
   setup_test_project
   trap cleanup_test_project RETURN
@@ -406,6 +431,8 @@ run_test "work merge rejects source branch mismatch" \
   test_work_merge_rejects_stored_source_branch_mismatch
 run_test "work merge rejects source workspace mismatch" \
   test_work_merge_rejects_source_workspace_mismatch
+run_test "work merge rejects wrong managed source workspace" \
+  test_work_merge_rejects_wrong_managed_source_workspace
 run_test "work merge rejects target workspace mismatch" \
   test_work_merge_rejects_target_workspace_mismatch
 run_test "work merge failed check leaves target unchanged" \
