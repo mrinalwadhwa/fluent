@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -243,13 +244,13 @@ impl WorkItem {
     ) -> Result<String, WorkModelError> {
         let candidate_id = format!("{attempt_id}-merge-candidate");
         validate_id("merge candidate", &candidate_id)?;
-        if self
+        if let Some(candidate) = self
             .merge_candidates
             .iter()
-            .any(|candidate| candidate.id == candidate_id && candidate.attempt_id == attempt_id)
+            .find(|candidate| candidate.attempt_id == attempt_id)
         {
             self.validate()?;
-            return Ok(candidate_id);
+            return Ok(candidate.id.clone());
         }
 
         let Some(attempt) = self
@@ -325,6 +326,20 @@ impl WorkItem {
                 });
             }
             attempt.validate(&self.id)?;
+        }
+        let mut merge_candidate_ids = HashSet::new();
+        let mut merge_candidate_attempts = HashSet::new();
+        for candidate in &self.merge_candidates {
+            if !merge_candidate_ids.insert(candidate.id.as_str()) {
+                return Err(WorkModelError::MergeCandidateAlreadyExists {
+                    id: candidate.id.clone(),
+                });
+            }
+            if !merge_candidate_attempts.insert(candidate.attempt_id.as_str()) {
+                return Err(WorkModelError::MergeCandidateAttemptAlreadyExists {
+                    attempt_id: candidate.attempt_id.clone(),
+                });
+            }
         }
         for candidate in &self.merge_candidates {
             candidate.validate(self)?;
@@ -643,17 +658,6 @@ impl MergeCandidate {
                 attempt_id: self.attempt_id.clone(),
             });
         };
-        if work_item
-            .merge_candidates
-            .iter()
-            .filter(|candidate| candidate.id == self.id)
-            .count()
-            > 1
-        {
-            return Err(WorkModelError::MergeCandidateAlreadyExists {
-                id: self.id.clone(),
-            });
-        }
         if attempt.status != AttemptStatus::Complete
             || attempt.review_state != Some(AttemptReviewState::Passed)
         {
@@ -763,6 +767,9 @@ pub enum WorkModelError {
     MergeCandidateAlreadyExists {
         id: String,
     },
+    MergeCandidateAttemptAlreadyExists {
+        attempt_id: String,
+    },
     MergeCandidateAttemptNotFound {
         candidate_id: String,
         attempt_id: String,
@@ -855,6 +862,9 @@ impl fmt::Display for WorkModelError {
             }
             Self::MergeCandidateAlreadyExists { id } => {
                 write!(f, "Merge Candidate {id:?} already exists")
+            }
+            Self::MergeCandidateAttemptAlreadyExists { attempt_id } => {
+                write!(f, "Attempt {attempt_id:?} already has a Merge Candidate")
             }
             Self::MergeCandidateAttemptNotFound {
                 candidate_id,
@@ -1562,6 +1572,36 @@ mod tests {
         assert_eq!(first, "attempt-1-merge-candidate");
         assert_eq!(second, first);
         assert_eq!(work_item.merge_candidates.len(), 1);
+    }
+
+    #[test]
+    fn merge_candidate_validation_rejects_duplicate_attempt_candidate() {
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Keep one merge candidate per attempt".to_string(),
+            attempts: vec![Attempt {
+                id: "attempt-1".to_string(),
+                work_item_id: "work-1".to_string(),
+                status: AttemptStatus::Complete,
+                tasks: vec![completed_write_task("attempt-1-write", "original")],
+                review_state: Some(AttemptReviewState::Passed),
+                artifacts: Vec::new(),
+            }],
+            merge_candidates: Vec::new(),
+        };
+        work_item
+            .create_or_get_merge_candidate("attempt-1")
+            .unwrap();
+        let mut duplicate = work_item.merge_candidates[0].clone();
+        duplicate.id = "alternate-merge-candidate".to_string();
+        work_item.merge_candidates.push(duplicate);
+
+        assert_eq!(
+            work_item.validate().unwrap_err(),
+            WorkModelError::MergeCandidateAttemptAlreadyExists {
+                attempt_id: "attempt-1".to_string(),
+            }
+        );
     }
 
     #[test]
