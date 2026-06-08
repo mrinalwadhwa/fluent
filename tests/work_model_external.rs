@@ -534,7 +534,7 @@ fn work_item_add_initial_attempt_creates_scheduler_facing_write_task() {
         task.workspace_access.writes,
         vec![WorkspaceRef {
             id: "candidate".to_string(),
-            path: ".factory/work/workspaces/attempt-1".to_string(),
+            path: "../work-6-work-1-attempt-1".to_string(),
         }]
     );
     assert_eq!(task.artifact_area, None);
@@ -560,7 +560,7 @@ fn work_item_add_initial_attempt_appends_to_existing_attempts() {
         attempt.tasks[0].workspace_access.writes,
         vec![WorkspaceRef {
             id: "candidate".to_string(),
-            path: ".factory/work/workspaces/attempt-2".to_string(),
+            path: "../work-6-work-1-attempt-2".to_string(),
         }]
     );
     work_item.validate().unwrap();

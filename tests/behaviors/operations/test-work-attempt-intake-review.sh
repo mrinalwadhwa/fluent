@@ -85,7 +85,7 @@ test_attempt_appends_to_existing_attempts() {
   [ "$(json_value '.attempts[1].tasks | length')" = "1" ] || RESULT=1
   [ "$(json_value '.attempts[1].tasks[0].id')" = "attempt-2-write" ] || RESULT=1
   [ "$(json_value '.attempts[1].tasks[0].attempt_id')" = "attempt-2" ] || RESULT=1
-  [ "$(json_value '.attempts[1].tasks[0].workspace_access.writes[0].path')" = ".factory/work/workspaces/attempt-2" ] || RESULT=1
+  [ "$(json_value '.attempts[1].tasks[0].workspace_access.writes[0].path')" = "../work-6-work-1-attempt-2" ] || RESULT=1
 
   cleanup_test_project
   return $RESULT
@@ -191,7 +191,7 @@ test_show_prints_attempt_and_task_as_pretty_json() {
             "writes": [
               {
                 "id": "candidate",
-                "path": ".factory/work/workspaces/attempt-1"
+                "path": "../work-6-work-1-attempt-1"
               }
             ]
           }

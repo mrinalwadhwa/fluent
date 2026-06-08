@@ -112,7 +112,8 @@ WHEN `factory work attempt <work-item-id> <attempt-id>` creates the
 initial `write` Task,
 THE SYSTEM SHALL give the Task role `author`, id `<attempt-id>-write`,
 the matching Work Item and Attempt ids, and exactly one writable
-workspace reference at `.factory/work/workspaces/<attempt-id>`, without
+workspace reference at
+`../work-<work-item-id-byte-len>-<work-item-id>-<attempt-id>`, without
 creating or executing that workspace during Attempt creation.
 Test: tests/work_model_external.rs (work_item_add_initial_attempt_creates_scheduler_facing_write_task)
 Test: tests/binary.rs (work_attempt_adds_planned_attempt_with_initial_write_task)
@@ -393,9 +394,9 @@ Test: tests/behaviors/operations/test-work-task-run.sh (coder failure marks Task
 
 IF the requested Task is missing, belongs to a different Attempt or Work
 Item, is not planned, has an unsupported kind, has zero or multiple
-writable workspaces for a write Task, declares a writable workspace outside
-`.factory/work/workspaces/`, points to an existing directory that is not a
-registered git worktree, or is a review Task that declares writable
+writable workspaces for a write Task, declares a writable workspace
+outside managed sibling workspaces, points to an existing directory that
+is not a registered git worktree, or is a review Task that declares writable
 workspaces, lacks an artifact area, declares no readable workspaces,
 lacks review context, declares review context whose candidate is not a
 readable workspace, declares an unmanaged artifact area path, or declares

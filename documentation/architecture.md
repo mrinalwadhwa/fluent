@@ -73,12 +73,16 @@ execution context with `--instructions <text>` or
 appends a planned Attempt with one initial `write` Task. The Task
 declares role `author`, copies the Work Item instructions into optional
 `Task.instructions`, and declares one writable workspace reference at
-`.factory/work/workspaces/<attempt-id>`. `factory work task run` creates
-or reuses that writable workspace as a git worktree, runs the coder
-there, and completes the Task only after the workspace is clean and
-contains a new commit produced after Factory bound the workspace for that
-Task run. The bridge rejects writable Task workspace paths outside
-`.factory/work/workspaces/` before it creates or binds a worktree.
+`../work-<work-item-id-byte-len>-<work-item-id>-<attempt-id>`.
+`factory work task run` creates or reuses that writable workspace as a
+sibling git worktree beside the source checkout, runs the coder there,
+and completes the Task only after the workspace is clean and contains a
+new commit produced after Factory bound the workspace for that Task run.
+The bridge stores workspace paths relative to the source root for
+portability, resolves them through the source checkout parent at
+execution time, and rejects writable Task workspace paths outside the
+expected managed sibling workspace before it creates or binds a
+worktree.
 `factory work review <work-item-id> <attempt-id>` appends planned
 `review` Tasks for the default reviewer set after a completed write Task
 exists. Each review Task reads the candidate workspace, carries review
@@ -166,14 +170,14 @@ the core model.
     "writes": [
       {
         "id": "candidate",
-        "path": ".factory/work/workspaces/attempt-1"
+        "path": "../work-6-work-1-attempt-1"
       }
     ]
   },
   "status": "complete",
   "output": {
     "workspace_id": "candidate",
-    "workspace_path": ".factory/work/workspaces/attempt-1",
+    "workspace_path": "../work-6-work-1-attempt-1",
     "source_branch": "main",
     "commit": "0123456789abcdef"
   }
@@ -210,7 +214,7 @@ artifact references under the Attempt and do not set `output`; their
 markdown verdict remains data, not Task execution status.
 
 Review tasks are read-only with respect to candidate workspaces,
-including managed candidate workspaces under `.factory/work/workspaces/`.
+including managed candidate workspaces beside the source checkout.
 Factory grants sandboxed review Tasks read-only access to candidate
 worktrees and their shared git metadata so standard commands such as
 `git diff <source>..<candidate>` work from the candidate workspace. They
@@ -235,6 +239,15 @@ coexistence is a compatibility bridge while agents start using Work Items,
 Attempts, Tasks, Workspaces, and Merge Candidates for new delegated build
 work.
 
+Managed candidate worktrees do not live under `.factory/work/`. Factory
+keeps Work Item JSON, review artifacts, merge artifacts, and operator
+state in the source checkout, but it creates candidate git worktrees as
+sibling directories beside the source checkout. Stored workspace
+references remain relative to the source root, for example
+`../work-6-work-1-attempt-1`, and include a Work Item ID byte-length
+prefix, Work Item ID, and Attempt ID so valid hyphenated IDs remain
+globally distinct.
+
 The first storage contract is:
 
 ```
@@ -249,12 +262,13 @@ Attempt contains its Tasks. The `WorkItem` also contains Merge Candidates
 created from passed Attempt reviews. Tasks store their workspace access
 under `workspace_access.reads` and `workspace_access.writes`. Workspace
 references stay inside task `workspace_access.reads` and
-`workspace_access.writes`. Merge Candidates store the reviewed source
-candidate workspace and target workspace directly as boundary data
-derived from the passed Attempt's latest completed write Task. Factory
-does not keep a standalone workspace registry in this first contract.
-Merge Candidates use the public `MergeCandidate` shape, but queue work
-has not yet introduced a separate candidate collection.
+`workspace_access.writes` and point to managed sibling worktrees for
+candidate execution. Merge Candidates store the reviewed source candidate
+workspace and target workspace directly as boundary data derived from the
+passed Attempt's latest completed write Task. Factory does not keep a
+standalone workspace registry in this first contract. Merge Candidates
+use the public `MergeCandidate` shape, but queue work has not yet
+introduced a separate candidate collection.
 
 Code that reads `.factory/work/items/*.json` must parse into the public
 Rust model and validate every embedded task and Merge Candidate before

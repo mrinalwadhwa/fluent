@@ -53,7 +53,7 @@ write_mock_claude() {
   cat > "${TEST_DIR}/bin/claude" <<'MOCK_SCRIPT'
 #!/usr/bin/env bash
 case "$PWD" in
-  */.factory/work/workspaces/*)
+  */work-6-work-1-attempt-1)
     printf 'merge output\n' > merge-output.txt
     git add merge-output.txt
     git commit -m "Add merge output" > /dev/null 2>&1
@@ -134,7 +134,7 @@ test_work_merge_lands_after_update_checks_and_reviewers() {
   create_passed_merge_candidate
 
   OLD_CANDIDATE="$(json_value '.merge_candidates[0].candidate_commit')"
-  CANDIDATE_PWD="$(cd .factory/work/workspaces/attempt-1 && pwd -P)"
+  CANDIDATE_PWD="$(cd ../work-6-work-1-attempt-1 && pwd -P)"
   printf 'target update\n' > target.txt
   git add target.txt && git commit -m "Add target update" > /dev/null 2>&1
   TARGET_BEFORE="$(git rev-parse main)"
@@ -180,7 +180,7 @@ EOF
     > "$TEST_DIR/landed-candidate" 2> "$TEST_DIR/stderr" || RESULT=1
   [ "$(jq -r '.merge_state.status' "$TEST_DIR/landed-candidate")" = "landed" ] || RESULT=1
   [ "$(jq -r '.merge_state.landed_commit' "$TEST_DIR/landed-candidate")" = "$LANDED_COMMIT" ] || RESULT=1
-  if git worktree list --porcelain | grep -Fq ".factory/work/workspaces/attempt-1"; then
+  if git worktree list --porcelain | grep -Fq "../work-6-work-1-attempt-1"; then
     printf '    FAIL: managed candidate workspace remains registered after merge\n'
     RESULT=1
   fi
@@ -367,7 +367,7 @@ test_work_merge_rebase_failure_leaves_target_unchanged() {
   [ "$(json_value '.merge_candidates[0].review_state')" = "pending" ] || RESULT=1
   assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" "rebase" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "rebase" || RESULT=1
-  if git -C .factory/work/workspaces/attempt-1 status 2>&1 | grep -qi "rebase in progress"; then
+  if git -C ../work-6-work-1-attempt-1 status 2>&1 | grep -qi "rebase in progress"; then
     printf '    FAIL: rebase remains in progress after merge failure\n'
     RESULT=1
   fi

@@ -24,11 +24,16 @@ flat_section="$(printf '%s\n' "$section" | tr '\n' ' ' | tr -s ' ')"
 for phrase in \
   'Durable work model state lives under `.factory/work/`' \
   'separate from `.factory/runs`' \
+  'Managed candidate worktrees do not live under `.factory/work/`' \
+  'sibling directories beside the source checkout' \
+  '../work-6-work-1-attempt-1' \
+  'include a Work Item ID byte-length prefix, Work Item ID, and Attempt ID' \
   '.factory/work/ items/ <work-item-id>.json' \
   'one serialized `WorkItem` from `factory::work_model`' \
   'contains its Attempts' \
   'contains its Tasks' \
   'Workspace references stay inside task `workspace_access.reads` and `workspace_access.writes`' \
+  'managed sibling worktrees for candidate execution' \
   'does not keep a standalone workspace registry' \
   'Merge Candidates use the public `MergeCandidate` shape' \
   'must parse into the public Rust model and validate every embedded task' \

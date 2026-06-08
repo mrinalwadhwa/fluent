@@ -70,7 +70,7 @@ show_json_value() {
 }
 
 workspace_path() {
-  printf '%s\n' ".factory/work/workspaces/attempt-1"
+  printf '%s\n' "../work-6-work-1-attempt-1"
 }
 
 physical_workspace_path() {
@@ -106,7 +106,7 @@ case "${TASK_RUN_MOCK_MODE:-commit}" in
     printf 'Verdict: uncertain\n\nCould not verify.\n' > review.md
     ;;
   review-read-candidate)
-    cat ../../../workspaces/attempt-1/README.md > candidate-read.txt
+    cat ../../../../../../work-6-work-1-attempt-1/README.md > candidate-read.txt
     printf 'Verdict: pass\n\nRead candidate workspace.\n' > review.md
     ;;
   review-missing)
@@ -497,7 +497,7 @@ test_invalid_review_task_requests_do_not_complete_or_mutate() {
   [ "$(cat .factory/work/items/work-1.json)" = "$AFTER_MUTATION" ] || RESULT=1
 
   printf '%s' "$BEFORE" > .factory/work/items/work-1.json
-  jq '(.attempts[0].tasks[] | select(.id == "attempt-1-review-tests") | .workspace_access.writes) = [{"id":"candidate","path":".factory/work/workspaces/attempt-1"}]' \
+  jq '(.attempts[0].tasks[] | select(.id == "attempt-1-review-tests") | .workspace_access.writes) = [{"id":"candidate","path":"../work-6-work-1-attempt-1"}]' \
     .factory/work/items/work-1.json > "$TEST_DIR/item.json"
   mv "$TEST_DIR/item.json" .factory/work/items/work-1.json
   AFTER_MUTATION="$(cat .factory/work/items/work-1.json)"
@@ -611,7 +611,7 @@ test_invalid_task_requests_do_not_complete_or_mutate() {
   assert_not_complete || RESULT=1
 
   printf '%s' "$BEFORE" > .factory/work/items/work-1.json
-  jq '.attempts[0].tasks[0].workspace_access.writes += [{"id":"other","path":".factory/work/workspaces/other"}]' \
+  jq '.attempts[0].tasks[0].workspace_access.writes += [{"id":"other","path":"../work-6-work-1-other"}]' \
     .factory/work/items/work-1.json > "$TEST_DIR/item.json"
   mv "$TEST_DIR/item.json" .factory/work/items/work-1.json
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \

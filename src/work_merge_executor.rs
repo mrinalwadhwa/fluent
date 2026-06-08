@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use std::fs;
 use std::io::ErrorKind;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use crate::checks;
@@ -15,7 +15,7 @@ use crate::review::{self, ReviewState};
 use crate::work_model::{
     ArtifactRef, MergeCandidateMergeState, MergeCandidateMergeStatus, MergeCandidateReviewState,
     WORK_ARTIFACTS_DIR, WorkItem, WorkModelError, WorkModelStorageError, WorkModelStore,
-    to_json_pretty,
+    resolve_expected_candidate_workspace_path, to_json_pretty,
 };
 use crate::worktree;
 
@@ -75,6 +75,8 @@ pub fn merge_candidate(config: WorkMergeConfig<'_>) -> Result<WorkMergeOutcome> 
     let source_workspace = resolve_managed_candidate_workspace_path(
         config.project_root,
         &candidate.source_workspace.path,
+        config.work_item_id,
+        &candidate.attempt_id,
     )?;
     let target_workspace =
         resolve_workspace_path(config.project_root, &candidate.target_workspace.path);
@@ -663,38 +665,19 @@ fn resolve_workspace_path(project_root: &Path, path: &str) -> PathBuf {
     }
 }
 
-fn resolve_managed_candidate_workspace_path(project_root: &Path, path: &str) -> Result<PathBuf> {
-    let relative_path = Path::new(path);
-    if relative_path.is_absolute() {
-        bail!("Merge Candidate source workspace path must be relative: {path}");
-    }
-
-    let mut components = Vec::new();
-    for component in relative_path.components() {
-        match component {
-            Component::Normal(part) => components.push(part.to_owned()),
-            _ => bail!(
-                "Merge Candidate source workspace path must stay under .factory/work/workspaces: {path}"
-            ),
-        }
-    }
-    let managed_prefix = [
-        std::ffi::OsStr::new(".factory"),
-        std::ffi::OsStr::new("work"),
-        std::ffi::OsStr::new("workspaces"),
-    ];
-    if components.len() <= managed_prefix.len()
-        || !components
-            .iter()
-            .zip(managed_prefix.iter())
-            .all(|(actual, expected)| actual == expected)
-    {
-        bail!(
-            "Merge Candidate source workspace path must stay under .factory/work/workspaces: {path}"
-        );
-    }
-
-    Ok(resolve_workspace_path(project_root, path))
+fn resolve_managed_candidate_workspace_path(
+    project_root: &Path,
+    path: &str,
+    work_item_id: &str,
+    attempt_id: &str,
+) -> Result<PathBuf> {
+    Ok(resolve_expected_candidate_workspace_path(
+        project_root,
+        path,
+        work_item_id,
+        attempt_id,
+        "Merge Candidate source",
+    )?)
 }
 
 fn rebase_candidate(source_workspace: &Path, target_branch: &str) -> Result<()> {

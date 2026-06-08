@@ -140,7 +140,7 @@ write_mock_claude() {
   cat > "${TEST_DIR}/bin/claude" <<'MOCK_SCRIPT'
 #!/usr/bin/env bash
 case "$PWD" in
-  */.factory/work/workspaces/*)
+  */work-12-work-visible-attempt-visible|*/work-11-work-action-attempt-action)
     printf 'status dashboard output\n' > status-dashboard-output.txt
     git add status-dashboard-output.txt
     git commit -m "Add status dashboard output" > /dev/null 2>&1
@@ -158,7 +158,7 @@ write_uncertain_mock_claude() {
   cat > "${TEST_DIR}/bin/claude" <<'MOCK_SCRIPT'
 #!/usr/bin/env bash
 case "$PWD" in
-  */.factory/work/workspaces/*)
+  */work-15-work-needs-user-attempt-needs-user)
     printf 'status dashboard uncertain output\n' > status-dashboard-uncertain.txt
     git add status-dashboard-uncertain.txt
     git commit -m "Add status dashboard uncertain output" > /dev/null 2>&1

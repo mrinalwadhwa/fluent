@@ -551,7 +551,7 @@ fn work_attempt_adds_planned_attempt_with_initial_write_task() {
     );
     assert_eq!(
         attempt["tasks"][0]["workspace_access"]["writes"][0]["path"],
-        ".factory/work/workspaces/attempt-1"
+        "../work-6-work-1-attempt-1"
     );
     assert!(
         attempt["tasks"][0]["workspace_access"]["reads"]
@@ -559,11 +559,40 @@ fn work_attempt_adds_planned_attempt_with_initial_write_task() {
             .unwrap()
             .is_empty()
     );
-    assert!(
-        !tmp.path()
-            .join(".factory/work/workspaces/attempt-1")
-            .exists()
-    );
+    assert!(!tmp.path().join("../work-6-work-1-attempt-1").exists());
+}
+
+#[test]
+fn work_attempt_paths_disambiguate_hyphenated_ids() {
+    let tmp = TempDir::new().unwrap();
+    write_work_item_json(tmp.path(), "work-a", "First work");
+    write_work_item_json(tmp.path(), "work-a-b", "Second work");
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "attempt", "work-a", "b-c"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "attempt", "work-a-b", "c"])
+        .assert()
+        .success();
+
+    let first: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(tmp.path().join(".factory/work/items/work-a.json")).unwrap(),
+    )
+    .unwrap();
+    let second: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(tmp.path().join(".factory/work/items/work-a-b.json")).unwrap(),
+    )
+    .unwrap();
+    let first_path = &first["attempts"][0]["tasks"][0]["workspace_access"]["writes"][0]["path"];
+    let second_path = &second["attempts"][0]["tasks"][0]["workspace_access"]["writes"][0]["path"];
+
+    assert_eq!(first_path, "../work-6-work-a-b-c");
+    assert_eq!(second_path, "../work-8-work-a-b-c");
+    assert_ne!(first_path, second_path);
 }
 
 #[test]
@@ -609,7 +638,7 @@ fn work_attempt_appends_to_existing_attempts() {
     assert_eq!(attempts[1]["tasks"][0]["attempt_id"], "attempt-2");
     assert_eq!(
         attempts[1]["tasks"][0]["workspace_access"]["writes"][0]["path"],
-        ".factory/work/workspaces/attempt-2"
+        "../work-6-work-1-attempt-2"
     );
 }
 
@@ -722,7 +751,7 @@ exit 0
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("Completed Task attempt-1-write"));
 
-    let workspace = main_dir.join(".factory/work/workspaces/attempt-1");
+    let workspace = main_dir.join("../work-6-work-1-attempt-1");
     assert!(workspace.join("task-output.txt").is_file());
     let head = StdCommand::new("git")
         .args(["-C", &workspace.to_string_lossy()])
@@ -740,7 +769,7 @@ exit 0
     assert_eq!(task["output"]["workspace_id"], "candidate");
     assert_eq!(
         task["output"]["workspace_path"],
-        ".factory/work/workspaces/attempt-1"
+        "../work-6-work-1-attempt-1"
     );
     assert_eq!(task["output"]["source_branch"], "main");
     assert_eq!(task["output"]["commit"], head);
@@ -1038,7 +1067,7 @@ fn work_review_plans_review_tasks_for_completed_attempt() {
     );
     assert_eq!(
         review_task["workspace_access"]["reads"][0]["path"],
-        ".factory/work/workspaces/attempt-1"
+        "../work-6-work-1-attempt-1"
     );
     assert!(
         review_task["workspace_access"]["writes"]
@@ -1056,12 +1085,12 @@ fn work_review_plans_review_tasks_for_completed_attempt() {
     );
     assert_eq!(
         review_task["review_context"]["candidate_workspace_path"],
-        ".factory/work/workspaces/attempt-1"
+        "../work-6-work-1-attempt-1"
     );
     assert_eq!(review_task["review_context"]["source_branch"], "main");
     assert_eq!(
         review_task["review_context"]["candidate_commit"],
-        git_head(&main_dir.join(".factory/work/workspaces/attempt-1"))
+        git_head(&main_dir.join("../work-6-work-1-attempt-1"))
     );
 }
 
@@ -1173,17 +1202,16 @@ exit 0
     assert!(prompt.contains("Execute this Factory review Task"));
     assert!(prompt.contains("Readable candidate workspaces:"));
     let candidate_workspace =
-        fs::canonicalize(main_dir.join(".factory/work/workspaces/attempt-1")).unwrap();
+        fs::canonicalize(main_dir.join("../work-6-work-1-attempt-1")).unwrap();
     assert!(prompt.contains(&format!("- candidate: {}", candidate_workspace.display())));
-    assert!(!prompt.contains("- candidate: .factory/work/workspaces/attempt-1"));
+    assert!(!prompt.contains("- candidate: ../work-6-work-1-attempt-1"));
     assert!(prompt.contains("Review context:"));
     assert!(prompt.contains("- Source branch: main"));
     assert!(prompt.contains("- Review diff: git -C <candidate-workspace> diff main.."));
     assert!(prompt.contains(&review_path.to_string_lossy().to_string()));
     let system = fs::read_to_string(system_log).unwrap();
     assert!(system.contains("Factory tests reviewer"));
-    let candidate_skill =
-        main_dir.join(".factory/work/workspaces/attempt-1/skills/review-tests/SKILL.md");
+    let candidate_skill = candidate_workspace.join("skills/review-tests/SKILL.md");
     assert!(system.contains(&candidate_skill.to_string_lossy().to_string()));
     assert!(system.contains(&review_path.to_string_lossy().to_string()));
     assert!(!system.contains(".factory/runs/{{RUN_ID}}/reviews"));
@@ -1325,7 +1353,7 @@ fn work_attempt_run_drives_write_reviews_and_passes() {
     assert_eq!(candidate["source_workspace"]["id"], "candidate");
     assert_eq!(
         candidate["source_workspace"]["path"],
-        ".factory/work/workspaces/attempt-1"
+        "../work-6-work-1-attempt-1"
     );
     assert_eq!(candidate["target_workspace"]["id"], "target");
     assert_eq!(candidate["target_workspace"]["path"], ".");
@@ -1410,7 +1438,7 @@ fn work_merge_candidate_lands_after_merge_time_reviews() {
         .assert()
         .success();
 
-    let candidate_workspace = main_dir.join(".factory/work/workspaces/attempt-1");
+    let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
     let candidate_head = git_head(&candidate_workspace);
     let main_before = git_head(&main_dir);
     assert_ne!(main_before, candidate_head);
@@ -1536,7 +1564,7 @@ fn work_merge_candidate_failed_review_leaves_target_unchanged() {
         .assert()
         .success();
 
-    let candidate_workspace = main_dir.join(".factory/work/workspaces/attempt-1");
+    let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
     let candidate_head = git_head(&candidate_workspace);
     let main_before = git_head(&main_dir);
     let fail_bin = tmp.path().join("bin-merge-fail");
@@ -1624,7 +1652,7 @@ run_before_land = true
     )
     .unwrap();
 
-    let candidate_workspace = main_dir.join(".factory/work/workspaces/attempt-1");
+    let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
     let candidate_head = git_head(&candidate_workspace);
     let main_before = git_head(&main_dir);
     factory_cmd()
@@ -1694,7 +1722,7 @@ fn work_merge_candidate_warns_when_cleanup_fails_after_landing() {
         .assert()
         .success();
 
-    let candidate_workspace = main_dir.join(".factory/work/workspaces/attempt-1");
+    let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
     let candidate_head = git_head(&candidate_workspace);
     let lock_output = StdCommand::new("git")
         .args(["worktree", "lock", &candidate_workspace.to_string_lossy()])
@@ -1823,7 +1851,7 @@ fn work_merge_candidate_rebases_when_target_advanced() {
         .assert()
         .success();
 
-    let candidate_workspace = main_dir.join(".factory/work/workspaces/attempt-1");
+    let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
     let candidate_head = git_head(&candidate_workspace);
     commit_file(
         &main_dir,
@@ -1889,7 +1917,7 @@ fn work_merge_candidate_rejects_target_moved_during_review() {
         .assert()
         .success();
 
-    let candidate_workspace = main_dir.join(".factory/work/workspaces/attempt-1");
+    let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
     let candidate_head = git_head(&candidate_workspace);
     let main_before_merge = git_head(&main_dir);
     let move_once_file = tmp.path().join("target-moved-once");
@@ -1962,7 +1990,7 @@ fn work_merge_candidate_rebase_failure_leaves_target_unchanged() {
         &bin_dir,
         r##"#!/bin/bash
 case "$PWD" in
-  */.factory/work/workspaces/*)
+  */work-6-work-1-attempt-1)
     printf 'candidate readme\n' > README.md
     git add README.md
     git commit -m "Update README from candidate" >/dev/null
@@ -1988,7 +2016,7 @@ exit 0
         .assert()
         .success();
 
-    let candidate_workspace = main_dir.join(".factory/work/workspaces/attempt-1");
+    let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
     let candidate_head = git_head(&candidate_workspace);
     commit_file(
         &main_dir,
@@ -2075,7 +2103,7 @@ fn work_attempt_run_plans_followup_for_failed_reviews() {
     assert_eq!(followup["workspace_access"]["writes"][0]["id"], "candidate");
     assert_eq!(
         followup["workspace_access"]["writes"][0]["path"],
-        ".factory/work/workspaces/attempt-1"
+        "../work-6-work-1-attempt-1"
     );
     assert_eq!(followup["input_artifacts"].as_array().unwrap().len(), 5);
     assert_eq!(
@@ -2087,7 +2115,7 @@ fn work_attempt_run_plans_followup_for_failed_reviews() {
         "Keep durable instructions on every write Task."
     );
 
-    let candidate_workspace = main_dir.join(".factory/work/workspaces/attempt-1");
+    let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
     let followup_commit_before = git_head(&candidate_workspace);
     factory_cmd()
         .current_dir(&main_dir)
@@ -2138,7 +2166,7 @@ fn work_attempt_run_plans_followup_for_failed_reviews() {
     );
     assert_eq!(
         second_tests_review["review_context"]["candidate_workspace_path"],
-        ".factory/work/workspaces/attempt-1"
+        "../work-6-work-1-attempt-1"
     );
     assert!(
         attempt["tasks"]
@@ -2231,7 +2259,7 @@ fn work_attempt_run_exposes_followup_input_artifacts() {
         &bin_dir,
         r##"#!/bin/bash
 case "$PWD" in
-  */.factory/work/workspaces/*)
+  */work-6-work-1-attempt-1)
     prompt=""
     while [ "$#" -gt 0 ]; do
       if [ "$1" = "-p" ]; then
@@ -2264,7 +2292,7 @@ if [ "$1" = "-f" ]; then
   profile="$2"
   shift 2
   case "$PWD" in
-    */.factory/work/workspaces/*)
+    */work-6-work-1-attempt-1)
       cp "$profile" "$SANDBOX_PROFILE_LOG"
       ;;
   esac
@@ -2524,8 +2552,7 @@ fn work_task_run_rejects_unmanaged_review_read_workspace_path() {
     let outside_absolute = outside_absolute.to_string_lossy().to_string();
     for path in [
         "../outside-review-read",
-        ".factory/work/workspaces",
-        ".factory/work/workspaces/../outside-review-read",
+        "../work-6-work-1-attempt-1/nested",
         outside_absolute.as_str(),
     ] {
         let mut value: serde_json::Value = serde_json::from_str(&planned).unwrap();
@@ -2615,7 +2642,7 @@ fn work_task_run_rejects_malformed_review_context() {
             }
             "path" => {
                 review_task["review_context"]["candidate_workspace_path"] =
-                    serde_json::Value::String(".factory/work/workspaces/other".to_string());
+                    serde_json::Value::String("../work-6-work-1-other".to_string());
             }
             _ => unreachable!(),
         }
@@ -2848,7 +2875,7 @@ fn work_task_run_fails_review_task_that_dirties_candidate_workspace() {
         .success();
 
     let bin_dir = tmp.path().join("bin-review");
-    let candidate = main_dir.join(".factory/work/workspaces/attempt-1");
+    let candidate = main_dir.join("../work-6-work-1-attempt-1");
     write_mock_claude(
         &bin_dir,
         r##"#!/bin/bash
@@ -2899,7 +2926,7 @@ fn work_task_run_fails_review_task_that_dirties_candidate_workspace_and_exits_no
         .success();
 
     let bin_dir = tmp.path().join("bin-review");
-    let candidate = main_dir.join(".factory/work/workspaces/attempt-1");
+    let candidate = main_dir.join("../work-6-work-1-attempt-1");
     write_mock_claude(
         &bin_dir,
         r##"#!/bin/bash
@@ -2949,7 +2976,7 @@ fn work_task_run_fails_review_task_that_commits_to_candidate_workspace() {
         .success();
 
     let bin_dir = tmp.path().join("bin-review");
-    let candidate = main_dir.join(".factory/work/workspaces/attempt-1");
+    let candidate = main_dir.join("../work-6-work-1-attempt-1");
     let baseline_head = git_head(&candidate);
     write_mock_claude(
         &bin_dir,
@@ -3006,7 +3033,7 @@ fn work_task_run_restores_committed_review_mutation_before_dirty_failure() {
         .success();
 
     let bin_dir = tmp.path().join("bin-review");
-    let candidate = main_dir.join(".factory/work/workspaces/attempt-1");
+    let candidate = main_dir.join("../work-6-work-1-attempt-1");
     let baseline_head = git_head(&candidate);
     write_mock_claude(
         &bin_dir,
@@ -3091,7 +3118,7 @@ fn work_task_run_sandboxes_review_with_read_only_candidate() {
         .success();
 
     let profile = fs::read_to_string(profile_copy).unwrap();
-    let candidate = fs::canonicalize(main_dir.join(".factory/work/workspaces/attempt-1")).unwrap();
+    let candidate = fs::canonicalize(main_dir.join("../work-6-work-1-attempt-1")).unwrap();
     let common_git_dir = fs::canonicalize(git_common_dir(&candidate)).unwrap();
     let artifact_dir =
         fs::canonicalize(main_dir.join(".factory/work/artifacts/attempt-1/attempt-1-review-tests"))
@@ -3352,7 +3379,7 @@ fn work_task_run_rejects_reused_workspace_without_new_commit() {
         .assert()
         .success();
 
-    let workspace = main_dir.join(".factory/work/workspaces/attempt-1");
+    let workspace = main_dir.join("../work-6-work-1-attempt-1");
     StdCommand::new("git")
         .args([
             "-C",
@@ -3428,7 +3455,7 @@ fn work_task_run_rejects_existing_directory_that_is_not_worktree() {
         .assert()
         .success();
 
-    let workspace = main_dir.join(".factory/work/workspaces/attempt-1");
+    let workspace = main_dir.join("../work-6-work-1-attempt-1");
     fs::create_dir_all(&workspace).unwrap();
     let item_path = main_dir.join(".factory/work/items/work-1.json");
     let before = fs::read_to_string(&item_path).unwrap();
@@ -3504,7 +3531,7 @@ fn work_task_run_rejects_existing_task_branch_without_workspace() {
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert!(value["attempts"][0]["tasks"][0].get("status").is_none());
     assert!(value["attempts"][0]["tasks"][0].get("output").is_none());
-    assert!(!main_dir.join(".factory/work/workspaces/attempt-1").exists());
+    assert!(!main_dir.join("../work-6-work-1-attempt-1").exists());
 }
 
 #[test]
@@ -3546,7 +3573,7 @@ fn work_task_run_rejects_task_that_is_not_planned() {
         .stderr(predicate::str::contains("expected planned"));
 
     assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
-    assert!(!main_dir.join(".factory/work/workspaces/attempt-1").exists());
+    assert!(!main_dir.join("../work-6-work-1-attempt-1").exists());
 }
 
 #[test]
@@ -3588,7 +3615,7 @@ fn work_task_run_rejects_non_write_task() {
         .stderr(predicate::str::contains("unsupported by task run"));
 
     assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
-    assert!(!main_dir.join(".factory/work/workspaces/attempt-1").exists());
+    assert!(!main_dir.join("../work-6-work-1-attempt-1").exists());
 }
 
 #[test]
@@ -3633,12 +3660,12 @@ fn work_task_run_requires_one_writable_workspace() {
         ));
 
     assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
-    assert!(!main_dir.join(".factory/work/workspaces/attempt-1").exists());
+    assert!(!main_dir.join("../work-6-work-1-attempt-1").exists());
 
     let mut value: serde_json::Value = serde_json::from_str(&before).unwrap();
     value["attempts"][0]["tasks"][0]["workspace_access"]["writes"] = serde_json::json!([
-        {"id": "candidate", "path": ".factory/work/workspaces/attempt-1"},
-        {"id": "other", "path": ".factory/work/workspaces/other"}
+        {"id": "candidate", "path": "../work-6-work-1-attempt-1"},
+        {"id": "other", "path": "../work-6-work-1-other"}
     ]);
     fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
     let before = fs::read_to_string(&item_path).unwrap();
@@ -3658,7 +3685,7 @@ fn work_task_run_requires_one_writable_workspace() {
         .failure();
 
     assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
-    assert!(!main_dir.join(".factory/work/workspaces/attempt-1").exists());
+    assert!(!main_dir.join("../work-6-work-1-attempt-1").exists());
 }
 
 #[test]
@@ -3682,7 +3709,8 @@ fn work_task_run_rejects_unmanaged_writable_workspace_path() {
     let outside_absolute = outside_absolute.to_string_lossy().to_string();
     for path in [
         "../outside-workspace",
-        ".factory/work/workspaces/../outside",
+        "../outside",
+        "../work-6-work-1-other-attempt",
         outside_absolute.as_str(),
     ] {
         let mut value: serde_json::Value =
@@ -3713,6 +3741,7 @@ fn work_task_run_rejects_unmanaged_writable_workspace_path() {
     }
 
     assert!(!main_dir.join("../outside-workspace").exists());
+    assert!(!main_dir.join("../work-6-work-1-other-attempt").exists());
     assert!(!main_dir.join(".factory/work/outside").exists());
     assert!(!Path::new(&outside_absolute).exists());
 }
@@ -3787,8 +3816,8 @@ fn work_task_run_missing_ids_leave_work_item_unchanged() {
     }
 
     assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
-    assert!(!main_dir.join(".factory/work/workspaces/attempt-1").exists());
-    assert!(!main_dir.join(".factory/work/workspaces/attempt-2").exists());
+    assert!(!main_dir.join("../work-6-work-1-attempt-1").exists());
+    assert!(!main_dir.join("../work-6-work-1-attempt-2").exists());
 }
 
 #[test]
@@ -4796,7 +4825,7 @@ fn loop_mock_script(verdict: &str) -> String {
     format!(
         r##"#!/bin/bash
 case "$PWD" in
-  */.factory/work/workspaces/*)
+  */work-6-work-1-attempt-1)
     printf 'loop output\n' > loop-output.txt
     git add loop-output.txt
     git commit -m "Add loop output" >/dev/null
@@ -4814,7 +4843,7 @@ fn stateful_loop_mock_script(verdict: &str) -> String {
     format!(
         r##"#!/bin/bash
 case "$PWD" in
-  */.factory/work/workspaces/*)
+  */work-6-work-1-attempt-1)
     count_file="$PWD/.factory-loop-write-count"
     if [ -f "$count_file" ]; then
       count="$(cat "$count_file")"
@@ -4839,7 +4868,7 @@ exit 0
 fn loop_mock_script_without_verdict() -> String {
     r##"#!/bin/bash
 case "$PWD" in
-  */.factory/work/workspaces/*)
+  */work-6-work-1-attempt-1)
     printf 'loop output\n' > loop-output.txt
     git add loop-output.txt
     git commit -m "Add loop output" >/dev/null
@@ -4856,7 +4885,7 @@ exit 0
 fn loop_mock_script_with_mixed_verdicts() -> String {
     r##"#!/bin/bash
 case "$PWD" in
-  */.factory/work/workspaces/*)
+  */work-6-work-1-attempt-1)
     printf 'loop output\n' > loop-output.txt
     git add loop-output.txt
     git commit -m "Add loop output" >/dev/null

@@ -185,7 +185,7 @@ test_work_attempt_adds_initial_write_task() {
   assert_contains "$SHOW_OUTPUT" '"kind": "write"' || RESULT=1
   assert_contains "$SHOW_OUTPUT" '"role": "author"' || RESULT=1
   assert_contains "$SHOW_OUTPUT" '"id": "candidate"' || RESULT=1
-  assert_contains "$SHOW_OUTPUT" '"path": ".factory/work/workspaces/attempt-1"' || RESULT=1
+  assert_contains "$SHOW_OUTPUT" '"path": "../work-6-work-1-attempt-1"' || RESULT=1
 
   cleanup_test_project
   return $RESULT

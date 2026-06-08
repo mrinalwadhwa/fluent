@@ -4,12 +4,137 @@ use std::error::Error;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
 pub const WORK_MODEL_DIR: &str = ".factory/work";
 pub const WORK_ITEMS_DIR: &str = "items";
 pub const WORK_ARTIFACTS_DIR: &str = ".factory/work/artifacts";
+
+pub fn initial_candidate_workspace_path(work_item_id: &str, attempt_id: &str) -> String {
+    format!("../work-{}-{work_item_id}-{attempt_id}", work_item_id.len())
+}
+
+pub fn resolve_managed_sibling_workspace_path(
+    project_root: &Path,
+    path: &str,
+    subject: &'static str,
+) -> Result<PathBuf, ManagedWorkspacePathError> {
+    let relative_path = Path::new(path);
+    if relative_path.is_absolute() {
+        return Err(ManagedWorkspacePathError::new(
+            subject,
+            path,
+            ManagedWorkspacePathErrorKind::Absolute,
+        ));
+    }
+
+    let mut components = relative_path.components();
+    let Some(Component::ParentDir) = components.next() else {
+        return Err(ManagedWorkspacePathError::new(
+            subject,
+            path,
+            ManagedWorkspacePathErrorKind::OutsideManagedRoot,
+        ));
+    };
+    let Some(Component::Normal(workspace_name)) = components.next() else {
+        return Err(ManagedWorkspacePathError::new(
+            subject,
+            path,
+            ManagedWorkspacePathErrorKind::OutsideManagedRoot,
+        ));
+    };
+    let workspace_name_string = workspace_name.to_string_lossy();
+    if !workspace_name_string.starts_with("work-")
+        || workspace_name_string.len() <= "work-".len()
+        || components.next().is_some()
+    {
+        return Err(ManagedWorkspacePathError::new(
+            subject,
+            path,
+            ManagedWorkspacePathErrorKind::OutsideManagedRoot,
+        ));
+    };
+
+    Ok(project_root
+        .parent()
+        .unwrap_or(project_root)
+        .join(workspace_name))
+}
+
+pub fn resolve_expected_candidate_workspace_path(
+    project_root: &Path,
+    path: &str,
+    work_item_id: &str,
+    attempt_id: &str,
+    subject: &'static str,
+) -> Result<PathBuf, ManagedWorkspacePathError> {
+    let resolved = resolve_managed_sibling_workspace_path(project_root, path, subject)?;
+    let expected = initial_candidate_workspace_path(work_item_id, attempt_id);
+    if path != expected {
+        return Err(ManagedWorkspacePathError::new(
+            subject,
+            path,
+            ManagedWorkspacePathErrorKind::UnexpectedCandidatePath { expected },
+        ));
+    }
+
+    Ok(resolved)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedWorkspacePathError {
+    subject: &'static str,
+    path: String,
+    kind: ManagedWorkspacePathErrorKind,
+}
+
+impl ManagedWorkspacePathError {
+    fn new(subject: &'static str, path: &str, kind: ManagedWorkspacePathErrorKind) -> Self {
+        Self {
+            subject,
+            path: path.to_string(),
+            kind,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ManagedWorkspacePathErrorKind {
+    Absolute,
+    OutsideManagedRoot,
+    UnexpectedCandidatePath { expected: String },
+}
+
+impl fmt::Display for ManagedWorkspacePathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.kind {
+            ManagedWorkspacePathErrorKind::Absolute => {
+                write!(
+                    f,
+                    "{} workspace path must be relative: {}",
+                    self.subject, self.path
+                )
+            }
+            ManagedWorkspacePathErrorKind::OutsideManagedRoot => {
+                write!(
+                    f,
+                    "{} workspace path must stay under managed sibling workspaces: {}",
+                    self.subject, self.path
+                )
+            }
+            ManagedWorkspacePathErrorKind::UnexpectedCandidatePath { ref expected } => {
+                write!(
+                    f,
+                    "{} workspace path must match expected candidate workspace {}: {}",
+                    self.subject, expected, self.path
+                )
+            }
+        }
+    }
+}
+
+impl Error for ManagedWorkspacePathError {}
 
 /// Durable unit of planned Factory work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,12 +155,14 @@ impl WorkItem {
         attempt_id: impl Into<String>,
     ) -> Result<(), WorkModelError> {
         let attempt_id = attempt_id.into();
+        validate_id("work item", &self.id)?;
         validate_id("attempt", &attempt_id)?;
         if self.attempts.iter().any(|attempt| attempt.id == attempt_id) {
             return Err(WorkModelError::AttemptAlreadyExists { id: attempt_id });
         }
 
         let task_id = format!("{attempt_id}-write");
+        let workspace_path = initial_candidate_workspace_path(&self.id, &attempt_id);
         self.attempts.push(Attempt {
             id: attempt_id.clone(),
             work_item_id: self.id.clone(),
@@ -52,7 +179,7 @@ impl WorkItem {
                     reads: Vec::new(),
                     writes: vec![WorkspaceRef {
                         id: "candidate".to_string(),
-                        path: format!(".factory/work/workspaces/{attempt_id}"),
+                        path: workspace_path,
                     }],
                 },
                 artifact_area: None,
@@ -1570,7 +1697,7 @@ mod tests {
         );
         assert_eq!(
             review_task.workspace_access.reads[0].path,
-            ".factory/work/workspaces/attempt-1-followup"
+            "../work-6-work-1-attempt-1-followup"
         );
     }
 
@@ -1635,7 +1762,7 @@ mod tests {
         assert_eq!(candidate.source_workspace.id, "candidate");
         assert_eq!(
             candidate.source_workspace.path,
-            ".factory/work/workspaces/attempt-1-followup"
+            "../work-6-work-1-attempt-1-followup"
         );
         assert_eq!(candidate.target_workspace.id, "target");
         assert_eq!(candidate.target_workspace.path, ".");
@@ -1727,7 +1854,7 @@ mod tests {
             attempt_id: "attempt-1".to_string(),
             source_workspace: WorkspaceRef {
                 id: "candidate".to_string(),
-                path: ".factory/work/workspaces/attempt-1-original".to_string(),
+                path: "../work-6-work-1-attempt-1-original".to_string(),
             },
             target_workspace: WorkspaceRef {
                 id: "target".to_string(),
@@ -1770,7 +1897,7 @@ mod tests {
             attempt_id: "attempt-1".to_string(),
             source_workspace: WorkspaceRef {
                 id: "candidate".to_string(),
-                path: ".factory/work/workspaces/attempt-1-original".to_string(),
+                path: "../work-6-work-1-attempt-1-original".to_string(),
             },
             target_workspace: WorkspaceRef {
                 id: "target".to_string(),
@@ -1813,7 +1940,7 @@ mod tests {
             attempt_id: "attempt-1".to_string(),
             source_workspace: WorkspaceRef {
                 id: "candidate".to_string(),
-                path: ".factory/work/workspaces/attempt-1-original".to_string(),
+                path: "../work-6-work-1-attempt-1-original".to_string(),
             },
             target_workspace: WorkspaceRef {
                 id: "target".to_string(),
@@ -1856,7 +1983,7 @@ mod tests {
             attempt_id: "attempt-1".to_string(),
             source_workspace: WorkspaceRef {
                 id: "candidate".to_string(),
-                path: ".factory/work/workspaces/attempt-1-original".to_string(),
+                path: "../work-6-work-1-attempt-1-original".to_string(),
             },
             target_workspace: WorkspaceRef {
                 id: "target".to_string(),
@@ -1923,7 +2050,7 @@ mod tests {
                 reads: Vec::new(),
                 writes: vec![WorkspaceRef {
                     id: "candidate".to_string(),
-                    path: format!(".factory/work/workspaces/attempt-1-{suffix}"),
+                    path: format!("../work-6-work-1-attempt-1-{suffix}"),
                 }],
             },
             artifact_area: None,
@@ -1931,7 +2058,7 @@ mod tests {
             input_artifacts: Vec::new(),
             output: Some(TaskOutput {
                 workspace_id: "candidate".to_string(),
-                workspace_path: format!(".factory/work/workspaces/attempt-1-{suffix}"),
+                workspace_path: format!("../work-6-work-1-attempt-1-{suffix}"),
                 source_branch: "main".to_string(),
                 commit: format!("commit-{suffix}"),
             }),

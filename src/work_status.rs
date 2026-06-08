@@ -330,12 +330,12 @@ mod tests {
             }],
             writes: vec![WorkspaceRef {
                 id: "candidate".to_string(),
-                path: ".factory/work/workspaces/attempt-1".to_string(),
+                path: "../work-6-work-1-attempt-1".to_string(),
             }],
         };
         task.output = Some(TaskOutput {
             workspace_id: "candidate".to_string(),
-            workspace_path: ".factory/work/workspaces/attempt-1".to_string(),
+            workspace_path: "../work-6-work-1-attempt-1".to_string(),
             source_branch: "main".to_string(),
             commit: "abc123".to_string(),
         });
@@ -436,12 +436,12 @@ mod tests {
             }],
             writes: vec![WorkspaceRef {
                 id: "candidate".to_string(),
-                path: ".factory/work/workspaces/attempt-1".to_string(),
+                path: "../work-6-work-1-attempt-1".to_string(),
             }],
         };
         task.output = Some(TaskOutput {
             workspace_id: "candidate".to_string(),
-            workspace_path: ".factory/work/workspaces/attempt-1".to_string(),
+            workspace_path: "../work-6-work-1-attempt-1".to_string(),
             source_branch: "main".to_string(),
             commit: "abc123".to_string(),
         });

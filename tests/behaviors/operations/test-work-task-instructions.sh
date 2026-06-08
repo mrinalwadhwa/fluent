@@ -72,7 +72,7 @@ for arg in "$@"; do
 done
 
 case "$PWD" in
-  */.factory/work/workspaces/*)
+  */work-6-work-1-attempt-1)
     count_file="${TASK_OUTPUT_COUNT_FILE}"
     count="$(cat "$count_file" 2>/dev/null || printf '0')"
     count="$((count + 1))"

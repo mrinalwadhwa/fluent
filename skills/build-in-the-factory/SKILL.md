@@ -218,14 +218,16 @@ Do NOT pause for:
 
 ## Work state
 
-Work model state lives under `.factory/work/`:
+Durable Work model state lives under `.factory/work/`:
 
 | Path | Purpose |
 |---|---|
 | `.factory/work/items/<work-item-id>.json` | Stored Work Item with Attempts, Tasks, and Merge Candidates |
-| `.factory/work/workspaces/<attempt-id>` | Managed candidate workspace for write Tasks |
 | `.factory/work/artifacts/<attempt-id>/<task-id>/` | Task artifacts such as review output |
 | `.factory/work/artifacts/<attempt-id>/<candidate-id>/merge/` | Merge-time review and execution artifacts |
+
+Managed candidate worktrees live beside the source checkout as
+`../work-<work-item-id-byte-len>-<work-item-id>-<attempt-id>`.
 
 Use `factory work show <work-item-id>` for the durable object. Use
 `factory status` or `factory dashboard` for operator-facing summaries.

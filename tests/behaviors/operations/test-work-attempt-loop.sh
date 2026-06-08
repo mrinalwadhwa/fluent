@@ -58,7 +58,7 @@ write_mock_claude() {
   cat > "${TEST_DIR}/bin/claude" <<MOCK_SCRIPT
 #!/usr/bin/env bash
 case "\$PWD" in
-  */.factory/work/workspaces/*)
+  */work-6-work-1-attempt-1)
     if [ "${write_mode}" = "fail" ]; then
       printf 'partial loop output\n' > partial-loop-output.txt
       exit 9
@@ -138,13 +138,13 @@ test_attempt_loop_passes_review_round() {
   [ "$(json_value '.attempts[0].review_state')" = "passed" ] || return 1
   [ "$(json_value '.merge_candidates | length')" = "1" ] || return 1
   [ "$(json_value '.merge_candidates[0].id')" = "attempt-1-merge-candidate" ] || return 1
-  [ "$(json_value '.merge_candidates[0].source_workspace.path')" = ".factory/work/workspaces/attempt-1" ] || return 1
+  [ "$(json_value '.merge_candidates[0].source_workspace.path')" = "../work-6-work-1-attempt-1" ] || return 1
   [ "$(json_value '.merge_candidates[0].target_workspace.id')" = "target" ] || return 1
   [ "$(json_value '.merge_candidates[0].target_workspace.path')" = "." ] || return 1
   [ "$(json_value '.merge_candidates[0].source_branch')" = "main" ] || return 1
   [ "$(json_value '.merge_candidates[0].target_branch')" = "main" ] || return 1
   [ "$(json_value '.merge_candidates[0].review_state')" = "pending" ] || return 1
-  [ "$(json_value '.merge_candidates[0].candidate_commit')" = "$(git -C .factory/work/workspaces/attempt-1 rev-parse HEAD)" ] || return 1
+  [ "$(json_value '.merge_candidates[0].candidate_commit')" = "$(git -C ../work-6-work-1-attempt-1 rev-parse HEAD)" ] || return 1
   "$FACTORY_BIN" work merge-candidate work-1 attempt-1-merge-candidate > "$TEST_DIR/candidate"
   [ "$(jq -r '.candidate_commit' "$TEST_DIR/candidate")" = "$(json_value '.merge_candidates[0].candidate_commit')" ] || return 1
   [ "$(jq -r '.target_workspace.path' "$TEST_DIR/candidate")" = "." ] || return 1
@@ -225,15 +225,15 @@ test_attempt_loop_plans_followup() {
   [ "$(json_value '.attempts[0].review_state')" = "failed" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[-1].input_artifacts | length')" = "5" ] || RESULT=1
 
-  FOLLOWUP_COMMIT_BEFORE="$(git -C .factory/work/workspaces/attempt-1 rev-parse HEAD)"
+  FOLLOWUP_COMMIT_BEFORE="$(git -C ../work-6-work-1-attempt-1 rev-parse HEAD)"
   run_attempt_loop > "$TEST_DIR/followup-stdout" || RESULT=1
-  FOLLOWUP_COMMIT_AFTER="$(git -C .factory/work/workspaces/attempt-1 rev-parse HEAD)"
+  FOLLOWUP_COMMIT_AFTER="$(git -C ../work-6-work-1-attempt-1 rev-parse HEAD)"
   [ "$FOLLOWUP_COMMIT_AFTER" != "$FOLLOWUP_COMMIT_BEFORE" ] || RESULT=1
   assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Completed Task attempt-1-followup-1" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Planned 5 review Tasks for Attempt attempt-1" || RESULT=1
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review" and (.id | startswith("attempt-1-review-2-")))] | length')" = "5" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-tests") | .review_context.candidate_commit')" = "$FOLLOWUP_COMMIT_AFTER" ] || RESULT=1
-  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-tests") | .review_context.candidate_workspace_path')" = ".factory/work/workspaces/attempt-1" ] || RESULT=1
+  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-tests") | .review_context.candidate_workspace_path')" = "../work-6-work-1-attempt-1" ] || RESULT=1
   return $RESULT
 }
 

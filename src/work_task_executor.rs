@@ -10,7 +10,7 @@ use crate::credential;
 use crate::os;
 use crate::work_model::{
     ArtifactRef, AttemptStatus, TaskKind, TaskOutput, TaskStatus, WorkItem, WorkModelStorageError,
-    WorkModelStore, to_json_pretty,
+    WorkModelStore, resolve_expected_candidate_workspace_path, to_json_pretty,
 };
 use crate::worktree;
 
@@ -84,7 +84,12 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     }
 
     let workspace = task.workspace_access.writes[0].clone();
-    let workspace_path = resolve_managed_workspace_path(config.project_root, &workspace.path)?;
+    let workspace_path = resolve_managed_workspace_path(
+        config.project_root,
+        &workspace.path,
+        config.work_item_id,
+        config.attempt_id,
+    )?;
     let input_artifacts = resolve_input_artifact_paths(config.project_root, &task.input_artifacts)?;
     let source_branch = current_branch(config.project_root)?;
     let branch_name = format!(
@@ -248,7 +253,12 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         .reads
         .iter()
         .map(|workspace| {
-            resolve_managed_readable_workspace_path(config.project_root, &workspace.path)
+            resolve_managed_readable_workspace_path(
+                config.project_root,
+                &workspace.path,
+                config.work_item_id,
+                config.attempt_id,
+            )
         })
         .collect::<Result<Vec<_>>>()?;
     if !task.workspace_access.reads.iter().any(|workspace| {
@@ -424,49 +434,42 @@ fn resolve_workspace_path(project_root: &Path, path: &str) -> PathBuf {
     }
 }
 
-fn resolve_managed_workspace_path(project_root: &Path, path: &str) -> Result<PathBuf> {
-    resolve_managed_task_workspace_path(project_root, path, "writable")
+fn resolve_managed_workspace_path(
+    project_root: &Path,
+    path: &str,
+    work_item_id: &str,
+    attempt_id: &str,
+) -> Result<PathBuf> {
+    resolve_managed_task_workspace_path(project_root, path, work_item_id, attempt_id, "writable")
 }
 
-fn resolve_managed_readable_workspace_path(project_root: &Path, path: &str) -> Result<PathBuf> {
-    resolve_managed_task_workspace_path(project_root, path, "readable")
+fn resolve_managed_readable_workspace_path(
+    project_root: &Path,
+    path: &str,
+    work_item_id: &str,
+    attempt_id: &str,
+) -> Result<PathBuf> {
+    resolve_managed_task_workspace_path(project_root, path, work_item_id, attempt_id, "readable")
 }
 
 fn resolve_managed_task_workspace_path(
     project_root: &Path,
     path: &str,
+    work_item_id: &str,
+    attempt_id: &str,
     access_kind: &str,
 ) -> Result<PathBuf> {
-    let relative_path = Path::new(path);
-    if relative_path.is_absolute() {
-        bail!("Task {access_kind} workspace path must be relative: {path}");
-    }
-
-    let mut components = Vec::new();
-    for component in relative_path.components() {
-        match component {
-            Component::Normal(part) => components.push(part.to_owned()),
-            _ => bail!(
-                "Task {access_kind} workspace path must stay under .factory/work/workspaces: {path}"
-            ),
-        }
-    }
-
-    let managed_prefix = [
-        std::ffi::OsStr::new(".factory"),
-        std::ffi::OsStr::new("work"),
-        std::ffi::OsStr::new("workspaces"),
-    ];
-    if components.len() <= managed_prefix.len()
-        || !components
-            .iter()
-            .zip(managed_prefix.iter())
-            .all(|(actual, expected)| actual == expected)
-    {
-        bail!("Task {access_kind} workspace path must stay under .factory/work/workspaces: {path}");
-    }
-
-    Ok(resolve_workspace_path(project_root, path))
+    Ok(resolve_expected_candidate_workspace_path(
+        project_root,
+        path,
+        work_item_id,
+        attempt_id,
+        match access_kind {
+            "writable" => "Task writable",
+            "readable" => "Task readable",
+            _ => "Task",
+        },
+    )?)
 }
 
 pub(crate) fn resolve_managed_artifact_area_path(
@@ -532,6 +535,12 @@ fn prepare_task_worktree(
         if !workspace_path.is_dir() {
             bail!(
                 "Workspace path exists but is not a directory: {}",
+                workspace_path.display()
+            );
+        }
+        if !workspace_path.join(".git").exists() {
+            bail!(
+                "Workspace {} exists but is not a registered git worktree",
                 workspace_path.display()
             );
         }
