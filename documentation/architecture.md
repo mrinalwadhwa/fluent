@@ -219,7 +219,8 @@ public `MergeCandidate` shape, but queue work has not yet introduced a
 separate candidate collection.
 
 Code that reads `.factory/work/items/*.json` must parse into the public
-Rust model and validate every embedded task before using the object.
+Rust model and validate the full `WorkItem`, including embedded Tasks
+and Merge Candidates, before using the object.
 The `WorkItem.id` inside each file must match the file stem, so
 `.factory/work/items/work-1.json` must contain `"id": "work-1"`.
 Work item IDs must not be empty, `.`, `..`, or contain `/` or `\`,

@@ -200,9 +200,9 @@ Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop passes 
 
 WHEN a Merge Candidate is created from a passed Attempt,
 THE SYSTEM SHALL record the source candidate workspace, target workspace,
-source branch, target branch, and candidate commit from the latest
-completed write Task, and set the Merge Candidate review state to
-pending.
+source branch, and candidate commit from the latest completed write Task,
+initialize the target branch from that write Task's source branch, and set
+the Merge Candidate review state to pending.
 Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop passes review round)
 
