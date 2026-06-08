@@ -114,6 +114,27 @@ fn work_model_store_writes_and_lists_documented_layout() {
 }
 
 #[test]
+fn work_model_store_create_refuses_existing_work_item() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    let original = work_item();
+    let mut replacement = work_item();
+    replacement.title = "Replacement title".to_string();
+
+    store.create_work_item(&original).unwrap();
+    let error = store.create_work_item(&replacement).unwrap_err();
+
+    match error {
+        WorkModelStorageError::WorkItemAlreadyExists { path, id } => {
+            assert_eq!(path, temp.path().join(".factory/work/items/work-1.json"));
+            assert_eq!(id, "work-1");
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+    assert_eq!(store.read_work_item("work-1").unwrap(), original);
+}
+
+#[test]
 fn work_model_store_keeps_existing_run_state_separate() {
     let temp = tempfile::tempdir().unwrap();
     let run_dir = temp.path().join(".factory/runs/run-legacy");
@@ -190,6 +211,10 @@ fn work_model_store_rejects_ids_that_cannot_name_files() {
         work_item.id = id.to_string();
         assert!(matches!(
             store.write_work_item(&work_item).unwrap_err(),
+            WorkModelStorageError::InvalidWorkItemId { .. }
+        ));
+        assert!(matches!(
+            store.create_work_item(&work_item).unwrap_err(),
             WorkModelStorageError::InvalidWorkItemId { .. }
         ));
     }

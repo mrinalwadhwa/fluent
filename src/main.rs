@@ -23,7 +23,7 @@ use factory::run::{self, Run};
 use factory::session::{self, DefaultHooks, SandboxedHooks, SessionConfig};
 use factory::summary;
 use factory::version;
-use factory::work_model::{WorkModelStorageError, WorkModelStore, to_json_pretty};
+use factory::work_model::{WorkItem, WorkModelStorageError, WorkModelStore, to_json_pretty};
 use factory::worktree;
 
 fn main() -> Result<()> {
@@ -206,6 +206,15 @@ fn main() -> Result<()> {
 fn cmd_work(project_root: &Path, command: WorkCommands) -> Result<()> {
     let store = WorkModelStore::new(project_root);
     match command {
+        WorkCommands::Create { id, title } => {
+            let item = WorkItem {
+                id,
+                title,
+                attempts: Vec::new(),
+            };
+            store.create_work_item(&item)?;
+            println!("Created Work Item {}", item.id);
+        }
         WorkCommands::List => {
             let items = store.list_work_items()?;
             if items.is_empty() {

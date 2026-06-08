@@ -27,7 +27,33 @@ stdout and exit successfully without requiring a Factory project.
 Test: tests/binary.rs (version_prints_package_version_and_commit)
 Test: tests/behaviors/operations/test-version.sh
 
-## Work Item inspection
+## Work Item intake and inspection
+
+WHEN `factory work create <id> --title <title>` is invoked from a
+directory,
+THE SYSTEM SHALL create `.factory/work/items/<id>.json` containing a
+Work Item with that id, that title, and an empty `attempts` list.
+Test: tests/binary.rs (work_create_writes_minimal_work_item)
+Test: tests/behaviors/operations/test-work-inspection.sh (work create writes minimal Work Item)
+
+IF `factory work create <id> --title <title>` is invoked for an
+existing Work Item id,
+THEN THE SYSTEM SHALL exit non-zero and leave the existing Work Item
+unchanged.
+Test: tests/binary.rs (work_create_refuses_existing_work_item)
+Test: tests/behaviors/operations/test-work-inspection.sh (work create existing item fails)
+
+IF `factory work create <id> --title <title>` is invoked with an invalid
+Work Item id,
+THEN THE SYSTEM SHALL exit non-zero and not write a Work Item file.
+Test: tests/binary.rs (work_create_rejects_invalid_work_item_id)
+Test: tests/behaviors/operations/test-work-inspection.sh (work create invalid id fails)
+
+WHEN a Work Item is created through intake,
+THE SYSTEM SHALL make it visible through `factory work list` and
+`factory work show <id>`.
+Test: tests/binary.rs (work_create_item_is_visible_through_list_and_show)
+Test: tests/behaviors/operations/test-work-inspection.sh (work create item is visible)
 
 WHEN `factory work list` is invoked,
 THE SYSTEM SHALL read stored Work Items from `.factory/work/items/` and
@@ -61,10 +87,11 @@ Test: tests/binary.rs (work_list_reports_invalid_stored_work_item_id)
 Test: tests/binary.rs (work_list_reports_invalid_stored_model)
 Test: tests/behaviors/operations/test-work-inspection.sh (work list reports invalid stored state)
 
-WHEN existing `.factory/runs` state exists without Work Item state,
+WHEN existing `.factory/runs` state exists,
 THE SYSTEM SHALL keep legacy run commands working and keep Work Item
-inspection independent from `.factory/runs`.
+intake and inspection independent from `.factory/runs`.
 Test: tests/binary.rs (work_list_empty_state_succeeds_without_work_items)
+Test: tests/binary.rs (work_create_is_independent_from_legacy_runs)
 Test: tests/behaviors/operations/test-work-inspection.sh (legacy runs and work inspection are independent)
 
 ## Brief capture

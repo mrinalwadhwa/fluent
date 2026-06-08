@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test-work-inspection - Verify read-only Work Item inspection commands.
+# test-work-inspection - Verify Work Item intake and inspection commands.
 
 set -euo pipefail
 
@@ -89,6 +89,67 @@ test_work_list_outputs_stored_items() {
   assert_contains "$OUTPUT" "Alpha title" || RESULT=1
   assert_contains "$OUTPUT" "work-beta" || RESULT=1
   assert_contains "$OUTPUT" "Beta title" || RESULT=1
+
+  cleanup_test_project
+  return $RESULT
+}
+
+test_work_create_writes_minimal_item() {
+  setup_test_project
+
+  RESULT=0
+  OUTPUT="$("$FACTORY_BIN" work create work-intake --title "Intake title" 2>&1)"
+  assert_contains "$OUTPUT" "Created Work Item work-intake" || RESULT=1
+  assert_contains "$(cat .factory/work/items/work-intake.json)" '"id": "work-intake"' || RESULT=1
+  assert_contains "$(cat .factory/work/items/work-intake.json)" '"title": "Intake title"' || RESULT=1
+  assert_contains "$(cat .factory/work/items/work-intake.json)" '"attempts": []' || RESULT=1
+
+  cleanup_test_project
+  return $RESULT
+}
+
+test_work_create_existing_item_fails() {
+  setup_test_project
+  write_work_item "work-existing" "Original title"
+
+  RESULT=0
+  assert_fails "$FACTORY_BIN" work create work-existing --title "Replacement title" || RESULT=1
+  ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
+  assert_contains "$ERROR_OUTPUT" "already exists" || RESULT=1
+  assert_contains "$(cat .factory/work/items/work-existing.json)" "Original title" || RESULT=1
+  assert_not_contains "$(cat .factory/work/items/work-existing.json)" "Replacement title" || RESULT=1
+
+  cleanup_test_project
+  return $RESULT
+}
+
+test_work_create_invalid_id_fails() {
+  setup_test_project
+
+  RESULT=0
+  assert_fails "$FACTORY_BIN" work create ../escape --title "Invalid title" || RESULT=1
+  ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
+  assert_contains "$ERROR_OUTPUT" "cannot be used as a file name" || RESULT=1
+  if [ -e .factory/work/items ]; then
+    printf '    FAIL: invalid id created Work Item storage\n'
+    RESULT=1
+  fi
+
+  cleanup_test_project
+  return $RESULT
+}
+
+test_work_create_item_is_visible() {
+  setup_test_project
+
+  RESULT=0
+  "$FACTORY_BIN" work create work-visible --title "Visible title" > /dev/null
+  LIST_OUTPUT="$("$FACTORY_BIN" work list 2>&1)"
+  assert_contains "$LIST_OUTPUT" "work-visible" || RESULT=1
+  assert_contains "$LIST_OUTPUT" "Visible title" || RESULT=1
+  SHOW_OUTPUT="$("$FACTORY_BIN" work show work-visible 2>&1)"
+  assert_contains "$SHOW_OUTPUT" '"id": "work-visible"' || RESULT=1
+  assert_contains "$SHOW_OUTPUT" '"title": "Visible title"' || RESULT=1
 
   cleanup_test_project
   return $RESULT
@@ -216,12 +277,21 @@ test_runs_and_work_items_are_independent() {
   assert_contains "$WORK_OUTPUT" "No Work Items found" || RESULT=1
   assert_not_contains "$WORK_OUTPUT" "run-legacy" || RESULT=1
 
+  "$FACTORY_BIN" work create work-from-run-project --title "Work from planning" > /dev/null
+  WORK_OUTPUT="$("$FACTORY_BIN" work list 2>&1)"
+  assert_contains "$WORK_OUTPUT" "work-from-run-project" || RESULT=1
+  assert_not_contains "$WORK_OUTPUT" "run-legacy" || RESULT=1
+
   cleanup_test_project
   return $RESULT
 }
 
 printf 'test-work-inspection\n\n'
 
+run_test "work create writes minimal Work Item" test_work_create_writes_minimal_item
+run_test "work create existing item fails" test_work_create_existing_item_fails
+run_test "work create invalid id fails" test_work_create_invalid_id_fails
+run_test "work create item is visible" test_work_create_item_is_visible
 run_test "work list prints stored Work Items" test_work_list_outputs_stored_items
 run_test "work list prints empty state" test_work_list_empty_state_succeeds
 run_test "work show prints pretty JSON" test_work_show_outputs_pretty_json

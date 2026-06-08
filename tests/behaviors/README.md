@@ -94,12 +94,16 @@ for test in tests/behaviors/operations/*.sh; do bash "$test"; done
 | Behavior | Test |
 |---|---|
 | Version command reports package version and build metadata | `test-version.sh`, `binary.rs` |
+| Work Item create writes a minimal item | `binary.rs`, `test-work-inspection.sh` |
+| Work Item create rejects existing ids | `binary.rs`, `test-work-inspection.sh` |
+| Work Item create rejects invalid ids | `binary.rs`, `test-work-inspection.sh` |
+| Created Work Items appear through list and show | `binary.rs`, `test-work-inspection.sh` |
 | Work Item list prints stored ids and titles | `binary.rs`, `test-work-inspection.sh` |
 | Work Item list prints an empty state with no items | `binary.rs`, `test-work-inspection.sh` |
 | Work Item show prints pretty JSON | `binary.rs`, `test-work-inspection.sh` |
 | Work Item show reports missing items | `binary.rs`, `test-work-inspection.sh` |
 | Work Item inspection reports invalid stored state | `binary.rs`, `test-work-inspection.sh` |
-| Work Item inspection is independent from legacy runs | `binary.rs`, `test-work-inspection.sh` |
+| Work Item intake and inspection are independent from legacy runs | `binary.rs`, `test-work-inspection.sh` |
 | Create worktree from current HEAD | `test-run` |
 | Branch from non-main branch | `test-run` |
 | Run-id resolution priority chain | `test-run` |

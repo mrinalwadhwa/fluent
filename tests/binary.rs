@@ -294,6 +294,124 @@ fn status_accepts_path_argument() {
 // -------------------------------------------------------------------------
 
 #[test]
+fn work_create_writes_minimal_work_item() {
+    let tmp = TempDir::new().unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "create", "work-intake", "--title", "Intake title"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created Work Item work-intake"));
+
+    let path = tmp.path().join(".factory/work/items/work-intake.json");
+    let json = fs::read_to_string(path).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["id"], "work-intake");
+    assert_eq!(value["title"], "Intake title");
+    assert_eq!(value["attempts"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn work_create_refuses_existing_work_item() {
+    let tmp = TempDir::new().unwrap();
+    write_work_item_json(tmp.path(), "work-existing", "Original title");
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args([
+            "work",
+            "create",
+            "work-existing",
+            "--title",
+            "Replacement title",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Work Item \"work-existing\" already exists",
+        ));
+
+    let json =
+        fs::read_to_string(tmp.path().join(".factory/work/items/work-existing.json")).unwrap();
+    assert!(json.contains("Original title"));
+    assert!(!json.contains("Replacement title"));
+}
+
+#[test]
+fn work_create_rejects_invalid_work_item_id() {
+    let tmp = TempDir::new().unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "create", "../escape", "--title", "Invalid item"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "work item id \"../escape\" cannot be used as a file name",
+        ));
+
+    assert!(!tmp.path().join(".factory/work/items").exists());
+}
+
+#[test]
+fn work_create_item_is_visible_through_list_and_show() {
+    let tmp = TempDir::new().unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "create", "work-visible", "--title", "Visible title"])
+        .assert()
+        .success();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("work-visible"))
+        .stdout(predicate::str::contains("Visible title"));
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "show", "work-visible"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("  \"id\": \"work-visible\""))
+        .stdout(predicate::str::contains("  \"title\": \"Visible title\""))
+        .stdout(predicate::str::contains("  \"attempts\": []"));
+}
+
+#[test]
+fn work_create_is_independent_from_legacy_runs() {
+    let tmp = TempDir::new().unwrap();
+    let run_dir = tmp.path().join(".factory/runs/legacy-run");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "complete").unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "create", "work-new", "--title", "New work"])
+        .assert()
+        .success();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("work-new"))
+        .stdout(predicate::str::contains("legacy-run").not());
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("legacy-run"));
+}
+
+#[test]
 fn work_list_outputs_stored_work_items() {
     let tmp = TempDir::new().unwrap();
     write_work_item_json(tmp.path(), "work-beta", "Second work item");

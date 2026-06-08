@@ -104,7 +104,7 @@ pub enum Commands {
         path: Option<String>,
     },
 
-    /// Inspect stored Work Items
+    /// Manage stored Work Items
     Work {
         #[command(subcommand)]
         command: WorkCommands,
@@ -190,6 +190,16 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum WorkCommands {
+    /// Create a stored Work Item
+    Create {
+        /// Work Item ID
+        id: String,
+
+        /// Work Item title
+        #[arg(long)]
+        title: String,
+    },
+
     /// List stored Work Items
     List,
 

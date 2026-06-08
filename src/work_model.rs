@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
-use std::fs;
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -338,6 +338,10 @@ pub enum WorkModelStorageError {
         path: PathBuf,
         source: io::Error,
     },
+    WorkItemAlreadyExists {
+        path: PathBuf,
+        id: String,
+    },
     ParseFile {
         path: PathBuf,
         source: serde_json::Error,
@@ -361,6 +365,7 @@ impl WorkModelStorageError {
             | Self::ReadDirectory { path, .. }
             | Self::ReadFile { path, .. }
             | Self::WriteFile { path, .. }
+            | Self::WorkItemAlreadyExists { path, .. }
             | Self::ParseFile { path, .. }
             | Self::WorkItemIdMismatch { path, .. }
             | Self::InvalidModel { path, .. } => Some(path),
@@ -385,6 +390,9 @@ impl fmt::Display for WorkModelStorageError {
             }
             Self::WriteFile { path, source } => {
                 write!(f, "failed to write {}: {source}", path.display())
+            }
+            Self::WorkItemAlreadyExists { id, .. } => {
+                write!(f, "Work Item {id:?} already exists")
             }
             Self::ParseFile { path, source } => {
                 write!(f, "failed to parse {}: {source}", path.display())
@@ -415,6 +423,7 @@ impl Error for WorkModelStorageError {
             | Self::ReadDirectory { source, .. }
             | Self::ReadFile { source, .. }
             | Self::WriteFile { source, .. } => Some(source),
+            Self::WorkItemAlreadyExists { .. } => None,
             Self::ParseFile { source, .. } => Some(source),
             Self::WorkItemIdMismatch { .. } => None,
             Self::InvalidModel { source, .. } => Some(source),
@@ -484,7 +493,19 @@ impl WorkModelStore {
         self.read_work_item_file(&path)
     }
 
+    pub fn create_work_item(&self, work_item: &WorkItem) -> Result<(), WorkModelStorageError> {
+        self.write_work_item_file(work_item, true)
+    }
+
     pub fn write_work_item(&self, work_item: &WorkItem) -> Result<(), WorkModelStorageError> {
+        self.write_work_item_file(work_item, false)
+    }
+
+    fn write_work_item_file(
+        &self,
+        work_item: &WorkItem,
+        create_new: bool,
+    ) -> Result<(), WorkModelStorageError> {
         let path = self.work_item_path(&work_item.id)?;
         work_item
             .validate()
@@ -502,7 +523,30 @@ impl WorkModelStore {
                 path: path.clone(),
                 source,
             })?;
-        fs::write(&path, json).map_err(|source| WorkModelStorageError::WriteFile { path, source })
+        if create_new {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(|source| {
+                    if source.kind() == io::ErrorKind::AlreadyExists {
+                        WorkModelStorageError::WorkItemAlreadyExists {
+                            path: path.clone(),
+                            id: work_item.id.clone(),
+                        }
+                    } else {
+                        WorkModelStorageError::WriteFile {
+                            path: path.clone(),
+                            source,
+                        }
+                    }
+                })?;
+            file.write_all(json.as_bytes())
+                .map_err(|source| WorkModelStorageError::WriteFile { path, source })
+        } else {
+            fs::write(&path, json)
+                .map_err(|source| WorkModelStorageError::WriteFile { path, source })
+        }
     }
 
     fn read_work_item_file(&self, path: &Path) -> Result<WorkItem, WorkModelStorageError> {
