@@ -693,11 +693,20 @@ Adopt the new model in this sequence:
    Codex/Claude capacity planning, Fargate task execution, learning
    capture, dashboard interventions, and team permissions.
 
-Progress: commit `407ca59` added the first operational transition:
-`factory work attempt <work-item-id> <attempt-id>` appends a planned
-Attempt plus initial `write` Task from an existing Work Item, without
-executing the task yet. The next slice should run a `write` task with
-the clean committed workspace invariant.
+Progress:
+- `407ca59` added the first operational transition:
+  `factory work attempt <work-item-id> <attempt-id>` appends a planned
+  Attempt plus initial `write` Task from an existing Work Item.
+- `73b01db` added write Task execution with the clean committed
+  workspace invariant.
+- `d699981` and `0ec8788` added review Task planning/execution,
+  read-only candidate review enforcement, review artifacts, and stale
+  review artifact protection.
+
+The next slice should implement the Attempt loop: drive an Attempt from
+write Task execution through review Task planning/execution, convert
+failed reviews into follow-up write Tasks, move uncertain review output
+to `needs-user`, and prepare the later Merge Candidate transition.
 
 2026-06-07 — Authors are increasingly using expertise, especially when
 the approach lists specific expertise files, but Factory should make this
