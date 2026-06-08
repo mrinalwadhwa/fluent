@@ -693,8 +693,8 @@ Adopt the new model in this sequence:
    Codex/Claude capacity planning, Fargate task execution, learning
    capture, dashboard interventions, and team permissions.
 
-The first implementation slice should create an Attempt plus initial
-write Task from an existing Work Item, without executing the task yet.
-That establishes the first operational transition in the new model:
-`WorkItem -> Attempt -> Task`. The next slice should run a `write` task
-with the clean committed workspace invariant.
+Progress: commit `407ca59` added the first operational transition:
+`factory work attempt <work-item-id> <attempt-id>` appends a planned
+Attempt plus initial `write` Task from an existing Work Item, without
+executing the task yet. The next slice should run a `write` task with
+the clean committed workspace invariant.
