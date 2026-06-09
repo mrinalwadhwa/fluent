@@ -1019,15 +1019,16 @@ arbitrary directories.
 Work cleanup runs from the same `factory cleanup` command when no
 `--run-id` is supplied. It selects Work Items only after every Attempt,
 Task, and Merge Candidate is terminal. Applying cleanup removes the Work
-Item JSON, referenced managed Work artifact files or directories, managed
-candidate worktrees, and Work task branches. Managed artifact references
-must be relative paths made only of normal path components and must
-resolve under `.factory/work/artifacts/`; cleanup ignores absolute paths
-and parent escapes. Managed Work worktrees are resolved with the same
-expected workspace path rules used by Work task and merge execution, and
-registered worktrees are removed through `git worktree remove --force`.
-Missing worktree paths and unregistered directories are reported without
-deleting arbitrary filesystem paths.
+Item metadata JSON, split Attempt records, split Task records, split
+Merge Candidate records, referenced managed Work artifact files or
+directories, managed candidate worktrees, and Work task branches. Managed
+artifact references must be relative paths made only of normal path
+components and must resolve under `.factory/work/artifacts/`; cleanup
+ignores absolute paths and parent escapes. Managed Work worktrees are
+resolved with the same expected workspace path rules used by Work task
+and merge execution, and registered worktrees are removed through
+`git worktree remove --force`. Missing worktree paths and unregistered
+directories are reported without deleting arbitrary filesystem paths.
 
 Cleanup resolves source Factory state even when invoked from a run
 worktree by finding the registered worktree that points back to the

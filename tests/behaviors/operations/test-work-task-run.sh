@@ -62,7 +62,7 @@ create_instructed_work_task() {
 }
 
 json_value() {
-  jq -r "$1" .factory/work/items/work-1.json
+  "$FACTORY_BIN" work show work-1 | jq -r "$1"
 }
 
 show_json_value() {
@@ -136,11 +136,17 @@ assert_contains() {
 
 assert_not_complete() {
   local status output_commit
-  status="$(json_value '.attempts[0].tasks[0].status // "missing"')"
-  output_commit="$(json_value '.attempts[0].tasks[0].output.commit // "missing"')"
+  local task_path=".factory/work/tasks/work-1/attempt-1/attempt-1-write.json"
+  if [ -f "$task_path" ]; then
+    status="$(jq -r '.status // "missing"' "$task_path")"
+    output_commit="$(jq -r '.output.commit // "missing"' "$task_path")"
+  else
+    status="$(json_value '.attempts[0].tasks[0].status // "missing"')"
+    output_commit="$(json_value '.attempts[0].tasks[0].output.commit // "missing"')"
+  fi
   if [ "$status" = "complete" ] || [ "$output_commit" != "missing" ]; then
     printf '    FAIL: Task completed unexpectedly\n'
-    "$FACTORY_BIN" work show work-1
+    "$FACTORY_BIN" work show work-1 || true
     return 1
   fi
 }
@@ -464,7 +470,8 @@ test_invalid_review_task_requests_do_not_complete_or_mutate() {
 
   RESULT=0
   REVIEW_FILTER='.attempts[0].tasks[] | select(.id == "attempt-1-review-tests")'
-  BEFORE="$(cat .factory/work/items/work-1.json)"
+  REVIEW_TASK_PATH=".factory/work/tasks/work-1/attempt-1/attempt-1-review-tests.json"
+  BEFORE="$(cat "$REVIEW_TASK_PATH")"
 
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
     missing-work attempt-1 attempt-1-review-tests || RESULT=1
@@ -474,86 +481,79 @@ test_invalid_review_task_requests_do_not_complete_or_mutate() {
     work-1 attempt-1 missing-review-task || RESULT=1
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
     work-1 attempt-2 attempt-1-review-tests || RESULT=1
-  [ "$(cat .factory/work/items/work-1.json)" = "$BEFORE" ] || RESULT=1
+  [ "$(cat "$REVIEW_TASK_PATH")" = "$BEFORE" ] || RESULT=1
 
-  jq '(.attempts[0].tasks[] | select(.id == "attempt-1-review-tests") | .work_item_id) = "other-work"' \
-    .factory/work/items/work-1.json > "$TEST_DIR/item.json"
-  mv "$TEST_DIR/item.json" .factory/work/items/work-1.json
-  AFTER_MUTATION="$(cat .factory/work/items/work-1.json)"
+  jq '.work_item_id = "other-work"' "$REVIEW_TASK_PATH" > "$TEST_DIR/task.json"
+  mv "$TEST_DIR/task.json" "$REVIEW_TASK_PATH"
+  AFTER_MUTATION="$(cat "$REVIEW_TASK_PATH")"
   assert_fails run_review_task review-fail || RESULT=1
-  [ "$(cat .factory/work/items/work-1.json)" = "$AFTER_MUTATION" ] || RESULT=1
+  [ "$(cat "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
 
-  printf '%s' "$BEFORE" > .factory/work/items/work-1.json
-  jq '(.attempts[0].tasks[] | select(.id == "attempt-1-review-tests") | .attempt_id) = "other-attempt"' \
-    .factory/work/items/work-1.json > "$TEST_DIR/item.json"
-  mv "$TEST_DIR/item.json" .factory/work/items/work-1.json
-  AFTER_MUTATION="$(cat .factory/work/items/work-1.json)"
+  printf '%s' "$BEFORE" > "$REVIEW_TASK_PATH"
+  jq '.attempt_id = "other-attempt"' "$REVIEW_TASK_PATH" > "$TEST_DIR/task.json"
+  mv "$TEST_DIR/task.json" "$REVIEW_TASK_PATH"
+  AFTER_MUTATION="$(cat "$REVIEW_TASK_PATH")"
   assert_fails run_review_task review-fail || RESULT=1
-  [ "$(cat .factory/work/items/work-1.json)" = "$AFTER_MUTATION" ] || RESULT=1
+  [ "$(cat "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
 
-  printf '%s' "$BEFORE" > .factory/work/items/work-1.json
-  jq '(.attempts[0].tasks[] | select(.id == "attempt-1-review-tests") | .status) = "failed"' \
-    .factory/work/items/work-1.json > "$TEST_DIR/item.json"
-  mv "$TEST_DIR/item.json" .factory/work/items/work-1.json
-  AFTER_MUTATION="$(cat .factory/work/items/work-1.json)"
+  printf '%s' "$BEFORE" > "$REVIEW_TASK_PATH"
+  jq '.status = "failed"' "$REVIEW_TASK_PATH" > "$TEST_DIR/task.json"
+  mv "$TEST_DIR/task.json" "$REVIEW_TASK_PATH"
+  AFTER_MUTATION="$(cat "$REVIEW_TASK_PATH")"
   assert_fails run_review_task review-fail || RESULT=1
-  [ "$(cat .factory/work/items/work-1.json)" = "$AFTER_MUTATION" ] || RESULT=1
+  [ "$(cat "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
 
-  printf '%s' "$BEFORE" > .factory/work/items/work-1.json
-  jq '(.attempts[0].tasks[] | select(.id == "attempt-1-review-tests") | .workspace_access.writes) = [{"id":"candidate","path":"../work-6-work-1-attempt-1"}]' \
-    .factory/work/items/work-1.json > "$TEST_DIR/item.json"
-  mv "$TEST_DIR/item.json" .factory/work/items/work-1.json
-  AFTER_MUTATION="$(cat .factory/work/items/work-1.json)"
+  printf '%s' "$BEFORE" > "$REVIEW_TASK_PATH"
+  jq '.workspace_access.writes = [{"id":"candidate","path":"../work-6-work-1-attempt-1"}]' \
+    "$REVIEW_TASK_PATH" > "$TEST_DIR/task.json"
+  mv "$TEST_DIR/task.json" "$REVIEW_TASK_PATH"
+  AFTER_MUTATION="$(cat "$REVIEW_TASK_PATH")"
   assert_fails run_review_task review-fail || RESULT=1
-  [ "$(cat .factory/work/items/work-1.json)" = "$AFTER_MUTATION" ] || RESULT=1
+  [ "$(cat "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
 
-  printf '%s' "$BEFORE" > .factory/work/items/work-1.json
-  jq 'del(.attempts[0].tasks[] | select(.id == "attempt-1-review-tests") | .artifact_area)' \
-    .factory/work/items/work-1.json > "$TEST_DIR/item.json"
-  mv "$TEST_DIR/item.json" .factory/work/items/work-1.json
-  AFTER_MUTATION="$(cat .factory/work/items/work-1.json)"
+  printf '%s' "$BEFORE" > "$REVIEW_TASK_PATH"
+  jq 'del(.artifact_area)' "$REVIEW_TASK_PATH" > "$TEST_DIR/task.json"
+  mv "$TEST_DIR/task.json" "$REVIEW_TASK_PATH"
+  AFTER_MUTATION="$(cat "$REVIEW_TASK_PATH")"
   assert_fails run_review_task review-fail || RESULT=1
-  [ "$(cat .factory/work/items/work-1.json)" = "$AFTER_MUTATION" ] || RESULT=1
+  [ "$(cat "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
 
-  printf '%s' "$BEFORE" > .factory/work/items/work-1.json
-  jq '(.attempts[0].tasks[] | select(.id == "attempt-1-review-tests") | .workspace_access.reads) = []' \
-    .factory/work/items/work-1.json > "$TEST_DIR/item.json"
-  mv "$TEST_DIR/item.json" .factory/work/items/work-1.json
-  AFTER_MUTATION="$(cat .factory/work/items/work-1.json)"
+  printf '%s' "$BEFORE" > "$REVIEW_TASK_PATH"
+  jq '.workspace_access.reads = []' "$REVIEW_TASK_PATH" > "$TEST_DIR/task.json"
+  mv "$TEST_DIR/task.json" "$REVIEW_TASK_PATH"
+  AFTER_MUTATION="$(cat "$REVIEW_TASK_PATH")"
   assert_fails run_review_task review-fail || RESULT=1
-  [ "$(cat .factory/work/items/work-1.json)" = "$AFTER_MUTATION" ] || RESULT=1
+  [ "$(cat "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
 
-  printf '%s' "$BEFORE" > .factory/work/items/work-1.json
-  jq 'del(.attempts[0].tasks[] | select(.id == "attempt-1-review-tests") | .review_context)' \
-    .factory/work/items/work-1.json > "$TEST_DIR/item.json"
-  mv "$TEST_DIR/item.json" .factory/work/items/work-1.json
-  AFTER_MUTATION="$(cat .factory/work/items/work-1.json)"
+  printf '%s' "$BEFORE" > "$REVIEW_TASK_PATH"
+  jq 'del(.review_context)' "$REVIEW_TASK_PATH" > "$TEST_DIR/task.json"
+  mv "$TEST_DIR/task.json" "$REVIEW_TASK_PATH"
+  AFTER_MUTATION="$(cat "$REVIEW_TASK_PATH")"
   assert_fails run_review_task review-fail || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "must declare review context" || RESULT=1
-  [ "$(cat .factory/work/items/work-1.json)" = "$AFTER_MUTATION" ] || RESULT=1
+  [ "$(cat "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
 
-  printf '%s' "$BEFORE" > .factory/work/items/work-1.json
-  jq '(.attempts[0].tasks[] | select(.id == "attempt-1-review-tests") | .review_context.candidate_workspace_id) = "other-candidate"' \
-    .factory/work/items/work-1.json > "$TEST_DIR/item.json"
-  mv "$TEST_DIR/item.json" .factory/work/items/work-1.json
-  AFTER_MUTATION="$(cat .factory/work/items/work-1.json)"
+  printf '%s' "$BEFORE" > "$REVIEW_TASK_PATH"
+  jq '.review_context.candidate_workspace_id = "other-candidate"' \
+    "$REVIEW_TASK_PATH" > "$TEST_DIR/task.json"
+  mv "$TEST_DIR/task.json" "$REVIEW_TASK_PATH"
+  AFTER_MUTATION="$(cat "$REVIEW_TASK_PATH")"
   assert_fails run_review_task review-fail || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "review context candidate must match" || RESULT=1
-  [ "$(cat .factory/work/items/work-1.json)" = "$AFTER_MUTATION" ] || RESULT=1
+  [ "$(cat "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
 
-  printf '%s' "$BEFORE" > .factory/work/items/work-1.json
+  printf '%s' "$BEFORE" > "$REVIEW_TASK_PATH"
   jq '
-    (.attempts[0].tasks[] | select(.id == "attempt-1-review-tests") | .workspace_access.reads[0].path) = "../outside-review-read" |
-    (.attempts[0].tasks[] | select(.id == "attempt-1-review-tests") | .review_context.candidate_workspace_path) = "../outside-review-read"
-  ' \
-    .factory/work/items/work-1.json > "$TEST_DIR/item.json"
-  mv "$TEST_DIR/item.json" .factory/work/items/work-1.json
-  AFTER_MUTATION="$(cat .factory/work/items/work-1.json)"
+    .workspace_access.reads[0].path = "../outside-review-read" |
+    .review_context.candidate_workspace_path = "../outside-review-read"
+  ' "$REVIEW_TASK_PATH" > "$TEST_DIR/task.json"
+  mv "$TEST_DIR/task.json" "$REVIEW_TASK_PATH"
+  AFTER_MUTATION="$(cat "$REVIEW_TASK_PATH")"
   assert_fails run_review_task review-fail || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "Task readable workspace path must" || RESULT=1
-  [ "$(cat .factory/work/items/work-1.json)" = "$AFTER_MUTATION" ] || RESULT=1
+  [ "$(cat "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
 
-  printf '%s' "$BEFORE" > .factory/work/items/work-1.json
+  printf '%s' "$BEFORE" > "$REVIEW_TASK_PATH"
   [ "$(json_value "$REVIEW_FILTER | .status // \"planned\"")" = "planned" ] || RESULT=1
 
   cleanup_test_project
@@ -567,7 +567,8 @@ test_invalid_task_requests_do_not_complete_or_mutate() {
   write_mock_codex
 
   RESULT=0
-  BEFORE="$(cat .factory/work/items/work-1.json)"
+  TASK_PATH=".factory/work/tasks/work-1/attempt-1/attempt-1-write.json"
+  BEFORE="$(cat "$TASK_PATH")"
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
     missing-work attempt-1 attempt-1-write || RESULT=1
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
@@ -576,53 +577,49 @@ test_invalid_task_requests_do_not_complete_or_mutate() {
     work-1 attempt-1 missing-task || RESULT=1
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
     work-1 attempt-2 attempt-1-write || RESULT=1
-  if [ "$(cat .factory/work/items/work-1.json)" != "$BEFORE" ]; then
+  if [ "$(cat "$TASK_PATH")" != "$BEFORE" ]; then
     printf '    FAIL: missing id requests changed Work Item state\n'
     RESULT=1
   fi
 
-  jq '.attempts[0].tasks[0].kind = "review"' \
-    .factory/work/items/work-1.json > "$TEST_DIR/item.json"
-  mv "$TEST_DIR/item.json" .factory/work/items/work-1.json
+  jq '.kind = "review"' "$TASK_PATH" > "$TEST_DIR/task.json"
+  mv "$TEST_DIR/task.json" "$TASK_PATH"
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
     work-1 attempt-1 attempt-1-write || RESULT=1
   assert_not_complete || RESULT=1
 
-  printf '%s' "$BEFORE" > .factory/work/items/work-1.json
-  jq '.attempts[0].tasks[0].work_item_id = "other-work"' \
-    .factory/work/items/work-1.json > "$TEST_DIR/item.json"
-  mv "$TEST_DIR/item.json" .factory/work/items/work-1.json
+  printf '%s' "$BEFORE" > "$TASK_PATH"
+  jq '.work_item_id = "other-work"' "$TASK_PATH" > "$TEST_DIR/task.json"
+  mv "$TEST_DIR/task.json" "$TASK_PATH"
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
     work-1 attempt-1 attempt-1-write || RESULT=1
   assert_not_complete || RESULT=1
 
-  printf '%s' "$BEFORE" > .factory/work/items/work-1.json
-  jq '.attempts[0].tasks[0].status = "failed"' \
-    .factory/work/items/work-1.json > "$TEST_DIR/item.json"
-  mv "$TEST_DIR/item.json" .factory/work/items/work-1.json
+  printf '%s' "$BEFORE" > "$TASK_PATH"
+  jq '.status = "failed"' "$TASK_PATH" > "$TEST_DIR/task.json"
+  mv "$TEST_DIR/task.json" "$TASK_PATH"
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
     work-1 attempt-1 attempt-1-write || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "expected planned" || RESULT=1
   assert_not_complete || RESULT=1
 
-  printf '%s' "$BEFORE" > .factory/work/items/work-1.json
-  jq '.attempts[0].tasks[0].workspace_access.writes = []' \
-    .factory/work/items/work-1.json > "$TEST_DIR/item.json"
-  mv "$TEST_DIR/item.json" .factory/work/items/work-1.json
+  printf '%s' "$BEFORE" > "$TASK_PATH"
+  jq '.workspace_access.writes = []' "$TASK_PATH" > "$TEST_DIR/task.json"
+  mv "$TEST_DIR/task.json" "$TASK_PATH"
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
     work-1 attempt-1 attempt-1-write || RESULT=1
   assert_not_complete || RESULT=1
 
-  printf '%s' "$BEFORE" > .factory/work/items/work-1.json
-  jq '.attempts[0].tasks[0].workspace_access.writes += [{"id":"other","path":"../work-6-work-1-other"}]' \
-    .factory/work/items/work-1.json > "$TEST_DIR/item.json"
-  mv "$TEST_DIR/item.json" .factory/work/items/work-1.json
+  printf '%s' "$BEFORE" > "$TASK_PATH"
+  jq '.workspace_access.writes += [{"id":"other","path":"../work-6-work-1-other"}]' \
+    "$TASK_PATH" > "$TEST_DIR/task.json"
+  mv "$TEST_DIR/task.json" "$TASK_PATH"
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
     work-1 attempt-1 attempt-1-write || RESULT=1
 
   assert_not_complete || RESULT=1
 
-  printf '%s' "$BEFORE" > .factory/work/items/work-1.json
+  printf '%s' "$BEFORE" > "$TASK_PATH"
   mkdir -p "$(workspace_path)"
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
     work-1 attempt-1 attempt-1-write || RESULT=1
@@ -630,10 +627,10 @@ test_invalid_task_requests_do_not_complete_or_mutate() {
   rm -rf "$(workspace_path)"
   assert_not_complete || RESULT=1
 
-  printf '%s' "$BEFORE" > .factory/work/items/work-1.json
-  jq '.attempts[0].tasks[0].workspace_access.writes[0].path = "../outside-workspace"' \
-    .factory/work/items/work-1.json > "$TEST_DIR/item.json"
-  mv "$TEST_DIR/item.json" .factory/work/items/work-1.json
+  printf '%s' "$BEFORE" > "$TASK_PATH"
+  jq '.workspace_access.writes[0].path = "../outside-workspace"' \
+    "$TASK_PATH" > "$TEST_DIR/task.json"
+  mv "$TEST_DIR/task.json" "$TASK_PATH"
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
     work-1 attempt-1 attempt-1-write || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "Task writable workspace path must" || RESULT=1
@@ -642,11 +639,11 @@ test_invalid_task_requests_do_not_complete_or_mutate() {
     RESULT=1
   fi
 
-  printf '%s' "$BEFORE" > .factory/work/items/work-1.json
+  printf '%s' "$BEFORE" > "$TASK_PATH"
   jq --arg path "${TEST_DIR}/outside-absolute" \
-    '.attempts[0].tasks[0].workspace_access.writes[0].path = $path' \
-    .factory/work/items/work-1.json > "$TEST_DIR/item.json"
-  mv "$TEST_DIR/item.json" .factory/work/items/work-1.json
+    '.workspace_access.writes[0].path = $path' \
+    "$TASK_PATH" > "$TEST_DIR/task.json"
+  mv "$TEST_DIR/task.json" "$TASK_PATH"
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
     work-1 attempt-1 attempt-1-write || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "Task writable workspace path must" || RESULT=1

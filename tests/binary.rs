@@ -778,8 +778,7 @@ exit 0
         .unwrap();
     let head = String::from_utf8(head.stdout).unwrap().trim().to_string();
 
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = work_item_value(&main_dir, "work-1");
     let attempt = &value["attempts"][0];
     let task = &attempt["tasks"][0];
     assert_eq!(attempt["status"], "complete");

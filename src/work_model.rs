@@ -1666,7 +1666,7 @@ impl WorkModelStore {
             }
         }
         let mut work_item = legacy_work_item.clone();
-        if self.has_split_records(&work_item.id) {
+        if self.has_split_records(&work_item.id)? {
             work_item = self.assemble_split_work_item(&work_item.id, path, validate)?;
         }
         if validate {
@@ -1680,10 +1680,52 @@ impl WorkModelStore {
         Ok(work_item)
     }
 
-    fn has_split_records(&self, work_item_id: &str) -> bool {
-        self.work_attempts_dir().join(work_item_id).exists()
-            || self.work_tasks_dir().join(work_item_id).exists()
-            || self.work_merge_candidates_dir().join(work_item_id).exists()
+    fn has_split_records(&self, work_item_id: &str) -> Result<bool, WorkModelStorageError> {
+        self.collection_has_json_records(&self.work_attempts_dir().join(work_item_id))
+            .and_then(|has_attempts| {
+                if has_attempts {
+                    Ok(true)
+                } else {
+                    self.collection_has_json_records(&self.work_tasks_dir().join(work_item_id))
+                }
+            })
+            .and_then(|has_tasks| {
+                if has_tasks {
+                    Ok(true)
+                } else {
+                    self.collection_has_json_records(
+                        &self.work_merge_candidates_dir().join(work_item_id),
+                    )
+                }
+            })
+    }
+
+    fn collection_has_json_records(&self, dir: &Path) -> Result<bool, WorkModelStorageError> {
+        if !dir.exists() {
+            return Ok(false);
+        }
+        let entries = fs::read_dir(dir).map_err(|source| WorkModelStorageError::ReadDirectory {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|source| WorkModelStorageError::ReadDirectory {
+                path: dir.to_path_buf(),
+                source,
+            })?;
+            let path = entry.path();
+            if path.is_dir() {
+                if self.collection_has_json_records(&path)? {
+                    return Ok(true);
+                }
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn assemble_split_work_item(

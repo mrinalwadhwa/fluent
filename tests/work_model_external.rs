@@ -185,6 +185,26 @@ fn work_model_store_writes_and_lists_documented_layout() {
 }
 
 #[test]
+fn work_model_store_ignores_empty_split_directories_for_legacy_items() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    let work_item = work_item();
+    let items_dir = temp.path().join(".factory/work/items");
+    fs::create_dir_all(&items_dir).unwrap();
+    fs::write(
+        items_dir.join("work-1.json"),
+        serde_json::to_string_pretty(&work_item).unwrap(),
+    )
+    .unwrap();
+    fs::create_dir_all(temp.path().join(".factory/work/attempts/work-1")).unwrap();
+    fs::create_dir_all(temp.path().join(".factory/work/tasks/work-1/attempt-1")).unwrap();
+    fs::create_dir_all(temp.path().join(".factory/work/merge-candidates/work-1")).unwrap();
+
+    assert_eq!(store.read_work_item("work-1").unwrap(), work_item);
+    assert_eq!(store.list_work_items().unwrap(), vec![work_item]);
+}
+
+#[test]
 fn work_model_store_create_refuses_existing_work_item() {
     let temp = tempfile::tempdir().unwrap();
     let store = WorkModelStore::new(temp.path());

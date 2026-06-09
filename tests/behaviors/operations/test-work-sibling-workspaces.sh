@@ -85,6 +85,10 @@ assert_fails() {
   fi
 }
 
+work_json_value() {
+  "$FACTORY_BIN" work show "$1" | jq -r "$2"
+}
+
 run_write_task() {
   TASK_RUN_MOCK_MODE=commit \
     PATH="${TEST_DIR}/bin:$PATH" \
@@ -101,8 +105,7 @@ test_attempt_records_sibling_candidate_path() {
   "$FACTORY_BIN" work create work-alpha --title "Sibling path" > /dev/null
   "$FACTORY_BIN" work attempt work-alpha attempt-one > /dev/null
 
-  PATH_VALUE="$(jq -r '.attempts[0].tasks[0].workspace_access.writes[0].path' \
-    .factory/work/items/work-alpha.json)"
+  PATH_VALUE="$(work_json_value work-alpha '.attempts[0].tasks[0].workspace_access.writes[0].path')"
   [ "$PATH_VALUE" = "../work-10-work-alpha-attempt-one" ] || RESULT=1
   case "$(cd "$PATH_VALUE/.." 2>/dev/null || cd ..; pwd -P)/$(basename "$PATH_VALUE")" in
     "$TEST_PROJECT_PWD"/*) RESULT=1 ;;
@@ -122,10 +125,8 @@ test_attempt_paths_include_work_item_to_avoid_collisions() {
   "$FACTORY_BIN" work attempt work-alpha shared-attempt > /dev/null
   "$FACTORY_BIN" work attempt work-beta shared-attempt > /dev/null
 
-  ALPHA_PATH="$(jq -r '.attempts[0].tasks[0].workspace_access.writes[0].path' \
-    .factory/work/items/work-alpha.json)"
-  BETA_PATH="$(jq -r '.attempts[0].tasks[0].workspace_access.writes[0].path' \
-    .factory/work/items/work-beta.json)"
+  ALPHA_PATH="$(work_json_value work-alpha '.attempts[0].tasks[0].workspace_access.writes[0].path')"
+  BETA_PATH="$(work_json_value work-beta '.attempts[0].tasks[0].workspace_access.writes[0].path')"
   [ "$ALPHA_PATH" = "../work-10-work-alpha-shared-attempt" ] || RESULT=1
   [ "$BETA_PATH" = "../work-9-work-beta-shared-attempt" ] || RESULT=1
   [ "$ALPHA_PATH" != "$BETA_PATH" ] || RESULT=1
@@ -135,10 +136,8 @@ test_attempt_paths_include_work_item_to_avoid_collisions() {
   "$FACTORY_BIN" work attempt work-a b-c > /dev/null
   "$FACTORY_BIN" work attempt work-a-b c > /dev/null
 
-  HYPHEN_FIRST_PATH="$(jq -r '.attempts[0].tasks[0].workspace_access.writes[0].path' \
-    .factory/work/items/work-a.json)"
-  HYPHEN_SECOND_PATH="$(jq -r '.attempts[0].tasks[0].workspace_access.writes[0].path' \
-    .factory/work/items/work-a-b.json)"
+  HYPHEN_FIRST_PATH="$(work_json_value work-a '.attempts[0].tasks[0].workspace_access.writes[0].path')"
+  HYPHEN_SECOND_PATH="$(work_json_value work-a-b '.attempts[0].tasks[0].workspace_access.writes[0].path')"
   [ "$HYPHEN_FIRST_PATH" = "../work-6-work-a-b-c" ] || RESULT=1
   [ "$HYPHEN_SECOND_PATH" = "../work-8-work-a-b-c" ] || RESULT=1
   [ "$HYPHEN_FIRST_PATH" != "$HYPHEN_SECOND_PATH" ] || RESULT=1
