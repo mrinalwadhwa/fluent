@@ -58,15 +58,34 @@ json_value() {
   jq -r "$1" .factory/work/items/work-1.json
 }
 
+show_json_value() {
+  "$FACTORY_BIN" work show work-1 | jq -r "$1"
+}
+
+attempt_json_value() {
+  ATTEMPT_ID="$1"
+  QUERY="$2"
+  jq -r "$QUERY" ".factory/work/attempts/work-1/${ATTEMPT_ID}.json"
+}
+
+task_json_value() {
+  ATTEMPT_ID="$1"
+  TASK_ID="$2"
+  QUERY="$3"
+  jq -r "$QUERY" ".factory/work/tasks/work-1/${ATTEMPT_ID}/${TASK_ID}.json"
+}
+
 test_attempt_adds_planned_attempt() {
   setup_test_project
   create_work_item
 
   RESULT=0
   "$FACTORY_BIN" work attempt work-1 attempt-1 > /dev/null
-  [ "$(json_value '.attempts | length')" = "1" ] || RESULT=1
-  [ "$(json_value '.attempts[0].id')" = "attempt-1" ] || RESULT=1
-  [ "$(json_value '.attempts[0].status')" = "planned" ] || RESULT=1
+  [ "$(attempt_json_value attempt-1 '.id')" = "attempt-1" ] || RESULT=1
+  [ "$(attempt_json_value attempt-1 '.work_item_id')" = "work-1" ] || RESULT=1
+  [ "$(attempt_json_value attempt-1 '.status')" = "planned" ] || RESULT=1
+  [ "$(show_json_value '.attempts | length')" = "1" ] || RESULT=1
+  [ "$(show_json_value '.attempts[0].id')" = "attempt-1" ] || RESULT=1
 
   cleanup_test_project
   return $RESULT
@@ -79,13 +98,15 @@ test_attempt_appends_to_existing_attempts() {
   RESULT=0
   "$FACTORY_BIN" work attempt work-1 attempt-1 > /dev/null
   "$FACTORY_BIN" work attempt work-1 attempt-2 > /dev/null
-  [ "$(json_value '.attempts | length')" = "2" ] || RESULT=1
-  [ "$(json_value '.attempts[0].id')" = "attempt-1" ] || RESULT=1
-  [ "$(json_value '.attempts[1].id')" = "attempt-2" ] || RESULT=1
-  [ "$(json_value '.attempts[1].tasks | length')" = "1" ] || RESULT=1
-  [ "$(json_value '.attempts[1].tasks[0].id')" = "attempt-2-write" ] || RESULT=1
-  [ "$(json_value '.attempts[1].tasks[0].attempt_id')" = "attempt-2" ] || RESULT=1
-  [ "$(json_value '.attempts[1].tasks[0].workspace_access.writes[0].path')" = "../work-6-work-1-attempt-2" ] || RESULT=1
+  [ "$(attempt_json_value attempt-1 '.order')" = "0" ] || RESULT=1
+  [ "$(attempt_json_value attempt-2 '.order')" = "1" ] || RESULT=1
+  [ "$(show_json_value '.attempts | length')" = "2" ] || RESULT=1
+  [ "$(show_json_value '.attempts[0].id')" = "attempt-1" ] || RESULT=1
+  [ "$(show_json_value '.attempts[1].id')" = "attempt-2" ] || RESULT=1
+  [ "$(show_json_value '.attempts[1].tasks | length')" = "1" ] || RESULT=1
+  [ "$(task_json_value attempt-2 attempt-2-write '.id')" = "attempt-2-write" ] || RESULT=1
+  [ "$(task_json_value attempt-2 attempt-2-write '.attempt_id')" = "attempt-2" ] || RESULT=1
+  [ "$(task_json_value attempt-2 attempt-2-write '.workspace_access.writes[0].path')" = "../work-6-work-1-attempt-2" ] || RESULT=1
 
   cleanup_test_project
   return $RESULT
@@ -97,8 +118,8 @@ test_attempt_adds_one_initial_write_task() {
 
   RESULT=0
   "$FACTORY_BIN" work attempt work-1 attempt-1 > /dev/null
-  [ "$(json_value '.attempts[0].tasks | length')" = "1" ] || RESULT=1
-  [ "$(json_value '.attempts[0].tasks[0].kind')" = "write" ] || RESULT=1
+  [ "$(show_json_value '.attempts[0].tasks | length')" = "1" ] || RESULT=1
+  [ "$(task_json_value attempt-1 attempt-1-write '.kind')" = "write" ] || RESULT=1
 
   cleanup_test_project
   return $RESULT
@@ -110,10 +131,10 @@ test_initial_write_task_has_ids_and_one_writable_workspace() {
 
   RESULT=0
   "$FACTORY_BIN" work attempt work-1 attempt-1 > /dev/null
-  [ "$(json_value '.attempts[0].tasks[0].work_item_id')" = "work-1" ] || RESULT=1
-  [ "$(json_value '.attempts[0].tasks[0].attempt_id')" = "attempt-1" ] || RESULT=1
-  [ "$(json_value '.attempts[0].tasks[0].workspace_access.reads | length')" = "0" ] || RESULT=1
-  [ "$(json_value '.attempts[0].tasks[0].workspace_access.writes | length')" = "1" ] || RESULT=1
+  [ "$(task_json_value attempt-1 attempt-1-write '.work_item_id')" = "work-1" ] || RESULT=1
+  [ "$(task_json_value attempt-1 attempt-1-write '.attempt_id')" = "attempt-1" ] || RESULT=1
+  [ "$(task_json_value attempt-1 attempt-1-write '.workspace_access.reads | length')" = "0" ] || RESULT=1
+  [ "$(task_json_value attempt-1 attempt-1-write '.workspace_access.writes | length')" = "1" ] || RESULT=1
 
   cleanup_test_project
   return $RESULT

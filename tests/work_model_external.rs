@@ -185,6 +185,35 @@ fn work_model_store_writes_and_lists_documented_layout() {
 }
 
 #[test]
+fn work_model_store_preserves_attempt_append_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    let mut work_item = WorkItem {
+        id: "work-1".to_string(),
+        title: "Order attempts".to_string(),
+        planning_context: None,
+        instructions: None,
+        attempts: Vec::new(),
+        merge_candidates: Vec::new(),
+    };
+
+    work_item.add_initial_attempt("attempt-2").unwrap();
+    work_item.add_initial_attempt("attempt-10").unwrap();
+    store.write_work_item(&work_item).unwrap();
+
+    let stored_attempt = fs::read_to_string(
+        temp.path()
+            .join(".factory/work/attempts/work-1/attempt-10.json"),
+    )
+    .unwrap();
+    let read = store.read_work_item("work-1").unwrap();
+
+    assert!(stored_attempt.contains(r#""order": 1"#));
+    assert_eq!(read.attempts[0].id, "attempt-2");
+    assert_eq!(read.attempts[1].id, "attempt-10");
+}
+
+#[test]
 fn work_model_store_ignores_empty_split_directories_for_legacy_items() {
     let temp = tempfile::tempdir().unwrap();
     let store = WorkModelStore::new(temp.path());

@@ -321,6 +321,8 @@ live in `merge-candidates/<work-item-id>/<merge-candidate-id>.json`.
 `WorkModelStore` assembles those split records into the public
 `WorkItem` shape from `factory::work_model` for `factory work show`,
 status, dashboard, task execution, review, merge, and cleanup.
+Attempt records carry an internal `order` field so the assembled public
+Work Item preserves append order after Factory reloads split records.
 New writes prefer the split layout; bridge-period nested Work Item files
 remain readable when no split records exist for that Work Item.
 
@@ -349,10 +351,11 @@ Attempt, Task, and Merge Candidate ids must match their file stems.
 Work item IDs, Attempt IDs, Task IDs, and Merge Candidate IDs must not be
 empty, `.`, `..`, or contain `/` or `\`, because Factory uses each ID as
 one path component under the split collections. Each stored Attempt must
-set `work_item_id` to the containing `WorkItem.id`. Each stored Task must
-set `work_item_id` to the containing `WorkItem.id`, and must set
-`attempt_id` to the containing Attempt id even though the public Task
-shape allows `attempt_id` to be absent before a task joins an Attempt.
+set `work_item_id` to the containing `WorkItem.id` and store its append
+position in `order`. Each stored Task must set `work_item_id` to the
+containing `WorkItem.id`, and must set `attempt_id` to the containing
+Attempt id even though the public Task shape allows `attempt_id` to be
+absent before a task joins an Attempt.
 Invalid JSON, ID mismatches, invalid object IDs, and model validation
 failures must report the file path or object that failed. Code that
 writes Work state must use deterministic pretty JSON and must not write

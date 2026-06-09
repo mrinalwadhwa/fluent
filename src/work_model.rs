@@ -1378,6 +1378,8 @@ struct WorkItemRecord {
 struct AttemptRecord {
     id: String,
     work_item_id: String,
+    #[serde(default)]
+    order: usize,
     status: AttemptStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     review_state: Option<AttemptReviewState>,
@@ -1409,11 +1411,12 @@ impl From<WorkItemRecord> for WorkItem {
     }
 }
 
-impl From<&Attempt> for AttemptRecord {
-    fn from(attempt: &Attempt) -> Self {
+impl AttemptRecord {
+    fn from_attempt(attempt: &Attempt, order: usize) -> Self {
         Self {
             id: attempt.id.clone(),
             work_item_id: attempt.work_item_id.clone(),
+            order,
             status: attempt.status.clone(),
             review_state: attempt.review_state.clone(),
             artifacts: attempt.artifacts.clone(),
@@ -1778,9 +1781,9 @@ impl WorkModelStore {
 
         let mut attempt_files = HashSet::new();
         let mut attempt_dirs = HashSet::new();
-        for attempt in &work_item.attempts {
+        for (order, attempt) in work_item.attempts.iter().enumerate() {
             let attempt_path = self.work_attempt_path(&work_item.id, &attempt.id)?;
-            let record = AttemptRecord::from(attempt);
+            let record = AttemptRecord::from_attempt(attempt, order);
             write_json_file(&attempt_path, &record)?;
             attempt_files.insert(attempt_path);
 
@@ -1837,7 +1840,9 @@ impl WorkModelStore {
 
         let mut attempts = Vec::new();
         for path in list_json_paths(&attempts_dir)? {
-            let mut attempt: Attempt = read_json_file::<AttemptRecord>(&path)?.into();
+            let record = read_json_file::<AttemptRecord>(&path)?;
+            let order = record.order;
+            let mut attempt: Attempt = record.into();
             let expected = file_stem_id(&path)?;
             if attempt.id != expected {
                 return Err(WorkModelStorageError::InvalidModel {
@@ -1856,9 +1861,17 @@ impl WorkModelStore {
                 });
             }
             attempt.tasks = self.read_task_records(work_item_id, &attempt.id)?;
-            attempts.push(attempt);
+            attempts.push((order, path, attempt));
         }
-        Ok(attempts)
+        attempts.sort_by(|(left_order, left_path, _), (right_order, right_path, _)| {
+            left_order
+                .cmp(right_order)
+                .then_with(|| left_path.cmp(right_path))
+        });
+        Ok(attempts
+            .into_iter()
+            .map(|(_, _, attempt)| attempt)
+            .collect())
     }
 
     fn read_task_records(
