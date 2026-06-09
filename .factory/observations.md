@@ -804,11 +804,3 @@ reviewer set kept as the merge-queue safety gate. A later policy pass
 can decide whether passed reviewers receive scoped stale-review context
 or whether touched domains, broad shared changes, and explicit review
 policy should add reviewers back into intermediate Attempt rounds.
-
-2026-06-09 — Work-model behavior reviews do not have a first-class
-`behaviors.diff.md` artifact like legacy runs did. During the targeted
-follow-up review work, behavior reviewers had to infer new behaviors
-from `documentation/behaviors.md`, the candidate diff, and Work Item
-planning context. The Work review prompt or artifact model should make
-the Work Item behavior increment explicit so behavior reviewers can
-stay within their no-source-code boundary without guessing from docs.
