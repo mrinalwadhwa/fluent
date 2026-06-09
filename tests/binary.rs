@@ -429,7 +429,8 @@ fn work_create_writes_minimal_work_item() {
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(value["id"], "work-intake");
     assert_eq!(value["title"], "Intake title");
-    assert_eq!(value["attempts"].as_array().unwrap().len(), 0);
+    assert!(value.get("attempts").is_none());
+    assert!(value.get("merge_candidates").is_none());
 }
 
 #[test]
@@ -2224,12 +2225,17 @@ fn work_merge_candidate_rejects_stale_stored_provenance_without_rewrite() {
         .assert()
         .success();
 
-    let item_path = main_dir.join(".factory/work/items/work-1.json");
+    let candidate_path =
+        main_dir.join(".factory/work/merge-candidates/work-1/attempt-1-merge-candidate.json");
     let mut value: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
-    value["merge_candidates"][0]["candidate_commit"] =
+        serde_json::from_str(&fs::read_to_string(&candidate_path).unwrap()).unwrap();
+    value["candidate_commit"] =
         serde_json::Value::String("0000000000000000000000000000000000000000".to_string());
-    fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    fs::write(
+        &candidate_path,
+        serde_json::to_string_pretty(&value).unwrap(),
+    )
+    .unwrap();
     let main_before = git_head(&main_dir);
 
     factory_cmd()
@@ -2248,10 +2254,9 @@ fn work_merge_candidate_rejects_stale_stored_provenance_without_rewrite() {
 
     assert_eq!(git_head(&main_dir), main_before);
     let value: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
-    let candidate = &value["merge_candidates"][0];
-    assert_eq!(candidate["merge_state"]["status"], "pending");
-    assert!(candidate["merge_state"].get("failure_reason").is_none());
+        serde_json::from_str(&fs::read_to_string(&candidate_path).unwrap()).unwrap();
+    assert_eq!(value["merge_state"]["status"], "pending");
+    assert!(value["merge_state"].get("failure_reason").is_none());
 }
 
 #[test]

@@ -1667,7 +1667,7 @@ impl WorkModelStore {
         }
         let mut work_item = legacy_work_item.clone();
         if self.has_split_records(&work_item.id) {
-            work_item = self.assemble_split_work_item(&work_item.id, path)?;
+            work_item = self.assemble_split_work_item(&work_item.id, path, validate)?;
         }
         if validate {
             work_item
@@ -1690,6 +1690,7 @@ impl WorkModelStore {
         &self,
         work_item_id: &str,
         item_path: &Path,
+        validate: bool,
     ) -> Result<WorkItem, WorkModelStorageError> {
         let content =
             fs::read_to_string(item_path).map_err(|source| WorkModelStorageError::ReadFile {
@@ -1711,7 +1712,8 @@ impl WorkModelStore {
 
         let mut work_item = WorkItem::from(record);
         work_item.attempts = self.read_attempt_records(work_item_id)?;
-        work_item.merge_candidates = self.read_merge_candidate_records(work_item_id)?;
+        work_item.merge_candidates =
+            self.read_merge_candidate_records(work_item_id, &work_item, validate)?;
         Ok(work_item)
     }
 
@@ -1869,6 +1871,8 @@ impl WorkModelStore {
     fn read_merge_candidate_records(
         &self,
         work_item_id: &str,
+        work_item: &WorkItem,
+        validate: bool,
     ) -> Result<Vec<MergeCandidate>, WorkModelStorageError> {
         let candidates_dir = self.work_merge_candidates_dir().join(work_item_id);
         if !candidates_dir.exists() {
@@ -1884,6 +1888,14 @@ impl WorkModelStore {
                     path,
                     source: WorkModelError::MergeCandidateAlreadyExists { id: expected },
                 });
+            }
+            if validate {
+                candidate.validate(work_item).map_err(|source| {
+                    WorkModelStorageError::InvalidModel {
+                        path: path.clone(),
+                        source,
+                    }
+                })?;
             }
             candidates.push(candidate);
         }

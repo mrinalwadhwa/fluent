@@ -31,8 +31,9 @@ Test: tests/behaviors/operations/test-version.sh
 
 WHEN `factory work create <id> --title <title>` is invoked from a
 directory,
-THE SYSTEM SHALL create `.factory/work/items/<id>.json` containing a
-Work Item with that id, that title, and an empty `attempts` list.
+THE SYSTEM SHALL create `.factory/work/items/<id>.json` containing Work
+Item metadata with that id and title, while Attempts, Tasks, and Merge
+Candidates remain in their split collections.
 Test: tests/binary.rs (work_create_writes_minimal_work_item)
 Test: tests/behaviors/operations/test-work-inspection.sh (work create writes minimal Work Item)
 

@@ -58,6 +58,20 @@ fn work_item() -> WorkItem {
     }
 }
 
+fn merge_candidate() -> MergeCandidate {
+    MergeCandidate {
+        id: "attempt-1-merge-candidate".to_string(),
+        attempt_id: "attempt-1".to_string(),
+        source_workspace: workspace("candidate"),
+        target_workspace: workspace("main"),
+        source_branch: "main".to_string(),
+        target_branch: "main".to_string(),
+        candidate_commit: "abc123".to_string(),
+        review_state: MergeCandidateReviewState::Pending,
+        merge_state: MergeCandidateMergeState::default(),
+    }
+}
+
 #[test]
 fn documented_task_kinds_parse_from_json() {
     let content = include_str!("fixtures/core-work-model/task-kinds.json");
@@ -341,17 +355,7 @@ fn work_model_store_writes_merge_candidates_as_records() {
     let temp = tempfile::tempdir().unwrap();
     let store = WorkModelStore::new(temp.path());
     let mut item = work_item();
-    item.merge_candidates.push(MergeCandidate {
-        id: "attempt-1-merge-candidate".to_string(),
-        attempt_id: "attempt-1".to_string(),
-        source_workspace: workspace("candidate"),
-        target_workspace: workspace("main"),
-        source_branch: "main".to_string(),
-        target_branch: "main".to_string(),
-        candidate_commit: "abc123".to_string(),
-        review_state: MergeCandidateReviewState::Pending,
-        merge_state: MergeCandidateMergeState::default(),
-    });
+    item.merge_candidates.push(merge_candidate());
 
     store.write_work_item(&item).unwrap();
 
@@ -368,6 +372,50 @@ fn work_model_store_writes_merge_candidates_as_records() {
     assert!(content.contains(r#""source_branch": "main""#));
     assert!(content.contains(r#""candidate_commit": "abc123""#));
     assert_eq!(store.read_work_item("work-1").unwrap(), item);
+}
+
+#[test]
+fn work_model_store_prunes_stale_split_records() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    let mut item = work_item();
+    item.merge_candidates.push(merge_candidate());
+
+    store.write_work_item(&item).unwrap();
+
+    let task_path = temp
+        .path()
+        .join(".factory/work/tasks/work-1/attempt-1/write-code.json");
+    let attempt_path = temp
+        .path()
+        .join(".factory/work/attempts/work-1/attempt-1.json");
+    let task_attempt_dir = temp.path().join(".factory/work/tasks/work-1/attempt-1");
+    let candidate_path = temp
+        .path()
+        .join(".factory/work/merge-candidates/work-1/attempt-1-merge-candidate.json");
+    assert!(task_path.exists());
+    assert!(attempt_path.exists());
+    assert!(candidate_path.exists());
+
+    let mut without_task = item.clone();
+    without_task.merge_candidates.clear();
+    without_task.attempts[0].status = AttemptStatus::Planned;
+    without_task.attempts[0].review_state = None;
+    without_task.attempts[0].tasks.clear();
+    store.write_work_item(&without_task).unwrap();
+
+    assert!(!task_path.exists());
+    assert!(!candidate_path.exists());
+    assert!(attempt_path.exists());
+    assert_eq!(store.read_work_item("work-1").unwrap(), without_task);
+
+    let mut without_attempt = without_task.clone();
+    without_attempt.attempts.clear();
+    store.write_work_item(&without_attempt).unwrap();
+
+    assert!(!attempt_path.exists());
+    assert!(!task_attempt_dir.exists());
+    assert_eq!(store.read_work_item("work-1").unwrap(), without_attempt);
 }
 
 #[test]
@@ -687,6 +735,237 @@ fn work_model_store_reports_file_for_invalid_model_read_from_disk() {
                 source,
                 WorkModelError::ReviewTaskWritesWorkspace {
                     task_id: "write-code".to_string(),
+                }
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn work_model_store_reports_file_for_split_attempt_id_mismatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    store.write_work_item(&work_item()).unwrap();
+
+    let path = temp
+        .path()
+        .join(".factory/work/attempts/work-1/attempt-1.json");
+    let invalid = fs::read_to_string(&path)
+        .unwrap()
+        .replace(r#""id": "attempt-1""#, r#""id": "attempt-2""#);
+    fs::write(&path, invalid).unwrap();
+
+    match store.read_work_item("work-1").unwrap_err() {
+        WorkModelStorageError::InvalidModel {
+            path: actual,
+            source,
+        } => {
+            assert_eq!(actual, path);
+            assert_eq!(
+                source,
+                WorkModelError::AttemptNotFound {
+                    id: "attempt-1".to_string(),
+                }
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn work_model_store_reports_file_for_split_attempt_work_item_mismatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    store.write_work_item(&work_item()).unwrap();
+
+    let path = temp
+        .path()
+        .join(".factory/work/attempts/work-1/attempt-1.json");
+    let invalid = fs::read_to_string(&path)
+        .unwrap()
+        .replace(r#""work_item_id": "work-1""#, r#""work_item_id": "work-2""#);
+    fs::write(&path, invalid).unwrap();
+
+    match store.read_work_item("work-1").unwrap_err() {
+        WorkModelStorageError::InvalidModel {
+            path: actual,
+            source,
+        } => {
+            assert_eq!(actual, path);
+            assert_eq!(
+                source,
+                WorkModelError::AttemptWorkItemMismatch {
+                    attempt_id: "attempt-1".to_string(),
+                    expected: "work-1".to_string(),
+                    actual: "work-2".to_string(),
+                }
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn work_model_store_reports_file_for_split_task_id_mismatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    store.write_work_item(&work_item()).unwrap();
+
+    let path = temp
+        .path()
+        .join(".factory/work/tasks/work-1/attempt-1/write-code.json");
+    let invalid = fs::read_to_string(&path)
+        .unwrap()
+        .replace(r#""id": "write-code""#, r#""id": "review-code""#);
+    fs::write(&path, invalid).unwrap();
+
+    match store.read_work_item("work-1").unwrap_err() {
+        WorkModelStorageError::InvalidModel {
+            path: actual,
+            source,
+        } => {
+            assert_eq!(actual, path);
+            assert_eq!(
+                source,
+                WorkModelError::TaskAlreadyExists {
+                    id: "write-code".to_string(),
+                }
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn work_model_store_reports_file_for_split_task_work_item_mismatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    store.write_work_item(&work_item()).unwrap();
+
+    let path = temp
+        .path()
+        .join(".factory/work/tasks/work-1/attempt-1/write-code.json");
+    let invalid = fs::read_to_string(&path)
+        .unwrap()
+        .replace(r#""work_item_id": "work-1""#, r#""work_item_id": "work-2""#);
+    fs::write(&path, invalid).unwrap();
+
+    match store.read_work_item("work-1").unwrap_err() {
+        WorkModelStorageError::InvalidModel {
+            path: actual,
+            source,
+        } => {
+            assert_eq!(actual, path);
+            assert_eq!(
+                source,
+                WorkModelError::TaskWorkItemMismatch {
+                    task_id: "write-code".to_string(),
+                    expected: "work-1".to_string(),
+                    actual: "work-2".to_string(),
+                }
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn work_model_store_reports_file_for_split_task_attempt_mismatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    store.write_work_item(&work_item()).unwrap();
+
+    let path = temp
+        .path()
+        .join(".factory/work/tasks/work-1/attempt-1/write-code.json");
+    let invalid = fs::read_to_string(&path).unwrap().replace(
+        r#""attempt_id": "attempt-1""#,
+        r#""attempt_id": "attempt-2""#,
+    );
+    fs::write(&path, invalid).unwrap();
+
+    match store.read_work_item("work-1").unwrap_err() {
+        WorkModelStorageError::InvalidModel {
+            path: actual,
+            source,
+        } => {
+            assert_eq!(actual, path);
+            assert_eq!(
+                source,
+                WorkModelError::TaskAttemptMismatch {
+                    task_id: "write-code".to_string(),
+                    expected: "attempt-1".to_string(),
+                    actual: Some("attempt-2".to_string()),
+                }
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn work_model_store_reports_file_for_split_merge_candidate_id_mismatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    let mut item = work_item();
+    item.merge_candidates.push(merge_candidate());
+    store.write_work_item(&item).unwrap();
+
+    let path = temp
+        .path()
+        .join(".factory/work/merge-candidates/work-1/attempt-1-merge-candidate.json");
+    let invalid = fs::read_to_string(&path).unwrap().replace(
+        r#""id": "attempt-1-merge-candidate""#,
+        r#""id": "attempt-1-other-candidate""#,
+    );
+    fs::write(&path, invalid).unwrap();
+
+    match store.read_work_item("work-1").unwrap_err() {
+        WorkModelStorageError::InvalidModel {
+            path: actual,
+            source,
+        } => {
+            assert_eq!(actual, path);
+            assert_eq!(
+                source,
+                WorkModelError::MergeCandidateAlreadyExists {
+                    id: "attempt-1-merge-candidate".to_string(),
+                }
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn work_model_store_reports_file_for_split_merge_candidate_attempt_mismatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    let mut item = work_item();
+    item.merge_candidates.push(merge_candidate());
+    store.write_work_item(&item).unwrap();
+
+    let path = temp
+        .path()
+        .join(".factory/work/merge-candidates/work-1/attempt-1-merge-candidate.json");
+    let invalid = fs::read_to_string(&path).unwrap().replace(
+        r#""attempt_id": "attempt-1""#,
+        r#""attempt_id": "attempt-2""#,
+    );
+    fs::write(&path, invalid).unwrap();
+
+    match store.read_work_item("work-1").unwrap_err() {
+        WorkModelStorageError::InvalidModel {
+            path: actual,
+            source,
+        } => {
+            assert_eq!(actual, path);
+            assert_eq!(
+                source,
+                WorkModelError::MergeCandidateAttemptNotFound {
+                    candidate_id: "attempt-1-merge-candidate".to_string(),
+                    attempt_id: "attempt-2".to_string(),
                 }
             );
         }

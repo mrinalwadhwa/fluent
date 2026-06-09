@@ -102,7 +102,10 @@ test_work_create_writes_minimal_item() {
   assert_contains "$OUTPUT" "Created Work Item work-intake" || RESULT=1
   assert_contains "$(cat .factory/work/items/work-intake.json)" '"id": "work-intake"' || RESULT=1
   assert_contains "$(cat .factory/work/items/work-intake.json)" '"title": "Intake title"' || RESULT=1
-  assert_contains "$(cat .factory/work/items/work-intake.json)" '"attempts": []' || RESULT=1
+  assert_not_contains "$(cat .factory/work/items/work-intake.json)" '"attempts"' || RESULT=1
+  assert_not_contains "$(cat .factory/work/items/work-intake.json)" '"merge_candidates"' || RESULT=1
+  SHOW_OUTPUT="$("$FACTORY_BIN" work show work-intake 2>&1)"
+  assert_contains "$SHOW_OUTPUT" '"attempts": []' || RESULT=1
 
   cleanup_test_project
   return $RESULT

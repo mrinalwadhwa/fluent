@@ -64,9 +64,10 @@ write and review transitions, and `factory work merge <work-item-id>
 capabilities the Work path has not proven or does not yet expose.
 
 `factory work create <id> --title <title>` exposes the first Work Item
-intake surface. It writes a Work Item with an empty `attempts` list and
-does not schedule work or mutate legacy run state. Callers may attach
-approved planning context directly to the Work Item with
+intake surface. It writes Work Item metadata under
+`.factory/work/items/` and leaves Attempt, Task, and Merge Candidate
+collections empty. It does not schedule work or mutate legacy run state.
+Callers may attach approved planning context directly to the Work Item with
 `--planning-context <text>`, `--planning-context-file <path>`, or
 separate `--brief-file`, `--behaviors-file`, `--approach-file`, and
 `--plan-file` inputs. Factory stores that context as optional
