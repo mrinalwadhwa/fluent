@@ -200,22 +200,25 @@ using the timestamp prefix when fallback artifacts are needed.
 
 Prefer the Work model for new delegated build work, but do not create
 the Work Item immediately after writing only the brief. Work Item
-instructions are set at `factory work create` time, and write Tasks copy
-those stored instructions later. Defer Work Item creation until the
-approved brief, behaviors, approach, and plan can be passed as one
-combined instructions file. The `plan-execution` stage assembles that
-file after the user approves `plan.md`:
+planning context is set at `factory work create` time, and write Tasks
+derive their stored instructions from that context later. Defer Work
+Item creation until the approved brief, behaviors, approach, and plan can
+be passed as Work Item planning context. The `plan-execution` stage
+creates the Work Item after the user approves `plan.md`:
 
 ```sh
 factory work create <work-id> --title "<short title>" \
-  --instructions-file .factory/runs/<run-id>/execution-instructions.md
+  --brief-file <brief.md> \
+  --behaviors-file <behaviors.diff.md> \
+  --approach-file <approach.md> \
+  --plan-file <plan.md>
 ```
 
-Store rich planning text in Work Item instructions with
-`--instructions <text>` or `--instructions-file <path>` so write Tasks
-receive the context through durable Work state. Write bridge planning
-artifacts when later skills need files to review, revise, combine into
-execution instructions, or pass to legacy fallback:
+Store approved planning text in Work Item planning context with
+`--planning-context <text>`, `--planning-context-file <path>`, or the
+separate planning file flags so write Tasks receive the context through
+durable Work state. Write bridge planning artifacts when later skills
+need files to review, revise, or pass to legacy fallback:
 
 ```
 .factory/runs/[run-id]/

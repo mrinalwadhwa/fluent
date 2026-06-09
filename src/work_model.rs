@@ -142,6 +142,8 @@ pub struct WorkItem {
     pub id: String,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planning_context: Option<PlanningContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
     #[serde(default)]
     pub attempts: Vec<Attempt>,
@@ -150,6 +152,12 @@ pub struct WorkItem {
 }
 
 impl WorkItem {
+    pub fn write_task_instructions(&self) -> Option<String> {
+        self.instructions
+            .clone()
+            .or_else(|| self.planning_context.as_ref()?.to_instructions())
+    }
+
     pub fn add_initial_attempt(
         &mut self,
         attempt_id: impl Into<String>,
@@ -172,7 +180,7 @@ impl WorkItem {
                 kind: TaskKind::Write,
                 status: TaskStatus::Planned,
                 role: "author".to_string(),
-                instructions: self.instructions.clone(),
+                instructions: self.write_task_instructions(),
                 work_item_id: self.id.clone(),
                 attempt_id: Some(attempt_id.clone()),
                 workspace_access: WorkspaceAccess {
@@ -308,6 +316,7 @@ impl WorkItem {
         attempt_id: &str,
         input_artifacts: Vec<ArtifactRef>,
     ) -> Result<String, WorkModelError> {
+        let write_task_instructions = self.write_task_instructions();
         let Some(attempt) = self
             .attempts
             .iter_mut()
@@ -348,7 +357,7 @@ impl WorkItem {
             kind: TaskKind::Write,
             status: TaskStatus::Planned,
             role: "author".to_string(),
-            instructions: self.instructions.clone(),
+            instructions: write_task_instructions,
             work_item_id: self.id.clone(),
             attempt_id: Some(attempt_id.to_string()),
             workspace_access: WorkspaceAccess {
@@ -478,6 +487,71 @@ impl WorkItem {
             candidate.validate(self)?;
         }
         Ok(())
+    }
+}
+
+/// Approved planning context attached directly to a Work Item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PlanningContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behaviors: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approach: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combined: Option<String>,
+}
+
+impl PlanningContext {
+    pub fn to_instructions(&self) -> Option<String> {
+        if let Some(combined) = non_empty_clone(&self.combined) {
+            return Some(combined);
+        }
+
+        let mut sections = Vec::new();
+        push_planning_section(&mut sections, "Brief", &self.brief);
+        push_planning_section(&mut sections, "Behaviors", &self.behaviors);
+        push_planning_section(&mut sections, "Approach", &self.approach);
+        push_planning_section(&mut sections, "Plan", &self.plan);
+        (!sections.is_empty()).then(|| sections.join("\n\n"))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.brief
+            .as_ref()
+            .is_none_or(|value| value.trim().is_empty())
+            && self
+                .behaviors
+                .as_ref()
+                .is_none_or(|value| value.trim().is_empty())
+            && self
+                .approach
+                .as_ref()
+                .is_none_or(|value| value.trim().is_empty())
+            && self
+                .plan
+                .as_ref()
+                .is_none_or(|value| value.trim().is_empty())
+            && self
+                .combined
+                .as_ref()
+                .is_none_or(|value| value.trim().is_empty())
+    }
+}
+
+fn non_empty_clone(value: &Option<String>) -> Option<String> {
+    value
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+}
+
+fn push_planning_section(sections: &mut Vec<String>, title: &str, content: &Option<String>) {
+    if let Some(content) = non_empty_clone(content) {
+        sections.push(format!("# {title}\n\n{}", content.trim()));
     }
 }
 
@@ -1663,6 +1737,7 @@ mod tests {
         let mut work_item = WorkItem {
             id: "work-1".to_string(),
             title: "Review latest candidate".to_string(),
+            planning_context: None,
             instructions: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
@@ -1706,6 +1781,7 @@ mod tests {
         let work_item = WorkItem {
             id: "work-1".to_string(),
             title: "Define the core work model".to_string(),
+            planning_context: None,
             instructions: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
@@ -1736,6 +1812,7 @@ mod tests {
         let mut work_item = WorkItem {
             id: "work-1".to_string(),
             title: "Create merge candidate".to_string(),
+            planning_context: None,
             instructions: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
@@ -1778,6 +1855,7 @@ mod tests {
         let mut work_item = WorkItem {
             id: "work-1".to_string(),
             title: "Create merge candidate once".to_string(),
+            planning_context: None,
             instructions: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
@@ -1807,6 +1885,7 @@ mod tests {
         let mut work_item = WorkItem {
             id: "work-1".to_string(),
             title: "Keep one merge candidate per attempt".to_string(),
+            planning_context: None,
             instructions: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
@@ -1838,6 +1917,7 @@ mod tests {
         let mut work_item = WorkItem {
             id: "work-1".to_string(),
             title: "Validate merge candidate attempt state".to_string(),
+            planning_context: None,
             instructions: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
@@ -1881,6 +1961,7 @@ mod tests {
         let mut work_item = WorkItem {
             id: "work-1".to_string(),
             title: "Validate merge candidate provenance".to_string(),
+            planning_context: None,
             instructions: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
@@ -1924,6 +2005,7 @@ mod tests {
         let mut work_item = WorkItem {
             id: "work-1".to_string(),
             title: "Preserve merge failure state".to_string(),
+            planning_context: None,
             instructions: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
@@ -1967,6 +2049,7 @@ mod tests {
         let mut work_item = WorkItem {
             id: "work-1".to_string(),
             title: "Validate failed merge candidate provenance".to_string(),
+            planning_context: None,
             instructions: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),

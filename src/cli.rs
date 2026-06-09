@@ -206,6 +206,30 @@ pub enum WorkCommands {
         /// Read rich instructions from a file
         #[arg(long, value_name = "PATH")]
         instructions_file: Option<String>,
+
+        /// Approved planning context to store on the Work Item
+        #[arg(long, conflicts_with = "planning_context_file")]
+        planning_context: Option<String>,
+
+        /// Read approved planning context from a file
+        #[arg(long, value_name = "PATH")]
+        planning_context_file: Option<String>,
+
+        /// Read the approved brief from a file
+        #[arg(long, value_name = "PATH")]
+        brief_file: Option<String>,
+
+        /// Read the approved behaviors from a file
+        #[arg(long, value_name = "PATH")]
+        behaviors_file: Option<String>,
+
+        /// Read the approved approach from a file
+        #[arg(long, value_name = "PATH")]
+        approach_file: Option<String>,
+
+        /// Read the approved plan from a file
+        #[arg(long, value_name = "PATH")]
+        plan_file: Option<String>,
     },
 
     /// List stored Work Items

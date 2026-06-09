@@ -296,6 +296,7 @@ mod tests {
         let mut item = WorkItem {
             id: "work-1".to_string(),
             title: "Build status view".to_string(),
+            planning_context: None,
             instructions: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
@@ -315,6 +316,7 @@ mod tests {
         let mut item = WorkItem {
             id: "work-1".to_string(),
             title: "Build status view".to_string(),
+            planning_context: None,
             instructions: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
@@ -355,6 +357,7 @@ mod tests {
         let mut item = WorkItem {
             id: "work-1".to_string(),
             title: "Build status view".to_string(),
+            planning_context: None,
             instructions: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
@@ -421,6 +424,7 @@ mod tests {
         let mut item = WorkItem {
             id: "work-1".to_string(),
             title: "Build status view".to_string(),
+            planning_context: None,
             instructions: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),

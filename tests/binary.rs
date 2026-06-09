@@ -893,6 +893,125 @@ fn work_create_persists_instructions_and_attempt_copies_them_to_write_task() {
 }
 
 #[test]
+fn work_create_persists_planning_context_and_attempt_copies_it_to_write_task() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let brief_path = tmp.path().join("brief.md");
+    let behaviors_path = tmp.path().join("behaviors.md");
+    let approach_path = tmp.path().join("approach.md");
+    let plan_path = tmp.path().join("plan.md");
+    fs::write(&brief_path, "Build Work planning context.\n").unwrap();
+    fs::write(&behaviors_path, "WHEN planning exists, store it.\n").unwrap();
+    fs::write(&approach_path, "Add first-class Work state.\n").unwrap();
+    fs::write(&plan_path, "1. Implement the model change.\n").unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "create",
+            "work-1",
+            "--title",
+            "Planning contract",
+            "--brief-file",
+            &brief_path.to_string_lossy(),
+            "--behaviors-file",
+            &behaviors_path.to_string_lossy(),
+            "--approach-file",
+            &approach_path.to_string_lossy(),
+            "--plan-file",
+            &plan_path.to_string_lossy(),
+        ])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let output = factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "show", "work-1"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "work show failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value["planning_context"]["brief"],
+        "Build Work planning context.\n"
+    );
+    assert_eq!(
+        value["planning_context"]["behaviors"],
+        "WHEN planning exists, store it.\n"
+    );
+    assert_eq!(
+        value["planning_context"]["approach"],
+        "Add first-class Work state.\n"
+    );
+    assert_eq!(
+        value["planning_context"]["plan"],
+        "1. Implement the model change.\n"
+    );
+    assert_eq!(value["instructions"], serde_json::Value::Null);
+    let task_instructions = value["attempts"][0]["tasks"][0]["instructions"]
+        .as_str()
+        .unwrap();
+    assert!(task_instructions.contains("# Brief\n\nBuild Work planning context."));
+    assert!(task_instructions.contains("# Behaviors\n\nWHEN planning exists, store it."));
+    assert!(task_instructions.contains("# Approach\n\nAdd first-class Work state."));
+    assert!(task_instructions.contains("# Plan\n\n1. Implement the model change."));
+}
+
+#[test]
+fn work_create_prefers_instructions_over_planning_context_for_write_task() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "create",
+            "work-1",
+            "--title",
+            "Planning precedence",
+            "--instructions",
+            "Use these explicit instructions.",
+            "--planning-context",
+            "# Brief\n\nDo not use this for the prompt.",
+        ])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let output = factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "show", "work-1"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value["attempts"][0]["tasks"][0]["instructions"],
+        "Use these explicit instructions."
+    );
+    assert_eq!(
+        value["planning_context"]["combined"],
+        "# Brief\n\nDo not use this for the prompt."
+    );
+}
+
+#[test]
 fn work_task_run_includes_task_instructions_in_coder_prompt() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
@@ -955,6 +1074,71 @@ exit 0
     assert!(prompt.contains("Task instructions:"));
     assert!(prompt.contains("Implement the first slice."));
     assert!(prompt.contains("Avoid prompt smuggling."));
+}
+
+#[test]
+fn work_task_run_includes_planning_context_in_coder_prompt() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin");
+    let prompt_log = tmp.path().join("prompt.log");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-p" ]; then
+    shift
+    printf '%s\n' "$1" > "$PROMPT_LOG"
+    break
+  fi
+  shift
+done
+printf 'task output\n' > task-output.txt
+git add task-output.txt
+git commit -m "Add task output" >/dev/null
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "create",
+            "work-1",
+            "--title",
+            "Planning prompt",
+            "--planning-context",
+            "# Brief\n\nUse durable planning context.\n\n# Plan\n\n1. Build it.",
+        ])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("PROMPT_LOG", &prompt_log)
+        .assert()
+        .success();
+
+    let prompt = fs::read_to_string(prompt_log).unwrap();
+    assert!(prompt.contains("Task instructions:"));
+    assert!(prompt.contains("Use durable planning context."));
+    assert!(prompt.contains("1. Build it."));
 }
 
 #[test]

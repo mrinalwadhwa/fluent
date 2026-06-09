@@ -65,13 +65,21 @@ capabilities the Work path has not proven or does not yet expose.
 
 `factory work create <id> --title <title>` exposes the first Work Item
 intake surface. It writes a Work Item with an empty `attempts` list and
-does not schedule work or mutate legacy run state. Callers may pass rich
-execution context with `--instructions <text>` or
-`--instructions-file <path>`; Factory stores that context as optional
-`WorkItem.instructions`. `factory work attempt <work-item-id>
-<attempt-id>` creates the first operational transition from intake: it
-appends a planned Attempt with one initial `write` Task. The Task
-declares role `author`, copies the Work Item instructions into optional
+does not schedule work or mutate legacy run state. Callers may attach
+approved planning context directly to the Work Item with
+`--planning-context <text>`, `--planning-context-file <path>`, or
+separate `--brief-file`, `--behaviors-file`, `--approach-file`, and
+`--plan-file` inputs. Factory stores that context as optional
+`WorkItem.planning_context` so `factory work show <id>` exposes the
+brief, behaviors, approach, and plan that write Tasks use. Callers may
+also pass explicit prompt text with `--instructions <text>` or
+`--instructions-file <path>`; Factory stores that text as optional
+`WorkItem.instructions` and gives it precedence over derived planning
+context when it creates write Task instructions. `factory work attempt
+<work-item-id> <attempt-id>` creates the first operational transition
+from intake: it appends a planned Attempt with one initial `write` Task.
+The Task declares role `author`, copies explicit Work Item instructions
+or derives instructions from Work Item planning context into optional
 `Task.instructions`, and declares one writable workspace reference at
 `../work-<work-item-id-byte-len>-<work-item-id>-<attempt-id>`.
 `factory work task run` creates or reuses that writable workspace as a
@@ -122,9 +130,11 @@ Task, the matching Merge Candidate, and a short action label. It returns
 valid rows and per-file read errors together so one bad Work Item file
 does not hide the rest of the queue.
 Write Task prompt generation reads `Task.instructions` from durable Work
-state and includes non-empty instructions in the coder prompt. Extra
-arguments passed after `--` remain coder flags only; Factory does not
-append them as additional prompt text.
+state and includes non-empty instructions in the coder prompt. A Task
+receives those instructions from explicit Work Item instructions first,
+or from rendered Work Item planning context when explicit instructions
+are absent. Extra arguments passed after `--` remain coder flags only;
+Factory does not append them as additional prompt text.
 `factory work merge-candidate <work-item-id> <merge-candidate-id>` prints
 one stored Merge Candidate as pretty JSON. This command only reads the
 boundary object. `factory work merge <work-item-id> <merge-candidate-id>`
@@ -201,9 +211,9 @@ workspaces. `workspace_access.writes` may be empty or contain one
 workspace. A `review` task must keep `writes` empty; reviewers write
 findings and notes under a required `artifact_area`.
 
-Write Tasks may include optional `instructions` copied from the
-containing Work Item. JSON omits `instructions` when the Task has no
-rich execution context.
+Write Tasks may include optional `instructions` copied from explicit Work
+Item instructions or derived from Work Item planning context. JSON omits
+`instructions` when the Task has no rich execution context.
 
 `status` tracks Task lifecycle state: `planned`, `executing`,
 `complete`, `failed`, or `needs-user`. Planned Tasks omit the field in

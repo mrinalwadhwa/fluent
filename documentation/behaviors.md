@@ -61,6 +61,13 @@ make them visible through `factory work show <id>`.
 Test: tests/binary.rs (work_create_persists_instructions_and_attempt_copies_them_to_write_task)
 Test: tests/behaviors/operations/test-work-inspection.sh (work create persists instructions)
 
+WHEN `factory work create` is invoked with approved planning context,
+THE SYSTEM SHALL persist the brief, behaviors, approach, and plan context
+in stored Work Item state and make that context visible through
+`factory work show <id>` without requiring a legacy run execution
+instructions file.
+Test: tests/binary.rs (work_create_persists_planning_context_and_attempt_copies_it_to_write_task)
+
 WHEN `factory work list` is invoked,
 THE SYSTEM SHALL read stored Work Items from `.factory/work/items/` and
 print each Work Item with its id and title.
@@ -127,6 +134,14 @@ can build the coder prompt from durable Work model state.
 Test: tests/binary.rs (work_create_persists_instructions_and_attempt_copies_them_to_write_task)
 Test: tests/behaviors/operations/test-work-task-instructions.sh (attempt copies instructions to initial write Task)
 
+WHEN `factory work attempt <work-item-id> <attempt-id>` creates the
+initial `write` Task for a Work Item with planning context and no
+explicit instructions,
+THE SYSTEM SHALL derive Task instructions from the Work Item planning
+context so Task execution can build the coder prompt from durable Work
+model state.
+Test: tests/binary.rs (work_create_persists_planning_context_and_attempt_copies_it_to_write_task)
+
 WHEN `factory work task run <work-item-id> <attempt-id> <task-id>` is
 invoked for an existing planned `write` Task with exactly one writable
 workspace,
@@ -140,6 +155,7 @@ WHEN `factory work task run <work-item-id> <attempt-id> <task-id>` or
 `write` Task with stored Task instructions,
 THE SYSTEM SHALL include those instructions in the coder prompt.
 Test: tests/binary.rs (work_task_run_includes_task_instructions_in_coder_prompt)
+Test: tests/binary.rs (work_task_run_includes_planning_context_in_coder_prompt)
 Test: tests/behaviors/operations/test-work-task-run.sh (run passes Task instructions to coder prompt)
 Test: tests/behaviors/operations/test-work-task-instructions.sh (task run uses durable instructions and keeps extra args out of prompt)
 Test: tests/behaviors/operations/test-work-task-instructions.sh (attempt run uses durable instructions and keeps extra args out of prompt)

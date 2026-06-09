@@ -146,29 +146,25 @@ steps. Determine if decomposition into child runs is needed. Write
 
 Once the plan is approved, prefer the Work model for delegated execution:
 
-1. Assemble `.factory/runs/<run-id>/execution-instructions.md` from the
-   approved planning files in this order: `brief.md`,
-   `behaviors.diff.md`, `approach.md`, then `plan.md`. Keep each file's
-   heading and content intact so the executing author sees the approved
-   context as one durable instruction document.
-2. Create a Work Item with those instructions:
+1. Create a Work Item with the approved planning files:
    `factory work create <work-item-id> --title <title>
-   --instructions-file <execution-instructions.md>`.
-3. Create an Attempt: `factory work attempt <work-item-id>
+   --brief-file <brief.md> --behaviors-file <behaviors.diff.md>
+   --approach-file <approach.md> --plan-file <plan.md>`.
+2. Create an Attempt: `factory work attempt <work-item-id>
    <attempt-id>`.
-4. Run the Attempt: `factory work attempt run <work-item-id>
+3. Run the Attempt: `factory work attempt run <work-item-id>
    <attempt-id>`.
-5. Inspect status with `factory status` or `factory work show
+4. Inspect status with `factory status` or `factory work show
    <work-item-id>`.
-6. When the Attempt creates a Merge Candidate, inspect it and land with
+5. When the Attempt creates a Merge Candidate, inspect it and land with
    `factory work merge <work-item-id> <merge-candidate-id>`.
 
 `factory work attempt run` advances the next safe transition by running
 planned write and review Tasks through the existing Task executor. It
 reloads stored Work Item state between transitions, carries Work Item
-instructions into initial and follow-up write Tasks, creates follow-up
-write Tasks after failed reviews, and records `needs-user` when the
-review state cannot be resolved autonomously.
+instructions or planning context into initial and follow-up write Tasks,
+creates follow-up write Tasks after failed reviews, and records
+`needs-user` when the review state cannot be resolved autonomously.
 
 Use legacy `factory run` only as a transitional fallback when the Work
 model cannot yet express the work, such as full review-only runs,
@@ -281,6 +277,8 @@ worktree.
 
 ```sh
 factory work create <id> --title <t> # create a stored Work Item
+factory work create <id> --title <t> --planning-context-file <path> # load planning context
+factory work create <id> --title <t> --brief-file <b> --behaviors-file <beh> --approach-file <a> --plan-file <p> # store approved planning files
 factory work create <id> --title <t> --instructions <text> # store prompt text
 factory work create <id> --title <t> --instructions-file <path> # load prompt file
 factory work list                    # list stored Work Items
@@ -325,6 +323,7 @@ directly in your session.
   Calling it from inside a session creates a nested loop. If you need
   the legacy fallback, tell the user to run it from their terminal.
 
-- Do not default to `.factory/runs` just because planning skills still
-  mention run artifacts. Treat those files as bridge context unless the
-  Work model lacks the capability you need.
+- Do not default to `.factory/runs` for Work execution planning. Store
+  approved planning context on the Work Item and treat legacy run files
+  as bridge context only when the Work model lacks the capability you
+  need.

@@ -44,6 +44,7 @@ fn work_item() -> WorkItem {
     WorkItem {
         id: "work-1".to_string(),
         title: "Add durable model storage".to_string(),
+        planning_context: None,
         instructions: None,
         attempts: vec![Attempt {
             id: "attempt-1".to_string(),
@@ -507,6 +508,7 @@ fn work_item_add_initial_attempt_creates_scheduler_facing_write_task() {
     let mut work_item = WorkItem {
         id: "work-1".to_string(),
         title: "Add attempt intake".to_string(),
+        planning_context: None,
         instructions: None,
         attempts: Vec::new(),
         merge_candidates: Vec::new(),
@@ -571,6 +573,7 @@ fn work_item_add_initial_attempt_rejects_duplicate_attempt_id() {
     let mut work_item = WorkItem {
         id: "work-1".to_string(),
         title: "Add attempt intake".to_string(),
+        planning_context: None,
         instructions: None,
         attempts: Vec::new(),
         merge_candidates: Vec::new(),
@@ -592,6 +595,7 @@ fn work_item_add_initial_attempt_rejects_invalid_attempt_id() {
     let mut work_item = WorkItem {
         id: "work-1".to_string(),
         title: "Add attempt intake".to_string(),
+        planning_context: None,
         instructions: None,
         attempts: Vec::new(),
         merge_candidates: Vec::new(),

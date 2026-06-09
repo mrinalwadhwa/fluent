@@ -157,19 +157,20 @@ Assemble `plan.md` and show the full plan:
 
 > "Here's the complete plan. Does the full picture hold together?"
 
-After the user approves the plan, assemble
-`.factory/runs/<run-id>/execution-instructions.md` for the Work Item.
-Concatenate the approved planning files in this order:
+After the user approves the plan, create the Work Item with planning
+context stored directly in Work state. Pass the approved planning files
+in this order:
 
-1. `.factory/runs/<run-id>/brief.md`
-2. `.factory/runs/<run-id>/behaviors.diff.md`
-3. `.factory/runs/<run-id>/approach.md`
-4. `.factory/runs/<run-id>/plan.md`
+1. the approved brief
+2. the approved behaviors diff
+3. the approved approach
+4. the approved plan
 
-Keep each file's heading and content intact, and separate files with a
-blank line. This file is the exact path passed to
-`factory work create --instructions-file`; `factory work create` only
-reads the file and stores its text.
+Use `factory work create --brief-file --behaviors-file --approach-file
+--plan-file` so Factory stores the approved context on the Work Item and
+derives write Task instructions from durable Work state. Assemble a
+legacy run `execution-instructions.md` file only when a compatibility
+path still requires one.
 
 Set status to `planned`.
 

@@ -26,7 +26,9 @@ use factory::summary;
 use factory::version;
 use factory::work_attempt_loop::{self, WorkAttemptRunConfig, WorkAttemptRunOutcome};
 use factory::work_merge_executor::{self, WorkMergeConfig};
-use factory::work_model::{WorkItem, WorkModelStorageError, WorkModelStore, to_json_pretty};
+use factory::work_model::{
+    PlanningContext, WorkItem, WorkModelStorageError, WorkModelStore, to_json_pretty,
+};
 use factory::work_status;
 use factory::work_task_executor::{self, WorkTaskRunConfig};
 use factory::worktree;
@@ -228,6 +230,12 @@ fn cmd_work(
             title,
             instructions,
             instructions_file,
+            planning_context,
+            planning_context_file,
+            brief_file,
+            behaviors_file,
+            approach_file,
+            plan_file,
         } => {
             let instructions = match (instructions, instructions_file) {
                 (Some(instructions), None) => Some(instructions),
@@ -235,9 +243,18 @@ fn cmd_work(
                 (None, None) => None,
                 (Some(_), Some(_)) => unreachable!("clap rejects conflicting instruction inputs"),
             };
+            let planning_context = read_planning_context(
+                planning_context,
+                planning_context_file,
+                brief_file,
+                behaviors_file,
+                approach_file,
+                plan_file,
+            )?;
             let item = WorkItem {
                 id,
                 title,
+                planning_context,
                 instructions,
                 attempts: Vec::new(),
                 merge_candidates: Vec::new(),
@@ -432,6 +449,34 @@ fn cmd_work(
         },
     }
     Ok(())
+}
+
+fn read_planning_context(
+    planning_context: Option<String>,
+    planning_context_file: Option<String>,
+    brief_file: Option<String>,
+    behaviors_file: Option<String>,
+    approach_file: Option<String>,
+    plan_file: Option<String>,
+) -> Result<Option<PlanningContext>> {
+    let context = PlanningContext {
+        brief: read_optional_file(brief_file)?,
+        behaviors: read_optional_file(behaviors_file)?,
+        approach: read_optional_file(approach_file)?,
+        plan: read_optional_file(plan_file)?,
+        combined: match (planning_context, planning_context_file) {
+            (Some(context), None) => Some(context),
+            (None, Some(path)) => Some(fs::read_to_string(path)?),
+            (None, None) => None,
+            (Some(_), Some(_)) => unreachable!("clap rejects conflicting planning context inputs"),
+        },
+    };
+
+    Ok((!context.is_empty()).then_some(context))
+}
+
+fn read_optional_file(path: Option<String>) -> Result<Option<String>> {
+    path.map(fs::read_to_string).transpose().map_err(Into::into)
 }
 
 fn cmd_interactive(

@@ -16,6 +16,7 @@ fn documented_work_item() -> WorkItem {
     WorkItem {
         id: "work-review".to_string(),
         title: "Review durable storage".to_string(),
+        planning_context: None,
         instructions: None,
         attempts: vec![Attempt {
             id: "attempt-review".to_string(),
