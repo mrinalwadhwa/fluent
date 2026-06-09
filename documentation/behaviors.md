@@ -696,7 +696,7 @@ WHEN `factory status` reads one or more invalid Work Item files,
 THE SYSTEM SHALL report the invalid Work model path in a Work Item read
 errors section while still displaying valid Work Items, and SHALL display
 valid legacy Runs only when `--runs` is supplied.
-Test: tests/binary.rs (status_reports_invalid_work_item_with_valid_state), tests/behaviors/operations/test-work-status-dashboard.sh (status reports invalid Work without hiding valid state)
+Test: tests/binary.rs (status_reports_invalid_work_item_by_default_and_with_runs), tests/behaviors/operations/test-work-status-dashboard.sh (status reports invalid Work without hiding valid state)
 
 WHEN `factory status` is invoked after cleanup,
 THE SYSTEM SHALL hide cleaned legacy Runs unless `--runs` is supplied;

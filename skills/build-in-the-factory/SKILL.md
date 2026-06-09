@@ -292,7 +292,8 @@ factory work review <id> <attempt>   # plan review Tasks
 factory work task run <id> <attempt> <task> # run one Task
 factory work merge-candidate <id> <candidate> # show a Merge Candidate
 factory work merge <id> <candidate>  # execute a Merge Candidate
-factory status                       # show all runs and their state
+factory status                       # show Work Items by default
+factory status --runs                # show legacy Runs compatibility view
 factory dashboard                    # open the live dashboard
 factory run                          # fallback legacy session loop
 factory run --run-id <id>            # target a legacy run

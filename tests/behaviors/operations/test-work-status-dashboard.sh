@@ -281,11 +281,17 @@ test_status_reports_invalid_work_without_hiding_valid_state() {
   printf '{ invalid json\n' > .factory/work/items/broken-work.json
 
   RESULT=0
-  OUTPUT="$("$FACTORY_BIN" status --runs 2>&1 || true)"
-  assert_contains "$OUTPUT" "run-valid" || RESULT=1
-  assert_contains "$OUTPUT" "complete" || RESULT=1
+  OUTPUT="$("$FACTORY_BIN" status 2>&1 || true)"
   assert_contains "$OUTPUT" "work-visible" || RESULT=1
+  assert_contains "$OUTPUT" "Work Item read errors" || RESULT=1
   assert_contains "$OUTPUT" ".factory/work/items/broken-work.json" || RESULT=1
+  assert_not_contains "$OUTPUT" "run-valid" || RESULT=1
+
+  RUN_OUTPUT="$("$FACTORY_BIN" status --runs 2>&1 || true)"
+  assert_contains "$RUN_OUTPUT" "run-valid" || RESULT=1
+  assert_contains "$RUN_OUTPUT" "complete" || RESULT=1
+  assert_contains "$RUN_OUTPUT" "work-visible" || RESULT=1
+  assert_contains "$RUN_OUTPUT" ".factory/work/items/broken-work.json" || RESULT=1
   return $RESULT
 }
 

@@ -272,7 +272,7 @@ fn status_runs_shows_runs_and_work_items_together() {
 }
 
 #[test]
-fn status_reports_invalid_work_item_with_valid_state() {
+fn status_reports_invalid_work_item_by_default_and_with_runs() {
     let tmp = TempDir::new().unwrap();
     let run_dir = tmp.path().join(".factory/runs/valid-run");
     fs::create_dir_all(&run_dir).unwrap();
@@ -285,6 +285,27 @@ fn status_reports_invalid_work_item_with_valid_state() {
         "{ invalid json\n",
     )
     .unwrap();
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .arg("status")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "status failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("work-valid"), "{stdout}");
+    assert!(stdout.contains("Work Item read errors"), "{stdout}");
+    assert!(
+        stdout.contains(".factory/work/items/work-broken.json"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("valid-run"), "{stdout}");
 
     let output = factory_cmd()
         .current_dir(tmp.path())
