@@ -226,6 +226,7 @@ impl WorkItem {
         };
         let source_ref = source_ref.into();
         let source_commit = source_commit.into();
+        let review_task_instructions = self.write_task_instructions();
         let mut task_ids = Vec::new();
         let mut tasks = Vec::new();
         for role in roles {
@@ -237,7 +238,7 @@ impl WorkItem {
                 kind: TaskKind::Review,
                 status: TaskStatus::Planned,
                 role: (*role).to_string(),
-                instructions: None,
+                instructions: review_task_instructions.clone(),
                 work_item_id: self.id.clone(),
                 attempt_id: Some(attempt_id.clone()),
                 workspace_access: WorkspaceAccess::read_only(vec![source.clone()]),
@@ -2571,6 +2572,32 @@ mod tests {
                 task_id: "task-1".to_string()
             }
         );
+    }
+
+    #[test]
+    fn review_only_attempt_copies_work_item_planning_context_to_tasks() {
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Review the codebase".to_string(),
+            planning_context: Some(PlanningContext {
+                brief: Some("Review only skills/ and focus on prompts.\n".to_string()),
+                ..PlanningContext::default()
+            }),
+            instructions: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+
+        work_item
+            .add_review_only_attempt("attempt-review", &["skills"], "main", "abc123")
+            .unwrap();
+
+        let instructions = work_item.attempts[0].tasks[0]
+            .instructions
+            .as_deref()
+            .unwrap();
+        assert!(instructions.contains("# Brief"));
+        assert!(instructions.contains("Review only skills/ and focus on prompts."));
     }
 
     #[test]

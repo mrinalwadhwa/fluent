@@ -1370,9 +1370,23 @@ fn work_review_requires_completed_write_output() {
 fn work_review_codebase_creates_review_only_attempt() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
+    let brief_path = tmp.path().join("review-brief.md");
+    fs::write(
+        &brief_path,
+        "Review only skills/ and focus on review-only prompt context.\n",
+    )
+    .unwrap();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Review codebase"])
+        .args([
+            "work",
+            "create",
+            "work-1",
+            "--title",
+            "Review codebase",
+            "--brief-file",
+            &brief_path.to_string_lossy(),
+        ])
         .assert()
         .success();
 
@@ -1401,6 +1415,12 @@ fn work_review_codebase_creates_review_only_attempt() {
         .iter()
         .find(|task| task["id"] == "attempt-review-review-tests")
         .unwrap();
+    assert!(
+        review_task["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Review only skills/ and focus on review-only prompt context.")
+    );
     assert_eq!(review_task["kind"], "review");
     assert_eq!(review_task["workspace_access"]["reads"][0]["id"], "source");
     assert_eq!(review_task["workspace_access"]["reads"][0]["path"], ".");
@@ -1427,6 +1447,74 @@ fn work_review_codebase_creates_review_only_attempt() {
         review_task["review_context"]["candidate_commit"],
         git_head(&main_dir)
     );
+}
+
+#[test]
+fn work_attempt_run_review_only_includes_planning_context_in_prompt() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-review-only-prompt");
+    let prompt_log = tmp.path().join("review-prompt.log");
+    let brief_path = tmp.path().join("review-brief.md");
+    fs::write(
+        &brief_path,
+        "Review only skills/ and focus on review-only prompt context.\n",
+    )
+    .unwrap();
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-p" ]; then
+    shift
+    printf '%s\n' "$1" >> "$PROMPT_LOG"
+    break
+  fi
+  shift
+done
+printf 'Verdict: pass\n\nReview-only result.\n' > review.md
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "create",
+            "work-1",
+            "--title",
+            "Review codebase",
+            "--brief-file",
+            &brief_path.to_string_lossy(),
+        ])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .assert()
+        .success();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-review",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("PROMPT_LOG", &prompt_log)
+        .assert()
+        .success();
+
+    let prompt = fs::read_to_string(prompt_log).unwrap();
+    assert!(prompt.contains("Task instructions:"));
+    assert!(prompt.contains("Review only skills/ and focus on review-only prompt context."));
+    assert!(prompt.contains("Readable source checkout:"));
 }
 
 #[test]

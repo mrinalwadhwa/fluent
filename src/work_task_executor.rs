@@ -981,13 +981,15 @@ fn run_review_coder(
     } else {
         "candidate workspaces"
     };
+    let task_instructions = task_instructions_prompt(task.instructions.as_deref());
     let prompt = format!(
-        "Execute this Factory review Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\n{}\nWrite the review artifact to exactly this path:\n{}\n\nThe Task completes when that artifact exists. The artifact may contain Verdict: pass, Verdict: fail, or Verdict: uncertain; do not edit {}.\n\nCurrent Task model:\n{}\n",
+        "Execute this Factory review Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\n{}{}\nWrite the review artifact to exactly this path:\n{}\n\nThe Task completes when that artifact exists. The artifact may contain Verdict: pass, Verdict: fail, or Verdict: uncertain; do not edit {}.\n\nCurrent Task model:\n{}\n",
         item.id,
         item.title,
         attempt_id,
         task_id,
         task.role,
+        task_instructions,
         scope_prompt,
         review_path.display(),
         edit_target,
