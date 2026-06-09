@@ -744,11 +744,32 @@ Progress:
   Tasks copy that context into `Task.instructions`, and write Task prompt
   generation uses durable Work state while keeping extra CLI args as
   coder flags.
+- `4ade899` and `e2b5a5d` made approved planning context first-class in
+  Work state. `factory work create` can now store separate brief,
+  behaviors, approach, and plan files or a combined planning context;
+  initial and follow-up write Tasks derive prompt text from that durable
+  context when explicit Work Item instructions are absent. The
+  build-in-the-factory, capture-brief, and plan-execution skills now
+  teach this Work path instead of defaulting to a legacy
+  `.factory/runs/<run-id>/execution-instructions.md` bridge.
 
-The next adoption slices should make the build workflow use these durable
-Work task instructions end to end; clean up Work workspaces and artifacts;
-and then delete legacy `.factory/runs` compatibility once the Work
-execution path is used end to end.
+The next adoption slices should continue breaking the Work model out of a
+single nested Work Item JSON file into separate durable collections,
+remove remaining legacy `.factory/runs` assumptions from prompts and
+reviewers, and then delete legacy `.factory/runs` compatibility once the
+Work execution path is used end to end.
+
+2026-06-08 — Merge-time reviewers still need a stricter Work-native,
+read-only contract. During the `work-planning-artifacts` merge candidate,
+the merge-time behavior reviewer received legacy `.factory/runs/...`
+instructions even though the Work merge artifact path was
+`.factory/work/artifacts/...`, then created useful scratch behavior tests
+and documentation edits inside the candidate workspace. The merge landed
+only the committed candidate and cleanup removed the transient worktree,
+so those scratch edits did not land. This reinforces the redesigned
+model: merge-time reviews should write only review artifacts, prompts
+should use Work-native paths, and useful scratch tests or suggested edits
+should become follow-up write Tasks instead of candidate mutations.
 
 2026-06-07 — Authors are increasingly using expertise, especially when
 the approach lists specific expertise files, but Factory should make this
