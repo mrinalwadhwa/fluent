@@ -297,8 +297,9 @@ WHEN `factory work merge <work-item-id> <merge-candidate-id>` launches a
 merge-time reviewer for a Work Merge Candidate,
 THE SYSTEM SHALL name the exact
 `.factory/work/artifacts/<attempt-id>/<candidate-id>/merge/reviews/<role>/review.md`
-artifact as the required review output and SHALL NOT instruct the
-reviewer to write legacy `.factory/runs/<run-id>/reviews/...` artifacts.
+artifact as the review output, provide the absolute filesystem path the
+reviewer must write, and SHALL NOT instruct the reviewer to write legacy
+`.factory/runs/<run-id>/reviews/...` artifacts.
 Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge lands after update, checks, and reviewers)
 
 WHEN a merge-time reviewer receives a candidate workspace,
@@ -362,9 +363,12 @@ the candidate workspace while `factory work merge <work-item-id>
 <merge-candidate-id>` executes,
 THEN THE SYSTEM SHALL stop before landing, leave the target branch
 unchanged, record the reviewer as non-passing, and expose an error that
-names the reviewer and dirty candidate workspace.
+names the reviewer and dirty candidate workspace. This includes ignored
+files such as files under the candidate workspace's `.factory` tree.
 Test: tests/binary.rs (work_merge_candidate_dirty_reviewer_fails_before_landing)
+Test: tests/binary.rs (work_merge_candidate_dirty_ignored_reviewer_fails_before_landing)
 Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge dirty reviewer leaves target unchanged)
+Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge dirty Factory state reviewer leaves target unchanged)
 
 IF configured pre-land checks fail while `factory work merge
 <work-item-id> <merge-candidate-id>` executes,

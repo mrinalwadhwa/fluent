@@ -1,5 +1,7 @@
 use anyhow::{Context, Result, bail};
+use std::collections::BTreeMap;
 use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -305,6 +307,7 @@ fn run_merge_reviews(
             producer_id: format!("merge-review-{reviewer}"),
             path: path_for_model(config.project_root, &review_path),
         };
+        let review_guard_baseline = review_guard_file_snapshot(source_workspace)?;
         let verdict_result = run_one_merge_reviewer(
             config,
             item,
@@ -317,7 +320,11 @@ fn run_merge_reviews(
             target_head_before,
             candidate_head_after_rebase,
         );
-        if let Err(error) = ensure_merge_reviewer_kept_candidate_clean(source_workspace, reviewer) {
+        if let Err(error) = ensure_merge_reviewer_kept_candidate_clean(
+            source_workspace,
+            reviewer,
+            &review_guard_baseline,
+        ) {
             artifacts.push(review_artifact);
             verdicts.insert((*reviewer).to_string(), review::Verdict::Fail);
             let state = ReviewState::from_verdicts(1, verdicts);
@@ -379,6 +386,7 @@ fn run_one_merge_reviewer(
     let candidate_json = to_json_pretty(candidate)?;
     let attempt_history = merge_review_attempt_history(item, candidate);
     let review_artifact_path = path_for_model(config.project_root, review_path);
+    let review_absolute_path = review_path.display();
     let reviewer_artifact_dir = path_for_model(config.project_root, reviewer_dir);
     let check_text = if check_artifacts.is_empty() {
         "None.".to_string()
@@ -390,7 +398,7 @@ fn run_one_merge_reviewer(
             .join("\n")
     };
     let prompt = format!(
-        "Execute a merge-time Work model review.\n\nWork Item: {}\nMerge Candidate: {}\nReviewer: {}\nCandidate workspace: {}\nTarget branch: {}\nReview diff: git -C {} diff {}..HEAD\n\nCandidate workspace access:\n- Treat the candidate workspace as read-only for review purposes.\n- Do not modify, stage, unstage, commit, create, or delete files in the candidate workspace.\n- Put scratch tests, suggested patches, or proposed documentation edits in the review artifact text or reviewer artifact directory instead of applying them to the candidate workspace.\n\nAttempt history:\n{}\n\nRebase/update state:\n- Rebased candidate workspace onto target branch {} before checks and reviewers.\n- Target branch head before merge checks/reviews: {}\n- Candidate head after rebase/update: {}\n\nCheck artifacts:\n{}\n\nWrite the review artifact to exactly this Work artifact path:\n{}\nYour reviewer artifact directory is:\n{}\n\nMerge Candidate model:\n{}\n",
+        "Execute a merge-time Work model review.\n\nWork Item: {}\nMerge Candidate: {}\nReviewer: {}\nCandidate workspace: {}\nTarget branch: {}\nReview diff: git -C {} diff {}..HEAD\n\nCandidate workspace access:\n- Treat the candidate workspace as read-only for review purposes.\n- Do not modify, stage, unstage, commit, create, or delete files in the candidate workspace.\n- Put scratch tests, suggested patches, or proposed documentation edits in the review artifact text or reviewer artifact directory instead of applying them to the candidate workspace.\n\nAttempt history:\n{}\n\nRebase/update state:\n- Rebased candidate workspace onto target branch {} before checks and reviewers.\n- Target branch head before merge checks/reviews: {}\n- Candidate head after rebase/update: {}\n\nCheck artifacts:\n{}\n\nWork review artifact path:\n{}\nWrite the review artifact to exactly this filesystem path:\n{}\nYour reviewer artifact directory is:\n{}\n\nMerge Candidate model:\n{}\n",
         config.work_item_id,
         candidate.id,
         reviewer,
@@ -404,12 +412,13 @@ fn run_one_merge_reviewer(
         candidate_head_after_rebase,
         check_text,
         review_artifact_path,
+        review_absolute_path,
         reviewer_artifact_dir,
         candidate_json
     );
     let reviewer_system = format!(
-        "{system}\nReview only this Work Merge Candidate. The candidate workspace is read-only for review purposes. Write only merge review artifacts, with the required verdict line (pass, fail, or uncertain) in {}.",
-        review_artifact_path
+        "{system}\nReview only this Work Merge Candidate. The candidate workspace is read-only for review purposes. Write only merge review artifacts, with the required verdict line (pass, fail, or uncertain) in {}. This is the Work artifact path {}; do not write legacy run review artifacts.",
+        review_absolute_path, review_artifact_path
     );
     if !config.no_sandbox {
         os::check_prerequisites_for(config.coder_kind)?;
@@ -800,6 +809,7 @@ fn ensure_clean_worktree(workspace_path: &Path) -> Result<()> {
 fn ensure_merge_reviewer_kept_candidate_clean(
     source_workspace: &Path,
     reviewer: &str,
+    review_guard_baseline: &BTreeMap<String, ReviewGuardFileState>,
 ) -> Result<()> {
     let status = worktree_status(source_workspace)?;
     if !status.is_empty() {
@@ -809,7 +819,132 @@ fn ensure_merge_reviewer_kept_candidate_clean(
             status.trim_end()
         );
     }
+    let review_guard_after = review_guard_file_snapshot(source_workspace)?;
+    if &review_guard_after != review_guard_baseline {
+        let changes = review_guard_snapshot_changes(review_guard_baseline, &review_guard_after);
+        bail!(
+            "Merge-time reviewer {reviewer} dirtied candidate workspace {}; candidate workspaces are read-only during merge review. Dirty ignored or Factory files:\n{}",
+            source_workspace.display(),
+            changes.trim_end()
+        );
+    }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReviewGuardFileState {
+    len: u64,
+    hash: u64,
+}
+
+fn review_guard_file_snapshot(
+    workspace_path: &Path,
+) -> Result<BTreeMap<String, ReviewGuardFileState>> {
+    let output = git_output(
+        workspace_path,
+        &[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+        ],
+        "snapshot ignored files",
+    )?;
+    if !output.status.success() {
+        bail!(
+            "Failed to snapshot ignored files:\n{}",
+            command_output(&output)
+        );
+    }
+
+    let mut snapshot = BTreeMap::new();
+    for raw_path in output.stdout.split(|byte| *byte == 0) {
+        if raw_path.is_empty() {
+            continue;
+        }
+        let relative_path = String::from_utf8_lossy(raw_path).to_string();
+        let path = workspace_path.join(&relative_path);
+        if !path.is_file() {
+            continue;
+        }
+        let bytes = fs::read(&path)
+            .with_context(|| format!("Failed to read ignored file {}", path.display()))?;
+        snapshot.insert(relative_path, ReviewGuardFileState::from_bytes(&bytes));
+    }
+    collect_factory_file_snapshot(workspace_path, &mut snapshot)?;
+    Ok(snapshot)
+}
+
+impl ReviewGuardFileState {
+    fn from_bytes(bytes: &[u8]) -> Self {
+        let mut hasher = DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        Self {
+            len: bytes.len() as u64,
+            hash: hasher.finish(),
+        }
+    }
+}
+
+fn collect_factory_file_snapshot(
+    workspace_path: &Path,
+    snapshot: &mut BTreeMap<String, ReviewGuardFileState>,
+) -> Result<()> {
+    let factory_dir = workspace_path.join(".factory");
+    if !factory_dir.exists() {
+        return Ok(());
+    }
+    let mut pending = vec![factory_dir];
+    while let Some(dir) = pending.pop() {
+        for entry in
+            fs::read_dir(&dir).with_context(|| format!("Failed to read {}", dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                pending.push(path);
+            } else if file_type.is_file() {
+                let relative_path = path_for_model(workspace_path, &path);
+                let bytes = fs::read(&path)
+                    .with_context(|| format!("Failed to read Factory file {}", path.display()))?;
+                snapshot.insert(relative_path, ReviewGuardFileState::from_bytes(&bytes));
+            } else if file_type.is_symlink() {
+                let relative_path = path_for_model(workspace_path, &path);
+                let target = fs::read_link(&path).with_context(|| {
+                    format!("Failed to read Factory symlink {}", path.display())
+                })?;
+                snapshot.insert(
+                    relative_path,
+                    ReviewGuardFileState::from_bytes(target.to_string_lossy().as_bytes()),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn review_guard_snapshot_changes(
+    before: &BTreeMap<String, ReviewGuardFileState>,
+    after: &BTreeMap<String, ReviewGuardFileState>,
+) -> String {
+    let mut lines = Vec::new();
+    for path in before.keys() {
+        if !after.contains_key(path) {
+            lines.push(format!("- deleted ignored file {path}"));
+        }
+    }
+    for (path, state) in after {
+        match before.get(path) {
+            None => lines.push(format!("- created ignored file {path}")),
+            Some(before_state) if before_state != state => {
+                lines.push(format!("- modified ignored file {path}"))
+            }
+            Some(_) => {}
+        }
+    }
+    lines.join("\n")
 }
 
 fn worktree_status(workspace_path: &Path) -> Result<String> {

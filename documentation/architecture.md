@@ -146,15 +146,17 @@ checks in the candidate workspace, runs the required reviewer set with
 merge-time context, then fast-forwards the target branch to the updated
 candidate head. Merge-time reviewers receive the exact
 `.factory/work/artifacts/<attempt-id>/<candidate-id>/merge/reviews/<role>/review.md`
-artifact path for their output. They treat the candidate workspace as
-read-only and write only merge review artifacts; scratch tests, suggested
-patches, and proposed documentation edits belong in those artifacts, not
-in the candidate workspace. After each reviewer exits, merge execution
-checks the candidate workspace for staged, unstaged, and untracked files
-and fails before landing if the reviewer dirtied it. After it records the
-landed state, it removes the managed candidate worktree. If cleanup fails
-after the target branch has landed, merge execution prints a warning and
-leaves the landed Merge Candidate state intact. Running the command again
+artifact path for their output and the absolute filesystem path the
+reviewer must write. They treat the candidate workspace as read-only and
+write only merge review artifacts; scratch tests, suggested patches, and
+proposed documentation edits belong in those artifacts, not in the
+candidate workspace. After each reviewer exits, merge execution checks
+the candidate workspace for staged, unstaged, untracked, and ignored file
+changes, including changes under `.factory`, and fails before landing if
+the reviewer dirtied it. After it records the landed state, it removes
+the managed candidate worktree. If cleanup fails after the target branch
+has landed, merge execution prints a warning and leaves the landed Merge
+Candidate state intact. Running the command again
 for a Merge Candidate that already has merge status `landed` and a stored
 `landed_commit` succeeds idempotently and reports the stored commit
 without resolving workspaces, rerunning checks, rerunning reviewers, or

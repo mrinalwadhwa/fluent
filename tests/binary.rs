@@ -1893,6 +1893,90 @@ exit 0
 }
 
 #[test]
+fn work_merge_candidate_dirty_ignored_reviewer_fails_before_landing() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "create",
+            "work-1",
+            "--title",
+            "Merge dirty ignored reviewer",
+        ])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let pass_bin = tmp.path().join("bin-attempt-pass");
+    write_mock_claude(&pass_bin, &loop_mock_script("pass"));
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&pass_bin))
+        .assert()
+        .success();
+
+    let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
+    let main_before = git_head(&main_dir);
+    let dirty_bin = tmp.path().join("bin-merge-dirty-ignored");
+    write_mock_claude(
+        &dirty_bin,
+        r##"#!/bin/bash
+printf 'Verdict: pass\n\nReviewer dirtied ignored Factory state.\n' > review.md
+mkdir -p "$CANDIDATE/.factory/review-scratch"
+printf 'dirty ignored merge review\n' > "$CANDIDATE/.factory/review-scratch/dirty.txt"
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "merge",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&dirty_bin))
+        .env("CANDIDATE", &candidate_workspace)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Merge-time reviewer documentation dirtied candidate workspace",
+        ))
+        .stderr(predicate::str::contains(
+            ".factory/review-scratch/dirty.txt",
+        ));
+
+    assert_eq!(git_head(&main_dir), main_before);
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let candidate = &value["merge_candidates"][0];
+    assert_eq!(candidate["review_state"], "failed");
+    assert_eq!(candidate["merge_state"]["status"], "failed");
+    assert!(
+        candidate["merge_state"]["failure_reason"]
+            .as_str()
+            .unwrap()
+            .contains(".factory/review-scratch/dirty.txt")
+    );
+}
+
+#[test]
 fn work_merge_candidate_failed_check_leaves_target_unchanged() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
