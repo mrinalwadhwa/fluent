@@ -248,24 +248,12 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             config.task_id
         )
     })?;
+    let workspace_reads = task.workspace_access.reads.clone();
+    let candidate_commit = review_context.candidate_commit.clone();
     let artifact_dir = resolve_managed_artifact_area_path(config.project_root, &artifact_area)?;
     let review_path = artifact_dir.join("review.md");
 
-    let readable_workspaces = task
-        .workspace_access
-        .reads
-        .iter()
-        .map(|workspace| {
-            resolve_review_readable_workspace_path(
-                config.project_root,
-                workspace,
-                config.work_item_id,
-                config.attempt_id,
-                &attempt_kind,
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
-    if !task.workspace_access.reads.iter().any(|workspace| {
+    if !workspace_reads.iter().any(|workspace| {
         workspace.id == review_context.candidate_workspace_id
             && workspace.path == review_context.candidate_workspace_path
     }) {
@@ -274,20 +262,14 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             config.task_id
         );
     }
-    let mut candidate_heads = Vec::new();
-    for workspace_path in &readable_workspaces {
-        ensure_same_git_repository(config.project_root, workspace_path)?;
-        let is_review_only_source =
-            attempt_kind == AttemptKind::ReviewOnly && workspace_path == config.project_root;
-        if is_review_only_source {
-            ensure_head_matches_review_context(workspace_path, &review_context.candidate_commit)?;
-            ensure_no_non_factory_worktree_changes(workspace_path)?;
-        } else {
-            ensure_registered_worktree(config.project_root, workspace_path)?;
-            ensure_clean_worktree(workspace_path)?;
-        }
-        candidate_heads.push((workspace_path.clone(), head_commit(workspace_path)?));
-    }
+    ReviewReadableWorkspaces::preflight(
+        config.project_root,
+        config.work_item_id,
+        config.attempt_id,
+        &attempt_kind,
+        &workspace_reads,
+        &candidate_commit,
+    )?;
     fs::create_dir_all(&artifact_dir)?;
     if review_path.is_file() {
         fs::remove_file(&review_path)?;
@@ -304,20 +286,27 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     item.attempts[attempt_index].tasks[task_index].output = None;
     config.store.write_work_item(&item)?;
 
-    let mut source_status_baselines = Vec::new();
-    for workspace_path in &readable_workspaces {
-        if attempt_kind == AttemptKind::ReviewOnly && workspace_path == config.project_root {
-            source_status_baselines.push(SourceCheckoutBaseline {
-                workspace_path: workspace_path.clone(),
-                status: worktree_status(workspace_path)?,
-                protected_factory_files: protected_factory_file_snapshot(
-                    workspace_path,
-                    &artifact_dir,
-                )?,
-                allowed_artifact_dir: artifact_dir.clone(),
-            });
+    let readable_workspaces = match ReviewReadableWorkspaces::resolve(
+        config.project_root,
+        config.work_item_id,
+        config.attempt_id,
+        &attempt_kind,
+        &workspace_reads,
+        &candidate_commit,
+        &artifact_dir,
+    ) {
+        Ok(workspaces) => workspaces,
+        Err(error) => {
+            mark_task_failed(
+                config.store,
+                config.work_item_id,
+                config.attempt_id,
+                config.task_id,
+            )?;
+            return Err(error);
         }
-    }
+    };
+    let readable_workspace_paths = readable_workspaces.paths();
 
     let run_result = run_review_coder(
         &item,
@@ -325,7 +314,7 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         config.task_id,
         &artifact_dir,
         &review_path,
-        &readable_workspaces,
+        &readable_workspace_paths,
         attempt_kind == AttemptKind::ReviewOnly,
         config.resolver,
         config.extra_args,
@@ -333,54 +322,14 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         config.no_sandbox,
     );
 
-    for (workspace_path, baseline_head) in &candidate_heads {
-        let head_result =
-            if attempt_kind == AttemptKind::ReviewOnly && workspace_path == config.project_root {
-                ensure_source_head_unchanged(workspace_path, baseline_head)
-            } else {
-                ensure_head_unchanged(workspace_path, baseline_head)
-            };
-        if let Err(error) = head_result {
-            mark_task_failed(
-                config.store,
-                config.work_item_id,
-                config.attempt_id,
-                config.task_id,
-            )?;
-            return Err(error);
-        }
-    }
-    for workspace_path in &readable_workspaces {
-        let clean_result =
-            if attempt_kind == AttemptKind::ReviewOnly && workspace_path == config.project_root {
-                ensure_no_non_factory_worktree_changes(workspace_path)
-            } else {
-                ensure_clean_worktree(workspace_path)
-            };
-        if let Err(error) = clean_result {
-            mark_task_failed(
-                config.store,
-                config.work_item_id,
-                config.attempt_id,
-                config.task_id,
-            )?;
-            if attempt_kind == AttemptKind::ReviewOnly && workspace_path == config.project_root {
-                restore_non_factory_worktree_changes(workspace_path)?;
-            }
-            return Err(error);
-        }
-    }
-    for baseline in &source_status_baselines {
-        if let Err(error) = ensure_source_changed_only_artifact_area(baseline) {
-            restore_source_changes_outside_artifact_area(baseline)?;
-            mark_task_failed(
-                config.store,
-                config.work_item_id,
-                config.attempt_id,
-                config.task_id,
-            )?;
-            return Err(error);
-        }
+    if let Err(error) = readable_workspaces.finish() {
+        mark_task_failed(
+            config.store,
+            config.work_item_id,
+            config.attempt_id,
+            config.task_id,
+        )?;
+        return Err(error);
     }
 
     if let Err(error) = run_result {
@@ -433,6 +382,161 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         task_id: config.task_id.to_string(),
         output: path_for_model(config.project_root, &review_path),
     })
+}
+
+struct ReviewReadableWorkspaces {
+    workspaces: Vec<ReviewReadableWorkspace>,
+}
+
+impl ReviewReadableWorkspaces {
+    fn preflight(
+        project_root: &Path,
+        work_item_id: &str,
+        attempt_id: &str,
+        attempt_kind: &AttemptKind,
+        workspace_refs: &[WorkspaceRef],
+        expected_source_head: &str,
+    ) -> Result<()> {
+        for workspace_ref in workspace_refs {
+            let workspace_path = resolve_review_readable_workspace_path(
+                project_root,
+                workspace_ref,
+                work_item_id,
+                attempt_id,
+                attempt_kind,
+            )?;
+            ensure_same_git_repository(project_root, &workspace_path)?;
+            if *attempt_kind == AttemptKind::ReviewOnly && workspace_path == project_root {
+                ensure_head_matches_review_context(&workspace_path, expected_source_head)?;
+                ensure_no_non_factory_worktree_changes(&workspace_path)?;
+            } else {
+                ensure_registered_worktree(project_root, &workspace_path)?;
+                ensure_clean_worktree(&workspace_path)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve(
+        project_root: &Path,
+        work_item_id: &str,
+        attempt_id: &str,
+        attempt_kind: &AttemptKind,
+        workspace_refs: &[WorkspaceRef],
+        expected_source_head: &str,
+        artifact_dir: &Path,
+    ) -> Result<Self> {
+        let mut workspaces = Vec::new();
+        for workspace_ref in workspace_refs {
+            let workspace_path = resolve_review_readable_workspace_path(
+                project_root,
+                workspace_ref,
+                work_item_id,
+                attempt_id,
+                attempt_kind,
+            )?;
+            ensure_same_git_repository(project_root, &workspace_path)?;
+            let workspace =
+                if *attempt_kind == AttemptKind::ReviewOnly && workspace_path == project_root {
+                    ReviewReadableWorkspace::Source(SourceCheckoutReviewGuard::begin(
+                        workspace_path,
+                        expected_source_head,
+                        artifact_dir,
+                    )?)
+                } else {
+                    ensure_registered_worktree(project_root, &workspace_path)?;
+                    ensure_clean_worktree(&workspace_path)?;
+                    ReviewReadableWorkspace::Candidate(CandidateReviewWorkspace {
+                        path: workspace_path.clone(),
+                        head: head_commit(&workspace_path)?,
+                    })
+                };
+            workspaces.push(workspace);
+        }
+        Ok(Self { workspaces })
+    }
+
+    fn paths(&self) -> Vec<PathBuf> {
+        self.workspaces
+            .iter()
+            .map(ReviewReadableWorkspace::path)
+            .collect()
+    }
+
+    fn finish(&self) -> Result<()> {
+        for workspace in &self.workspaces {
+            workspace.finish()?;
+        }
+        Ok(())
+    }
+}
+
+enum ReviewReadableWorkspace {
+    Candidate(CandidateReviewWorkspace),
+    Source(SourceCheckoutReviewGuard),
+}
+
+impl ReviewReadableWorkspace {
+    fn path(&self) -> PathBuf {
+        match self {
+            Self::Candidate(workspace) => workspace.path.clone(),
+            Self::Source(guard) => guard.path.clone(),
+        }
+    }
+
+    fn finish(&self) -> Result<()> {
+        match self {
+            Self::Candidate(workspace) => workspace.finish(),
+            Self::Source(guard) => guard.finish(),
+        }
+    }
+}
+
+struct CandidateReviewWorkspace {
+    path: PathBuf,
+    head: String,
+}
+
+impl CandidateReviewWorkspace {
+    fn finish(&self) -> Result<()> {
+        ensure_head_unchanged(&self.path, &self.head)?;
+        ensure_clean_worktree(&self.path)
+    }
+}
+
+struct SourceCheckoutReviewGuard {
+    path: PathBuf,
+    head: String,
+    status: Vec<String>,
+    protected_factory_files: BTreeMap<PathBuf, Vec<u8>>,
+    allowed_artifact_dir: PathBuf,
+}
+
+impl SourceCheckoutReviewGuard {
+    fn begin(path: PathBuf, expected_head: &str, allowed_artifact_dir: &Path) -> Result<Self> {
+        ensure_head_matches_review_context(&path, expected_head)?;
+        ensure_no_non_factory_worktree_changes(&path)?;
+        Ok(Self {
+            head: head_commit(&path)?,
+            status: worktree_status(&path)?,
+            protected_factory_files: protected_factory_file_snapshot(&path, allowed_artifact_dir)?,
+            path,
+            allowed_artifact_dir: allowed_artifact_dir.to_path_buf(),
+        })
+    }
+
+    fn finish(&self) -> Result<()> {
+        ensure_source_head_unchanged(&self.path, &self.head)?;
+        if let Err(error) = ensure_no_non_factory_worktree_changes(&self.path) {
+            restore_non_factory_worktree_changes(&self.path)?;
+            return Err(error);
+        }
+        if let Err(error) = ensure_source_changed_only_artifact_area(self) {
+            restore_source_changes_outside_artifact_area(self)?;
+            return Err(error);
+        }
+        Ok(())
+    }
 }
 
 fn read_work_item_or_not_found(store: &WorkModelStore, id: &str) -> Result<WorkItem> {
@@ -1079,20 +1183,13 @@ fn ensure_head_matches_review_context(workspace_path: &Path, expected_head: &str
     }
 }
 
-struct SourceCheckoutBaseline {
-    workspace_path: PathBuf,
-    status: Vec<String>,
-    protected_factory_files: BTreeMap<PathBuf, Vec<u8>>,
-    allowed_artifact_dir: PathBuf,
-}
-
-fn ensure_source_changed_only_artifact_area(baseline: &SourceCheckoutBaseline) -> Result<()> {
-    let current_status = worktree_status(&baseline.workspace_path)?;
-    let allowed = allowed_status_prefix(&baseline.workspace_path, &baseline.allowed_artifact_dir)?;
+fn ensure_source_changed_only_artifact_area(baseline: &SourceCheckoutReviewGuard) -> Result<()> {
+    let current_status = worktree_status(&baseline.path)?;
+    let allowed = allowed_status_prefix(&baseline.path, &baseline.allowed_artifact_dir)?;
     let baseline_status = filtered_status_entries(&baseline.status, &allowed);
     let current = filtered_status_entries(&current_status, &allowed);
     let current_protected =
-        protected_factory_file_snapshot(&baseline.workspace_path, &baseline.allowed_artifact_dir)?;
+        protected_factory_file_snapshot(&baseline.path, &baseline.allowed_artifact_dir)?;
     if current == baseline_status && current_protected == baseline.protected_factory_files {
         Ok(())
     } else {
@@ -1282,11 +1379,13 @@ fn restore_non_factory_worktree_changes(workspace_path: &Path) -> Result<()> {
     }
 }
 
-fn restore_source_changes_outside_artifact_area(baseline: &SourceCheckoutBaseline) -> Result<()> {
-    let allowed = allowed_status_prefix(&baseline.workspace_path, &baseline.allowed_artifact_dir)?;
+fn restore_source_changes_outside_artifact_area(
+    baseline: &SourceCheckoutReviewGuard,
+) -> Result<()> {
+    let allowed = allowed_status_prefix(&baseline.path, &baseline.allowed_artifact_dir)?;
     let excluded_pathspec = format!(":(exclude){}", allowed.display());
     let restore = Command::new("git")
-        .args(["-C", &baseline.workspace_path.to_string_lossy()])
+        .args(["-C", &baseline.path.to_string_lossy()])
         .args(["restore", "--staged", "--worktree", "--"])
         .arg(".")
         .arg(&excluded_pathspec)
@@ -1299,7 +1398,7 @@ fn restore_source_changes_outside_artifact_area(baseline: &SourceCheckoutBaselin
     }
 
     let clean = Command::new("git")
-        .args(["-C", &baseline.workspace_path.to_string_lossy()])
+        .args(["-C", &baseline.path.to_string_lossy()])
         .args(["clean", "-fd", "--"])
         .arg(".")
         .arg(&excluded_pathspec)
@@ -1311,18 +1410,17 @@ fn restore_source_changes_outside_artifact_area(baseline: &SourceCheckoutBaselin
         )
     }
 
-    let current =
-        protected_factory_file_snapshot(&baseline.workspace_path, &baseline.allowed_artifact_dir)?;
+    let current = protected_factory_file_snapshot(&baseline.path, &baseline.allowed_artifact_dir)?;
     for path in current.keys() {
         if !baseline.protected_factory_files.contains_key(path) {
-            let absolute = baseline.workspace_path.join(path);
+            let absolute = baseline.path.join(path);
             if absolute.is_file() {
                 fs::remove_file(&absolute)?;
             }
         }
     }
     for (path, content) in &baseline.protected_factory_files {
-        let absolute = baseline.workspace_path.join(path);
+        let absolute = baseline.path.join(path);
         if let Some(parent) = absolute.parent() {
             fs::create_dir_all(parent)?;
         }

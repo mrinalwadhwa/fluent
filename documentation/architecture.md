@@ -109,7 +109,13 @@ checkout. Review-only Attempts contain review Tasks only, read the source
 checkout through workspace id `source` at path `.`, and write artifacts
 under `.factory/work/artifacts/<attempt-id>/<task-id>/`. This is the
 default Work-model path for review-only work; legacy review runs remain
-for compatibility and recovery.
+for compatibility and recovery. The review Task executor treats the
+source checkout as a guarded readable workspace: the reviewer sandbox
+gets the source checkout as a read-only root and the managed artifact
+area as its writable root. For no-sandbox or failed-reviewer paths, the
+guard verifies that source HEAD and source files stayed unchanged and
+that only the Task artifact area changed under `.factory/`; if not, it
+restores protected checkout state before failing the Task.
 `factory work attempt run <work-item-id> <attempt-id>` is the first
 Attempt-level orchestration path. It advances one Attempt by running the
 next planned write or review Task through the same Task executor, then
