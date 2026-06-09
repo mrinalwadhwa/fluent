@@ -1243,7 +1243,7 @@ WHEN a reviewer finishes,
 THE SYSTEM SHALL reflect the new verdict immediately.
 Test: dashboard::tests::test_agent_tab_shows_verdict_immediately, dashboard::tests::test_discover_agents_updates_verdict, tests/behaviors/operations/test-dashboard-activity.sh (no crash when reviewer verdict arrives)
 
-WHEN the dashboard is displayed,
+WHEN the dashboard legacy Runs view displays a run,
 THE SYSTEM SHALL show a phase label that accurately describes what is
 happening right now (executing, reviewing, complete, failed, needs input,
 rate-limited, planned). The `reviewing` phase shows a spinner, including
@@ -1252,7 +1252,14 @@ Test: dashboard::tests::test_header_reviewing_shows_progress, dashboard::tests::
 
 ### Dashboard layout
 
-WHEN the dashboard is displayed,
+WHEN the dashboard Work Items view is displayed,
+THE SYSTEM SHALL render four vertical regions: Work Items counts header,
+view tabs, Work Items list, and help bar.
+Test: dashboard::tests::test_work_view_counts_errors,
+dashboard::tests::test_work_view_renders_work_items_without_runs,
+dashboard::tests::test_work_view_renders_empty_state_when_selected
+
+WHEN the dashboard legacy Runs view is displayed,
 THE SYSTEM SHALL render five vertical regions: header (run ID, status,
 session count, event count), run tabs, agent tabs, activity feed, and
 help bar.
