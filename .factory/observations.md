@@ -759,18 +759,6 @@ remove remaining legacy `.factory/runs` assumptions from prompts and
 reviewers, and then delete legacy `.factory/runs` compatibility once the
 Work execution path is used end to end.
 
-2026-06-08 — Merge-time reviewers still need a stricter Work-native,
-read-only contract. During the `work-planning-artifacts` merge candidate,
-the merge-time behavior reviewer received legacy `.factory/runs/...`
-instructions even though the Work merge artifact path was
-`.factory/work/artifacts/...`, then created useful scratch behavior tests
-and documentation edits inside the candidate workspace. The merge landed
-only the committed candidate and cleanup removed the transient worktree,
-so those scratch edits did not land. This reinforces the redesigned
-model: merge-time reviews should write only review artifacts, prompts
-should use Work-native paths, and useful scratch tests or suggested edits
-should become follow-up write Tasks instead of candidate mutations.
-
 2026-06-07 — Authors are increasingly using expertise, especially when
 the approach lists specific expertise files, but Factory should make this
 more explicit and auditable. A good next improvement would be: every run
@@ -808,3 +796,13 @@ paths such as
 `../work-<work-item-id-byte-len>-<work-item-id>-<attempt-id>`. Cleanup,
 dashboard, and merge follow-up work should treat `.factory/work/` as
 durable state and managed sibling worktrees as transient execution roots.
+
+2026-06-08 — Work Attempt follow-up loops currently rerun the full
+reviewer set after every small follow-up writer Task. That preserves
+quality, but it made `work-native-merge-reviewers` take several full
+review rounds even when only one reviewer finding changed. Keep the full
+required reviewer set as the merge-queue safety gate, but add targeted
+follow-up review planning during an Attempt: failed reviewers should
+recheck their findings, passed reviewers should receive scoped stale
+review context, and Factory should rerun or skip them based on touched
+domains, broad shared changes, and explicit review policy.
