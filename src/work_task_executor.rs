@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
@@ -274,7 +275,6 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         );
     }
     let mut candidate_heads = Vec::new();
-    let mut source_status_baselines = Vec::new();
     for workspace_path in &readable_workspaces {
         ensure_same_git_repository(config.project_root, workspace_path)?;
         let is_review_only_source =
@@ -282,11 +282,6 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         if is_review_only_source {
             ensure_head_matches_review_context(workspace_path, &review_context.candidate_commit)?;
             ensure_no_non_factory_worktree_changes(workspace_path)?;
-            source_status_baselines.push((
-                workspace_path.clone(),
-                worktree_status(workspace_path)?,
-                artifact_dir.clone(),
-            ));
         } else {
             ensure_registered_worktree(config.project_root, workspace_path)?;
             ensure_clean_worktree(workspace_path)?;
@@ -308,6 +303,21 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Executing;
     item.attempts[attempt_index].tasks[task_index].output = None;
     config.store.write_work_item(&item)?;
+
+    let mut source_status_baselines = Vec::new();
+    for workspace_path in &readable_workspaces {
+        if attempt_kind == AttemptKind::ReviewOnly && workspace_path == config.project_root {
+            source_status_baselines.push(SourceCheckoutBaseline {
+                workspace_path: workspace_path.clone(),
+                status: worktree_status(workspace_path)?,
+                protected_factory_files: protected_factory_file_snapshot(
+                    workspace_path,
+                    &artifact_dir,
+                )?,
+                allowed_artifact_dir: artifact_dir.clone(),
+            });
+        }
+    }
 
     let run_result = run_review_coder(
         &item,
@@ -360,12 +370,9 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             return Err(error);
         }
     }
-    for (workspace_path, baseline_status, allowed_artifact_dir) in &source_status_baselines {
-        if let Err(error) = ensure_source_changed_only_artifact_area(
-            workspace_path,
-            baseline_status,
-            allowed_artifact_dir,
-        ) {
+    for baseline in &source_status_baselines {
+        if let Err(error) = ensure_source_changed_only_artifact_area(baseline) {
+            restore_source_changes_outside_artifact_area(baseline)?;
             mark_task_failed(
                 config.store,
                 config.work_item_id,
@@ -1072,22 +1079,38 @@ fn ensure_head_matches_review_context(workspace_path: &Path, expected_head: &str
     }
 }
 
-fn ensure_source_changed_only_artifact_area(
-    workspace_path: &Path,
-    baseline_status: &[String],
-    allowed_artifact_dir: &Path,
-) -> Result<()> {
-    let current_status = worktree_status(workspace_path)?;
-    let allowed = allowed_status_prefix(workspace_path, allowed_artifact_dir)?;
-    let baseline = filtered_status_entries(baseline_status, &allowed);
+struct SourceCheckoutBaseline {
+    workspace_path: PathBuf,
+    status: Vec<String>,
+    protected_factory_files: BTreeMap<PathBuf, Vec<u8>>,
+    allowed_artifact_dir: PathBuf,
+}
+
+fn ensure_source_changed_only_artifact_area(baseline: &SourceCheckoutBaseline) -> Result<()> {
+    let current_status = worktree_status(&baseline.workspace_path)?;
+    let allowed = allowed_status_prefix(&baseline.workspace_path, &baseline.allowed_artifact_dir)?;
+    let baseline_status = filtered_status_entries(&baseline.status, &allowed);
     let current = filtered_status_entries(&current_status, &allowed);
-    if current == baseline {
+    let current_protected =
+        protected_factory_file_snapshot(&baseline.workspace_path, &baseline.allowed_artifact_dir)?;
+    if current == baseline_status && current_protected == baseline.protected_factory_files {
         Ok(())
     } else {
+        let status_delta = status_diff(&baseline_status, &current);
+        let factory_delta =
+            factory_file_snapshot_diff(&baseline.protected_factory_files, &current_protected);
+        let mut delta = [status_delta, factory_delta]
+            .into_iter()
+            .filter(|section| !section.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if delta.is_empty() {
+            delta = "(source changed outside artifact area)".to_string();
+        }
         bail!(
             "Review Task changed source checkout outside managed artifact area; only {} may change:\n{}",
             allowed.display(),
-            status_diff(&baseline, &current)
+            delta
         )
     }
 }
@@ -1169,6 +1192,63 @@ fn status_diff(baseline: &[String], current: &[String]) -> String {
     lines.join("\n")
 }
 
+fn protected_factory_file_snapshot(
+    workspace_path: &Path,
+    allowed_artifact_dir: &Path,
+) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
+    let mut snapshot = BTreeMap::new();
+    let factory_dir = workspace_path.join(".factory");
+    if !factory_dir.exists() {
+        return Ok(snapshot);
+    }
+    let allowed = allowed_status_prefix(workspace_path, allowed_artifact_dir)?;
+    collect_protected_factory_files(workspace_path, &factory_dir, &allowed, &mut snapshot)?;
+    Ok(snapshot)
+}
+
+fn collect_protected_factory_files(
+    workspace_path: &Path,
+    dir: &Path,
+    allowed: &Path,
+    snapshot: &mut BTreeMap<PathBuf, Vec<u8>>,
+) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let relative = path.strip_prefix(workspace_path)?.to_path_buf();
+        if relative == allowed || relative.starts_with(allowed) {
+            continue;
+        }
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_protected_factory_files(workspace_path, &path, allowed, snapshot)?;
+        } else if file_type.is_file() {
+            snapshot.insert(relative, fs::read(&path)?);
+        }
+    }
+    Ok(())
+}
+
+fn factory_file_snapshot_diff(
+    baseline: &BTreeMap<PathBuf, Vec<u8>>,
+    current: &BTreeMap<PathBuf, Vec<u8>>,
+) -> String {
+    let mut lines = Vec::new();
+    for (path, content) in baseline {
+        match current.get(path) {
+            Some(current_content) if current_content == content => {}
+            Some(_) => lines.push(format!("~ {}", path.display())),
+            None => lines.push(format!("- {}", path.display())),
+        }
+    }
+    for path in current.keys() {
+        if !baseline.contains_key(path) {
+            lines.push(format!("+ {}", path.display()));
+        }
+    }
+    lines.join("\n")
+}
+
 fn restore_non_factory_worktree_changes(workspace_path: &Path) -> Result<()> {
     let restore = Command::new("git")
         .args(["-C", &workspace_path.to_string_lossy()])
@@ -1200,6 +1280,56 @@ fn restore_non_factory_worktree_changes(workspace_path: &Path) -> Result<()> {
             String::from_utf8_lossy(&clean.stderr)
         )
     }
+}
+
+fn restore_source_changes_outside_artifact_area(baseline: &SourceCheckoutBaseline) -> Result<()> {
+    let allowed = allowed_status_prefix(&baseline.workspace_path, &baseline.allowed_artifact_dir)?;
+    let excluded_pathspec = format!(":(exclude){}", allowed.display());
+    let restore = Command::new("git")
+        .args(["-C", &baseline.workspace_path.to_string_lossy()])
+        .args(["restore", "--staged", "--worktree", "--"])
+        .arg(".")
+        .arg(&excluded_pathspec)
+        .output()?;
+    if !restore.status.success() {
+        bail!(
+            "Failed to restore source changes outside managed artifact area: {}",
+            String::from_utf8_lossy(&restore.stderr)
+        );
+    }
+
+    let clean = Command::new("git")
+        .args(["-C", &baseline.workspace_path.to_string_lossy()])
+        .args(["clean", "-fd", "--"])
+        .arg(".")
+        .arg(&excluded_pathspec)
+        .output()?;
+    if !clean.status.success() {
+        bail!(
+            "Failed to remove untracked source changes outside managed artifact area: {}",
+            String::from_utf8_lossy(&clean.stderr)
+        )
+    }
+
+    let current =
+        protected_factory_file_snapshot(&baseline.workspace_path, &baseline.allowed_artifact_dir)?;
+    for path in current.keys() {
+        if !baseline.protected_factory_files.contains_key(path) {
+            let absolute = baseline.workspace_path.join(path);
+            if absolute.is_file() {
+                fs::remove_file(&absolute)?;
+            }
+        }
+    }
+    for (path, content) in &baseline.protected_factory_files {
+        let absolute = baseline.workspace_path.join(path);
+        if let Some(parent) = absolute.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(absolute, content)?;
+    }
+
+    Ok(())
 }
 
 fn ensure_head_unchanged(workspace_path: &Path, baseline_head: &str) -> Result<()> {
