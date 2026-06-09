@@ -1599,13 +1599,23 @@ fn work_merge_candidate_lands_after_merge_time_reviews() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     fs::create_dir_all(main_dir.join("skills/review-documentation")).unwrap();
+    fs::create_dir_all(main_dir.join(".factory/expertise")).unwrap();
     fs::write(
         main_dir.join("skills/review-documentation/SKILL.md"),
         "# Documentation review\n",
     )
     .unwrap();
+    fs::write(
+        main_dir.join(".factory/expertise/decisions.md"),
+        "Do not flag the recorded merge review decision.\n",
+    )
+    .unwrap();
     StdCommand::new("git")
-        .args(["add", "skills/review-documentation/SKILL.md"])
+        .args([
+            "add",
+            "skills/review-documentation/SKILL.md",
+            ".factory/expertise/decisions.md",
+        ])
         .current_dir(&main_dir)
         .output()
         .unwrap();
@@ -1645,6 +1655,8 @@ fn work_merge_candidate_lands_after_merge_time_reviews() {
     let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
     let documentation_skill =
         fs::canonicalize(candidate_workspace.join("skills/review-documentation/SKILL.md")).unwrap();
+    let decisions_file =
+        fs::canonicalize(candidate_workspace.join(".factory/expertise/decisions.md")).unwrap();
     let candidate_head = git_head(&candidate_workspace);
     let main_before = git_head(&main_dir);
     assert_ne!(main_before, candidate_head);
@@ -1681,6 +1693,13 @@ fn work_merge_candidate_lands_after_merge_time_reviews() {
             "Follow the review-documentation skill at skills/review-documentation/SKILL.md"
         )
     );
+    assert!(
+        logged_system.contains(decisions_file.to_string_lossy().as_ref()),
+        "logged system prompt should contain {}:\n{}",
+        decisions_file.display(),
+        logged_system
+    );
+    assert!(!logged_system.contains("Read `.factory/expertise/decisions.md` if it exists"));
     assert!(!logged_system.contains(".factory/runs/{{RUN_ID}}/reviews"));
 
     let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();

@@ -422,8 +422,10 @@ fn run_one_merge_reviewer(
         candidate_json
     );
     let reviewer_system = format!(
-        "{system}\nReview only this Work Merge Candidate. The candidate workspace is read-only for review purposes. Write only merge review artifacts, with the required verdict line (pass, fail, or uncertain) in {}. This is the Work artifact path {}; do not write legacy run review artifacts.",
-        review_absolute_path, review_artifact_path
+        "{system}\n{}\nReview only this Work Merge Candidate. The candidate workspace is read-only for review purposes. Write only merge review artifacts, with the required verdict line (pass, fail, or uncertain) in {}. This is the Work artifact path {}; do not write legacy run review artifacts.",
+        merge_review_decisions_instruction(source_workspace),
+        review_absolute_path,
+        review_artifact_path
     );
     if !config.no_sandbox {
         os::check_prerequisites_for(config.coder_kind)?;
@@ -465,6 +467,8 @@ fn work_merge_reviewer_system_prompt(
         .lines()
         .filter(|line| !line.contains(".factory/runs/"))
         .filter(|line| !line.contains("skills/review-"))
+        .filter(|line| !line.contains(".factory/expertise/decisions.md"))
+        .filter(|line| !line.contains("recorded decision"))
         .map(str::to_string)
         .collect::<Vec<_>>();
     lines.push(merge_review_skill_instruction(reviewer, source_workspace));
@@ -479,6 +483,18 @@ fn merge_review_skill_instruction(reviewer: &str, source_workspace: &Path) -> St
         format!(
             "No review-{reviewer} skill file was found in the candidate workspace; apply the reviewer role directly."
         )
+    }
+}
+
+fn merge_review_decisions_instruction(source_workspace: &Path) -> String {
+    let path = source_workspace.join(".factory/expertise/decisions.md");
+    if path.is_file() {
+        format!(
+            "Read recorded decisions at {} if it exists. Do not flag findings that contradict a recorded decision.",
+            path.display()
+        )
+    } else {
+        "No project decision file was found in the candidate workspace.".to_string()
     }
 }
 

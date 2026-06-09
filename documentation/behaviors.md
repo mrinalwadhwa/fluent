@@ -305,10 +305,13 @@ Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge lands 
 WHEN `factory work merge <work-item-id> <merge-candidate-id>` builds the
 system prompt for a Work merge-time reviewer,
 THE SYSTEM SHALL remove legacy run review paths and relative
-`skills/review-<role>/SKILL.md` instructions from the base prompt, then
+`skills/review-<role>/SKILL.md` and
+`.factory/expertise/decisions.md` instructions from the base prompt, then
 tell the reviewer to follow the candidate workspace's absolute
 `skills/review-<role>/SKILL.md` path when that skill exists, or to apply
-the reviewer role directly when it does not.
+the reviewer role directly when it does not. If the candidate workspace
+contains `.factory/expertise/decisions.md`, the system shall name that
+absolute path as the recorded-decisions file.
 Test: tests/binary.rs (work_merge_candidate_lands_after_merge_time_reviews)
 
 WHEN a merge-time reviewer receives a candidate workspace,
