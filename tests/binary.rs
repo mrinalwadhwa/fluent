@@ -2362,6 +2362,80 @@ fn work_attempt_run_plans_followup_for_failed_reviews() {
 }
 
 #[test]
+fn work_create_planning_context_feeds_followup_for_failed_reviews() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let brief_path = tmp.path().join("brief.md");
+    let behaviors_path = tmp.path().join("behaviors.md");
+    let approach_path = tmp.path().join("approach.md");
+    let plan_path = tmp.path().join("plan.md");
+    fs::write(&brief_path, "Build retry planning context.\n").unwrap();
+    fs::write(&behaviors_path, "WHEN reviews fail, retry with context.\n").unwrap();
+    fs::write(&approach_path, "Reuse Work state for retry prompts.\n").unwrap();
+    fs::write(&plan_path, "1. Plan the follow-up write Task.\n").unwrap();
+
+    let bin_dir = tmp.path().join("bin-planning-followup");
+    write_mock_claude(&bin_dir, &stateful_loop_mock_script("fail"));
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "create",
+            "work-1",
+            "--title",
+            "Planning follow-up",
+            "--brief-file",
+            &brief_path.to_string_lossy(),
+            "--behaviors-file",
+            &behaviors_path.to_string_lossy(),
+            "--approach-file",
+            &approach_path.to_string_lossy(),
+            "--plan-file",
+            &plan_path.to_string_lossy(),
+        ])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Planned follow-up write Task attempt-1-followup-1",
+        ));
+
+    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["instructions"], serde_json::Value::Null);
+    let followup = value["attempts"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "attempt-1-followup-1")
+        .unwrap();
+    let instructions = followup["instructions"].as_str().unwrap();
+    assert!(instructions.contains("# Brief\n\nBuild retry planning context."));
+    assert!(instructions.contains("# Behaviors\n\nWHEN reviews fail, retry with context."));
+    assert!(instructions.contains("# Approach\n\nReuse Work state for retry prompts."));
+    assert!(instructions.contains("# Plan\n\n1. Plan the follow-up write Task."));
+    assert_eq!(followup["input_artifacts"].as_array().unwrap().len(), 5);
+}
+
+#[test]
 fn work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);

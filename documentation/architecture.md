@@ -114,9 +114,11 @@ Merge Candidate for later merge execution. The Merge Candidate records
 the source candidate workspace, target workspace, source branch, target
 branch, candidate commit, and its own pending review state. Any fail
 creates a planned follow-up write Task with the failed review artifacts
-as Task inputs and copies the Work Item instructions into that follow-up
-Task. When no review artifact fails, uncertain or missing verdicts mark
-the Attempt `needs-user` with a handoff under
+as Task inputs and copies explicit Work Item instructions into that
+follow-up Task, or derives those instructions from stored Work Item
+planning context when explicit instructions are absent. When no review
+artifact fails, uncertain or missing verdicts mark the Attempt
+`needs-user` with a handoff under
 `.factory/work/artifacts/<attempt-id>/`.
 `factory work list` and `factory work show <id>` expose the same durable
 Work Item model for inspection. These commands use `.factory/work/items/`

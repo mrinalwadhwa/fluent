@@ -345,9 +345,11 @@ WHEN any completed review artifact has a failing verdict,
 THE SYSTEM SHALL mark the Attempt review state as `failed` and create a
 planned follow-up write Task with deterministic id
 `<attempt-id>-followup-<n>`, the candidate workspace as writable access,
-the Work Item instructions copied into the Task instructions, and the
-failed review artifacts as Task inputs.
+write Task instructions copied from explicit Work Item instructions or
+derived from the Work Item planning context, and the failed review
+artifacts as Task inputs.
 Test: tests/binary.rs (work_attempt_run_plans_followup_for_failed_reviews)
+Test: tests/binary.rs (work_create_planning_context_feeds_followup_for_failed_reviews)
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop plans follow-up write)
 
 WHEN no completed review artifact has a failing verdict and any completed
