@@ -229,6 +229,7 @@ test_cleanup_work_items_dry_run_and_apply() {
   "$FACTORY_BIN" work create work-1 --title "Cleanup work" >/dev/null
   "$FACTORY_BIN" work attempt work-1 attempt-1 >/dev/null
   "$FACTORY_BIN" work create work-active --title "Active work" >/dev/null
+  "$FACTORY_BIN" work attempt work-active attempt-1 >/dev/null
 
   python3 - <<'PY'
 import json
@@ -249,15 +250,31 @@ task["output"] = {
     "commit": "HEAD"
 }
 path.write_text(json.dumps(data, indent=2) + "\n")
+
+path = Path(".factory/work/items/work-active.json")
+data = json.loads(path.read_text())
+task = data["attempts"][0]["tasks"][0]
+data["attempts"][0]["status"] = "executing"
+task["status"] = "executing"
+task["artifact_area"] = {
+    "path": ".factory/work/artifacts/attempt-1/attempt-1-active"
+}
+path.write_text(json.dumps(data, indent=2) + "\n")
 PY
 
   ARTIFACT_DIR=".factory/work/artifacts/attempt-1/attempt-1-write"
   mkdir -p "$ARTIFACT_DIR"
   printf 'artifact' > "$ARTIFACT_DIR/result.md"
+  ACTIVE_ARTIFACT_DIR=".factory/work/artifacts/attempt-1/attempt-1-active"
+  mkdir -p "$ACTIVE_ARTIFACT_DIR"
+  printf 'active artifact' > "$ACTIVE_ARTIFACT_DIR/result.md"
 
   WORKTREE_DIR="$(cd .. && pwd)/work-6-work-1-attempt-1"
   BRANCH_NAME="work/work-1/attempt-1/attempt-1-write"
   git worktree add -q -b "$BRANCH_NAME" "$WORKTREE_DIR" HEAD
+  ACTIVE_WORKTREE_DIR="$(cd .. && pwd)/work-11-work-active-attempt-1"
+  ACTIVE_BRANCH_NAME="work/work-active/attempt-1/attempt-1-write"
+  git worktree add -q -b "$ACTIVE_BRANCH_NAME" "$ACTIVE_WORKTREE_DIR" HEAD
 
   OUTPUT="$("$FACTORY_BIN" cleanup 2>&1)"
 
@@ -277,6 +294,18 @@ PY
   fi
   if [ ! -d "$ARTIFACT_DIR" ]; then
     printf '    FAIL: dry run removed Work artifact\n'
+    RESULT=1
+  fi
+  if [ ! -f ".factory/work/items/work-active.json" ]; then
+    printf '    FAIL: dry run removed active Work Item state\n'
+    RESULT=1
+  fi
+  if [ ! -d "$ACTIVE_WORKTREE_DIR" ]; then
+    printf '    FAIL: dry run removed active Work worktree\n'
+    RESULT=1
+  fi
+  if [ ! -d "$ACTIVE_ARTIFACT_DIR" ]; then
+    printf '    FAIL: dry run removed active Work artifact\n'
     RESULT=1
   fi
 
@@ -300,13 +329,26 @@ PY
     printf '    FAIL: apply kept Work artifact\n'
     RESULT=1
   fi
+  if [ ! -d "$ACTIVE_WORKTREE_DIR" ]; then
+    printf '    FAIL: apply removed active Work worktree\n'
+    RESULT=1
+  fi
+  if [ ! -d "$ACTIVE_ARTIFACT_DIR" ]; then
+    printf '    FAIL: apply removed active Work artifact\n'
+    RESULT=1
+  fi
   if git show-ref --verify --quiet "refs/heads/${BRANCH_NAME}"; then
     printf '    FAIL: apply kept Work branch\n'
     RESULT=1
   fi
+  if ! git show-ref --verify --quiet "refs/heads/${ACTIVE_BRANCH_NAME}"; then
+    printf '    FAIL: apply removed active Work branch\n'
+    RESULT=1
+  fi
 
   git worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1 || true
-  rm -rf "$TEST_DIR" "$WORKTREE_DIR"
+  git worktree remove --force "$ACTIVE_WORKTREE_DIR" >/dev/null 2>&1 || true
+  rm -rf "$TEST_DIR" "$WORKTREE_DIR" "$ACTIVE_WORKTREE_DIR"
   return $RESULT
 }
 
