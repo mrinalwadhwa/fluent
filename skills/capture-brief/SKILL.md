@@ -230,8 +230,13 @@ Write `.factory/active-run` containing the run-id only for the legacy
 fallback path.
 
 If the brief is a full-codebase review request, write the review target,
-focus areas, and requested reviewers in the brief. Do not start review
-execution until the user confirms the brief.
+focus areas, and any requested reviewers in the brief. Do not start
+review execution until the user confirms the brief.
+
+The Work-model review-only path currently runs the default reviewer set.
+If the user requests specific reviewers, call out that limitation before
+execution and use the legacy review-run state when the request depends on
+filtering reviewers.
 
 Use the legacy review-run state only for compatibility or explicit
 recovery after the user confirms:
@@ -268,6 +273,9 @@ build something new), continue into the Work-model review-only path
 instead of stopping after confirmation:
 
 - Write the brief as usual so the Work Item has durable context
+- Confirm that the user accepts the default reviewer set; if the user
+  asked for specific reviewers, use the legacy review-run path until
+  Work-model reviewer filtering exists
 - Create the Work Item with the approved brief:
   `factory work create <work-item-id> --title "<short title>" --brief-file <brief.md>`
 - Use `factory work review-codebase <work-item-id> <attempt-id>` to add
