@@ -287,6 +287,20 @@ its Work review artifact, and leave non-Factory source files unchanged.
 Test: tests/binary.rs (work_attempt_run_review_only_passes_without_merge_candidate)
 Test: tests/behaviors/operations/test-work-review-codebase.sh (review-only pass completes without Merge Candidate)
 
+WHEN a review-only review Task starts,
+THE SYSTEM SHALL require the source checkout HEAD to match the source
+commit recorded in the Task review context.
+Test: tests/binary.rs (work_attempt_run_review_only_requires_recorded_source_commit)
+
+WHEN a review-only review Task changes source files or Factory-owned
+state outside its managed artifact area,
+THE SYSTEM SHALL mark the Task failed, restore changed non-Factory
+source files, and report that the source checkout changed outside the
+allowed boundary.
+Test: tests/binary.rs (work_attempt_run_review_only_rejects_source_changes)
+Test: tests/binary.rs (work_attempt_run_review_only_rejects_factory_state_changes)
+Test: tests/behaviors/operations/test-work-review-codebase.sh (review-only rejects source changes)
+
 WHEN all review-only reviewer artifacts have verdict `pass`,
 THE SYSTEM SHALL mark the Attempt complete with review state `passed`
 and SHALL NOT create a Merge Candidate.

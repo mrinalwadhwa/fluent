@@ -337,7 +337,12 @@ live in `merge-candidates/<work-item-id>/<merge-candidate-id>.json`.
 `WorkModelStore` assembles those split records into the public
 `WorkItem` shape from `factory::work_model` for `factory work show`,
 status, dashboard, task execution, review, merge, and cleanup.
-Attempt records carry an internal `order` field so the assembled public
+Attempt records carry `kind`, which serializes as `write` or
+`review-only`; older records and omitted values default to `write`.
+Write attempts omit `kind` on new writes, and review-only attempts
+persist `kind: "review-only"` so the attempt loop can interpret review
+verdicts as terminal output instead of post-author feedback. Attempt
+records also carry an internal `order` field so the assembled public
 Work Item preserves append order after Factory reloads split records.
 Task records carry the same internal `order` field; Factory sorts split
 Task files by that persisted order before exposing `Attempt.tasks`.

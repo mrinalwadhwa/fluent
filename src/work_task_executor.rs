@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
@@ -274,12 +274,19 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         );
     }
     let mut candidate_heads = Vec::new();
+    let mut source_status_baselines = Vec::new();
     for workspace_path in &readable_workspaces {
         ensure_same_git_repository(config.project_root, workspace_path)?;
         let is_review_only_source =
             attempt_kind == AttemptKind::ReviewOnly && workspace_path == config.project_root;
         if is_review_only_source {
+            ensure_head_matches_review_context(workspace_path, &review_context.candidate_commit)?;
             ensure_no_non_factory_worktree_changes(workspace_path)?;
+            source_status_baselines.push((
+                workspace_path.clone(),
+                worktree_status(workspace_path)?,
+                artifact_dir.clone(),
+            ));
         } else {
             ensure_registered_worktree(config.project_root, workspace_path)?;
             ensure_clean_worktree(workspace_path)?;
@@ -350,6 +357,21 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             if attempt_kind == AttemptKind::ReviewOnly && workspace_path == config.project_root {
                 restore_non_factory_worktree_changes(workspace_path)?;
             }
+            return Err(error);
+        }
+    }
+    for (workspace_path, baseline_status, allowed_artifact_dir) in &source_status_baselines {
+        if let Err(error) = ensure_source_changed_only_artifact_area(
+            workspace_path,
+            baseline_status,
+            allowed_artifact_dir,
+        ) {
+            mark_task_failed(
+                config.store,
+                config.work_item_id,
+                config.attempt_id,
+                config.task_id,
+            )?;
             return Err(error);
         }
     }
@@ -809,7 +831,8 @@ fn run_review_coder(
         .review_context
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Review Task {task_id:?} must declare review context"))?;
-    let review_skill_instruction = review_skill_instruction(&task.role, readable_workspaces);
+    let review_skill_instruction =
+        review_skill_instruction(&task.role, readable_workspaces, review_only);
     let decisions_instruction = decisions_instruction(readable_workspaces);
     let read_paths = task
         .workspace_access
@@ -912,7 +935,11 @@ fn review_readable_sandbox_roots(readable_workspaces: &[PathBuf]) -> Result<Vec<
     Ok(roots)
 }
 
-fn review_skill_instruction(role: &str, readable_workspaces: &[PathBuf]) -> String {
+fn review_skill_instruction(
+    role: &str,
+    readable_workspaces: &[PathBuf],
+    review_only: bool,
+) -> String {
     let relative = format!("skills/review-{role}/SKILL.md");
     readable_workspaces
         .iter()
@@ -920,8 +947,13 @@ fn review_skill_instruction(role: &str, readable_workspaces: &[PathBuf]) -> Stri
         .find(|path| path.is_file())
         .map(|path| format!("Follow the review-{role} skill at {}.", path.display()))
         .unwrap_or_else(|| {
+            let workspace_kind = if review_only {
+                "source checkout"
+            } else {
+                "readable candidate workspaces"
+            };
             format!(
-                "No review-{role} skill file was found in the readable candidate workspaces; apply the Task role directly."
+                "No review-{role} skill file was found in the {workspace_kind}; apply the Task role directly."
             )
         })
 }
@@ -984,10 +1016,7 @@ fn build_coder_sandbox_with_read_only_roots(
 }
 
 fn ensure_clean_worktree(workspace_path: &Path) -> Result<()> {
-    let output = Command::new("git")
-        .args(["-C", &workspace_path.to_string_lossy()])
-        .args(["status", "--porcelain"])
-        .output()?;
+    let output = git_status_output(workspace_path, &["--porcelain"])?;
     if !output.status.success() {
         bail!(
             "Failed to read task workspace status: {}",
@@ -1005,17 +1034,16 @@ fn ensure_clean_worktree(workspace_path: &Path) -> Result<()> {
 }
 
 fn ensure_no_non_factory_worktree_changes(workspace_path: &Path) -> Result<()> {
-    let output = Command::new("git")
-        .args(["-C", &workspace_path.to_string_lossy()])
-        .args([
-            "status",
+    let output = git_status_output(
+        workspace_path,
+        &[
             "--porcelain",
             "--untracked-files=all",
             "--",
             ".",
             ":(exclude).factory",
-        ])
-        .output()?;
+        ],
+    )?;
     if !output.status.success() {
         bail!(
             "Failed to read source checkout status: {}",
@@ -1030,6 +1058,115 @@ fn ensure_no_non_factory_worktree_changes(workspace_path: &Path) -> Result<()> {
             String::from_utf8_lossy(&output.stdout)
         )
     }
+}
+
+fn ensure_head_matches_review_context(workspace_path: &Path, expected_head: &str) -> Result<()> {
+    let current_head = head_commit(workspace_path)?;
+    if current_head == expected_head {
+        Ok(())
+    } else {
+        bail!(
+            "Readable source checkout HEAD {current_head} does not match review context source commit {expected_head}: {}",
+            workspace_path.display()
+        )
+    }
+}
+
+fn ensure_source_changed_only_artifact_area(
+    workspace_path: &Path,
+    baseline_status: &[String],
+    allowed_artifact_dir: &Path,
+) -> Result<()> {
+    let current_status = worktree_status(workspace_path)?;
+    let allowed = allowed_status_prefix(workspace_path, allowed_artifact_dir)?;
+    let baseline = filtered_status_entries(baseline_status, &allowed);
+    let current = filtered_status_entries(&current_status, &allowed);
+    if current == baseline {
+        Ok(())
+    } else {
+        bail!(
+            "Review Task changed source checkout outside managed artifact area; only {} may change:\n{}",
+            allowed.display(),
+            status_diff(&baseline, &current)
+        )
+    }
+}
+
+fn worktree_status(workspace_path: &Path) -> Result<Vec<String>> {
+    let output = git_status_output(workspace_path, &["--porcelain", "--untracked-files=all"])?;
+    if !output.status.success() {
+        bail!(
+            "Failed to read source checkout status: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect())
+}
+
+fn git_status_output(workspace_path: &Path, args: &[&str]) -> Result<std::process::Output> {
+    Ok(Command::new("git")
+        .args(["-C", &workspace_path.to_string_lossy()])
+        .arg("status")
+        .args(args)
+        .output()?)
+}
+
+fn allowed_status_prefix(workspace_path: &Path, allowed_artifact_dir: &Path) -> Result<PathBuf> {
+    let artifact_dir = if allowed_artifact_dir.is_absolute() {
+        allowed_artifact_dir.to_path_buf()
+    } else {
+        workspace_path.join(allowed_artifact_dir)
+    };
+    let relative = artifact_dir
+        .strip_prefix(workspace_path)
+        .with_context(|| {
+            format!(
+                "Artifact area {} must be inside source checkout {}",
+                artifact_dir.display(),
+                workspace_path.display()
+            )
+        })?
+        .to_path_buf();
+    Ok(relative)
+}
+
+fn filtered_status_entries(entries: &[String], allowed_prefix: &Path) -> Vec<String> {
+    let mut filtered = entries
+        .iter()
+        .filter(|entry| !status_entry_touches_path(entry, allowed_prefix))
+        .cloned()
+        .collect::<Vec<_>>();
+    filtered.sort();
+    filtered
+}
+
+fn status_entry_touches_path(entry: &str, path_prefix: &Path) -> bool {
+    let path = match entry.get(3..) {
+        Some(path) => path,
+        None => return false,
+    };
+    path.split(" -> ").any(|status_path| {
+        let status_path = Path::new(status_path);
+        status_path == path_prefix || status_path.starts_with(path_prefix)
+    })
+}
+
+fn status_diff(baseline: &[String], current: &[String]) -> String {
+    let mut lines = Vec::new();
+    for entry in baseline {
+        if !current.contains(entry) {
+            lines.push(format!("- {entry}"));
+        }
+    }
+    for entry in current {
+        if !baseline.contains(entry) {
+            lines.push(format!("+ {entry}"));
+        }
+    }
+    lines.join("\n")
 }
 
 fn restore_non_factory_worktree_changes(workspace_path: &Path) -> Result<()> {
