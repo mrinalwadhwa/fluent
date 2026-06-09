@@ -268,7 +268,8 @@ build something new), default to the Work-model review-only path after
 capture is complete:
 
 - Write the brief as usual so the Work Item has durable context
-- Create or prepare a Work Item for the review target
+- Create the Work Item with the approved brief:
+  `factory work create <work-item-id> --title "<short title>" --brief-file <brief.md>`
 - Use `factory work review-codebase <work-item-id> <attempt-id>` to add
   the review-only Attempt
 - Run the Attempt with `factory work attempt run <work-item-id>

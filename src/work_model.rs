@@ -656,12 +656,68 @@ impl Attempt {
                     actual: task.attempt_id.clone(),
                 });
             }
+        }
+        if self.kind == AttemptKind::ReviewOnly {
+            self.validate_review_only_shape()?;
+        }
+        for task in &self.tasks {
             task.validate()?;
             if self.status == AttemptStatus::Complete && task.status != TaskStatus::Complete {
                 return Err(WorkModelError::CompleteAttemptHasIncompleteTask {
                     attempt_id: self.id.clone(),
                     task_id: task.id.clone(),
                     task_status: task.status.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_review_only_shape(&self) -> Result<(), WorkModelError> {
+        for task in &self.tasks {
+            if task.kind != TaskKind::Review {
+                return Err(WorkModelError::ReviewOnlyAttemptInvalidTask {
+                    attempt_id: self.id.clone(),
+                    task_id: task.id.clone(),
+                    field: "kind",
+                });
+            }
+            if task.workspace_access.reads.len() != 1
+                || task.workspace_access.reads[0].id != "source"
+                || task.workspace_access.reads[0].path != "."
+            {
+                return Err(WorkModelError::ReviewOnlyAttemptInvalidTask {
+                    attempt_id: self.id.clone(),
+                    task_id: task.id.clone(),
+                    field: "workspace_access.reads",
+                });
+            }
+            let Some(review_context) = task.review_context.as_ref() else {
+                return Err(WorkModelError::ReviewOnlyAttemptInvalidTask {
+                    attempt_id: self.id.clone(),
+                    task_id: task.id.clone(),
+                    field: "review_context",
+                });
+            };
+            if review_context.candidate_workspace_id != "source"
+                || review_context.candidate_workspace_path != "."
+            {
+                return Err(WorkModelError::ReviewOnlyAttemptInvalidTask {
+                    attempt_id: self.id.clone(),
+                    task_id: task.id.clone(),
+                    field: "review_context.candidate_workspace",
+                });
+            }
+            let expected_artifact_path = format!("{WORK_ARTIFACTS_DIR}/{}/{}", self.id, task.id);
+            if task
+                .artifact_area
+                .as_ref()
+                .is_none_or(|area| area.path != expected_artifact_path)
+            {
+                return Err(WorkModelError::ReviewOnlyAttemptInvalidTask {
+                    attempt_id: self.id.clone(),
+                    task_id: task.id.clone(),
+                    field: "artifact_area.path",
                 });
             }
         }
@@ -1152,6 +1208,11 @@ pub enum WorkModelError {
     ReviewTaskContextCandidateNotReadable {
         task_id: String,
     },
+    ReviewOnlyAttemptInvalidTask {
+        attempt_id: String,
+        task_id: String,
+        field: &'static str,
+    },
     AttemptWorkItemMismatch {
         attempt_id: String,
         expected: String,
@@ -1278,6 +1339,16 @@ impl fmt::Display for WorkModelError {
                 write!(
                     f,
                     "review task {task_id} review context candidate must match a readable workspace"
+                )
+            }
+            Self::ReviewOnlyAttemptInvalidTask {
+                attempt_id,
+                task_id,
+                field,
+            } => {
+                write!(
+                    f,
+                    "review-only Attempt {attempt_id:?} task {task_id} has invalid {field}"
                 )
             }
             Self::AttemptWorkItemMismatch {
@@ -2375,6 +2446,21 @@ mod tests {
         }
     }
 
+    fn review_only_work_item() -> WorkItem {
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Review the codebase".to_string(),
+            planning_context: None,
+            instructions: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        work_item
+            .add_review_only_attempt("attempt-review", &["tests"], "main", "abc123")
+            .unwrap();
+        work_item
+    }
+
     #[test]
     fn task_kind_parses_generic_kinds() {
         assert_eq!("write".parse::<TaskKind>().unwrap(), TaskKind::Write);
@@ -2483,6 +2569,101 @@ mod tests {
             review_task.validate().unwrap_err(),
             WorkModelError::ReviewTaskContextCandidateNotReadable {
                 task_id: "task-1".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn review_only_attempt_rejects_write_tasks() {
+        let mut work_item = review_only_work_item();
+        let review_task = work_item.attempts[0].tasks[0].clone();
+        let write_task = Task {
+            kind: TaskKind::Write,
+            review_context: None,
+            artifact_area: None,
+            workspace_access: WorkspaceAccess {
+                reads: Vec::new(),
+                writes: vec![WorkspaceRef {
+                    id: "candidate".to_string(),
+                    path: "../work-6-work-1-attempt-review".to_string(),
+                }],
+            },
+            ..review_task
+        };
+        work_item.attempts[0].tasks[0] = write_task;
+
+        assert_eq!(
+            work_item.validate().unwrap_err(),
+            WorkModelError::ReviewOnlyAttemptInvalidTask {
+                attempt_id: "attempt-review".to_string(),
+                task_id: "attempt-review-review-tests".to_string(),
+                field: "kind"
+            }
+        );
+    }
+
+    #[test]
+    fn review_only_attempt_rejects_non_source_reads() {
+        let mut work_item = review_only_work_item();
+        work_item.attempts[0].tasks[0].workspace_access.reads = vec![WorkspaceRef {
+            id: "candidate".to_string(),
+            path: "../work-6-work-1-attempt-review".to_string(),
+        }];
+        work_item.attempts[0].tasks[0]
+            .review_context
+            .as_mut()
+            .unwrap()
+            .candidate_workspace_id = "candidate".to_string();
+        work_item.attempts[0].tasks[0]
+            .review_context
+            .as_mut()
+            .unwrap()
+            .candidate_workspace_path = "../work-6-work-1-attempt-review".to_string();
+
+        assert_eq!(
+            work_item.validate().unwrap_err(),
+            WorkModelError::ReviewOnlyAttemptInvalidTask {
+                attempt_id: "attempt-review".to_string(),
+                task_id: "attempt-review-review-tests".to_string(),
+                field: "workspace_access.reads"
+            }
+        );
+    }
+
+    #[test]
+    fn review_only_attempt_rejects_non_source_context() {
+        let mut work_item = review_only_work_item();
+        work_item.attempts[0].tasks[0]
+            .review_context
+            .as_mut()
+            .unwrap()
+            .candidate_workspace_id = "candidate".to_string();
+
+        assert_eq!(
+            work_item.validate().unwrap_err(),
+            WorkModelError::ReviewOnlyAttemptInvalidTask {
+                attempt_id: "attempt-review".to_string(),
+                task_id: "attempt-review-review-tests".to_string(),
+                field: "review_context.candidate_workspace"
+            }
+        );
+    }
+
+    #[test]
+    fn review_only_attempt_rejects_unmanaged_artifact_area() {
+        let mut work_item = review_only_work_item();
+        work_item.attempts[0].tasks[0]
+            .artifact_area
+            .as_mut()
+            .unwrap()
+            .path = ".factory/work/artifacts/other-attempt/attempt-review-review-tests".to_string();
+
+        assert_eq!(
+            work_item.validate().unwrap_err(),
+            WorkModelError::ReviewOnlyAttemptInvalidTask {
+                attempt_id: "attempt-review".to_string(),
+                task_id: "attempt-review-review-tests".to_string(),
+                field: "artifact_area.path"
             }
         );
     }
