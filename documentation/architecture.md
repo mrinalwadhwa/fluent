@@ -114,8 +114,11 @@ source checkout as a guarded readable workspace: the reviewer sandbox
 gets the source checkout as a read-only root and the managed artifact
 area as its writable root. For no-sandbox or failed-reviewer paths, the
 guard verifies that source HEAD and source files stayed unchanged and
-that only the Task artifact area changed under `.factory/`; if not, it
-restores protected checkout state before failing the Task.
+that only the Task artifact area changed under `.factory/`. If a reviewer
+changes source HEAD, the guard resets HEAD before failing the Task. If a
+reviewer changes source files or protected `.factory/` state outside the
+Task artifact area, the guard restores protected checkout state before
+failing the Task.
 `factory work attempt run <work-item-id> <attempt-id>` is the first
 Attempt-level orchestration path. It advances one Attempt by running the
 next planned write or review Task through the same Task executor, then

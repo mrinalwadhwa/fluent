@@ -2254,6 +2254,85 @@ fn work_attempt_run_review_only_rejects_work_state_changes() {
 }
 
 #[test]
+fn work_attempt_run_review_only_restores_mixed_source_and_factory_changes() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    fs::create_dir_all(main_dir.join(".factory/expertise")).unwrap();
+    fs::write(
+        main_dir.join(".factory/expertise/decisions.md"),
+        "# Decisions\n\n",
+    )
+    .unwrap();
+    StdCommand::new("git")
+        .args(["add", ".factory/expertise/decisions.md"])
+        .current_dir(&main_dir)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "record decisions"])
+        .current_dir(&main_dir)
+        .output()
+        .unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Review codebase"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-review-only-mixed-dirty");
+    write_mock_claude(
+        &bin_dir,
+        &review_only_dirty_source_and_factory_mock_script(),
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-review",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "changed source checkout outside managed artifact area",
+        ))
+        .stderr(predicate::str::contains(".factory/expertise/decisions.md"))
+        .stdout(predicate::str::contains("Merge Candidate").not())
+        .stdout(predicate::str::contains("follow-up").not());
+
+    assert_eq!(
+        fs::read_to_string(main_dir.join("README.md")).unwrap(),
+        "test"
+    );
+    assert_eq!(
+        fs::read_to_string(main_dir.join(".factory/expertise/decisions.md")).unwrap(),
+        "# Decisions\n\n"
+    );
+    let value = read_work_show_json(&main_dir, "work-1");
+    let attempt = &value["attempts"][0];
+    assert_eq!(review_only_write_task_count(attempt), 0);
+    assert!(merge_candidates_are_empty(&value));
+    assert!(
+        attempt["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task["kind"] == "review" && task["status"] == "failed")
+    );
+}
+
+#[test]
 fn work_attempt_run_review_only_fails_without_followup() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
@@ -6702,6 +6781,16 @@ exit 0
 fn review_only_dirty_work_state_mock_script() -> String {
     r##"#!/bin/bash
 printf 'reviewer edit\n' >> ../../../items/work-1.json
+printf 'Verdict: pass\n\nReview-only result.\n' > review.md
+exit 0
+"##
+    .to_string()
+}
+
+fn review_only_dirty_source_and_factory_mock_script() -> String {
+    r##"#!/bin/bash
+printf 'reviewer source edit\n' >> ../../../../../README.md
+printf 'reviewer factory edit\n' >> ../../../../../.factory/expertise/decisions.md
 printf 'Verdict: pass\n\nReview-only result.\n' > review.md
 exit 0
 "##

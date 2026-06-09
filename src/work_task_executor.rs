@@ -527,12 +527,18 @@ impl SourceCheckoutReviewGuard {
 
     fn finish(&self) -> Result<()> {
         ensure_source_head_unchanged(&self.path, &self.head)?;
-        if let Err(error) = ensure_no_non_factory_worktree_changes(&self.path) {
-            restore_non_factory_worktree_changes(&self.path)?;
-            return Err(error);
-        }
+        let non_factory_error =
+            if let Err(error) = ensure_no_non_factory_worktree_changes(&self.path) {
+                restore_non_factory_worktree_changes(&self.path)?;
+                Some(error)
+            } else {
+                None
+            };
         if let Err(error) = ensure_source_changed_only_artifact_area(self) {
             restore_source_changes_outside_artifact_area(self)?;
+            return Err(error);
+        }
+        if let Some(error) = non_factory_error {
             return Err(error);
         }
         Ok(())
