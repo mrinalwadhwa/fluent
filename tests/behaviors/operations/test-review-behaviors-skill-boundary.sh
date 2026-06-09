@@ -44,6 +44,18 @@ if ! grep -Fq 'or `.factory/runs/[run-id]/brief.md` for legacy run reviews' <<<"
   failures=$((failures + 1))
 fi
 
+if ! grep -Fq "check the Work Item and Task prompt" "$SKILL"; then
+  echo "review-behaviors no longer uses Work prompt context for test fallback" >&2
+  failures=$((failures + 1))
+fi
+
+skill_text="$(tr '\n' ' ' < "$SKILL")"
+
+if ! grep -Fq "or the run's brief for legacy run reviews" <<<"$skill_text"; then
+  echo "review-behaviors no longer limits fallback brief use to legacy reviews" >&2
+  failures=$((failures + 1))
+fi
+
 if ! grep -Fq 'documentation/behaviors.md' <<<"$phase_one_reads"; then
   echo "review-behaviors Phase 1 no longer tells reviewers to read documentation/behaviors.md" >&2
   failures=$((failures + 1))
