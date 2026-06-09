@@ -323,6 +323,8 @@ live in `merge-candidates/<work-item-id>/<merge-candidate-id>.json`.
 status, dashboard, task execution, review, merge, and cleanup.
 Attempt records carry an internal `order` field so the assembled public
 Work Item preserves append order after Factory reloads split records.
+Task records carry the same internal `order` field; Factory sorts split
+Task files by that persisted order before exposing `Attempt.tasks`.
 New writes prefer the split layout; bridge-period nested Work Item files
 remain readable when no split records exist for that Work Item.
 

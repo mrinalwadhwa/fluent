@@ -1,8 +1,8 @@
 use factory::work_model::{
     Attempt, AttemptReviewState, AttemptStatus, MergeCandidate, MergeCandidateMergeState,
-    MergeCandidateReviewState, Task, TaskArtifactArea, TaskKind, TaskOutput, TaskStatus, WorkItem,
-    WorkModelError, WorkModelStorageError, WorkModelStore, WorkspaceAccess, WorkspaceRef,
-    from_json,
+    MergeCandidateReviewState, ReviewContext, Task, TaskArtifactArea, TaskKind, TaskOutput,
+    TaskStatus, WorkItem, WorkModelError, WorkModelStorageError, WorkModelStore, WorkspaceAccess,
+    WorkspaceRef, from_json,
 };
 use std::fs;
 
@@ -214,6 +214,44 @@ fn work_model_store_preserves_attempt_append_order() {
 }
 
 #[test]
+fn work_model_store_preserves_task_append_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    let mut work_item = work_item();
+    let mut followup = task(TaskKind::Write);
+    followup.id = "write-followup".to_string();
+    followup.status = TaskStatus::Planned;
+    followup.output = None;
+    let mut review = task(TaskKind::Review);
+    review.id = "custom-review".to_string();
+    review.role = "custom".to_string();
+    review.workspace_access.reads = vec![workspace("candidate")];
+    review.workspace_access.writes.clear();
+    review.output = None;
+    review.review_context = Some(ReviewContext {
+        candidate_workspace_id: "candidate".to_string(),
+        candidate_workspace_path: "../workspaces/candidate".to_string(),
+        source_branch: "main".to_string(),
+        candidate_commit: "abc123".to_string(),
+    });
+    work_item.attempts[0].tasks = vec![followup.clone(), review.clone()];
+    work_item.attempts[0].status = AttemptStatus::Reviewing;
+
+    store.write_work_item(&work_item).unwrap();
+
+    let stored_task = fs::read_to_string(
+        temp.path()
+            .join(".factory/work/tasks/work-1/attempt-1/custom-review.json"),
+    )
+    .unwrap();
+    let read = store.read_work_item("work-1").unwrap();
+
+    assert!(stored_task.contains(r#""order": 1"#));
+    assert_eq!(read.attempts[0].tasks[0].id, "write-followup");
+    assert_eq!(read.attempts[0].tasks[1].id, "custom-review");
+}
+
+#[test]
 fn work_model_store_ignores_empty_split_directories_for_legacy_items() {
     let temp = tempfile::tempdir().unwrap();
     let store = WorkModelStore::new(temp.path());
@@ -394,6 +432,7 @@ fn work_model_store_writes_deterministic_pretty_json() {
             .join(".factory/work/tasks/work-1/attempt-1/write-code.json"),
     )
     .unwrap();
+    assert!(task.contains(r#""order": 0"#));
     assert!(task.contains(r#""id": "write-code""#));
     assert!(task.contains(r#""kind": "write""#));
     assert!(task.contains(r#""output": {"#));

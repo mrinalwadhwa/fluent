@@ -1028,6 +1028,10 @@ pub enum WorkModelError {
     TaskAlreadyExists {
         id: String,
     },
+    TaskOrderAlreadyExists {
+        attempt_id: String,
+        order: usize,
+    },
     MergeCandidateAlreadyExists {
         id: String,
     },
@@ -1123,6 +1127,12 @@ impl fmt::Display for WorkModelError {
             }
             Self::TaskAlreadyExists { id } => {
                 write!(f, "Task {id:?} already exists")
+            }
+            Self::TaskOrderAlreadyExists { attempt_id, order } => {
+                write!(
+                    f,
+                    "Attempt {attempt_id:?} has multiple Tasks at order {order}"
+                )
             }
             Self::MergeCandidateAlreadyExists { id } => {
                 write!(f, "Merge Candidate {id:?} already exists")
@@ -1387,6 +1397,14 @@ struct AttemptRecord {
     artifacts: Vec<ArtifactRef>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TaskRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    order: Option<usize>,
+    #[serde(flatten)]
+    task: Task,
+}
+
 impl From<&WorkItem> for WorkItemRecord {
     fn from(work_item: &WorkItem) -> Self {
         Self {
@@ -1434,6 +1452,24 @@ impl From<AttemptRecord> for Attempt {
             review_state: record.review_state,
             artifacts: record.artifacts,
         }
+    }
+}
+
+impl TaskRecord {
+    fn from_task(task: &Task, order: usize) -> Self {
+        Self {
+            order: Some(order),
+            task: task.clone(),
+        }
+    }
+
+    fn order_key(&self, attempt_id: &str) -> (usize, usize, usize, String) {
+        self.order
+            .map(|order| (0, order, 0, self.task.id.clone()))
+            .unwrap_or_else(|| {
+                let (group, role_order, id) = task_order_key(attempt_id, &self.task);
+                (1, group, role_order, id)
+            })
     }
 }
 
@@ -1796,9 +1832,10 @@ impl WorkModelStore {
             })?;
             attempt_dirs.insert(task_dir.clone());
             let mut task_files = HashSet::new();
-            for task in &attempt.tasks {
+            for (order, task) in attempt.tasks.iter().enumerate() {
                 let task_path = self.work_task_path(&work_item.id, &attempt.id, &task.id)?;
-                write_json_file(&task_path, task)?;
+                let record = TaskRecord::from_task(task, order);
+                write_json_file(&task_path, &record)?;
                 task_files.insert(task_path);
             }
             prune_json_files(&task_dir, &task_files)?;
@@ -1885,8 +1922,11 @@ impl WorkModelStore {
         }
 
         let mut tasks = Vec::new();
+        let mut task_orders = HashSet::new();
         for path in list_json_paths(&tasks_dir)? {
-            let task: Task = read_json_file(&path)?;
+            let record: TaskRecord = read_json_file(&path)?;
+            let order_key = record.order_key(attempt_id);
+            let task = record.task;
             let expected = file_stem_id(&path)?;
             if task.id != expected {
                 return Err(WorkModelStorageError::InvalidModel {
@@ -1919,10 +1959,25 @@ impl WorkModelStore {
                     path: path.clone(),
                     source,
                 })?;
-            tasks.push(task);
+            if let Some(order) = record.order {
+                if !task_orders.insert(order) {
+                    return Err(WorkModelStorageError::InvalidModel {
+                        path,
+                        source: WorkModelError::TaskOrderAlreadyExists {
+                            attempt_id: attempt_id.to_string(),
+                            order,
+                        },
+                    });
+                }
+            }
+            tasks.push((order_key, task));
         }
-        tasks.sort_by_key(|task| task_order_key(attempt_id, task));
-        Ok(tasks)
+        tasks.sort_by(|(left_order, left_task), (right_order, right_task)| {
+            left_order
+                .cmp(right_order)
+                .then_with(|| left_task.id.cmp(&right_task.id))
+        });
+        Ok(tasks.into_iter().map(|(_, task)| task).collect())
     }
 
     fn reject_task_records_without_attempt(

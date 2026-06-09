@@ -99,7 +99,23 @@ MOCK_SCRIPT
 }
 
 json_value() {
-  jq -r "$1" .factory/work/items/work-1.json
+  "$FACTORY_BIN" work show work-1 | jq -r "$1"
+}
+
+attempt_record_path() {
+  printf '.factory/work/attempts/work-1/attempt-1.json'
+}
+
+task_record_path() {
+  printf '.factory/work/tasks/work-1/attempt-1/attempt-1-write.json'
+}
+
+merge_candidate_record_path() {
+  printf '.factory/work/merge-candidates/work-1/attempt-1-merge-candidate.json'
+}
+
+merge_candidate_record_value() {
+  jq -r "$1" "$(merge_candidate_record_path)"
 }
 
 assert_contains() {
@@ -229,7 +245,7 @@ test_work_merge_rejects_missing_merge_candidate() {
   create_passed_merge_candidate
 
   MAIN_BEFORE="$(git rev-parse main)"
-  STATE_BEFORE="$(cat .factory/work/items/work-1.json)"
+  STATE_BEFORE="$("$FACTORY_BIN" work show work-1)"
 
   RESULT=0
   if "$FACTORY_BIN" work merge --no-sandbox work-1 missing-candidate \
@@ -238,7 +254,7 @@ test_work_merge_rejects_missing_merge_candidate() {
     RESULT=1
   fi
   [ "$(git rev-parse main)" = "$MAIN_BEFORE" ] || RESULT=1
-  [ "$(cat .factory/work/items/work-1.json)" = "$STATE_BEFORE" ] || RESULT=1
+  [ "$("$FACTORY_BIN" work show work-1)" = "$STATE_BEFORE" ] || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "missing-candidate" || RESULT=1
   return $RESULT
 }
@@ -250,9 +266,8 @@ test_work_merge_rejects_candidate_without_passed_attempt() {
   create_passed_merge_candidate
 
   MAIN_BEFORE="$(git rev-parse main)"
-  jq '.attempts[0].review_state = "failed"' \
-    .factory/work/items/work-1.json > "$TEST_DIR/item.json"
-  mv "$TEST_DIR/item.json" .factory/work/items/work-1.json
+  jq '.review_state = "failed"' "$(attempt_record_path)" > "$TEST_DIR/attempt.json"
+  mv "$TEST_DIR/attempt.json" "$(attempt_record_path)"
 
   RESULT=0
   assert_fails run_merge pass || RESULT=1
@@ -270,14 +285,14 @@ test_work_merge_rejects_stored_source_branch_mismatch() {
   create_passed_merge_candidate
   MAIN_BEFORE="$(git rev-parse main)"
 
-  jq '.merge_candidates[0].source_branch = "unexpected-source"' \
-    .factory/work/items/work-1.json > "$TEST_DIR/item.json"
-  mv "$TEST_DIR/item.json" .factory/work/items/work-1.json
+  jq '.source_branch = "unexpected-source"' \
+    "$(merge_candidate_record_path)" > "$TEST_DIR/candidate.json"
+  mv "$TEST_DIR/candidate.json" "$(merge_candidate_record_path)"
 
   RESULT=0
   assert_fails run_merge pass || RESULT=1
   [ "$(git rev-parse main)" = "$MAIN_BEFORE" ] || RESULT=1
-  [ "$(json_value '.merge_candidates[0].merge_state.status')" = "pending" ] || RESULT=1
+  [ "$(merge_candidate_record_value '.merge_state.status')" = "pending" ] || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "source_branch" || RESULT=1
   return $RESULT
 }
@@ -289,14 +304,14 @@ test_work_merge_rejects_source_workspace_mismatch() {
   create_passed_merge_candidate
   MAIN_BEFORE="$(git rev-parse main)"
 
-  jq '.merge_candidates[0].source_workspace.path = "/tmp/not-factory-source"' \
-    .factory/work/items/work-1.json > "$TEST_DIR/item.json"
-  mv "$TEST_DIR/item.json" .factory/work/items/work-1.json
+  jq '.source_workspace.path = "/tmp/not-factory-source"' \
+    "$(merge_candidate_record_path)" > "$TEST_DIR/candidate.json"
+  mv "$TEST_DIR/candidate.json" "$(merge_candidate_record_path)"
 
   RESULT=0
   assert_fails run_merge pass || RESULT=1
   [ "$(git rev-parse main)" = "$MAIN_BEFORE" ] || RESULT=1
-  [ "$(json_value '.merge_candidates[0].merge_state.status')" = "pending" ] || RESULT=1
+  [ "$(merge_candidate_record_value '.merge_state.status')" = "pending" ] || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "source_workspace.path" || RESULT=1
   return $RESULT
 }
@@ -308,18 +323,17 @@ test_work_merge_rejects_wrong_managed_source_workspace() {
   create_passed_merge_candidate
   MAIN_BEFORE="$(git rev-parse main)"
 
-  jq '
-    .merge_candidates[0].source_workspace.path = "../work-6-work-1-other-attempt" |
-    (.attempts[0].tasks[] | select(.id == "attempt-1-write").output.workspace_path) =
-      "../work-6-work-1-other-attempt"
-  ' \
-    .factory/work/items/work-1.json > "$TEST_DIR/item.json"
-  mv "$TEST_DIR/item.json" .factory/work/items/work-1.json
+  jq '.source_workspace.path = "../work-6-work-1-other-attempt"' \
+    "$(merge_candidate_record_path)" > "$TEST_DIR/candidate.json"
+  mv "$TEST_DIR/candidate.json" "$(merge_candidate_record_path)"
+  jq '.output.workspace_path = "../work-6-work-1-other-attempt"' \
+    "$(task_record_path)" > "$TEST_DIR/task.json"
+  mv "$TEST_DIR/task.json" "$(task_record_path)"
 
   RESULT=0
   assert_fails run_merge pass || RESULT=1
   [ "$(git rev-parse main)" = "$MAIN_BEFORE" ] || RESULT=1
-  [ "$(json_value '.merge_candidates[0].merge_state.status')" = "pending" ] || RESULT=1
+  [ "$(merge_candidate_record_value '.merge_state.status')" = "pending" ] || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "source workspace path" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "../work-6-work-1-attempt-1" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "../work-6-work-1-other-attempt" || RESULT=1
@@ -333,14 +347,14 @@ test_work_merge_rejects_target_workspace_mismatch() {
   create_passed_merge_candidate
   MAIN_BEFORE="$(git rev-parse main)"
 
-  jq '.merge_candidates[0].target_workspace.path = "/tmp/not-factory-target"' \
-    .factory/work/items/work-1.json > "$TEST_DIR/item.json"
-  mv "$TEST_DIR/item.json" .factory/work/items/work-1.json
+  jq '.target_workspace.path = "/tmp/not-factory-target"' \
+    "$(merge_candidate_record_path)" > "$TEST_DIR/candidate.json"
+  mv "$TEST_DIR/candidate.json" "$(merge_candidate_record_path)"
 
   RESULT=0
   assert_fails run_merge pass || RESULT=1
   [ "$(git rev-parse main)" = "$MAIN_BEFORE" ] || RESULT=1
-  [ "$(json_value '.merge_candidates[0].merge_state.status')" = "pending" ] || RESULT=1
+  [ "$(merge_candidate_record_value '.merge_state.status')" = "pending" ] || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "target_workspace.path" || RESULT=1
   return $RESULT
 }
@@ -462,14 +476,14 @@ test_work_merge_candidate_inspection_read_only() {
   write_mock_claude
   create_passed_merge_candidate
   MAIN_BEFORE="$(git rev-parse main)"
-  STATE_BEFORE="$(cat .factory/work/items/work-1.json)"
+  STATE_BEFORE="$("$FACTORY_BIN" work show work-1)"
 
   RESULT=0
   "$FACTORY_BIN" work merge-candidate work-1 attempt-1-merge-candidate \
     > "$TEST_DIR/candidate" 2> "$TEST_DIR/stderr" || RESULT=1
   jq -e '.id == "attempt-1-merge-candidate"' "$TEST_DIR/candidate" > /dev/null || RESULT=1
   [ "$(git rev-parse main)" = "$MAIN_BEFORE" ] || RESULT=1
-  [ "$(cat .factory/work/items/work-1.json)" = "$STATE_BEFORE" ] || RESULT=1
+  [ "$("$FACTORY_BIN" work show work-1)" = "$STATE_BEFORE" ] || RESULT=1
   [ "$(json_value '.merge_candidates[0].merge_state.status')" = "pending" ] || RESULT=1
   return $RESULT
 }
