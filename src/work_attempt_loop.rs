@@ -159,20 +159,14 @@ fn has_completed_write(tasks: &[Task]) -> bool {
 }
 
 fn has_open_review_round(tasks: &[Task]) -> bool {
-    let mut saw_review = false;
     for task in tasks.iter().rev() {
         match task.kind {
             TaskKind::Write => return false,
-            TaskKind::Review => {
-                saw_review = true;
-                if task.status != TaskStatus::Complete {
-                    return true;
-                }
-            }
+            TaskKind::Review if task.status != TaskStatus::Complete => return true,
             _ => {}
         }
     }
-    saw_review
+    false
 }
 
 fn has_review_after_latest_write(tasks: &[Task]) -> bool {
@@ -283,6 +277,48 @@ fn latest_review_artifacts(project_root: &Path, tasks: &[Task]) -> Result<Vec<Re
 mod tests {
     use super::*;
     use crate::work_model::{TaskArtifactArea, WorkspaceAccess};
+
+    #[test]
+    fn completed_review_round_is_not_open() {
+        let tasks = vec![
+            Task {
+                id: "attempt-1-write".to_string(),
+                kind: TaskKind::Write,
+                status: TaskStatus::Complete,
+                role: "author".to_string(),
+                instructions: None,
+                work_item_id: "work-1".to_string(),
+                attempt_id: Some("attempt-1".to_string()),
+                workspace_access: WorkspaceAccess {
+                    reads: Vec::new(),
+                    writes: Vec::new(),
+                },
+                artifact_area: None,
+                review_context: None,
+                input_artifacts: Vec::new(),
+                output: None,
+            },
+            Task {
+                id: "attempt-1-review-tests".to_string(),
+                kind: TaskKind::Review,
+                status: TaskStatus::Complete,
+                role: "tests".to_string(),
+                instructions: None,
+                work_item_id: "work-1".to_string(),
+                attempt_id: Some("attempt-1".to_string()),
+                workspace_access: WorkspaceAccess {
+                    reads: Vec::new(),
+                    writes: Vec::new(),
+                },
+                artifact_area: None,
+                review_context: None,
+                input_artifacts: Vec::new(),
+                output: None,
+            },
+        ];
+
+        assert!(!has_open_review_round(&tasks));
+    }
 
     #[test]
     fn latest_review_artifacts_rejects_unmanaged_artifact_area() {

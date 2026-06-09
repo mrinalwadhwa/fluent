@@ -174,20 +174,22 @@ test_task_run_rejects_unmanaged_workspace_paths() {
   "$FACTORY_BIN" work create work-alpha --title "Reject paths" > /dev/null
   "$FACTORY_BIN" work attempt work-alpha attempt-one > /dev/null
 
-  jq '.attempts[0].tasks[0].workspace_access.writes[0].path = ".factory/work/workspaces/attempt-one"' \
-    .factory/work/items/work-alpha.json > "$TEST_DIR/item.json"
-  mv "$TEST_DIR/item.json" .factory/work/items/work-alpha.json
+  TASK_RECORD=.factory/work/tasks/work-alpha/attempt-one/attempt-one-write.json
+
+  jq '.workspace_access.writes[0].path = ".factory/work/workspaces/attempt-one"' \
+    "$TASK_RECORD" > "$TEST_DIR/task.json"
+  mv "$TEST_DIR/task.json" "$TASK_RECORD"
   assert_fails run_write_task work-alpha attempt-one || RESULT=1
 
   jq --arg path "$TEST_DIR/absolute-workspace" \
-    '.attempts[0].tasks[0].workspace_access.writes[0].path = $path' \
-    .factory/work/items/work-alpha.json > "$TEST_DIR/item.json"
-  mv "$TEST_DIR/item.json" .factory/work/items/work-alpha.json
+    '.workspace_access.writes[0].path = $path' \
+    "$TASK_RECORD" > "$TEST_DIR/task.json"
+  mv "$TEST_DIR/task.json" "$TASK_RECORD"
   assert_fails run_write_task work-alpha attempt-one || RESULT=1
 
-  jq '.attempts[0].tasks[0].workspace_access.writes[0].path = "../work-10-work-alpha-other-attempt"' \
-    .factory/work/items/work-alpha.json > "$TEST_DIR/item.json"
-  mv "$TEST_DIR/item.json" .factory/work/items/work-alpha.json
+  jq '.workspace_access.writes[0].path = "../work-10-work-alpha-other-attempt"' \
+    "$TASK_RECORD" > "$TEST_DIR/task.json"
+  mv "$TEST_DIR/task.json" "$TASK_RECORD"
   assert_fails run_write_task work-alpha attempt-one || RESULT=1
 
   [ ! -e .factory/work/workspaces/attempt-one ] || RESULT=1
@@ -213,8 +215,7 @@ test_attempt_run_keeps_state_and_artifacts_in_source_checkout() {
 
   [ -f .factory/work/items/work-alpha.json ] || RESULT=1
   [ -d .factory/work/artifacts/attempt-one ] || RESULT=1
-  jq -e '.merge_candidates[0].source_workspace.path == "../work-10-work-alpha-attempt-one"' \
-    .factory/work/items/work-alpha.json > /dev/null || RESULT=1
+  [ "$(work_json_value work-alpha '.merge_candidates[0].source_workspace.path')" = "../work-10-work-alpha-attempt-one" ] || RESULT=1
   [ -d ../work-10-work-alpha-attempt-one ] || RESULT=1
   [ ! -d ../work-10-work-alpha-attempt-one/.factory/work/artifacts ] || RESULT=1
 

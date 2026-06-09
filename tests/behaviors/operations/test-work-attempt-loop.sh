@@ -96,7 +96,7 @@ MOCK_SCRIPT
 }
 
 json_value() {
-  jq -r "$1" .factory/work/items/work-1.json
+  "$FACTORY_BIN" work show work-1 | jq -r "$1"
 }
 
 assert_contains() {

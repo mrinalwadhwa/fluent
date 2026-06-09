@@ -1754,6 +1754,7 @@ impl WorkModelStore {
 
         let mut work_item = WorkItem::from(record);
         work_item.attempts = self.read_attempt_records(work_item_id)?;
+        self.reject_task_records_without_attempt(work_item_id, &work_item.attempts)?;
         work_item.merge_candidates =
             self.read_merge_candidate_records(work_item_id, &work_item, validate)?;
         Ok(work_item)
@@ -1907,7 +1908,53 @@ impl WorkModelStore {
                 })?;
             tasks.push(task);
         }
+        tasks.sort_by_key(|task| task_order_key(attempt_id, task));
         Ok(tasks)
+    }
+
+    fn reject_task_records_without_attempt(
+        &self,
+        work_item_id: &str,
+        attempts: &[Attempt],
+    ) -> Result<(), WorkModelStorageError> {
+        let tasks_item_dir = self.work_tasks_dir().join(work_item_id);
+        if !tasks_item_dir.exists() {
+            return Ok(());
+        }
+
+        let attempt_ids: HashSet<&str> =
+            attempts.iter().map(|attempt| attempt.id.as_str()).collect();
+        let entries = fs::read_dir(&tasks_item_dir).map_err(|source| {
+            WorkModelStorageError::ReadDirectory {
+                path: tasks_item_dir.clone(),
+                source,
+            }
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|source| WorkModelStorageError::ReadDirectory {
+                path: tasks_item_dir.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            if !path.is_dir() || !self.collection_has_json_records(&path)? {
+                continue;
+            }
+            let attempt_id = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+                .ok_or_else(|| WorkModelStorageError::InvalidWorkItemId {
+                    id: path.display().to_string(),
+                })?;
+            object_dir_name(&attempt_id)?;
+            if !attempt_ids.contains(attempt_id.as_str()) {
+                return Err(WorkModelStorageError::InvalidModel {
+                    path,
+                    source: WorkModelError::AttemptNotFound { id: attempt_id },
+                });
+            }
+        }
+        Ok(())
     }
 
     fn read_merge_candidate_records(
@@ -1990,6 +2037,55 @@ fn list_json_paths(dir: &Path) -> Result<Vec<PathBuf>, WorkModelStorageError> {
     }
     paths.sort();
     Ok(paths)
+}
+
+fn task_order_key(attempt_id: &str, task: &Task) -> (usize, usize, String) {
+    let initial_write_id = format!("{attempt_id}-write");
+    if task.kind == TaskKind::Write && task.id == initial_write_id {
+        return (0, 0, task.id.clone());
+    }
+
+    let review_prefix = format!("{attempt_id}-review-");
+    if task.kind == TaskKind::Review {
+        let Some(suffix) = task.id.strip_prefix(&review_prefix) else {
+            return (usize::MAX, 0, task.id.clone());
+        };
+        if let Some((round, role)) = suffix
+            .split_once('-')
+            .and_then(|(round, role)| round.parse::<usize>().ok().map(|round| (round, role)))
+        {
+            return (
+                round.saturating_sub(1) * 2 + 1,
+                review_role_order(role),
+                role.to_string(),
+            );
+        }
+        return (1, review_role_order(suffix), suffix.to_string());
+    }
+
+    let followup_prefix = format!("{attempt_id}-followup-");
+    if task.kind == TaskKind::Write {
+        if let Some(round) = task
+            .id
+            .strip_prefix(&followup_prefix)
+            .and_then(|round| round.parse::<usize>().ok())
+        {
+            return (round * 2, 0, task.id.clone());
+        }
+    }
+
+    (usize::MAX, 0, task.id.clone())
+}
+
+fn review_role_order(role: &str) -> usize {
+    match role {
+        "documentation" => 0,
+        "behaviors" => 1,
+        "architecture" => 2,
+        "skills" => 3,
+        "tests" => 4,
+        _ => usize::MAX,
+    }
 }
 
 fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, WorkModelStorageError> {
@@ -2625,6 +2721,104 @@ mod tests {
 
         assert_eq!(attempt.review_state, Some(AttemptReviewState::Uncertain));
         assert_eq!(candidate.review_state, MergeCandidateReviewState::Passed);
+    }
+
+    #[test]
+    fn split_task_records_without_attempt_are_invalid() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Split task orphan".to_string(),
+            planning_context: None,
+            instructions: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        work_item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&work_item).unwrap();
+
+        let attempt_path = store.work_attempt_path("work-1", "attempt-1").unwrap();
+        fs::remove_file(&attempt_path).unwrap();
+
+        let error = store
+            .read_work_item("work-1")
+            .expect_err("orphan task collection should be invalid");
+        let message = error.to_string();
+        assert!(
+            message.contains(".factory/work/tasks/work-1/attempt-1"),
+            "{message}"
+        );
+        assert!(
+            message.contains("Attempt \"attempt-1\" not found"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn split_task_records_preserve_lifecycle_order() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Split task order".to_string(),
+            planning_context: None,
+            instructions: None,
+            attempts: vec![Attempt {
+                id: "attempt-1".to_string(),
+                work_item_id: "work-1".to_string(),
+                status: AttemptStatus::Reviewing,
+                tasks: vec![
+                    completed_write_task("attempt-1-write", "initial"),
+                    Task {
+                        id: "attempt-1-review-tests".to_string(),
+                        kind: TaskKind::Review,
+                        status: TaskStatus::Complete,
+                        role: "tests".to_string(),
+                        instructions: None,
+                        work_item_id: "work-1".to_string(),
+                        attempt_id: Some("attempt-1".to_string()),
+                        workspace_access: WorkspaceAccess::read_only(vec![workspace("candidate")]),
+                        artifact_area: Some(TaskArtifactArea {
+                            path: ".factory/work/artifacts/attempt-1/attempt-1-review-tests"
+                                .to_string(),
+                        }),
+                        review_context: Some(ReviewContext {
+                            candidate_workspace_id: "candidate".to_string(),
+                            candidate_workspace_path: "/workspaces/candidate".to_string(),
+                            source_branch: "main".to_string(),
+                            candidate_commit: "commit-initial".to_string(),
+                        }),
+                        input_artifacts: Vec::new(),
+                        output: None,
+                    },
+                    completed_write_task("attempt-1-followup-1", "followup"),
+                ],
+                review_state: Some(AttemptReviewState::NotReviewed),
+                artifacts: Vec::new(),
+            }],
+            merge_candidates: Vec::new(),
+        };
+        work_item
+            .add_review_tasks_with_round("attempt-1", &["tests"], Some(2))
+            .unwrap();
+        store.create_work_item(&work_item).unwrap();
+
+        let read = store.read_work_item("work-1").unwrap();
+        let task_ids = read.attempts[0]
+            .tasks
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            task_ids,
+            vec![
+                "attempt-1-write",
+                "attempt-1-review-tests",
+                "attempt-1-followup-1",
+                "attempt-1-review-2-tests"
+            ]
+        );
     }
 
     fn completed_write_task(id: &str, suffix: &str) -> Task {

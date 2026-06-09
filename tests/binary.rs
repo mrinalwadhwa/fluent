@@ -1250,8 +1250,7 @@ fn work_review_plans_review_tasks_for_completed_attempt() {
         ))
         .stdout(predicate::str::contains("attempt-1-review-tests"));
 
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let attempt = &value["attempts"][0];
     assert_eq!(attempt["status"], "reviewing");
     assert_eq!(attempt["review_state"], "not-reviewed");
@@ -1420,8 +1419,7 @@ exit 0
     assert!(system.contains(&review_path.to_string_lossy().to_string()));
     assert!(!system.contains(".factory/runs/{{RUN_ID}}/reviews"));
 
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let review_task = value["attempts"][0]["tasks"]
         .as_array()
         .unwrap()
@@ -1481,8 +1479,7 @@ fn work_task_run_completes_attempt_after_all_review_tasks_complete() {
             .success();
     }
 
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let attempt = &value["attempts"][0];
     assert_eq!(attempt["status"], "complete");
     for task in attempt["tasks"].as_array().unwrap() {
@@ -1544,8 +1541,7 @@ fn work_attempt_run_drives_write_reviews_and_passes() {
             "Attempt attempt-1 reviews passed; Merge Candidate attempt-1-merge-candidate is ready",
         ));
 
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let attempt = &value["attempts"][0];
     assert_eq!(attempt["status"], "complete");
     assert_eq!(attempt["review_state"], "passed");
@@ -1590,7 +1586,7 @@ fn work_attempt_run_drives_write_reviews_and_passes() {
     let inspected: serde_json::Value = serde_json::from_slice(&inspection.stdout).unwrap();
     assert_eq!(inspected, *candidate);
 
-    let before = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let before = read_work_show_json(&main_dir, "work-1");
     factory_cmd()
         .current_dir(&main_dir)
         .args([
@@ -1607,7 +1603,7 @@ fn work_attempt_run_drives_write_reviews_and_passes() {
         .stdout(predicate::str::contains(
             "Merge Candidate attempt-1-merge-candidate is ready",
         ));
-    let after = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
+    let after = read_work_show_json(&main_dir, "work-1");
     assert_eq!(after, before);
 }
 
@@ -1719,8 +1715,7 @@ fn work_merge_candidate_lands_after_merge_time_reviews() {
     assert!(!logged_system.contains("Read `.factory/expertise/decisions.md` if it exists"));
     assert!(!logged_system.contains(".factory/runs/{{RUN_ID}}/reviews"));
 
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];
     assert_eq!(candidate["review_state"], "passed");
     assert_eq!(candidate["merge_state"]["status"], "landed");
@@ -1778,9 +1773,7 @@ run_before_land = true
 
     assert_eq!(git_head(&main_dir), target_after_landing);
     assert!(!candidate_workspace.exists());
-    let json_after_rerun =
-        fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value_after_rerun: serde_json::Value = serde_json::from_str(&json_after_rerun).unwrap();
+    let value_after_rerun = read_work_show_json(&main_dir, "work-1");
     let candidate_after_rerun = &value_after_rerun["merge_candidates"][0];
     assert_eq!(candidate_after_rerun["merge_state"]["status"], "landed");
     assert_eq!(
@@ -1847,8 +1840,7 @@ fn work_merge_candidate_failed_review_leaves_target_unchanged() {
 
     assert_eq!(git_head(&main_dir), main_before);
     assert_eq!(git_head(&candidate_workspace), candidate_head);
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];
     assert_eq!(candidate["review_state"], "failed");
     assert_eq!(candidate["merge_state"]["status"], "failed");
@@ -1941,8 +1933,7 @@ exit 0
     assert_eq!(git_head(&main_dir), main_before);
     assert_eq!(git_head(&candidate_workspace), candidate_head);
     assert!(candidate_workspace.join("dirty-merge-review.txt").is_file());
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];
     assert_eq!(candidate["review_state"], "failed");
     assert_eq!(candidate["merge_state"]["status"], "failed");
@@ -2032,8 +2023,7 @@ exit 0
         ));
 
     assert_eq!(git_head(&main_dir), main_before);
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];
     assert_eq!(candidate["review_state"], "failed");
     assert_eq!(candidate["merge_state"]["status"], "failed");
@@ -2105,8 +2095,7 @@ run_before_land = true
 
     assert_eq!(git_head(&main_dir), main_before);
     assert_eq!(git_head(&candidate_workspace), candidate_head);
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];
     assert_eq!(candidate["review_state"], "pending");
     assert_eq!(candidate["merge_state"]["status"], "failed");
@@ -2185,8 +2174,7 @@ fn work_merge_candidate_warns_when_cleanup_fails_after_landing() {
 
     assert_eq!(git_head(&main_dir), candidate_head);
     assert!(candidate_workspace.exists());
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];
     assert_eq!(candidate["review_state"], "passed");
     assert_eq!(candidate["merge_state"]["status"], "landed");
@@ -2317,8 +2305,7 @@ fn work_merge_candidate_rebases_when_target_advanced() {
     assert_ne!(main_after_merge, main_before_merge);
     assert!(main_dir.join("target-only.txt").is_file());
     assert!(main_dir.join("loop-output.txt").is_file());
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];
     assert_eq!(candidate["merge_state"]["status"], "landed");
     assert_eq!(candidate["merge_state"]["landed_commit"], main_after_merge);
@@ -2395,8 +2382,7 @@ exit 0
     assert_ne!(main_after_merge, candidate_head);
     assert!(main_dir.join("target-moved-during-review.txt").is_file());
     assert!(!main_dir.join("loop-output.txt").is_file());
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];
     assert_eq!(candidate["review_state"], "passed");
     assert_eq!(candidate["merge_state"]["status"], "failed");
@@ -2480,8 +2466,7 @@ exit 0
 
     assert_eq!(git_head(&main_dir), main_before_merge);
     assert_eq!(git_head(&candidate_workspace), candidate_head);
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];
     assert_eq!(candidate["review_state"], "pending");
     assert_eq!(candidate["merge_state"]["status"], "failed");
@@ -2526,8 +2511,7 @@ fn work_attempt_run_plans_followup_for_failed_reviews() {
             "Planned follow-up write Task attempt-1-followup-1",
         ));
 
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let attempt = &value["attempts"][0];
     assert_eq!(attempt["status"], "planned");
     assert_eq!(attempt["review_state"], "failed");
@@ -2577,8 +2561,7 @@ fn work_attempt_run_plans_followup_for_failed_reviews() {
 
     let followup_commit = git_head(&candidate_workspace);
     assert_ne!(followup_commit, followup_commit_before);
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let attempt = &value["attempts"][0];
     assert_eq!(attempt["status"], "planned");
     let second_round_reviews: Vec<_> = attempt["tasks"]
@@ -2672,8 +2655,7 @@ fn work_create_planning_context_feeds_followup_for_failed_reviews() {
             "Planned follow-up write Task attempt-1-followup-1",
         ));
 
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     assert_eq!(value["instructions"], serde_json::Value::Null);
     let followup = value["attempts"][0]["tasks"]
         .as_array()
@@ -2715,8 +2697,7 @@ fn work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews() {
             "Planned follow-up write Task attempt-1-followup-1",
         ));
 
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let attempt = &value["attempts"][0];
     assert_eq!(attempt["status"], "planned");
     assert_eq!(attempt["review_state"], "failed");
@@ -2900,19 +2881,13 @@ fn work_attempt_run_rejects_unmanaged_completed_review_artifact_area_path() {
     fs::create_dir_all(&outside_dir).unwrap();
     fs::write(outside_dir.join("review.md"), "Verdict: fail\n").unwrap();
 
-    let item_path = main_dir.join(".factory/work/items/work-1.json");
-    let mut value: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
-    let review_task = value["attempts"][0]["tasks"]
-        .as_array_mut()
-        .unwrap()
-        .iter_mut()
-        .find(|task| task["id"] == "attempt-1-review-tests")
-        .unwrap();
-    review_task["artifact_area"]["path"] =
+    let task_path =
+        work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-review-tests");
+    let mut value = read_json_value(&task_path);
+    value["artifact_area"]["path"] =
         serde_json::Value::String("../outside-review-artifacts".to_string());
-    fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
-    let before = fs::read_to_string(&item_path).unwrap();
+    write_json_value(&task_path, &value);
+    let before = fs::read_to_string(&task_path).unwrap();
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -2928,7 +2903,7 @@ fn work_attempt_run_rejects_unmanaged_completed_review_artifact_area_path() {
         .failure()
         .stderr(predicate::str::contains("Task artifact area path must"));
 
-    assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
+    assert_eq!(fs::read_to_string(&task_path).unwrap(), before);
 }
 
 #[test]
@@ -2957,8 +2932,7 @@ fn work_attempt_run_marks_uncertain_reviews_needs_user() {
             "Attempt attempt-1 needs user input: .factory/work/artifacts/attempt-1/needs-user.md",
         ));
 
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let attempt = &value["attempts"][0];
     assert_eq!(attempt["status"], "needs-user");
     assert_eq!(attempt["review_state"], "uncertain");
@@ -2994,8 +2968,7 @@ fn work_attempt_run_marks_missing_verdict_needs_user() {
             "Attempt attempt-1 needs user input: .factory/work/artifacts/attempt-1/needs-user.md",
         ));
 
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let attempt = &value["attempts"][0];
     assert_eq!(attempt["status"], "needs-user");
     assert_eq!(attempt["review_state"], "uncertain");
@@ -3039,8 +3012,7 @@ fn work_attempt_run_stops_when_task_executor_fails() {
         .failure()
         .stderr(predicate::str::contains("Coder exited with code 7"));
 
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let attempt = &value["attempts"][0];
     assert_eq!(attempt["status"], "failed");
     assert_eq!(attempt["tasks"][0]["status"], "failed");
@@ -3058,8 +3030,9 @@ fn work_task_run_rejects_unmanaged_review_read_workspace_path() {
         .assert()
         .success();
 
-    let item_path = main_dir.join(".factory/work/items/work-1.json");
-    let planned = fs::read_to_string(&item_path).unwrap();
+    let task_path =
+        work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-review-tests");
+    let planned = fs::read_to_string(&task_path).unwrap();
     let outside_absolute = tmp.path().join("outside-review-read");
     let outside_absolute = outside_absolute.to_string_lossy().to_string();
     for path in [
@@ -3068,18 +3041,11 @@ fn work_task_run_rejects_unmanaged_review_read_workspace_path() {
         outside_absolute.as_str(),
     ] {
         let mut value: serde_json::Value = serde_json::from_str(&planned).unwrap();
-        let review_task = value["attempts"][0]["tasks"]
-            .as_array_mut()
-            .unwrap()
-            .iter_mut()
-            .find(|task| task["id"] == "attempt-1-review-tests")
-            .unwrap();
-        review_task["workspace_access"]["reads"][0]["path"] =
+        value["workspace_access"]["reads"][0]["path"] = serde_json::Value::String(path.to_string());
+        value["review_context"]["candidate_workspace_path"] =
             serde_json::Value::String(path.to_string());
-        review_task["review_context"]["candidate_workspace_path"] =
-            serde_json::Value::String(path.to_string());
-        fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
-        let before = fs::read_to_string(&item_path).unwrap();
+        write_json_value(&task_path, &value);
+        let before = fs::read_to_string(&task_path).unwrap();
 
         factory_cmd()
             .current_dir(&main_dir)
@@ -3098,7 +3064,7 @@ fn work_task_run_rejects_unmanaged_review_read_workspace_path() {
                 "Task readable workspace path must",
             ));
 
-        assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
+        assert_eq!(fs::read_to_string(&task_path).unwrap(), before);
     }
     assert!(
         !main_dir
@@ -3118,8 +3084,9 @@ fn work_task_run_rejects_malformed_review_context() {
         .assert()
         .success();
 
-    let item_path = main_dir.join(".factory/work/items/work-1.json");
-    let planned = fs::read_to_string(&item_path).unwrap();
+    let task_path =
+        work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-review-tests");
+    let planned = fs::read_to_string(&task_path).unwrap();
     for (mutation, expected) in [
         (
             "delete",
@@ -3134,13 +3101,7 @@ fn work_task_run_rejects_malformed_review_context() {
             "review task attempt-1-review-tests review context candidate must match a readable workspace",
         ),
     ] {
-        let mut value: serde_json::Value = serde_json::from_str(&planned).unwrap();
-        let review_task = value["attempts"][0]["tasks"]
-            .as_array_mut()
-            .unwrap()
-            .iter_mut()
-            .find(|task| task["id"] == "attempt-1-review-tests")
-            .unwrap();
+        let mut review_task: serde_json::Value = serde_json::from_str(&planned).unwrap();
         match mutation {
             "delete" => {
                 review_task
@@ -3158,8 +3119,8 @@ fn work_task_run_rejects_malformed_review_context() {
             }
             _ => unreachable!(),
         }
-        fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
-        let before = fs::read_to_string(&item_path).unwrap();
+        write_json_value(&task_path, &review_task);
+        let before = fs::read_to_string(&task_path).unwrap();
 
         factory_cmd()
             .current_dir(&main_dir)
@@ -3176,7 +3137,7 @@ fn work_task_run_rejects_malformed_review_context() {
             .failure()
             .stderr(predicate::str::contains(expected));
 
-        assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
+        assert_eq!(fs::read_to_string(&task_path).unwrap(), before);
     }
     assert!(
         !main_dir
@@ -3214,8 +3175,7 @@ fn work_task_run_fails_review_task_without_artifact() {
         .failure()
         .stderr(predicate::str::contains("without writing"));
 
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let review_task = value["attempts"][0]["tasks"]
         .as_array()
         .unwrap()
@@ -3262,8 +3222,7 @@ fn work_task_run_ignores_stale_review_artifact() {
         .stderr(predicate::str::contains("without writing"));
 
     assert!(!review_path.exists());
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let review_task = value["attempts"][0]["tasks"]
         .as_array()
         .unwrap()
@@ -3285,8 +3244,9 @@ fn work_task_run_rejects_unmanaged_review_artifact_area_path() {
         .assert()
         .success();
 
-    let item_path = main_dir.join(".factory/work/items/work-1.json");
-    let planned = fs::read_to_string(&item_path).unwrap();
+    let task_path =
+        work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-review-tests");
+    let planned = fs::read_to_string(&task_path).unwrap();
     let outside_absolute = tmp.path().join("outside-review-absolute");
     let outside_absolute = outside_absolute.to_string_lossy().to_string();
     for path in [
@@ -3296,15 +3256,9 @@ fn work_task_run_rejects_unmanaged_review_artifact_area_path() {
         outside_absolute.as_str(),
     ] {
         let mut value: serde_json::Value = serde_json::from_str(&planned).unwrap();
-        let review_task = value["attempts"][0]["tasks"]
-            .as_array_mut()
-            .unwrap()
-            .iter_mut()
-            .find(|task| task["id"] == "attempt-1-review-tests")
-            .unwrap();
-        review_task["artifact_area"]["path"] = serde_json::Value::String(path.to_string());
-        fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
-        let before = fs::read_to_string(&item_path).unwrap();
+        value["artifact_area"]["path"] = serde_json::Value::String(path.to_string());
+        write_json_value(&task_path, &value);
+        let before = fs::read_to_string(&task_path).unwrap();
 
         factory_cmd()
             .current_dir(&main_dir)
@@ -3321,7 +3275,7 @@ fn work_task_run_rejects_unmanaged_review_artifact_area_path() {
             .failure()
             .stderr(predicate::str::contains("Task artifact area path must"));
 
-        assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
+        assert_eq!(fs::read_to_string(&task_path).unwrap(), before);
     }
 
     assert!(!main_dir.join("../outside-review-artifacts").exists());
@@ -3363,8 +3317,7 @@ fn work_task_run_marks_review_task_failed_when_coder_exits_nonzero() {
         .failure()
         .stderr(predicate::str::contains("Coder exited with code 7"));
 
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let review_task = value["attempts"][0]["tasks"]
         .as_array()
         .unwrap()
@@ -3414,8 +3367,7 @@ exit 0
         .failure()
         .stderr(predicate::str::contains("uncommitted changes"));
 
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let review_task = value["attempts"][0]["tasks"]
         .as_array()
         .unwrap()
@@ -3464,8 +3416,7 @@ exit 7
         .failure()
         .stderr(predicate::str::contains("uncommitted changes"));
 
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let review_task = value["attempts"][0]["tasks"]
         .as_array()
         .unwrap()
@@ -3521,8 +3472,7 @@ exit 0
         ));
 
     assert_eq!(git_head(&candidate), baseline_head);
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let review_task = value["attempts"][0]["tasks"]
         .as_array()
         .unwrap()
@@ -3579,8 +3529,7 @@ exit 0
         ));
 
     assert_eq!(git_head(&candidate), baseline_head);
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let review_task = value["attempts"][0]["tasks"]
         .as_array()
         .unwrap()
@@ -3691,13 +3640,10 @@ exit 0
         .assert()
         .success();
 
-    let item_path = main_dir.join(".factory/work/items/work-1.json");
-    let mut value: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
-    value["attempts"][0]["tasks"]
-        .as_array_mut()
-        .unwrap()
-        .push(serde_json::json!({
+    let report_path = work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-report");
+    write_json_value(
+        &report_path,
+        &serde_json::json!({
             "id": "attempt-1-report",
             "kind": "report",
             "role": "reporter",
@@ -3707,8 +3653,8 @@ exit 0
                 "reads": [],
                 "writes": []
             }
-        }));
-    fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+        }),
+    );
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -3725,8 +3671,7 @@ exit 0
         .assert()
         .success();
 
-    let json = fs::read_to_string(item_path).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     assert_eq!(value["attempts"][0]["status"], "executing");
     assert_eq!(value["attempts"][0]["tasks"][0]["status"], "complete");
     assert!(value["attempts"][0]["tasks"][1].get("status").is_none());
@@ -3774,8 +3719,7 @@ exit 0
             "commit or remove them before completing",
         ));
 
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let attempt = &value["attempts"][0];
     let task = &attempt["tasks"][0];
     assert_eq!(attempt["status"], "failed");
@@ -3823,8 +3767,7 @@ exit 7
         .failure()
         .stderr(predicate::str::contains("Coder exited with code 7"));
 
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     let attempt = &value["attempts"][0];
     let task = &attempt["tasks"][0];
     assert_eq!(attempt["status"], "failed");
@@ -3866,8 +3809,7 @@ fn work_task_run_rejects_success_without_commits() {
         .failure()
         .stderr(predicate::str::contains("no committed Task output"));
 
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     assert_eq!(value["attempts"][0]["status"], "failed");
     assert_eq!(value["attempts"][0]["tasks"][0]["status"], "failed");
     assert!(value["attempts"][0]["tasks"][0].get("output").is_none());
@@ -3942,8 +3884,7 @@ fn work_task_run_rejects_reused_workspace_without_new_commit() {
         .failure()
         .stderr(predicate::str::contains("no committed Task output"));
 
-    let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     assert_eq!(value["attempts"][0]["status"], "failed");
     assert_eq!(value["attempts"][0]["tasks"][0]["status"], "failed");
     assert!(value["attempts"][0]["tasks"][0].get("output").is_none());
@@ -4038,9 +3979,7 @@ fn work_task_run_rejects_existing_task_branch_without_workspace() {
         .failure()
         .stderr(predicate::str::contains("already exists but workspace"));
 
-    let item_path = main_dir.join(".factory/work/items/work-1.json");
-    let json = fs::read_to_string(item_path).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let value = read_work_show_json(&main_dir, "work-1");
     assert!(value["attempts"][0]["tasks"][0].get("status").is_none());
     assert!(value["attempts"][0]["tasks"][0].get("output").is_none());
     assert!(!main_dir.join("../work-6-work-1-attempt-1").exists());
@@ -4062,12 +4001,11 @@ fn work_task_run_rejects_task_that_is_not_planned() {
         .assert()
         .success();
 
-    let item_path = main_dir.join(".factory/work/items/work-1.json");
-    let mut value: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
-    value["attempts"][0]["tasks"][0]["status"] = serde_json::Value::String("failed".to_string());
-    fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
-    let before = fs::read_to_string(&item_path).unwrap();
+    let task_path = work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-write");
+    let mut value = read_json_value(&task_path);
+    value["status"] = serde_json::Value::String("failed".to_string());
+    write_json_value(&task_path, &value);
+    let before = fs::read_to_string(&task_path).unwrap();
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -4084,7 +4022,7 @@ fn work_task_run_rejects_task_that_is_not_planned() {
         .failure()
         .stderr(predicate::str::contains("expected planned"));
 
-    assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
+    assert_eq!(fs::read_to_string(&task_path).unwrap(), before);
     assert!(!main_dir.join("../work-6-work-1-attempt-1").exists());
 }
 
@@ -4104,12 +4042,11 @@ fn work_task_run_rejects_non_write_task() {
         .assert()
         .success();
 
-    let item_path = main_dir.join(".factory/work/items/work-1.json");
-    let mut value: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
-    value["attempts"][0]["tasks"][0]["kind"] = serde_json::Value::String("probe".to_string());
-    fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
-    let before = fs::read_to_string(&item_path).unwrap();
+    let task_path = work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-write");
+    let mut value = read_json_value(&task_path);
+    value["kind"] = serde_json::Value::String("probe".to_string());
+    write_json_value(&task_path, &value);
+    let before = fs::read_to_string(&task_path).unwrap();
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -4126,7 +4063,7 @@ fn work_task_run_rejects_non_write_task() {
         .failure()
         .stderr(predicate::str::contains("unsupported by task run"));
 
-    assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
+    assert_eq!(fs::read_to_string(&task_path).unwrap(), before);
     assert!(!main_dir.join("../work-6-work-1-attempt-1").exists());
 }
 
@@ -4146,13 +4083,11 @@ fn work_task_run_requires_one_writable_workspace() {
         .assert()
         .success();
 
-    let item_path = main_dir.join(".factory/work/items/work-1.json");
-    let mut value: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
-    value["attempts"][0]["tasks"][0]["workspace_access"]["writes"] =
-        serde_json::Value::Array(Vec::new());
-    fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
-    let before = fs::read_to_string(&item_path).unwrap();
+    let task_path = work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-write");
+    let mut value = read_json_value(&task_path);
+    value["workspace_access"]["writes"] = serde_json::Value::Array(Vec::new());
+    write_json_value(&task_path, &value);
+    let before = fs::read_to_string(&task_path).unwrap();
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -4171,16 +4106,16 @@ fn work_task_run_requires_one_writable_workspace() {
             "must declare exactly one writable workspace",
         ));
 
-    assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
+    assert_eq!(fs::read_to_string(&task_path).unwrap(), before);
     assert!(!main_dir.join("../work-6-work-1-attempt-1").exists());
 
     let mut value: serde_json::Value = serde_json::from_str(&before).unwrap();
-    value["attempts"][0]["tasks"][0]["workspace_access"]["writes"] = serde_json::json!([
+    value["workspace_access"]["writes"] = serde_json::json!([
         {"id": "candidate", "path": "../work-6-work-1-attempt-1"},
         {"id": "other", "path": "../work-6-work-1-other"}
     ]);
-    fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
-    let before = fs::read_to_string(&item_path).unwrap();
+    write_json_value(&task_path, &value);
+    let before = fs::read_to_string(&task_path).unwrap();
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -4196,7 +4131,7 @@ fn work_task_run_requires_one_writable_workspace() {
         .assert()
         .failure();
 
-    assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
+    assert_eq!(fs::read_to_string(&task_path).unwrap(), before);
     assert!(!main_dir.join("../work-6-work-1-attempt-1").exists());
 }
 
@@ -4216,7 +4151,7 @@ fn work_task_run_rejects_unmanaged_writable_workspace_path() {
         .assert()
         .success();
 
-    let item_path = main_dir.join(".factory/work/items/work-1.json");
+    let task_path = work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-write");
     let outside_absolute = tmp.path().join("outside-absolute");
     let outside_absolute = outside_absolute.to_string_lossy().to_string();
     for path in [
@@ -4225,12 +4160,11 @@ fn work_task_run_rejects_unmanaged_writable_workspace_path() {
         "../work-6-work-1-other-attempt",
         outside_absolute.as_str(),
     ] {
-        let mut value: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
-        value["attempts"][0]["tasks"][0]["workspace_access"]["writes"][0]["path"] =
+        let mut value = read_json_value(&task_path);
+        value["workspace_access"]["writes"][0]["path"] =
             serde_json::Value::String(path.to_string());
-        fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
-        let before = fs::read_to_string(&item_path).unwrap();
+        write_json_value(&task_path, &value);
+        let before = fs::read_to_string(&task_path).unwrap();
 
         factory_cmd()
             .current_dir(&main_dir)
@@ -4249,7 +4183,7 @@ fn work_task_run_rejects_unmanaged_writable_workspace_path() {
                 "Task writable workspace path must",
             ));
 
-        assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
+        assert_eq!(fs::read_to_string(&task_path).unwrap(), before);
     }
 
     assert!(!main_dir.join("../outside-workspace").exists());
@@ -4588,6 +4522,42 @@ fn write_work_item_json(project_root: &Path, id: &str, title: &str) {
         ),
     )
     .unwrap();
+}
+
+fn read_work_show_json(project_root: &Path, work_item_id: &str) -> serde_json::Value {
+    let output = factory_cmd()
+        .current_dir(project_root)
+        .args(["work", "show", work_item_id])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "work show failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn work_task_record_path(
+    project_root: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    task_id: &str,
+) -> PathBuf {
+    project_root
+        .join(".factory/work/tasks")
+        .join(work_item_id)
+        .join(attempt_id)
+        .join(format!("{task_id}.json"))
+}
+
+fn read_json_value(path: &Path) -> serde_json::Value {
+    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+}
+
+fn write_json_value(path: &Path, value: &serde_json::Value) {
+    fs::write(path, serde_json::to_string_pretty(value).unwrap()).unwrap();
 }
 
 // -------------------------------------------------------------------------
