@@ -5974,6 +5974,7 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
     write_json_path(&task_path, &task);
 
     let artifact_dir = main_dir.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-write");
+    let artifact_parent = main_dir.join(".factory/work/artifacts/work-1/attempt-1");
     fs::create_dir_all(&artifact_dir).unwrap();
     fs::write(artifact_dir.join("result.md"), "artifact").unwrap();
 
@@ -6040,6 +6041,7 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
     assert!(item_path.exists());
     assert!(worktree_dir.is_dir());
     assert!(artifact_dir.is_dir());
+    assert!(artifact_parent.is_dir());
     assert!(active_item_path.exists());
     assert!(active_worktree_dir.is_dir());
     assert!(active_artifact_dir.is_dir());
@@ -6061,6 +6063,7 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
     assert!(active_task_path.exists());
     assert!(!worktree_dir.exists());
     assert!(!artifact_dir.exists());
+    assert!(!artifact_parent.exists());
     assert!(active_worktree_dir.is_dir());
     assert!(active_artifact_dir.is_dir());
 
@@ -6439,6 +6442,9 @@ fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() 
     let check_artifact = main_dir.join(
         ".factory/work/artifacts/work-merge-cleanup/attempt-1/candidate-1/merge/checks/checks.json",
     );
+    let attempt_artifact_dir =
+        main_dir.join(".factory/work/artifacts/work-merge-cleanup/attempt-1");
+    let candidate_artifact_dir = attempt_artifact_dir.join("candidate-1");
     let review_artifact = main_dir
         .join(".factory/work/artifacts/work-merge-cleanup/attempt-1/candidate-1/merge/reviews/tests/review.md");
     fs::create_dir_all(check_artifact.parent().unwrap()).unwrap();
@@ -6467,6 +6473,8 @@ fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() 
     assert!(worktree_dir.exists());
     assert!(check_artifact.exists());
     assert!(review_artifact.exists());
+    assert!(candidate_artifact_dir.is_dir());
+    assert!(attempt_artifact_dir.is_dir());
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -6487,11 +6495,8 @@ fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() 
     assert!(!worktree_dir.exists());
     assert!(!check_artifact.exists());
     assert!(!review_artifact.exists());
-    assert!(
-        !main_dir
-            .join(".factory/work/artifacts/work-merge-cleanup/attempt-1/candidate-1")
-            .exists()
-    );
+    assert!(!candidate_artifact_dir.exists());
+    assert!(!attempt_artifact_dir.exists());
 
     let branch_check = StdCommand::new("git")
         .args([
