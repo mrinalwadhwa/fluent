@@ -296,12 +296,14 @@ impl WorkItem {
                 id: attempt_id.to_string(),
             });
         };
-        let existing_review_tasks = attempt
+        let latest_review_round = attempt
             .tasks
             .iter()
             .filter(|task| task.kind == TaskKind::Review)
-            .count();
-        let next_round = existing_review_tasks / roles.len() + 1;
+            .filter_map(|task| review_task_round(attempt_id, task))
+            .max()
+            .unwrap_or(0);
+        let next_round = latest_review_round + 1;
         let round = (next_round > 1).then_some(next_round);
         self.add_review_tasks_with_round(attempt_id, roles, round)
     }
@@ -2301,6 +2303,18 @@ fn task_order_key(attempt_id: &str, task: &Task) -> (usize, usize, String) {
     (usize::MAX, 0, task.id.clone())
 }
 
+fn review_task_round(attempt_id: &str, task: &Task) -> Option<usize> {
+    if task.kind != TaskKind::Review {
+        return None;
+    }
+    let review_prefix = format!("{attempt_id}-review-");
+    let suffix = task.id.strip_prefix(&review_prefix)?;
+    suffix
+        .split_once('-')
+        .and_then(|(round, _)| round.parse::<usize>().ok())
+        .or(Some(1))
+}
+
 fn review_role_order(role: &str) -> usize {
     match role {
         "documentation" => 0,
@@ -2738,6 +2752,80 @@ mod tests {
             review_task.workspace_access.reads[0].path,
             "../work-6-work-1-attempt-1-followup"
         );
+    }
+
+    #[test]
+    fn next_review_tasks_keep_round_number_after_full_round() {
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Review latest candidate".to_string(),
+            planning_context: None,
+            instructions: None,
+            attempts: vec![Attempt {
+                id: "attempt-1".to_string(),
+                work_item_id: "work-1".to_string(),
+                kind: AttemptKind::Write,
+                status: AttemptStatus::Planned,
+                tasks: vec![
+                    completed_write_task("attempt-1-write", "initial"),
+                    Task {
+                        id: "attempt-1-review-documentation".to_string(),
+                        kind: TaskKind::Review,
+                        status: TaskStatus::Complete,
+                        role: "documentation".to_string(),
+                        instructions: None,
+                        work_item_id: "work-1".to_string(),
+                        attempt_id: Some("attempt-1".to_string()),
+                        workspace_access: WorkspaceAccess::read_only(vec![workspace("candidate")]),
+                        artifact_area: Some(TaskArtifactArea {
+                            path:
+                                ".factory/work/artifacts/attempt-1/attempt-1-review-documentation"
+                                    .to_string(),
+                        }),
+                        review_context: Some(ReviewContext {
+                            candidate_workspace_id: "candidate".to_string(),
+                            candidate_workspace_path: "/workspaces/candidate".to_string(),
+                            source_branch: "main".to_string(),
+                            candidate_commit: "commit-initial".to_string(),
+                        }),
+                        input_artifacts: Vec::new(),
+                        output: None,
+                    },
+                    Task {
+                        id: "attempt-1-review-behaviors".to_string(),
+                        kind: TaskKind::Review,
+                        status: TaskStatus::Complete,
+                        role: "behaviors".to_string(),
+                        instructions: None,
+                        work_item_id: "work-1".to_string(),
+                        attempt_id: Some("attempt-1".to_string()),
+                        workspace_access: WorkspaceAccess::read_only(vec![workspace("candidate")]),
+                        artifact_area: Some(TaskArtifactArea {
+                            path: ".factory/work/artifacts/attempt-1/attempt-1-review-behaviors"
+                                .to_string(),
+                        }),
+                        review_context: Some(ReviewContext {
+                            candidate_workspace_id: "candidate".to_string(),
+                            candidate_workspace_path: "/workspaces/candidate".to_string(),
+                            source_branch: "main".to_string(),
+                            candidate_commit: "commit-initial".to_string(),
+                        }),
+                        input_artifacts: Vec::new(),
+                        output: None,
+                    },
+                    completed_write_task("attempt-1-followup-1", "followup"),
+                ],
+                review_state: Some(AttemptReviewState::NotReviewed),
+                artifacts: Vec::new(),
+            }],
+            merge_candidates: Vec::new(),
+        };
+
+        let task_ids = work_item
+            .add_next_review_tasks("attempt-1", &["tests"])
+            .unwrap();
+
+        assert_eq!(task_ids, vec!["attempt-1-review-2-tests"]);
     }
 
     #[test]

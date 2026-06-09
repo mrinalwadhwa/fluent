@@ -1,4 +1,5 @@
 use anyhow::{Result, bail};
+use std::collections::HashSet;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -7,8 +8,8 @@ use crate::coder::CoderKind;
 use crate::content::ContentResolver;
 use crate::review::{self, Verdict};
 use crate::work_model::{
-    ArtifactRef, AttemptKind, AttemptReviewState, AttemptStatus, Task, TaskKind, TaskStatus,
-    WorkItem, WorkModelStorageError, WorkModelStore,
+    ArtifactRef, Attempt, AttemptKind, AttemptReviewState, AttemptStatus, Task, TaskKind,
+    TaskStatus, WorkItem, WorkModelStorageError, WorkModelStore,
 };
 use crate::work_task_executor::{self, WorkTaskRunConfig};
 
@@ -112,8 +113,9 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             && has_completed_write(attempt.tasks.as_slice())
             && !has_review_after_latest_write(attempt.tasks.as_slice())
         {
+            let review_roles = next_review_roles(attempt);
             let mut item = item;
-            let task_ids = item.add_next_review_tasks(config.attempt_id, review::REVIEWERS)?;
+            let task_ids = item.add_next_review_tasks(config.attempt_id, &review_roles)?;
             config.store.write_work_item(&item)?;
             outcomes.push(WorkAttemptRunOutcome::PlannedReviews {
                 task_ids: task_ids.clone(),
@@ -182,6 +184,44 @@ fn has_review_after_latest_write(tasks: &[Task]) -> bool {
     tasks[last_write_index + 1..]
         .iter()
         .any(|task| task.kind == TaskKind::Review)
+}
+
+fn next_review_roles(attempt: &Attempt) -> Vec<&'static str> {
+    let Some(latest_write) = attempt
+        .tasks
+        .iter()
+        .rev()
+        .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+    else {
+        return review::REVIEWERS.to_vec();
+    };
+
+    if latest_write.input_artifacts.is_empty() {
+        return review::REVIEWERS.to_vec();
+    }
+
+    let input_producer_ids = latest_write
+        .input_artifacts
+        .iter()
+        .map(|artifact| artifact.producer_id.as_str())
+        .collect::<HashSet<_>>();
+    let roles = review::REVIEWERS
+        .iter()
+        .copied()
+        .filter(|role| {
+            attempt.tasks.iter().any(|task| {
+                task.kind == TaskKind::Review
+                    && input_producer_ids.contains(task.id.as_str())
+                    && task.role == *role
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if roles.is_empty() {
+        review::REVIEWERS.to_vec()
+    } else {
+        roles
+    }
 }
 
 fn completed_review_tasks_after_latest_write(tasks: &[Task]) -> impl Iterator<Item = &Task> {
@@ -404,6 +444,127 @@ mod tests {
                 .to_string()
                 .contains("Task artifact area path must stay under .factory/work/artifacts")
         );
+    }
+
+    #[test]
+    fn initial_write_uses_full_review_roles() {
+        let attempt = attempt_with_tasks(vec![write_task("attempt-1-write", Vec::new())]);
+
+        assert_eq!(next_review_roles(&attempt), review::REVIEWERS);
+    }
+
+    #[test]
+    fn followup_write_uses_failed_input_review_role() {
+        let attempt = attempt_with_tasks(vec![
+            write_task("attempt-1-write", Vec::new()),
+            review_task("attempt-1-review-tests", "tests"),
+            write_task(
+                "attempt-1-followup-1",
+                vec![ArtifactRef {
+                    producer_id: "attempt-1-review-tests".to_string(),
+                    path: ".factory/work/artifacts/attempt-1/attempt-1-review-tests/review.md"
+                        .to_string(),
+                }],
+            ),
+        ]);
+
+        assert_eq!(next_review_roles(&attempt), vec!["tests"]);
+    }
+
+    #[test]
+    fn followup_write_uses_failed_roles_in_default_order() {
+        let attempt = attempt_with_tasks(vec![
+            write_task("attempt-1-write", Vec::new()),
+            review_task("attempt-1-review-tests", "tests"),
+            review_task("attempt-1-review-documentation", "documentation"),
+            write_task(
+                "attempt-1-followup-1",
+                vec![
+                    ArtifactRef {
+                        producer_id: "attempt-1-review-tests".to_string(),
+                        path: ".factory/work/artifacts/attempt-1/attempt-1-review-tests/review.md"
+                            .to_string(),
+                    },
+                    ArtifactRef {
+                        producer_id: "attempt-1-review-documentation".to_string(),
+                        path: ".factory/work/artifacts/attempt-1/attempt-1-review-documentation/review.md"
+                            .to_string(),
+                    },
+                ],
+            ),
+        ]);
+
+        assert_eq!(next_review_roles(&attempt), vec!["documentation", "tests"]);
+    }
+
+    #[test]
+    fn unmappable_followup_inputs_fall_back_to_full_review_roles() {
+        let attempt = attempt_with_tasks(vec![
+            write_task("attempt-1-write", Vec::new()),
+            review_task("attempt-1-review-tests", "tests"),
+            write_task(
+                "attempt-1-followup-1",
+                vec![ArtifactRef {
+                    producer_id: "missing-review-task".to_string(),
+                    path: ".factory/work/artifacts/attempt-1/missing-review-task/review.md"
+                        .to_string(),
+                }],
+            ),
+        ]);
+
+        assert_eq!(next_review_roles(&attempt), review::REVIEWERS);
+    }
+
+    fn attempt_with_tasks(tasks: Vec<Task>) -> Attempt {
+        Attempt {
+            id: "attempt-1".to_string(),
+            work_item_id: "work-1".to_string(),
+            kind: AttemptKind::Write,
+            status: AttemptStatus::Planned,
+            tasks,
+            review_state: Some(AttemptReviewState::NotReviewed),
+            artifacts: Vec::new(),
+        }
+    }
+
+    fn write_task(id: &str, input_artifacts: Vec<ArtifactRef>) -> Task {
+        Task {
+            id: id.to_string(),
+            kind: TaskKind::Write,
+            status: TaskStatus::Complete,
+            role: "author".to_string(),
+            instructions: None,
+            work_item_id: "work-1".to_string(),
+            attempt_id: Some("attempt-1".to_string()),
+            workspace_access: WorkspaceAccess {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            },
+            artifact_area: None,
+            review_context: None,
+            input_artifacts,
+            output: None,
+        }
+    }
+
+    fn review_task(id: &str, role: &str) -> Task {
+        Task {
+            id: id.to_string(),
+            kind: TaskKind::Review,
+            status: TaskStatus::Complete,
+            role: role.to_string(),
+            instructions: None,
+            work_item_id: "work-1".to_string(),
+            attempt_id: Some("attempt-1".to_string()),
+            workspace_access: WorkspaceAccess {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            },
+            artifact_area: None,
+            review_context: None,
+            input_artifacts: Vec::new(),
+            output: None,
+        }
     }
 }
 

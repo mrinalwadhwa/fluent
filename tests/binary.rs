@@ -3549,6 +3549,46 @@ fn work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews() {
         input_artifacts[0]["path"],
         ".factory/work/artifacts/attempt-1/attempt-1-review-documentation/review.md"
     );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Completed Task attempt-1-followup-1",
+        ))
+        .stdout(predicate::str::contains(
+            "Planned 1 review Tasks for Attempt attempt-1",
+        ))
+        .stdout(predicate::str::contains("attempt-1-review-2-documentation"))
+        .stdout(predicate::str::contains("attempt-1-review-2-tests").not());
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let second_round_reviews: Vec<_> = value["attempts"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| {
+            task["kind"] == "review"
+                && task["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("attempt-1-review-2-"))
+        })
+        .collect();
+    assert_eq!(second_round_reviews.len(), 1);
+    assert_eq!(
+        second_round_reviews[0]["id"],
+        "attempt-1-review-2-documentation"
+    );
 }
 
 #[test]

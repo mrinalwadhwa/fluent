@@ -261,10 +261,23 @@ Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop passes 
 WHEN `factory work attempt run <work-item-id> <attempt-id>` advances an
 Attempt whose write output has completed and no review round is planned
 for that write output,
-THE SYSTEM SHALL plan review Tasks using the existing review policy and
-run planned review Tasks through the existing Task executor.
+THE SYSTEM SHALL plan initial review Tasks using the full Work reviewer
+set and run planned review Tasks through the existing Task executor.
 Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop passes review round)
+
+WHEN a normal Work Attempt completes a follow-up write Task created from
+failed review artifacts,
+THE SYSTEM SHALL plan the next review round only for the failed reviewer
+roles that fed that follow-up write Task.
+Test: tests/binary.rs (work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews)
+Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop plans follow-up with mixed missing review)
+
+IF a normal Work Attempt completes a follow-up write Task and the failed
+reviewer roles cannot be derived from the follow-up Task input artifacts,
+THEN THE SYSTEM SHALL plan the next review round using the full Work
+reviewer set.
+Test: src/work_attempt_loop.rs (unmappable_followup_inputs_fall_back_to_full_review_roles)
 
 WHEN `factory work attempt run <work-item-id> <attempt-id>` is invoked
 for an Attempt with planned review Tasks,
@@ -351,8 +364,8 @@ Test: tests/binary.rs (work_merge_candidate_missing_item_or_candidate_reports_er
 WHEN `factory work merge <work-item-id> <merge-candidate-id>` is invoked
 for a stored Merge Candidate that still needs to land,
 THE SYSTEM SHALL update the candidate workspace against the target
-branch, run configured pre-land checks, run merge-time reviewers, and
-fast-forward the target branch only after those steps pass.
+branch, run configured pre-land checks, run the full merge-time reviewer
+set, and fast-forward the target branch only after those steps pass.
 Test: tests/binary.rs (work_merge_candidate_lands_after_merge_time_reviews)
 
 WHEN `factory work merge <work-item-id> <merge-candidate-id>` launches a

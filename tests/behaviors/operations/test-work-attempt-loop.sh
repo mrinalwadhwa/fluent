@@ -250,6 +250,13 @@ test_attempt_loop_plans_followup_with_mixed_failed_and_missing_reviews() {
   [ "$(json_value '.attempts[0].tasks[-1].input_artifacts | length')" = "1" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[-1].input_artifacts[0].path')" = ".factory/work/artifacts/attempt-1/attempt-1-review-documentation/review.md" ] || RESULT=1
   [ ! -f .factory/work/artifacts/attempt-1/needs-user.md ] || RESULT=1
+
+  run_attempt_loop > "$TEST_DIR/followup-stdout" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Completed Task attempt-1-followup-1" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Planned 1 review Tasks for Attempt attempt-1" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/followup-stdout")" "attempt-1-review-2-documentation" || RESULT=1
+  [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review" and (.id | startswith("attempt-1-review-2-")))] | length')" = "1" ] || RESULT=1
+  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-documentation") | .role')" = "documentation" ] || RESULT=1
   return $RESULT
 }
 

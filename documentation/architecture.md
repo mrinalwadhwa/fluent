@@ -122,20 +122,23 @@ failing the Task.
 `factory work attempt run <work-item-id> <attempt-id>` is the first
 Attempt-level orchestration path. It advances one Attempt by running the
 next planned write or review Task through the same Task executor, then
-reloads stored state before deciding the next transition. After write
-output completes it plans review Tasks with the existing review policy.
-After a completed review round it interprets review artifacts with the
-review subsystem verdict parser. All pass marks the Attempt review state
-as passed, completes the Attempt, and creates or returns one durable
-Merge Candidate for later merge execution. The Merge Candidate records
-the source candidate workspace, target workspace, source branch, target
-branch, candidate commit, and its own pending review state. Any fail
-creates a planned follow-up write Task with the failed review artifacts
-as Task inputs and copies explicit Work Item instructions into that
-follow-up Task, or derives those instructions from stored Work Item
-planning context when explicit instructions are absent. When no review
-artifact fails, uncertain or missing verdicts mark the Attempt
-`needs-user` with a handoff under
+reloads stored state before deciding the next transition. After the
+initial write output completes it plans review Tasks for the full Work
+reviewer set. After a follow-up write output completes it derives the
+next review roles from that Task's failed review input artifacts; when
+it cannot derive at least one role, it falls back to the full Work
+reviewer set. After a completed review round it interprets review
+artifacts with the review subsystem verdict parser. All pass marks the
+Attempt review state as passed, completes the Attempt, and creates or
+returns one durable Merge Candidate for later merge execution. The Merge
+Candidate records the source candidate workspace, target workspace,
+source branch, target branch, candidate commit, and its own pending
+review state. Any fail creates a planned follow-up write Task with the
+failed review artifacts as Task inputs and copies explicit Work Item
+instructions into that follow-up Task, or derives those instructions
+from stored Work Item planning context when explicit instructions are
+absent. When no review artifact fails, uncertain or missing verdicts
+mark the Attempt `needs-user` with a handoff under
 `.factory/work/artifacts/<attempt-id>/`.
 For review-only Attempts, all pass marks the Attempt complete with review
 state `passed` and does not create a Merge Candidate. Any fail marks the
@@ -272,6 +275,8 @@ candidate commit. Follow-up write Tasks include `input_artifacts` when
 reviewers fail an Attempt; each entry names the producing review Task
 and the artifact path, such as
 `.factory/work/artifacts/attempt-1/attempt-1-review-tests/review.md`.
+The Attempt loop uses those producer task ids to choose the reviewers
+for the next follow-up review round.
 JSON omits `input_artifacts` when the list is empty. Incomplete Tasks do
 not carry output. Attempt
 completion is derived from its Tasks; a complete Attempt must not contain
