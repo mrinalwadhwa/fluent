@@ -326,7 +326,7 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     for (workspace_path, baseline_head) in &candidate_heads {
         let head_result =
             if attempt_kind == AttemptKind::ReviewOnly && workspace_path == config.project_root {
-                ensure_head_unchanged_without_reset(workspace_path, baseline_head)
+                ensure_source_head_unchanged(workspace_path, baseline_head)
             } else {
                 ensure_head_unchanged(workspace_path, baseline_head)
             };
@@ -1215,11 +1215,12 @@ fn ensure_head_unchanged(workspace_path: &Path, baseline_head: &str) -> Result<(
     }
 }
 
-fn ensure_head_unchanged_without_reset(workspace_path: &Path, baseline_head: &str) -> Result<()> {
+fn ensure_source_head_unchanged(workspace_path: &Path, baseline_head: &str) -> Result<()> {
     let current_head = head_commit(workspace_path)?;
     if current_head == baseline_head {
         Ok(())
     } else {
+        reset_worktree_head(workspace_path, baseline_head)?;
         bail!(
             "Review Task changed readable source checkout HEAD from {baseline_head} to {current_head}: {}",
             workspace_path.display()

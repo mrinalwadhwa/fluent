@@ -1934,6 +1934,59 @@ fn work_attempt_run_review_only_rejects_source_changes() {
 }
 
 #[test]
+fn work_attempt_run_review_only_restores_changed_source_head() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Review codebase"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .assert()
+        .success();
+
+    let main_head = git_head(&main_dir);
+    let bin_dir = tmp.path().join("bin-review-only-head");
+    write_mock_claude(&bin_dir, &review_only_changed_head_mock_script());
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-review",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "changed readable source checkout HEAD",
+        ))
+        .stdout(predicate::str::contains("Merge Candidate").not())
+        .stdout(predicate::str::contains("follow-up").not());
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let attempt = &value["attempts"][0];
+    assert_eq!(review_only_write_task_count(attempt), 0);
+    assert!(merge_candidates_are_empty(&value));
+    assert!(
+        attempt["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task["kind"] == "review" && task["status"] == "failed")
+    );
+    assert_eq!(git_head(&main_dir), main_head);
+    assert_no_non_factory_changes(&main_dir);
+}
+
+#[test]
 fn work_attempt_run_review_only_requires_recorded_source_commit() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
@@ -6473,6 +6526,20 @@ exit 0
 fn review_only_dirty_source_mock_script() -> String {
     r##"#!/bin/bash
 printf 'reviewer edit\n' >> ../../../../../README.md
+printf 'Verdict: pass\n\nReview-only result.\n' > review.md
+exit 0
+"##
+    .to_string()
+}
+
+fn review_only_changed_head_mock_script() -> String {
+    r##"#!/bin/bash
+repo="$(pwd)/../../../../../"
+git -C "$repo" config user.email test@example.com
+git -C "$repo" config user.name "Test User"
+printf 'reviewer commit\n' > "$repo/reviewer-commit.txt"
+git -C "$repo" add reviewer-commit.txt
+git -C "$repo" commit -m "Mutate source head" >/dev/null
 printf 'Verdict: pass\n\nReview-only result.\n' > review.md
 exit 0
 "##

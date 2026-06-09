@@ -229,19 +229,12 @@ need files to review, revise, or pass to legacy fallback:
 Write `.factory/active-run` containing the run-id only for the legacy
 fallback path.
 
-**Review-only work:** If the brief is a full-codebase review request
-(the user wants to run reviewers against the existing codebase, not
-build something new), default to the Work-model review-only path:
-
-- Write the brief as usual so the Work Item has durable context
-- Create or prepare a Work Item for the review target
-- Use `factory work review-codebase <work-item-id> <attempt-id>` to add
-  the review-only Attempt
-- Run the Attempt with `factory work attempt run <work-item-id>
-  <attempt-id>`
+If the brief is a full-codebase review request, write the review target,
+focus areas, and requested reviewers in the brief. Do not start review
+execution until the user confirms the brief.
 
 Use the legacy review-run state only for compatibility or explicit
-recovery:
+recovery after the user confirms:
 
 - Write `.factory/runs/[run-id]/mode` containing `review`
 - If the user wants specific reviewers, write
@@ -268,6 +261,18 @@ If something is still fuzzy, identify which part and re-enter the
 relevant phase. Do not start over.
 
 When the user confirms, the skill is done.
+
+**Review-only work:** If the confirmed brief is a full-codebase review
+request (the user wants reviewers to inspect the existing codebase, not
+build something new), default to the Work-model review-only path after
+capture is complete:
+
+- Write the brief as usual so the Work Item has durable context
+- Create or prepare a Work Item for the review target
+- Use `factory work review-codebase <work-item-id> <attempt-id>` to add
+  the review-only Attempt
+- Run the Attempt with `factory work attempt run <work-item-id>
+  <attempt-id>`
 
 ---
 
