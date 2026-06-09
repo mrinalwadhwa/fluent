@@ -302,6 +302,15 @@ reviewer must write, and SHALL NOT instruct the reviewer to write legacy
 `.factory/runs/<run-id>/reviews/...` artifacts.
 Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge lands after update, checks, and reviewers)
 
+WHEN `factory work merge <work-item-id> <merge-candidate-id>` builds the
+system prompt for a Work merge-time reviewer,
+THE SYSTEM SHALL remove legacy run review paths and relative
+`skills/review-<role>/SKILL.md` instructions from the base prompt, then
+tell the reviewer to follow the candidate workspace's absolute
+`skills/review-<role>/SKILL.md` path when that skill exists, or to apply
+the reviewer role directly when it does not.
+Test: tests/binary.rs (work_merge_candidate_lands_after_merge_time_reviews)
+
 WHEN a merge-time reviewer receives a candidate workspace,
 THE SYSTEM SHALL tell the reviewer that the candidate workspace is
 read-only for review purposes and that scratch tests, suggested patches,

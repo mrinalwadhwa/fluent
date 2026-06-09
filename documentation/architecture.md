@@ -147,8 +147,14 @@ merge-time context, then fast-forwards the target branch to the updated
 candidate head. Merge-time reviewers receive the exact
 `.factory/work/artifacts/<attempt-id>/<candidate-id>/merge/reviews/<role>/review.md`
 artifact path for their output and the absolute filesystem path the
-reviewer must write. They treat the candidate workspace as read-only and
-write only merge review artifacts; scratch tests, suggested patches, and
+reviewer must write. When Factory builds the Work merge reviewer system
+prompt, it strips legacy `.factory/runs` review paths and relative
+`skills/review-<role>/SKILL.md` instructions from the base review prompt.
+It then points the reviewer at the absolute candidate workspace skill
+path when that skill exists; if the candidate does not contain that
+skill file, the prompt tells the reviewer to apply the reviewer role
+directly. Reviewers treat the candidate workspace as read-only and write
+only merge review artifacts; scratch tests, suggested patches, and
 proposed documentation edits belong in those artifacts, not in the
 candidate workspace. After each reviewer exits, merge execution checks
 the candidate workspace for staged, unstaged, untracked, and ignored file
