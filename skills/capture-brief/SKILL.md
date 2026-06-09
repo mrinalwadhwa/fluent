@@ -260,12 +260,12 @@ Show the brief to the user:
 If something is still fuzzy, identify which part and re-enter the
 relevant phase. Do not start over.
 
-When the user confirms, the skill is done.
+When the user confirms a normal build brief, the skill is done.
 
 **Review-only work:** If the confirmed brief is a full-codebase review
 request (the user wants reviewers to inspect the existing codebase, not
-build something new), default to the Work-model review-only path after
-capture is complete:
+build something new), continue into the Work-model review-only path
+instead of stopping after confirmation:
 
 - Write the brief as usual so the Work Item has durable context
 - Create the Work Item with the approved brief:
@@ -274,6 +274,8 @@ capture is complete:
   the review-only Attempt
 - Run the Attempt with `factory work attempt run <work-item-id>
   <attempt-id>`
+
+When those review-only commands have been started, the skill is done.
 
 ---
 
