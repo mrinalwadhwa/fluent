@@ -726,9 +726,15 @@ passed.
 Test: tests/binary.rs (cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch), tests/binary.rs (cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree)
 
 WHEN `factory cleanup --apply` cleans a terminal Work Item,
-THE SYSTEM SHALL remove the Work Item state, referenced Work artifacts,
-registered managed candidate worktrees, and Work branches.
+THE SYSTEM SHALL remove the Work Item state, referenced managed Work
+artifacts, registered managed candidate worktrees, and Work branches.
 Test: tests/binary.rs (cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch), tests/binary.rs (cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree)
+
+WHEN Work cleanup sees artifact references that are absolute paths, use
+parent escapes, or do not resolve under `.factory/work/artifacts/`,
+THE SYSTEM SHALL ignore those unmanaged artifact references without
+reporting or removing them.
+Test: tests/behaviors/operations/test-cleanup.sh (Work cleanup ignores unmanaged artifacts)
 
 WHEN Work cleanup sees active Work Items or Work Items with active Merge
 Candidates,
