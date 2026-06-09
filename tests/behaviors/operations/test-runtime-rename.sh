@@ -7,7 +7,7 @@
 # Covers:
 #   - factory run --help shows --runtime flag
 #   - factory run --help does not mention --backend
-#   - factory status column header says RUNTIME
+#   - factory status --runs column header says RUNTIME
 #   - factory run --runtime local is accepted
 #   - factory run --backend rejects unknown flag
 #
@@ -75,7 +75,7 @@ test_status_header_says_runtime() {
   printf 'planned' > "${TEST_DIR}/.factory/runs/test-rename/status"
   printf 'Test brief' > "${TEST_DIR}/.factory/runs/test-rename/brief.md"
 
-  OUTPUT="$(cd "$TEST_DIR" && "$FACTORY_BIN" status 2>&1)"
+  OUTPUT="$(cd "$TEST_DIR" && "$FACTORY_BIN" status --runs 2>&1)"
 
   RESULT=0
   if ! printf '%s' "$OUTPUT" | grep -q 'RUNTIME'; then
@@ -111,7 +111,7 @@ test_status_reads_runtime_file() {
   printf 'Test brief' > "${TEST_DIR}/.factory/runs/test-rt-file/brief.md"
   printf 'local' > "${TEST_DIR}/.factory/runs/test-rt-file/runtime"
 
-  OUTPUT="$(cd "$TEST_DIR" && "$FACTORY_BIN" status 2>&1)"
+  OUTPUT="$(cd "$TEST_DIR" && "$FACTORY_BIN" status --runs 2>&1)"
 
   RESULT=0
   if ! printf '%s' "$OUTPUT" | grep -q 'test-rt-file.*local'; then
@@ -132,7 +132,7 @@ test_status_shows_dash_without_runtime_file() {
   printf 'Test brief' > "${TEST_DIR}/.factory/runs/test-no-rt/brief.md"
   # No runtime file
 
-  OUTPUT="$(cd "$TEST_DIR" && "$FACTORY_BIN" status 2>&1)"
+  OUTPUT="$(cd "$TEST_DIR" && "$FACTORY_BIN" status --runs 2>&1)"
 
   RESULT=0
   if ! printf '%s' "$OUTPUT" | grep -q 'test-no-rt'; then

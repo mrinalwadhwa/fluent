@@ -79,10 +79,15 @@ create_run() {
 
 capture_dashboard_default() {
   PROJECT_PATH="$1"
+  KEYS="${2:-}"
   OUTPUT_FILE="$(mktemp -t factory-dashboard-output-XXXXXX)"
 
   (
     sleep 1
+    if [ -n "$KEYS" ]; then
+      printf '%b' "$KEYS"
+      sleep 1
+    fi
     printf 'q'
   ) | FACTORY_DASH_BIN="$FACTORY_BIN" \
       FACTORY_DASH_PROJECT="$PROJECT_PATH" \
@@ -212,7 +217,7 @@ test_status_lists_cleaned_runs_with_original_status() {
   create_run "run-complete" "complete" "Complete brief"
 
   "$FACTORY_BIN" cleanup --apply >/dev/null
-  OUTPUT="$("$FACTORY_BIN" status 2>&1)"
+  OUTPUT="$("$FACTORY_BIN" status --runs 2>&1)"
 
   RESULT=0
   assert_output_contains "$OUTPUT" "run-complete" || RESULT=1
@@ -229,7 +234,7 @@ test_dashboard_prefers_actionable_run_over_cleaned_run() {
   create_run "run-planned" "planned" "Planned brief"
 
   "$FACTORY_BIN" cleanup --apply >/dev/null
-  OUTPUT="$(capture_dashboard_default "$TEST_DIR")"
+  OUTPUT="$(capture_dashboard_default "$TEST_DIR" "r")"
 
   RESULT=0
   assert_output_contains "$OUTPUT" "Run: run-planned" || RESULT=1

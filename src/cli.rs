@@ -98,8 +98,12 @@ pub enum Commands {
         extra_args: Vec<String>,
     },
 
-    /// Show run state for a project
+    /// Show Work Item state for a project
     Status {
+        /// Include legacy Run status rows
+        #[arg(long)]
+        runs: bool,
+
         /// Path to check (default: current directory)
         path: Option<String>,
     },

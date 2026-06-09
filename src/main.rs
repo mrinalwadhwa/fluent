@@ -150,9 +150,9 @@ fn main() -> Result<()> {
                 no_sandbox || cli.no_sandbox,
             )?;
         }
-        Some(Commands::Status { path }) => {
+        Some(Commands::Status { runs, path }) => {
             let search_root = path.map(PathBuf::from).unwrap_or(cwd);
-            cmd_status(&search_root)?;
+            cmd_status(&search_root, runs)?;
         }
         Some(Commands::Work { command }) => {
             cmd_work(
@@ -703,18 +703,25 @@ fn cmd_review(
     }
 }
 
-fn cmd_status(search_root: &Path) -> Result<()> {
+fn cmd_status(search_root: &Path, show_runs: bool) -> Result<()> {
     let runs_dir = search_root.join(".factory/runs");
     let work_status = work_status::load_work_status(search_root)?;
 
-    if !runs_dir.is_dir() && work_status.is_empty() {
-        println!("No runs found in {}", search_root.display());
+    if !show_runs && work_status.is_empty() {
+        print!("{}", work_status::format_work_status(&work_status));
         return Ok(());
     }
 
-    if runs_dir.is_dir() {
+    if !work_status.is_empty() {
+        print!("{}", work_status::format_work_status(&work_status));
+    }
+
+    if show_runs && runs_dir.is_dir() {
         let runs = run::list_runs(search_root)?;
 
+        if !work_status.is_empty() {
+            println!();
+        }
         println!(
             "{:<20} {:<16} {:<10} {}",
             "RUN", "STATUS", "RUNTIME", "BRIEF"
@@ -736,11 +743,8 @@ fn cmd_status(search_root: &Path) -> Result<()> {
         }
     }
 
-    if !work_status.is_empty() {
-        if runs_dir.is_dir() {
-            println!();
-        }
-        print!("{}", work_status::format_work_status(&work_status));
+    if show_runs && !runs_dir.is_dir() && work_status.is_empty() {
+        println!("No runs found in {}", search_root.display());
     }
 
     Ok(())

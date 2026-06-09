@@ -2,8 +2,8 @@
 # test-watch-and-status-edges — Verify watch and status edge cases via Rust binary.
 #
 # Tests observable behaviors:
-#   - factory status displays fargate runtime
-#   - factory status displays mixed runtimes
+#   - factory status --runs displays fargate runtime
+#   - factory status --runs displays mixed runtimes
 #   - factory watch polls at the specified interval
 #   - factory watch polls at the default interval (60s)
 #   - factory watch displays run status
@@ -69,7 +69,7 @@ test_status_displays_fargate_runtime() {
   printf 'Deploy to production' > "${TEST_DIR}/.factory/runs/run-fg/brief.md"
   printf 'fargate' > "${TEST_DIR}/.factory/runs/run-fg/runtime"
 
-  OUTPUT="$(cd "$TEST_DIR" && "$FACTORY_BIN" status 2>&1 || true)"
+  OUTPUT="$(cd "$TEST_DIR" && "$FACTORY_BIN" status --runs 2>&1 || true)"
 
   RESULT=0
   assert_output_contains "$OUTPUT" "run-fg" || RESULT=1
@@ -91,7 +91,7 @@ test_status_displays_mixed_runtimes() {
   printf 'Remote run' > "${TEST_DIR}/.factory/runs/run-remote/brief.md"
   printf 'fargate' > "${TEST_DIR}/.factory/runs/run-remote/runtime"
 
-  OUTPUT="$(cd "$TEST_DIR" && "$FACTORY_BIN" status 2>&1 || true)"
+  OUTPUT="$(cd "$TEST_DIR" && "$FACTORY_BIN" status --runs 2>&1 || true)"
 
   RESULT=0
   assert_output_contains "$OUTPUT" "run-local" || RESULT=1

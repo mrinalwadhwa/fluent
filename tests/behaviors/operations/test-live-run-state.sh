@@ -127,7 +127,7 @@ test_status_lists_live_status() {
     "run-live-status" "planned" "complete" \
     "SOURCE_STATUS_BRIEF" "LIVE_STATUS_BRIEF"
 
-  OUTPUT="$("$FACTORY_BIN" status 2>&1)"
+  OUTPUT="$("$FACTORY_BIN" status --runs 2>&1)"
 
   RESULT=0
   assert_contains "$OUTPUT" "run-live-status" || RESULT=1
@@ -335,7 +335,7 @@ test_invalid_worktree_falls_back_to_source() {
     "${LIVE_OTHER}/.factory/runs/other-run/brief.md"
   printf '%s' "$LIVE_OTHER" > ".factory/runs/run-no-live-run/worktree"
 
-  OUTPUT="$("$FACTORY_BIN" status 2>&1)"
+  OUTPUT="$("$FACTORY_BIN" status --runs 2>&1)"
 
   RESULT=0
   assert_contains "$OUTPUT" "run-missing-worktree" || RESULT=1

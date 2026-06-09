@@ -344,6 +344,10 @@ test_runs_and_work_items_are_independent() {
 
   RESULT=0
   STATUS_OUTPUT="$("$FACTORY_BIN" status 2>&1)"
+  assert_contains "$STATUS_OUTPUT" "No Work Items found" || RESULT=1
+  assert_not_contains "$STATUS_OUTPUT" "run-legacy" || RESULT=1
+
+  STATUS_OUTPUT="$("$FACTORY_BIN" status --runs 2>&1)"
   assert_contains "$STATUS_OUTPUT" "run-legacy" || RESULT=1
   assert_contains "$STATUS_OUTPUT" "complete" || RESULT=1
 

@@ -78,7 +78,7 @@ test_resolved_observations_are_curated() {
 test_smoke_runs_are_marked_non_actionable() {
   cd "$PROJECT_DIR"
 
-  OUTPUT="$(cargo run --quiet -- status 2>&1)"
+  OUTPUT="$(cargo run --quiet -- status --runs 2>&1)"
 
   RESULT=0
   for RUN_ID in \

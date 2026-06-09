@@ -532,7 +532,7 @@ impl App {
             sort_views_for_dashboard(&mut views);
         }
         let work_status = work_status::load_work_status(search_root)?;
-        let show_work = target_run_id.is_none() && views.is_empty() && !work_status.is_empty();
+        let show_work = target_run_id.is_none();
 
         // Find the index of the target run, or pick the first active one
         let selected = if let Some(id) = target_run_id {
@@ -594,9 +594,7 @@ impl App {
         if let Ok(work_status) = work_status::load_work_status(&self.search_root) {
             self.work_status = work_status;
         }
-        if self.runs.is_empty() && !self.work_status.is_empty() {
-            self.show_work = true;
-        }
+        self.show_work |= self.runs.is_empty();
     }
 
     fn current_view_mut(&mut self) -> &mut RunView {
@@ -2738,13 +2736,30 @@ mod tests {
     fn test_work_view_renders_empty_state_when_selected() {
         let tmp = tempfile::TempDir::new().unwrap();
         let mut app = App::new(tmp.path(), None).unwrap();
-        app.show_work = true;
 
         let text = render_app_text(&mut app);
 
+        assert!(app.show_work);
         assert!(text.contains("Work Items (0)"));
         assert!(text.contains("No Work Items found"));
         assert!(!text.contains("No runs in this project"));
+    }
+
+    #[test]
+    fn test_app_new_opens_work_view_with_legacy_runs_present() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let runs_dir = tmp.path().join(".factory/runs");
+        make_filesystem_run(&runs_dir.join("legacy-run"), "legacy-run", "executing");
+
+        let mut app = App::new(tmp.path(), None).unwrap();
+
+        assert!(app.show_work);
+        assert_eq!(app.runs.len(), 1);
+        let text = render_app_text(&mut app);
+        assert!(text.contains("Work Items (0)"));
+        assert!(text.contains("Runs (1)"));
+        assert!(text.contains("No Work Items found"));
+        assert!(!text.contains("Run: legacy-run"));
     }
 
     #[test]
@@ -2989,7 +3004,7 @@ mod tests {
             })
             .unwrap();
         let text = buffer_text(terminal.backend().buffer());
-        assert!(text.contains("No runs"));
+        assert!(text.contains("No Work Items found"));
     }
 
     // --- ANSI + multibyte rendering test (stray character guard) ---

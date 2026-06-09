@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test-status-edges — Verify factory status edge cases via the Rust binary.
 #
-# Tests status display behaviors:
+# Tests status --runs display behaviors:
 #   - Status when runtime file is missing
 #   - Status when brief.md is missing
 #   - Status with all known status values
@@ -57,7 +57,7 @@ test_status_missing_runtime_file() {
   printf 'planned' > "${TEST_DIR}/.factory/runs/run-no-runtime/status"
   printf 'A run without runtime file' > "${TEST_DIR}/.factory/runs/run-no-runtime/brief.md"
 
-  OUTPUT="$(cd "$TEST_DIR" && "$FACTORY_BIN" status 2>&1 || true)"
+  OUTPUT="$(cd "$TEST_DIR" && "$FACTORY_BIN" status --runs 2>&1 || true)"
 
   RESULT=0
   assert_output_contains "$OUTPUT" "run-no-runtime" || RESULT=1
@@ -74,7 +74,7 @@ test_status_missing_brief_file() {
   printf 'executing' > "${TEST_DIR}/.factory/runs/run-no-brief/status"
   printf 'local' > "${TEST_DIR}/.factory/runs/run-no-brief/runtime"
 
-  OUTPUT="$(cd "$TEST_DIR" && "$FACTORY_BIN" status 2>&1 || true)"
+  OUTPUT="$(cd "$TEST_DIR" && "$FACTORY_BIN" status --runs 2>&1 || true)"
 
   RESULT=0
   assert_output_contains "$OUTPUT" "run-no-brief" || RESULT=1
@@ -94,7 +94,7 @@ test_status_all_known_statuses() {
     printf 'local' > "${TEST_DIR}/.factory/runs/run-${STATUS}/runtime"
   done
 
-  OUTPUT="$(cd "$TEST_DIR" && "$FACTORY_BIN" status 2>&1 || true)"
+  OUTPUT="$(cd "$TEST_DIR" && "$FACTORY_BIN" status --runs 2>&1 || true)"
 
   RESULT=0
   for STATUS in briefed behaviors-defined approach-designed planned executing rate-limited needs-user complete failed; do
@@ -114,7 +114,7 @@ test_status_with_review_run() {
   printf 'local' > "${TEST_DIR}/.factory/runs/review-test/runtime"
   printf 'review' > "${TEST_DIR}/.factory/runs/review-test/mode"
 
-  OUTPUT="$(cd "$TEST_DIR" && "$FACTORY_BIN" status 2>&1 || true)"
+  OUTPUT="$(cd "$TEST_DIR" && "$FACTORY_BIN" status --runs 2>&1 || true)"
 
   RESULT=0
   assert_output_contains "$OUTPUT" "review-test" || RESULT=1
@@ -145,7 +145,7 @@ SH
   AWS_LOG="${TEST_DIR}/aws.log"
   export AWS_LOG
 
-  OUTPUT="$(cd "$TEST_DIR" && PATH="${TEST_DIR}/bin:${PATH}" "$FACTORY_BIN" status 2>&1)"
+  OUTPUT="$(cd "$TEST_DIR" && PATH="${TEST_DIR}/bin:${PATH}" "$FACTORY_BIN" status --runs 2>&1)"
 
   RESULT=0
   assert_output_contains "$OUTPUT" "run-fg-local" || RESULT=1

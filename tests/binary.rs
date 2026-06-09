@@ -155,7 +155,7 @@ fn status_no_factory_dir() {
         .arg("status")
         .assert()
         .success()
-        .stdout(predicate::str::contains("No runs found"));
+        .stdout(predicate::str::contains("No Work Items found"));
 }
 
 #[test]
@@ -165,7 +165,7 @@ fn status_empty_runs() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .arg("status")
+        .args(["status", "--runs"])
         .assert()
         .success()
         .stdout(predicate::str::contains("RUN"))
@@ -173,7 +173,7 @@ fn status_empty_runs() {
 }
 
 #[test]
-fn status_shows_runs_with_correct_fields() {
+fn status_hides_runs_by_default() {
     let tmp = TempDir::new().unwrap();
     let run_dir = tmp.path().join(".factory/runs/test-run");
     fs::create_dir_all(&run_dir).unwrap();
@@ -184,6 +184,25 @@ fn status_shows_runs_with_correct_fields() {
     factory_cmd()
         .current_dir(tmp.path())
         .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No Work Items found"))
+        .stdout(predicate::str::contains("test-run").not())
+        .stdout(predicate::str::contains("Do the thing").not());
+}
+
+#[test]
+fn status_runs_shows_runs_with_correct_fields() {
+    let tmp = TempDir::new().unwrap();
+    let run_dir = tmp.path().join(".factory/runs/test-run");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "executing\n").unwrap();
+    fs::write(run_dir.join("runtime"), "local\n").unwrap();
+    fs::write(run_dir.join("brief.md"), "# Brief\n\nDo the thing\n").unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["status", "--runs"])
         .assert()
         .success()
         .stdout(predicate::str::contains("test-run"))
@@ -222,7 +241,7 @@ fn status_shows_work_items_without_runs() {
 }
 
 #[test]
-fn status_shows_runs_and_work_items_together() {
+fn status_runs_shows_runs_and_work_items_together() {
     let tmp = TempDir::new().unwrap();
     let run_dir = tmp.path().join(".factory/runs/legacy-run");
     fs::create_dir_all(&run_dir).unwrap();
@@ -233,7 +252,7 @@ fn status_shows_runs_and_work_items_together() {
 
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .arg("status")
+        .args(["status", "--runs"])
         .output()
         .unwrap();
 
@@ -246,7 +265,7 @@ fn status_shows_runs_and_work_items_together() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let run_index = stdout.find("legacy-run").unwrap();
     let work_header_index = stdout.find("Work Items").unwrap();
-    assert!(run_index < work_header_index, "{stdout}");
+    assert!(work_header_index < run_index, "{stdout}");
     assert!(stdout.contains("executing"), "{stdout}");
     assert!(stdout.contains("work-mixed"), "{stdout}");
     assert!(stdout.contains("Mixed status work"), "{stdout}");
@@ -269,7 +288,7 @@ fn status_reports_invalid_work_item_with_valid_state() {
 
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .arg("status")
+        .args(["status", "--runs"])
         .output()
         .unwrap();
 
@@ -305,7 +324,7 @@ fn status_prefers_live_worktree_status() {
 
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .arg("status")
+        .args(["status", "--runs"])
         .output()
         .unwrap();
 
@@ -335,7 +354,7 @@ fn status_trims_runtime_with_trailing_newline() {
 
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .arg("status")
+        .args(["status", "--runs"])
         .output()
         .unwrap();
 
@@ -361,7 +380,7 @@ fn status_truncates_long_brief() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .arg("status")
+        .args(["status", "--runs"])
         .assert()
         .success()
         .stdout(predicate::str::contains("..."));
@@ -379,7 +398,7 @@ fn status_outputs_to_stdout_not_stderr() {
 
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .arg("status")
+        .args(["status", "--runs"])
         .output()
         .unwrap();
 
@@ -403,7 +422,7 @@ fn status_accepts_path_argument() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["status", project.to_str().unwrap()])
+        .args(["status", "--runs", project.to_str().unwrap()])
         .assert()
         .success()
         .stdout(predicate::str::contains("path-test"));
@@ -529,7 +548,9 @@ fn work_create_is_independent_from_legacy_runs() {
         .arg("status")
         .assert()
         .success()
-        .stdout(predicate::str::contains("legacy-run"));
+        .stdout(predicate::str::contains("work-new"))
+        .stdout(predicate::str::contains("New work"))
+        .stdout(predicate::str::contains("legacy-run").not());
 }
 
 #[test]
@@ -4321,7 +4342,8 @@ fn work_list_empty_state_succeeds_without_work_items() {
         .arg("status")
         .assert()
         .success()
-        .stdout(predicate::str::contains("legacy-run"));
+        .stdout(predicate::str::contains("No Work Items found"))
+        .stdout(predicate::str::contains("legacy-run").not());
 }
 
 #[test]

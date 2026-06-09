@@ -665,15 +665,21 @@ source run directory.
 Test: tests/behaviors/operations/test-live-run-state.sh (invalid worktree falls back to source)
 
 WHEN `factory status` is invoked,
-THE SYSTEM SHALL display all runs with their status, runtime, and brief
-summary.
-Test: tests/binary.rs (status display tests, status_prefers_live_worktree_status), tests/behaviors/operations/test-live-run-state.sh (status lists live status)
+THE SYSTEM SHALL display Work Item status by default and SHALL NOT
+display legacy Run rows by default.
+Test: tests/binary.rs (status_hides_runs_by_default), tests/behaviors/operations/test-work-status-dashboard.sh (status hides runs by default and prints Work summary)
+
+WHEN `factory status --runs` is invoked,
+THE SYSTEM SHALL display legacy Runs with their status, runtime, and
+brief summary using the existing run summary format, and SHALL still
+display Work Item status when Work Items or Work Item read errors exist.
+Test: tests/binary.rs (status_runs_shows_runs_with_correct_fields, status_runs_shows_runs_and_work_items_together, status_prefers_live_worktree_status), tests/behaviors/operations/test-live-run-state.sh (status lists live status)
 
 WHEN `factory status` is invoked and stored Work Items exist,
 THE SYSTEM SHALL display a Work Items section with each Work Item's
 latest Attempt, selected Task, review state, Merge Candidate, merge
 state, actionable label, and title.
-Test: tests/binary.rs (status_shows_work_items_without_runs, status_shows_runs_and_work_items_together)
+Test: tests/binary.rs (status_shows_work_items_without_runs, status_runs_shows_runs_and_work_items_together)
 
 WHEN `factory status` is invoked for a project with Work Items and no
 legacy runs,
@@ -681,17 +687,24 @@ THE SYSTEM SHALL display the Work Items section instead of reporting
 that no runs were found.
 Test: tests/binary.rs (status_shows_work_items_without_runs)
 
+WHEN `factory status` is invoked for a project with no Work Items and no
+Work Item read errors,
+THE SYSTEM SHALL report that no Work Items were found.
+Test: tests/binary.rs (status_no_factory_dir, status_hides_runs_by_default)
+
 WHEN `factory status` reads one or more invalid Work Item files,
 THE SYSTEM SHALL report the invalid Work model path in a Work Item read
-errors section while still displaying valid runs and valid Work Items.
+errors section while still displaying valid Work Items, and SHALL display
+valid legacy Runs only when `--runs` is supplied.
 Test: tests/binary.rs (status_reports_invalid_work_item_with_valid_state), tests/behaviors/operations/test-work-status-dashboard.sh (status reports invalid Work without hiding valid state)
 
 WHEN `factory status` is invoked after cleanup,
-THE SYSTEM SHALL list cleaned runs with their existing run status and
-without a cleanup-specific status.
+THE SYSTEM SHALL hide cleaned legacy Runs unless `--runs` is supplied;
+when `--runs` is supplied, THE SYSTEM SHALL list cleaned runs with their
+existing run status and without a cleanup-specific status.
 Test: tests/behaviors/operations/test-cleanup.sh (status lists cleaned runs with original status)
 
-WHEN `factory status` is invoked and a Fargate run exists,
+WHEN `factory status --runs` is invoked and a Fargate run exists,
 THE SYSTEM SHALL display the locally recorded run status, runtime, and
 brief summary without querying AWS.
 Test: tests/behaviors/operations/test-status-edges.sh (status fargate uses local state without AWS)
@@ -812,7 +825,7 @@ WHEN Work cleanup sees failed terminal Work Items,
 THE SYSTEM SHALL select them for cleanup.
 Test: tests/binary.rs (cleanup_work_items_selects_failed_terminal_and_skips_pending_merge_candidate)
 
-WHEN the dashboard opens without an explicit run,
+WHEN the dashboard legacy Runs view selects a run,
 THE SYSTEM SHALL prefer actionable runs over cleaned runs.
 Test: src/dashboard.rs (test_app_new_prefers_actionable_run_over_cleaned_terminal_run)
 
@@ -1101,10 +1114,8 @@ Test: tests/behaviors/operations/test-land.sh, tests/binary.rs (land_resolves_mo
 ## Dashboard
 
 WHEN `factory dashboard` is invoked,
-THE SYSTEM SHALL display a TUI listing all runs with their status,
-an activity feed for the selected transcript or report view, and
-keyboard navigation.
-Test: tests/behaviors/operations/test-dashboard.sh
+THE SYSTEM SHALL open the Work Items view by default.
+Test: src/dashboard.rs (test_app_new_opens_work_view_with_legacy_runs_present), tests/behaviors/operations/test-work-status-dashboard.sh (dashboard shows Work Items alongside legacy runs)
 
 WHEN `factory dashboard` is invoked and stored Work Items exist,
 THE SYSTEM SHALL provide a Work Items view that shows Work Items,
@@ -1113,6 +1124,11 @@ state, and actionable labels.
 Test: dashboard::tests::test_work_view_renders_work_items_without_runs,
 tests/behaviors/operations/test-work-status-dashboard.sh (dashboard shows
 Work Items alongside legacy runs)
+
+WHEN legacy Runs exist,
+THE SYSTEM SHALL let the user switch to the legacy Runs view from the
+dashboard without making legacy Runs the default view.
+Test: tests/behaviors/operations/test-work-status-dashboard.sh (dashboard shows Work Items alongside legacy runs)
 
 WHEN the dashboard polls Work model state,
 THE SYSTEM SHALL refresh the Work Items view from stored Work Item files

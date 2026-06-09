@@ -88,6 +88,9 @@ test_status_summary_dashboard_and_cleanup_without_work_item_state() {
   assert_absent_work_item_state || RESULT=1
 
   STATUS_OUTPUT="$("$FACTORY_BIN" status 2>&1)"
+  assert_contains "$STATUS_OUTPUT" "No Work Items found" || RESULT=1
+
+  STATUS_OUTPUT="$("$FACTORY_BIN" status --runs 2>&1)"
   assert_contains "$STATUS_OUTPUT" "run-legacy" || RESULT=1
   assert_contains "$STATUS_OUTPUT" "complete" || RESULT=1
   assert_contains "$STATUS_OUTPUT" "Legacy run without Work Item state" || RESULT=1

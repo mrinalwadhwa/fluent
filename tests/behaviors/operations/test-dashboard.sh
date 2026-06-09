@@ -79,10 +79,15 @@ capture_dashboard() {
 
 capture_dashboard_default() {
   PROJECT_PATH="$1"
+  KEYS="${2:-}"
   OUTPUT_FILE="$(mktemp -t factory-dashboard-output-XXXXXX)"
 
   (
     sleep 1
+    if [ -n "$KEYS" ]; then
+      printf '%b' "$KEYS"
+      sleep 1
+    fi
     printf 'q'
   ) | FACTORY_DASH_BIN="$FACTORY_BIN" \
       FACTORY_DASH_PROJECT="$PROJECT_PATH" \
@@ -250,7 +255,7 @@ test_initial_run_prefers_live_active_status() {
   printf 'complete' > "${TEST_DIR}/.factory/runs/source-complete/status"
   printf 'Complete brief' > "${TEST_DIR}/.factory/runs/source-complete/brief.md"
 
-  OUTPUT="$(capture_dashboard_default "$TEST_DIR")"
+  OUTPUT="$(capture_dashboard_default "$TEST_DIR" "r")"
   CLEAN_OUTPUT="$(printf '%s' "$OUTPUT" | clean_dashboard_output)"
 
   RESULT=0
@@ -337,12 +342,12 @@ test_poll_renders_empty_state_when_all_runs_removed() {
     printf '    FAIL: dashboard panicked after all runs were removed\n'
     RESULT=1
   fi
-  if ! echo "$FINAL_OUTPUT" | grep -q "No runs found"; then
-    printf '    FAIL: expected empty-state header after all runs were removed\n'
+  if ! echo "$FINAL_OUTPUT" | grep -q "Work Items (0)"; then
+    printf '    FAIL: expected Work view after all runs were removed\n'
     RESULT=1
   fi
-  if ! echo "$FINAL_OUTPUT" | grep -q "No runs in this project"; then
-    printf '    FAIL: expected empty-state body after all runs were removed\n'
+  if ! echo "$FINAL_OUTPUT" | grep -q "No Work Items found"; then
+    printf '    FAIL: expected Work empty-state body after all runs were removed\n'
     RESULT=1
   fi
 

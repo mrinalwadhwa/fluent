@@ -126,12 +126,15 @@ Work Item model for inspection. These commands use `.factory/work/items/`
 through the Rust storage model and validate stored objects. This keeps
 Work Items and Attempts visible while the legacy `.factory/runs`
 lifecycle remains available as a fallback for full session loops.
-`factory status` and `factory dashboard` read Work Items through
-`work_status.rs`, which reduces stored Work Items to operator-facing
-rows. That boundary chooses the latest Attempt, the active or waiting
-Task, the matching Merge Candidate, and a short action label. It returns
-valid rows and per-file read errors together so one bad Work Item file
-does not hide the rest of the queue.
+`factory status` and `factory dashboard` use Work Items as the default
+operator surface. They read Work Items through `work_status.rs`, which
+reduces stored Work Items to operator-facing rows. That boundary chooses
+the latest Attempt, the active or waiting Task, the matching Merge
+Candidate, and a short action label. It returns valid rows and per-file
+read errors together so one bad Work Item file does not hide the rest of
+the queue. Legacy `.factory/runs` rows remain available through
+`factory status --runs` and the dashboard Runs view as an explicit
+compatibility path while the old session loop remains in place.
 Write Task prompt generation reads `Task.instructions` from durable Work
 state and includes non-empty instructions in the coder prompt. A Task
 receives those instructions from explicit Work Item instructions first,
@@ -821,7 +824,7 @@ Local machine                    Fargate task
                                  7. Rust session loop launches Claude
                                  8. ...hours pass...
                                  9. upload workspace → S3
-factory status ──────────► (local run artifacts)
+factory status --runs ───► (local run artifacts)
 factory shell ───────────► (ECS Exec into container)
 factory pull ────────────► (download from S3 into worktree)
 ```
