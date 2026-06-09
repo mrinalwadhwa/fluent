@@ -67,6 +67,9 @@ case "$PWD" in
     fi
     if [ "${MERGE_MOCK_MODE:-pass}" = "fail-merge-review" ]; then
       printf 'Verdict: fail\n\nMerge behavior review failed.\n' > review.md
+    elif [ "${MERGE_MOCK_MODE:-pass}" = "dirty-merge-review" ]; then
+      printf 'Verdict: pass\n\nMerge behavior review dirtied the candidate.\n' > review.md
+      printf 'dirty merge review\n' > "${CANDIDATE_WORKSPACE}/dirty-merge-review.txt"
     else
       printf 'Verdict: pass\n\nMerge behavior review passed.\n' > review.md
     fi
@@ -123,6 +126,7 @@ run_merge() {
   MERGE_MOCK_MODE="${1:-pass}" \
     MERGE_REVIEW_LOG="${TEST_DIR}/merge-review-log" \
     MERGE_REVIEW_ARGS_LOG="${TEST_DIR}/merge-review-args-log" \
+    CANDIDATE_WORKSPACE="${TEST_DIR}/work-6-work-1-attempt-1" \
     PATH="${TEST_DIR}/bin:$PATH" \
     "$FACTORY_BIN" work merge --no-sandbox work-1 attempt-1-merge-candidate
 }
@@ -166,6 +170,12 @@ EOF
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "attempt-1-merge-candidate" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Target branch: main" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Review diff:" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" ".factory/work/artifacts/attempt-1/attempt-1-merge-candidate/merge/reviews/behaviors/review.md" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "candidate workspace as read-only" || RESULT=1
+  if grep -Fq ".factory/runs/" "$TEST_DIR/merge-review-args-log"; then
+    printf '    FAIL: merge reviewer prompt contains legacy run review path\n'
+    RESULT=1
+  fi
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Attempt history:" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Attempt attempt-1 review_state: passed" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Task attempt-1-write: kind=write" || RESULT=1
@@ -373,6 +383,27 @@ test_work_merge_failed_reviewer_leaves_target_unchanged() {
   return $RESULT
 }
 
+test_work_merge_dirty_reviewer_leaves_target_unchanged() {
+  setup_test_project
+  trap cleanup_test_project RETURN
+  write_mock_claude
+  create_passed_merge_candidate
+  MAIN_BEFORE="$(git rev-parse main)"
+  CANDIDATE_WORKSPACE="${TEST_DIR}/work-6-work-1-attempt-1"
+
+  RESULT=0
+  assert_fails run_merge dirty-merge-review || RESULT=1
+  [ "$(git rev-parse main)" = "$MAIN_BEFORE" ] || RESULT=1
+  [ "$(json_value '.merge_candidates[0].merge_state.status')" = "failed" ] || RESULT=1
+  [ "$(json_value '.merge_candidates[0].review_state')" = "failed" ] || RESULT=1
+  assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" "Merge-time reviewer behaviors dirtied candidate workspace" || RESULT=1
+  assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" "$CANDIDATE_WORKSPACE" || RESULT=1
+  [ "$(json_value '.merge_candidates[0].merge_state.review_artifacts | length')" = "2" ] || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stderr")" "Merge-time reviewer behaviors dirtied candidate workspace" || RESULT=1
+  test -f "$CANDIDATE_WORKSPACE/dirty-merge-review.txt" || RESULT=1
+  return $RESULT
+}
+
 test_work_merge_rebase_failure_leaves_target_unchanged() {
   setup_test_project
   trap cleanup_test_project RETURN
@@ -439,6 +470,8 @@ run_test "work merge failed check leaves target unchanged" \
   test_work_merge_failed_check_leaves_target_unchanged
 run_test "work merge failed reviewer leaves target unchanged" \
   test_work_merge_failed_reviewer_leaves_target_unchanged
+run_test "work merge dirty reviewer leaves target unchanged" \
+  test_work_merge_dirty_reviewer_leaves_target_unchanged
 run_test "work merge rebase failure leaves target unchanged" \
   test_work_merge_rebase_failure_leaves_target_unchanged
 run_test "work merge-candidate inspection is read-only" \

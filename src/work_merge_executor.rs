@@ -301,7 +301,11 @@ fn run_merge_reviews(
         if review_path.exists() {
             fs::remove_file(&review_path)?;
         }
-        let verdict = run_one_merge_reviewer(
+        let review_artifact = ArtifactRef {
+            producer_id: format!("merge-review-{reviewer}"),
+            path: path_for_model(config.project_root, &review_path),
+        };
+        let verdict_result = run_one_merge_reviewer(
             config,
             item,
             candidate,
@@ -312,12 +316,25 @@ fn run_merge_reviews(
             check_artifacts,
             target_head_before,
             candidate_head_after_rebase,
-        )?;
+        );
+        if let Err(error) = ensure_merge_reviewer_kept_candidate_clean(source_workspace, reviewer) {
+            artifacts.push(review_artifact);
+            verdicts.insert((*reviewer).to_string(), review::Verdict::Fail);
+            let state = ReviewState::from_verdicts(1, verdicts);
+            review::write_review_state(artifact_dir, &state)?;
+            record_candidate_failure(
+                config.store,
+                config.work_item_id,
+                &candidate.id,
+                error.to_string(),
+                check_artifacts.to_vec(),
+                artifacts,
+            )?;
+            return Err(error);
+        }
+        let verdict = verdict_result?;
         verdicts.insert((*reviewer).to_string(), verdict);
-        artifacts.push(ArtifactRef {
-            producer_id: format!("merge-review-{reviewer}"),
-            path: path_for_model(config.project_root, &review_path),
-        });
+        artifacts.push(review_artifact);
     }
 
     let state = ReviewState::from_verdicts(1, verdicts);
@@ -357,14 +374,12 @@ fn run_one_merge_reviewer(
     let prompt_content = config.resolver.resolve_content(&prompt_key);
     let system = prompt_content
         .as_deref()
-        .map(|content| prompt_section(content, "system").replace("{{RUN_ID}}", &candidate.id))
+        .map(work_merge_reviewer_system_prompt)
         .unwrap_or_else(|| format!("You are a Factory {reviewer} reviewer."));
-    let base_prompt = prompt_content
-        .as_deref()
-        .map(|content| prompt_section(content, "changes").replace("{{RUN_ID}}", &candidate.id))
-        .unwrap_or_default();
     let candidate_json = to_json_pretty(candidate)?;
     let attempt_history = merge_review_attempt_history(item, candidate);
+    let review_artifact_path = path_for_model(config.project_root, review_path);
+    let reviewer_artifact_dir = path_for_model(config.project_root, reviewer_dir);
     let check_text = if check_artifacts.is_empty() {
         "None.".to_string()
     } else {
@@ -375,7 +390,7 @@ fn run_one_merge_reviewer(
             .join("\n")
     };
     let prompt = format!(
-        "{base_prompt}\n\nExecute a merge-time Work model review.\n\nWork Item: {}\nMerge Candidate: {}\nReviewer: {}\nCandidate workspace: {}\nTarget branch: {}\nReview diff: git -C {} diff {}..HEAD\n\nAttempt history:\n{}\n\nRebase/update state:\n- Rebased candidate workspace onto target branch {} before checks and reviewers.\n- Target branch head before merge checks/reviews: {}\n- Candidate head after rebase/update: {}\n\nCheck artifacts:\n{}\n\nWrite the review artifact to exactly this path:\n{}\n\nMerge Candidate model:\n{}\n",
+        "Execute a merge-time Work model review.\n\nWork Item: {}\nMerge Candidate: {}\nReviewer: {}\nCandidate workspace: {}\nTarget branch: {}\nReview diff: git -C {} diff {}..HEAD\n\nCandidate workspace access:\n- Treat the candidate workspace as read-only for review purposes.\n- Do not modify, stage, unstage, commit, create, or delete files in the candidate workspace.\n- Put scratch tests, suggested patches, or proposed documentation edits in the review artifact text or reviewer artifact directory instead of applying them to the candidate workspace.\n\nAttempt history:\n{}\n\nRebase/update state:\n- Rebased candidate workspace onto target branch {} before checks and reviewers.\n- Target branch head before merge checks/reviews: {}\n- Candidate head after rebase/update: {}\n\nCheck artifacts:\n{}\n\nWrite the review artifact to exactly this Work artifact path:\n{}\nYour reviewer artifact directory is:\n{}\n\nMerge Candidate model:\n{}\n",
         config.work_item_id,
         candidate.id,
         reviewer,
@@ -388,12 +403,13 @@ fn run_one_merge_reviewer(
         target_head_before,
         candidate_head_after_rebase,
         check_text,
-        review_path.display(),
+        review_artifact_path,
+        reviewer_artifact_dir,
         candidate_json
     );
     let reviewer_system = format!(
-        "{system}\nReview only this merge candidate. Write a verdict line with pass, fail, or uncertain to {}.",
-        review_path.display()
+        "{system}\nReview only this Work Merge Candidate. The candidate workspace is read-only for review purposes. Write only merge review artifacts, with the required verdict line (pass, fail, or uncertain) in {}.",
+        review_artifact_path
     );
     if !config.no_sandbox {
         os::check_prerequisites_for(config.coder_kind)?;
@@ -424,6 +440,14 @@ fn run_one_merge_reviewer(
         reviewer: &*coder,
         transcript_path: None,
     })
+}
+
+fn work_merge_reviewer_system_prompt(content: &str) -> String {
+    prompt_section(content, "system")
+        .lines()
+        .filter(|line| !line.contains(".factory/runs/"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn merge_review_attempt_history(
@@ -763,6 +787,32 @@ fn ensure_registered_worktree(project_root: &Path, workspace_path: &Path) -> Res
 }
 
 fn ensure_clean_worktree(workspace_path: &Path) -> Result<()> {
+    let status = worktree_status(workspace_path)?;
+    if !status.is_empty() {
+        bail!(
+            "Workspace {} has uncommitted changes",
+            workspace_path.display()
+        );
+    }
+    Ok(())
+}
+
+fn ensure_merge_reviewer_kept_candidate_clean(
+    source_workspace: &Path,
+    reviewer: &str,
+) -> Result<()> {
+    let status = worktree_status(source_workspace)?;
+    if !status.is_empty() {
+        bail!(
+            "Merge-time reviewer {reviewer} dirtied candidate workspace {}; candidate workspaces are read-only during merge review. Dirty status:\n{}",
+            source_workspace.display(),
+            status.trim_end()
+        );
+    }
+    Ok(())
+}
+
+fn worktree_status(workspace_path: &Path) -> Result<String> {
     let output = git_output(
         workspace_path,
         &[
@@ -775,13 +825,16 @@ fn ensure_clean_worktree(workspace_path: &Path) -> Result<()> {
         ],
         "check worktree status",
     )?;
-    if !output.stdout.is_empty() {
+    if !output.status.success() {
         bail!(
-            "Workspace {} has uncommitted changes",
-            workspace_path.display()
+            "Failed to check worktree status:\n{}",
+            command_output(&output)
         );
     }
-    Ok(())
+    if !output.stdout.is_empty() {
+        return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+    }
+    Ok(String::new())
 }
 
 fn head_commit(repo: &Path) -> Result<String> {
