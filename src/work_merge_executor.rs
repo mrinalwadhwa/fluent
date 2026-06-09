@@ -17,7 +17,7 @@ use crate::review::{self, ReviewState};
 use crate::work_model::{
     ArtifactRef, MergeCandidateMergeState, MergeCandidateMergeStatus, MergeCandidateReviewState,
     WORK_ARTIFACTS_DIR, WorkItem, WorkModelError, WorkModelStorageError, WorkModelStore,
-    resolve_expected_candidate_workspace_path, to_json_pretty,
+    resolve_expected_candidate_workspace_path, to_json_pretty, work_behavior_review_input,
 };
 use crate::worktree;
 
@@ -402,8 +402,13 @@ fn run_one_merge_reviewer(
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let behavior_review_input = if reviewer == "behaviors" {
+        format!("{}\n", work_behavior_review_input(item))
+    } else {
+        String::new()
+    };
     let prompt = format!(
-        "Execute a merge-time Work model review.\n\nWork Item: {}\nMerge Candidate: {}\nReviewer: {}\nCandidate workspace: {}\nTarget branch: {}\nReview diff: git -C {} diff {}..HEAD\n\nCandidate workspace access:\n- Treat the candidate workspace as read-only for review purposes.\n- Do not modify, stage, unstage, commit, create, or delete files in the candidate workspace.\n- Put scratch tests, suggested patches, or proposed documentation edits in the review artifact text or reviewer artifact directory instead of applying them to the candidate workspace.\n\nAttempt history:\n{}\n\nRebase/update state:\n- Rebased candidate workspace onto target branch {} before checks and reviewers.\n- Target branch head before merge checks/reviews: {}\n- Candidate head after rebase/update: {}\n\nCheck artifacts:\n{}\n\nWork review artifact path:\n{}\nWrite the review artifact to exactly this filesystem path:\n{}\nYour reviewer artifact directory is:\n{}\n\nMerge Candidate model:\n{}\n",
+        "Execute a merge-time Work model review.\n\nWork Item: {}\nMerge Candidate: {}\nReviewer: {}\nCandidate workspace: {}\nTarget branch: {}\nReview diff: git -C {} diff {}..HEAD\n\nCandidate workspace access:\n- Treat the candidate workspace as read-only for review purposes.\n- Do not modify, stage, unstage, commit, create, or delete files in the candidate workspace.\n- Put scratch tests, suggested patches, or proposed documentation edits in the review artifact text or reviewer artifact directory instead of applying them to the candidate workspace.\n\n{}Attempt history:\n{}\n\nRebase/update state:\n- Rebased candidate workspace onto target branch {} before checks and reviewers.\n- Target branch head before merge checks/reviews: {}\n- Candidate head after rebase/update: {}\n\nCheck artifacts:\n{}\n\nWork review artifact path:\n{}\nWrite the review artifact to exactly this filesystem path:\n{}\nYour reviewer artifact directory is:\n{}\n\nMerge Candidate model:\n{}\n",
         config.work_item_id,
         candidate.id,
         reviewer,
@@ -411,6 +416,7 @@ fn run_one_merge_reviewer(
         candidate.target_branch,
         source_workspace.display(),
         candidate.target_branch,
+        behavior_review_input,
         attempt_history,
         candidate.target_branch,
         target_head_before,

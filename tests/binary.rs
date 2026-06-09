@@ -1676,6 +1676,118 @@ exit 0
 }
 
 #[test]
+fn work_behavior_review_task_prompt_includes_behavior_increment() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt_with_behaviors(
+        &tmp,
+        &main_dir,
+        "WHEN behavior input exists,\nTHE SYSTEM SHALL show it to behavior reviewers.\n",
+    );
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-behavior-review-prompt");
+    let prompt_log = tmp.path().join("behavior-review-prompt.log");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-p" ]; then
+    shift
+    printf '%s\n' "$1" > "$PROMPT_LOG"
+    break
+  fi
+  shift
+done
+printf 'Verdict: pass\n\nBehavior review passed.\n' > review.md
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-review-behaviors",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("PROMPT_LOG", &prompt_log)
+        .assert()
+        .success();
+
+    let prompt = fs::read_to_string(prompt_log).unwrap();
+    assert!(prompt.contains("Work behavior review input:"));
+    assert!(prompt.contains("WHEN behavior input exists,"));
+    assert!(prompt.contains("THE SYSTEM SHALL show it to behavior reviewers."));
+    assert!(
+        prompt.contains(
+            "without requiring a legacy .factory/runs/[run-id]/behaviors.diff.md artifact"
+        )
+    );
+    assert!(!prompt.contains("Read behaviors.diff.md and the brief"));
+}
+
+#[test]
+fn work_behavior_review_task_prompt_states_missing_behavior_increment() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-behavior-review-missing-prompt");
+    let prompt_log = tmp.path().join("behavior-review-missing-prompt.log");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-p" ]; then
+    shift
+    printf '%s\n' "$1" > "$PROMPT_LOG"
+    break
+  fi
+  shift
+done
+printf 'Verdict: pass\n\nBehavior review passed.\n' > review.md
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-review-behaviors",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("PROMPT_LOG", &prompt_log)
+        .assert()
+        .success();
+
+    let prompt = fs::read_to_string(prompt_log).unwrap();
+    assert!(prompt.contains("Work behavior review input:"));
+    assert!(prompt.contains("No Work behavior increment was provided for this Work Item."));
+    assert!(!prompt.contains("Read behaviors.diff.md and the brief"));
+}
+
+#[test]
 fn work_task_run_review_only_uses_source_prompt() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
@@ -2468,9 +2580,23 @@ fn work_merge_candidate_lands_after_merge_time_reviews() {
         .current_dir(&main_dir)
         .output()
         .unwrap();
+    let behaviors_path = tmp.path().join("merge-behaviors.md");
+    fs::write(
+        &behaviors_path,
+        "WHEN merge behavior input exists,\nTHE SYSTEM SHALL show it to merge behavior reviewers.\n",
+    )
+    .unwrap();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Merge candidate"])
+        .args([
+            "work",
+            "create",
+            "work-1",
+            "--title",
+            "Merge candidate",
+            "--behaviors-file",
+            &behaviors_path.to_string_lossy(),
+        ])
         .assert()
         .success();
     factory_cmd()
@@ -2481,7 +2607,8 @@ fn work_merge_candidate_lands_after_merge_time_reviews() {
 
     let bin_dir = tmp.path().join("bin-merge-pass");
     let system_log = tmp.path().join("merge-system.log");
-    write_mock_claude(&bin_dir, &loop_mock_script("pass"));
+    let prompt_log = tmp.path().join("merge-behavior-prompt.log");
+    write_mock_claude(&bin_dir, &merge_prompt_logging_mock_script("pass"));
     factory_cmd()
         .current_dir(&main_dir)
         .args([
@@ -2493,6 +2620,7 @@ fn work_merge_candidate_lands_after_merge_time_reviews() {
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&bin_dir))
+        .env("PROMPT_LOG", &prompt_log)
         .assert()
         .success();
 
@@ -2516,6 +2644,7 @@ fn work_merge_candidate_lands_after_merge_time_reviews() {
         ])
         .env("PATH", mock_path(&bin_dir))
         .env("SYSTEM_LOG", &system_log)
+        .env("PROMPT_LOG", &prompt_log)
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -2545,6 +2674,16 @@ fn work_merge_candidate_lands_after_merge_time_reviews() {
     );
     assert!(!logged_system.contains("Read `.factory/expertise/decisions.md` if it exists"));
     assert!(!logged_system.contains(".factory/runs/{{RUN_ID}}/reviews"));
+    let logged_prompt = fs::read_to_string(prompt_log).unwrap();
+    assert!(logged_prompt.contains("Work behavior review input:"));
+    assert!(logged_prompt.contains("WHEN merge behavior input exists,"));
+    assert!(logged_prompt.contains("THE SYSTEM SHALL show it to merge behavior reviewers."));
+    assert!(
+        logged_prompt.contains(
+            "without requiring a legacy .factory/runs/[run-id]/behaviors.diff.md artifact"
+        )
+    );
+    assert!(!logged_prompt.contains("Read behaviors.diff.md and the brief"));
 
     let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];
@@ -2611,6 +2750,64 @@ run_before_land = true
         candidate_after_rerun["merge_state"]["landed_commit"],
         candidate_head
     );
+}
+
+#[test]
+fn work_merge_behavior_review_prompt_states_missing_behavior_increment() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "create",
+            "work-1",
+            "--title",
+            "Merge missing behavior",
+        ])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-merge-missing-behavior");
+    let prompt_log = tmp.path().join("merge-missing-behavior-prompt.log");
+    write_mock_claude(&bin_dir, &merge_prompt_logging_mock_script("pass"));
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "merge",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("PROMPT_LOG", &prompt_log)
+        .assert()
+        .success();
+
+    let prompt = fs::read_to_string(prompt_log).unwrap();
+    assert!(prompt.contains("Work behavior review input:"));
+    assert!(prompt.contains("No Work behavior increment was provided for this Work Item."));
+    assert!(!prompt.contains("Read behaviors.diff.md and the brief"));
 }
 
 #[test]
@@ -6779,6 +6976,54 @@ fn create_completed_work_attempt(tmp: &TempDir, main_dir: &Path) {
     create_completed_work_attempt_with_instructions(tmp, main_dir, None);
 }
 
+fn create_completed_work_attempt_with_behaviors(tmp: &TempDir, main_dir: &Path, behaviors: &str) {
+    let bin_dir = tmp.path().join("bin-write-with-behaviors");
+    let behaviors_path = tmp.path().join("behaviors.md");
+    fs::write(&behaviors_path, behaviors).unwrap();
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+printf 'task output\n' > task-output.txt
+git add task-output.txt
+git commit -m "Add task output" >/dev/null
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(main_dir)
+        .args([
+            "work",
+            "create",
+            "work-1",
+            "--title",
+            "Run review",
+            "--behaviors-file",
+            &behaviors_path.to_string_lossy(),
+        ])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+}
+
 fn create_completed_work_attempt_with_instructions(
     tmp: &TempDir,
     main_dir: &Path,
@@ -6823,6 +7068,45 @@ exit 0
         .env("PATH", mock_path(&bin_dir))
         .assert()
         .success();
+}
+
+fn merge_prompt_logging_mock_script(verdict: &str) -> String {
+    format!(
+        r##"#!/bin/bash
+case "$PWD" in
+  */work-6-work-1-attempt-1)
+    printf 'loop output\n' > loop-output.txt
+    git add loop-output.txt
+    git commit -m "Add loop output" >/dev/null
+    ;;
+  */merge/reviews/behaviors)
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "-p" ]; then
+        shift
+        printf '%s\n' "$1" > "$PROMPT_LOG"
+        break
+      fi
+      shift
+    done
+    printf 'Verdict: {verdict}\n\nMerge behavior review.\n' > review.md
+    ;;
+  *)
+    if [ -n "${{SYSTEM_LOG:-}}" ]; then
+      while [ "$#" -gt 0 ]; do
+        if [ "$1" = "--append-system-prompt" ]; then
+          shift
+          printf '%s\n' "$1" >> "$SYSTEM_LOG"
+          break
+        fi
+        shift
+      done
+    fi
+    printf 'Verdict: {verdict}\n\nLoop review.\n' > review.md
+    ;;
+esac
+exit 0
+"##
+    )
 }
 
 fn loop_mock_script(verdict: &str) -> String {

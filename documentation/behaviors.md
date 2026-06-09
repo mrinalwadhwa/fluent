@@ -151,6 +151,18 @@ workspace path and launch the selected coder in that workspace.
 Test: tests/binary.rs (work_task_run_completes_write_task_with_committed_output)
 Test: tests/behaviors/operations/test-work-task-run.sh (run reuses worktree and launches coder there)
 
+WHEN Factory runs a Work-model behavior review Task for an Attempt whose
+Work Item includes a behavior increment,
+THE SYSTEM SHALL include the behavior increment explicitly in the review
+Task prompt.
+Test: tests/binary.rs (work_behavior_review_task_prompt_includes_behavior_increment)
+
+WHEN Factory runs a Work-model behavior review Task for an Attempt whose
+Work Item does not include a behavior increment,
+THE SYSTEM SHALL state in the review Task prompt that no Work behavior
+increment was provided.
+Test: tests/binary.rs (work_behavior_review_task_prompt_states_missing_behavior_increment)
+
 WHEN `factory work task run <work-item-id> <attempt-id> <task-id>` or
 `factory work attempt run <work-item-id> <attempt-id>` launches a
 `write` Task with stored Task instructions,
@@ -376,6 +388,18 @@ artifact as the review output, provide the absolute filesystem path the
 reviewer must write, and SHALL NOT instruct the reviewer to write legacy
 `.factory/runs/<run-id>/reviews/...` artifacts.
 Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge lands after update, checks, and reviewers)
+
+WHEN Factory runs a merge-time behavior reviewer for a Merge Candidate
+whose Work Item includes a behavior increment,
+THE SYSTEM SHALL include the behavior increment explicitly in the merge
+review prompt.
+Test: tests/binary.rs (work_merge_candidate_lands_after_merge_time_reviews)
+
+WHEN Factory runs a merge-time behavior reviewer for a Merge Candidate
+whose Work Item does not include a behavior increment,
+THE SYSTEM SHALL state in the merge review prompt that no Work behavior
+increment was provided.
+Test: tests/binary.rs (work_merge_behavior_review_prompt_states_missing_behavior_increment)
 
 WHEN `factory work merge <work-item-id> <merge-candidate-id>` builds the
 system prompt for a Work merge-time reviewer,

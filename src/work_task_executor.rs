@@ -12,7 +12,7 @@ use crate::os;
 use crate::work_model::{
     ArtifactRef, AttemptKind, AttemptStatus, TaskKind, TaskOutput, TaskStatus, WorkItem,
     WorkModelStorageError, WorkModelStore, WorkspaceRef, resolve_expected_candidate_workspace_path,
-    to_json_pretty,
+    to_json_pretty, work_behavior_review_input,
 };
 use crate::worktree;
 
@@ -988,6 +988,12 @@ fn run_review_coder(
         "candidate workspaces"
     };
     let task_instructions = task_instructions_prompt(task.instructions.as_deref());
+    let behavior_review_input = if task.role == "behaviors" {
+        format!("{}\n", work_behavior_review_input(item))
+    } else {
+        String::new()
+    };
+    let scope_prompt = format!("{scope_prompt}{behavior_review_input}");
     let prompt = format!(
         "Execute this Factory review Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\n{}{}\nWrite the review artifact to exactly this path:\n{}\n\nThe Task completes when that artifact exists. The artifact may contain Verdict: pass, Verdict: fail, or Verdict: uncertain; do not edit {}.\n\nCurrent Task model:\n{}\n",
         item.id,

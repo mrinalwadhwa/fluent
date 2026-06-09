@@ -1,19 +1,21 @@
 ---
 name: review-behaviors
 description: >
-  User-facing behavior reviewer. Reads behaviors.diff.md and user-facing
-  documentation without seeing source code. Writes tests that verify each
-  behavior from the user's perspective, runs them, checks for regressions,
-  and produces a verdict and findings.
+  User-facing behavior reviewer. Reads the Work behavior review input or
+  legacy behaviors.diff.md and user-facing documentation without seeing
+  source code. Writes tests that verify each behavior from the user's
+  perspective, runs them, checks for regressions, and produces a verdict
+  and findings.
 ---
 
 # Review Behaviors
 
-Verify that the system delivers the behaviors specified in
-behaviors.diff.md. Write tests from the user's perspective, run them,
-and report findings. You cannot see the source code — you can only
-interact with the system through its external interface, the way a user
-would.
+Verify that the system delivers the behavior increment specified by the
+review input. Work-model reviews receive a "Work behavior review input"
+section in the prompt. Legacy run reviews use behaviors.diff.md. Write
+tests from the user's perspective, run them, and report findings. You
+cannot see the source code — you can only interact with the system
+through its external interface, the way a user would.
 
 This is deliberate. Verifying behavior without knowing the implementation
 catches problems that code-aware reviewers miss. If you can't figure out
@@ -25,7 +27,10 @@ reason to look at the code.
 ## Visibility boundary
 
 You may read:
-- `.factory/runs/[run-id]/behaviors.diff.md` — the new behaviors to verify
+- The Work behavior review input in the prompt — the behavior increment
+  to verify for Work-model Attempt and merge-time reviews
+- `.factory/runs/[run-id]/behaviors.diff.md` — the new behaviors to
+  verify for legacy run reviews
 - `.factory/runs/[run-id]/brief.md` — the intent behind the run
 - `documentation/behaviors.md` — existing behaviors and their tests
 - User-facing documentation (README, skills, guides — whatever describes
@@ -49,7 +54,9 @@ something, stop. Report it as a documentation finding instead.
 ### Phase 1 — Read the inputs and establish baseline
 
 Read:
-- `.factory/runs/[run-id]/behaviors.diff.md` — the behaviors to verify
+- The Work behavior review input in the prompt for Work-model reviews,
+  or `.factory/runs/[run-id]/behaviors.diff.md` for legacy run reviews
+  — the behaviors to verify
 - `.factory/runs/[run-id]/brief.md` — context for the run's intent
 - `documentation/behaviors.md` — existing behaviors and test references
 - User-facing documentation — to understand the system's external
@@ -65,7 +72,7 @@ point for detecting regressions later.
 
 ### Phase 2 — Write tests for new behaviors
 
-For each behavior in behaviors.diff.md, write a test that verifies it
+For each behavior in the review input, write a test that verifies it
 from the outside:
 
 1. Read the EARS statement. Identify the trigger (WHEN/WHILE/IF) and
@@ -114,9 +121,11 @@ For new tests that passed:
 1. Write the test file to the project's test directory, following
    existing conventions for location.
 
-2. Add a `Test:` reference line to the corresponding behavior in
-   `behaviors.diff.md`. When the behavior is later absorbed into
-   `documentation/behaviors.md`, the test reference comes along.
+2. Add a `Test:` reference line to the corresponding behavior source
+   when a mutable behavior artifact exists. For legacy reviews, update
+   `behaviors.diff.md`; for Work-model reviews, record the test path in
+   the review artifact unless the prompt provides a writable behavior
+   source.
 
 Do not persist tests that failed — the behavior isn't working yet,
 so the test would be a guaranteed failure in the regression suite.

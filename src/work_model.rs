@@ -613,6 +613,24 @@ impl PlanningContext {
     }
 }
 
+pub fn work_behavior_review_input(item: &WorkItem) -> String {
+    let behavior_increment = item
+        .planning_context
+        .as_ref()
+        .and_then(|context| context.behaviors.as_ref())
+        .filter(|behaviors| !behaviors.trim().is_empty());
+
+    match behavior_increment {
+        Some(behaviors) => format!(
+            "Work behavior review input:\nThe Work Item includes this behavior increment. Verify this behavior increment without requiring a legacy .factory/runs/[run-id]/behaviors.diff.md artifact:\n\n{}\n",
+            behaviors.trim()
+        ),
+        None => {
+            "Work behavior review input:\nNo Work behavior increment was provided for this Work Item.\n".to_string()
+        }
+    }
+}
+
 fn non_empty_clone(value: &Option<String>) -> Option<String> {
     value
         .as_ref()

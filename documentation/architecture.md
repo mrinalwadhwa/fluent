@@ -294,6 +294,11 @@ may write task artifacts, such as findings or scratch notes, but concrete
 reviewer fixes become follow-up `write` tasks. Sandboxed delegated tasks
 produce learning artifacts in task artifact areas; Factory can later
 ingest those artifacts into project-local expertise after review.
+Work-model behavior reviewers receive the Work Item behavior increment
+from `WorkItem.planning_context.behaviors` in the prompt when one exists,
+or an explicit statement that no behavior increment was provided. Legacy
+`.factory/runs/<run-id>/behaviors.diff.md` remains a legacy run input,
+not the Work-model behavior review contract.
 
 Project-local `.factory/observations.md` and `.factory/expertise/*` are
 durable Factory memory that belongs in normal repository history. Runtime
