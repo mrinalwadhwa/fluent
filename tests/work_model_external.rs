@@ -252,6 +252,50 @@ fn work_model_store_preserves_task_append_order() {
 }
 
 #[test]
+fn work_model_store_rejects_duplicate_task_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    let mut work_item = work_item();
+    let mut followup = task(TaskKind::Write);
+    followup.id = "write-followup".to_string();
+    followup.status = TaskStatus::Planned;
+    followup.output = None;
+    work_item.attempts[0].status = AttemptStatus::Executing;
+    work_item.attempts[0].review_state = None;
+    work_item.attempts[0].tasks.push(followup);
+
+    store.write_work_item(&work_item).unwrap();
+
+    let duplicate_path = temp
+        .path()
+        .join(".factory/work/tasks/work-1/attempt-1/write-followup.json");
+    let mut duplicate: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&duplicate_path).unwrap()).unwrap();
+    duplicate["order"] = serde_json::json!(0);
+    fs::write(
+        &duplicate_path,
+        serde_json::to_string_pretty(&duplicate).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let error = store.read_work_item("work-1").unwrap_err();
+
+    match error {
+        WorkModelStorageError::InvalidModel { path, source } => {
+            assert_eq!(path, duplicate_path);
+            assert_eq!(
+                source,
+                WorkModelError::TaskOrderAlreadyExists {
+                    attempt_id: "attempt-1".to_string(),
+                    order: 0,
+                }
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
 fn work_model_store_ignores_empty_split_directories_for_legacy_items() {
     let temp = tempfile::tempdir().unwrap();
     let store = WorkModelStore::new(temp.path());

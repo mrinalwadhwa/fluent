@@ -249,10 +249,13 @@ test_cleanup_work_items_dry_run_and_apply() {
 import json
 from pathlib import Path
 
-path = Path(".factory/work/items/work-1.json")
-data = json.loads(path.read_text())
-task = data["attempts"][0]["tasks"][0]
-data["attempts"][0]["status"] = "complete"
+path = Path(".factory/work/attempts/work-1/attempt-1.json")
+attempt = json.loads(path.read_text())
+attempt["status"] = "complete"
+path.write_text(json.dumps(attempt, indent=2) + "\n")
+
+path = Path(".factory/work/tasks/work-1/attempt-1/attempt-1-write.json")
+task = json.loads(path.read_text())
 task["status"] = "complete"
 task["artifact_area"] = {
     "path": ".factory/work/artifacts/attempt-1/attempt-1-write"
@@ -263,17 +266,20 @@ task["output"] = {
     "source_branch": "main",
     "commit": "HEAD"
 }
-path.write_text(json.dumps(data, indent=2) + "\n")
+path.write_text(json.dumps(task, indent=2) + "\n")
 
-path = Path(".factory/work/items/work-active.json")
-data = json.loads(path.read_text())
-task = data["attempts"][0]["tasks"][0]
-data["attempts"][0]["status"] = "executing"
+path = Path(".factory/work/attempts/work-active/attempt-1.json")
+attempt = json.loads(path.read_text())
+attempt["status"] = "executing"
+path.write_text(json.dumps(attempt, indent=2) + "\n")
+
+path = Path(".factory/work/tasks/work-active/attempt-1/attempt-1-write.json")
+task = json.loads(path.read_text())
 task["status"] = "executing"
 task["artifact_area"] = {
     "path": ".factory/work/artifacts/attempt-1/attempt-1-active"
 }
-path.write_text(json.dumps(data, indent=2) + "\n")
+path.write_text(json.dumps(task, indent=2) + "\n")
 PY
 
   ARTIFACT_DIR=".factory/work/artifacts/attempt-1/attempt-1-write"
@@ -384,11 +390,21 @@ from pathlib import Path
 absolute_path = sys.argv[1]
 parent_escape_path = sys.argv[2]
 
-path = Path(".factory/work/items/work-1.json")
-data = json.loads(path.read_text())
-attempt = data["attempts"][0]
-task = attempt["tasks"][0]
-data["attempts"][0]["status"] = "complete"
+path = Path(".factory/work/attempts/work-1/attempt-1.json")
+attempt = json.loads(path.read_text())
+attempt["status"] = "complete"
+attempt["artifacts"] = [
+    {"producer_id": "outside-absolute", "path": absolute_path},
+    {"producer_id": "outside-parent", "path": parent_escape_path},
+    {
+        "producer_id": "managed",
+        "path": ".factory/work/artifacts/attempt-1/attempt-1-review/review.md",
+    },
+]
+path.write_text(json.dumps(attempt, indent=2) + "\n")
+
+path = Path(".factory/work/tasks/work-1/attempt-1/attempt-1-write.json")
+task = json.loads(path.read_text())
 task["status"] = "complete"
 task["artifact_area"] = {
     "path": ".factory/work/artifacts/attempt-1/attempt-1-write"
@@ -399,15 +415,7 @@ task["output"] = {
     "source_branch": "main",
     "commit": "HEAD",
 }
-attempt["artifacts"] = [
-    {"producer_id": "outside-absolute", "path": absolute_path},
-    {"producer_id": "outside-parent", "path": parent_escape_path},
-    {
-        "producer_id": "managed",
-        "path": ".factory/work/artifacts/attempt-1/attempt-1-review/review.md",
-    },
-]
-path.write_text(json.dumps(data, indent=2) + "\n")
+path.write_text(json.dumps(task, indent=2) + "\n")
 PY
 
   ARTIFACT_DIR=".factory/work/artifacts/attempt-1/attempt-1-write"
