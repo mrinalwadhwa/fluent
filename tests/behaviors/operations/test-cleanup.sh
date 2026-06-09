@@ -53,6 +53,20 @@ create_project() {
   git -c commit.gpgsign=false commit -qm "init"
 }
 
+create_project_with_unique_sibling_parent() {
+  TEST_PARENT_DIR="$(mktemp -d -t factory-test-cleanup-parent-XXXXXX)"
+  TEST_DIR="${TEST_PARENT_DIR}/source"
+  mkdir -p "$TEST_DIR"
+  cd "$TEST_DIR"
+  git init -q
+  git config user.email "factory@example.com"
+  git config user.name "Factory Test"
+  git config commit.gpgsign false
+  touch README.md
+  git add README.md
+  git -c commit.gpgsign=false commit -qm "init"
+}
+
 create_run() {
   RUN_ID="$1"
   STATUS="$2"
@@ -225,7 +239,7 @@ test_dashboard_prefers_actionable_run_over_cleaned_run() {
 }
 
 test_cleanup_work_items_dry_run_and_apply() {
-  create_project
+  create_project_with_unique_sibling_parent
   "$FACTORY_BIN" work create work-1 --title "Cleanup work" >/dev/null
   "$FACTORY_BIN" work attempt work-1 attempt-1 >/dev/null
   "$FACTORY_BIN" work create work-active --title "Active work" >/dev/null
@@ -348,7 +362,88 @@ PY
 
   git worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1 || true
   git worktree remove --force "$ACTIVE_WORKTREE_DIR" >/dev/null 2>&1 || true
-  rm -rf "$TEST_DIR" "$WORKTREE_DIR" "$ACTIVE_WORKTREE_DIR"
+  rm -rf "$TEST_PARENT_DIR"
+  rm -rf "$WORKTREE_DIR" "$ACTIVE_WORKTREE_DIR"
+  return $RESULT
+}
+
+test_cleanup_work_items_ignore_unmanaged_artifacts() {
+  create_project
+  "$FACTORY_BIN" work create work-1 --title "Cleanup work" >/dev/null
+  "$FACTORY_BIN" work attempt work-1 attempt-1 >/dev/null
+
+  OUTSIDE_DIR="$(mktemp -d -t factory-test-cleanup-outside-XXXXXX)"
+  OUTSIDE_FILE="${OUTSIDE_DIR}/outside.md"
+  PARENT_ESCAPE_FILE="../outside-artifact.md"
+
+  python3 - "$OUTSIDE_FILE" "$PARENT_ESCAPE_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+absolute_path = sys.argv[1]
+parent_escape_path = sys.argv[2]
+
+path = Path(".factory/work/items/work-1.json")
+data = json.loads(path.read_text())
+attempt = data["attempts"][0]
+task = attempt["tasks"][0]
+data["attempts"][0]["status"] = "complete"
+task["status"] = "complete"
+task["artifact_area"] = {
+    "path": ".factory/work/artifacts/attempt-1/attempt-1-write"
+}
+task["output"] = {
+    "workspace_id": "candidate",
+    "workspace_path": "../work-6-work-1-attempt-1",
+    "source_branch": "main",
+    "commit": "HEAD",
+}
+attempt["artifacts"] = [
+    {"producer_id": "outside-absolute", "path": absolute_path},
+    {"producer_id": "outside-parent", "path": parent_escape_path},
+    {
+        "producer_id": "managed",
+        "path": ".factory/work/artifacts/attempt-1/attempt-1-review/review.md",
+    },
+]
+path.write_text(json.dumps(data, indent=2) + "\n")
+PY
+
+  ARTIFACT_DIR=".factory/work/artifacts/attempt-1/attempt-1-write"
+  MANAGED_REVIEW_ARTIFACT=".factory/work/artifacts/attempt-1/attempt-1-review/review.md"
+  mkdir -p "$ARTIFACT_DIR" "$(dirname "$MANAGED_REVIEW_ARTIFACT")"
+  printf 'artifact' > "$ARTIFACT_DIR/result.md"
+  printf 'review' > "$MANAGED_REVIEW_ARTIFACT"
+  printf 'outside' > "$OUTSIDE_FILE"
+  printf 'parent escape' > "$PARENT_ESCAPE_FILE"
+
+  OUTPUT="$("$FACTORY_BIN" cleanup --apply 2>&1)"
+
+  RESULT=0
+  assert_output_contains "$OUTPUT" "cleaned Work Item work-1" || RESULT=1
+  assert_output_contains "$OUTPUT" "removed Work artifact" || RESULT=1
+  assert_output_not_contains "$OUTPUT" "$OUTSIDE_FILE" || RESULT=1
+  assert_output_not_contains "$OUTPUT" "$PARENT_ESCAPE_FILE" || RESULT=1
+  if [ ! -f "$OUTSIDE_FILE" ]; then
+    printf '    FAIL: apply removed absolute unmanaged artifact\n'
+    RESULT=1
+  fi
+  if [ ! -f "$PARENT_ESCAPE_FILE" ]; then
+    printf '    FAIL: apply removed parent-directory unmanaged artifact\n'
+    RESULT=1
+  fi
+  if [ -d "$ARTIFACT_DIR" ]; then
+    printf '    FAIL: apply kept managed task artifact directory\n'
+    RESULT=1
+  fi
+  if [ -f "$MANAGED_REVIEW_ARTIFACT" ]; then
+    printf '    FAIL: apply kept managed attempt artifact\n'
+    RESULT=1
+  fi
+
+  rm -f "$PARENT_ESCAPE_FILE"
+  rm -rf "$TEST_DIR" "$OUTSIDE_DIR"
   return $RESULT
 }
 
@@ -370,6 +465,8 @@ run_test "dashboard prefers actionable run over cleaned run" \
   test_dashboard_prefers_actionable_run_over_cleaned_run
 run_test "cleanup handles Work Items with dry run and apply" \
   test_cleanup_work_items_dry_run_and_apply
+run_test "cleanup ignores unmanaged Work artifact paths" \
+  test_cleanup_work_items_ignore_unmanaged_artifacts
 
 printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
 
