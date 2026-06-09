@@ -103,6 +103,13 @@ Task. Running a review Task requires `review.md` in that artifact area;
 the Task can complete even when that artifact says `Verdict: fail` or
 `Verdict: uncertain` because verdict acceptance belongs to later review
 or merge policy.
+`factory work review-codebase <work-item-id> <attempt-id>` appends a
+review-only Attempt for full-codebase review of the current source
+checkout. Review-only Attempts contain review Tasks only, read the source
+checkout through workspace id `source` at path `.`, and write artifacts
+under `.factory/work/artifacts/<attempt-id>/<task-id>/`. This is the
+default Work-model path for review-only work; legacy review runs remain
+for compatibility and recovery.
 `factory work attempt run <work-item-id> <attempt-id>` is the first
 Attempt-level orchestration path. It advances one Attempt by running the
 next planned write or review Task through the same Task executor, then
@@ -121,11 +128,17 @@ planning context when explicit instructions are absent. When no review
 artifact fails, uncertain or missing verdicts mark the Attempt
 `needs-user` with a handoff under
 `.factory/work/artifacts/<attempt-id>/`.
+For review-only Attempts, all pass marks the Attempt complete with review
+state `passed` and does not create a Merge Candidate. Any fail marks the
+Attempt failed with review state `failed` and does not create a follow-up
+write Task. Uncertain verdicts without failures mark the Attempt
+`needs-user` and write the same Work handoff artifact.
 `factory work list` and `factory work show <id>` expose the same durable
 Work Item model for inspection. These commands use `.factory/work/items/`
 through the Rust storage model and validate stored objects. This keeps
 Work Items and Attempts visible while the legacy `.factory/runs`
-lifecycle remains available as a fallback for full session loops.
+lifecycle remains available as a fallback for full session loops and
+legacy review-run recovery.
 `factory status` and `factory dashboard` use Work Items as the default
 operator surface. They read Work Items through `work_status.rs`, which
 reduces stored Work Items to operator-facing rows. That boundary chooses
@@ -747,17 +760,20 @@ represents only the current review round; archived `round-N/` contents
 remain historical records and do not drive current dashboard reviewer
 tabs or verdicts.
 
-`factory review` creates or reuses a review run. It writes `status` as
-`planned`, `mode` as `review`, updates `.factory/active-run`, and writes
-optional `reviewers` and `brief.md` files from `--reviewers` and
-`--brief`. After preparing that state, it enters the normal local run
-loop for the selected coder and sandbox mode.
+Use `factory work review-codebase <work-item-id> <attempt-id>` for new
+full-codebase review-only work. `factory review` remains a compatibility
+and recovery path for legacy `.factory/runs` review runs. It creates or
+reuses a review run, writes `status` as `planned`, `mode` as `review`,
+updates `.factory/active-run`, and writes optional `reviewers` and
+`brief.md` files from `--reviewers` and `--brief`. After preparing that
+state, it enters the normal local run loop for the selected coder and
+sandbox mode.
 
-Review runs (`mode=review`) produce findings only. Reviewers run with
-full-codebase scope. Their findings are written to the reviews/
+Legacy review runs (`mode=review`) produce findings only. Reviewers run
+with full-codebase scope. Their findings are written to the reviews/
 directory. Passing review-only runs set status to `complete`;
-non-passing review-only runs set status to `failed`. No author session
-is launched.
+non-passing review-only runs set status to `failed`. No author session is
+launched.
 
 ### Resume
 

@@ -177,6 +177,7 @@ impl WorkItem {
         self.attempts.push(Attempt {
             id: attempt_id.clone(),
             work_item_id: self.id.clone(),
+            kind: AttemptKind::Write,
             status: AttemptStatus::Planned,
             tasks: vec![Task {
                 id: task_id,
@@ -203,6 +204,70 @@ impl WorkItem {
         });
 
         self.validate()
+    }
+
+    pub fn add_review_only_attempt(
+        &mut self,
+        attempt_id: impl Into<String>,
+        roles: &[&str],
+        source_ref: impl Into<String>,
+        source_commit: impl Into<String>,
+    ) -> Result<Vec<String>, WorkModelError> {
+        let attempt_id = attempt_id.into();
+        validate_id("work item", &self.id)?;
+        validate_id("attempt", &attempt_id)?;
+        if self.attempts.iter().any(|attempt| attempt.id == attempt_id) {
+            return Err(WorkModelError::AttemptAlreadyExists { id: attempt_id });
+        }
+
+        let source = WorkspaceRef {
+            id: "source".to_string(),
+            path: ".".to_string(),
+        };
+        let source_ref = source_ref.into();
+        let source_commit = source_commit.into();
+        let mut task_ids = Vec::new();
+        let mut tasks = Vec::new();
+        for role in roles {
+            validate_id("review role", role)?;
+            let task_id = format!("{attempt_id}-review-{role}");
+            validate_id("task", &task_id)?;
+            tasks.push(Task {
+                id: task_id.clone(),
+                kind: TaskKind::Review,
+                status: TaskStatus::Planned,
+                role: (*role).to_string(),
+                instructions: None,
+                work_item_id: self.id.clone(),
+                attempt_id: Some(attempt_id.clone()),
+                workspace_access: WorkspaceAccess::read_only(vec![source.clone()]),
+                artifact_area: Some(TaskArtifactArea {
+                    path: format!("{WORK_ARTIFACTS_DIR}/{attempt_id}/{task_id}"),
+                }),
+                review_context: Some(ReviewContext {
+                    candidate_workspace_id: source.id.clone(),
+                    candidate_workspace_path: source.path.clone(),
+                    source_branch: source_ref.clone(),
+                    candidate_commit: source_commit.clone(),
+                }),
+                input_artifacts: Vec::new(),
+                output: None,
+            });
+            task_ids.push(task_id);
+        }
+
+        self.attempts.push(Attempt {
+            id: attempt_id,
+            work_item_id: self.id.clone(),
+            kind: AttemptKind::ReviewOnly,
+            status: AttemptStatus::Reviewing,
+            tasks,
+            review_state: Some(AttemptReviewState::NotReviewed),
+            artifacts: Vec::new(),
+        });
+
+        self.validate()?;
+        Ok(task_ids)
     }
 
     pub fn add_review_tasks(
@@ -563,6 +628,8 @@ fn push_planning_section(sections: &mut Vec<String>, title: &str, content: &Opti
 pub struct Attempt {
     pub id: String,
     pub work_item_id: String,
+    #[serde(default, skip_serializing_if = "attempt_kind_is_write")]
+    pub kind: AttemptKind,
     pub status: AttemptStatus,
     #[serde(default)]
     pub tasks: Vec<Task>,
@@ -600,6 +667,19 @@ impl Attempt {
         }
         Ok(())
     }
+}
+
+/// What an attempt is expected to produce.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AttemptKind {
+    #[default]
+    Write,
+    ReviewOnly,
+}
+
+fn attempt_kind_is_write(kind: &AttemptKind) -> bool {
+    *kind == AttemptKind::Write
 }
 
 /// Coarse attempt lifecycle state.
@@ -1388,6 +1468,8 @@ struct WorkItemRecord {
 struct AttemptRecord {
     id: String,
     work_item_id: String,
+    #[serde(default, skip_serializing_if = "attempt_kind_is_write")]
+    kind: AttemptKind,
     #[serde(default)]
     order: usize,
     status: AttemptStatus,
@@ -1434,6 +1516,7 @@ impl AttemptRecord {
         Self {
             id: attempt.id.clone(),
             work_item_id: attempt.work_item_id.clone(),
+            kind: attempt.kind.clone(),
             order,
             status: attempt.status.clone(),
             review_state: attempt.review_state.clone(),
@@ -1447,6 +1530,7 @@ impl From<AttemptRecord> for Attempt {
         Self {
             id: record.id,
             work_item_id: record.work_item_id,
+            kind: record.kind,
             status: record.status,
             tasks: Vec::new(),
             review_state: record.review_state,
@@ -2413,6 +2497,7 @@ mod tests {
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
+                kind: AttemptKind::Write,
                 status: AttemptStatus::Planned,
                 tasks: vec![
                     completed_write_task("attempt-1-write", "original"),
@@ -2457,6 +2542,7 @@ mod tests {
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
+                kind: AttemptKind::Write,
                 status: AttemptStatus::Complete,
                 tasks: vec![task(TaskKind::Write, vec![workspace("candidate")])],
                 review_state: Some(AttemptReviewState::Passed),
@@ -2488,6 +2574,7 @@ mod tests {
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
+                kind: AttemptKind::Write,
                 status: AttemptStatus::Complete,
                 tasks: vec![
                     completed_write_task("attempt-1-write", "original"),
@@ -2531,6 +2618,7 @@ mod tests {
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
+                kind: AttemptKind::Write,
                 status: AttemptStatus::Complete,
                 tasks: vec![completed_write_task("attempt-1-write", "original")],
                 review_state: Some(AttemptReviewState::Passed),
@@ -2561,6 +2649,7 @@ mod tests {
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
+                kind: AttemptKind::Write,
                 status: AttemptStatus::Complete,
                 tasks: vec![completed_write_task("attempt-1-write", "original")],
                 review_state: Some(AttemptReviewState::Passed),
@@ -2593,6 +2682,7 @@ mod tests {
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
+                kind: AttemptKind::Write,
                 status: AttemptStatus::Reviewing,
                 tasks: vec![completed_write_task("attempt-1-write", "original")],
                 review_state: Some(AttemptReviewState::Uncertain),
@@ -2637,6 +2727,7 @@ mod tests {
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
+                kind: AttemptKind::Write,
                 status: AttemptStatus::Complete,
                 tasks: vec![completed_write_task("attempt-1-write", "original")],
                 review_state: Some(AttemptReviewState::Passed),
@@ -2681,6 +2772,7 @@ mod tests {
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
+                kind: AttemptKind::Write,
                 status: AttemptStatus::Reviewing,
                 tasks: vec![completed_write_task("attempt-1-write", "original")],
                 review_state: Some(AttemptReviewState::Failed),
@@ -2725,6 +2817,7 @@ mod tests {
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
+                kind: AttemptKind::Write,
                 status: AttemptStatus::Complete,
                 tasks: vec![completed_write_task("attempt-1-write", "original")],
                 review_state: Some(AttemptReviewState::Passed),
@@ -2770,6 +2863,7 @@ mod tests {
         let attempt = Attempt {
             id: "attempt-1".to_string(),
             work_item_id: "work-1".to_string(),
+            kind: AttemptKind::Write,
             status: AttemptStatus::Reviewing,
             tasks: Vec::new(),
             review_state: Some(AttemptReviewState::Uncertain),
@@ -2835,6 +2929,7 @@ mod tests {
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
+                kind: AttemptKind::Write,
                 status: AttemptStatus::Reviewing,
                 tasks: vec![
                     completed_write_task("attempt-1-write", "initial"),

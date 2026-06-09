@@ -9,8 +9,9 @@ use crate::content::ContentResolver;
 use crate::credential;
 use crate::os;
 use crate::work_model::{
-    ArtifactRef, AttemptStatus, TaskKind, TaskOutput, TaskStatus, WorkItem, WorkModelStorageError,
-    WorkModelStore, resolve_expected_candidate_workspace_path, to_json_pretty,
+    ArtifactRef, AttemptKind, AttemptStatus, TaskKind, TaskOutput, TaskStatus, WorkItem,
+    WorkModelStorageError, WorkModelStore, WorkspaceRef, resolve_expected_candidate_workspace_path,
+    to_json_pretty,
 };
 use crate::worktree;
 
@@ -212,6 +213,7 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", config.task_id))?;
 
     let task = &item.attempts[attempt_index].tasks[task_index];
+    let attempt_kind = item.attempts[attempt_index].kind.clone();
     if task.status != TaskStatus::Planned {
         bail!(
             "Task {:?} is {}; expected planned",
@@ -253,11 +255,12 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         .reads
         .iter()
         .map(|workspace| {
-            resolve_managed_readable_workspace_path(
+            resolve_review_readable_workspace_path(
                 config.project_root,
-                &workspace.path,
+                workspace,
                 config.work_item_id,
                 config.attempt_id,
+                &attempt_kind,
             )
         })
         .collect::<Result<Vec<_>>>()?;
@@ -273,8 +276,12 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     let mut candidate_heads = Vec::new();
     for workspace_path in &readable_workspaces {
         ensure_same_git_repository(config.project_root, workspace_path)?;
-        ensure_registered_worktree(config.project_root, workspace_path)?;
-        ensure_clean_worktree(workspace_path)?;
+        let is_review_only_source =
+            attempt_kind == AttemptKind::ReviewOnly && workspace_path == config.project_root;
+        if !is_review_only_source {
+            ensure_registered_worktree(config.project_root, workspace_path)?;
+            ensure_clean_worktree(workspace_path)?;
+        }
         candidate_heads.push((workspace_path.clone(), head_commit(workspace_path)?));
     }
     fs::create_dir_all(&artifact_dir)?;
@@ -300,6 +307,7 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         &artifact_dir,
         &review_path,
         &readable_workspaces,
+        attempt_kind == AttemptKind::ReviewOnly,
         config.resolver,
         config.extra_args,
         config.coder_kind,
@@ -307,7 +315,13 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     );
 
     for (workspace_path, baseline_head) in &candidate_heads {
-        if let Err(error) = ensure_head_unchanged(workspace_path, baseline_head) {
+        let head_result =
+            if attempt_kind == AttemptKind::ReviewOnly && workspace_path == config.project_root {
+                ensure_head_unchanged_without_reset(workspace_path, baseline_head)
+            } else {
+                ensure_head_unchanged(workspace_path, baseline_head)
+            };
+        if let Err(error) = head_result {
             mark_task_failed(
                 config.store,
                 config.work_item_id,
@@ -318,6 +332,9 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         }
     }
     for workspace_path in &readable_workspaces {
+        if attempt_kind == AttemptKind::ReviewOnly && workspace_path == config.project_root {
+            continue;
+        }
         if let Err(error) = ensure_clean_worktree(workspace_path) {
             mark_task_failed(
                 config.store,
@@ -450,6 +467,21 @@ fn resolve_managed_readable_workspace_path(
     attempt_id: &str,
 ) -> Result<PathBuf> {
     resolve_managed_task_workspace_path(project_root, path, work_item_id, attempt_id, "readable")
+}
+
+fn resolve_review_readable_workspace_path(
+    project_root: &Path,
+    workspace: &WorkspaceRef,
+    work_item_id: &str,
+    attempt_id: &str,
+    attempt_kind: &AttemptKind,
+) -> Result<PathBuf> {
+    if *attempt_kind == AttemptKind::ReviewOnly && workspace.id == "source" && workspace.path == "."
+    {
+        return Ok(project_root.to_path_buf());
+    }
+
+    resolve_managed_readable_workspace_path(project_root, &workspace.path, work_item_id, attempt_id)
 }
 
 fn resolve_managed_task_workspace_path(
@@ -746,6 +778,7 @@ fn run_review_coder(
     artifact_dir: &Path,
     review_path: &Path,
     readable_workspaces: &[PathBuf],
+    review_only: bool,
     resolver: &ContentResolver,
     extra_args: &[String],
     coder_kind: CoderKind,
@@ -780,28 +813,55 @@ fn run_review_coder(
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let scope_prompt = if review_only {
+        format!(
+            "Readable source checkout:\n{}\n\nReview context:\n- Source checkout: {} ({})\n- Source ref: {}\n- Source commit: {}\n",
+            read_paths,
+            review_context.candidate_workspace_id,
+            review_context.candidate_workspace_path,
+            review_context.source_branch,
+            review_context.candidate_commit
+        )
+    } else {
+        format!(
+            "Readable candidate workspaces:\n{}\n\nReview context:\n- Candidate workspace: {} ({})\n- Source branch: {}\n- Candidate commit: {}\n- Review diff: git -C <candidate-workspace> diff {}..{}\n",
+            read_paths,
+            review_context.candidate_workspace_id,
+            review_context.candidate_workspace_path,
+            review_context.source_branch,
+            review_context.candidate_commit,
+            review_context.source_branch,
+            review_context.candidate_commit
+        )
+    };
+    let edit_target = if review_only {
+        "source checkout"
+    } else {
+        "candidate workspaces"
+    };
     let prompt = format!(
-        "Execute this Factory review Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\nReadable candidate workspaces:\n{}\n\nReview context:\n- Candidate workspace: {} ({})\n- Source branch: {}\n- Candidate commit: {}\n- Review diff: git -C <candidate-workspace> diff {}..{}\n\nWrite the review artifact to exactly this path:\n{}\n\nThe Task completes when that artifact exists. The artifact may contain Verdict: pass, Verdict: fail, or Verdict: uncertain; do not edit candidate workspaces.\n\nCurrent Task model:\n{}\n",
+        "Execute this Factory review Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\n{}\nWrite the review artifact to exactly this path:\n{}\n\nThe Task completes when that artifact exists. The artifact may contain Verdict: pass, Verdict: fail, or Verdict: uncertain; do not edit {}.\n\nCurrent Task model:\n{}\n",
         item.id,
         item.title,
         attempt_id,
         task_id,
         task.role,
-        read_paths,
-        review_context.candidate_workspace_id,
-        review_context.candidate_workspace_path,
-        review_context.source_branch,
-        review_context.candidate_commit,
-        review_context.source_branch,
-        review_context.candidate_commit,
+        scope_prompt,
         review_path.display(),
+        edit_target,
         task_json
     );
 
+    let system_scope = if review_only {
+        "Read the source checkout only; do not edit or commit in it."
+    } else {
+        "Read candidate workspaces only; do not edit or commit in them."
+    };
     let system_prompt = format!(
-        "You are a Factory {} reviewer operating as a Work model review Task.\n{}\nRead candidate workspaces only; do not edit or commit in them.\nWrite the review artifact only to {} with a verdict (pass, fail, or uncertain) and findings.\n{} Do not flag findings that contradict a recorded decision.",
+        "You are a Factory {} reviewer operating as a Work model review Task.\n{}\n{}\nWrite the review artifact only to {} with a verdict (pass, fail, or uncertain) and findings.\n{} Do not flag findings that contradict a recorded decision.",
         task.role,
         review_skill_instruction,
+        system_scope,
         review_path.display(),
         decisions_instruction
     );
@@ -944,6 +1004,18 @@ fn ensure_head_unchanged(workspace_path: &Path, baseline_head: &str) -> Result<(
         reset_worktree_head(workspace_path, baseline_head)?;
         bail!(
             "Review Task changed readable candidate workspace HEAD from {baseline_head} to {current_head}: {}",
+            workspace_path.display()
+        )
+    }
+}
+
+fn ensure_head_unchanged_without_reset(workspace_path: &Path, baseline_head: &str) -> Result<()> {
+    let current_head = head_commit(workspace_path)?;
+    if current_head == baseline_head {
+        Ok(())
+    } else {
+        bail!(
+            "Review Task changed readable source checkout HEAD from {baseline_head} to {current_head}: {}",
             workspace_path.display()
         )
     }

@@ -266,6 +266,15 @@ pub enum WorkCommands {
         attempt_id: String,
     },
 
+    /// Create a review-only Attempt for the current codebase
+    ReviewCodebase {
+        /// Work Item ID
+        work_item_id: String,
+
+        /// Attempt ID
+        attempt_id: String,
+    },
+
     /// Show one stored Merge Candidate as JSON
     MergeCandidate {
         /// Work Item ID

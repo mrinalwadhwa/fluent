@@ -1,8 +1,8 @@
 use factory::work_model::{
-    Attempt, AttemptReviewState, AttemptStatus, MergeCandidate, MergeCandidateMergeState,
-    MergeCandidateReviewState, ReviewContext, Task, TaskArtifactArea, TaskKind, TaskOutput,
-    TaskStatus, WorkItem, WorkModelError, WorkModelStorageError, WorkModelStore, WorkspaceAccess,
-    WorkspaceRef, from_json,
+    Attempt, AttemptKind, AttemptReviewState, AttemptStatus, MergeCandidate,
+    MergeCandidateMergeState, MergeCandidateReviewState, ReviewContext, Task, TaskArtifactArea,
+    TaskKind, TaskOutput, TaskStatus, WorkItem, WorkModelError, WorkModelStorageError,
+    WorkModelStore, WorkspaceAccess, WorkspaceRef, from_json,
 };
 use std::fs;
 
@@ -49,6 +49,7 @@ fn work_item() -> WorkItem {
         attempts: vec![Attempt {
             id: "attempt-1".to_string(),
             work_item_id: "work-1".to_string(),
+            kind: AttemptKind::Write,
             status: AttemptStatus::Complete,
             tasks: vec![task(TaskKind::Write)],
             review_state: Some(AttemptReviewState::Passed),

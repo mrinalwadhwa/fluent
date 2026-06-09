@@ -7,8 +7,8 @@ use crate::coder::CoderKind;
 use crate::content::ContentResolver;
 use crate::review::{self, Verdict};
 use crate::work_model::{
-    ArtifactRef, AttemptReviewState, AttemptStatus, Task, TaskKind, TaskStatus, WorkItem,
-    WorkModelStorageError, WorkModelStore,
+    ArtifactRef, AttemptKind, AttemptReviewState, AttemptStatus, Task, TaskKind, TaskStatus,
+    WorkItem, WorkModelStorageError, WorkModelStore,
 };
 use crate::work_task_executor::{self, WorkTaskRunConfig};
 
@@ -30,6 +30,8 @@ pub enum WorkAttemptRunOutcome {
     MergeCandidateReady { candidate_id: String },
     PlannedFollowup { task_id: String },
     NeedsUser { handoff_path: String },
+    ReviewOnlyComplete,
+    ReviewOnlyFailed,
 }
 
 pub struct WorkAttemptRunResult {
@@ -49,7 +51,8 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
 
         reject_terminal_attempt(attempt.status.clone())?;
 
-        if attempt.status == AttemptStatus::Complete
+        if attempt.kind != AttemptKind::ReviewOnly
+            && attempt.status == AttemptStatus::Complete
             && attempt.review_state == Some(AttemptReviewState::Passed)
         {
             let mut item = item;
@@ -105,7 +108,8 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             );
         }
 
-        if has_completed_write(attempt.tasks.as_slice())
+        if attempt.kind != AttemptKind::ReviewOnly
+            && has_completed_write(attempt.tasks.as_slice())
             && !has_review_after_latest_write(attempt.tasks.as_slice())
         {
             let mut item = item;
@@ -129,6 +133,8 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                 WorkAttemptRunOutcome::MergeCandidateReady { .. }
                     | WorkAttemptRunOutcome::PlannedFollowup { .. }
                     | WorkAttemptRunOutcome::NeedsUser { .. }
+                    | WorkAttemptRunOutcome::ReviewOnlyComplete
+                    | WorkAttemptRunOutcome::ReviewOnlyFailed
             );
             outcomes.push(outcome);
             if should_stop {
@@ -201,8 +207,7 @@ fn interpret_reviews(
         .position(|attempt| attempt.id == attempt_id)
         .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", attempt_id))?;
 
-    let review_artifacts =
-        latest_review_artifacts(project_root, &item.attempts[attempt_index].tasks)?;
+    let review_artifacts = latest_review_artifacts(project_root, &item.attempts[attempt_index])?;
     if review_artifacts.is_empty() {
         bail!("Attempt {:?} has no completed review artifacts", attempt_id);
     }
@@ -220,6 +225,11 @@ fn interpret_reviews(
 
     if !failed.is_empty() {
         item.attempts[attempt_index].review_state = Some(AttemptReviewState::Failed);
+        if item.attempts[attempt_index].kind == AttemptKind::ReviewOnly {
+            item.attempts[attempt_index].status = AttemptStatus::Failed;
+            store.write_work_item(&item)?;
+            return Ok(WorkAttemptRunOutcome::ReviewOnlyFailed);
+        }
         item.attempts[attempt_index].status = AttemptStatus::Planned;
         let task_id = item.add_followup_write_task(attempt_id, failed)?;
         store.write_work_item(&item)?;
@@ -240,6 +250,10 @@ fn interpret_reviews(
 
     item.attempts[attempt_index].review_state = Some(AttemptReviewState::Passed);
     item.attempts[attempt_index].status = AttemptStatus::Complete;
+    if item.attempts[attempt_index].kind == AttemptKind::ReviewOnly {
+        store.write_work_item(&item)?;
+        return Ok(WorkAttemptRunOutcome::ReviewOnlyComplete);
+    }
     let candidate_id = item.create_or_get_merge_candidate(attempt_id)?;
     store.write_work_item(&item)?;
     Ok(WorkAttemptRunOutcome::MergeCandidateReady { candidate_id })
@@ -251,11 +265,23 @@ struct ReviewArtifact {
     review_path: PathBuf,
 }
 
-fn latest_review_artifacts(project_root: &Path, tasks: &[Task]) -> Result<Vec<ReviewArtifact>> {
-    let Some(last_write_index) = tasks.iter().rposition(|task| task.kind == TaskKind::Write) else {
-        return Ok(Vec::new());
+fn latest_review_artifacts(
+    project_root: &Path,
+    attempt: &crate::work_model::Attempt,
+) -> Result<Vec<ReviewArtifact>> {
+    let start = if attempt.kind == AttemptKind::ReviewOnly {
+        0
+    } else {
+        let Some(last_write_index) = attempt
+            .tasks
+            .iter()
+            .rposition(|task| task.kind == TaskKind::Write)
+        else {
+            return Ok(Vec::new());
+        };
+        last_write_index + 1
     };
-    tasks[last_write_index + 1..]
+    attempt.tasks[start..]
         .iter()
         .filter(|task| task.kind == TaskKind::Review && task.status == TaskStatus::Complete)
         .filter_map(|task| task.artifact_area.as_ref().map(|area| (task, area)))
@@ -276,7 +302,7 @@ fn latest_review_artifacts(project_root: &Path, tasks: &[Task]) -> Result<Vec<Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::work_model::{TaskArtifactArea, WorkspaceAccess};
+    use crate::work_model::{Attempt, TaskArtifactArea, WorkspaceAccess};
 
     #[test]
     fn completed_review_round_is_not_open() {
@@ -361,7 +387,17 @@ mod tests {
             },
         ];
 
-        let error = latest_review_artifacts(Path::new("/tmp/project"), &tasks)
+        let attempt = Attempt {
+            id: "attempt-1".to_string(),
+            work_item_id: "work-1".to_string(),
+            kind: AttemptKind::Write,
+            status: AttemptStatus::Complete,
+            tasks,
+            review_state: Some(AttemptReviewState::Passed),
+            artifacts: Vec::new(),
+        };
+
+        let error = latest_review_artifacts(Path::new("/tmp/project"), &attempt)
             .expect_err("unmanaged artifact area should fail");
         assert!(
             error

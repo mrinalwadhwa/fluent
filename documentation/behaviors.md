@@ -222,6 +222,26 @@ unchanged.
 Test: tests/binary.rs (work_review_requires_completed_write_output)
 Test: tests/behaviors/operations/test-work-task-run.sh (review planning requires completed write output)
 
+WHEN `factory work review-codebase <work-item-id> <attempt-id>` is
+invoked for a stored Work Item with no existing Attempt of that id,
+THE SYSTEM SHALL append a review-only Attempt with planned review Tasks
+for the default reviewer set.
+Test: tests/binary.rs (work_review_codebase_creates_review_only_attempt)
+Test: tests/behaviors/operations/test-work-review-codebase.sh (review-codebase creates review-only Attempt)
+
+WHEN a review-only Attempt is created,
+THE SYSTEM SHALL give each review Task read-only access to the current
+source checkout and a managed artifact area under
+`.factory/work/artifacts/<attempt-id>/<task-id>/`.
+Test: tests/binary.rs (work_review_codebase_creates_review_only_attempt)
+Test: tests/behaviors/operations/test-work-review-codebase.sh (review-codebase creates review-only Attempt)
+
+IF `factory work review-codebase <work-item-id> <attempt-id>` is invoked
+for a missing Work Item or duplicate Attempt id,
+THEN THE SYSTEM SHALL exit non-zero without changing Work state.
+Test: tests/binary.rs (work_review_codebase_missing_or_duplicate_leaves_state_unchanged)
+Test: tests/behaviors/operations/test-work-review-codebase.sh (review-codebase rejects missing and duplicate)
+
 WHEN `factory work task run <work-item-id> <attempt-id> <task-id>` is
 invoked for a planned `review` Task,
 THE SYSTEM SHALL complete the Task after the reviewer writes `review.md`
@@ -259,6 +279,33 @@ Attempt `complete`, create one durable Merge Candidate, and report the
 Merge Candidate id.
 Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop passes review round)
+
+WHEN `factory work attempt run <work-item-id> <attempt-id>` is invoked
+for a review-only Attempt with planned review Tasks,
+THE SYSTEM SHALL run those reviewer Tasks, require each reviewer to write
+its Work review artifact, and leave non-Factory source files unchanged.
+Test: tests/binary.rs (work_attempt_run_review_only_passes_without_merge_candidate)
+Test: tests/behaviors/operations/test-work-review-codebase.sh (review-only pass completes without Merge Candidate)
+
+WHEN all review-only reviewer artifacts have verdict `pass`,
+THE SYSTEM SHALL mark the Attempt complete with review state `passed`
+and SHALL NOT create a Merge Candidate.
+Test: tests/binary.rs (work_attempt_run_review_only_passes_without_merge_candidate)
+Test: tests/behaviors/operations/test-work-review-codebase.sh (review-only pass completes without Merge Candidate)
+
+WHEN any review-only reviewer artifact has verdict `fail`,
+THE SYSTEM SHALL mark the Attempt failed with review state `failed` and
+SHALL NOT create a follow-up write Task or Merge Candidate.
+Test: tests/binary.rs (work_attempt_run_review_only_fails_without_followup)
+Test: tests/behaviors/operations/test-work-review-codebase.sh (review-only fail stops without follow-up)
+
+WHEN any review-only reviewer artifact has verdict `uncertain` and none
+has verdict `fail`,
+THE SYSTEM SHALL mark the Attempt `needs-user`, write a Work handoff
+artifact, and SHALL NOT create a follow-up write Task or Merge
+Candidate.
+Test: tests/binary.rs (work_attempt_run_review_only_uncertain_needs_user)
+Test: tests/behaviors/operations/test-work-review-codebase.sh (review-only uncertain needs user)
 
 WHEN a Merge Candidate is created from a passed Attempt,
 THE SYSTEM SHALL record the source candidate workspace, target workspace,
@@ -903,7 +950,11 @@ review phase fail with a `reviews/review-[name].md` artifact that
 records `Verdict: fail`.
 Test: src/review.rs (reviewer execution failure tests)
 
-## Review runs
+## Legacy review runs
+
+Full-codebase review-only work defaults to `factory work review-codebase`
+and `factory work attempt run`. Legacy review runs remain available for
+compatibility and recovery of existing `.factory/runs` state.
 
 WHEN `factory run` is invoked and the run's mode is `review`,
 THE SYSTEM SHALL set status to `reviewing`, run reviewers with

@@ -166,11 +166,14 @@ instructions or planning context into initial and follow-up write Tasks,
 creates follow-up write Tasks after failed reviews, and records
 `needs-user` when the review state cannot be resolved autonomously.
 
-Use legacy `factory run` only as a transitional fallback when the Work
-model cannot yet express the work, such as full review-only runs,
-Fargate-only execution, parallel child-run decomposition, or recovery of
-existing `.factory/runs` state. The fallback still manages the session
-loop by restarting agents across sessions as long as work remains.
+For full-codebase review-only work, use the Work model by creating a
+Work Item, running `factory work review-codebase <work-item-id>
+<attempt-id>`, then running `factory work attempt run <work-item-id>
+<attempt-id>`. Use legacy `factory run` only as a transitional fallback
+when the Work model cannot yet express the work, such as Fargate-only
+execution, parallel child-run decomposition, or recovery of existing
+`.factory/runs` state. The fallback still manages the session loop by
+restarting agents across sessions as long as work remains.
 
 ### 5. Execute
 
@@ -289,6 +292,7 @@ factory work show <id>               # show one Work Item as JSON
 factory work attempt <id> <attempt>  # add an Attempt with a write Task
 factory work attempt run <id> <attempt> # advance an Attempt
 factory work review <id> <attempt>   # plan review Tasks
+factory work review-codebase <id> <attempt> # add a review-only Attempt
 factory work task run <id> <attempt> <task> # run one Task
 factory work merge-candidate <id> <candidate> # show a Merge Candidate
 factory work merge <id> <candidate>  # execute a Merge Candidate

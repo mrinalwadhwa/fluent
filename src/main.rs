@@ -332,6 +332,12 @@ fn cmd_work(
                         WorkAttemptRunOutcome::NeedsUser { handoff_path } => {
                             println!("Attempt {attempt_id} needs user input: {handoff_path}");
                         }
+                        WorkAttemptRunOutcome::ReviewOnlyComplete => {
+                            println!("Review-only Attempt {attempt_id} passed");
+                        }
+                        WorkAttemptRunOutcome::ReviewOnlyFailed => {
+                            println!("Review-only Attempt {attempt_id} failed");
+                        }
                     }
                 }
             }
@@ -371,6 +377,36 @@ fn cmd_work(
             store.write_work_item(&item)?;
             println!(
                 "Planned {} review Tasks for Attempt {attempt_id}",
+                task_ids.len()
+            );
+            for task_id in task_ids {
+                println!("{task_id}");
+            }
+        }
+        WorkCommands::ReviewCodebase {
+            work_item_id,
+            attempt_id,
+        } => {
+            let mut item = match store.read_work_item(&work_item_id) {
+                Ok(item) => item,
+                Err(WorkModelStorageError::ReadFile { source, .. })
+                    if source.kind() == ErrorKind::NotFound =>
+                {
+                    bail!("Work Item {work_item_id:?} not found");
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let source_ref = current_ref(project_root)?;
+            let source_commit = head_commit(project_root)?;
+            let task_ids = item.add_review_only_attempt(
+                attempt_id.clone(),
+                review::REVIEWERS,
+                source_ref,
+                source_commit,
+            )?;
+            store.write_work_item(&item)?;
+            println!(
+                "Created review-only Attempt {attempt_id} with {} review Tasks",
                 task_ids.len()
             );
             for task_id in task_ids {
@@ -477,6 +513,40 @@ fn read_planning_context(
 
 fn read_optional_file(path: Option<String>) -> Result<Option<String>> {
     path.map(fs::read_to_string).transpose().map_err(Into::into)
+}
+
+fn head_commit(project_root: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["-C", &project_root.to_string_lossy()])
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        bail!(
+            "Failed to resolve source checkout HEAD: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    }
+}
+
+fn current_ref(project_root: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["-C", &project_root.to_string_lossy()])
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "Failed to resolve source checkout ref: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch == "HEAD" {
+        head_commit(project_root)
+    } else {
+        Ok(branch)
+    }
 }
 
 fn cmd_interactive(

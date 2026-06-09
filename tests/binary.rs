@@ -1367,6 +1367,112 @@ fn work_review_requires_completed_write_output() {
 }
 
 #[test]
+fn work_review_codebase_creates_review_only_attempt() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Review codebase"])
+        .assert()
+        .success();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Created review-only Attempt attempt-review with 5 review Tasks",
+        ))
+        .stdout(predicate::str::contains("attempt-review-review-tests"));
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let attempt = &value["attempts"][0];
+    assert_eq!(attempt["id"], "attempt-review");
+    assert_eq!(attempt["kind"], "review-only");
+    assert_eq!(attempt["status"], "reviewing");
+    assert_eq!(attempt["review_state"], "not-reviewed");
+    assert_eq!(attempt["tasks"].as_array().unwrap().len(), 5);
+    assert!(merge_candidates_are_empty(&value));
+
+    let review_task = attempt["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "attempt-review-review-tests")
+        .unwrap();
+    assert_eq!(review_task["kind"], "review");
+    assert_eq!(review_task["workspace_access"]["reads"][0]["id"], "source");
+    assert_eq!(review_task["workspace_access"]["reads"][0]["path"], ".");
+    assert!(
+        review_task["workspace_access"]["writes"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        review_task["artifact_area"]["path"],
+        ".factory/work/artifacts/attempt-review/attempt-review-review-tests"
+    );
+    assert_eq!(
+        review_task["review_context"]["candidate_workspace_id"],
+        "source"
+    );
+    assert_eq!(
+        review_task["review_context"]["candidate_workspace_path"],
+        "."
+    );
+    assert_eq!(review_task["review_context"]["source_branch"], "main");
+    assert_eq!(
+        review_task["review_context"]["candidate_commit"],
+        git_head(&main_dir)
+    );
+}
+
+#[test]
+fn work_review_codebase_missing_or_duplicate_leaves_state_unchanged() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Review codebase"])
+        .assert()
+        .success();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .assert()
+        .success();
+    let item_path = main_dir.join(".factory/work/items/work-1.json");
+    let before = fs::read_to_string(&item_path).unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review-codebase", "missing-work", "attempt-review"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Work Item \"missing-work\" not found",
+        ));
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Attempt \"attempt-review\" already exists",
+        ));
+
+    assert_eq!(fs::read_to_string(item_path).unwrap(), before);
+    assert!(
+        !main_dir
+            .join(".factory/work/items/missing-work.json")
+            .exists()
+    );
+}
+
+#[test]
 fn work_task_run_completes_review_task_with_fail_verdict_artifact() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
@@ -1647,6 +1753,160 @@ fn work_attempt_run_drives_write_reviews_and_passes() {
         ));
     let after = read_work_show_json(&main_dir, "work-1");
     assert_eq!(after, before);
+}
+
+#[test]
+fn work_attempt_run_review_only_passes_without_merge_candidate() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Review codebase"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .assert()
+        .success();
+
+    let main_head = git_head(&main_dir);
+    let bin_dir = tmp.path().join("bin-review-only-pass");
+    write_mock_claude(&bin_dir, &review_only_mock_script("pass"));
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-review",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Review-only Attempt attempt-review passed",
+        ))
+        .stdout(predicate::str::contains("Merge Candidate").not())
+        .stdout(predicate::str::contains("follow-up").not());
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let attempt = &value["attempts"][0];
+    assert_eq!(attempt["status"], "complete");
+    assert_eq!(attempt["review_state"], "passed");
+    assert_eq!(review_only_write_task_count(attempt), 0);
+    assert!(merge_candidates_are_empty(&value));
+    assert_eq!(git_head(&main_dir), main_head);
+    assert_no_non_factory_changes(&main_dir);
+}
+
+#[test]
+fn work_attempt_run_review_only_fails_without_followup() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Review codebase"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-review-only-fail");
+    write_mock_claude(&bin_dir, &review_only_mock_script("fail"));
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-review",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Review-only Attempt attempt-review failed",
+        ))
+        .stdout(predicate::str::contains("Merge Candidate").not())
+        .stdout(predicate::str::contains("follow-up").not());
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let attempt = &value["attempts"][0];
+    assert_eq!(attempt["status"], "failed");
+    assert_eq!(attempt["review_state"], "failed");
+    assert_eq!(review_only_write_task_count(attempt), 0);
+    assert!(merge_candidates_are_empty(&value));
+    assert_no_non_factory_changes(&main_dir);
+}
+
+#[test]
+fn work_attempt_run_review_only_uncertain_needs_user() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Review codebase"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-review-only-uncertain");
+    write_mock_claude(&bin_dir, &review_only_mock_script("uncertain"));
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-review",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Attempt attempt-review needs user input",
+        ))
+        .stdout(predicate::str::contains("Merge Candidate").not())
+        .stdout(predicate::str::contains("follow-up").not());
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let attempt = &value["attempts"][0];
+    assert_eq!(attempt["status"], "needs-user");
+    assert_eq!(attempt["review_state"], "uncertain");
+    assert!(
+        attempt["artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|artifact| {
+                artifact["path"] == ".factory/work/artifacts/attempt-review/needs-user.md"
+            })
+    );
+    assert_eq!(review_only_write_task_count(attempt), 0);
+    assert!(merge_candidates_are_empty(&value));
+    assert!(
+        main_dir
+            .join(".factory/work/artifacts/attempt-review/needs-user.md")
+            .is_file()
+    );
+    assert_no_non_factory_changes(&main_dir);
 }
 
 #[test]
@@ -5946,6 +6206,57 @@ esac
 exit 0
 "##
     )
+}
+
+fn review_only_mock_script(verdict: &str) -> String {
+    format!(
+        r##"#!/bin/bash
+printf 'Verdict: {verdict}\n\nReview-only result.\n' > review.md
+exit 0
+"##
+    )
+}
+
+fn review_only_write_task_count(attempt: &serde_json::Value) -> usize {
+    attempt["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| task["kind"] == "write")
+        .count()
+}
+
+fn merge_candidates_are_empty(value: &serde_json::Value) -> bool {
+    value
+        .get("merge_candidates")
+        .and_then(|candidates| candidates.as_array())
+        .is_none_or(Vec::is_empty)
+}
+
+fn assert_no_non_factory_changes(path: &Path) {
+    let output = StdCommand::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git status failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status = String::from_utf8_lossy(&output.stdout);
+    let unexpected = status
+        .lines()
+        .filter(|line| {
+            !line
+                .get(3..)
+                .is_some_and(|path| path.starts_with(".factory/"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        unexpected.is_empty(),
+        "source files should not change:\n{status}"
+    );
 }
 
 fn stateful_loop_mock_script(verdict: &str) -> String {
