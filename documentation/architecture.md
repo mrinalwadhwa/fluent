@@ -822,7 +822,7 @@ factory/main/
     coder.rs                 ← Coder trait + Claude/Codex implementations
     cli.rs                   ← CLI argument types
     checks.rs                ← Project check execution and autofix commits
-    cleanup.rs               ← Cleanup of terminal run worktrees
+    cleanup.rs               ← Cleanup of terminal run and Work state
     config.rs                ← .factory/config.toml parsing
     content.rs               ← Runtime content resolution (project → user → bundled)
     credential.rs            ← Keychain credential injection
@@ -948,14 +948,25 @@ the worktree, and setting status to `landed`.
 
 ### Cleanup
 
-`cleanup.rs` owns cleanup of terminal run artifacts. Cleanup selects
-`complete` and `landed` runs by default, rejects non-terminal targets,
-and preserves the source run directory. Applying cleanup writes
-`cleaned.md` with the original status, cleanup time, and worktree
-outcome. If a run records a git-registered worktree, cleanup removes it
-through `git worktree remove --force`; if the path is missing or is not a
+`cleanup.rs` owns cleanup of terminal legacy run artifacts and terminal
+Work model state. Legacy cleanup selects `complete` and `landed` runs by
+default, rejects non-terminal targets, and preserves the source run
+directory. Applying legacy cleanup writes `cleaned.md` with the original
+status, cleanup time, and worktree outcome. If a run records a
+git-registered worktree, cleanup removes it through
+`git worktree remove --force`; if the path is missing or is not a
 registered worktree, cleanup records that outcome instead of deleting
 arbitrary directories.
+
+Work cleanup runs from the same `factory cleanup` command when no
+`--run-id` is supplied. It selects Work Items only after every Attempt,
+Task, and Merge Candidate is terminal. Applying cleanup removes the Work
+Item JSON, referenced Work artifact files or directories, managed
+candidate worktrees, and Work task branches. Managed Work worktrees are
+resolved with the same expected workspace path rules used by Work task
+and merge execution, and registered worktrees are removed through
+`git worktree remove --force`. Missing worktree paths and unregistered
+directories are reported without deleting arbitrary filesystem paths.
 
 Cleanup resolves source Factory state even when invoked from a run
 worktree by finding the registered worktree that points back to the

@@ -4505,6 +4505,158 @@ fn cleanup_work_items_selects_failed_terminal_and_skips_pending_merge_candidate(
     assert!(pending_item_path.exists());
 }
 
+#[test]
+fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "create",
+            "work-merge-cleanup",
+            "--title",
+            "Merge cleanup work",
+        ])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-merge-cleanup", "attempt-1"])
+        .assert()
+        .success();
+
+    let item_path = main_dir.join(".factory/work/items/work-merge-cleanup.json");
+    let workspace_path = "../work-18-work-merge-cleanup-attempt-1";
+    let worktree_dir = main_dir.join(workspace_path);
+    let branch_name = "work/work-merge-cleanup/attempt-1/attempt-1-write";
+    StdCommand::new("git")
+        .args([
+            "worktree",
+            "add",
+            worktree_dir.to_str().unwrap(),
+            "-b",
+            branch_name,
+            "HEAD",
+        ])
+        .current_dir(&main_dir)
+        .output()
+        .unwrap();
+
+    let candidate_head = git_head(&worktree_dir);
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
+    value["attempts"][0]["status"] = serde_json::Value::String("complete".to_string());
+    value["attempts"][0]["review_state"] = serde_json::Value::String("passed".to_string());
+    value["attempts"][0]["tasks"][0]["status"] = serde_json::Value::String("complete".to_string());
+    value["attempts"][0]["tasks"][0]["output"] = serde_json::json!({
+        "workspace_id": "candidate",
+        "workspace_path": workspace_path,
+        "source_branch": "main",
+        "commit": candidate_head
+    });
+    value["merge_candidates"] = serde_json::json!([
+        {
+            "id": "candidate-1",
+            "attempt_id": "attempt-1",
+            "source_workspace": {
+                "id": "candidate",
+                "path": workspace_path
+            },
+            "target_workspace": {
+                "id": "target",
+                "path": "."
+            },
+            "source_branch": "main",
+            "target_branch": "main",
+            "candidate_commit": candidate_head,
+            "review_state": "passed",
+            "merge_state": {
+                "status": "landed",
+                "landed_commit": git_head(&main_dir),
+                "check_artifacts": [
+                    {
+                        "producer_id": "merge-check",
+                        "path": ".factory/work/artifacts/attempt-1/candidate-1/merge/checks/checks.json"
+                    }
+                ],
+                "review_artifacts": [
+                    {
+                        "producer_id": "merge-review-tests",
+                        "path": ".factory/work/artifacts/attempt-1/candidate-1/merge/reviews/tests/review.md"
+                    }
+                ]
+            }
+        }
+    ]);
+    fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+    let check_artifact =
+        main_dir.join(".factory/work/artifacts/attempt-1/candidate-1/merge/checks/checks.json");
+    let review_artifact = main_dir
+        .join(".factory/work/artifacts/attempt-1/candidate-1/merge/reviews/tests/review.md");
+    fs::create_dir_all(check_artifact.parent().unwrap()).unwrap();
+    fs::create_dir_all(review_artifact.parent().unwrap()).unwrap();
+    fs::write(&check_artifact, "{}").unwrap();
+    fs::write(&review_artifact, "Verdict: pass\n").unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .arg("cleanup")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "would clean Work Item work-merge-cleanup",
+        ))
+        .stdout(predicate::str::contains("would remove registered worktree"))
+        .stdout(predicate::str::contains("would remove Work branch"))
+        .stdout(predicate::str::contains(
+            check_artifact.to_string_lossy().as_ref(),
+        ))
+        .stdout(predicate::str::contains(
+            review_artifact.to_string_lossy().as_ref(),
+        ));
+
+    assert!(item_path.exists());
+    assert!(worktree_dir.exists());
+    assert!(check_artifact.exists());
+    assert!(review_artifact.exists());
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["cleanup", "--apply"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "cleaned Work Item work-merge-cleanup",
+        ))
+        .stdout(predicate::str::contains("removed registered worktree"))
+        .stdout(predicate::str::contains("removed Work branch"))
+        .stdout(predicate::str::contains("removed Work artifact"));
+
+    assert!(!item_path.exists());
+    assert!(!worktree_dir.exists());
+    assert!(!check_artifact.exists());
+    assert!(!review_artifact.exists());
+    assert!(
+        !main_dir
+            .join(".factory/work/artifacts/attempt-1/candidate-1")
+            .exists()
+    );
+
+    let branch_check = StdCommand::new("git")
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch_name}"),
+        ])
+        .current_dir(&main_dir)
+        .status()
+        .unwrap();
+    assert!(!branch_check.success());
+}
+
 // -------------------------------------------------------------------------
 // Summary
 // -------------------------------------------------------------------------

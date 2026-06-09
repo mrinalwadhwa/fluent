@@ -719,6 +719,26 @@ WHEN cleanup sees a recorded worktree path that git does not register,
 THE SYSTEM SHALL leave the path in place and report that it was skipped.
 Test: src/cleanup.rs (unregistered_worktree_path_is_not_removed), tests/binary.rs (cleanup_skips_unregistered_worktree_path)
 
+WHEN `factory cleanup` sees terminal Work Items,
+THE SYSTEM SHALL report Work Item state, artifacts, managed candidate
+worktrees, and Work branches without removing them unless `--apply` is
+passed.
+Test: tests/binary.rs (cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch), tests/binary.rs (cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree)
+
+WHEN `factory cleanup --apply` cleans a terminal Work Item,
+THE SYSTEM SHALL remove the Work Item state, referenced Work artifacts,
+registered managed candidate worktrees, and Work branches.
+Test: tests/binary.rs (cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch), tests/binary.rs (cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree)
+
+WHEN Work cleanup sees active Work Items or Work Items with active Merge
+Candidates,
+THE SYSTEM SHALL leave them out of cleanup results.
+Test: tests/binary.rs (cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch), tests/binary.rs (cleanup_work_items_selects_failed_terminal_and_skips_pending_merge_candidate)
+
+WHEN Work cleanup sees failed terminal Work Items,
+THE SYSTEM SHALL select them for cleanup.
+Test: tests/binary.rs (cleanup_work_items_selects_failed_terminal_and_skips_pending_merge_candidate)
+
 WHEN the dashboard opens without an explicit run,
 THE SYSTEM SHALL prefer actionable runs over cleaned runs.
 Test: src/dashboard.rs (test_app_new_prefers_actionable_run_over_cleaned_terminal_run)
