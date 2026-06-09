@@ -34,8 +34,13 @@ if ! grep -Fq '.factory/runs/[run-id]/behaviors.diff.md' <<<"$phase_one_reads"; 
   failures=$((failures + 1))
 fi
 
-if ! grep -Fq '.factory/runs/[run-id]/brief.md' <<<"$phase_one_reads"; then
-  echo "review-behaviors Phase 1 no longer tells reviewers to read brief.md" >&2
+if ! grep -Fq 'Work Item and Task context in the prompt for Work-model reviews' <<<"$phase_one_reads"; then
+  echo "review-behaviors Phase 1 no longer tells Work reviewers to use prompt context" >&2
+  failures=$((failures + 1))
+fi
+
+if ! grep -Fq 'or `.factory/runs/[run-id]/brief.md` for legacy run reviews' <<<"$phase_one_reads"; then
+  echo "review-behaviors Phase 1 no longer limits brief.md to legacy reviews" >&2
   failures=$((failures + 1))
 fi
 

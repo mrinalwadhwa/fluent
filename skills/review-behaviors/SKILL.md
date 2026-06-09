@@ -30,9 +30,11 @@ reason to look at the code.
 You may read:
 - The Work behavior review input in the prompt — the behavior increment
   to verify for Work-model Attempt and merge-time reviews
+- The Work Item and Task context in the prompt — the intent behind a
+  Work-model review
 - `.factory/runs/[run-id]/behaviors.diff.md` — the new behaviors to
   verify for legacy run reviews
-- `.factory/runs/[run-id]/brief.md` — the intent behind the run
+- `.factory/runs/[run-id]/brief.md` — the intent behind a legacy run
 - `documentation/behaviors.md` — existing behaviors and their tests
 - User-facing documentation (README, skills, guides — whatever describes
   how to use the system from the outside)
@@ -58,7 +60,9 @@ Read:
 - The Work behavior review input in the prompt for Work-model reviews,
   or `.factory/runs/[run-id]/behaviors.diff.md` for legacy run reviews
   — the behaviors to verify
-- `.factory/runs/[run-id]/brief.md` — context for the run's intent
+- The Work Item and Task context in the prompt for Work-model reviews,
+  or `.factory/runs/[run-id]/brief.md` for legacy run reviews — context
+  for the review intent
 - `documentation/behaviors.md` — existing behaviors and test references
 - User-facing documentation — to understand the system's external
   interface
