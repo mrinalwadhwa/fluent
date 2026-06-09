@@ -833,6 +833,9 @@ exit 0
     assert!(prompt.contains("Attempt: attempt-1"));
     assert!(prompt.contains("Task: attempt-1-write"));
     assert!(prompt.contains("Role: author"));
+    assert!(prompt.contains("Completion contract:"));
+    assert!(prompt.contains("Commit all Task output"));
+    assert!(prompt.contains("Leave the writable workspace clean"));
     assert!(!prompt.contains("Task instructions:"));
     assert!(prompt.contains("Current Task model:"));
     assert!(prompt.contains(r#""id": "attempt-1-write""#));

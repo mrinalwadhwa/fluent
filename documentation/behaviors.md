@@ -160,6 +160,14 @@ Test: tests/behaviors/operations/test-work-task-run.sh (run passes Task instruct
 Test: tests/behaviors/operations/test-work-task-instructions.sh (task run uses durable instructions and keeps extra args out of prompt)
 Test: tests/behaviors/operations/test-work-task-instructions.sh (attempt run uses durable instructions and keeps extra args out of prompt)
 
+WHEN `factory work task run <work-item-id> <attempt-id> <task-id>` or
+`factory work attempt run <work-item-id> <attempt-id>` launches a
+`write` Task,
+THE SYSTEM SHALL tell the coder that the Task completes only after all
+Task output is committed and the writable workspace is clean.
+Test: tests/binary.rs (work_task_run_passes_task_context_to_coder_prompt)
+Test: tests/behaviors/operations/test-work-task-run.sh (run passes Task context to coder prompt)
+
 IF a caller passes extra args to `factory work task run` or
 `factory work attempt run`,
 THE SYSTEM SHALL pass those args only as coder options and SHALL NOT

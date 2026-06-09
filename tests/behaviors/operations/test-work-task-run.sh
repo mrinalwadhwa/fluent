@@ -209,6 +209,9 @@ test_run_passes_task_context_to_coder_prompt() {
   assert_contains "$PROMPT" "Attempt: attempt-1" || RESULT=1
   assert_contains "$PROMPT" "Task: attempt-1-write" || RESULT=1
   assert_contains "$PROMPT" "Role: author" || RESULT=1
+  assert_contains "$PROMPT" "Completion contract:" || RESULT=1
+  assert_contains "$PROMPT" "Commit all Task output" || RESULT=1
+  assert_contains "$PROMPT" "Leave the writable workspace clean" || RESULT=1
   assert_contains "$PROMPT" "Current Task model:" || RESULT=1
   assert_contains "$PROMPT" '"id": "attempt-1-write"' || RESULT=1
   assert_contains "$PROMPT" '"kind": "write"' || RESULT=1
