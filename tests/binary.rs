@@ -4463,6 +4463,63 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
 }
 
 #[test]
+fn cleanup_work_items_apply_skips_unregistered_managed_worktree() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "create",
+            "work-unregistered",
+            "--title",
+            "Unregistered cleanup work",
+        ])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-unregistered", "attempt-1"])
+        .assert()
+        .success();
+
+    let item_path = main_dir.join(".factory/work/items/work-unregistered.json");
+    let workspace_path = "../work-17-work-unregistered-attempt-1";
+    let workspace_dir = main_dir.join(workspace_path);
+    fs::create_dir_all(&workspace_dir).unwrap();
+    fs::write(workspace_dir.join("user-file.txt"), "keep me").unwrap();
+
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
+    value["attempts"][0]["status"] = serde_json::Value::String("complete".to_string());
+    value["attempts"][0]["tasks"][0]["status"] = serde_json::Value::String("complete".to_string());
+    value["attempts"][0]["tasks"][0]["output"] = serde_json::json!({
+        "workspace_id": "candidate",
+        "workspace_path": workspace_path,
+        "source_branch": "main",
+        "commit": git_head(&main_dir)
+    });
+    fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["cleanup", "--apply"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "cleaned Work Item work-unregistered",
+        ))
+        .stdout(predicate::str::contains("skipped unregistered worktree"));
+
+    assert!(!item_path.exists());
+    assert!(workspace_dir.is_dir());
+    assert_eq!(
+        fs::read_to_string(workspace_dir.join("user-file.txt")).unwrap(),
+        "keep me"
+    );
+}
+
+#[test]
 fn cleanup_work_items_selects_failed_terminal_and_skips_pending_merge_candidate() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
