@@ -381,8 +381,13 @@ fn run_one_merge_reviewer(
     let prompt_content = config.resolver.resolve_content(&prompt_key);
     let system = prompt_content
         .as_deref()
-        .map(work_merge_reviewer_system_prompt)
-        .unwrap_or_else(|| format!("You are a Factory {reviewer} reviewer."));
+        .map(|content| work_merge_reviewer_system_prompt(content, reviewer, source_workspace))
+        .unwrap_or_else(|| {
+            format!(
+                "You are a Factory {reviewer} reviewer.\n{}",
+                merge_review_skill_instruction(reviewer, source_workspace)
+            )
+        });
     let candidate_json = to_json_pretty(candidate)?;
     let attempt_history = merge_review_attempt_history(item, candidate);
     let review_artifact_path = path_for_model(config.project_root, review_path);
@@ -451,12 +456,30 @@ fn run_one_merge_reviewer(
     })
 }
 
-fn work_merge_reviewer_system_prompt(content: &str) -> String {
-    prompt_section(content, "system")
+fn work_merge_reviewer_system_prompt(
+    content: &str,
+    reviewer: &str,
+    source_workspace: &Path,
+) -> String {
+    let mut lines = prompt_section(content, "system")
         .lines()
         .filter(|line| !line.contains(".factory/runs/"))
-        .collect::<Vec<_>>()
-        .join("\n")
+        .filter(|line| !line.contains("skills/review-"))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    lines.push(merge_review_skill_instruction(reviewer, source_workspace));
+    lines.join("\n")
+}
+
+fn merge_review_skill_instruction(reviewer: &str, source_workspace: &Path) -> String {
+    let path = source_workspace.join(format!("skills/review-{reviewer}/SKILL.md"));
+    if path.is_file() {
+        format!("Follow the review-{reviewer} skill at {}.", path.display())
+    } else {
+        format!(
+            "No review-{reviewer} skill file was found in the candidate workspace; apply the reviewer role directly."
+        )
+    }
 }
 
 fn merge_review_attempt_history(

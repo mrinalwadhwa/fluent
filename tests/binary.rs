@@ -1598,6 +1598,22 @@ fn work_attempt_run_drives_write_reviews_and_passes() {
 fn work_merge_candidate_lands_after_merge_time_reviews() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
+    fs::create_dir_all(main_dir.join("skills/review-documentation")).unwrap();
+    fs::write(
+        main_dir.join("skills/review-documentation/SKILL.md"),
+        "# Documentation review\n",
+    )
+    .unwrap();
+    StdCommand::new("git")
+        .args(["add", "skills/review-documentation/SKILL.md"])
+        .current_dir(&main_dir)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "Add documentation review skill"])
+        .current_dir(&main_dir)
+        .output()
+        .unwrap();
     factory_cmd()
         .current_dir(&main_dir)
         .args(["work", "create", "work-1", "--title", "Merge candidate"])
@@ -1610,6 +1626,7 @@ fn work_merge_candidate_lands_after_merge_time_reviews() {
         .success();
 
     let bin_dir = tmp.path().join("bin-merge-pass");
+    let system_log = tmp.path().join("merge-system.log");
     write_mock_claude(&bin_dir, &loop_mock_script("pass"));
     factory_cmd()
         .current_dir(&main_dir)
@@ -1626,6 +1643,8 @@ fn work_merge_candidate_lands_after_merge_time_reviews() {
         .success();
 
     let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
+    let documentation_skill =
+        fs::canonicalize(candidate_workspace.join("skills/review-documentation/SKILL.md")).unwrap();
     let candidate_head = git_head(&candidate_workspace);
     let main_before = git_head(&main_dir);
     assert_ne!(main_before, candidate_head);
@@ -1640,6 +1659,7 @@ fn work_merge_candidate_lands_after_merge_time_reviews() {
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&bin_dir))
+        .env("SYSTEM_LOG", &system_log)
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -1649,6 +1669,19 @@ fn work_merge_candidate_lands_after_merge_time_reviews() {
     assert_eq!(git_head(&main_dir), candidate_head);
     assert!(main_dir.join("loop-output.txt").is_file());
     assert!(!candidate_workspace.exists());
+    let logged_system = fs::read_to_string(system_log).unwrap();
+    assert!(
+        logged_system.contains(documentation_skill.to_string_lossy().as_ref()),
+        "logged system prompt should contain {}:\n{}",
+        documentation_skill.display(),
+        logged_system
+    );
+    assert!(
+        !logged_system.contains(
+            "Follow the review-documentation skill at skills/review-documentation/SKILL.md"
+        )
+    );
+    assert!(!logged_system.contains(".factory/runs/{{RUN_ID}}/reviews"));
 
     let json = fs::read_to_string(main_dir.join(".factory/work/items/work-1.json")).unwrap();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -5806,6 +5839,16 @@ case "$PWD" in
     git commit -m "Add loop output" >/dev/null
     ;;
   *)
+    if [ -n "${{SYSTEM_LOG:-}}" ]; then
+      while [ "$#" -gt 0 ]; do
+        if [ "$1" = "--append-system-prompt" ]; then
+          shift
+          printf '%s\n' "$1" >> "$SYSTEM_LOG"
+          break
+        fi
+        shift
+      done
+    fi
     printf 'Verdict: {verdict}\n\nLoop review.\n' > review.md
     ;;
 esac
