@@ -9,6 +9,9 @@ use std::str::FromStr;
 
 pub const WORK_MODEL_DIR: &str = ".factory/work";
 pub const WORK_ITEMS_DIR: &str = "items";
+pub const WORK_ATTEMPTS_DIR: &str = "attempts";
+pub const WORK_TASKS_DIR: &str = "tasks";
+pub const WORK_MERGE_CANDIDATES_DIR: &str = "merge-candidates";
 pub const WORK_ARTIFACTS_DIR: &str = ".factory/work/artifacts";
 
 pub fn initial_candidate_workspace_path(work_item_id: &str, attempt_id: &str) -> String {
@@ -1361,6 +1364,76 @@ pub struct WorkModelStore {
     project_root: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct WorkItemRecord {
+    id: String,
+    title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    planning_context: Option<PlanningContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    instructions: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct AttemptRecord {
+    id: String,
+    work_item_id: String,
+    status: AttemptStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_state: Option<AttemptReviewState>,
+    #[serde(default)]
+    artifacts: Vec<ArtifactRef>,
+}
+
+impl From<&WorkItem> for WorkItemRecord {
+    fn from(work_item: &WorkItem) -> Self {
+        Self {
+            id: work_item.id.clone(),
+            title: work_item.title.clone(),
+            planning_context: work_item.planning_context.clone(),
+            instructions: work_item.instructions.clone(),
+        }
+    }
+}
+
+impl From<WorkItemRecord> for WorkItem {
+    fn from(record: WorkItemRecord) -> Self {
+        Self {
+            id: record.id,
+            title: record.title,
+            planning_context: record.planning_context,
+            instructions: record.instructions,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        }
+    }
+}
+
+impl From<&Attempt> for AttemptRecord {
+    fn from(attempt: &Attempt) -> Self {
+        Self {
+            id: attempt.id.clone(),
+            work_item_id: attempt.work_item_id.clone(),
+            status: attempt.status.clone(),
+            review_state: attempt.review_state.clone(),
+            artifacts: attempt.artifacts.clone(),
+        }
+    }
+}
+
+impl From<AttemptRecord> for Attempt {
+    fn from(record: AttemptRecord) -> Self {
+        Self {
+            id: record.id,
+            work_item_id: record.work_item_id,
+            status: record.status,
+            tasks: Vec::new(),
+            review_state: record.review_state,
+            artifacts: record.artifacts,
+        }
+    }
+}
+
 impl WorkModelStore {
     pub fn new(project_root: impl Into<PathBuf>) -> Self {
         Self {
@@ -1376,8 +1449,62 @@ impl WorkModelStore {
         self.work_dir().join(WORK_ITEMS_DIR)
     }
 
+    pub fn work_attempts_dir(&self) -> PathBuf {
+        self.work_dir().join(WORK_ATTEMPTS_DIR)
+    }
+
+    pub fn work_tasks_dir(&self) -> PathBuf {
+        self.work_dir().join(WORK_TASKS_DIR)
+    }
+
+    pub fn work_merge_candidates_dir(&self) -> PathBuf {
+        self.work_dir().join(WORK_MERGE_CANDIDATES_DIR)
+    }
+
     pub fn work_item_path(&self, id: &str) -> Result<PathBuf, WorkModelStorageError> {
         work_item_file_name(id).map(|file_name| self.work_items_dir().join(file_name))
+    }
+
+    pub fn work_attempt_path(
+        &self,
+        work_item_id: &str,
+        attempt_id: &str,
+    ) -> Result<PathBuf, WorkModelStorageError> {
+        let work_item_dir = object_dir_name(work_item_id)?;
+        let attempt_file = object_file_name(attempt_id)?;
+        Ok(self
+            .work_attempts_dir()
+            .join(work_item_dir)
+            .join(attempt_file))
+    }
+
+    pub fn work_task_path(
+        &self,
+        work_item_id: &str,
+        attempt_id: &str,
+        task_id: &str,
+    ) -> Result<PathBuf, WorkModelStorageError> {
+        let work_item_dir = object_dir_name(work_item_id)?;
+        let attempt_dir = object_dir_name(attempt_id)?;
+        let task_file = object_file_name(task_id)?;
+        Ok(self
+            .work_tasks_dir()
+            .join(work_item_dir)
+            .join(attempt_dir)
+            .join(task_file))
+    }
+
+    pub fn work_merge_candidate_path(
+        &self,
+        work_item_id: &str,
+        candidate_id: &str,
+    ) -> Result<PathBuf, WorkModelStorageError> {
+        let work_item_dir = object_dir_name(work_item_id)?;
+        let candidate_file = object_file_name(candidate_id)?;
+        Ok(self
+            .work_merge_candidates_dir()
+            .join(work_item_dir)
+            .join(candidate_file))
     }
 
     pub fn list_work_items(&self) -> Result<Vec<WorkItem>, WorkModelStorageError> {
@@ -1473,11 +1600,11 @@ impl WorkModelStore {
         fs::create_dir_all(&dir)
             .map_err(|source| WorkModelStorageError::CreateDirectory { path: dir, source })?;
 
-        let json =
-            to_json_pretty(work_item).map_err(|source| WorkModelStorageError::ParseFile {
-                path: path.clone(),
-                source,
-            })?;
+        let record = WorkItemRecord::from(work_item);
+        let json = to_json_pretty(&record).map_err(|source| WorkModelStorageError::ParseFile {
+            path: path.clone(),
+            source,
+        })?;
         if create_new {
             let mut file = OpenOptions::new()
                 .write(true)
@@ -1497,11 +1624,20 @@ impl WorkModelStore {
                     }
                 })?;
             file.write_all(json.as_bytes())
-                .map_err(|source| WorkModelStorageError::WriteFile { path, source })
+                .map_err(|source| WorkModelStorageError::WriteFile {
+                    path: path.clone(),
+                    source,
+                })?;
         } else {
-            fs::write(&path, json)
-                .map_err(|source| WorkModelStorageError::WriteFile { path, source })
+            fs::write(&path, json).map_err(|source| WorkModelStorageError::WriteFile {
+                path: path.clone(),
+                source,
+            })?;
         }
+
+        self.write_attempt_records(work_item)?;
+        self.write_merge_candidate_records(work_item)?;
+        Ok(())
     }
 
     fn read_work_item_file(
@@ -1514,20 +1650,24 @@ impl WorkModelStore {
                 path: path.to_path_buf(),
                 source,
             })?;
-        let work_item: WorkItem =
+        let legacy_work_item: WorkItem =
             from_json(&content).map_err(|source| WorkModelStorageError::ParseFile {
                 path: path.to_path_buf(),
                 source,
             })?;
         if let Some(expected) = path.file_stem().and_then(|stem| stem.to_str()) {
             work_item_file_name(expected)?;
-            if work_item.id != expected {
+            if legacy_work_item.id != expected {
                 return Err(WorkModelStorageError::WorkItemIdMismatch {
                     path: path.to_path_buf(),
                     expected: expected.to_string(),
-                    actual: work_item.id.clone(),
+                    actual: legacy_work_item.id.clone(),
                 });
             }
+        }
+        let mut work_item = legacy_work_item.clone();
+        if self.has_split_records(&work_item.id) {
+            work_item = self.assemble_split_work_item(&work_item.id, path)?;
         }
         if validate {
             work_item
@@ -1539,13 +1679,326 @@ impl WorkModelStore {
         }
         Ok(work_item)
     }
+
+    fn has_split_records(&self, work_item_id: &str) -> bool {
+        self.work_attempts_dir().join(work_item_id).exists()
+            || self.work_tasks_dir().join(work_item_id).exists()
+            || self.work_merge_candidates_dir().join(work_item_id).exists()
+    }
+
+    fn assemble_split_work_item(
+        &self,
+        work_item_id: &str,
+        item_path: &Path,
+    ) -> Result<WorkItem, WorkModelStorageError> {
+        let content =
+            fs::read_to_string(item_path).map_err(|source| WorkModelStorageError::ReadFile {
+                path: item_path.to_path_buf(),
+                source,
+            })?;
+        let record: WorkItemRecord =
+            from_json(&content).map_err(|source| WorkModelStorageError::ParseFile {
+                path: item_path.to_path_buf(),
+                source,
+            })?;
+        if record.id != work_item_id {
+            return Err(WorkModelStorageError::WorkItemIdMismatch {
+                path: item_path.to_path_buf(),
+                expected: work_item_id.to_string(),
+                actual: record.id,
+            });
+        }
+
+        let mut work_item = WorkItem::from(record);
+        work_item.attempts = self.read_attempt_records(work_item_id)?;
+        work_item.merge_candidates = self.read_merge_candidate_records(work_item_id)?;
+        Ok(work_item)
+    }
+
+    fn write_attempt_records(&self, work_item: &WorkItem) -> Result<(), WorkModelStorageError> {
+        let attempts_dir = self.work_attempts_dir().join(&work_item.id);
+        let tasks_item_dir = self.work_tasks_dir().join(&work_item.id);
+        fs::create_dir_all(&attempts_dir).map_err(|source| {
+            WorkModelStorageError::CreateDirectory {
+                path: attempts_dir.clone(),
+                source,
+            }
+        })?;
+        fs::create_dir_all(&tasks_item_dir).map_err(|source| {
+            WorkModelStorageError::CreateDirectory {
+                path: tasks_item_dir.clone(),
+                source,
+            }
+        })?;
+
+        let mut attempt_files = HashSet::new();
+        let mut attempt_dirs = HashSet::new();
+        for attempt in &work_item.attempts {
+            let attempt_path = self.work_attempt_path(&work_item.id, &attempt.id)?;
+            let record = AttemptRecord::from(attempt);
+            write_json_file(&attempt_path, &record)?;
+            attempt_files.insert(attempt_path);
+
+            let task_dir = tasks_item_dir.join(object_dir_name(&attempt.id)?);
+            fs::create_dir_all(&task_dir).map_err(|source| {
+                WorkModelStorageError::CreateDirectory {
+                    path: task_dir.clone(),
+                    source,
+                }
+            })?;
+            attempt_dirs.insert(task_dir.clone());
+            let mut task_files = HashSet::new();
+            for task in &attempt.tasks {
+                let task_path = self.work_task_path(&work_item.id, &attempt.id, &task.id)?;
+                write_json_file(&task_path, task)?;
+                task_files.insert(task_path);
+            }
+            prune_json_files(&task_dir, &task_files)?;
+        }
+        prune_json_files(&attempts_dir, &attempt_files)?;
+        prune_child_dirs(&tasks_item_dir, &attempt_dirs)?;
+        Ok(())
+    }
+
+    fn write_merge_candidate_records(
+        &self,
+        work_item: &WorkItem,
+    ) -> Result<(), WorkModelStorageError> {
+        let candidates_dir = self.work_merge_candidates_dir().join(&work_item.id);
+        fs::create_dir_all(&candidates_dir).map_err(|source| {
+            WorkModelStorageError::CreateDirectory {
+                path: candidates_dir.clone(),
+                source,
+            }
+        })?;
+        let mut candidate_files = HashSet::new();
+        for candidate in &work_item.merge_candidates {
+            let candidate_path = self.work_merge_candidate_path(&work_item.id, &candidate.id)?;
+            write_json_file(&candidate_path, candidate)?;
+            candidate_files.insert(candidate_path);
+        }
+        prune_json_files(&candidates_dir, &candidate_files)?;
+        Ok(())
+    }
+
+    fn read_attempt_records(
+        &self,
+        work_item_id: &str,
+    ) -> Result<Vec<Attempt>, WorkModelStorageError> {
+        let attempts_dir = self.work_attempts_dir().join(work_item_id);
+        if !attempts_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut attempts = Vec::new();
+        for path in list_json_paths(&attempts_dir)? {
+            let mut attempt: Attempt = read_json_file::<AttemptRecord>(&path)?.into();
+            let expected = file_stem_id(&path)?;
+            if attempt.id != expected {
+                return Err(WorkModelStorageError::InvalidModel {
+                    path,
+                    source: WorkModelError::AttemptNotFound { id: expected },
+                });
+            }
+            if attempt.work_item_id != work_item_id {
+                return Err(WorkModelStorageError::InvalidModel {
+                    path,
+                    source: WorkModelError::AttemptWorkItemMismatch {
+                        attempt_id: attempt.id,
+                        expected: work_item_id.to_string(),
+                        actual: attempt.work_item_id,
+                    },
+                });
+            }
+            attempt.tasks = self.read_task_records(work_item_id, &attempt.id)?;
+            attempts.push(attempt);
+        }
+        Ok(attempts)
+    }
+
+    fn read_task_records(
+        &self,
+        work_item_id: &str,
+        attempt_id: &str,
+    ) -> Result<Vec<Task>, WorkModelStorageError> {
+        let tasks_dir = self.work_tasks_dir().join(work_item_id).join(attempt_id);
+        if !tasks_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut tasks = Vec::new();
+        for path in list_json_paths(&tasks_dir)? {
+            let task: Task = read_json_file(&path)?;
+            let expected = file_stem_id(&path)?;
+            if task.id != expected {
+                return Err(WorkModelStorageError::InvalidModel {
+                    path,
+                    source: WorkModelError::TaskAlreadyExists { id: expected },
+                });
+            }
+            if task.work_item_id != work_item_id {
+                return Err(WorkModelStorageError::InvalidModel {
+                    path,
+                    source: WorkModelError::TaskWorkItemMismatch {
+                        task_id: task.id,
+                        expected: work_item_id.to_string(),
+                        actual: task.work_item_id,
+                    },
+                });
+            }
+            if task.attempt_id.as_deref() != Some(attempt_id) {
+                return Err(WorkModelStorageError::InvalidModel {
+                    path,
+                    source: WorkModelError::TaskAttemptMismatch {
+                        task_id: task.id,
+                        expected: attempt_id.to_string(),
+                        actual: task.attempt_id,
+                    },
+                });
+            }
+            task.validate()
+                .map_err(|source| WorkModelStorageError::InvalidModel {
+                    path: path.clone(),
+                    source,
+                })?;
+            tasks.push(task);
+        }
+        Ok(tasks)
+    }
+
+    fn read_merge_candidate_records(
+        &self,
+        work_item_id: &str,
+    ) -> Result<Vec<MergeCandidate>, WorkModelStorageError> {
+        let candidates_dir = self.work_merge_candidates_dir().join(work_item_id);
+        if !candidates_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut candidates = Vec::new();
+        for path in list_json_paths(&candidates_dir)? {
+            let candidate: MergeCandidate = read_json_file(&path)?;
+            let expected = file_stem_id(&path)?;
+            if candidate.id != expected {
+                return Err(WorkModelStorageError::InvalidModel {
+                    path,
+                    source: WorkModelError::MergeCandidateAlreadyExists { id: expected },
+                });
+            }
+            candidates.push(candidate);
+        }
+        Ok(candidates)
+    }
 }
 
 fn work_item_file_name(id: &str) -> Result<String, WorkModelStorageError> {
+    object_file_name(id)
+}
+
+fn object_dir_name(id: &str) -> Result<String, WorkModelStorageError> {
     if !is_file_safe_id(id) {
         return Err(WorkModelStorageError::InvalidWorkItemId { id: id.to_string() });
     }
-    Ok(format!("{id}.json"))
+    Ok(id.to_string())
+}
+
+fn object_file_name(id: &str) -> Result<String, WorkModelStorageError> {
+    object_dir_name(id).map(|id| format!("{id}.json"))
+}
+
+fn file_stem_id(path: &Path) -> Result<String, WorkModelStorageError> {
+    let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return Err(WorkModelStorageError::InvalidWorkItemId {
+            id: path.display().to_string(),
+        });
+    };
+    object_dir_name(id)
+}
+
+fn list_json_paths(dir: &Path) -> Result<Vec<PathBuf>, WorkModelStorageError> {
+    let mut paths = Vec::new();
+    let entries = fs::read_dir(dir).map_err(|source| WorkModelStorageError::ReadDirectory {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| WorkModelStorageError::ReadDirectory {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, WorkModelStorageError> {
+    let content = fs::read_to_string(path).map_err(|source| WorkModelStorageError::ReadFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    from_json(&content).map_err(|source| WorkModelStorageError::ParseFile {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), WorkModelStorageError> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|source| WorkModelStorageError::CreateDirectory {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+    }
+    let json = to_json_pretty(value).map_err(|source| WorkModelStorageError::ParseFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    fs::write(path, json).map_err(|source| WorkModelStorageError::WriteFile {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn prune_json_files(dir: &Path, keep: &HashSet<PathBuf>) -> Result<(), WorkModelStorageError> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for path in list_json_paths(dir)? {
+        if !keep.contains(&path) {
+            fs::remove_file(&path)
+                .map_err(|source| WorkModelStorageError::WriteFile { path, source })?;
+        }
+    }
+    Ok(())
+}
+
+fn prune_child_dirs(dir: &Path, keep: &HashSet<PathBuf>) -> Result<(), WorkModelStorageError> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    let entries = fs::read_dir(dir).map_err(|source| WorkModelStorageError::ReadDirectory {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| WorkModelStorageError::ReadDirectory {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        if path.is_dir() && !keep.contains(&path) {
+            fs::remove_dir_all(&path)
+                .map_err(|source| WorkModelStorageError::WriteFile { path, source })?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_id(kind: &'static str, id: &str) -> Result<(), WorkModelError> {

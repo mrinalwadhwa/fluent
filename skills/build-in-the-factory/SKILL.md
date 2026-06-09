@@ -218,7 +218,10 @@ Durable Work model state lives under `.factory/work/`:
 
 | Path | Purpose |
 |---|---|
-| `.factory/work/items/<work-item-id>.json` | Stored Work Item with Attempts, Tasks, and Merge Candidates |
+| `.factory/work/items/<work-item-id>.json` | Stored Work Item metadata and planning context |
+| `.factory/work/attempts/<work-item-id>/<attempt-id>.json` | Stored Attempt records |
+| `.factory/work/tasks/<work-item-id>/<attempt-id>/<task-id>.json` | Stored Task records |
+| `.factory/work/merge-candidates/<work-item-id>/<candidate-id>.json` | Stored Merge Candidate records |
 | `.factory/work/artifacts/<attempt-id>/<task-id>/` | Task artifacts such as review output |
 | `.factory/work/artifacts/<attempt-id>/<candidate-id>/merge/` | Merge-time review and execution artifacts |
 

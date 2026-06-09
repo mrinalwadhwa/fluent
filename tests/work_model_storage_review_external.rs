@@ -140,7 +140,9 @@ fn reviewer_storage_reports_invalid_files() {
 
     let store = WorkModelStore::new(temp.path());
     store.write_work_item(&documented_work_item()).unwrap();
-    let invalid_model = items.join("work-review.json");
+    let invalid_model = temp
+        .path()
+        .join(".factory/work/tasks/work-review/attempt-review/write-review.json");
     let content = fs::read_to_string(&invalid_model)
         .unwrap()
         .replace(r#""kind": "write""#, r#""kind": "review""#);
@@ -172,52 +174,27 @@ fn reviewer_storage_writes_documented_deterministic_json() {
         fs::read_to_string(path).unwrap(),
         r#"{
   "id": "work-review",
-  "title": "Review durable storage",
-  "attempts": [
-    {
-      "id": "attempt-review",
-      "work_item_id": "work-review",
-      "status": "complete",
-      "tasks": [
-        {
-          "id": "write-review",
-          "kind": "write",
-          "status": "complete",
-          "role": "author",
-          "work_item_id": "work-review",
-          "attempt_id": "attempt-review",
-          "workspace_access": {
-            "reads": [
-              {
-                "id": "main",
-                "path": "../workspaces/main"
-              }
-            ],
-            "writes": [
-              {
-                "id": "candidate",
-                "path": "../workspaces/candidate"
-              }
-            ]
-          },
-          "artifact_area": {
-            "path": ".factory/work/artifacts/write-review"
-          },
-          "output": {
-            "workspace_id": "candidate",
-            "workspace_path": "../workspaces/candidate",
-            "source_branch": "main",
-            "commit": "abc123"
-          }
-        }
-      ],
-      "review_state": "passed",
-      "artifacts": []
-    }
-  ]
+  "title": "Review durable storage"
 }
 "#
     );
+    let attempt = fs::read_to_string(
+        temp.path()
+            .join(".factory/work/attempts/work-review/attempt-review.json"),
+    )
+    .unwrap();
+    assert!(attempt.contains(r#""id": "attempt-review""#));
+    assert!(attempt.contains(r#""review_state": "passed""#));
+    assert!(!attempt.contains(r#""tasks""#));
+
+    let task = fs::read_to_string(
+        temp.path()
+            .join(".factory/work/tasks/work-review/attempt-review/write-review.json"),
+    )
+    .unwrap();
+    assert!(task.contains(r#""id": "write-review""#));
+    assert!(task.contains(r#""kind": "write""#));
+    assert!(task.contains(r#""commit": "abc123""#));
 }
 
 #[test]

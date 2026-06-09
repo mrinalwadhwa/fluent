@@ -154,8 +154,17 @@ fn work_model_store_writes_and_lists_documented_layout() {
 
     store.write_work_item(&work_item).unwrap();
 
-    let path = temp.path().join(".factory/work/items/work-1.json");
-    assert!(path.exists());
+    assert!(temp.path().join(".factory/work/items/work-1.json").exists());
+    assert!(
+        temp.path()
+            .join(".factory/work/attempts/work-1/attempt-1.json")
+            .exists()
+    );
+    assert!(
+        temp.path()
+            .join(".factory/work/tasks/work-1/attempt-1/write-code.json")
+            .exists()
+    );
     assert!(!temp.path().join(".factory/runs").exists());
     assert_eq!(store.read_work_item("work-1").unwrap(), work_item);
     assert_eq!(store.list_work_items().unwrap(), vec![work_item]);
@@ -304,56 +313,31 @@ fn work_model_store_writes_deterministic_pretty_json() {
         content,
         r#"{
   "id": "work-1",
-  "title": "Add durable model storage",
-  "attempts": [
-    {
-      "id": "attempt-1",
-      "work_item_id": "work-1",
-      "status": "complete",
-      "tasks": [
-        {
-          "id": "write-code",
-          "kind": "write",
-          "status": "complete",
-          "role": "author",
-          "work_item_id": "work-1",
-          "attempt_id": "attempt-1",
-          "workspace_access": {
-            "reads": [
-              {
-                "id": "main",
-                "path": "../workspaces/main"
-              }
-            ],
-            "writes": [
-              {
-                "id": "candidate",
-                "path": "../workspaces/candidate"
-              }
-            ]
-          },
-          "artifact_area": {
-            "path": ".factory/work/artifacts/write-code"
-          },
-          "output": {
-            "workspace_id": "candidate",
-            "workspace_path": "../workspaces/candidate",
-            "source_branch": "main",
-            "commit": "abc123"
-          }
-        }
-      ],
-      "review_state": "passed",
-      "artifacts": []
-    }
-  ]
+  "title": "Add durable model storage"
 }
 "#
     );
+    let attempt = fs::read_to_string(
+        temp.path()
+            .join(".factory/work/attempts/work-1/attempt-1.json"),
+    )
+    .unwrap();
+    assert!(attempt.contains(r#""id": "attempt-1""#));
+    assert!(attempt.contains(r#""status": "complete""#));
+    assert!(!attempt.contains(r#""tasks""#));
+
+    let task = fs::read_to_string(
+        temp.path()
+            .join(".factory/work/tasks/work-1/attempt-1/write-code.json"),
+    )
+    .unwrap();
+    assert!(task.contains(r#""id": "write-code""#));
+    assert!(task.contains(r#""kind": "write""#));
+    assert!(task.contains(r#""output": {"#));
 }
 
 #[test]
-fn work_model_store_writes_merge_candidates_in_work_item_json() {
+fn work_model_store_writes_merge_candidates_as_records() {
     let temp = tempfile::tempdir().unwrap();
     let store = WorkModelStore::new(temp.path());
     let mut item = work_item();
@@ -371,8 +355,14 @@ fn work_model_store_writes_merge_candidates_in_work_item_json() {
 
     store.write_work_item(&item).unwrap();
 
-    let content = fs::read_to_string(temp.path().join(".factory/work/items/work-1.json")).unwrap();
-    assert!(content.contains(r#""merge_candidates": ["#));
+    let item_content =
+        fs::read_to_string(temp.path().join(".factory/work/items/work-1.json")).unwrap();
+    assert!(!item_content.contains(r#""merge_candidates""#));
+    let content = fs::read_to_string(
+        temp.path()
+            .join(".factory/work/merge-candidates/work-1/attempt-1-merge-candidate.json"),
+    )
+    .unwrap();
     assert!(content.contains(r#""id": "attempt-1-merge-candidate""#));
     assert!(content.contains(r#""target_workspace": {"#));
     assert!(content.contains(r#""source_branch": "main""#));
@@ -677,7 +667,9 @@ fn work_model_store_reports_file_for_invalid_model_read_from_disk() {
     let store = WorkModelStore::new(temp.path());
     store.write_work_item(&work_item()).unwrap();
 
-    let path = temp.path().join(".factory/work/items/work-1.json");
+    let path = temp
+        .path()
+        .join(".factory/work/tasks/work-1/attempt-1/write-code.json");
     let invalid = fs::read_to_string(&path)
         .unwrap()
         .replace(r#""kind": "write""#, r#""kind": "review""#);

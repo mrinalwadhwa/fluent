@@ -29,20 +29,25 @@ for phrase in \
   '../work-6-work-1-attempt-1' \
   'include a Work Item ID byte-length prefix, Work Item ID, and Attempt ID' \
   '.factory/work/ items/ <work-item-id>.json' \
-  'one serialized `WorkItem` from `factory::work_model`' \
-  'contains its Attempts' \
-  'contains its Tasks' \
+  'attempts/ <work-item-id>/ <attempt-id>.json' \
+  'tasks/ <work-item-id>/ <attempt-id>/ <task-id>.json' \
+  'merge-candidates/ <work-item-id>/ <merge-candidate-id>.json' \
+  'stores Work Item metadata and planning context' \
+  '`WorkModelStore` assembles those split records into the public `WorkItem` shape' \
+  'New writes prefer the split layout' \
+  'bridge-period nested Work Item files remain readable when no split records exist' \
   'Workspace references stay inside task `workspace_access.reads` and `workspace_access.writes`' \
   'managed sibling worktrees for candidate execution' \
   'does not keep a standalone workspace registry' \
-  'Merge Candidates use the public `MergeCandidate` shape' \
-  'must parse into the public Rust model and validate every embedded task' \
-  'The `WorkItem.id` inside each file must match the file stem' \
-  'Work item IDs must not be empty, `.`, `..`, or contain `/` or `\`' \
+  'Merge Candidates use the public `MergeCandidate` shape and have their own candidate collection' \
+  'must parse records into the public Rust model and validate every assembled Attempt, Task, and Merge Candidate' \
+  'The `WorkItem.id` inside each item file must match the file stem' \
+  'Attempt, Task, and Merge Candidate ids must match their file stems' \
+  'Work item IDs, Attempt IDs, Task IDs, and Merge Candidate IDs must not be empty, `.`, `..`, or contain `/` or `\`' \
   'Each stored Attempt must set `work_item_id` to the containing `WorkItem.id`' \
   'Each stored Task must set `work_item_id` to the containing `WorkItem.id`' \
   'must set `attempt_id` to the containing Attempt id' \
-  'Invalid JSON, ID mismatches, invalid work item IDs, and model validation failures must report the file path or object that failed'
+  'Invalid JSON, ID mismatches, invalid object IDs, and model validation failures must report the file path or object that failed'
 do
   if ! grep -Fq "$phrase" <<<"$flat_section"; then
     echo "work model storage documentation does not contain: $phrase" >&2

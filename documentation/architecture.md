@@ -295,43 +295,67 @@ The first storage contract is:
 .factory/work/
   items/
     <work-item-id>.json
+  attempts/
+    <work-item-id>/
+      <attempt-id>.json
+  tasks/
+    <work-item-id>/
+      <attempt-id>/
+        <task-id>.json
+  merge-candidates/
+    <work-item-id>/
+      <merge-candidate-id>.json
+  artifacts/
+    <attempt-id>/
+      <task-id>/
+      <merge-candidate-id>/merge/
 ```
 
-Each file in `items/` stores one serialized `WorkItem` from
-`factory::work_model`. The `WorkItem` contains its Attempts, and each
-Attempt contains its Tasks. The `WorkItem` also contains Merge Candidates
-created from passed Attempt reviews. Tasks store their workspace access
-under `workspace_access.reads` and `workspace_access.writes`. Workspace
-references stay inside task `workspace_access.reads` and
-`workspace_access.writes` and point to managed sibling worktrees for
-candidate execution. Merge Candidates store the reviewed source candidate
-workspace and target workspace directly as boundary data derived from the
-passed Attempt's latest completed write Task. Factory does not keep a
-standalone workspace registry in this first contract. Merge Candidates
-use the public `MergeCandidate` shape, but queue work has not yet
-introduced a separate candidate collection.
+Each file in `items/` stores Work Item metadata and planning context:
+the Work Item id, title, optional explicit instructions, and optional
+brief/behaviors/approach/plan context. Attempts live in
+`attempts/<work-item-id>/<attempt-id>.json`, Tasks live in
+`tasks/<work-item-id>/<attempt-id>/<task-id>.json`, and Merge Candidates
+live in `merge-candidates/<work-item-id>/<merge-candidate-id>.json`.
+`WorkModelStore` assembles those split records into the public
+`WorkItem` shape from `factory::work_model` for `factory work show`,
+status, dashboard, task execution, review, merge, and cleanup.
+New writes prefer the split layout; bridge-period nested Work Item files
+remain readable when no split records exist for that Work Item.
 
-Code that reads `.factory/work/items/*.json` must parse into the public
-Rust model and validate every embedded task and Merge Candidate before
-using the object.
+Tasks store their workspace access under `workspace_access.reads` and
+`workspace_access.writes`. Workspace references stay inside task
+`workspace_access.reads` and `workspace_access.writes` and point to
+managed sibling worktrees for candidate execution. Merge Candidates store
+the reviewed source candidate workspace and target workspace directly as
+boundary data derived from the passed Attempt's latest completed write
+Task. Factory does not keep a standalone workspace registry in this
+contract. Merge Candidates use the public `MergeCandidate` shape and have
+their own candidate collection.
+
+Code that reads `.factory/work/` state must parse records into the public
+Rust model and validate every assembled Attempt, Task, and Merge
+Candidate before using the object.
 The merge executor is the only recovery reader in this contract: it may
 load a Work Item that fails merge-execution preconditions so it can mark
 the affected Merge Candidate failed, but it must validate the candidate
 before it updates a workspace or target branch. Failed Merge Candidates
 still must preserve the boundary data derived from the latest completed
 write Task; the failed state only records why merge execution stopped.
-The `WorkItem.id` inside each file must match the file stem, so
+The `WorkItem.id` inside each item file must match the file stem, so
 `.factory/work/items/work-1.json` must contain `"id": "work-1"`.
-Work item IDs must not be empty, `.`, `..`, or contain `/` or `\`,
-because Factory uses each ID directly as one file name under `items/`.
-Each stored Attempt must set `work_item_id` to the containing
-`WorkItem.id`. Each stored Task must set `work_item_id` to the
-containing `WorkItem.id`, and must set `attempt_id` to the containing
-Attempt id even though the public Task shape allows `attempt_id` to be
-absent before a task joins an Attempt. Invalid JSON, ID mismatches,
-invalid work item IDs, and model validation failures must report the file
-path or object that failed. Code that writes work items must use
-deterministic pretty JSON and must not write invalid model state.
+Attempt, Task, and Merge Candidate ids must match their file stems.
+Work item IDs, Attempt IDs, Task IDs, and Merge Candidate IDs must not be
+empty, `.`, `..`, or contain `/` or `\`, because Factory uses each ID as
+one path component under the split collections. Each stored Attempt must
+set `work_item_id` to the containing `WorkItem.id`. Each stored Task must
+set `work_item_id` to the containing `WorkItem.id`, and must set
+`attempt_id` to the containing Attempt id even though the public Task
+shape allows `attempt_id` to be absent before a task joins an Attempt.
+Invalid JSON, ID mismatches, invalid object IDs, and model validation
+failures must report the file path or object that failed. Code that
+writes Work state must use deterministic pretty JSON and must not write
+invalid model state.
 
 ## The run
 

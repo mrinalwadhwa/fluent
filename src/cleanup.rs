@@ -46,6 +46,7 @@ pub struct WorkCleanupResult {
     pub work_item_id: String,
     pub applied: bool,
     pub item_path: PathBuf,
+    pub state_paths: Vec<PathBuf>,
     pub artifacts: Vec<PathBuf>,
     pub worktrees: Vec<WorktreeCleanup>,
     pub branches: Vec<WorkBranchCleanup>,
@@ -308,12 +309,18 @@ fn work_cleanup_plan(
     }
 
     let item_path = store.work_item_path(&work_item.id)?;
+    let state_paths = vec![
+        store.work_attempts_dir().join(&work_item.id),
+        store.work_tasks_dir().join(&work_item.id),
+        store.work_merge_candidates_dir().join(&work_item.id),
+    ];
     let artifacts = work_item_artifact_paths(source_root, work_item);
 
     Ok(WorkCleanupResult {
         work_item_id: work_item.id.clone(),
         applied: apply,
         item_path,
+        state_paths,
         artifacts,
         worktrees,
         branches,
@@ -495,6 +502,13 @@ fn apply_work_item_cleanup(plan: &WorkCleanupResult) -> Result<()> {
         Ok(()) => {}
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
         Err(err) => return Err(err).context("Failed to remove Work Item state"),
+    }
+    for path in &plan.state_paths {
+        match fs::remove_dir_all(path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err).context("Failed to remove Work state collection"),
+        }
     }
 
     Ok(())

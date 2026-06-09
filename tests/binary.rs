@@ -9,6 +9,29 @@ fn factory_cmd() -> Command {
     Command::cargo_bin("factory").unwrap()
 }
 
+fn work_item_value(project_root: &Path, id: &str) -> serde_json::Value {
+    let output = factory_cmd()
+        .current_dir(project_root)
+        .args(["work", "show", id])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "work show failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn read_json_path(path: &Path) -> serde_json::Value {
+    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+}
+
+fn write_json_path(path: &Path, value: &serde_json::Value) {
+    fs::write(path, serde_json::to_string_pretty(value).unwrap()).unwrap()
+}
+
 #[test]
 fn version_prints_package_version_and_commit() {
     let tmp = TempDir::new().unwrap();
@@ -579,14 +602,8 @@ fn work_attempt_paths_disambiguate_hyphenated_ids() {
         .assert()
         .success();
 
-    let first: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(tmp.path().join(".factory/work/items/work-a.json")).unwrap(),
-    )
-    .unwrap();
-    let second: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(tmp.path().join(".factory/work/items/work-a-b.json")).unwrap(),
-    )
-    .unwrap();
+    let first = work_item_value(tmp.path(), "work-a");
+    let second = work_item_value(tmp.path(), "work-a-b");
     let first_path = &first["attempts"][0]["tasks"][0]["workspace_access"]["writes"][0]["path"];
     let second_path = &second["attempts"][0]["tasks"][0]["workspace_access"]["writes"][0]["path"];
 
@@ -4815,20 +4832,23 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
         .success();
 
     let item_path = main_dir.join(".factory/work/items/work-1.json");
-    let mut value: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
-    value["attempts"][0]["status"] = serde_json::Value::String("complete".to_string());
-    value["attempts"][0]["tasks"][0]["status"] = serde_json::Value::String("complete".to_string());
-    value["attempts"][0]["tasks"][0]["artifact_area"] = serde_json::json!({
+    let attempt_path = main_dir.join(".factory/work/attempts/work-1/attempt-1.json");
+    let task_path = main_dir.join(".factory/work/tasks/work-1/attempt-1/attempt-1-write.json");
+    let mut attempt = read_json_path(&attempt_path);
+    attempt["status"] = serde_json::Value::String("complete".to_string());
+    write_json_path(&attempt_path, &attempt);
+    let mut task = read_json_path(&task_path);
+    task["status"] = serde_json::Value::String("complete".to_string());
+    task["artifact_area"] = serde_json::json!({
         "path": ".factory/work/artifacts/attempt-1/attempt-1-write"
     });
-    value["attempts"][0]["tasks"][0]["output"] = serde_json::json!({
+    task["output"] = serde_json::json!({
         "workspace_id": "candidate",
         "workspace_path": "../work-6-work-1-attempt-1",
         "source_branch": "main",
         "commit": git_head(&main_dir)
     });
-    fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    write_json_path(&task_path, &task);
 
     let artifact_dir = main_dir.join(".factory/work/artifacts/attempt-1/attempt-1-write");
     fs::create_dir_all(&artifact_dir).unwrap();
@@ -4850,19 +4870,18 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
         .unwrap();
 
     let active_item_path = main_dir.join(".factory/work/items/work-active.json");
-    let mut active: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&active_item_path).unwrap()).unwrap();
-    active["attempts"][0]["status"] = serde_json::Value::String("executing".to_string());
-    active["attempts"][0]["tasks"][0]["status"] =
-        serde_json::Value::String("executing".to_string());
-    active["attempts"][0]["tasks"][0]["artifact_area"] = serde_json::json!({
+    let active_attempt_path = main_dir.join(".factory/work/attempts/work-active/attempt-1.json");
+    let active_task_path =
+        main_dir.join(".factory/work/tasks/work-active/attempt-1/attempt-1-write.json");
+    let mut active_attempt = read_json_path(&active_attempt_path);
+    active_attempt["status"] = serde_json::Value::String("executing".to_string());
+    write_json_path(&active_attempt_path, &active_attempt);
+    let mut active_task = read_json_path(&active_task_path);
+    active_task["status"] = serde_json::Value::String("executing".to_string());
+    active_task["artifact_area"] = serde_json::json!({
         "path": ".factory/work/artifacts/attempt-1/attempt-1-active"
     });
-    fs::write(
-        &active_item_path,
-        serde_json::to_string_pretty(&active).unwrap(),
-    )
-    .unwrap();
+    write_json_path(&active_task_path, &active_task);
 
     let active_artifact_dir = main_dir.join(".factory/work/artifacts/attempt-1/attempt-1-active");
     fs::create_dir_all(&active_artifact_dir).unwrap();
@@ -4911,7 +4930,11 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
         .stdout(predicate::str::contains("removed Work branch"));
 
     assert!(!item_path.exists());
+    assert!(!attempt_path.exists());
+    assert!(!task_path.exists());
     assert!(active_item_path.exists());
+    assert!(active_attempt_path.exists());
+    assert!(active_task_path.exists());
     assert!(!worktree_dir.exists());
     assert!(!artifact_dir.exists());
     assert!(active_worktree_dir.is_dir());
@@ -4980,17 +5003,21 @@ fn cleanup_work_items_apply_skips_unregistered_managed_worktree() {
     fs::create_dir_all(&workspace_dir).unwrap();
     fs::write(workspace_dir.join("user-file.txt"), "keep me").unwrap();
 
-    let mut value: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
-    value["attempts"][0]["status"] = serde_json::Value::String("complete".to_string());
-    value["attempts"][0]["tasks"][0]["status"] = serde_json::Value::String("complete".to_string());
-    value["attempts"][0]["tasks"][0]["output"] = serde_json::json!({
+    let attempt_path = main_dir.join(".factory/work/attempts/work-unregistered/attempt-1.json");
+    let task_path =
+        main_dir.join(".factory/work/tasks/work-unregistered/attempt-1/attempt-1-write.json");
+    let mut attempt = read_json_path(&attempt_path);
+    attempt["status"] = serde_json::Value::String("complete".to_string());
+    write_json_path(&attempt_path, &attempt);
+    let mut task = read_json_path(&task_path);
+    task["status"] = serde_json::Value::String("complete".to_string());
+    task["output"] = serde_json::json!({
         "workspace_id": "candidate",
         "workspace_path": workspace_path,
         "source_branch": "main",
         "commit": git_head(&main_dir)
     });
-    fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    write_json_path(&task_path, &task);
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -5003,6 +5030,8 @@ fn cleanup_work_items_apply_skips_unregistered_managed_worktree() {
         .stdout(predicate::str::contains("skipped unregistered worktree"));
 
     assert!(!item_path.exists());
+    assert!(!attempt_path.exists());
+    assert!(!task_path.exists());
     assert!(workspace_dir.is_dir());
     assert_eq!(
         fs::read_to_string(workspace_dir.join("user-file.txt")).unwrap(),
@@ -5042,33 +5071,42 @@ fn cleanup_work_items_selects_failed_terminal_and_skips_pending_merge_candidate(
         .success();
 
     let failed_item_path = main_dir.join(".factory/work/items/work-failed.json");
-    let mut failed: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&failed_item_path).unwrap()).unwrap();
-    failed["attempts"][0]["status"] = serde_json::Value::String("failed".to_string());
-    failed["attempts"][0]["tasks"][0]["status"] = serde_json::Value::String("failed".to_string());
-    fs::write(
-        &failed_item_path,
-        serde_json::to_string_pretty(&failed).unwrap(),
-    )
-    .unwrap();
+    let failed_attempt_path = main_dir.join(".factory/work/attempts/work-failed/attempt-1.json");
+    let failed_task_path =
+        main_dir.join(".factory/work/tasks/work-failed/attempt-1/attempt-1-write.json");
+    let mut failed_attempt = read_json_path(&failed_attempt_path);
+    failed_attempt["status"] = serde_json::Value::String("failed".to_string());
+    write_json_path(&failed_attempt_path, &failed_attempt);
+    let mut failed_task = read_json_path(&failed_task_path);
+    failed_task["status"] = serde_json::Value::String("failed".to_string());
+    write_json_path(&failed_task_path, &failed_task);
 
     let pending_item_path = main_dir.join(".factory/work/items/work-pending-merge.json");
     let pending_workspace = "../work-18-work-pending-merge-attempt-1";
     let head = git_head(&main_dir);
-    let mut pending: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&pending_item_path).unwrap()).unwrap();
-    pending["attempts"][0]["status"] = serde_json::Value::String("complete".to_string());
-    pending["attempts"][0]["review_state"] = serde_json::Value::String("passed".to_string());
-    pending["attempts"][0]["tasks"][0]["status"] =
-        serde_json::Value::String("complete".to_string());
-    pending["attempts"][0]["tasks"][0]["output"] = serde_json::json!({
+    let pending_attempt_path =
+        main_dir.join(".factory/work/attempts/work-pending-merge/attempt-1.json");
+    let pending_task_path =
+        main_dir.join(".factory/work/tasks/work-pending-merge/attempt-1/attempt-1-write.json");
+    let mut pending_attempt = read_json_path(&pending_attempt_path);
+    pending_attempt["status"] = serde_json::Value::String("complete".to_string());
+    pending_attempt["review_state"] = serde_json::Value::String("passed".to_string());
+    write_json_path(&pending_attempt_path, &pending_attempt);
+    let mut pending_task = read_json_path(&pending_task_path);
+    pending_task["status"] = serde_json::Value::String("complete".to_string());
+    pending_task["output"] = serde_json::json!({
         "workspace_id": "candidate",
         "workspace_path": pending_workspace,
         "source_branch": "main",
         "commit": head
     });
-    pending["merge_candidates"] = serde_json::json!([
-        {
+    write_json_path(&pending_task_path, &pending_task);
+    let pending_candidate_path =
+        main_dir.join(".factory/work/merge-candidates/work-pending-merge/candidate-1.json");
+    fs::create_dir_all(pending_candidate_path.parent().unwrap()).unwrap();
+    write_json_path(
+        &pending_candidate_path,
+        &serde_json::json!({
             "id": "candidate-1",
             "attempt_id": "attempt-1",
             "source_workspace": {
@@ -5086,13 +5124,8 @@ fn cleanup_work_items_selects_failed_terminal_and_skips_pending_merge_candidate(
             "merge_state": {
                 "status": "pending"
             }
-        }
-    ]);
-    fs::write(
-        &pending_item_path,
-        serde_json::to_string_pretty(&pending).unwrap(),
-    )
-    .unwrap();
+        }),
+    );
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -5113,7 +5146,12 @@ fn cleanup_work_items_selects_failed_terminal_and_skips_pending_merge_candidate(
         .stdout(predicate::str::contains("work-pending-merge").not());
 
     assert!(!failed_item_path.exists());
+    assert!(!failed_attempt_path.exists());
+    assert!(!failed_task_path.exists());
     assert!(pending_item_path.exists());
+    assert!(pending_attempt_path.exists());
+    assert!(pending_task_path.exists());
+    assert!(pending_candidate_path.exists());
 }
 
 #[test]
@@ -5138,14 +5176,18 @@ fn cleanup_work_items_skips_failed_attempt_with_active_task() {
         .success();
 
     let item_path = main_dir.join(".factory/work/items/work-active-task.json");
-    let mut value: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
-    value["attempts"][0]["status"] = serde_json::Value::String("failed".to_string());
-    value["attempts"][0]["tasks"][0]["status"] = serde_json::Value::String("executing".to_string());
-    value["attempts"][0]["tasks"][0]["artifact_area"] = serde_json::json!({
+    let attempt_path = main_dir.join(".factory/work/attempts/work-active-task/attempt-1.json");
+    let task_path =
+        main_dir.join(".factory/work/tasks/work-active-task/attempt-1/attempt-1-write.json");
+    let mut attempt = read_json_path(&attempt_path);
+    attempt["status"] = serde_json::Value::String("failed".to_string());
+    write_json_path(&attempt_path, &attempt);
+    let mut task = read_json_path(&task_path);
+    task["status"] = serde_json::Value::String("executing".to_string());
+    task["artifact_area"] = serde_json::json!({
         "path": ".factory/work/artifacts/attempt-1/attempt-1-write"
     });
-    fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    write_json_path(&task_path, &task);
 
     let artifact_dir = main_dir.join(".factory/work/artifacts/attempt-1/attempt-1-write");
     fs::create_dir_all(&artifact_dir).unwrap();
@@ -5166,6 +5208,8 @@ fn cleanup_work_items_skips_failed_attempt_with_active_task() {
         .stdout(predicate::str::contains("work-active-task").not());
 
     assert!(item_path.exists());
+    assert!(attempt_path.exists());
+    assert!(task_path.exists());
     assert!(artifact_dir.is_dir());
     assert_eq!(
         fs::read_to_string(artifact_dir.join("result.md")).unwrap(),
@@ -5212,19 +5256,28 @@ fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() 
         .unwrap();
 
     let candidate_head = git_head(&worktree_dir);
-    let mut value: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
-    value["attempts"][0]["status"] = serde_json::Value::String("complete".to_string());
-    value["attempts"][0]["review_state"] = serde_json::Value::String("passed".to_string());
-    value["attempts"][0]["tasks"][0]["status"] = serde_json::Value::String("complete".to_string());
-    value["attempts"][0]["tasks"][0]["output"] = serde_json::json!({
+    let attempt_path = main_dir.join(".factory/work/attempts/work-merge-cleanup/attempt-1.json");
+    let task_path =
+        main_dir.join(".factory/work/tasks/work-merge-cleanup/attempt-1/attempt-1-write.json");
+    let mut attempt = read_json_path(&attempt_path);
+    attempt["status"] = serde_json::Value::String("complete".to_string());
+    attempt["review_state"] = serde_json::Value::String("passed".to_string());
+    write_json_path(&attempt_path, &attempt);
+    let mut task = read_json_path(&task_path);
+    task["status"] = serde_json::Value::String("complete".to_string());
+    task["output"] = serde_json::json!({
         "workspace_id": "candidate",
         "workspace_path": workspace_path,
         "source_branch": "main",
         "commit": candidate_head
     });
-    value["merge_candidates"] = serde_json::json!([
-        {
+    write_json_path(&task_path, &task);
+    let candidate_path =
+        main_dir.join(".factory/work/merge-candidates/work-merge-cleanup/candidate-1.json");
+    fs::create_dir_all(candidate_path.parent().unwrap()).unwrap();
+    write_json_path(
+        &candidate_path,
+        &serde_json::json!({
             "id": "candidate-1",
             "attempt_id": "attempt-1",
             "source_workspace": {
@@ -5255,9 +5308,8 @@ fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() 
                     }
                 ]
             }
-        }
-    ]);
-    fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+        }),
+    );
 
     let check_artifact =
         main_dir.join(".factory/work/artifacts/attempt-1/candidate-1/merge/checks/checks.json");
@@ -5303,6 +5355,9 @@ fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() 
         .stdout(predicate::str::contains("removed Work artifact"));
 
     assert!(!item_path.exists());
+    assert!(!attempt_path.exists());
+    assert!(!task_path.exists());
+    assert!(!candidate_path.exists());
     assert!(!worktree_dir.exists());
     assert!(!check_artifact.exists());
     assert!(!review_artifact.exists());
