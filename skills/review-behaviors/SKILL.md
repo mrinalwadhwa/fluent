@@ -147,6 +147,8 @@ Write the review artifact to the exact path named in the prompt. For
 legacy run reviews, that path is usually
 `.factory/runs/[run-id]/reviews/review-behaviors.md`.
 
+Do not create legacy run review artifacts during Work-model reviews.
+
 Determine the verdict:
 - **pass** — all new behavior tests pass, no regressions
 - **fail** — one or more behavior tests fail, or regressions found
