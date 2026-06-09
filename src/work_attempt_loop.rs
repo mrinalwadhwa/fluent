@@ -211,6 +211,7 @@ fn next_review_roles(attempt: &Attempt) -> Vec<&'static str> {
         .filter(|role| {
             attempt.tasks.iter().any(|task| {
                 task.kind == TaskKind::Review
+                    && task.status == TaskStatus::Complete
                     && input_producer_ids.contains(task.id.as_str())
                     && task.role == *role
             })

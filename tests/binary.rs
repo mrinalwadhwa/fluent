@@ -3592,6 +3592,82 @@ fn work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews() {
 }
 
 #[test]
+fn work_attempt_run_falls_back_when_followup_inputs_are_missing() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+
+    let bin_dir = tmp.path().join("bin-loop-missing-followup-inputs");
+    write_mock_claude(&bin_dir, &loop_mock_script_with_mixed_verdicts());
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Planned follow-up write Task attempt-1-followup-1",
+        ));
+
+    let task_path = work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-followup-1");
+    let mut task = read_json_value(&task_path);
+    task["input_artifacts"] = serde_json::Value::Array(Vec::new());
+    write_json_value(&task_path, &task);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Completed Task attempt-1-followup-1",
+        ))
+        .stdout(predicate::str::contains(
+            "Planned 5 review Tasks for Attempt attempt-1",
+        ));
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let second_round_reviews: Vec<_> = value["attempts"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| {
+            task["kind"] == "review"
+                && task["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("attempt-1-review-2-"))
+        })
+        .collect();
+    assert_eq!(second_round_reviews.len(), 5);
+    assert!(
+        second_round_reviews
+            .iter()
+            .any(|task| task["role"] == "tests")
+    );
+    assert!(
+        second_round_reviews
+            .iter()
+            .any(|task| task["role"] == "documentation")
+    );
+}
+
+#[test]
 fn work_attempt_run_exposes_followup_input_artifacts() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);

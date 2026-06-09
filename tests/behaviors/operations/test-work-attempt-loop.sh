@@ -260,6 +260,31 @@ test_attempt_loop_plans_followup_with_mixed_failed_and_missing_reviews() {
   return $RESULT
 }
 
+test_attempt_loop_falls_back_when_followup_inputs_are_missing() {
+  setup_test_project
+  trap cleanup_test_project RETURN
+  write_mock_claude mixed-missing
+
+  RESULT=0
+  run_attempt_loop > "$TEST_DIR/stdout" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stdout")" "Planned follow-up write Task attempt-1-followup-1" || RESULT=1
+
+  jq '.input_artifacts = []' \
+    .factory/work/tasks/work-1/attempt-1/attempt-1-followup-1.json \
+    > "$TEST_DIR/followup-task.json" || RESULT=1
+  mv "$TEST_DIR/followup-task.json" \
+    .factory/work/tasks/work-1/attempt-1/attempt-1-followup-1.json || RESULT=1
+  [ "$(json_value '.attempts[0].tasks[-1].input_artifacts | length')" = "0" ] || RESULT=1
+
+  run_attempt_loop > "$TEST_DIR/followup-stdout" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Completed Task attempt-1-followup-1" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Planned 5 review Tasks for Attempt attempt-1" || RESULT=1
+  [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review" and (.id | startswith("attempt-1-review-2-")))] | length')" = "5" ] || RESULT=1
+  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-documentation") | .role')" = "documentation" ] || RESULT=1
+  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-tests") | .role')" = "tests" ] || RESULT=1
+  return $RESULT
+}
+
 test_attempt_loop_marks_uncertain_reviews_needs_user() {
   setup_test_project
   trap cleanup_test_project RETURN
@@ -331,6 +356,7 @@ run_test "work merge-candidate missing requests leave state unchanged" test_work
 run_test "attempt loop runs planned review Tasks" test_attempt_loop_runs_planned_review_tasks
 run_test "attempt loop plans follow-up write" test_attempt_loop_plans_followup
 run_test "attempt loop plans follow-up with mixed missing review" test_attempt_loop_plans_followup_with_mixed_failed_and_missing_reviews
+run_test "attempt loop falls back when follow-up inputs are missing" test_attempt_loop_falls_back_when_followup_inputs_are_missing
 run_test "attempt loop marks uncertain reviews needs-user" test_attempt_loop_marks_uncertain_reviews_needs_user
 run_test "attempt loop marks missing verdict needs-user" test_attempt_loop_marks_missing_verdict_needs_user
 run_test "attempt loop stops after Task executor failure" test_attempt_loop_stops_after_task_executor_failure

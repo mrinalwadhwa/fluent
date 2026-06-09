@@ -258,9 +258,9 @@ then reload stored Work Item state before planning later transitions.
 Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop passes review round)
 
-WHEN `factory work attempt run <work-item-id> <attempt-id>` advances an
-Attempt whose write output has completed and no review round is planned
-for that write output,
+WHEN `factory work attempt run <work-item-id> <attempt-id>` advances a
+normal Work Attempt whose initial write Task has completed and no review
+round is planned for that write output,
 THE SYSTEM SHALL plan initial review Tasks using the full Work reviewer
 set and run planned review Tasks through the existing Task executor.
 Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
