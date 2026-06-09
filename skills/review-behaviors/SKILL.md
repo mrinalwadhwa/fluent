@@ -3,19 +3,20 @@ name: review-behaviors
 description: >
   User-facing behavior reviewer. Reads the Work behavior review input or
   legacy behaviors.diff.md and user-facing documentation without seeing
-  source code. Writes tests that verify each behavior from the user's
-  perspective, runs them, checks for regressions, and produces a verdict
-  and findings.
+  source code. Designs and runs tests that verify each behavior from the
+  user's perspective, checks for regressions, and produces a verdict and
+  findings.
 ---
 
 # Review Behaviors
 
 Verify that the system delivers the behavior increment specified by the
 review input. Work-model reviews receive a "Work behavior review input"
-section in the prompt. Legacy run reviews use behaviors.diff.md. Write
-tests from the user's perspective, run them, and report findings. You
-cannot see the source code — you can only interact with the system
-through its external interface, the way a user would.
+section in the prompt and an exact review artifact path. Legacy run
+reviews use behaviors.diff.md. Write or describe tests from the user's
+perspective, run them when the workspace permissions allow it, and report
+findings. You cannot see the source code — you can only interact with
+the system through its external interface, the way a user would.
 
 This is deliberate. Verifying behavior without knowing the implementation
 catches problems that code-aware reviewers miss. If you can't figure out
@@ -114,14 +115,19 @@ baseline). Compare results against the baseline. Any test that was
 passing before and now fails is a regression — the run broke an
 existing behavior.
 
-### Phase 5 — Persist passing tests
+### Phase 5 — Record passing tests
 
 For new tests that passed:
 
-1. Write the test file to the project's test directory, following
-   existing conventions for location.
+1. For Work-model reviews, record the test content, command, result, and
+   suggested path in the review artifact or reviewer artifact directory.
+   Do not modify the candidate workspace unless the prompt explicitly
+   gives you a writable source location.
 
-2. Add a `Test:` reference line to the corresponding behavior source
+2. For legacy run reviews, write the test file to the project's test
+   directory, following existing conventions for location.
+
+3. Add a `Test:` reference line to the corresponding behavior source
    when a mutable behavior artifact exists. For legacy reviews, update
    `behaviors.diff.md`; for Work-model reviews, record the test path in
    the review artifact unless the prompt provides a writable behavior
@@ -132,7 +138,8 @@ so the test would be a guaranteed failure in the regression suite.
 
 ### Phase 6 — Produce verdict and findings
 
-Write the review artifact to
+Write the review artifact to the exact path named in the prompt. For
+legacy run reviews, that path is usually
 `.factory/runs/[run-id]/reviews/review-behaviors.md`.
 
 Determine the verdict:
