@@ -52,6 +52,16 @@ MOCK_SCRIPT
   chmod +x "${TEST_DIR}/bin/claude"
 }
 
+write_dirty_mock_claude() {
+  cat > "${TEST_DIR}/bin/claude" <<MOCK_SCRIPT
+#!/usr/bin/env bash
+printf 'reviewer edit\n' >> ../../../../../README.md
+printf 'Verdict: pass\n\nReview-only result.\n' > review.md
+exit 0
+MOCK_SCRIPT
+  chmod +x "${TEST_DIR}/bin/claude"
+}
+
 json_value() {
   "$FACTORY_BIN" work show work-1 | jq -r "$1"
 }
@@ -150,6 +160,26 @@ test_review_codebase_fail_stops_without_followup() {
   return $RESULT
 }
 
+test_review_codebase_rejects_source_changes() {
+  setup_test_project
+  trap cleanup_test_project RETURN
+  write_dirty_mock_claude
+  run_review_codebase > /dev/null
+
+  RESULT=0
+  assert_fails env PATH="${TEST_DIR}/bin:$PATH" "$FACTORY_BIN" work attempt run \
+    work-1 attempt-review --no-sandbox || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stderr")" "Review Task changed non-Factory source files" || RESULT=1
+  [ "$(json_value '(.merge_candidates // []) | length')" = "0" ] || RESULT=1
+  [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "write")] | length')" = "0" ] || RESULT=1
+  [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review" and .status == "failed")] | length')" = "1" ] || RESULT=1
+  [ "$(cat README.md)" = "test" ] || RESULT=1
+  git status --porcelain --untracked-files=all -- . ':(exclude).factory' > "$TEST_DIR/non-factory-status"
+  [ ! -s "$TEST_DIR/non-factory-status" ] || RESULT=1
+
+  return $RESULT
+}
+
 test_review_codebase_uncertain_needs_user() {
   setup_test_project
   trap cleanup_test_project RETURN
@@ -174,6 +204,7 @@ run_test "review-codebase creates review-only Attempt" test_review_codebase_inta
 run_test "review-codebase rejects missing and duplicate" test_review_codebase_rejects_missing_and_duplicate
 run_test "review-only pass completes without Merge Candidate" test_review_codebase_pass_completes_without_merge_candidate
 run_test "review-only fail stops without follow-up" test_review_codebase_fail_stops_without_followup
+run_test "review-only rejects source changes" test_review_codebase_rejects_source_changes
 run_test "review-only uncertain needs user" test_review_codebase_uncertain_needs_user
 
 printf '\nResults: %d passed, %d failed\n' "$PASS" "$FAIL"

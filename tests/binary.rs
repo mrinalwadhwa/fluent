@@ -1804,6 +1804,59 @@ fn work_attempt_run_review_only_passes_without_merge_candidate() {
 }
 
 #[test]
+fn work_attempt_run_review_only_rejects_source_changes() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Review codebase"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .assert()
+        .success();
+
+    let main_head = git_head(&main_dir);
+    let bin_dir = tmp.path().join("bin-review-only-dirty");
+    write_mock_claude(&bin_dir, &review_only_dirty_source_mock_script());
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-review",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Review Task changed non-Factory source files",
+        ))
+        .stdout(predicate::str::contains("Merge Candidate").not())
+        .stdout(predicate::str::contains("follow-up").not());
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let attempt = &value["attempts"][0];
+    assert_eq!(review_only_write_task_count(attempt), 0);
+    assert!(merge_candidates_are_empty(&value));
+    assert!(
+        attempt["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task["kind"] == "review" && task["status"] == "failed")
+    );
+    assert_eq!(git_head(&main_dir), main_head);
+    assert_no_non_factory_changes(&main_dir);
+}
+
+#[test]
 fn work_attempt_run_review_only_fails_without_followup() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
@@ -6217,6 +6270,15 @@ exit 0
     )
 }
 
+fn review_only_dirty_source_mock_script() -> String {
+    r##"#!/bin/bash
+printf 'reviewer edit\n' >> ../../../../../README.md
+printf 'Verdict: pass\n\nReview-only result.\n' > review.md
+exit 0
+"##
+    .to_string()
+}
+
 fn review_only_write_task_count(attempt: &serde_json::Value) -> usize {
     attempt["tasks"]
         .as_array()
@@ -6235,7 +6297,14 @@ fn merge_candidates_are_empty(value: &serde_json::Value) -> bool {
 
 fn assert_no_non_factory_changes(path: &Path) {
     let output = StdCommand::new("git")
-        .args(["status", "--porcelain"])
+        .args([
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            ".",
+            ":(exclude).factory",
+        ])
         .current_dir(path)
         .output()
         .unwrap();
@@ -6245,16 +6314,8 @@ fn assert_no_non_factory_changes(path: &Path) {
         String::from_utf8_lossy(&output.stderr)
     );
     let status = String::from_utf8_lossy(&output.stdout);
-    let unexpected = status
-        .lines()
-        .filter(|line| {
-            !line
-                .get(3..)
-                .is_some_and(|path| path.starts_with(".factory/"))
-        })
-        .collect::<Vec<_>>();
     assert!(
-        unexpected.is_empty(),
+        status.is_empty(),
         "source files should not change:\n{status}"
     );
 }

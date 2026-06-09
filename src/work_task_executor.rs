@@ -278,7 +278,9 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         ensure_same_git_repository(config.project_root, workspace_path)?;
         let is_review_only_source =
             attempt_kind == AttemptKind::ReviewOnly && workspace_path == config.project_root;
-        if !is_review_only_source {
+        if is_review_only_source {
+            ensure_no_non_factory_worktree_changes(workspace_path)?;
+        } else {
             ensure_registered_worktree(config.project_root, workspace_path)?;
             ensure_clean_worktree(workspace_path)?;
         }
@@ -332,16 +334,22 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         }
     }
     for workspace_path in &readable_workspaces {
-        if attempt_kind == AttemptKind::ReviewOnly && workspace_path == config.project_root {
-            continue;
-        }
-        if let Err(error) = ensure_clean_worktree(workspace_path) {
+        let clean_result =
+            if attempt_kind == AttemptKind::ReviewOnly && workspace_path == config.project_root {
+                ensure_no_non_factory_worktree_changes(workspace_path)
+            } else {
+                ensure_clean_worktree(workspace_path)
+            };
+        if let Err(error) = clean_result {
             mark_task_failed(
                 config.store,
                 config.work_item_id,
                 config.attempt_id,
                 config.task_id,
             )?;
+            if attempt_kind == AttemptKind::ReviewOnly && workspace_path == config.project_root {
+                restore_non_factory_worktree_changes(workspace_path)?;
+            }
             return Err(error);
         }
     }
@@ -992,6 +1000,67 @@ fn ensure_clean_worktree(workspace_path: &Path) -> Result<()> {
         bail!(
             "Task workspace has uncommitted changes; commit or remove them before completing:\n{}",
             String::from_utf8_lossy(&output.stdout)
+        )
+    }
+}
+
+fn ensure_no_non_factory_worktree_changes(workspace_path: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .args(["-C", &workspace_path.to_string_lossy()])
+        .args([
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            ".",
+            ":(exclude).factory",
+        ])
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "Failed to read source checkout status: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    if output.stdout.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "Review Task changed non-Factory source files; source checkout must remain read-only:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    }
+}
+
+fn restore_non_factory_worktree_changes(workspace_path: &Path) -> Result<()> {
+    let restore = Command::new("git")
+        .args(["-C", &workspace_path.to_string_lossy()])
+        .args([
+            "restore",
+            "--staged",
+            "--worktree",
+            "--",
+            ".",
+            ":(exclude).factory",
+        ])
+        .output()?;
+    if !restore.status.success() {
+        bail!(
+            "Failed to restore non-Factory source changes: {}",
+            String::from_utf8_lossy(&restore.stderr)
+        );
+    }
+
+    let clean = Command::new("git")
+        .args(["-C", &workspace_path.to_string_lossy()])
+        .args(["clean", "-fd", "--", ".", ":(exclude).factory"])
+        .output()?;
+    if clean.status.success() {
+        Ok(())
+    } else {
+        bail!(
+            "Failed to remove untracked non-Factory source changes: {}",
+            String::from_utf8_lossy(&clean.stderr)
         )
     }
 }
