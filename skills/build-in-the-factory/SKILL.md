@@ -135,9 +135,10 @@ review. On approval, set status to `approach-designed`.
 ### 4. Plan execution
 
 Follow the `plan-execution` skill. Break the approach into executable
-steps. Determine if decomposition into child runs is needed. Write
-`plan.md`. Present to the user for review. On approval, set status to
-`planned`.
+steps. Determine whether the work should stay in one Attempt, split
+into separate peer Work Items, or use legacy child-run decomposition as
+a fallback for one large effort. Write `plan.md`. Present to the user
+for review. On approval, set status to `planned`.
 
 ---
 
@@ -165,22 +166,33 @@ instructions or planning context into initial and follow-up write Tasks,
 creates follow-up write Tasks after failed reviews, and records
 `needs-user` when the review state cannot be resolved autonomously.
 
+For unrelated work that can proceed in parallel, create independent peer
+Work Items rather than decomposing one parent run. Use the group/step
+plan format only when one large effort needs coordinated child work with
+explicit sync points and the Work model cannot yet carry that
+decomposition. In that case, the legacy `factory run` fallback detects
+the structured `plan.md`, creates child run directories and worktrees,
+and launches child sessions.
+
 For full-codebase review-only work, use the Work model by creating a
 Work Item, running `factory work review-codebase <work-item-id>
 <attempt-id>`, then running `factory work attempt run <work-item-id>
 <attempt-id>`. Use legacy `factory run` only as a transitional fallback
 when the Work model cannot yet express the work, such as Fargate-only
-execution, parallel child-run decomposition, or recovery of existing
-`.factory/runs` state. The fallback still manages the session loop by
-restarting agents across sessions as long as work remains.
+execution, coordinated child-run decomposition for one large effort, or
+recovery of existing `.factory/runs` state. The fallback still manages
+the session loop by restarting agents across sessions as long as work
+remains.
 
 ### 5. Execute
 
-Implement the plan. If the plan uses the group/step format (multiple
-groups or any parallel group with multiple steps), the factory command
-detects the structured plan.md and automatically creates child run
-directories, worktrees, and launches child sessions. At leaf level, write
-code directly.
+Implement the approved Task in the assigned Workspace. In the Work model,
+write Tasks make commits in their writable Workspace, review Tasks write
+Work artifacts, and the Attempt loop schedules follow-up Tasks or creates
+a Merge Candidate from the latest accepted output. Treat legacy
+`.factory/runs` execution as fallback or recovery state; do not describe
+new Work-model Tasks as automatically creating legacy child runs. At leaf
+level, write code directly.
 
 During execution, you have latitude to adapt within the approach. For
 significant deviations, pause and renegotiate via `needs-user`.
