@@ -4626,6 +4626,63 @@ fn cleanup_work_items_selects_failed_terminal_and_skips_pending_merge_candidate(
 }
 
 #[test]
+fn cleanup_work_items_skips_failed_attempt_with_active_task() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "create",
+            "work-active-task",
+            "--title",
+            "Active task cleanup work",
+        ])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-active-task", "attempt-1"])
+        .assert()
+        .success();
+
+    let item_path = main_dir.join(".factory/work/items/work-active-task.json");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
+    value["attempts"][0]["status"] = serde_json::Value::String("failed".to_string());
+    value["attempts"][0]["tasks"][0]["status"] = serde_json::Value::String("executing".to_string());
+    value["attempts"][0]["tasks"][0]["artifact_area"] = serde_json::json!({
+        "path": ".factory/work/artifacts/attempt-1/attempt-1-write"
+    });
+    fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+    let artifact_dir = main_dir.join(".factory/work/artifacts/attempt-1/attempt-1-write");
+    fs::create_dir_all(&artifact_dir).unwrap();
+    fs::write(artifact_dir.join("result.md"), "active task artifact").unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .arg("cleanup")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("work-active-task").not());
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["cleanup", "--apply"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("work-active-task").not());
+
+    assert!(item_path.exists());
+    assert!(artifact_dir.is_dir());
+    assert_eq!(
+        fs::read_to_string(artifact_dir.join("result.md")).unwrap(),
+        "active task artifact"
+    );
+}
+
+#[test]
 fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
