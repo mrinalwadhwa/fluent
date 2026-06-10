@@ -181,6 +181,25 @@ Task output is committed and the writable workspace is clean.
 Test: tests/binary.rs (work_task_run_passes_task_context_to_coder_prompt)
 Test: tests/behaviors/operations/test-work-task-run.sh (run passes Task context to coder prompt)
 
+WHEN `factory work task run <work-item-id> <attempt-id> <task-id>` or
+`factory work attempt run <work-item-id> <attempt-id>` launches a
+`write` Task,
+THE SYSTEM SHALL tell the author to perform an upfront scope preflight
+that identifies likely touched behavior statements, user-facing docs,
+tests, skills/expertise, and verification commands before editing; to
+update applicable related artifacts when changing a user-facing command,
+behavior, skill, or documentation surface; and to record why related
+artifacts do not apply when the Task is intentionally code-only or
+docs-only.
+Test: tests/binary.rs (work_task_run_passes_task_context_to_coder_prompt)
+
+WHEN Factory launches a Work-model follow-up `write` Task that includes
+input artifacts,
+THE SYSTEM SHALL tell the author to read the review input artifacts
+first, address the concrete findings, and check whether each finding
+reveals a missing first-pass preflight item.
+Test: tests/binary.rs (work_attempt_run_exposes_followup_input_artifacts)
+
 IF a caller passes extra args to `factory work task run` or
 `factory work attempt run`,
 THE SYSTEM SHALL pass those args only as coder options and SHALL NOT
