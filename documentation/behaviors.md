@@ -908,6 +908,14 @@ THE SYSTEM SHALL remove the Work Item state, referenced managed Work
 artifacts, registered managed candidate worktrees, and Work branches.
 Test: tests/binary.rs (cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch), tests/binary.rs (cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree)
 
+WHEN Factory reads stored Work state with legacy artifact references
+under `.factory/work/artifacts/<attempt-id>/...`,
+THE SYSTEM SHALL expose those references under
+`.factory/work/artifacts/<work-item-id>/<attempt-id>/...` and move
+existing legacy artifacts into that namespace when no namespaced artifact
+already exists.
+Test: src/work_model.rs (store_migrates_legacy_work_artifact_paths_on_read)
+
 WHEN Work cleanup sees artifact references that are absolute paths, use
 parent escapes, or do not resolve under `.factory/work/artifacts/`,
 THE SYSTEM SHALL ignore those unmanaged artifact references without

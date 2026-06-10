@@ -368,6 +368,13 @@ Task records carry the same internal `order` field; Factory sorts split
 Task files by that persisted order before exposing `Attempt.tasks`.
 New writes prefer the split layout; bridge-period nested Work Item files
 remain readable when no split records exist for that Work Item.
+When `WorkModelStore` reads stored Work state, it normalizes legacy
+artifact references that still use
+`.factory/work/artifacts/<attempt-id>/...` into the current
+`.factory/work/artifacts/<work-item-id>/<attempt-id>/...` form before it
+validates the assembled Work Item. If the legacy path exists on disk and
+the namespaced path does not, the store moves that artifact directory or
+file into the Work Item namespace during the read.
 
 Tasks store their workspace access under `workspace_access.reads` and
 `workspace_access.writes`. Workspace references stay inside task

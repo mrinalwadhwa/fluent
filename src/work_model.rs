@@ -2911,7 +2911,7 @@ mod tests {
     }
 
     #[test]
-    fn store_migrates_legacy_attempt_artifact_paths_on_read() {
+    fn store_migrates_legacy_work_artifact_paths_on_read() {
         let tmp = tempfile::TempDir::new().unwrap();
         let store = WorkModelStore::new(tmp.path());
         let mut work_item = work_item_with_completed_write("work-1");
@@ -2919,10 +2919,52 @@ mod tests {
             .add_next_review_tasks("attempt-1", &["tests"])
             .unwrap();
         work_item.attempts[0].tasks[1].status = TaskStatus::Complete;
+        work_item
+            .add_followup_write_task(
+                "attempt-1",
+                vec![ArtifactRef {
+                    producer_id: "attempt-1-review-tests".to_string(),
+                    path:
+                        ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
+                            .to_string(),
+                }],
+            )
+            .unwrap();
         work_item.attempts[0].artifacts.push(ArtifactRef {
             producer_id: "attempt-1-review-tests".to_string(),
             path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
                 .to_string(),
+        });
+        work_item.merge_candidates.push(MergeCandidate {
+            id: "attempt-1-merge-candidate".to_string(),
+            attempt_id: "attempt-1".to_string(),
+            source_workspace: WorkspaceRef {
+                id: "candidate".to_string(),
+                path: "../work-6-work-1-attempt-1-initial".to_string(),
+            },
+            target_workspace: WorkspaceRef {
+                id: "target".to_string(),
+                path: ".".to_string(),
+            },
+            source_branch: "main".to_string(),
+            target_branch: "main".to_string(),
+            candidate_commit: "commit-initial".to_string(),
+            review_state: MergeCandidateReviewState::Failed,
+            merge_state: MergeCandidateMergeState {
+                status: MergeCandidateMergeStatus::Failed,
+                landed_commit: None,
+                failure_reason: Some("Review failed".to_string()),
+                check_artifacts: vec![ArtifactRef {
+                    producer_id: "merge-check".to_string(),
+                    path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/checks/checks.json"
+                        .to_string(),
+                }],
+                review_artifacts: vec![ArtifactRef {
+                    producer_id: "merge-review-tests".to_string(),
+                    path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/tests/review.md"
+                        .to_string(),
+                }],
+            },
         });
         store.create_work_item(&work_item).unwrap();
 
@@ -2944,6 +2986,32 @@ mod tests {
         );
         fs::write(&attempt_path, to_json_pretty(&attempt_record).unwrap()).unwrap();
 
+        let followup_path = store
+            .work_task_path("work-1", "attempt-1", "attempt-1-followup-1")
+            .unwrap();
+        let mut followup_record: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&followup_path).unwrap()).unwrap();
+        followup_record["input_artifacts"][0]["path"] = serde_json::Value::String(
+            ".factory/work/artifacts/attempt-1/attempt-1-review-tests/review.md".to_string(),
+        );
+        fs::write(&followup_path, to_json_pretty(&followup_record).unwrap()).unwrap();
+
+        let candidate_path = store
+            .work_merge_candidate_path("work-1", "attempt-1-merge-candidate")
+            .unwrap();
+        let mut candidate_record: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&candidate_path).unwrap()).unwrap();
+        candidate_record["merge_state"]["check_artifacts"][0]["path"] = serde_json::Value::String(
+            ".factory/work/artifacts/attempt-1/attempt-1-merge-candidate/merge/checks/checks.json"
+                .to_string(),
+        );
+        candidate_record["merge_state"]["review_artifacts"][0]["path"] =
+            serde_json::Value::String(
+                ".factory/work/artifacts/attempt-1/attempt-1-merge-candidate/merge/reviews/tests/review.md"
+                    .to_string(),
+            );
+        fs::write(&candidate_path, to_json_pretty(&candidate_record).unwrap()).unwrap();
+
         let legacy_dir = tmp
             .path()
             .join(".factory/work/artifacts/attempt-1/attempt-1-review-tests");
@@ -2963,6 +3031,18 @@ mod tests {
         assert_eq!(
             read.attempts[0].artifacts[0].path,
             ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
+        );
+        assert_eq!(
+            read.attempts[0].tasks[2].input_artifacts[0].path,
+            ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
+        );
+        assert_eq!(
+            read.merge_candidates[0].merge_state.check_artifacts[0].path,
+            ".factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/checks/checks.json"
+        );
+        assert_eq!(
+            read.merge_candidates[0].merge_state.review_artifacts[0].path,
+            ".factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/tests/review.md"
         );
         assert!(
             tmp.path()
