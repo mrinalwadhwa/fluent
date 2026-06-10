@@ -280,6 +280,7 @@ fn run_single_reviewer_with_coder(
         review_path: &run_dir.join(format!("reviews/review-{reviewer_name}.md")),
         working_dir: project_root,
         extra_args: &[],
+        extra_env: &[],
         reviewer,
         transcript_path: Some(transcript_path),
     })
@@ -293,6 +294,7 @@ pub struct ReviewCoderRun<'a> {
     pub review_path: &'a Path,
     pub working_dir: &'a Path,
     pub extra_args: &'a [String],
+    pub extra_env: &'a [(String, String)],
     pub reviewer: &'a dyn Coder,
     pub transcript_path: Option<&'a Path>,
 }
@@ -303,6 +305,7 @@ pub fn run_reviewer_with_coder(config: ReviewCoderRun<'_>) -> Result<Verdict> {
         config.system_prompt,
         config.working_dir,
         config.extra_args,
+        config.extra_env,
         config.transcript_path,
     );
 
@@ -793,6 +796,7 @@ mod tests {
             _system_prompt: &str,
             working_dir: &Path,
             _extra_args: &[String],
+            _extra_env: &[(String, String)],
             _transcript_file: Option<&Path>,
         ) -> Result<i32> {
             if self.write_review {
@@ -812,6 +816,7 @@ mod tests {
             _system_prompt: &str,
             _working_dir: &Path,
             _extra_args: &[String],
+            _extra_env: &[(String, String)],
         ) -> Result<i32> {
             Ok(0)
         }

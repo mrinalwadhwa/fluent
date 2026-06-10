@@ -2707,10 +2707,11 @@ fn work_merge_candidate_lands_after_merge_time_reviews() {
         .success();
 
     let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
-    let documentation_skill = main_dir
-        .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/review-worktrees/documentation/skills/review-documentation/SKILL.md");
-    let decisions_file = main_dir
-        .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/review-worktrees/documentation/.factory/expertise/decisions.md");
+    let sibling_root = main_dir.parent().unwrap();
+    let documentation_skill = sibling_root
+        .join("review-6-work-1-attempt-1-documentation/skills/review-documentation/SKILL.md");
+    let decisions_file = sibling_root
+        .join("review-6-work-1-attempt-1-documentation/.factory/expertise/decisions.md");
     let candidate_head = git_head(&candidate_workspace);
     let main_before = git_head(&main_dir);
     assert_ne!(main_before, candidate_head);
@@ -3035,16 +3036,13 @@ exit 0
         .stderr(predicate::str::contains(
             "Merge-time reviewer documentation dirtied candidate workspace",
         ))
-        .stderr(predicate::str::contains("review-worktrees/documentation"));
+        .stderr(predicate::str::contains(
+            "review-6-work-1-attempt-1-documentation",
+        ));
 
     assert_eq!(git_head(&main_dir), main_before);
     assert_eq!(git_head(&candidate_workspace), candidate_head);
     assert!(!candidate_workspace.join("dirty-merge-review.txt").is_file());
-    assert!(
-        !main_dir
-            .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/review-worktrees")
-            .exists()
-    );
     let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];
     assert_eq!(candidate["review_state"], "failed");
@@ -3139,11 +3137,6 @@ exit 0
         !candidate_workspace
             .join(".factory/review-scratch/dirty.txt")
             .is_file()
-    );
-    assert!(
-        !main_dir
-            .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/review-worktrees")
-            .exists()
     );
     let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];

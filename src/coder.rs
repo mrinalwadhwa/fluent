@@ -102,6 +102,7 @@ pub trait Coder: Send + Sync {
         system_prompt: &str,
         working_dir: &Path,
         extra_args: &[String],
+        extra_env: &[(String, String)],
         transcript_file: Option<&Path>,
     ) -> Result<i32>;
 
@@ -111,6 +112,7 @@ pub trait Coder: Send + Sync {
         system_prompt: &str,
         working_dir: &Path,
         extra_args: &[String],
+        extra_env: &[(String, String)],
     ) -> Result<i32>;
 }
 
@@ -126,9 +128,13 @@ impl Coder for SandboxedClaudeCode {
         system_prompt: &str,
         working_dir: &Path,
         extra_args: &[String],
+        extra_env: &[(String, String)],
         transcript_file: Option<&Path>,
     ) -> Result<i32> {
         let mut cmd = self.build_command(working_dir);
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
         if transcript_file.is_some() {
             cmd.args(["--verbose", "--output-format", "stream-json"]);
         }
@@ -144,8 +150,12 @@ impl Coder for SandboxedClaudeCode {
         system_prompt: &str,
         working_dir: &Path,
         extra_args: &[String],
+        extra_env: &[(String, String)],
     ) -> Result<i32> {
         let mut cmd = self.build_command(working_dir);
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
         cmd.args(["--append-system-prompt", system_prompt]);
         cmd.args(extra_args);
 
@@ -182,10 +192,14 @@ impl Coder for BareClaudeCode {
         system_prompt: &str,
         working_dir: &Path,
         extra_args: &[String],
+        extra_env: &[(String, String)],
         transcript_file: Option<&Path>,
     ) -> Result<i32> {
         let mut cmd = Command::new("claude");
         cmd.current_dir(working_dir);
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
         cmd.args(["--dangerously-skip-permissions"]);
         cmd.args(["--model", &claude_model()]);
         if transcript_file.is_some() {
@@ -203,9 +217,13 @@ impl Coder for BareClaudeCode {
         system_prompt: &str,
         working_dir: &Path,
         extra_args: &[String],
+        extra_env: &[(String, String)],
     ) -> Result<i32> {
         let mut cmd = Command::new("claude");
         cmd.current_dir(working_dir);
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
         cmd.args(["--dangerously-skip-permissions"]);
         cmd.args(["--append-system-prompt", system_prompt]);
         cmd.args(extra_args);
@@ -227,9 +245,13 @@ impl Coder for CodexCode {
         system_prompt: &str,
         working_dir: &Path,
         extra_args: &[String],
+        extra_env: &[(String, String)],
         transcript_file: Option<&Path>,
     ) -> Result<i32> {
         let mut cmd = self.build_command(working_dir, true);
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
         if transcript_file.is_some() {
             cmd.arg("--json");
         }
@@ -245,8 +267,12 @@ impl Coder for CodexCode {
         system_prompt: &str,
         working_dir: &Path,
         extra_args: &[String],
+        extra_env: &[(String, String)],
     ) -> Result<i32> {
         let mut cmd = self.build_command(working_dir, false);
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
         cmd.arg(system_prompt);
         cmd.args(extra_args);
 
@@ -337,6 +363,7 @@ where
         _system_prompt: &str,
         _working_dir: &Path,
         _extra_args: &[String],
+        _extra_env: &[(String, String)],
         _transcript_file: Option<&Path>,
     ) -> Result<i32> {
         let n = self
@@ -354,6 +381,7 @@ where
         _system_prompt: &str,
         _working_dir: &Path,
         _extra_args: &[String],
+        _extra_env: &[(String, String)],
     ) -> Result<i32> {
         Ok(0)
     }

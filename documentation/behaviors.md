@@ -412,10 +412,10 @@ executor serially before planning later transitions.
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop runs planned review Tasks)
 
 WHEN Factory executes merge-time Work reviewers for a Merge Candidate,
-THE SYSTEM SHALL prepare one dedicated candidate review worktree per
-reviewer at the post-rebase Merge Candidate commit, run reviewer roles
-in parallel when those worktrees can be prepared, and give each reviewer
-only its own writable merge review artifact directory.
+THE SYSTEM SHALL create each reviewer's worktree at
+`../review-<work-item-id-bytelen>-<work-item-id>-<attempt-id>-<reviewer>`
+relative to the project root, run reviewer roles in parallel, and give
+each reviewer only its own writable merge review artifact directory.
 Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge reviewers run in parallel)
 
 WHEN parallel merge-time Work reviewers finish,
@@ -437,6 +437,33 @@ THE SYSTEM SHALL remove those reviewer worktrees after successful merge
 or failed review handling while preserving durable review artifacts
 under `.factory/work/artifacts/`.
 Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge reviewers run in parallel)
+
+WHEN Factory launches a merge-time reviewer,
+THE SYSTEM SHALL set `CARGO_TARGET_DIR` in the reviewer's environment to
+a path inside that reviewer's artifact directory under
+`.factory/work/artifacts/<work-item-id>/<attempt-id>/<candidate-id>/merge/reviews/<reviewer>/`,
+so Cargo writes build outputs there rather than into the reviewer's
+worktree or the candidate workspace.
+Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge lands after update, checks, and reviewers)
+
+WHEN Factory launches a merge-time reviewer for a Work Item,
+THE SYSTEM SHALL grant the reviewer process read access to the whole
+`.factory/work/artifacts/<work-item-id>/<attempt-id>/` subtree through
+the sandbox profile, so referenced merge-check and prior-review
+artifact paths are readable.
+
+WHEN Factory generates a merge-time reviewer prompt,
+THE SYSTEM SHALL NOT instruct the reviewer to copy the candidate
+workspace to `/tmp`, export `CARGO_TARGET_DIR`, or otherwise manage
+build cache redirection.
+Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge lands after update, checks, and reviewers)
+
+WHEN `factory cleanup` runs and finds a sibling directory matching
+`../review-<bytelen>-<work-item-id>-<attempt-id>-<reviewer>` whose
+Work Item has no merge candidate currently executing,
+THE SYSTEM SHALL list the directory in the dry-run report; with
+`--apply`, THE SYSTEM SHALL remove the directory and any registered
+git worktree pointing at it.
 
 WHEN all review Tasks for an Attempt review round complete and all
 review artifacts have passing verdicts,

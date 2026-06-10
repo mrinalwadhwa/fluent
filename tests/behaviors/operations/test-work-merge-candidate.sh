@@ -64,6 +64,9 @@ case "$PWD" in
     if [ -n "${MERGE_REVIEW_LOG:-}" ]; then
       printf '%s\n' "$REVIEWER" >> "$MERGE_REVIEW_LOG"
     fi
+    if [ -n "${MERGE_REVIEW_ENV_LOG:-}" ]; then
+      printf 'CARGO_TARGET_DIR=%s\n' "${CARGO_TARGET_DIR:-}" >> "$MERGE_REVIEW_ENV_LOG"
+    fi
     if [ -n "${MERGE_REVIEW_TIMING_LOG:-}" ]; then
       printf 'start %s\n' "$REVIEWER" >> "$MERGE_REVIEW_TIMING_LOG"
       sleep 1
@@ -160,6 +163,7 @@ run_merge() {
   MERGE_MOCK_MODE="${1:-pass}" \
     MERGE_REVIEW_LOG="${TEST_DIR}/merge-review-log" \
     MERGE_REVIEW_ARGS_LOG="${TEST_DIR}/merge-review-args-log" \
+    MERGE_REVIEW_ENV_LOG="${TEST_DIR}/merge-review-env-log" \
     MERGE_REVIEW_TIMING_LOG="${MERGE_REVIEW_TIMING_LOG:-}" \
     CANDIDATE_WORKSPACE="${TEST_DIR}/work-6-work-1-attempt-1" \
     PATH="${TEST_DIR}/bin:$PATH" \
@@ -167,14 +171,17 @@ run_merge() {
 }
 
 assert_no_merge_reviewer_worktrees() {
-  if git -C "$TEST_PROJECT_PWD" worktree list --porcelain | grep -Fq "/review-worktrees/"; then
+  if git -C "$TEST_PROJECT_PWD" worktree list --porcelain | grep -Eq "/review-[0-9]+-"; then
     printf '    FAIL: reviewer worktree remains registered\n'
     return 1
   fi
-  if [ -d "$TEST_PROJECT_PWD/.factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/review-worktrees" ]; then
-    printf '    FAIL: reviewer worktree directory remains\n'
-    return 1
-  fi
+  SIBLING_DIR="$(dirname "$TEST_PROJECT_PWD")"
+  for reviewer in documentation behaviors architecture skills tests; do
+    if [ -d "$SIBLING_DIR/review-6-work-1-attempt-1-${reviewer}" ]; then
+      printf '    FAIL: reviewer worktree directory remains: %s\n' "review-6-work-1-attempt-1-${reviewer}"
+      return 1
+    fi
+  done
 }
 
 assert_merge_review_artifacts_in_reviewer_order() {
@@ -235,8 +242,9 @@ EOF
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "attempt-1" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "attempt-1-merge-candidate" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Target branch: main" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "review-worktrees/behaviors" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Review diff: git -C '$TEST_PROJECT_PWD/.factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/review-worktrees/behaviors' diff '$TARGET_BEFORE..$LANDED_COMMIT'" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "review-6-work-1-attempt-1-behaviors" || RESULT=1
+  SIBLING_DIR="$(dirname "$TEST_PROJECT_PWD")"
+  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Review diff: git -C '${SIBLING_DIR}/review-6-work-1-attempt-1-behaviors' diff '$TARGET_BEFORE..$LANDED_COMMIT'" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" ".factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/behaviors/review.md" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "$TEST_PROJECT_PWD/.factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/behaviors/review.md" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "candidate workspace as read-only" || RESULT=1
@@ -256,6 +264,19 @@ EOF
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Merge checks ran before reviewers" || RESULT=1
   if grep -Fq "Check artifacts:" "$TEST_DIR/merge-review-args-log"; then
     printf '    FAIL: merge reviewer prompt contains check artifact path list\n'
+    RESULT=1
+  fi
+  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Factory sets CARGO_TARGET_DIR=" || RESULT=1
+  if grep -Fq 'CARGO_TARGET_DIR="' "$TEST_DIR/merge-review-args-log" 2>/dev/null || \
+     grep -Fq 'CARGO_TARGET_DIR=' "$TEST_DIR/merge-review-args-log" | grep -Fq 'cargo test' 2>/dev/null; then
+    :
+  fi
+  if [ -f "$TEST_DIR/merge-review-env-log" ]; then
+    assert_contains "$(cat "$TEST_DIR/merge-review-env-log")" "CARGO_TARGET_DIR=" || RESULT=1
+    assert_contains "$(cat "$TEST_DIR/merge-review-env-log")" "/merge/reviews/" || RESULT=1
+    assert_contains "$(cat "$TEST_DIR/merge-review-env-log")" "/target" || RESULT=1
+  else
+    printf '    FAIL: merge-review-env-log not written\n'
     RESULT=1
   fi
   assert_contains "$(cat "$TEST_DIR/stdout")" "Merged Merge Candidate attempt-1-merge-candidate" || RESULT=1
@@ -527,7 +548,7 @@ test_work_merge_dirty_reviewer_leaves_target_unchanged() {
   [ "$(json_value '.merge_candidates[0].merge_state.status')" = "failed" ] || RESULT=1
   [ "$(json_value '.merge_candidates[0].review_state')" = "failed" ] || RESULT=1
   assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" "Merge-time reviewer behaviors dirtied candidate workspace" || RESULT=1
-  assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" "review-worktrees/behaviors" || RESULT=1
+  assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" "review-6-work-1-attempt-1-behaviors" || RESULT=1
   [ "$(json_value '.merge_candidates[0].merge_state.review_artifacts | length')" = "6" ] || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "Merge-time reviewer behaviors dirtied candidate workspace" || RESULT=1
   test ! -f "$CANDIDATE_WORKSPACE/dirty-merge-review.txt" || RESULT=1

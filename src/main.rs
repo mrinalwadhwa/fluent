@@ -586,7 +586,7 @@ fn cmd_interactive(
     eprintln!("  Sandbox root      {}", sandbox_root.display());
 
     let author = coder_kind.boxed(sandbox);
-    author.run_interactive(&system_prompt, sandbox_root, extra_args)?;
+    author.run_interactive(&system_prompt, sandbox_root, extra_args, &[])?;
     Ok(())
 }
 
@@ -842,8 +842,9 @@ fn cmd_cleanup(search_root: &Path, run_id: Option<String>, apply: bool) -> Resul
     let options = CleanupOptions { run_id, apply };
     let run_results = cleanup::cleanup_runs(search_root, &options)?;
     let work_results = cleanup::cleanup_work_items(search_root, &options)?;
+    let reviewer_results = cleanup::cleanup_stranded_reviewer_worktrees(search_root, &options)?;
 
-    if run_results.is_empty() && work_results.is_empty() {
+    if run_results.is_empty() && work_results.is_empty() && reviewer_results.is_empty() {
         println!("No cleanup candidates found.");
         return Ok(());
     }
@@ -944,6 +945,24 @@ fn cmd_cleanup(search_root: &Path, run_id: Option<String>, apply: bool) -> Resul
                     );
                 }
             }
+        }
+    }
+
+    for result in reviewer_results {
+        if result.applied {
+            println!(
+                "  removed stranded reviewer worktree {} (work-item: {}, reviewer: {})",
+                result.path.display(),
+                result.work_item_id,
+                result.reviewer
+            );
+        } else {
+            println!(
+                "  would remove stranded reviewer worktree {} (work-item: {}, reviewer: {})",
+                result.path.display(),
+                result.work_item_id,
+                result.reviewer
+            );
         }
     }
 
@@ -1090,7 +1109,7 @@ fn cmd_resume(
     eprintln!("  Factory           resume session (run: {})", run.id);
 
     let author = coder_kind.boxed(sandbox);
-    author.run_interactive(&system_prompt, search_root, extra_args)?;
+    author.run_interactive(&system_prompt, search_root, extra_args, &[])?;
     Ok(())
 }
 

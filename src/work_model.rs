@@ -22,6 +22,13 @@ pub fn initial_candidate_workspace_path(work_item_id: &str, attempt_id: &str) ->
     format!("../work-{}-{work_item_id}-{attempt_id}", work_item_id.len())
 }
 
+pub fn reviewer_workspace_path(work_item_id: &str, attempt_id: &str, reviewer: &str) -> String {
+    format!(
+        "../review-{}-{work_item_id}-{attempt_id}-{reviewer}",
+        work_item_id.len()
+    )
+}
+
 pub fn resolve_managed_sibling_workspace_path(
     project_root: &Path,
     path: &str,
@@ -2689,6 +2696,18 @@ mod tests {
             .add_review_only_attempt("attempt-review", &["tests"], "main", "abc123")
             .unwrap();
         work_item
+    }
+
+    #[test]
+    fn reviewer_workspace_path_encodes_bytelen_prefix() {
+        assert_eq!(
+            reviewer_workspace_path("work-1", "attempt-1", "tests"),
+            "../review-6-work-1-attempt-1-tests"
+        );
+        assert_eq!(
+            reviewer_workspace_path("my-long-work-item", "a1", "architecture"),
+            "../review-17-my-long-work-item-a1-architecture"
+        );
     }
 
     #[test]

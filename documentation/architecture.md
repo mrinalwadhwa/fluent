@@ -194,7 +194,10 @@ checks in the candidate workspace, runs the required reviewer set with
 merge-time context, then fast-forwards the target branch to the updated
 candidate head. Merge-time review prepares one detached reviewer
 worktree per role at the post-rebase candidate commit and runs those
-roles in parallel. Each reviewer sees its dedicated reviewer worktree as
+roles in parallel. Each reviewer worktree lives at a sibling path
+`../review-<work-item-id-bytelen>-<work-item-id>-<attempt-id>-<reviewer>`
+relative to the project root, not nested under `.factory/work/artifacts/`.
+Each reviewer sees its dedicated reviewer worktree as
 the candidate workspace and receives only its own writable artifact
 directory. Merge-time reviewers receive the exact
 `.factory/work/artifacts/<work-item-id>/<attempt-id>/<candidate-id>/merge/reviews/<role>/review.md`
@@ -218,7 +221,12 @@ reviewers do not resolve decisions relative to their artifact directory.
 Reviewers treat the candidate workspace as read-only and write only merge
 review artifacts; scratch tests, suggested patches, and proposed
 documentation edits belong in those artifacts, not in the candidate
-workspace. After reviewers exit, merge execution checks each reviewer
+workspace. Factory sets `CARGO_TARGET_DIR` in each reviewer's environment
+to a path under that reviewer's artifact directory, so build outputs go to
+`.factory/work/artifacts/<work-item-id>/<attempt-id>/<candidate-id>/merge/reviews/<role>/target/`
+without reviewer cooperation. The reviewer sandbox grants read access to
+the whole `.factory/work/artifacts/<work-item-id>/<attempt-id>/` subtree
+so merge-check and prior-review artifacts are readable. After reviewers exit, merge execution checks each reviewer
 worktree for staged, unstaged, untracked, and ignored file changes,
 including changes under `.factory`, and fails before landing if any
 reviewer dirtied its isolated candidate. It writes one combined review
@@ -244,7 +252,8 @@ stale Work Item as intentionally abandoned; cleanup treats that marker as
 terminal only when no Attempt is executing or reviewing, no Task is
 executing, and no Merge Candidate is reviewing or merging. Cleanup removes
 the stored Work Item, referenced managed Work artifacts, managed candidate
-worktrees, and Work task branches. Managed artifact references must be
+worktrees, Work task branches, and stranded sibling reviewer worktrees
+left behind by killed merges. Managed artifact references must be
 relative paths made only of normal path components and must resolve under
 `.factory/work/artifacts/`; cleanup ignores absolute paths and parent
 escapes. It skips Work Items with active Attempts, Tasks, or Merge

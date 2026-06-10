@@ -140,6 +140,7 @@ pub fn run_session_loop(
             &config.system_prompt,
             &config.working_dir,
             &config.extra_args,
+            &[],
             Some(&transcript_file),
         )?;
 
@@ -480,6 +481,7 @@ mod tests {
             _system_prompt: &str,
             _working_dir: &Path,
             _extra_args: &[String],
+            _extra_env: &[(String, String)],
             transcript_file: Option<&Path>,
         ) -> Result<i32> {
             let n = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
@@ -495,6 +497,7 @@ mod tests {
             _system_prompt: &str,
             _working_dir: &Path,
             _extra_args: &[String],
+            _extra_env: &[(String, String)],
         ) -> Result<i32> {
             Ok(0)
         }

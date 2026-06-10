@@ -19,7 +19,8 @@ use crate::review_diff_command::render_review_diff_command;
 use crate::work_model::{
     ArtifactRef, MergeCandidateMergeState, MergeCandidateMergeStatus, MergeCandidateReviewState,
     WORK_ARTIFACTS_DIR, WorkItem, WorkModelError, WorkModelStorageError, WorkModelStore,
-    resolve_expected_candidate_workspace_path, to_json_pretty, work_behavior_review_input,
+    resolve_expected_candidate_workspace_path, reviewer_workspace_path, to_json_pretty,
+    work_behavior_review_input,
 };
 use crate::worktree;
 
@@ -321,7 +322,8 @@ fn run_merge_reviews(
     let mut artifacts = Vec::new();
     let reviewer_worktrees = MergeReviewerWorktrees::prepare(
         config.project_root,
-        artifact_dir,
+        config.work_item_id,
+        &candidate.attempt_id,
         candidate_head_after_rebase,
     )?;
 
@@ -540,7 +542,6 @@ fn reviewer_order(reviewer: &str) -> usize {
 
 struct MergeReviewerWorktrees {
     project_root: PathBuf,
-    root: PathBuf,
     entries: Vec<MergeReviewerWorktree>,
 }
 
@@ -550,16 +551,23 @@ struct MergeReviewerWorktree {
 }
 
 impl MergeReviewerWorktrees {
-    fn prepare(project_root: &Path, artifact_dir: &Path, commit: &str) -> Result<Self> {
-        let root = artifact_dir.join("review-worktrees");
-        fs::create_dir_all(&root)?;
+    fn prepare(
+        project_root: &Path,
+        work_item_id: &str,
+        attempt_id: &str,
+        commit: &str,
+    ) -> Result<Self> {
+        let sibling_root = project_root.parent().unwrap_or(project_root);
         let mut entries = Vec::new();
         for reviewer in review::REVIEWERS {
-            let entry = match prepare_one_reviewer_worktree(project_root, &root, reviewer, commit) {
+            let relative = reviewer_workspace_path(work_item_id, attempt_id, reviewer);
+            let name = relative.strip_prefix("../").unwrap_or(&relative);
+            let path = sibling_root.join(name);
+            let entry = match prepare_one_reviewer_worktree(project_root, &path, reviewer, commit) {
                 Ok(entry) => entry,
                 Err(error) => {
                     if let Err(cleanup_error) =
-                        cleanup_reviewer_worktree_paths(project_root, &root, &entries)
+                        cleanup_reviewer_worktree_paths(project_root, &entries)
                     {
                         eprintln!(
                             "  Warning: partial merge reviewer worktree cleanup failed: {cleanup_error}"
@@ -572,7 +580,6 @@ impl MergeReviewerWorktrees {
         }
         Ok(Self {
             project_root: project_root.to_path_buf(),
-            root,
             entries,
         })
     }
@@ -598,11 +605,6 @@ impl MergeReviewerWorktrees {
                 }
             }
         }
-        if self.root.exists() {
-            if let Err(error) = fs::remove_dir(&self.root) {
-                errors.push(format!("{}: {error}", self.root.display()));
-            }
-        }
         if errors.is_empty() {
             Ok(())
         } else {
@@ -613,14 +615,13 @@ impl MergeReviewerWorktrees {
 
 fn prepare_one_reviewer_worktree(
     project_root: &Path,
-    root: &Path,
+    path: &Path,
     reviewer: &'static str,
     commit: &str,
 ) -> Result<MergeReviewerWorktree> {
-    let path = root.join(reviewer);
-    remove_reviewer_worktree_if_present(project_root, &path)?;
+    remove_reviewer_worktree_if_present(project_root, path)?;
     if path.exists() {
-        fs::remove_dir_all(&path)
+        fs::remove_dir_all(path)
             .with_context(|| format!("Failed to clear reviewer worktree {}", path.display()))?;
     }
     let output = Command::new("git")
@@ -641,13 +642,15 @@ fn prepare_one_reviewer_worktree(
             command_output(&output)
         );
     }
-    worktree::disable_commit_signing(&path)?;
-    Ok(MergeReviewerWorktree { reviewer, path })
+    worktree::disable_commit_signing(path)?;
+    Ok(MergeReviewerWorktree {
+        reviewer,
+        path: path.to_path_buf(),
+    })
 }
 
 fn cleanup_reviewer_worktree_paths(
     project_root: &Path,
-    root: &Path,
     entries: &[MergeReviewerWorktree],
 ) -> Result<()> {
     let mut errors = Vec::new();
@@ -659,11 +662,6 @@ fn cleanup_reviewer_worktree_paths(
             if let Err(error) = fs::remove_dir_all(&entry.path) {
                 errors.push(format!("{}: {error}", entry.path.display()));
             }
-        }
-    }
-    if root.exists() {
-        if let Err(error) = fs::remove_dir(root) {
-            errors.push(format!("{}: {error}", root.display()));
         }
     }
     if errors.is_empty() {
@@ -793,10 +791,16 @@ fn run_one_merge_reviewer(
         review_artifact_path,
         writable_outputs_guidance
     );
+    let attempt_artifact_root = config
+        .project_root
+        .join(WORK_ARTIFACTS_DIR)
+        .join(config.work_item_id)
+        .join(&candidate.attempt_id);
     let (sandbox, _sandbox_profile) = if config.no_sandbox {
         (CoderSandbox::None, None)
     } else {
-        let readable_roots = merge_review_readable_sandbox_roots(source_workspace)?;
+        let readable_roots =
+            merge_review_readable_sandbox_roots(source_workspace, &attempt_artifact_root)?;
         build_reviewer_sandbox(
             config.coder_kind,
             config.resolver,
@@ -804,6 +808,11 @@ fn run_one_merge_reviewer(
             &readable_roots,
         )?
     };
+    let cargo_target_dir = reviewer_dir.join("target");
+    let extra_env = vec![(
+        "CARGO_TARGET_DIR".to_string(),
+        cargo_target_dir.to_string_lossy().to_string(),
+    )];
     let coder = config.coder_kind.boxed(sandbox);
     review::run_reviewer_with_coder(review::ReviewCoderRun {
         reviewer_name: reviewer,
@@ -813,6 +822,7 @@ fn run_one_merge_reviewer(
         review_path,
         working_dir: reviewer_dir,
         extra_args: config.extra_args,
+        extra_env: &extra_env,
         reviewer: &*coder,
         transcript_path: None,
     })
@@ -836,7 +846,7 @@ fn work_merge_reviewer_system_prompt(
 
 fn merge_reviewer_writable_outputs_guidance(reviewer_dir: &Path) -> String {
     format!(
-        "Writable review outputs:\n- Put build caches, scratch files, suggested patches, proposed documentation edits, and temporary outputs under the reviewer artifact directory instead of applying them to the candidate workspace.\n- For Cargo commands against the read-only candidate workspace, set CARGO_TARGET_DIR to a directory under the reviewer artifact directory, for example: CARGO_TARGET_DIR=\"{}/target\" cargo test.",
+        "Writable review outputs:\n- Put build caches, scratch files, suggested patches, proposed documentation edits, and temporary outputs under the reviewer artifact directory instead of applying them to the candidate workspace.\n- Factory sets CARGO_TARGET_DIR={}/target in this reviewer's environment. Do not override it or write build outputs into the candidate workspace.",
         reviewer_dir.display()
     )
 }
@@ -915,11 +925,17 @@ fn merge_review_attempt_history(
     lines.join("\n")
 }
 
-fn merge_review_readable_sandbox_roots(source_workspace: &Path) -> Result<Vec<PathBuf>> {
+fn merge_review_readable_sandbox_roots(
+    source_workspace: &Path,
+    attempt_artifact_root: &Path,
+) -> Result<Vec<PathBuf>> {
     let mut roots = vec![source_workspace.to_path_buf()];
     let common_git_dir = worktree::git_common_dir(source_workspace)?;
     if !roots.iter().any(|root| root == &common_git_dir) {
         roots.push(common_git_dir);
+    }
+    if !roots.iter().any(|root| root == attempt_artifact_root) {
+        roots.push(attempt_artifact_root.to_path_buf());
     }
     Ok(roots)
 }
@@ -1679,7 +1695,7 @@ Keep this Work-native sentence.
 
         assert!(guidance.contains("CARGO_TARGET_DIR"));
         assert!(guidance.contains("/tmp/factory/merge/reviews/tests/target"));
-        assert!(guidance.contains("cargo test"));
+        assert!(guidance.contains("Factory sets CARGO_TARGET_DIR"));
         assert!(guidance.contains("reviewer artifact directory"));
         assert!(!guidance.contains(".factory/runs/"));
     }

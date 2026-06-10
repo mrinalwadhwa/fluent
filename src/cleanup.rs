@@ -5,6 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::review;
 use crate::run::{self, Run, RunStatus};
 use crate::work_model::{
     Attempt, AttemptStatus, MergeCandidate, MergeCandidateMergeStatus, MergeCandidateReviewState,
@@ -64,6 +65,15 @@ pub struct OrphanWorkArtifactCleanupResult {
     pub work_item_id: String,
     pub applied: bool,
     pub artifact_root: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct StrandedReviewerWorktreeCleanupResult {
+    pub path: PathBuf,
+    pub work_item_id: String,
+    pub attempt_id: String,
+    pub reviewer: String,
+    pub applied: bool,
 }
 
 pub fn cleanup_runs(search_root: &Path, options: &CleanupOptions) -> Result<Vec<CleanupResult>> {
@@ -126,6 +136,91 @@ pub fn cleanup_work_items(
     }
 
     Ok(results)
+}
+
+pub fn cleanup_stranded_reviewer_worktrees(
+    search_root: &Path,
+    options: &CleanupOptions,
+) -> Result<Vec<StrandedReviewerWorktreeCleanupResult>> {
+    if options.run_id.is_some() {
+        return Ok(Vec::new());
+    }
+
+    let source_root = cleanup_source_root(search_root)?;
+    let store = WorkModelStore::new(&source_root);
+    let sibling_root = source_root.parent().unwrap_or(&source_root);
+    let entries = match fs::read_dir(sibling_root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err).context("Failed to read sibling directory"),
+    };
+
+    let registered = registered_worktrees(&source_root)?;
+    let mut results = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some((work_item_id, attempt_id, reviewer)) = parse_reviewer_worktree_name(&name) else {
+            continue;
+        };
+
+        if has_executing_merge_candidate(&store, &work_item_id) {
+            continue;
+        }
+
+        let path = entry.path();
+        if options.apply {
+            if path_is_registered(&path, &registered) {
+                let _ = remove_registered_worktree(&source_root, &path);
+            }
+            let _ = fs::remove_dir_all(&path);
+        }
+        results.push(StrandedReviewerWorktreeCleanupResult {
+            path,
+            work_item_id,
+            attempt_id,
+            reviewer,
+            applied: options.apply,
+        });
+    }
+
+    results.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(results)
+}
+
+fn parse_reviewer_worktree_name(name: &str) -> Option<(String, String, String)> {
+    let rest = name.strip_prefix("review-")?;
+    let (bytelen_str, rest) = rest.split_once('-')?;
+    let bytelen: usize = bytelen_str.parse().ok()?;
+    if rest.len() < bytelen {
+        return None;
+    }
+    let work_item_id = &rest[..bytelen];
+    let rest = rest.get(bytelen + 1..)?;
+    for &reviewer in review::REVIEWERS {
+        if let Some(attempt_id) = rest.strip_suffix(&format!("-{reviewer}")) {
+            if !attempt_id.is_empty() {
+                return Some((
+                    work_item_id.to_string(),
+                    attempt_id.to_string(),
+                    reviewer.to_string(),
+                ));
+            }
+        }
+    }
+    None
+}
+
+fn has_executing_merge_candidate(store: &WorkModelStore, work_item_id: &str) -> bool {
+    let Ok(item) = store.read_work_item(work_item_id) else {
+        return false;
+    };
+    item.merge_candidates
+        .iter()
+        .any(|candidate| candidate.merge_state.status == MergeCandidateMergeStatus::Executing)
 }
 
 pub fn run_is_cleaned(run: &Run) -> bool {
@@ -956,5 +1051,124 @@ mod tests {
 
             assert!(candidates.is_empty());
         }
+    }
+
+    #[test]
+    fn parse_reviewer_worktree_name_extracts_components() {
+        let result = parse_reviewer_worktree_name("review-6-work-1-attempt-1-tests");
+        assert_eq!(
+            result,
+            Some((
+                "work-1".to_string(),
+                "attempt-1".to_string(),
+                "tests".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_reviewer_worktree_name_handles_long_work_item_id() {
+        let result = parse_reviewer_worktree_name("review-17-my-long-work-item-a1-architecture");
+        assert_eq!(
+            result,
+            Some((
+                "my-long-work-item".to_string(),
+                "a1".to_string(),
+                "architecture".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_reviewer_worktree_name_rejects_non_reviewer_suffix() {
+        assert_eq!(
+            parse_reviewer_worktree_name("review-6-work-1-attempt-1-unknown"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_reviewer_worktree_name_rejects_non_matching_names() {
+        assert_eq!(
+            parse_reviewer_worktree_name("work-6-work-1-attempt-1"),
+            None
+        );
+        assert_eq!(
+            parse_reviewer_worktree_name("review-bad-work-1-tests"),
+            None
+        );
+        assert_eq!(parse_reviewer_worktree_name("review-999-x-a-tests"), None);
+    }
+
+    #[test]
+    fn stranded_reviewer_worktree_detected_for_non_executing_work_item() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        Command::new("git")
+            .args(["-C", &project.to_string_lossy(), "init", "-b", "main"])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args([
+                "-C",
+                &project.to_string_lossy(),
+                "config",
+                "user.email",
+                "test@test",
+            ])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args([
+                "-C",
+                &project.to_string_lossy(),
+                "config",
+                "user.name",
+                "test",
+            ])
+            .output()
+            .unwrap();
+        fs::write(project.join("README.md"), "test\n").unwrap();
+        Command::new("git")
+            .args(["-C", &project.to_string_lossy(), "add", "README.md"])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["-C", &project.to_string_lossy(), "commit", "-m", "init"])
+            .output()
+            .unwrap();
+
+        let store = WorkModelStore::new(&project);
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Stranded test".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+
+        let stranded = tmp.path().join("review-6-work-1-attempt-1-tests");
+        fs::create_dir_all(&stranded).unwrap();
+
+        let active = tmp.path().join("review-6-work-1-attempt-1-architecture");
+        fs::create_dir_all(&active).unwrap();
+
+        let results = cleanup_stranded_reviewer_worktrees(
+            &project,
+            &CleanupOptions {
+                run_id: None,
+                apply: false,
+            },
+        )
+        .unwrap();
+
+        let work_item_ids: Vec<_> = results.iter().map(|r| r.work_item_id.as_str()).collect();
+        assert!(work_item_ids.contains(&"work-1"));
+        assert_eq!(results.len(), 2);
     }
 }

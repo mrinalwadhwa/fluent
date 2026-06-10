@@ -890,7 +890,14 @@ fn run_task_coder(
     eprintln!("  Worktree          {}", workspace_path.display());
 
     let coder = coder_kind.boxed(sandbox);
-    let exit_code = coder.run(&prompt, &system_prompt, workspace_path, extra_args, None)?;
+    let exit_code = coder.run(
+        &prompt,
+        &system_prompt,
+        workspace_path,
+        extra_args,
+        &[],
+        None,
+    )?;
     if exit_code == 0 {
         Ok(())
     } else {
@@ -1008,6 +1015,7 @@ fn run_review_coder(
         &prompts.system_prompt,
         artifact_dir,
         extra_args,
+        &[],
         None,
     )?;
     if exit_code == 0 {
