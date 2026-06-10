@@ -8369,6 +8369,77 @@ exit 0
 }
 
 #[test]
+fn headless_resume_global_no_sandbox_does_not_require_sandbox_exec() {
+    let tmp = TempDir::new().unwrap();
+
+    let run_id = "20260606-headless-global-no-seatbelt";
+    let run_dir = tmp.path().join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "needs-user").unwrap();
+    fs::write(run_dir.join("source-branch"), "main").unwrap();
+    fs::write(
+        run_dir.join("brief.md"),
+        "# Brief\n\nResume without Seatbelt via global flag\n",
+    )
+    .unwrap();
+    fs::write(run_dir.join("handoff.md"), "## Handoff\nContinue.\n").unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_codex(
+        &bin_dir,
+        r##"#!/bin/bash
+RUN_DIR="$PWD/.factory/runs/20260606-headless-global-no-seatbelt"
+printf '%s\n' "$@" > "$RUN_DIR/resume-codex-args"
+echo "complete" > "$RUN_DIR/status"
+exit 0
+"##,
+    );
+    write_mock_executable(
+        &bin_dir,
+        "git",
+        r##"#!/bin/bash
+if [ "$1" = "diff" ]; then
+  exit 0
+fi
+if [ "$1" = "status" ]; then
+  exit 0
+fi
+exit 0
+"##,
+    );
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["--no-sandbox", "resume", run_id, "--coder", "codex"])
+        .env("PATH", &bin_dir)
+        .write_stdin("")
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "resume should honor global --no-sandbox without sandbox-exec on PATH: {stderr}"
+    );
+    assert!(
+        stderr.contains("session loop (run: 20260606-headless-global-no-seatbelt)"),
+        "headless resume should restart the session loop: {stderr}"
+    );
+
+    let args = fs::read_to_string(run_dir.join("resume-codex-args")).unwrap();
+    assert!(
+        args.lines().any(|line| line == "exec"),
+        "headless resume should pass control to codex exec: {args}"
+    );
+    assert!(
+        args.lines().any(|line| line == "--json"),
+        "headless resume should capture JSON output: {args}"
+    );
+    let status = fs::read_to_string(run_dir.join("status")).unwrap();
+    assert_eq!(status.trim(), "complete");
+}
+
+#[test]
 fn headless_resume_rejects_parallel_parent() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);

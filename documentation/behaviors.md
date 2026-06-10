@@ -1137,7 +1137,8 @@ Test: tests/binary.rs (headless_resume_restarts_selected_run_loop, headless_resu
 
 WHEN `factory --no-sandbox resume [RUN_ID] --coder codex` is invoked,
 THE SYSTEM SHALL preserve the top-level no-sandbox behavior for resume.
-Test: tests/behaviors/operations/test-live-run-state.sh (resume uses live status rule)
+Test: tests/binary.rs (headless_resume_global_no_sandbox_does_not_require_sandbox_exec),
+tests/behaviors/operations/test-live-run-state.sh (resume uses live status rule)
 
 WHEN `factory resume --help` is shown,
 THE SYSTEM SHALL list `--no-sandbox` as a resume option.
