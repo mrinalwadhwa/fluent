@@ -113,6 +113,13 @@ Recent Work Item runs suggest several promising measurements:
 - Record whether a delay came from scarce model capacity, sandbox/tooling
   failure, missing context, or real design uncertainty. These categories
   should drive different scheduling or process improvements.
+- Assess whether some extensive reviews should move from the pre-merge
+  path to periodic post-merge review on `main`. One possible shape: keep
+  deterministic tests as the hard rebase regression gate before merge,
+  then run broader qualitative reviews after merge on a schedule or from
+  the merge queue. This could shorten Work Item elapsed time, but it
+  changes where quality risk is caught. The tradeoff needs explicit
+  analysis before changing the gate.
 
 2026-06-05 — Wrote expertise/terminal-ui.md without following the
 factory process. A proper run with reviewers would have caught:
