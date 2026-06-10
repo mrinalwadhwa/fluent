@@ -133,6 +133,17 @@ Recent Work Item runs suggest several promising measurements:
   the merge queue. This could shorten Work Item elapsed time, but it
   changes where quality risk is caught. The tradeoff needs explicit
   analysis before changing the gate.
+- Merge-time reviewers need explicit guidance for running tests against a
+  read-only candidate workspace. During `split-storage-only`, one reviewer
+  first failed Cargo tests because Cargo tried to lock
+  `target/debug/.cargo-lock` inside the candidate workspace; rerunning
+  with `CARGO_TARGET_DIR` under the review artifact directory worked.
+  Another reviewer skipped test execution because it interpreted the
+  read-only candidate rule as "do not run tests." Factory prompts or test
+  reviewer skills should make the intended pattern explicit: read the
+  candidate, write build outputs and scratch files only under the review
+  artifact area, and run tests with redirected target/cache paths when the
+  tool normally writes into the checkout.
 
 2026-06-05 — Wrote expertise/terminal-ui.md without following the
 factory process. A proper run with reviewers would have caught:
@@ -810,12 +821,16 @@ Progress:
   build-in-the-factory, capture-brief, and plan-execution skills now
   teach this Work path instead of defaulting to a legacy
   `.factory/runs/<run-id>/execution-instructions.md` bridge.
+- `4f9c52f` and `bc2c4e6` made split Work storage authoritative.
+  `WorkModelStore` now reads Work Item metadata from `.factory/work/items/`
+  and assembles Attempts, Tasks, and Merge Candidates only from their
+  split collections. Nested operational collections in item JSON are
+  ignored, and architecture/behavior docs plus storage tests describe the
+  split collections as the Work storage contract.
 
-The next adoption slices should continue breaking the Work model out of a
-single nested Work Item JSON file into separate durable collections,
-remove remaining legacy `.factory/runs` assumptions from prompts and
-reviewers, and then delete legacy `.factory/runs` compatibility once the
-Work execution path is used end to end.
+The next adoption slices should remove remaining legacy `.factory/runs`
+assumptions from prompts and reviewers, then delete legacy `.factory/runs`
+compatibility once the Work execution path is used end to end.
 
 2026-06-07 — Authors are increasingly using expertise, especially when
 the approach lists specific expertise files, but Factory should make this
