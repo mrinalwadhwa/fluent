@@ -213,6 +213,18 @@ THE SYSTEM SHALL name the input artifact paths in the review prompt and
 tell the reviewer to read them first before evaluating the candidate.
 Test: tests/binary.rs (work_task_run_completes_review_task_with_fail_verdict_artifact)
 
+WHEN Factory launches a Work-model `review` Task,
+THE SYSTEM SHALL name the Work review artifact path, the exact
+filesystem `review.md` path the reviewer must write, and the reviewer
+artifact directory; SHALL tell the reviewer to put build caches, scratch
+files, suggested patches, and temporary outputs under the reviewer
+artifact directory when the candidate workspace is read-only; SHALL
+include Cargo guidance to set `CARGO_TARGET_DIR` under the reviewer
+artifact directory for tests against a read-only workspace; and SHALL
+NOT instruct the reviewer to write legacy
+`.factory/runs/<run-id>/reviews/...` artifacts.
+Test: src/work_task_executor.rs (work_review_prompt_names_work_artifacts_and_writable_outputs)
+
 IF a caller passes extra args to `factory work task run` or
 `factory work attempt run`,
 THE SYSTEM SHALL pass those args only as coder options and SHALL NOT
