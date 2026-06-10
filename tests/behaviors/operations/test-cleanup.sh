@@ -378,6 +378,61 @@ PY
   return $RESULT
 }
 
+test_cleanup_work_items_remove_orphan_artifact_roots() {
+  create_project
+  "$FACTORY_BIN" work create work-active --title "Active work" >/dev/null
+
+  ORPHAN_ROOT=".factory/work/artifacts/work-orphan"
+  ACTIVE_ROOT=".factory/work/artifacts/work-active"
+  FILE_ENTRY=".factory/work/artifacts/not-a-directory"
+  mkdir -p "$ORPHAN_ROOT/attempt-1/task-1"
+  printf 'orphan artifact' > "$ORPHAN_ROOT/attempt-1/task-1/result.md"
+  mkdir -p "$ACTIVE_ROOT/attempt-1/task-1"
+  printf 'active artifact' > "$ACTIVE_ROOT/attempt-1/task-1/result.md"
+  printf 'keep file entries' > "$FILE_ENTRY"
+
+  OUTPUT="$("$FACTORY_BIN" cleanup 2>&1)"
+
+  RESULT=0
+  assert_output_contains "$OUTPUT" "would remove orphan Work artifact root" || RESULT=1
+  assert_output_contains "$OUTPUT" "work-orphan" || RESULT=1
+  assert_output_not_contains "$OUTPUT" "work-active" || RESULT=1
+  assert_output_not_contains "$OUTPUT" "not-a-directory" || RESULT=1
+  if [ ! -d "$ORPHAN_ROOT" ]; then
+    printf '    FAIL: dry run removed orphan Work artifact root\n'
+    RESULT=1
+  fi
+  if [ ! -d "$ACTIVE_ROOT" ]; then
+    printf '    FAIL: dry run removed active Work artifact root\n'
+    RESULT=1
+  fi
+  if [ ! -f "$FILE_ENTRY" ]; then
+    printf '    FAIL: dry run removed Work artifact file entry\n'
+    RESULT=1
+  fi
+
+  APPLY_OUTPUT="$("$FACTORY_BIN" cleanup --apply 2>&1)"
+  assert_output_contains "$APPLY_OUTPUT" "removed orphan Work artifact root" || RESULT=1
+  assert_output_contains "$APPLY_OUTPUT" "work-orphan" || RESULT=1
+  assert_output_not_contains "$APPLY_OUTPUT" "work-active" || RESULT=1
+  assert_output_not_contains "$APPLY_OUTPUT" "not-a-directory" || RESULT=1
+  if [ -d "$ORPHAN_ROOT" ]; then
+    printf '    FAIL: apply kept orphan Work artifact root\n'
+    RESULT=1
+  fi
+  if [ ! -d "$ACTIVE_ROOT" ]; then
+    printf '    FAIL: apply removed active Work artifact root\n'
+    RESULT=1
+  fi
+  if [ ! -f "$FILE_ENTRY" ]; then
+    printf '    FAIL: apply removed Work artifact file entry\n'
+    RESULT=1
+  fi
+
+  rm -rf "$TEST_DIR"
+  return $RESULT
+}
+
 test_cleanup_work_items_ignore_unmanaged_artifacts() {
   create_project
   "$FACTORY_BIN" work create work-1 --title "Cleanup work" >/dev/null
@@ -478,6 +533,8 @@ run_test "dashboard prefers actionable run over cleaned run" \
   test_dashboard_prefers_actionable_run_over_cleaned_run
 run_test "cleanup handles Work Items with dry run and apply" \
   test_cleanup_work_items_dry_run_and_apply
+run_test "cleanup removes orphan Work artifact roots" \
+  test_cleanup_work_items_remove_orphan_artifact_roots
 run_test "cleanup ignores unmanaged Work artifact paths" \
   test_cleanup_work_items_ignore_unmanaged_artifacts
 

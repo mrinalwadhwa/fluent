@@ -6294,6 +6294,67 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
 }
 
 #[test]
+fn cleanup_work_items_reports_and_removes_orphan_artifact_roots() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-active", "--title", "Active work"])
+        .assert()
+        .success();
+
+    let artifacts_dir = main_dir.join(".factory/work/artifacts");
+    let orphan_artifact_root = artifacts_dir.join("work-orphan");
+    let active_artifact_root = artifacts_dir.join("work-active");
+    let file_entry = artifacts_dir.join("not-a-directory");
+    fs::create_dir_all(orphan_artifact_root.join("attempt-1/task-1")).unwrap();
+    fs::write(
+        orphan_artifact_root.join("attempt-1/task-1/result.md"),
+        "orphan artifact",
+    )
+    .unwrap();
+    fs::create_dir_all(active_artifact_root.join("attempt-1/task-1")).unwrap();
+    fs::write(
+        active_artifact_root.join("attempt-1/task-1/result.md"),
+        "active artifact",
+    )
+    .unwrap();
+    fs::write(&file_entry, "keep file entries").unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .arg("cleanup")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "would remove orphan Work artifact root",
+        ))
+        .stdout(predicate::str::contains("work-orphan"))
+        .stdout(predicate::str::contains("work-active").not())
+        .stdout(predicate::str::contains("not-a-directory").not());
+
+    assert!(orphan_artifact_root.is_dir());
+    assert!(active_artifact_root.is_dir());
+    assert!(file_entry.is_file());
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["cleanup", "--apply"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "removed orphan Work artifact root",
+        ))
+        .stdout(predicate::str::contains("work-orphan"))
+        .stdout(predicate::str::contains("work-active").not())
+        .stdout(predicate::str::contains("not-a-directory").not());
+
+    assert!(!orphan_artifact_root.exists());
+    assert!(active_artifact_root.is_dir());
+    assert!(file_entry.is_file());
+}
+
+#[test]
 fn cleanup_work_items_apply_skips_unregistered_managed_worktree() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);

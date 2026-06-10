@@ -8,7 +8,9 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-use factory::cleanup::{self, CleanupOptions, WorkBranchCleanup, WorktreeCleanup};
+use factory::cleanup::{
+    self, CleanupOptions, WorkBranchCleanup, WorkCleanupResult, WorktreeCleanup,
+};
 use factory::cli::{Cli, Commands, WorkAttemptCommands, WorkCommands, WorkTaskCommands};
 use factory::coder::{CoderKind, CoderSandbox};
 use factory::content::ContentResolver;
@@ -862,53 +864,70 @@ fn cmd_cleanup(search_root: &Path, run_id: Option<String>, apply: bool) -> Resul
     }
 
     for result in work_results {
-        let action = if result.applied {
-            "cleaned Work Item"
-        } else {
-            "would clean Work Item"
-        };
-        println!("  {} {}", action, result.work_item_id);
-        if result.applied {
-            println!("    removed Work Item state {}", result.item_path.display());
-        } else {
-            println!(
-                "    would remove Work Item state {}",
-                result.item_path.display()
-            );
-        }
-        for worktree in result.worktrees {
-            match worktree {
-                WorktreeCleanup::None => {}
-                WorktreeCleanup::WouldRemove(path) => {
-                    println!("    would remove registered worktree {}", path.display());
+        match result {
+            WorkCleanupResult::WorkItem(result) => {
+                let action = if result.applied {
+                    "cleaned Work Item"
+                } else {
+                    "would clean Work Item"
+                };
+                println!("  {} {}", action, result.work_item_id);
+                if result.applied {
+                    println!("    removed Work Item state {}", result.item_path.display());
+                } else {
+                    println!(
+                        "    would remove Work Item state {}",
+                        result.item_path.display()
+                    );
                 }
-                WorktreeCleanup::Removed(path) => {
-                    println!("    removed registered worktree {}", path.display());
+                for worktree in result.worktrees {
+                    match worktree {
+                        WorktreeCleanup::None => {}
+                        WorktreeCleanup::WouldRemove(path) => {
+                            println!("    would remove registered worktree {}", path.display());
+                        }
+                        WorktreeCleanup::Removed(path) => {
+                            println!("    removed registered worktree {}", path.display());
+                        }
+                        WorktreeCleanup::SkippedUnregistered(path) => {
+                            println!("    skipped unregistered worktree {}", path.display());
+                        }
+                        WorktreeCleanup::Missing(path) => {
+                            println!("    managed worktree missing {}", path.display());
+                        }
+                    }
                 }
-                WorktreeCleanup::SkippedUnregistered(path) => {
-                    println!("    skipped unregistered worktree {}", path.display());
+                for branch in result.branches {
+                    match branch {
+                        WorkBranchCleanup::WouldRemove(branch) => {
+                            println!("    would remove Work branch {branch}");
+                        }
+                        WorkBranchCleanup::Removed(branch) => {
+                            println!("    removed Work branch {branch}");
+                        }
+                        WorkBranchCleanup::Missing(_) => {}
+                    }
                 }
-                WorktreeCleanup::Missing(path) => {
-                    println!("    managed worktree missing {}", path.display());
+                for artifact in result.artifacts {
+                    if result.applied {
+                        println!("    removed Work artifact {}", artifact.display());
+                    } else {
+                        println!("    would remove Work artifact {}", artifact.display());
+                    }
                 }
             }
-        }
-        for branch in result.branches {
-            match branch {
-                WorkBranchCleanup::WouldRemove(branch) => {
-                    println!("    would remove Work branch {branch}");
+            WorkCleanupResult::OrphanArtifact(result) => {
+                if result.applied {
+                    println!(
+                        "  removed orphan Work artifact root {}",
+                        result.artifact_root.display()
+                    );
+                } else {
+                    println!(
+                        "  would remove orphan Work artifact root {}",
+                        result.artifact_root.display()
+                    );
                 }
-                WorkBranchCleanup::Removed(branch) => {
-                    println!("    removed Work branch {branch}");
-                }
-                WorkBranchCleanup::Missing(_) => {}
-            }
-        }
-        for artifact in result.artifacts {
-            if result.applied {
-                println!("    removed Work artifact {}", artifact.display());
-            } else {
-                println!("    would remove Work artifact {}", artifact.display());
             }
         }
     }

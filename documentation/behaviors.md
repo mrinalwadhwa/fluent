@@ -1003,6 +1003,25 @@ WHEN Work cleanup sees failed terminal Work Items,
 THE SYSTEM SHALL select them for cleanup.
 Test: tests/binary.rs (cleanup_work_items_selects_failed_terminal_and_skips_pending_merge_candidate)
 
+WHEN `factory cleanup` sees a top-level
+`.factory/work/artifacts/<work-item-id>/` directory without a matching
+stored Work Item,
+THE SYSTEM SHALL report the orphaned Work artifact root without removing
+it unless `--apply` is passed.
+Test: tests/binary.rs (cleanup_work_items_reports_and_removes_orphan_artifact_roots), tests/behaviors/operations/test-cleanup.sh (cleanup removes orphan Work artifact roots)
+
+WHEN `factory cleanup --apply` sees a top-level
+`.factory/work/artifacts/<work-item-id>/` directory without a matching
+stored Work Item,
+THE SYSTEM SHALL remove the orphaned Work artifact root and report that
+it was removed.
+Test: tests/binary.rs (cleanup_work_items_reports_and_removes_orphan_artifact_roots), tests/behaviors/operations/test-cleanup.sh (cleanup removes orphan Work artifact roots)
+
+WHEN Work cleanup sees top-level entries under `.factory/work/artifacts/`
+that are files or directories with matching stored Work Items,
+THE SYSTEM SHALL ignore them for orphan Work artifact cleanup.
+Test: tests/binary.rs (cleanup_work_items_reports_and_removes_orphan_artifact_roots), tests/behaviors/operations/test-cleanup.sh (cleanup removes orphan Work artifact roots)
+
 WHEN the dashboard legacy Runs view selects a run,
 THE SYSTEM SHALL prefer actionable runs over cleaned runs.
 Test: src/dashboard.rs (test_app_new_prefers_actionable_run_over_cleaned_terminal_run)

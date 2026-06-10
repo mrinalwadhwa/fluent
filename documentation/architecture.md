@@ -1098,6 +1098,12 @@ resolved with the same expected workspace path rules used by Work task
 and merge execution, and registered worktrees are removed through
 `git worktree remove --force`. Missing worktree paths and unregistered
 directories are reported without deleting arbitrary filesystem paths.
+After planning stored Work Item cleanup, cleanup scans the top level of
+`.factory/work/artifacts/` for directories whose names do not match any
+stored Work Item JSON under `.factory/work/items/`. Dry runs report those
+orphan Work artifact roots, and `--apply` removes only those top-level
+artifact directories. File entries under `.factory/work/artifacts/` and
+artifact roots for stored Work Items are ignored by orphan cleanup.
 
 Cleanup resolves source Factory state even when invoked from a run
 worktree by finding the registered worktree that points back to the

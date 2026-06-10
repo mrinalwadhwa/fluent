@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -42,7 +43,13 @@ pub enum WorkBranchCleanup {
 }
 
 #[derive(Debug, Clone)]
-pub struct WorkCleanupResult {
+pub enum WorkCleanupResult {
+    WorkItem(WorkItemCleanupResult),
+    OrphanArtifact(OrphanWorkArtifactCleanupResult),
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkItemCleanupResult {
     pub work_item_id: String,
     pub applied: bool,
     pub item_path: PathBuf,
@@ -50,6 +57,13 @@ pub struct WorkCleanupResult {
     pub artifacts: Vec<PathBuf>,
     pub worktrees: Vec<WorktreeCleanup>,
     pub branches: Vec<WorkBranchCleanup>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OrphanWorkArtifactCleanupResult {
+    pub work_item_id: String,
+    pub applied: bool,
+    pub artifact_root: PathBuf,
 }
 
 pub fn cleanup_runs(search_root: &Path, options: &CleanupOptions) -> Result<Vec<CleanupResult>> {
@@ -85,7 +99,12 @@ pub fn cleanup_work_items(
 
     let source_root = cleanup_source_root(search_root)?;
     let store = WorkModelStore::new(&source_root);
-    let candidates = cleanup_work_item_candidates(&store)?;
+    let work_items = store.list_work_items()?;
+    let stored_work_item_ids = work_items
+        .iter()
+        .map(|work_item| work_item.id.clone())
+        .collect::<HashSet<_>>();
+    let candidates = cleanup_work_item_candidates(work_items);
     let registered = registered_worktrees(&source_root)?;
     let mut results = Vec::new();
 
@@ -94,7 +113,16 @@ pub fn cleanup_work_items(
         if options.apply {
             apply_work_item_cleanup(&plan)?;
         }
-        results.push(plan);
+        results.push(WorkCleanupResult::WorkItem(plan));
+    }
+
+    for plan in
+        orphan_work_artifact_cleanup_plans(&source_root, &stored_work_item_ids, options.apply)?
+    {
+        if options.apply {
+            apply_orphan_work_artifact_cleanup(&plan)?;
+        }
+        results.push(WorkCleanupResult::OrphanArtifact(plan));
     }
 
     Ok(results)
@@ -214,14 +242,11 @@ fn is_cleanable_status(status: &RunStatus) -> bool {
     matches!(status, RunStatus::Complete | RunStatus::Landed)
 }
 
-fn cleanup_work_item_candidates(store: &WorkModelStore) -> Result<Vec<WorkItem>> {
-    let mut candidates = Vec::new();
-    for work_item in store.list_work_items()? {
-        if work_item_is_cleanable(&work_item) {
-            candidates.push(work_item);
-        }
-    }
-    Ok(candidates)
+fn cleanup_work_item_candidates(work_items: Vec<WorkItem>) -> Vec<WorkItem> {
+    work_items
+        .into_iter()
+        .filter(work_item_is_cleanable)
+        .collect()
 }
 
 fn work_item_is_cleanable(work_item: &WorkItem) -> bool {
@@ -258,7 +283,7 @@ fn work_cleanup_plan(
     work_item: &WorkItem,
     registered: &[PathBuf],
     apply: bool,
-) -> Result<WorkCleanupResult> {
+) -> Result<WorkItemCleanupResult> {
     let mut worktrees = Vec::new();
     let mut branches = Vec::new();
 
@@ -316,7 +341,7 @@ fn work_cleanup_plan(
     ];
     let artifacts = work_item_artifact_paths(source_root, work_item);
 
-    Ok(WorkCleanupResult {
+    Ok(WorkItemCleanupResult {
         work_item_id: work_item.id.clone(),
         applied: apply,
         item_path,
@@ -325,6 +350,38 @@ fn work_cleanup_plan(
         worktrees,
         branches,
     })
+}
+
+fn orphan_work_artifact_cleanup_plans(
+    source_root: &Path,
+    stored_work_item_ids: &HashSet<String>,
+    apply: bool,
+) -> Result<Vec<OrphanWorkArtifactCleanupResult>> {
+    let artifacts_dir = source_root.join(WORK_ARTIFACTS_DIR);
+    let entries = match fs::read_dir(&artifacts_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err).context("Failed to read Work artifacts directory"),
+    };
+
+    let mut plans = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let work_item_id = entry.file_name().to_string_lossy().into_owned();
+        if stored_work_item_ids.contains(&work_item_id) {
+            continue;
+        }
+        plans.push(OrphanWorkArtifactCleanupResult {
+            work_item_id,
+            applied: apply,
+            artifact_root: entry.path(),
+        });
+    }
+    plans.sort_by(|left, right| left.artifact_root.cmp(&right.artifact_root));
+    Ok(plans)
 }
 
 fn push_unique_worktree(worktrees: &mut Vec<WorktreeCleanup>, cleanup: WorktreeCleanup) {
@@ -492,7 +549,7 @@ fn resolve_managed_artifact_path(source_root: &Path, path: &str) -> Option<PathB
     }
 }
 
-fn apply_work_item_cleanup(plan: &WorkCleanupResult) -> Result<()> {
+fn apply_work_item_cleanup(plan: &WorkItemCleanupResult) -> Result<()> {
     for artifact in &plan.artifacts {
         remove_artifact_path(artifact)?;
     }
@@ -527,7 +584,15 @@ fn remove_artifact_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn prune_empty_artifact_parents(plan: &WorkCleanupResult) -> Result<()> {
+fn apply_orphan_work_artifact_cleanup(plan: &OrphanWorkArtifactCleanupResult) -> Result<()> {
+    match fs::remove_dir_all(&plan.artifact_root) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).context("Failed to remove orphan Work artifact root"),
+    }
+}
+
+fn prune_empty_artifact_parents(plan: &WorkItemCleanupResult) -> Result<()> {
     let Some(work_dir) = plan.item_path.parent().and_then(Path::parent) else {
         return Ok(());
     };
