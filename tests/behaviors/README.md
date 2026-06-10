@@ -42,6 +42,16 @@ tests/test-run
 for test in tests/behaviors/operations/*.sh; do bash "$test"; done
 ```
 
+Merge reviewers who need to keep a candidate workspace read-only can
+build Factory under their artifact directory and pass that binary to
+operation scripts that support the override:
+
+```sh
+CARGO_TARGET_DIR="$REVIEW_ARTIFACT_DIR/target" cargo build
+FACTORY_BIN_OVERRIDE="$REVIEW_ARTIFACT_DIR/target/debug/factory" \
+  bash tests/behaviors/operations/test-work-task-run.sh
+```
+
 ## Behavior mapping
 
 ### Brief capture

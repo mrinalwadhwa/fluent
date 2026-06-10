@@ -234,6 +234,12 @@ NOT instruct the reviewer to write legacy
 `.factory/runs/<run-id>/reviews/...` artifacts.
 Test: src/work_task_executor.rs (work_review_prompt_names_work_artifacts_and_writable_outputs)
 
+WHEN a behavior operation script invokes the Factory binary,
+THE SYSTEM SHALL allow callers to set `FACTORY_BIN_OVERRIDE` to an
+explicit binary path; when no override is set, the script SHALL keep the
+repository-local `target/debug/factory` default.
+Test: tests/behaviors/operations/test-behavior-bin-override.sh (Work task instructions script uses FACTORY_BIN_OVERRIDE)
+
 IF a caller passes extra args to `factory work task run` or
 `factory work attempt run`,
 THE SYSTEM SHALL pass those args only as coder options and SHALL NOT

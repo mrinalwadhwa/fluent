@@ -5,7 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
-FACTORY_BIN="${PROJECT_DIR}/target/debug/factory"
+FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
 
 PASS=0
 FAIL=0
@@ -160,7 +160,7 @@ test_attempt_copies_instructions_to_initial_write_task() {
 
   RESULT=0
   [ "$("$FACTORY_BIN" work show work-1 | jq -r '.attempts[0].tasks[0].instructions')" = "$(cat "$TEST_DIR/instructions.md")" ] || RESULT=1
-  [ "$(json_value '.attempts[0].tasks[0].id')" = "attempt-1-write" ] || RESULT=1
+  [ "$("$FACTORY_BIN" work show work-1 | jq -r '.attempts[0].tasks[0].id')" = "attempt-1-write" ] || RESULT=1
 
   cleanup_test_project
   return $RESULT
