@@ -238,7 +238,7 @@ WHEN a behavior operation script invokes the Factory binary,
 THE SYSTEM SHALL allow callers to set `FACTORY_BIN_OVERRIDE` to an
 explicit binary path; when no override is set, the script SHALL keep the
 repository-local `target/debug/factory` default.
-Test: tests/behaviors/operations/test-behavior-bin-override.sh (Work task instructions script uses FACTORY_BIN_OVERRIDE)
+Test: tests/behaviors/operations/test-behavior-bin-override.sh (operation scripts use FACTORY_BIN_OVERRIDE for debug binary bindings)
 
 IF a caller passes extra args to `factory work task run` or
 `factory work attempt run`,

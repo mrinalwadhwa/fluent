@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SKILL="$ROOT/skills/build-in-the-factory/SKILL.md"
-FACTORY_BIN="$ROOT/target/debug/factory"
+FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-$ROOT/target/debug/factory}"
 
 if [ ! -x "$FACTORY_BIN" ]; then
   (cd "$ROOT" && cargo build --quiet)

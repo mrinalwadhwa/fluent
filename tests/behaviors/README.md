@@ -44,7 +44,7 @@ for test in tests/behaviors/operations/*.sh; do bash "$test"; done
 
 Merge reviewers who need to keep a candidate workspace read-only can
 build Factory under their artifact directory and pass that binary to
-operation scripts that support the override:
+behavior operation scripts:
 
 ```sh
 CARGO_TARGET_DIR="$REVIEW_ARTIFACT_DIR/target" cargo build
@@ -103,6 +103,7 @@ FACTORY_BIN_OVERRIDE="$REVIEW_ARTIFACT_DIR/target/debug/factory" \
 
 | Behavior | Test |
 |---|---|
+| Behavior operation scripts accept `FACTORY_BIN_OVERRIDE` and default to `target/debug/factory` | `test-behavior-bin-override.sh` |
 | Version command reports package version and build metadata | `test-version.sh`, `binary.rs` |
 | Work Item create writes a minimal item | `binary.rs`, `test-work-inspection.sh` |
 | Work Item create rejects existing ids | `binary.rs`, `test-work-inspection.sh` |

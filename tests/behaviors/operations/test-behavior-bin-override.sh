@@ -50,14 +50,17 @@ assert_contains() {
   fi
 }
 
-test_work_task_instructions_uses_factory_bin_override() {
+test_script_uses_factory_bin_override() {
+  SCRIPT_PATH="$1"
+  EXPECTED_ARGS="$2"
+
   setup_test_project
   write_mock_factory
 
   RESULT=0
   if FACTORY_BIN_OVERRIDE="$TEST_DIR/bin/factory" \
       FACTORY_OVERRIDE_LOG="$TEST_DIR/factory.log" \
-      bash "$PROJECT_DIR/tests/behaviors/operations/test-work-task-instructions.sh" \
+      bash "$SCRIPT_PATH" \
         > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr"; then
     printf '    FAIL: updated script unexpectedly passed with sentinel mock\n'
     RESULT=1
@@ -68,9 +71,44 @@ test_work_task_instructions_uses_factory_bin_override() {
     RESULT=1
   }
   assert_contains "$(cat "$TEST_DIR/factory.log" 2>/dev/null || true)" "$TEST_DIR/bin/factory" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/factory.log" 2>/dev/null || true)" "work create" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/factory.log" 2>/dev/null || true)" "$EXPECTED_ARGS" || RESULT=1
 
   cleanup_test_project
+  return $RESULT
+}
+
+test_work_task_instructions_uses_factory_bin_override() {
+  test_script_uses_factory_bin_override \
+    "$PROJECT_DIR/tests/behaviors/operations/test-work-task-instructions.sh" \
+    "work create"
+}
+
+test_work_task_run_uses_factory_bin_override() {
+  test_script_uses_factory_bin_override \
+    "$PROJECT_DIR/tests/behaviors/operations/test-work-task-run.sh" \
+    "work create"
+}
+
+test_version_uses_factory_bin_override() {
+  test_script_uses_factory_bin_override \
+    "$PROJECT_DIR/tests/behaviors/operations/test-version.sh" \
+    "version"
+}
+
+test_operation_scripts_use_override_for_debug_binary() {
+  RESULT=0
+  UNSUPPORTED="$(
+    grep -RIn 'target/debug/factory' "$PROJECT_DIR/tests/behaviors/operations" |
+      grep -v '/test-behavior-bin-override.sh:' |
+      grep -v 'FACTORY_BIN_OVERRIDE' || true
+  )"
+
+  if [ -n "$UNSUPPORTED" ]; then
+    printf '    FAIL: scripts bind target/debug/factory without FACTORY_BIN_OVERRIDE\n'
+    printf '%s\n' "$UNSUPPORTED"
+    RESULT=1
+  fi
+
   return $RESULT
 }
 
@@ -78,6 +116,12 @@ printf 'test-behavior-bin-override\n\n'
 
 run_test "Work task instructions script uses FACTORY_BIN_OVERRIDE" \
   test_work_task_instructions_uses_factory_bin_override
+run_test "Work task run script uses FACTORY_BIN_OVERRIDE" \
+  test_work_task_run_uses_factory_bin_override
+run_test "Version script uses FACTORY_BIN_OVERRIDE" \
+  test_version_uses_factory_bin_override
+run_test "Operation scripts use override for debug binary bindings" \
+  test_operation_scripts_use_override_for_debug_binary
 
 printf '\n  %s passed, %s failed\n' "$PASS" "$FAIL"
 if [ "$FAIL" -ne 0 ]; then
