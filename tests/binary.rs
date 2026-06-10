@@ -895,6 +895,17 @@ exit 0
     assert!(prompt.contains("Completion contract:"));
     assert!(prompt.contains("Commit all Task output"));
     assert!(prompt.contains("Leave the writable workspace clean"));
+    assert!(prompt.contains("Author preflight:"));
+    assert!(prompt.contains("Before editing, identify the likely touched surfaces"));
+    assert!(prompt.contains(
+        "behavior statements, user-facing docs, tests, skills/expertise, and verification commands"
+    ));
+    assert!(
+        prompt.contains(
+            "update the applicable behavior contract, docs, tests, and verification notes"
+        )
+    );
+    assert!(prompt.contains("record why the other related artifacts do not apply"));
     assert!(!prompt.contains("Task instructions:"));
     assert!(prompt.contains("Current Task model:"));
     assert!(prompt.contains(r#""id": "attempt-1-write""#));
@@ -3962,6 +3973,10 @@ exec "$@"
     let expected_artifact_dir = expected_artifact.parent().unwrap();
     let prompt = fs::read_to_string(prompt_log).unwrap();
     assert!(prompt.contains("Input artifacts:"));
+    assert!(prompt.contains("Author preflight:"));
+    assert!(prompt.contains("Read the review input artifacts first"));
+    assert!(prompt.contains("address the concrete findings"));
+    assert!(prompt.contains("missing first-pass preflight item"));
     assert!(
         prompt.contains(&format!("- {}", expected_artifact.display())),
         "{prompt}"

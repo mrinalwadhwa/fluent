@@ -846,14 +846,16 @@ fn run_task_coder(
         .ok_or_else(|| anyhow::anyhow!("Task {task_id:?} not found"))?;
     let task_json = to_json_pretty(task)?;
     let input_artifacts_prompt = input_artifacts_instruction(input_artifacts);
+    let preflight_prompt = write_task_preflight_prompt(input_artifacts);
     let task_instructions = task_instructions_prompt(task.instructions.as_deref());
     let prompt = format!(
-        "Execute this Factory write Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\nCompletion contract:\n- Commit all Task output in the writable workspace before marking the Task complete.\n- Leave the writable workspace clean: no unstaged, staged, or untracked Task changes.\n- If no code, documentation, skill, behavior, or other repository change is needed, mark the Task needs-user or failed instead of complete.\n\n{}Input artifacts:\n{}\n\nCurrent Task model:\n{}\n",
+        "Execute this Factory write Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\nCompletion contract:\n- Commit all Task output in the writable workspace before marking the Task complete.\n- Leave the writable workspace clean: no unstaged, staged, or untracked Task changes.\n- If no code, documentation, skill, behavior, or other repository change is needed, mark the Task needs-user or failed instead of complete.\n\n{}{}Input artifacts:\n{}\n\nCurrent Task model:\n{}\n",
         item.id,
         item.title,
         attempt_id,
         task_id,
         task.role,
+        preflight_prompt,
         task_instructions,
         input_artifacts_prompt,
         task_json
@@ -890,6 +892,34 @@ fn run_task_coder(
     } else {
         bail!("Coder exited with code {exit_code}")
     }
+}
+
+fn write_task_preflight_prompt(input_artifacts: &[PathBuf]) -> String {
+    let follow_up = if input_artifacts.is_empty() {
+        String::new()
+    } else {
+        concat!(
+            "- This Task has input artifacts. Read the review input artifacts first, ",
+            "address the concrete findings, and check whether each finding reveals ",
+            "a missing first-pass preflight item.\n"
+        )
+        .to_string()
+    };
+    format!(
+        concat!(
+            "Author preflight:\n",
+            "- Before editing, identify the likely touched surfaces: behavior ",
+            "statements, user-facing docs, tests, skills/expertise, and ",
+            "verification commands.\n",
+            "- When changing a user-facing command, behavior, skill, or ",
+            "documentation surface, update the applicable behavior contract, ",
+            "docs, tests, and verification notes in this first pass.\n",
+            "- If this Task is intentionally code-only or docs-only, record why ",
+            "the other related artifacts do not apply instead of adding churn.\n",
+            "{follow_up}\n",
+        ),
+        follow_up = follow_up
+    )
 }
 
 fn input_artifacts_instruction(input_artifacts: &[PathBuf]) -> String {
