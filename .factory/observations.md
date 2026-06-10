@@ -151,6 +151,20 @@ Recent Work Item runs suggest several promising measurements:
   hit permission errors. The candidate stayed clean, but Factory should
   make reviewer build/cache isolation more automatic and auditable instead
   of relying only on prompt guidance.
+- During `work-cleanup-orphan-artifacts`, merge-time reviewers could read
+  the candidate workspace but could not read the sibling merge-check
+  artifact directory; `find` and `rg` returned `Operation not permitted`
+  for `.factory/work/artifacts/<work>/<attempt>/<candidate>/merge/checks`.
+  The reviews still passed from candidate diff and direct verification,
+  but merge-check artifacts should either be readable to reviewers when
+  the prompt names them, or omitted from reviewer prompts until the
+  sandbox grants access.
+- During the same Work Item, multiple reviewers initially ran plain
+  `git diff -- <path>` in a clean candidate workspace, got empty output,
+  then had to rediscover the explicit target-to-candidate commit diff.
+  Factory should make the review diff command copy-safe and hard to
+  misuse, ideally by including concrete commit ids and path examples
+  rather than only prose like `git -C <candidate> diff main..HEAD`.
 
 2026-06-05 — Wrote expertise/terminal-ui.md without following the
 factory process. A proper run with reviewers would have caught:
