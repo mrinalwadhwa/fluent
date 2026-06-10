@@ -96,29 +96,29 @@ worktree.
 `review` Tasks for the default reviewer set after a completed write Task
 exists. Each review Task reads the candidate workspace, carries review
 context copied from the write output, and writes only under
-`.factory/work/artifacts/<attempt-id>/<task-id>/`. The review context
-names the candidate workspace, source branch, and candidate commit so a
-reviewer can inspect the scoped diff without rediscovering the author
-Task. Running a review Task requires `review.md` in that artifact area;
-the Task can complete even when that artifact says `Verdict: fail` or
-`Verdict: uncertain` because verdict acceptance belongs to later review
-or merge policy.
+`.factory/work/artifacts/<work-item-id>/<attempt-id>/<task-id>/`. The
+review context names the candidate workspace, source branch, and
+candidate commit so a reviewer can inspect the scoped diff without
+rediscovering the author Task. Running a review Task requires `review.md`
+in that artifact area; the Task can complete even when that artifact
+says `Verdict: fail` or `Verdict: uncertain` because verdict acceptance
+belongs to later review or merge policy.
 `factory work review-codebase <work-item-id> <attempt-id>` appends a
 review-only Attempt for full-codebase review of the current source
 checkout. Review-only Attempts contain review Tasks only, read the source
 checkout through workspace id `source` at path `.`, and write artifacts
-under `.factory/work/artifacts/<attempt-id>/<task-id>/`. This is the
-default Work-model path for review-only work; legacy review runs remain
-for compatibility and recovery. The review Task executor treats the
-source checkout as a guarded readable workspace: the reviewer sandbox
-gets the source checkout as a read-only root and the managed artifact
-area as its writable root. For no-sandbox or failed-reviewer paths, the
-guard verifies that source HEAD and source files stayed unchanged and
-that only the Task artifact area changed under `.factory/`. If a reviewer
-changes source HEAD, the guard resets HEAD before failing the Task. If a
-reviewer changes source files or protected `.factory/` state outside the
-Task artifact area, the guard restores protected checkout state before
-failing the Task.
+under `.factory/work/artifacts/<work-item-id>/<attempt-id>/<task-id>/`.
+This is the default Work-model path for review-only work; legacy review
+runs remain for compatibility and recovery. The review Task executor
+treats the source checkout as a guarded readable workspace: the reviewer
+sandbox gets the source checkout as a read-only root and the managed
+artifact area as its writable root. For no-sandbox or failed-reviewer
+paths, the guard verifies that source HEAD and source files stayed
+unchanged and that only the Task artifact area changed under `.factory/`.
+If a reviewer changes source HEAD, the guard resets HEAD before failing
+the Task. If a reviewer changes source files or protected `.factory/`
+state outside the Task artifact area, the guard restores protected
+checkout state before failing the Task.
 `factory work attempt run <work-item-id> <attempt-id>` is the first
 Attempt-level orchestration path. It advances one Attempt by running the
 next planned write or review Task through the same Task executor, then
@@ -139,7 +139,7 @@ instructions into that follow-up Task, or derives those instructions
 from stored Work Item planning context when explicit instructions are
 absent. When no review artifact fails, uncertain or missing verdicts
 mark the Attempt `needs-user` with a handoff under
-`.factory/work/artifacts/<attempt-id>/`.
+`.factory/work/artifacts/<work-item-id>/<attempt-id>/`.
 For review-only Attempts, all pass marks the Attempt complete with review
 state `passed` and does not create a Merge Candidate. Any fail marks the
 Attempt failed with review state `failed` and does not create a follow-up
@@ -174,7 +174,7 @@ candidate workspace against the target branch, runs configured pre-land
 checks in the candidate workspace, runs the required reviewer set with
 merge-time context, then fast-forwards the target branch to the updated
 candidate head. Merge-time reviewers receive the exact
-`.factory/work/artifacts/<attempt-id>/<candidate-id>/merge/reviews/<role>/review.md`
+`.factory/work/artifacts/<work-item-id>/<attempt-id>/<candidate-id>/merge/reviews/<role>/review.md`
 artifact path for their output and the absolute filesystem path the
 reviewer must write. When Factory builds the Work merge reviewer system
 prompt, it strips legacy `.factory/runs` review paths and relative
@@ -199,9 +199,9 @@ for a Merge Candidate that already has merge status `landed` and a stored
 `landed_commit` succeeds idempotently and reports the stored commit
 without resolving workspaces, rerunning checks, rerunning reviewers, or
 moving the target branch. Merge artifacts live under
-`.factory/work/artifacts/<attempt-id>/<candidate-id>/merge/`, and the
-stored Merge Candidate records whether execution is pending, executing,
-failed, needs-user, or landed.
+`.factory/work/artifacts/<work-item-id>/<attempt-id>/<candidate-id>/merge/`,
+and the stored Merge Candidate records whether execution is pending,
+executing, failed, needs-user, or landed.
 `factory cleanup` owns the terminal Work model cleanup lifecycle. It
 defaults to a dry run and only mutates state with `--apply`. A Work Item
 is eligible when every Attempt is terminal, every Task in those Attempts
@@ -342,9 +342,10 @@ The first storage contract is:
     <work-item-id>/
       <merge-candidate-id>.json
   artifacts/
-    <attempt-id>/
-      <task-id>/
-      <merge-candidate-id>/merge/
+    <work-item-id>/
+      <attempt-id>/
+        <task-id>/
+        <merge-candidate-id>/merge/
 ```
 
 Each file in `items/` stores Work Item metadata and planning context:

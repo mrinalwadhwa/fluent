@@ -223,7 +223,7 @@ WHEN `factory work review <work-item-id> <attempt-id>` is invoked for an
 Attempt with completed write output,
 THE SYSTEM SHALL append planned `review` Tasks that read the candidate
 workspace, declare no writable workspace, and declare artifact areas
-under `.factory/work/artifacts/<attempt-id>/<task-id>/`.
+under `.factory/work/artifacts/<work-item-id>/<attempt-id>/<task-id>/`.
 Test: tests/binary.rs (work_review_plans_review_tasks_for_completed_attempt)
 Test: tests/behaviors/operations/test-work-task-run.sh (review planning adds read-only Task without changing candidate)
 
@@ -244,7 +244,7 @@ Test: tests/behaviors/operations/test-work-review-codebase.sh (review-codebase c
 WHEN a review-only Attempt is created,
 THE SYSTEM SHALL give each review Task read-only access to the current
 source checkout and a managed artifact area under
-`.factory/work/artifacts/<attempt-id>/<task-id>/`.
+`.factory/work/artifacts/<work-item-id>/<attempt-id>/<task-id>/`.
 Test: tests/binary.rs (work_review_codebase_creates_review_only_attempt)
 Test: tests/behaviors/operations/test-work-review-codebase.sh (review-codebase creates review-only Attempt)
 
@@ -383,7 +383,7 @@ Test: tests/binary.rs (work_merge_candidate_lands_after_merge_time_reviews)
 WHEN `factory work merge <work-item-id> <merge-candidate-id>` launches a
 merge-time reviewer for a Work Merge Candidate,
 THE SYSTEM SHALL name the exact
-`.factory/work/artifacts/<attempt-id>/<candidate-id>/merge/reviews/<role>/review.md`
+`.factory/work/artifacts/<work-item-id>/<attempt-id>/<candidate-id>/merge/reviews/<role>/review.md`
 artifact as the review output, provide the absolute filesystem path the
 reviewer must write, and SHALL NOT instruct the reviewer to write legacy
 `.factory/runs/<run-id>/reviews/...` artifacts.

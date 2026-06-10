@@ -235,6 +235,16 @@ test_documentation_describes_sibling_workspace_layout() {
     "$PROJECT_DIR/skills/build-in-the-factory/SKILL.md" \
     "$PROJECT_DIR/tests/behaviors/README.md" > /dev/null || RESULT=1
 
+  rg -n '\.factory/work/artifacts/<attempt-id>|\.factory/work/artifacts/attempt-1|\.factory/work/artifacts/attempt-one' \
+    "$PROJECT_DIR/documentation" \
+    "$PROJECT_DIR/skills/build-in-the-factory/SKILL.md" \
+    "$PROJECT_DIR/tests/behaviors/README.md" && RESULT=1
+
+  rg -n '\.factory/work/artifacts/<work-item-id>/<attempt-id>|\.factory/work/artifacts/work-1/attempt-1|\.factory/work/artifacts/work-alpha/attempt-one' \
+    "$PROJECT_DIR/documentation" \
+    "$PROJECT_DIR/skills/build-in-the-factory/SKILL.md" \
+    "$PROJECT_DIR/tests/behaviors/README.md" > /dev/null || RESULT=1
+
   return $RESULT
 }
 
