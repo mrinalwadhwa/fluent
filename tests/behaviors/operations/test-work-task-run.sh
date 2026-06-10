@@ -218,6 +218,11 @@ test_run_passes_task_context_to_coder_prompt() {
   assert_contains "$PROMPT" "Completion contract:" || RESULT=1
   assert_contains "$PROMPT" "Commit all Task output" || RESULT=1
   assert_contains "$PROMPT" "Leave the writable workspace clean" || RESULT=1
+  assert_contains "$PROMPT" "no committed Task output makes the Task fail" || RESULT=1
+  if printf '%s' "$PROMPT" | grep -Fq "mark the Task needs-user"; then
+    printf '    FAIL: prompt should not tell write Task authors to mark needs-user\n'
+    RESULT=1
+  fi
   assert_contains "$PROMPT" "Author preflight:" || RESULT=1
   assert_contains "$PROMPT" "Before editing, identify the likely touched surfaces" || RESULT=1
   assert_contains "$PROMPT" "behavior statements, user-facing docs, tests, skills/expertise, and verification commands" || RESULT=1

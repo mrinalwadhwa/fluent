@@ -895,6 +895,8 @@ exit 0
     assert!(prompt.contains("Completion contract:"));
     assert!(prompt.contains("Commit all Task output"));
     assert!(prompt.contains("Leave the writable workspace clean"));
+    assert!(prompt.contains("no committed Task output makes the Task fail"));
+    assert!(!prompt.contains("mark the Task needs-user"));
     assert!(prompt.contains("Author preflight:"));
     assert!(prompt.contains("Before editing, identify the likely touched surfaces"));
     assert!(prompt.contains(

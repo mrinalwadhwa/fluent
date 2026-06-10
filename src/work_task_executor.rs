@@ -851,7 +851,7 @@ fn run_task_coder(
     let preflight_prompt = write_task_preflight_prompt(input_artifacts);
     let task_instructions = task_instructions_prompt(task.instructions.as_deref());
     let prompt = format!(
-        "Execute this Factory write Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\nCompletion contract:\n- Commit all Task output in the writable workspace before marking the Task complete.\n- Leave the writable workspace clean: no unstaged, staged, or untracked Task changes.\n- If no code, documentation, skill, behavior, or other repository change is needed, mark the Task needs-user or failed instead of complete.\n\n{}{}Input artifacts:\n{}\n\nCurrent Task model:\n{}\n",
+        "Execute this Factory write Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\nCompletion contract:\n- Commit all Task output in the writable workspace before marking the Task complete.\n- Leave the writable workspace clean: no unstaged, staged, or untracked Task changes.\n- If no code, documentation, skill, behavior, or other repository change is needed, do not mark the Task complete; under the current write Task executor contract, no committed Task output makes the Task fail.\n\n{}{}Input artifacts:\n{}\n\nCurrent Task model:\n{}\n",
         item.id,
         item.title,
         attempt_id,
