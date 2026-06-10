@@ -250,6 +250,7 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     })?;
     let workspace_reads = task.workspace_access.reads.clone();
     let candidate_commit = review_context.candidate_commit.clone();
+    let input_artifacts = resolve_input_artifact_paths(config.project_root, &task.input_artifacts)?;
     let artifact_dir = resolve_managed_artifact_area_path(config.project_root, &artifact_area)?;
     let review_path = artifact_dir.join("review.md");
 
@@ -315,6 +316,7 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         &artifact_dir,
         &review_path,
         &readable_workspace_paths,
+        &input_artifacts,
         attempt_kind == AttemptKind::ReviewOnly,
         config.resolver,
         config.extra_args,
@@ -955,6 +957,7 @@ fn run_review_coder(
     artifact_dir: &Path,
     review_path: &Path,
     readable_workspaces: &[PathBuf],
+    input_artifacts: &[PathBuf],
     review_only: bool,
     resolver: &ContentResolver,
     extra_args: &[String],
@@ -1018,6 +1021,7 @@ fn run_review_coder(
         "candidate workspaces"
     };
     let task_instructions = task_instructions_prompt(task.instructions.as_deref());
+    let input_artifacts_prompt = review_input_artifacts_prompt(input_artifacts);
     let behavior_review_input = if task.role == "behaviors" {
         format!("{}\n", work_behavior_review_input(item))
     } else {
@@ -1025,13 +1029,14 @@ fn run_review_coder(
     };
     let scope_prompt = format!("{scope_prompt}{behavior_review_input}");
     let prompt = format!(
-        "Execute this Factory review Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\n{}{}\nWrite the review artifact to exactly this path:\n{}\n\nThe Task completes when that artifact exists. The artifact may contain Verdict: pass, Verdict: fail, or Verdict: uncertain; do not edit {}.\n\nCurrent Task model:\n{}\n",
+        "Execute this Factory review Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\n{}{}{}\nWrite the review artifact to exactly this path:\n{}\n\nThe Task completes when that artifact exists. The artifact may contain Verdict: pass, Verdict: fail, or Verdict: uncertain; do not edit {}.\n\nCurrent Task model:\n{}\n",
         item.id,
         item.title,
         attempt_id,
         task_id,
         task.role,
         task_instructions,
+        input_artifacts_prompt,
         scope_prompt,
         review_path.display(),
         edit_target,
@@ -1054,7 +1059,8 @@ fn run_review_coder(
     let (sandbox, _sandbox_profile) = if no_sandbox {
         (CoderSandbox::None, None)
     } else {
-        let readable_roots = review_readable_sandbox_roots(readable_workspaces)?;
+        let mut readable_roots = review_readable_sandbox_roots(readable_workspaces)?;
+        readable_roots.extend(input_artifact_readable_roots(input_artifacts));
         build_coder_sandbox_with_read_only_roots(
             coder_kind,
             resolver,
@@ -1076,6 +1082,21 @@ fn run_review_coder(
     } else {
         bail!("Coder exited with code {exit_code}")
     }
+}
+
+fn review_input_artifacts_prompt(input_artifacts: &[PathBuf]) -> String {
+    if input_artifacts.is_empty() {
+        return String::new();
+    }
+
+    let artifacts = input_artifacts
+        .iter()
+        .map(|path| format!("- {}", path.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "Review input artifacts:\n{artifacts}\n\nRead these input artifacts first. Verify whether the follow-up addressed the concrete findings before evaluating the candidate.\n\n"
+    )
 }
 
 fn review_readable_sandbox_roots(readable_workspaces: &[PathBuf]) -> Result<Vec<PathBuf>> {

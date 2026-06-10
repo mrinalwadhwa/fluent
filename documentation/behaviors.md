@@ -200,6 +200,12 @@ first, address the concrete findings, and check whether each finding
 reveals a missing first-pass preflight item.
 Test: tests/binary.rs (work_attempt_run_exposes_followup_input_artifacts)
 
+WHEN Factory launches a Work-model `review` Task that includes input
+artifacts,
+THE SYSTEM SHALL name the input artifact paths in the review prompt and
+tell the reviewer to read them first before evaluating the candidate.
+Test: tests/binary.rs (work_task_run_completes_review_task_with_fail_verdict_artifact)
+
 IF a caller passes extra args to `factory work task run` or
 `factory work attempt run`,
 THE SYSTEM SHALL pass those args only as coder options and SHALL NOT
@@ -303,6 +309,13 @@ THE SYSTEM SHALL plan the next review round only for the failed reviewer
 roles that fed that follow-up write Task.
 Test: tests/binary.rs (work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews)
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop plans follow-up with mixed missing review)
+
+WHEN a normal Work Attempt completes a follow-up write Task created from
+failed review artifacts and Factory plans a targeted follow-up review
+round,
+THE SYSTEM SHALL attach the relevant prior failed review artifact for
+each planned review Task role as that review Task's input artifact.
+Test: tests/binary.rs (work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews)
 
 IF a normal Work Attempt completes a follow-up write Task and the failed
 reviewer roles cannot be derived from the follow-up Task input artifacts,

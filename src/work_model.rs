@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -328,18 +328,23 @@ impl WorkItem {
             });
         };
 
-        let Some(write_output) = attempt
+        let Some(latest_write) = attempt
             .tasks
             .iter()
             .rev()
             .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
-            .and_then(|task| task.output.as_ref())
             .cloned()
         else {
             return Err(WorkModelError::AttemptMissingCompletedWriteTask {
                 attempt_id: attempt_id.to_string(),
             });
         };
+        let Some(write_output) = latest_write.output.as_ref().cloned() else {
+            return Err(WorkModelError::AttemptMissingCompletedWriteTask {
+                attempt_id: attempt_id.to_string(),
+            });
+        };
+        let review_input_artifacts = review_input_artifacts_by_role(attempt, &latest_write);
 
         let candidate = WorkspaceRef {
             id: write_output.workspace_id.clone(),
@@ -374,7 +379,10 @@ impl WorkItem {
                     source_branch: write_output.source_branch.clone(),
                     candidate_commit: write_output.commit.clone(),
                 }),
-                input_artifacts: Vec::new(),
+                input_artifacts: review_input_artifacts
+                    .get(*role)
+                    .cloned()
+                    .unwrap_or_default(),
                 output: None,
             });
             task_ids.push(task_id);
@@ -2434,6 +2442,30 @@ fn review_task_round(attempt_id: &str, task: &Task) -> Option<usize> {
         .split_once('-')
         .and_then(|(round, _)| round.parse::<usize>().ok())
         .or(Some(1))
+}
+
+fn review_input_artifacts_by_role(
+    attempt: &Attempt,
+    latest_write: &Task,
+) -> HashMap<String, Vec<ArtifactRef>> {
+    let mut roles_by_producer = HashMap::new();
+    for task in &attempt.tasks {
+        if task.kind == TaskKind::Review && task.status == TaskStatus::Complete {
+            roles_by_producer.insert(task.id.as_str(), task.role.as_str());
+        }
+    }
+
+    let mut artifacts_by_role: HashMap<String, Vec<ArtifactRef>> = HashMap::new();
+    for artifact in &latest_write.input_artifacts {
+        let Some(role) = roles_by_producer.get(artifact.producer_id.as_str()) else {
+            continue;
+        };
+        artifacts_by_role
+            .entry((*role).to_string())
+            .or_default()
+            .push(artifact.clone());
+    }
+    artifacts_by_role
 }
 
 fn review_role_order(role: &str) -> usize {

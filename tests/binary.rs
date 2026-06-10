@@ -1597,6 +1597,24 @@ fn work_task_run_completes_review_task_with_fail_verdict_artifact() {
         .args(["work", "review", "work-1", "attempt-1"])
         .assert()
         .success();
+    let prior_review_path = main_dir
+        .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests-prior/review.md");
+    fs::create_dir_all(prior_review_path.parent().unwrap()).unwrap();
+    fs::write(
+        &prior_review_path,
+        "Verdict: fail\n\nPrior tests finding.\n",
+    )
+    .unwrap();
+    let task_path =
+        work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-review-tests");
+    let mut task = read_json_value(&task_path);
+    task["input_artifacts"] = serde_json::json!([
+        {
+            "producer_id": "attempt-1-review-tests-prior",
+            "path": ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests-prior/review.md"
+        }
+    ]);
+    write_json_value(&task_path, &task);
 
     let bin_dir = tmp.path().join("bin-review");
     let prompt_log = tmp.path().join("review-prompt.log");
@@ -1650,6 +1668,11 @@ exit 0
     );
     let prompt = fs::read_to_string(prompt_log).unwrap();
     assert!(prompt.contains("Execute this Factory review Task"));
+    assert!(prompt.contains("Review input artifacts:"));
+    let expected_prior_review_path = fs::canonicalize(&prior_review_path).unwrap();
+    assert!(prompt.contains(&format!("- {}", expected_prior_review_path.display())));
+    assert!(prompt.contains("Read these input artifacts first"));
+    assert!(prompt.contains("Verify whether the follow-up addressed the concrete findings"));
     assert!(prompt.contains("Readable candidate workspaces:"));
     let candidate_workspace =
         fs::canonicalize(main_dir.join("../work-6-work-1-attempt-1")).unwrap();
@@ -3890,6 +3913,18 @@ fn work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews() {
     assert_eq!(
         second_round_reviews[0]["id"],
         "attempt-1-review-2-documentation"
+    );
+    let second_round_inputs = second_round_reviews[0]["input_artifacts"]
+        .as_array()
+        .unwrap();
+    assert_eq!(second_round_inputs.len(), 1);
+    assert_eq!(
+        second_round_inputs[0]["path"],
+        ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-documentation/review.md"
+    );
+    assert_eq!(
+        second_round_inputs[0]["producer_id"],
+        "attempt-1-review-documentation"
     );
 }
 
