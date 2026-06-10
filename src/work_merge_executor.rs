@@ -430,8 +430,9 @@ fn run_one_merge_reviewer(
     } else {
         String::new()
     };
+    let writable_outputs_guidance = merge_reviewer_writable_outputs_guidance(reviewer_dir);
     let prompt = format!(
-        "Execute a merge-time Work model review.\n\nWork Item: {}\nMerge Candidate: {}\nReviewer: {}\nCandidate workspace: {}\nTarget branch: {}\nReview diff: git -C {} diff {}..HEAD\n\nCandidate workspace access:\n- Treat the candidate workspace as read-only for review purposes.\n- Do not modify, stage, unstage, commit, create, or delete files in the candidate workspace.\n- Put scratch tests, suggested patches, or proposed documentation edits in the review artifact text or reviewer artifact directory instead of applying them to the candidate workspace.\n\n{}Attempt history:\n{}\n\nRebase/update state:\n- Rebased candidate workspace onto target branch {} before checks and reviewers.\n- Target branch head before merge checks/reviews: {}\n- Candidate head after rebase/update: {}\n\nCheck artifacts:\n{}\n\nWork review artifact path:\n{}\nWrite the review artifact to exactly this filesystem path:\n{}\nYour reviewer artifact directory is:\n{}\n\nMerge Candidate model:\n{}\n",
+        "Execute a merge-time Work model review.\n\nWork Item: {}\nMerge Candidate: {}\nReviewer: {}\nCandidate workspace: {}\nTarget branch: {}\nReview diff: git -C {} diff {}..HEAD\n\nCandidate workspace access:\n- Treat the candidate workspace as read-only for review purposes.\n- Do not modify, stage, unstage, commit, create, or delete files in the candidate workspace.\n\n{}\n\n{}Attempt history:\n{}\n\nRebase/update state:\n- Rebased candidate workspace onto target branch {} before checks and reviewers.\n- Target branch head before merge checks/reviews: {}\n- Candidate head after rebase/update: {}\n\nCheck artifacts:\n{}\n\nWork merge review artifact path:\n{}\nWrite the review artifact to exactly this filesystem path:\n{}\nYour reviewer artifact directory is:\n{}\n\nMerge Candidate model:\n{}\n",
         config.work_item_id,
         candidate.id,
         reviewer,
@@ -439,6 +440,7 @@ fn run_one_merge_reviewer(
         candidate.target_branch,
         source_workspace.display(),
         candidate.target_branch,
+        writable_outputs_guidance,
         behavior_review_input,
         attempt_history,
         candidate.target_branch,
@@ -451,10 +453,11 @@ fn run_one_merge_reviewer(
         candidate_json
     );
     let reviewer_system = format!(
-        "{system}\n{}\nReview only this Work Merge Candidate. The candidate workspace is read-only for review purposes. Write only merge review artifacts, with the required verdict line (pass, fail, or uncertain) in {}. This is the Work artifact path {}; do not write legacy run review artifacts.",
+        "{system}\n{}\nReview only this Work Merge Candidate. The candidate workspace is read-only for review purposes. Write only merge review artifacts, with the required verdict line (pass, fail, or uncertain) in {}. This is the Work merge review artifact path {}; do not write legacy run review artifacts.\n{}",
         merge_review_decisions_instruction(source_workspace),
         review_absolute_path,
-        review_artifact_path
+        review_artifact_path,
+        writable_outputs_guidance
     );
     if !config.no_sandbox {
         os::check_prerequisites_for(config.coder_kind)?;
@@ -492,16 +495,22 @@ fn work_merge_reviewer_system_prompt(
     reviewer: &str,
     source_workspace: &Path,
 ) -> String {
-    let mut lines = prompt_section(content, "system")
-        .lines()
-        .filter(|line| !line.contains(".factory/runs/"))
-        .filter(|line| !line.contains("skills/review-"))
-        .filter(|line| !line.contains(".factory/expertise/decisions.md"))
-        .filter(|line| !line.contains("recorded decision"))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
+    let work_system = prompt_section(content, "work-system");
+    let source = if work_system.trim().is_empty() {
+        prompt_section(content, "system")
+    } else {
+        work_system
+    };
+    let mut lines = source.lines().map(str::to_string).collect::<Vec<_>>();
     lines.push(merge_review_skill_instruction(reviewer, source_workspace));
     lines.join("\n")
+}
+
+fn merge_reviewer_writable_outputs_guidance(reviewer_dir: &Path) -> String {
+    format!(
+        "Writable review outputs:\n- Put build caches, scratch files, suggested patches, proposed documentation edits, and temporary outputs under the reviewer artifact directory instead of applying them to the candidate workspace.\n- For Cargo commands against the read-only candidate workspace, set CARGO_TARGET_DIR to a directory under the reviewer artifact directory, for example: CARGO_TARGET_DIR=\"{}/target\" cargo test.",
+        reviewer_dir.display()
+    )
 }
 
 fn merge_review_skill_instruction(reviewer: &str, source_workspace: &Path) -> String {
@@ -1253,5 +1262,54 @@ mod tests {
             Some(landed_commit.as_str())
         );
         assert!(candidate.merge_state.failure_reason.is_none());
+    }
+
+    #[test]
+    fn merge_reviewer_system_prompt_uses_work_section_without_legacy_filtering() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let source_workspace = tmp.path();
+        fs::create_dir_all(source_workspace.join("skills/review-tests")).unwrap();
+        fs::write(
+            source_workspace.join("skills/review-tests/SKILL.md"),
+            "# Test review\n",
+        )
+        .unwrap();
+        let content = "\
+[system]
+Write your review to .factory/runs/{{RUN_ID}}/reviews/review-tests.md.
+Follow the review-tests skill at skills/review-tests/SKILL.md.
+
+[work-system]
+Write your review only to the Work merge review artifact path.
+Keep this Work-native sentence.
+";
+
+        let system = work_merge_reviewer_system_prompt(content, "tests", source_workspace);
+
+        assert!(system.contains("Work merge review artifact path"));
+        assert!(system.contains("Keep this Work-native sentence."));
+        assert!(!system.contains(".factory/runs/"));
+        assert!(!system.contains("Follow the review-tests skill at skills/review-tests/SKILL.md"));
+        assert!(
+            system.contains(
+                source_workspace
+                    .join("skills/review-tests/SKILL.md")
+                    .to_string_lossy()
+                    .as_ref()
+            ),
+            "{system}"
+        );
+    }
+
+    #[test]
+    fn merge_reviewer_writable_outputs_guidance_uses_artifact_directory() {
+        let guidance =
+            merge_reviewer_writable_outputs_guidance(Path::new("/tmp/factory/merge/reviews/tests"));
+
+        assert!(guidance.contains("CARGO_TARGET_DIR"));
+        assert!(guidance.contains("/tmp/factory/merge/reviews/tests/target"));
+        assert!(guidance.contains("cargo test"));
+        assert!(guidance.contains("reviewer artifact directory"));
+        assert!(!guidance.contains(".factory/runs/"));
     }
 }

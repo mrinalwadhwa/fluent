@@ -220,6 +220,36 @@ Review run {{RUN_ID}}.
     }
 
     #[test]
+    fn bundled_review_prompts_keep_legacy_and_work_sections_separate() {
+        for reviewer in [
+            "architecture",
+            "behaviors",
+            "documentation",
+            "skills",
+            "tests",
+        ] {
+            let content = bundled_content(&format!("prompts/review-{reviewer}.md")).unwrap();
+            let legacy_system = prompt_section(&content, "system");
+            let work_system = prompt_section(&content, "work-system");
+
+            assert!(
+                legacy_system.contains(&format!(
+                    ".factory/runs/{{{{RUN_ID}}}}/reviews/review-{reviewer}.md"
+                )),
+                "legacy system prompt for {reviewer} should keep run review path"
+            );
+            assert!(
+                work_system.contains("Work review artifact path"),
+                "Work system prompt for {reviewer} should name Work artifact guidance"
+            );
+            assert!(
+                !work_system.contains(".factory/runs/"),
+                "Work system prompt for {reviewer} should not name legacy run paths"
+            );
+        }
+    }
+
+    #[test]
     fn test_bundled_content_sandbox() {
         assert!(bundled_content("sandbox/common.sb").is_some());
         assert!(bundled_content("sandbox/claude-code.sb").is_some());

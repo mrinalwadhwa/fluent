@@ -970,92 +970,17 @@ fn run_review_coder(
         credential::setup_git_signing();
     }
 
-    let task = item
-        .attempts
-        .iter()
-        .find(|attempt| attempt.id == attempt_id)
-        .and_then(|attempt| attempt.tasks.iter().find(|task| task.id == task_id))
-        .ok_or_else(|| anyhow::anyhow!("Task {task_id:?} not found"))?;
-    let task_json = to_json_pretty(task)?;
-    let review_context = task
-        .review_context
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Review Task {task_id:?} must declare review context"))?;
-    let review_skill_instruction =
-        review_skill_instruction(&task.role, readable_workspaces, review_only);
-    let decisions_instruction = decisions_instruction(readable_workspaces);
-    let read_paths = task
-        .workspace_access
-        .reads
-        .iter()
-        .zip(readable_workspaces.iter())
-        .map(|(workspace, resolved_path)| {
-            format!("- {}: {}", workspace.id, resolved_path.display())
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let scope_prompt = if review_only {
-        format!(
-            "Readable source checkout:\n{}\n\nReview context:\n- Source checkout: {} ({})\n- Source ref: {}\n- Source commit: {}\n",
-            read_paths,
-            review_context.candidate_workspace_id,
-            review_context.candidate_workspace_path,
-            review_context.source_branch,
-            review_context.candidate_commit
-        )
-    } else {
-        format!(
-            "Readable candidate workspaces:\n{}\n\nReview context:\n- Candidate workspace: {} ({})\n- Source branch: {}\n- Candidate commit: {}\n- Review diff: git -C <candidate-workspace> diff {}..{}\n",
-            read_paths,
-            review_context.candidate_workspace_id,
-            review_context.candidate_workspace_path,
-            review_context.source_branch,
-            review_context.candidate_commit,
-            review_context.source_branch,
-            review_context.candidate_commit
-        )
-    };
-    let edit_target = if review_only {
-        "source checkout"
-    } else {
-        "candidate workspaces"
-    };
-    let task_instructions = task_instructions_prompt(task.instructions.as_deref());
-    let input_artifacts_prompt = review_input_artifacts_prompt(input_artifacts);
-    let behavior_review_input = if task.role == "behaviors" {
-        format!("{}\n", work_behavior_review_input(item))
-    } else {
-        String::new()
-    };
-    let scope_prompt = format!("{scope_prompt}{behavior_review_input}");
-    let prompt = format!(
-        "Execute this Factory review Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\n{}{}{}\nWrite the review artifact to exactly this path:\n{}\n\nThe Task completes when that artifact exists. The artifact may contain Verdict: pass, Verdict: fail, or Verdict: uncertain; do not edit {}.\n\nCurrent Task model:\n{}\n",
-        item.id,
-        item.title,
+    let prompts = build_work_review_prompts(WorkReviewPromptInput {
+        item,
         attempt_id,
         task_id,
-        task.role,
-        task_instructions,
-        input_artifacts_prompt,
-        scope_prompt,
-        review_path.display(),
-        edit_target,
-        task_json
-    );
+        artifact_dir,
+        review_path,
+        readable_workspaces,
+        input_artifacts,
+        review_only,
+    })?;
 
-    let system_scope = if review_only {
-        "Read the source checkout only; do not edit or commit in it."
-    } else {
-        "Read candidate workspaces only; do not edit or commit in them."
-    };
-    let system_prompt = format!(
-        "You are a Factory {} reviewer operating as a Work model review Task.\n{}\n{}\nWrite the review artifact only to {} with a verdict (pass, fail, or uncertain) and findings.\n{} Do not flag findings that contradict a recorded decision.",
-        task.role,
-        review_skill_instruction,
-        system_scope,
-        review_path.display(),
-        decisions_instruction
-    );
     let (sandbox, _sandbox_profile) = if no_sandbox {
         (CoderSandbox::None, None)
     } else {
@@ -1076,11 +1001,216 @@ fn run_review_coder(
     eprintln!("  Artifact area     {}", artifact_dir.display());
 
     let coder = coder_kind.boxed(sandbox);
-    let exit_code = coder.run(&prompt, &system_prompt, artifact_dir, extra_args, None)?;
+    let exit_code = coder.run(
+        &prompts.review_prompt,
+        &prompts.system_prompt,
+        artifact_dir,
+        extra_args,
+        None,
+    )?;
     if exit_code == 0 {
         Ok(())
     } else {
         bail!("Coder exited with code {exit_code}")
+    }
+}
+
+struct WorkReviewPrompts {
+    system_prompt: String,
+    review_prompt: String,
+}
+
+struct WorkReviewPromptInput<'a> {
+    item: &'a WorkItem,
+    attempt_id: &'a str,
+    task_id: &'a str,
+    artifact_dir: &'a Path,
+    review_path: &'a Path,
+    readable_workspaces: &'a [PathBuf],
+    input_artifacts: &'a [PathBuf],
+    review_only: bool,
+}
+
+fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkReviewPrompts> {
+    let task = input
+        .item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == input.attempt_id)
+        .and_then(|attempt| attempt.tasks.iter().find(|task| task.id == input.task_id))
+        .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", input.task_id))?;
+    let task_json = to_json_pretty(task)?;
+    let review_context = task.review_context.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Review Task {:?} must declare review context",
+            input.task_id
+        )
+    })?;
+    let review_artifact_path = work_review_artifact_path(task)?;
+    let review_skill_instruction =
+        review_skill_instruction(&task.role, input.readable_workspaces, input.review_only);
+    let decisions_instruction = decisions_instruction(input.readable_workspaces);
+    let read_paths = task
+        .workspace_access
+        .reads
+        .iter()
+        .zip(input.readable_workspaces.iter())
+        .map(|(workspace, resolved_path)| {
+            format!("- {}: {}", workspace.id, resolved_path.display())
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let scope_prompt = if input.review_only {
+        format!(
+            "Readable source checkout:\n{}\n\nReview context:\n- Source checkout: {} ({})\n- Source ref: {}\n- Source commit: {}\n",
+            read_paths,
+            review_context.candidate_workspace_id,
+            review_context.candidate_workspace_path,
+            review_context.source_branch,
+            review_context.candidate_commit
+        )
+    } else {
+        format!(
+            "Readable candidate workspaces:\n{}\n\nReview context:\n- Candidate workspace: {} ({})\n- Source branch: {}\n- Candidate commit: {}\n- Review diff: git -C <candidate-workspace> diff {}..{}\n",
+            read_paths,
+            review_context.candidate_workspace_id,
+            review_context.candidate_workspace_path,
+            review_context.source_branch,
+            review_context.candidate_commit,
+            review_context.source_branch,
+            review_context.candidate_commit
+        )
+    };
+    let edit_target = if input.review_only {
+        "source checkout"
+    } else {
+        "candidate workspaces"
+    };
+    let task_instructions = task_instructions_prompt(task.instructions.as_deref());
+    let input_artifacts_prompt = review_input_artifacts_prompt(input.input_artifacts);
+    let behavior_review_input = if task.role == "behaviors" {
+        format!("{}\n", work_behavior_review_input(input.item))
+    } else {
+        String::new()
+    };
+    let scope_prompt = format!("{scope_prompt}{behavior_review_input}");
+    let writable_outputs_guidance = reviewer_writable_outputs_guidance(input.artifact_dir);
+    let review_prompt = format!(
+        "Execute this Factory review Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\n{}{}{}\nWork review artifact path:\n{}\nWrite the review artifact to exactly this filesystem path:\n{}\nYour reviewer artifact directory is:\n{}\n\n{}\n\nThe Task completes when that artifact exists. The artifact may contain Verdict: pass, Verdict: fail, or Verdict: uncertain; do not edit {}.\n\nCurrent Task model:\n{}\n",
+        input.item.id,
+        input.item.title,
+        input.attempt_id,
+        input.task_id,
+        task.role,
+        task_instructions,
+        input_artifacts_prompt,
+        scope_prompt,
+        review_artifact_path,
+        input.review_path.display(),
+        input.artifact_dir.display(),
+        writable_outputs_guidance,
+        edit_target,
+        task_json
+    );
+
+    let system_scope = if input.review_only {
+        "Read the source checkout only; do not edit or commit in it."
+    } else {
+        "Read candidate workspaces only; do not edit or commit in them."
+    };
+    let system_prompt = format!(
+        "You are a Factory {} reviewer operating as a Work model review Task.\n{}\n{}\nWrite the review artifact only to {} with a verdict (pass, fail, or uncertain) and findings. The Work review artifact path is {}.\n{}\n{} Do not flag findings that contradict a recorded decision.",
+        task.role,
+        review_skill_instruction,
+        system_scope,
+        input.review_path.display(),
+        review_artifact_path,
+        writable_outputs_guidance,
+        decisions_instruction
+    );
+    Ok(WorkReviewPrompts {
+        system_prompt,
+        review_prompt,
+    })
+}
+
+fn work_review_artifact_path(task: &crate::work_model::Task) -> Result<String> {
+    let artifact_area = task.artifact_area.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("Review Task {:?} must declare an artifact area", task.id)
+    })?;
+    Ok(format!(
+        "{}/review.md",
+        artifact_area.path.trim_end_matches('/')
+    ))
+}
+
+fn reviewer_writable_outputs_guidance(artifact_dir: &Path) -> String {
+    format!(
+        "Writable review outputs:\n- Put build caches, scratch files, suggested patches, and temporary outputs under the reviewer artifact directory, not in the read-only workspace.\n- For Cargo commands against a read-only workspace, set CARGO_TARGET_DIR to a directory under the reviewer artifact directory, for example: CARGO_TARGET_DIR=\"{}/target\" cargo test.",
+        artifact_dir.display()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::work_model::{TaskOutput, TaskStatus, WorkItem};
+
+    fn review_item() -> WorkItem {
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Review prompts".to_string(),
+            planning_context: None,
+            instructions: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        let attempt = item.attempts.first_mut().unwrap();
+        let task = attempt.tasks.first_mut().unwrap();
+        let workspace = task.workspace_access.writes.first().unwrap().clone();
+        task.status = TaskStatus::Complete;
+        task.output = Some(TaskOutput {
+            workspace_id: workspace.id,
+            workspace_path: workspace.path,
+            source_branch: "main".to_string(),
+            commit: "abc123".to_string(),
+        });
+        item.add_review_tasks("attempt-1", &["tests"]).unwrap();
+        item
+    }
+
+    #[test]
+    fn work_review_prompt_names_work_artifacts_and_writable_outputs() {
+        let item = review_item();
+        let prompts = build_work_review_prompts(WorkReviewPromptInput {
+            item: &item,
+            attempt_id: "attempt-1",
+            task_id: "attempt-1-review-tests",
+            artifact_dir: Path::new("/tmp/project/.factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests"),
+            review_path: Path::new("/tmp/project/.factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"),
+            readable_workspaces: &[PathBuf::from("/tmp/project/../work-6-work-1-attempt-1")],
+            input_artifacts: &[],
+            review_only: false,
+        })
+        .unwrap();
+
+        assert!(prompts.review_prompt.contains(
+            "Work review artifact path:\n.factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
+        ));
+        assert!(
+            prompts
+                .review_prompt
+                .contains("Your reviewer artifact directory is:")
+        );
+        assert!(prompts.review_prompt.contains("CARGO_TARGET_DIR"));
+        assert!(prompts.review_prompt.contains("cargo test"));
+        assert!(!prompts.review_prompt.contains(".factory/runs/"));
+        assert!(prompts.system_prompt.contains(
+            "The Work review artifact path is .factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
+        ));
+        assert!(prompts.system_prompt.contains("CARGO_TARGET_DIR"));
+        assert!(!prompts.system_prompt.contains(".factory/runs/"));
     }
 }
 
