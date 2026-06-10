@@ -1877,25 +1877,22 @@ impl WorkModelStore {
                 path: path.to_path_buf(),
                 source,
             })?;
-        let legacy_work_item: WorkItem =
+        let record: WorkItemRecord =
             from_json(&content).map_err(|source| WorkModelStorageError::ParseFile {
                 path: path.to_path_buf(),
                 source,
             })?;
         if let Some(expected) = path.file_stem().and_then(|stem| stem.to_str()) {
             work_item_file_name(expected)?;
-            if legacy_work_item.id != expected {
+            if record.id != expected {
                 return Err(WorkModelStorageError::WorkItemIdMismatch {
                     path: path.to_path_buf(),
                     expected: expected.to_string(),
-                    actual: legacy_work_item.id.clone(),
+                    actual: record.id.clone(),
                 });
             }
         }
-        let mut work_item = legacy_work_item.clone();
-        if self.has_split_records(&work_item.id)? {
-            work_item = self.assemble_split_work_item(&work_item.id, path, validate)?;
-        }
+        let mut work_item = self.assemble_split_work_item(record, validate)?;
         self.normalize_work_artifact_paths(&mut work_item)?;
         if validate {
             work_item
@@ -1908,83 +1905,18 @@ impl WorkModelStore {
         Ok(work_item)
     }
 
-    fn has_split_records(&self, work_item_id: &str) -> Result<bool, WorkModelStorageError> {
-        self.collection_has_json_records(&self.work_attempts_dir().join(work_item_id))
-            .and_then(|has_attempts| {
-                if has_attempts {
-                    Ok(true)
-                } else {
-                    self.collection_has_json_records(&self.work_tasks_dir().join(work_item_id))
-                }
-            })
-            .and_then(|has_tasks| {
-                if has_tasks {
-                    Ok(true)
-                } else {
-                    self.collection_has_json_records(
-                        &self.work_merge_candidates_dir().join(work_item_id),
-                    )
-                }
-            })
-    }
-
-    fn collection_has_json_records(&self, dir: &Path) -> Result<bool, WorkModelStorageError> {
-        if !dir.exists() {
-            return Ok(false);
-        }
-        let entries = fs::read_dir(dir).map_err(|source| WorkModelStorageError::ReadDirectory {
-            path: dir.to_path_buf(),
-            source,
-        })?;
-        for entry in entries {
-            let entry = entry.map_err(|source| WorkModelStorageError::ReadDirectory {
-                path: dir.to_path_buf(),
-                source,
-            })?;
-            let path = entry.path();
-            if path.is_dir() {
-                if self.collection_has_json_records(&path)? {
-                    return Ok(true);
-                }
-            } else if path
-                .extension()
-                .is_some_and(|extension| extension == "json")
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
     fn assemble_split_work_item(
         &self,
-        work_item_id: &str,
-        item_path: &Path,
+        record: WorkItemRecord,
         validate: bool,
     ) -> Result<WorkItem, WorkModelStorageError> {
-        let content =
-            fs::read_to_string(item_path).map_err(|source| WorkModelStorageError::ReadFile {
-                path: item_path.to_path_buf(),
-                source,
-            })?;
-        let record: WorkItemRecord =
-            from_json(&content).map_err(|source| WorkModelStorageError::ParseFile {
-                path: item_path.to_path_buf(),
-                source,
-            })?;
-        if record.id != work_item_id {
-            return Err(WorkModelStorageError::WorkItemIdMismatch {
-                path: item_path.to_path_buf(),
-                expected: work_item_id.to_string(),
-                actual: record.id,
-            });
-        }
+        let work_item_id = record.id.clone();
 
         let mut work_item = WorkItem::from(record);
-        work_item.attempts = self.read_attempt_records(work_item_id)?;
-        self.reject_task_records_without_attempt(work_item_id, &work_item.attempts)?;
+        work_item.attempts = self.read_attempt_records(&work_item_id)?;
+        self.reject_task_records_without_attempt(&work_item_id, &work_item.attempts)?;
         work_item.merge_candidates =
-            self.read_merge_candidate_records(work_item_id, &work_item, validate)?;
+            self.read_merge_candidate_records(&work_item_id, &work_item, validate)?;
         Ok(work_item)
     }
 
@@ -2212,6 +2144,34 @@ impl WorkModelStore {
             }
         }
         Ok(())
+    }
+
+    fn collection_has_json_records(&self, dir: &Path) -> Result<bool, WorkModelStorageError> {
+        if !dir.exists() {
+            return Ok(false);
+        }
+        let entries = fs::read_dir(dir).map_err(|source| WorkModelStorageError::ReadDirectory {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|source| WorkModelStorageError::ReadDirectory {
+                path: dir.to_path_buf(),
+                source,
+            })?;
+            let path = entry.path();
+            if path.is_dir() {
+                if self.collection_has_json_records(&path)? {
+                    return Ok(true);
+                }
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn read_merge_candidate_records(

@@ -5754,8 +5754,7 @@ fn work_list_reports_stored_work_item_id_mismatch() {
         items_dir.join("work-1.json"),
         r#"{
   "id": "work-2",
-  "title": "Mismatched id",
-  "attempts": []
+  "title": "Mismatched id"
 }
 "#,
     )
@@ -5780,8 +5779,7 @@ fn work_list_reports_invalid_stored_work_item_id() {
         items_dir.join(r"bad\id.json"),
         r#"{
   "id": "bad\\id",
-  "title": "Invalid id",
-  "attempts": []
+  "title": "Invalid id"
 }
 "#,
     )
@@ -5805,15 +5803,20 @@ fn work_list_reports_invalid_stored_model() {
         items_dir.join("work-invalid.json"),
         r#"{
   "id": "work-invalid",
-  "title": "Invalid model",
-  "attempts": [
-    {
-      "id": "attempt-1",
-      "work_item_id": "other-work",
-      "status": "planned",
-      "tasks": []
-    }
-  ]
+  "title": "Invalid model"
+}
+"#,
+    )
+    .unwrap();
+    let attempts_dir = tmp.path().join(".factory/work/attempts/work-invalid");
+    fs::create_dir_all(&attempts_dir).unwrap();
+    fs::write(
+        attempts_dir.join("attempt-1.json"),
+        r#"{
+  "id": "attempt-1",
+  "work_item_id": "other-work",
+  "order": 0,
+  "status": "planned"
 }
 "#,
     )
@@ -5825,7 +5828,7 @@ fn work_list_reports_invalid_stored_model() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            ".factory/work/items/work-invalid.json",
+            ".factory/work/attempts/work-invalid/attempt-1.json",
         ))
         .stderr(predicate::str::contains("invalid work model"))
         .stderr(predicate::str::contains("expected work-invalid"));

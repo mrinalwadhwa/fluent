@@ -34,8 +34,9 @@ for phrase in \
   'merge-candidates/ <work-item-id>/ <merge-candidate-id>.json' \
   'stores Work Item metadata and planning context' \
   '`WorkModelStore` assembles those split records into the public `WorkItem` shape' \
-  'New writes prefer the split layout' \
-  'bridge-period nested Work Item files remain readable when no split records exist' \
+  'If an item file contains nested Attempts, Tasks, or Merge Candidates' \
+  'Factory ignores those nested operational collections' \
+  'Factory writes Work Item metadata to `items/` and operational records to the split Attempt, Task, and Merge Candidate collections' \
   'Workspace references stay inside task `workspace_access.reads` and `workspace_access.writes`' \
   'managed sibling worktrees for candidate execution' \
   'does not keep a standalone workspace registry' \

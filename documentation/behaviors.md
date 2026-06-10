@@ -71,9 +71,16 @@ Test: tests/binary.rs (work_create_persists_planning_context_and_attempt_copies_
 
 WHEN `factory work list` is invoked,
 THE SYSTEM SHALL read stored Work Items from `.factory/work/items/` and
-print each Work Item with its id and title.
+assemble Attempts, Tasks, and Merge Candidates only from their split
+collections before printing each Work Item with its id and title.
 Test: tests/binary.rs (work_list_outputs_stored_work_items)
 Test: tests/behaviors/operations/test-work-inspection.sh (work list prints stored Work Items)
+
+IF a `.factory/work/items/<id>.json` file contains nested Attempts,
+Tasks, or Merge Candidates,
+THEN THE SYSTEM SHALL ignore those nested operational collections and
+expose only split-collection Attempt, Task, and Merge Candidate records.
+Test: tests/work_model_external.rs (work_model_store_ignores_nested_operational_collections)
 
 WHEN `factory work list` is invoked and no Work Items exist,
 THE SYSTEM SHALL print an empty-state message and exit successfully.

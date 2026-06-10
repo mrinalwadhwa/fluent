@@ -48,8 +48,7 @@ write_work_item() {
   printf '%s\n' \
     '{' \
     "  \"id\": \"${ITEM_ID}\"," \
-    "  \"title\": \"${TITLE}\"," \
-    '  "attempts": []' \
+    "  \"title\": \"${TITLE}\"" \
     '}' > ".factory/work/items/${ITEM_ID}.json"
 }
 
@@ -282,8 +281,7 @@ test_work_list_invalid_state_fails() {
   printf '%s\n' \
     '{' \
     '  "id": "bad/id",' \
-    '  "title": "Invalid id",' \
-    '  "attempts": []' \
+    '  "title": "Invalid id"' \
     '}' > .factory/work/items/bad-id.json
   rm .factory/work/items/broken-json.json
 
@@ -294,21 +292,21 @@ test_work_list_invalid_state_fails() {
   printf '%s\n' \
     '{' \
     '  "id": "work-invalid",' \
-    '  "title": "Invalid model",' \
-    '  "attempts": [' \
-    '    {' \
-    '      "id": "attempt-1",' \
-    '      "work_item_id": "other-work",' \
-    '      "status": "planned",' \
-    '      "tasks": []' \
-    '    }' \
-    '  ]' \
+    '  "title": "Invalid model"' \
     '}' > .factory/work/items/work-invalid.json
+  mkdir -p .factory/work/attempts/work-invalid
+  printf '%s\n' \
+    '{' \
+    '  "id": "attempt-1",' \
+    '  "work_item_id": "other-work",' \
+    '  "order": 0,' \
+    '  "status": "planned"' \
+    '}' > .factory/work/attempts/work-invalid/attempt-1.json
   rm .factory/work/items/bad-id.json
 
   assert_fails "$FACTORY_BIN" work list || RESULT=1
   ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
-  assert_contains "$ERROR_OUTPUT" ".factory/work/items/work-invalid.json" || RESULT=1
+  assert_contains "$ERROR_OUTPUT" ".factory/work/attempts/work-invalid/attempt-1.json" || RESULT=1
 
   cleanup_test_project
   return $RESULT
@@ -320,8 +318,7 @@ test_work_list_id_mismatch_fails() {
   printf '%s\n' \
     '{' \
     '  "id": "work-object",' \
-    '  "title": "Mismatched id",' \
-    '  "attempts": []' \
+    '  "title": "Mismatched id"' \
     '}' > .factory/work/items/work-file.json
 
   RESULT=0

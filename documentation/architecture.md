@@ -329,7 +329,7 @@ references remain relative to the source root, for example
 prefix, Work Item ID, and Attempt ID so valid hyphenated IDs remain
 globally distinct.
 
-The first storage contract is:
+The Work storage contract is:
 
 ```
 .factory/work/
@@ -361,6 +361,9 @@ live in `merge-candidates/<work-item-id>/<merge-candidate-id>.json`.
 `WorkModelStore` assembles those split records into the public
 `WorkItem` shape from `factory::work_model` for `factory work show`,
 status, dashboard, task execution, review, merge, and cleanup.
+If an item file contains nested Attempts, Tasks, or Merge Candidates,
+Factory ignores those nested operational collections and exposes only
+records from the split Attempt, Task, and Merge Candidate collections.
 Attempt records carry `kind`, which serializes as `write` or
 `review-only`; older records and omitted values default to `write`.
 Write attempts omit `kind` on new writes, and review-only attempts
@@ -370,8 +373,8 @@ records also carry an internal `order` field so the assembled public
 Work Item preserves append order after Factory reloads split records.
 Task records carry the same internal `order` field; Factory sorts split
 Task files by that persisted order before exposing `Attempt.tasks`.
-New writes prefer the split layout; bridge-period nested Work Item files
-remain readable when no split records exist for that Work Item.
+Factory writes Work Item metadata to `items/` and operational records to
+the split Attempt, Task, and Merge Candidate collections.
 When `WorkModelStore` reads stored Work state, it normalizes legacy
 artifact references that still use
 `.factory/work/artifacts/<attempt-id>/...` into the current

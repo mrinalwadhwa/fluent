@@ -297,20 +297,22 @@ fn work_model_store_rejects_duplicate_task_order() {
 }
 
 #[test]
-fn work_model_store_ignores_empty_split_directories_for_legacy_items() {
+fn work_model_store_ignores_nested_operational_collections() {
     let temp = tempfile::tempdir().unwrap();
     let store = WorkModelStore::new(temp.path());
     let work_item = work_item();
-    let items_dir = temp.path().join(".factory/work/items");
-    fs::create_dir_all(&items_dir).unwrap();
+
+    store.write_work_item(&work_item).unwrap();
+
+    let mut nested_item = work_item.clone();
+    nested_item.attempts[0].id = "nested-attempt".to_string();
+    nested_item.attempts[0].work_item_id = "other-work".to_string();
+    nested_item.attempts[0].tasks.clear();
     fs::write(
-        items_dir.join("work-1.json"),
-        serde_json::to_string_pretty(&work_item).unwrap(),
+        temp.path().join(".factory/work/items/work-1.json"),
+        serde_json::to_string_pretty(&nested_item).unwrap(),
     )
     .unwrap();
-    fs::create_dir_all(temp.path().join(".factory/work/attempts/work-1")).unwrap();
-    fs::create_dir_all(temp.path().join(".factory/work/tasks/work-1/attempt-1")).unwrap();
-    fs::create_dir_all(temp.path().join(".factory/work/merge-candidates/work-1")).unwrap();
 
     assert_eq!(store.read_work_item("work-1").unwrap(), work_item);
     assert_eq!(store.list_work_items().unwrap(), vec![work_item]);

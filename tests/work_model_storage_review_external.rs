@@ -63,49 +63,65 @@ fn reviewer_storage_reads_documented_layout() {
         items.join("work-review.json"),
         r#"{
   "id": "work-review",
-  "title": "Review durable storage",
-  "attempts": [
-    {
-      "id": "attempt-review",
-      "work_item_id": "work-review",
-      "status": "complete",
-      "tasks": [
-        {
-          "id": "write-review",
-          "kind": "write",
-          "status": "complete",
-          "role": "author",
-          "work_item_id": "work-review",
-          "attempt_id": "attempt-review",
-          "workspace_access": {
-            "reads": [
-              {
-                "id": "main",
-                "path": "../workspaces/main"
-              }
-            ],
-            "writes": [
-              {
-                "id": "candidate",
-                "path": "../workspaces/candidate"
-              }
-            ]
-          },
-          "artifact_area": {
-            "path": ".factory/work/artifacts/write-review"
-          },
-          "output": {
-            "workspace_id": "candidate",
-            "workspace_path": "../workspaces/candidate",
-            "source_branch": "main",
-            "commit": "abc123"
-          }
-        }
-      ],
-      "review_state": "passed",
-      "artifacts": []
-    }
-  ]
+  "title": "Review durable storage"
+}
+"#,
+    )
+    .unwrap();
+    fs::create_dir_all(temp.path().join(".factory/work/attempts/work-review")).unwrap();
+    fs::write(
+        temp.path()
+            .join(".factory/work/attempts/work-review/attempt-review.json"),
+        r#"{
+  "id": "attempt-review",
+  "work_item_id": "work-review",
+  "order": 0,
+  "status": "complete",
+  "review_state": "passed",
+  "artifacts": []
+}
+"#,
+    )
+    .unwrap();
+    fs::create_dir_all(
+        temp.path()
+            .join(".factory/work/tasks/work-review/attempt-review"),
+    )
+    .unwrap();
+    fs::write(
+        temp.path()
+            .join(".factory/work/tasks/work-review/attempt-review/write-review.json"),
+        r#"{
+  "order": 0,
+  "id": "write-review",
+  "kind": "write",
+  "status": "complete",
+  "role": "author",
+  "work_item_id": "work-review",
+  "attempt_id": "attempt-review",
+  "workspace_access": {
+    "reads": [
+      {
+        "id": "main",
+        "path": "../workspaces/main"
+      }
+    ],
+    "writes": [
+      {
+        "id": "candidate",
+        "path": "../workspaces/candidate"
+      }
+    ]
+  },
+  "artifact_area": {
+    "path": ".factory/work/artifacts/write-review"
+  },
+  "output": {
+    "workspace_id": "candidate",
+    "workspace_path": "../workspaces/candidate",
+    "source_branch": "main",
+    "commit": "abc123"
+  }
 }
 "#,
     )
