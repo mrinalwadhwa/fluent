@@ -61,4 +61,30 @@ if ! grep -Fq 'documentation/behaviors.md' <<<"$phase_one_reads"; then
   failures=$((failures + 1))
 fi
 
+if ! grep -Fq 'lacks credentials, network access, or another' "$SKILL" ||
+    ! grep -Fq 'external prerequisite' "$SKILL"; then
+  echo "review-behaviors no longer records environment-limited test execution" >&2
+  failures=$((failures + 1))
+fi
+
+if ! grep -Fq 'Do not treat that execution error as a behavior failure.' "$SKILL"; then
+  echo "review-behaviors no longer distinguishes execution errors from behavior failures" >&2
+  failures=$((failures + 1))
+fi
+
+if ! grep -Fq 'passing deterministic behavior check covers the same behavior' "$SKILL"; then
+  echo "review-behaviors no longer allows pass when deterministic checks cover an environment-limited test" >&2
+  failures=$((failures + 1))
+fi
+
+if ! grep -Fq 'return' "$SKILL" || ! grep -Fq '`uncertain`' "$SKILL"; then
+  echo "review-behaviors no longer keeps uncertain for uncovered environment-limited behavior" >&2
+  failures=$((failures + 1))
+fi
+
+if ! grep -Fq 'return `fail`' "$SKILL"; then
+  echo "review-behaviors no longer keeps fail for behavior mismatches" >&2
+  failures=$((failures + 1))
+fi
+
 exit "$failures"

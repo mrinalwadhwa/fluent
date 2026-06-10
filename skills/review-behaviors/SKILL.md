@@ -113,6 +113,19 @@ Run each test you wrote. Record the result:
 - **Error** — the test could not run (missing dependency, environment
   issue). Record what went wrong.
 
+If a model-backed or external-service-backed test errors only because
+the reviewer environment lacks credentials, network access, or another
+external prerequisite, record that environment limitation explicitly.
+Do not treat that execution error as a behavior failure.
+
+When deterministic behavior checks already cover the same behavior and
+those checks pass, you may still return `pass` with a residual-risk note
+that names the model-backed or external-service-backed test that could
+not run. When no deterministic check covers the behavior and the only
+available test cannot run because of an environment limitation, return
+`uncertain`. If a test runs and shows that the behavior does not match
+the expected outcome, return `fail`.
+
 ### Phase 4 — Check for regressions
 
 Run the existing behavior tests again (the same ones from the Phase 1
@@ -153,7 +166,10 @@ Determine the verdict:
 - **pass** — all new behavior tests pass, no regressions
 - **fail** — one or more behavior tests fail, or regressions found
 - **uncertain** — could not test one or more behaviors due to
-  insufficient documentation or environment issues
+  insufficient documentation or environment issues, except when a
+  passing deterministic behavior check covers the same behavior and the
+  environment issue only blocked an additional model-backed or
+  external-service-backed test
 
 Format:
 
