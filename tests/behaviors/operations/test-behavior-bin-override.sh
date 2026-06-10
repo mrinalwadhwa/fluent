@@ -95,6 +95,12 @@ test_version_uses_factory_bin_override() {
     "version"
 }
 
+test_run_curation_uses_factory_bin_override() {
+  test_script_uses_factory_bin_override \
+    "$PROJECT_DIR/tests/behaviors/operations/test-run-curation.sh" \
+    "status --runs"
+}
+
 test_operation_scripts_use_override_for_debug_binary() {
   RESULT=0
   UNSUPPORTED="$(
@@ -112,6 +118,22 @@ test_operation_scripts_use_override_for_debug_binary() {
   return $RESULT
 }
 
+test_operation_scripts_do_not_use_cargo_run_for_factory() {
+  RESULT=0
+  UNSUPPORTED="$(
+    grep -RIn 'cargo run' "$PROJECT_DIR/tests/behaviors/operations" |
+      grep -v '/test-behavior-bin-override.sh:' || true
+  )"
+
+  if [ -n "$UNSUPPORTED" ]; then
+    printf '    FAIL: scripts invoke Factory through cargo run without FACTORY_BIN_OVERRIDE\n'
+    printf '%s\n' "$UNSUPPORTED"
+    RESULT=1
+  fi
+
+  return $RESULT
+}
+
 printf 'test-behavior-bin-override\n\n'
 
 run_test "Work task instructions script uses FACTORY_BIN_OVERRIDE" \
@@ -120,8 +142,12 @@ run_test "Work task run script uses FACTORY_BIN_OVERRIDE" \
   test_work_task_run_uses_factory_bin_override
 run_test "Version script uses FACTORY_BIN_OVERRIDE" \
   test_version_uses_factory_bin_override
+run_test "Run curation script uses FACTORY_BIN_OVERRIDE" \
+  test_run_curation_uses_factory_bin_override
 run_test "Operation scripts use override for debug binary bindings" \
   test_operation_scripts_use_override_for_debug_binary
+run_test "Operation scripts avoid cargo run Factory invocations" \
+  test_operation_scripts_do_not_use_cargo_run_for_factory
 
 printf '\n  %s passed, %s failed\n' "$PASS" "$FAIL"
 if [ "$FAIL" -ne 0 ]; then

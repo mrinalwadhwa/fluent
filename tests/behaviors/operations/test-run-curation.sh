@@ -9,6 +9,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
+FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
 
 PASS=0
 FAIL=0
@@ -78,7 +79,7 @@ test_resolved_observations_are_curated() {
 test_smoke_runs_are_marked_non_actionable() {
   cd "$PROJECT_DIR"
 
-  OUTPUT="$(cargo run --quiet -- status --runs 2>&1)"
+  OUTPUT="$("$FACTORY_BIN" status --runs 2>&1)"
 
   RESULT=0
   for RUN_ID in \
