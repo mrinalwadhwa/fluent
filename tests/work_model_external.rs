@@ -300,22 +300,27 @@ fn work_model_store_rejects_duplicate_task_order() {
 fn work_model_store_ignores_nested_operational_collections() {
     let temp = tempfile::tempdir().unwrap();
     let store = WorkModelStore::new(temp.path());
-    let work_item = work_item();
 
-    store.write_work_item(&work_item).unwrap();
+    let mut nested_item = work_item();
+    nested_item.merge_candidates.push(merge_candidate());
+    let expected = WorkItem {
+        id: nested_item.id.clone(),
+        title: nested_item.title.clone(),
+        planning_context: nested_item.planning_context.clone(),
+        instructions: nested_item.instructions.clone(),
+        attempts: Vec::new(),
+        merge_candidates: Vec::new(),
+    };
 
-    let mut nested_item = work_item.clone();
-    nested_item.attempts[0].id = "nested-attempt".to_string();
-    nested_item.attempts[0].work_item_id = "other-work".to_string();
-    nested_item.attempts[0].tasks.clear();
+    fs::create_dir_all(temp.path().join(".factory/work/items")).unwrap();
     fs::write(
         temp.path().join(".factory/work/items/work-1.json"),
         serde_json::to_string_pretty(&nested_item).unwrap(),
     )
     .unwrap();
 
-    assert_eq!(store.read_work_item("work-1").unwrap(), work_item);
-    assert_eq!(store.list_work_items().unwrap(), vec![work_item]);
+    assert_eq!(store.read_work_item("work-1").unwrap(), expected);
+    assert_eq!(store.list_work_items().unwrap(), vec![expected]);
 }
 
 #[test]
