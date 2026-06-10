@@ -177,12 +177,15 @@ candidate head. Merge-time reviewers receive the exact
 `.factory/work/artifacts/<work-item-id>/<attempt-id>/<candidate-id>/merge/reviews/<role>/review.md`
 artifact path for their output and the absolute filesystem path the
 reviewer must write. When Factory builds the Work merge reviewer system
-prompt, it strips legacy `.factory/runs` review paths and relative
-`skills/review-<role>/SKILL.md` instructions from the base review prompt.
-It then points the reviewer at the absolute candidate workspace skill
-path when that skill exists; if the candidate does not contain that
-skill file, the prompt tells the reviewer to apply the reviewer role
-directly. If the candidate workspace contains
+prompt, it uses the prompt's `[work-system]` section when one exists and
+falls back to the raw `[system]` section otherwise. Bundled reviewer
+prompts keep legacy `.factory/runs` artifact paths in `[system]` and put
+Work-native artifact guidance in `[work-system]`, so Work merge reviews
+do not depend on filtering legacy run guidance out of bundled prompt
+text. Factory then points the reviewer at the absolute candidate
+workspace skill path when that skill exists; if the candidate does not
+contain that skill file, the prompt tells the reviewer to apply the
+reviewer role directly. If the candidate workspace contains
 `.factory/expertise/decisions.md`, the prompt names that absolute path so
 reviewers do not resolve decisions relative to their artifact directory.
 Reviewers treat the candidate workspace as read-only and write only merge
