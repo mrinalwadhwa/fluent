@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SKILL="$ROOT/skills/build-in-the-factory/SKILL.md"
 ARCHITECTURE="$ROOT/documentation/architecture.md"
+AGENT_INSTRUCTIONS="$ROOT/CLAUDE.md"
 
 failures=0
 
@@ -19,13 +20,31 @@ require_in_file() {
 }
 
 require_in_file "$SKILL" \
-  "The target lifecycle is the Work model" \
+  "The normal delegated build lifecycle is the Work model" \
   "build-in-the-factory skill"
 require_in_file "$SKILL" \
   "Work Item → Attempt → Task →" \
   "build-in-the-factory skill"
 require_in_file "$SKILL" \
-  'Use legacy `factory run` only as a transitional fallback' \
+  'Use legacy run artifacts only for explicit fallback' \
+  "build-in-the-factory skill"
+require_in_file "$SKILL" \
+  'Fargate-only execution, coordinated child-run decomposition, or recovery' \
+  "build-in-the-factory skill"
+require_in_file "$SKILL" \
+  'Create a Work Item with the approved planning files' \
+  "build-in-the-factory skill"
+require_in_file "$SKILL" \
+  'Create an Attempt' \
+  "build-in-the-factory skill"
+require_in_file "$SKILL" \
+  'Run the Attempt' \
+  "build-in-the-factory skill"
+require_in_file "$SKILL" \
+  'factory work merge-candidate <work-item-id> <merge-candidate-id>' \
+  "build-in-the-factory skill"
+require_in_file "$SKILL" \
+  'Land through `factory work merge <work-item-id>' \
   "build-in-the-factory skill"
 require_in_file "$SKILL" \
   "For unrelated work that can proceed in parallel, create independent peer" \
@@ -43,11 +62,26 @@ require_in_file "$SKILL" \
   ".factory/work/items/<work-item-id>.json" \
   "build-in-the-factory skill"
 require_in_file "$ARCHITECTURE" \
-  "Factory's target execution lifecycle uses these durable nouns" \
+  "Factory's primary execution lifecycle uses these durable nouns" \
   "architecture documentation"
 require_in_file "$ARCHITECTURE" \
-  'commands remain supported as a transitional fallback' \
+  'commands remain supported as legacy compatibility' \
   "architecture documentation"
+require_in_file "$ARCHITECTURE" \
+  '## Legacy run compatibility' \
+  "architecture documentation"
+require_in_file "$ARCHITECTURE" \
+  'New delegated build work should use Work Items' \
+  "architecture documentation"
+require_in_file "$AGENT_INSTRUCTIONS" \
+  'Use legacy `factory run` only for' \
+  "agent instructions"
+require_in_file "$AGENT_INSTRUCTIONS" \
+  'explicit fallback, Fargate-only execution, coordinated child-run' \
+  "agent instructions"
+require_in_file "$AGENT_INSTRUCTIONS" \
+  'decomposition, or recovery of existing run state' \
+  "agent instructions"
 
 if grep -Fq 'The current `.factory/runs` lifecycle remains the execution implementation' "$ARCHITECTURE"; then
   echo "architecture still names legacy runs as the execution implementation" >&2
@@ -56,6 +90,11 @@ fi
 
 if grep -Fq 'the factory command detects the structured plan.md and automatically creates child run directories' "$SKILL"; then
   echo "build-in-the-factory still frames structured plans as the default child-run path" >&2
+  failures=$((failures + 1))
+fi
+
+if grep -Fq 'transitional fallback when the Work path cannot yet carry the work' "$AGENT_INSTRUCTIONS"; then
+  echo "agent instructions still describe legacy run as a broad transitional fallback" >&2
   failures=$((failures + 1))
 fi
 

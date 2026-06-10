@@ -728,8 +728,10 @@ Test: tests/behaviors/operations/test-planning-skills-work-context.sh
 WHEN the user invokes the build-in-the-factory skill for new delegated
 build work,
 THE SYSTEM SHALL teach Work Items, Attempts, Tasks, Workspaces, and Merge
-Candidates as the target lifecycle and describe legacy `factory run` as a
-transitional fallback.
+Candidates as the normal lifecycle, direct the user through Work Item
+creation, Attempt execution, Merge Candidate inspection, and
+`factory work merge`, and describe legacy `factory run` as compatibility,
+Fargate-only, recovery, or explicit fallback.
 Test: tests/behaviors/operations/test-build-in-factory-work-model-guidance.sh
 
 WHEN the brief is confirmed by the user,
@@ -782,32 +784,32 @@ label child-run decomposition as a legacy fallback.
 Test: tests/behaviors/skills/parallel-work-items-plan.md (test-skill)
 Test: tests/behaviors/operations/test-planning-skills-work-context.sh
 
-## Worktree isolation
+## Legacy run worktree isolation
 
-WHEN `factory run` is invoked,
+WHEN legacy `factory run` is invoked,
 THE SYSTEM SHALL create a git worktree branched from the current HEAD,
 copy the run's state into it, and execute within the worktree.
 Test: src/worktree.rs (setup_run_worktree tests), tests/binary.rs (worktree creates and copies state)
 
-WHEN `factory run` is invoked from a non-main branch,
+WHEN legacy `factory run` is invoked from a non-main branch,
 THE SYSTEM SHALL branch the worktree from that branch and record it as
 the source-branch.
 Test: tests/test-run (setup_run_worktree from non-main branch)
 
-## Session loop (local)
+## Legacy session loop (local)
 
-WHEN `factory run` is invoked with the local runtime,
+WHEN legacy `factory run` is invoked with the local runtime,
 THE SYSTEM SHALL launch the selected coder in non-interactive mode with
 the brief or handoff as the initial prompt.
 Test: src/session.rs (test_loop_initial_prompt_uses_brief, test_loop_initial_prompt_uses_handoff), tests/binary.rs (run_uses_handoff_prompt_when_handoff_exists)
 
-WHEN `factory run --coder codex` is invoked with the local runtime,
+WHEN legacy `factory run --coder codex` is invoked with the local runtime,
 THE SYSTEM SHALL launch Codex with `codex exec --json`, prepend the
 factory system prompt to the run prompt, and capture Codex JSON output
 as the session transcript.
 Test: tests/binary.rs (run_with_codex_uses_exec_json_and_status_contract)
 
-WHEN `factory run` is invoked with an unknown coder,
+WHEN legacy `factory run` is invoked with an unknown coder,
 THE SYSTEM SHALL fail before resolving or launching a run.
 Test: tests/binary.rs (run_unknown_coder_fails)
 
@@ -831,7 +833,7 @@ IF the session count exceeds 50,
 THEN THE SYSTEM SHALL set status to `failed` and stop the loop.
 Test: src/session.rs (test_loop_max_sessions_sets_failed)
 
-## Session observability
+## Legacy session observability
 
 WHEN a session completes within the session loop,
 THE SYSTEM SHALL write a line to `sessions.log` containing the session
@@ -843,7 +845,7 @@ THE SYSTEM SHALL request machine-readable JSON events from the selected
 coder and pipe stdout to `sessions/session-N/transcript.jsonl`.
 Test: src/session.rs (test_loop_creates_session_transcript_dir), tests/binary.rs (run_captures_stream_json_transcript), tests/behaviors/operations/test-observability.sh
 
-## Review archiving
+## Legacy review archiving
 
 WHEN a review round fails and a new round starts,
 THE SYSTEM SHALL archive previous review artifacts to `reviews/round-N/`
@@ -856,7 +858,7 @@ THE SYSTEM SHALL capture its stream-json output to
 `reviews/transcript-{name}.jsonl`.
 Test: tests/binary.rs (run_archives_review_rounds), tests/behaviors/operations/test-observability.sh
 
-## Session loop (local) — credential refresh
+## Legacy session loop (local) — credential refresh
 
 WHEN a new Claude session starts on the sandboxed local runtime,
 THE SYSTEM SHALL run an unsandboxed Claude invocation to refresh the
@@ -868,15 +870,15 @@ WHEN a new Codex session starts on the sandboxed local runtime,
 THE SYSTEM SHALL NOT run the Claude credential refresh hook.
 Test: tests/behaviors/operations/test-codex-runtime.sh (codex does not run claude refresh hook, parallel codex does not run claude refresh hook)
 
-## Fargate execution
+## Legacy Fargate execution
 
-WHEN `factory run --runtime fargate` is invoked,
+WHEN legacy `factory run --runtime fargate` is invoked,
 THE SYSTEM SHALL upload the worktree to S3, start an ECS Fargate task,
 record `runtime=fargate`, and record the ECS task handle in the source
 run directory.
 Test: tests/binary.rs (run_fargate_launch_uploads_workspace_and_records_task_handle), tests/behaviors/operations/test-fargate-launch.sh
 
-WHEN `factory run --runtime fargate --coder codex` is invoked,
+WHEN legacy `factory run --runtime fargate --coder codex` is invoked,
 THE SYSTEM SHALL fail with a clear unsupported-coder error.
 Test: tests/binary.rs (run_fargate_with_codex_fails_before_config)
 
@@ -955,19 +957,19 @@ THE SYSTEM SHALL display the locally recorded run status, runtime, and
 brief summary without querying AWS.
 Test: tests/behaviors/operations/test-status-edges.sh (status fargate uses local state without AWS)
 
-## Run summary
+## Legacy run summary
 
-WHEN `factory summary` is invoked,
+WHEN legacy `factory summary` is invoked,
 THE SYSTEM SHALL summarize the active run using existing run artifacts
 and print the summary to stdout.
 Test: tests/binary.rs (summary_resolves_active_run)
 
-WHEN `factory summary --run-id <id>` is invoked,
+WHEN legacy `factory summary --run-id <id>` is invoked,
 THE SYSTEM SHALL summarize that run instead of resolving the active run.
 Test: tests/binary.rs (summary_uses_explicit_run_id)
 
-WHEN `factory summary --run-id <id>` is invoked for a run with a live
-worktree run directory,
+WHEN legacy `factory summary --run-id <id>` is invoked for a run with a
+live worktree run directory,
 THE SYSTEM SHALL prefer live status, sessions, review verdicts, handoff,
 and report presence before falling back to source artifacts.
 Test: tests/binary.rs (summary_prefers_live_worktree_artifacts), tests/behaviors/operations/test-live-run-state.sh (summary reads live artifacts)
@@ -1011,7 +1013,7 @@ THE SYSTEM SHALL show that a report is available without printing the
 entire report.
 Test: tests/binary.rs (summary_includes_sessions_reviews_handoff_and_report)
 
-WHEN no run can be resolved for `factory summary`,
+WHEN no run can be resolved for legacy `factory summary`,
 THE SYSTEM SHALL fail with a clear error instead of printing an empty
 summary.
 Test: tests/binary.rs (summary_fails_without_resolved_run)
@@ -1191,12 +1193,12 @@ Full-codebase review-only work defaults to `factory work review-codebase`
 and `factory work attempt run`. Legacy review runs remain available for
 compatibility and recovery of existing `.factory/runs` state.
 
-WHEN `factory run` is invoked and the run's mode is `review`,
+WHEN legacy `factory run` is invoked and the run's mode is `review`,
 THE SYSTEM SHALL set status to `reviewing`, run reviewers with
 full-codebase scope, and produce findings. No author session is launched.
 Test: src/session.rs (review-only mode tests)
 
-WHEN `factory run` is invoked and the run has a `scope` file,
+WHEN legacy `factory run` is invoked and the run has a `scope` file,
 THE SYSTEM SHALL copy the scope file into the worktree.
 Test: src/worktree.rs (test_worktree_copies_scope_file)
 
@@ -1691,7 +1693,7 @@ THE SYSTEM SHALL execute them in order, launching each group only after
 the previous group's merge completes.
 Test: tests/behaviors/operations/test-parallel-runs.sh (sequential groups run in order)
 
-## Sandbox (local)
+## Legacy sandbox compatibility (local)
 
 WHILE running Claude on the sandboxed local runtime,
 THE SYSTEM SHALL execute Claude inside a macOS Seatbelt sandbox with
@@ -1705,7 +1707,8 @@ THE SUITE SHALL fail with an explicit message that sandbox behavior
 coverage requires a working Seatbelt runtime.
 Test: tests/behaviors/operations/test-sandbox-prereq.sh
 
-WHEN `factory run --coder codex` is invoked with the sandboxed local runtime,
+WHEN legacy `factory run --coder codex` is invoked with the sandboxed
+local runtime,
 THE SYSTEM SHALL launch Codex under `sandbox-exec` with Factory's
 Seatbelt profile, approval policy `never`, and the run worktree as
 `--cd`, while disabling Codex's own sandbox. The rendered profile SHALL
@@ -1715,7 +1718,7 @@ selected by Factory, even when the caller inherited a different
 `SSL_CERT_FILE`.
 Test: tests/behaviors/operations/test-codex-runtime.sh (sandboxed codex uses factory seatbelt, sandboxed codex prefers factory ca bundle), tests/behaviors/operations/test-codex-approval-flag.sh (approval-policy flag appears before exec)
 
-WHEN `factory run --coder codex --no-sandbox` is invoked,
+WHEN legacy `factory run --coder codex --no-sandbox` is invoked,
 THE SYSTEM SHALL launch Codex with
 `--dangerously-bypass-approvals-and-sandbox`.
 Test: tests/binary.rs (run_with_codex_uses_exec_json_and_status_contract)

@@ -40,17 +40,18 @@ Brief  →  Behaviors →  Approach →  Plan  →  Execute →  Review
 (interactive)                               (autonomous)
 ```
 
-The target lifecycle is the Work model: Work Item → Attempt → Task →
-Workspace → Merge Candidate. Work Items represent planned Factory work,
-Attempts carry one execution history, Tasks are schedulable units,
-Workspaces are the filesystem contexts Tasks read or write, and Merge
-Candidates are reviewed outputs ready to land.
+The normal delegated build lifecycle is the Work model:
+Work Item → Attempt → Task → Workspace → Merge Candidate. Work Items
+represent planned Factory work, Attempts carry one execution history,
+Tasks are schedulable units, Workspaces are the filesystem contexts
+Tasks read or write, and Merge Candidates are reviewed outputs ready to
+land.
 
-During the bridge period, the older `.factory/runs/[run-id]/` lifecycle
-still exists. Use Work-model commands for new delegated execution when
-they can carry the work. Use legacy run artifacts as a transitional
-fallback when the Work path lacks a needed planning, review, runtime, or
-recovery capability.
+The older `.factory/runs/[run-id]/` lifecycle still exists only as
+legacy compatibility. Use Work-model commands for new delegated
+execution. Use legacy run artifacts only for explicit fallback,
+Fargate-only execution, coordinated child-run decomposition, or recovery
+of existing run state.
 
 ---
 
@@ -70,7 +71,8 @@ Candidate, inspect it with `factory work merge-candidate <work-item-id>
 <merge-candidate-id>` after the user accepts the candidate or the run
 policy says autonomous landing is allowed.
 
-Then check `.factory/runs/` for legacy runs that need attention:
+Then check `.factory/runs/` only for legacy compatibility or recovery
+runs that need attention:
 
 **Completed runs with reports:** Scan for runs with status `complete`
 that have a `report.md` but no `reported` marker. These completed
@@ -151,7 +153,7 @@ paths.
 
 ## Autonomous stages (user away)
 
-Once the plan is approved, prefer the Work model for delegated execution:
+Once the plan is approved, use the Work model for delegated execution:
 
 1. Create a Work Item with the approved planning files:
    `factory work create <work-item-id> --title <title>
@@ -163,8 +165,10 @@ Once the plan is approved, prefer the Work model for delegated execution:
    <attempt-id>`.
 4. Inspect status with `factory status` or `factory work show
    <work-item-id>`.
-5. When the Attempt creates a Merge Candidate, inspect it and land with
-   `factory work merge <work-item-id> <merge-candidate-id>`.
+5. When the Attempt creates a Merge Candidate, inspect it with
+   `factory work merge-candidate <work-item-id> <merge-candidate-id>`.
+6. Land through `factory work merge <work-item-id>
+   <merge-candidate-id>`.
 
 `factory work attempt run` advances the next safe transition by running
 planned write and review Tasks through the existing Task executor. It
@@ -184,12 +188,11 @@ and launches child sessions.
 For full-codebase review-only work, use the Work model by creating a
 Work Item, running `factory work review-codebase <work-item-id>
 <attempt-id>`, then running `factory work attempt run <work-item-id>
-<attempt-id>`. Use legacy `factory run` only as a transitional fallback
-when the Work model cannot yet express the work, such as Fargate-only
-execution, coordinated child-run decomposition for one large effort, or
-recovery of existing `.factory/runs` state. The fallback still manages
-the session loop by restarting agents across sessions as long as work
-remains.
+<attempt-id>`. Use legacy `factory run` only for compatibility,
+Fargate-only execution, coordinated child-run decomposition for one large
+effort, or recovery of existing `.factory/runs` state. The fallback
+still manages the session loop by restarting agents across sessions as
+long as work remains.
 
 ### 5. Execute
 
@@ -258,7 +261,8 @@ Cleanup skips active Attempts, Tasks, and Merge Candidates.
 
 ## Legacy run state
 
-Legacy run state lives in `.factory/runs/[run-id]/`:
+Legacy run state is compatibility and recovery state. It lives in
+`.factory/runs/[run-id]/`:
 
 | File | Purpose |
 |---|---|
@@ -304,6 +308,11 @@ worktree.
 
 ## Factory commands
 
+Work-model commands are listed first because they are the normal path for
+new delegated work. Legacy run commands follow as compatibility,
+Fargate, and recovery commands while the old session loop remains
+available.
+
 ```sh
 factory work create <id> --title <t> # create a stored Work Item
 factory work create <id> --title <t> --planning-context-file <path> # load planning context
@@ -321,20 +330,22 @@ factory work task run <id> <attempt> <task> # run one Task
 factory work merge-candidate <id> <candidate> # show a Merge Candidate
 factory work merge <id> <candidate>  # execute a Merge Candidate
 factory status                       # show Work Items by default
-factory status --runs                # show legacy Runs compatibility view
 factory dashboard                    # open the live dashboard
+factory cleanup                      # dry-run stale Work and legacy cleanup
+factory cleanup --apply              # clean terminal Work state and legacy runs
+
+factory status --runs                # show legacy Runs compatibility view
 factory run                          # fallback legacy session loop
 factory run --run-id <id>            # target a legacy run
 factory run --coder codex            # run legacy path with Codex
 factory run --runtime fargate        # run legacy path on Fargate
 factory summary                      # summarize one legacy run
 factory watch                        # poll status, notify on change
+factory review                       # create or reuse a legacy review run
 factory pull                         # download legacy workspace from S3
 factory shell                        # shell into a legacy remote task
 factory resume                       # restart a paused legacy run
 factory land                         # land a completed legacy run
-factory cleanup                      # dry-run stale run and Work cleanup
-factory cleanup --apply              # clean stale runs, Work state, worktrees, and branches
 factory init                         # initialize .factory/ directories
 factory version                      # print version and build commit
 ```

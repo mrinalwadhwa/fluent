@@ -13,8 +13,9 @@ Task, Workspace, and Merge Candidate.
 
 Do not implement substantial product/code changes directly on `main`.
 Use Factory Work Items and Attempts for delegated build work that needs
-isolation, reviewers, and landing. Use legacy `factory run` only as a
-transitional fallback when the Work path cannot yet carry the work.
+isolation, reviewers, and landing. Use legacy `factory run` only for
+explicit fallback, Fargate-only execution, coordinated child-run
+decomposition, or recovery of existing run state.
 
 Conversation agents may edit Factory planning and memory state directly
 when they are collaborating with the user in the discussion loop:

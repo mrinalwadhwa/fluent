@@ -20,10 +20,10 @@ from intent capture through execution and review across multiple sessions.
 │  Teaches agents the full workflow               │
 ├─────────────────────────────────────────────────┤
 │  Factory command                                │
-│  factory work / status / run / summary          │
-│  factory cleanup / review / pull / shell        │
-│  factory watch / resume / init / dashboard      │
-│  factory land / version                         │
+│  factory work / status / dashboard / cleanup    │
+│  factory run / review / summary / watch         │
+│  factory resume / land / pull / shell           │
+│  factory init / version                         │
 │  Deterministic, operational                     │
 └─────────────────────────────────────────────────┘
 ```
@@ -44,12 +44,13 @@ Brief → Behaviors → Approach → Plan → Execute → Review → Land
 Interactive stages happen in the agent's session with the user present.
 The agent follows skills directly.
 
-Autonomous stages don't need the user. The factory command manages the
-session loop and can run locally or on Fargate.
+Autonomous stages don't need the user. The Work model is the primary
+delegated execution path. Legacy run commands remain available for
+compatibility, Fargate, and recovery.
 
 ## Core work model
 
-Factory's target execution lifecycle uses these durable nouns: Work
+Factory's primary execution lifecycle uses these durable nouns: Work
 Item, Attempt, Task, Workspace, and Merge Candidate. This model is
 documented and represented in Rust so scheduling, status, review, and
 merge paths use the same vocabulary.
@@ -60,8 +61,9 @@ stored write or review Task through the selected coder, `factory work
 attempt run <work-item-id> <attempt-id>` advances an Attempt through safe
 write and review transitions, and `factory work merge <work-item-id>
 <merge-candidate-id>` executes a stored Merge Candidate. Legacy
-`.factory/runs` commands remain supported as a transitional fallback for
-capabilities the Work path has not proven or does not yet expose.
+`.factory/runs` commands remain supported as legacy compatibility for
+explicit fallback, Fargate-only execution, coordinated child-run
+decomposition, and recovery of existing run state.
 
 `factory work create <id> --title <title>` exposes the first Work Item
 intake surface. It writes Work Item metadata under
@@ -320,11 +322,11 @@ or an explicit statement that no behavior increment was provided. Legacy
 not the Work-model behavior review contract.
 
 Project-local `.factory/observations.md` and `.factory/expertise/*` are
-durable Factory memory that belongs in normal repository history. Runtime
-state remains under `.factory/runs` and related run artifacts. Keeping
-these concepts separate lets learning and planning land through the same
-reviewed workflow as code without treating transient session state as
-project knowledge.
+durable Factory memory that belongs in normal repository history. Legacy
+runtime compatibility state remains under `.factory/runs` and related
+run artifacts. Keeping these concepts separate lets learning and
+planning land through the same reviewed workflow as code without
+treating transient session state as project knowledge.
 
 Durable work model state lives under `.factory/work/`. This tree is
 separate from `.factory/runs`, which still stores legacy run execution
@@ -434,9 +436,12 @@ failures must report the file path or object that failed. Code that
 writes Work state must use deterministic pretty JSON and must not write
 invalid model state.
 
-## The run
+## Legacy run compatibility
 
-The core recursive unit of work.
+The legacy recursive run model remains for compatibility, Fargate-only
+execution, coordinated child-run decomposition, and recovery of existing
+`.factory/runs` state. New delegated build work should use Work Items,
+Attempts, Tasks, Workspaces, and Merge Candidates instead.
 
 ```
 Brief
