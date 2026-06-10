@@ -139,12 +139,25 @@ Attempt review state as passed, completes the Attempt, and creates or
 returns one durable Merge Candidate for later merge execution. The Merge
 Candidate records the source candidate workspace, target workspace,
 source branch, target branch, candidate commit, and its own pending
-review state. Any fail creates a planned follow-up write Task with the
-failed review artifacts as Task inputs and copies explicit Work Item
-instructions into that follow-up Task, or derives those instructions
-from stored Work Item planning context when explicit instructions are
-absent. When no review artifact fails, uncertain or missing verdicts
-mark the Attempt `needs-user` with a handoff under
+review state. When the same-invocation auto-continue budget permits
+another follow-up write Task, any fail records a `PlannedFollowup`
+outcome, creates a planned follow-up write Task with the failed review
+artifacts as Task inputs, and copies explicit Work Item instructions
+into that follow-up Task, or derives those instructions from stored Work
+Item planning context when explicit instructions are absent. One command
+invocation may advance at most two follow-up write Tasks, including
+already-planned follow-up write Tasks that existed before the command
+started and follow-up Tasks planned by the command. The same invocation
+then continues through each budgeted follow-up write Task, targeted
+review planning, and targeted review execution until the Attempt reaches
+an existing terminal boundary such as merge-candidate-ready, needs-user,
+review-only complete, review-only failed, failed task, or executing-task
+state. If another failed review round would require a third
+same-invocation follow-up write Task, the Attempt loop marks the Attempt
+`needs-user`, writes a handoff that names the failed review artifacts
+and says the auto-continue budget was exhausted, and stops without
+creating the over-budget Task. When no review artifact fails, uncertain
+or missing verdicts mark the Attempt `needs-user` with a handoff under
 `.factory/work/artifacts/<work-item-id>/<attempt-id>/`.
 For review-only Attempts, all pass marks the Attempt complete with review
 state `passed` and does not create a Merge Candidate. Any fail marks the

@@ -13,6 +13,8 @@ use crate::work_model::{
 };
 use crate::work_task_executor::{self, WorkTaskRunConfig};
 
+const MAX_FOLLOWUP_WRITES_PER_INVOCATION: usize = 2;
+
 pub struct WorkAttemptRunConfig<'a> {
     pub project_root: &'a Path,
     pub store: &'a WorkModelStore,
@@ -41,6 +43,7 @@ pub struct WorkAttemptRunResult {
 
 pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunResult> {
     let mut outcomes = Vec::new();
+    let mut followup_writes_advanced = 0;
 
     loop {
         let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
@@ -69,6 +72,8 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             .iter()
             .find(|task| task.status == TaskStatus::Planned)
         {
+            let is_followup_write =
+                task.kind == TaskKind::Write && is_followup_write_task(config.attempt_id, &task.id);
             // Review Tasks stay serial here because run_task mutates shared Work
             // Item JSON for each Task. Parallel Attempt reviews need a batch
             // transition that marks all selected Tasks executing, runs them,
@@ -88,6 +93,9 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                 task_id: result.task_id,
                 output: result.output,
             });
+            if is_followup_write {
+                followup_writes_advanced += 1;
+            }
             continue;
         }
 
@@ -133,12 +141,16 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             .is_some()
             && !has_open_review_round(attempt.tasks.as_slice())
         {
-            let outcome =
-                interpret_reviews(config.project_root, config.store, item, config.attempt_id)?;
+            let outcome = interpret_reviews(
+                config.project_root,
+                config.store,
+                item,
+                config.attempt_id,
+                followup_writes_advanced < MAX_FOLLOWUP_WRITES_PER_INVOCATION,
+            )?;
             let should_stop = matches!(
                 outcome,
                 WorkAttemptRunOutcome::MergeCandidateReady { .. }
-                    | WorkAttemptRunOutcome::PlannedFollowup { .. }
                     | WorkAttemptRunOutcome::NeedsUser { .. }
                     | WorkAttemptRunOutcome::ReviewOnlyComplete
                     | WorkAttemptRunOutcome::ReviewOnlyFailed
@@ -169,6 +181,11 @@ fn has_completed_write(tasks: &[Task]) -> bool {
     tasks
         .iter()
         .any(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+}
+
+fn is_followup_write_task(attempt_id: &str, task_id: &str) -> bool {
+    let followup_prefix = format!("{attempt_id}-followup-");
+    task_id.starts_with(&followup_prefix)
 }
 
 fn has_open_review_round(tasks: &[Task]) -> bool {
@@ -246,6 +263,7 @@ fn interpret_reviews(
     store: &WorkModelStore,
     mut item: WorkItem,
     attempt_id: &str,
+    followup_budget_available: bool,
 ) -> Result<WorkAttemptRunOutcome> {
     let attempt_index = item
         .attempts
@@ -275,6 +293,17 @@ fn interpret_reviews(
             item.attempts[attempt_index].status = AttemptStatus::Failed;
             store.write_work_item(&item)?;
             return Ok(WorkAttemptRunOutcome::ReviewOnlyFailed);
+        }
+        if !followup_budget_available {
+            let handoff_path =
+                write_budget_exhausted_handoff(project_root, &item.id, attempt_id, &failed)?;
+            item.attempts[attempt_index].status = AttemptStatus::NeedsUser;
+            item.attempts[attempt_index].artifacts.push(ArtifactRef {
+                producer_id: "attempt-loop".to_string(),
+                path: handoff_path.clone(),
+            });
+            store.write_work_item(&item)?;
+            return Ok(WorkAttemptRunOutcome::NeedsUser { handoff_path });
         }
         item.attempts[attempt_index].status = AttemptStatus::Planned;
         let task_id = item.add_followup_write_task(attempt_id, failed)?;
@@ -639,6 +668,31 @@ fn write_needs_user_handoff(
         &path,
         format!(
             "# Attempt needs user input\n\nThe Attempt loop found uncertain or missing review verdicts.\n\n{artifacts}\n"
+        ),
+    )?;
+    Ok(relative_path)
+}
+
+fn write_budget_exhausted_handoff(
+    project_root: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    failed: &[ArtifactRef],
+) -> Result<String> {
+    let relative_path = work_artifact_path(work_item_id, attempt_id, "needs-user.md");
+    let path = project_root.join(&relative_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let artifacts = failed
+        .iter()
+        .map(|artifact| format!("- {}", artifact.path))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(
+        &path,
+        format!(
+            "# Attempt needs user input\n\nThe Attempt loop exhausted the same-invocation follow-up write budget after advancing {MAX_FOLLOWUP_WRITES_PER_INVOCATION} follow-up write Tasks.\n\nFailed review artifacts still need attention:\n\n{artifacts}\n"
         ),
     )?;
     Ok(relative_path)

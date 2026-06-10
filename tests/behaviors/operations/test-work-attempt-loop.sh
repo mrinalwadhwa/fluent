@@ -125,6 +125,34 @@ run_write_task() {
     work-1 attempt-1 attempt-1-write --no-sandbox
 }
 
+write_planned_followup_task() {
+  local workspace_id workspace_path task_count
+  workspace_id="$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-write") | .output.workspace_id')"
+  workspace_path="$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-write") | .output.workspace_path')"
+  task_count="$(json_value '.attempts[0].tasks | length')"
+  mkdir -p .factory/work/tasks/work-1/attempt-1
+  jq -n \
+    --argjson order "$task_count" \
+    --arg workspace_id "$workspace_id" \
+    --arg workspace_path "$workspace_path" \
+    '{
+      order: $order,
+      id: "attempt-1-followup-1",
+      kind: "write",
+      role: "author",
+      work_item_id: "work-1",
+      attempt_id: "attempt-1",
+      workspace_access: {
+        reads: [],
+        writes: [{id: $workspace_id, path: $workspace_path}]
+      },
+      input_artifacts: []
+    }' > .factory/work/tasks/work-1/attempt-1/attempt-1-followup-1.json
+  jq '.status = "planned" | .review_state = "failed"' \
+    .factory/work/attempts/work-1/attempt-1.json > "$TEST_DIR/attempt.json"
+  mv "$TEST_DIR/attempt.json" .factory/work/attempts/work-1/attempt-1.json
+}
+
 test_attempt_loop_passes_review_round() {
   setup_test_project
   trap cleanup_test_project RETURN
@@ -221,19 +249,17 @@ test_attempt_loop_plans_followup() {
   run_attempt_loop > "$TEST_DIR/stdout"
 
   grep -q 'Planned follow-up write Task attempt-1-followup-1' "$TEST_DIR/stdout" || RESULT=1
-  [ "$(json_value '.attempts[0].status')" = "planned" ] || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stdout")" "Completed Task attempt-1-followup-1" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stdout")" "Planned follow-up write Task attempt-1-followup-2" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stdout")" "Completed Task attempt-1-followup-2" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stdout")" "needs user input" || RESULT=1
+  [ "$(json_value '.attempts[0].status')" = "needs-user" ] || RESULT=1
   [ "$(json_value '.attempts[0].review_state')" = "failed" ] || RESULT=1
-  [ "$(json_value '.attempts[0].tasks[-1].input_artifacts | length')" = "5" ] || RESULT=1
-
-  FOLLOWUP_COMMIT_BEFORE="$(git -C ../work-6-work-1-attempt-1 rev-parse HEAD)"
-  run_attempt_loop > "$TEST_DIR/followup-stdout" || RESULT=1
-  FOLLOWUP_COMMIT_AFTER="$(git -C ../work-6-work-1-attempt-1 rev-parse HEAD)"
-  [ "$FOLLOWUP_COMMIT_AFTER" != "$FOLLOWUP_COMMIT_BEFORE" ] || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Completed Task attempt-1-followup-1" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Planned 5 review Tasks for Attempt attempt-1" || RESULT=1
+  [ "$(json_value '[.attempts[0].tasks[] | select(.id == "attempt-1-followup-3")] | length')" = "0" ] || RESULT=1
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review" and (.id | startswith("attempt-1-review-2-")))] | length')" = "5" ] || RESULT=1
-  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-tests") | .review_context.candidate_commit')" = "$FOLLOWUP_COMMIT_AFTER" ] || RESULT=1
+  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-tests") | .review_context.candidate_commit')" = "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-followup-1") | .output.commit')" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-tests") | .review_context.candidate_workspace_path')" = "../work-6-work-1-attempt-1" ] || RESULT=1
+  assert_contains "$(cat .factory/work/artifacts/work-1/attempt-1/needs-user.md)" "follow-up write budget" || RESULT=1
   return $RESULT
 }
 
@@ -245,43 +271,40 @@ test_attempt_loop_plans_followup_with_mixed_failed_and_missing_reviews() {
   RESULT=0
   run_attempt_loop > "$TEST_DIR/stdout" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stdout")" "Planned follow-up write Task attempt-1-followup-1" || RESULT=1
-  [ "$(json_value '.attempts[0].status')" = "planned" ] || RESULT=1
-  [ "$(json_value '.attempts[0].review_state')" = "failed" ] || RESULT=1
-  [ "$(json_value '.attempts[0].tasks[-1].input_artifacts | length')" = "1" ] || RESULT=1
-  [ "$(json_value '.attempts[0].tasks[-1].input_artifacts[0].path')" = ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-documentation/review.md" ] || RESULT=1
-  [ ! -f .factory/work/artifacts/work-1/attempt-1/needs-user.md ] || RESULT=1
-
-  run_attempt_loop > "$TEST_DIR/followup-stdout" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Completed Task attempt-1-followup-1" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Planned 1 review Tasks for Attempt attempt-1" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/followup-stdout")" "attempt-1-review-2-documentation" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stdout")" "Completed Task attempt-1-followup-1" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stdout")" "Planned 1 review Tasks for Attempt attempt-1" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stdout")" "attempt-1-review-2-documentation" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stdout")" "Merge Candidate attempt-1-merge-candidate is ready" || RESULT=1
+  [ "$(json_value '.attempts[0].status')" = "complete" ] || RESULT=1
+  [ "$(json_value '.attempts[0].review_state')" = "passed" ] || RESULT=1
+  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-followup-1") | .input_artifacts | length')" = "1" ] || RESULT=1
+  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-followup-1") | .input_artifacts[0].path')" = ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-documentation/review.md" ] || RESULT=1
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review" and (.id | startswith("attempt-1-review-2-")))] | length')" = "1" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-documentation") | .role')" = "documentation" ] || RESULT=1
   return $RESULT
 }
 
-test_attempt_loop_falls_back_when_followup_inputs_are_missing() {
+test_attempt_loop_counts_preplanned_followup_against_budget() {
   setup_test_project
   trap cleanup_test_project RETURN
-  write_mock_claude mixed-missing
+  write_mock_claude fail
 
   RESULT=0
-  run_attempt_loop > "$TEST_DIR/stdout" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/stdout")" "Planned follow-up write Task attempt-1-followup-1" || RESULT=1
-
-  jq '.input_artifacts = []' \
-    .factory/work/tasks/work-1/attempt-1/attempt-1-followup-1.json \
-    > "$TEST_DIR/followup-task.json" || RESULT=1
-  mv "$TEST_DIR/followup-task.json" \
-    .factory/work/tasks/work-1/attempt-1/attempt-1-followup-1.json || RESULT=1
-  [ "$(json_value '.attempts[0].tasks[-1].input_artifacts | length')" = "0" ] || RESULT=1
+  run_write_task > "$TEST_DIR/write-stdout" || RESULT=1
+  write_planned_followup_task
 
   run_attempt_loop > "$TEST_DIR/followup-stdout" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Completed Task attempt-1-followup-1" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Planned 5 review Tasks for Attempt attempt-1" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Planned follow-up write Task attempt-1-followup-2" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Completed Task attempt-1-followup-2" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/followup-stdout")" "needs user input" || RESULT=1
+  [ "$(json_value '.attempts[0].status')" = "needs-user" ] || RESULT=1
+  [ "$(json_value '[.attempts[0].tasks[] | select(.id == "attempt-1-followup-3")] | length')" = "0" ] || RESULT=1
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review" and (.id | startswith("attempt-1-review-2-")))] | length')" = "5" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-documentation") | .role')" = "documentation" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-tests") | .role')" = "tests" ] || RESULT=1
+  assert_contains "$(cat .factory/work/artifacts/work-1/attempt-1/needs-user.md)" "follow-up write budget" || RESULT=1
   return $RESULT
 }
 
@@ -356,7 +379,7 @@ run_test "work merge-candidate missing requests leave state unchanged" test_work
 run_test "attempt loop runs planned review Tasks" test_attempt_loop_runs_planned_review_tasks
 run_test "attempt loop plans follow-up write" test_attempt_loop_plans_followup
 run_test "attempt loop plans follow-up with mixed missing review" test_attempt_loop_plans_followup_with_mixed_failed_and_missing_reviews
-run_test "attempt loop falls back when follow-up inputs are missing" test_attempt_loop_falls_back_when_followup_inputs_are_missing
+run_test "attempt loop counts preplanned follow-up against budget" test_attempt_loop_counts_preplanned_followup_against_budget
 run_test "attempt loop marks uncertain reviews needs-user" test_attempt_loop_marks_uncertain_reviews_needs_user
 run_test "attempt loop marks missing verdict needs-user" test_attempt_loop_marks_missing_verdict_needs_user
 run_test "attempt loop stops after Task executor failure" test_attempt_loop_stops_after_task_executor_failure

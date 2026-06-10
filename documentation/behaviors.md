@@ -651,6 +651,23 @@ Test: tests/binary.rs (work_attempt_run_plans_followup_for_failed_reviews)
 Test: tests/binary.rs (work_create_planning_context_feeds_followup_for_failed_reviews)
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop plans follow-up write)
 
+WHEN `factory work attempt run` advances follow-up write Tasks during one
+command invocation,
+THE SYSTEM SHALL count already-planned follow-up write Tasks and
+follow-up write Tasks planned during the invocation against the same
+two-follow-up budget.
+Test: tests/binary.rs (work_attempt_run_counts_already_planned_followup_against_budget)
+Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop counts preplanned follow-up against budget)
+
+IF a failed review round would require a third follow-up write Task in
+the same `factory work attempt run` command invocation,
+THE SYSTEM SHALL mark the Attempt as `needs-user`, write a durable
+handoff that names the failed review artifacts and budget exhaustion,
+and SHALL NOT create the over-budget follow-up write Task.
+Test: tests/binary.rs (work_attempt_run_plans_followup_for_failed_reviews)
+Test: tests/binary.rs (work_attempt_run_counts_already_planned_followup_against_budget)
+Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop counts preplanned follow-up against budget)
+
 WHEN no completed review artifact has a failing verdict and any completed
 review artifact has an uncertain or missing verdict,
 THE SYSTEM SHALL mark the Attempt as `needs-user`, mark the Attempt
