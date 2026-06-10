@@ -9,7 +9,7 @@ use crate::content::ContentResolver;
 use crate::review::{self, Verdict};
 use crate::work_model::{
     ArtifactRef, Attempt, AttemptKind, AttemptReviewState, AttemptStatus, Task, TaskKind,
-    TaskStatus, WorkItem, WorkModelStorageError, WorkModelStore,
+    TaskStatus, WorkItem, WorkModelStorageError, WorkModelStore, work_artifact_path,
 };
 use crate::work_task_executor::{self, WorkTaskRunConfig};
 
@@ -278,7 +278,8 @@ fn interpret_reviews(
     }
 
     if !uncertain.is_empty() {
-        let handoff_path = write_needs_user_handoff(project_root, attempt_id, &uncertain)?;
+        let handoff_path =
+            write_needs_user_handoff(project_root, &item.id, attempt_id, &uncertain)?;
         item.attempts[attempt_index].review_state = Some(AttemptReviewState::Uncertain);
         item.attempts[attempt_index].status = AttemptStatus::NeedsUser;
         item.attempts[attempt_index].artifacts.push(ArtifactRef {
@@ -463,8 +464,9 @@ mod tests {
                 "attempt-1-followup-1",
                 vec![ArtifactRef {
                     producer_id: "attempt-1-review-tests".to_string(),
-                    path: ".factory/work/artifacts/attempt-1/attempt-1-review-tests/review.md"
-                        .to_string(),
+                    path:
+                        ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
+                            .to_string(),
                 }],
             ),
         ]);
@@ -483,12 +485,12 @@ mod tests {
                 vec![
                     ArtifactRef {
                         producer_id: "attempt-1-review-tests".to_string(),
-                        path: ".factory/work/artifacts/attempt-1/attempt-1-review-tests/review.md"
+                        path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
                             .to_string(),
                     },
                     ArtifactRef {
                         producer_id: "attempt-1-review-documentation".to_string(),
-                        path: ".factory/work/artifacts/attempt-1/attempt-1-review-documentation/review.md"
+                        path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-documentation/review.md"
                             .to_string(),
                     },
                 ],
@@ -507,7 +509,7 @@ mod tests {
                 "attempt-1-followup-1",
                 vec![ArtifactRef {
                     producer_id: "missing-review-task".to_string(),
-                    path: ".factory/work/artifacts/attempt-1/missing-review-task/review.md"
+                    path: ".factory/work/artifacts/work-1/attempt-1/missing-review-task/review.md"
                         .to_string(),
                 }],
             ),
@@ -571,10 +573,11 @@ mod tests {
 
 fn write_needs_user_handoff(
     project_root: &Path,
+    work_item_id: &str,
     attempt_id: &str,
     uncertain: &[ArtifactRef],
 ) -> Result<String> {
-    let relative_path = format!(".factory/work/artifacts/{attempt_id}/needs-user.md");
+    let relative_path = work_artifact_path(work_item_id, attempt_id, "needs-user.md");
     let path = project_root.join(&relative_path);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;

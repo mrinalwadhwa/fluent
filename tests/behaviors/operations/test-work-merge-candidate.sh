@@ -191,8 +191,8 @@ EOF
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "attempt-1-merge-candidate" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Target branch: main" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Review diff:" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" ".factory/work/artifacts/attempt-1/attempt-1-merge-candidate/merge/reviews/behaviors/review.md" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "$TEST_PROJECT_PWD/.factory/work/artifacts/attempt-1/attempt-1-merge-candidate/merge/reviews/behaviors/review.md" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" ".factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/behaviors/review.md" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "$TEST_PROJECT_PWD/.factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/behaviors/review.md" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "candidate workspace as read-only" || RESULT=1
   if grep -Fq ".factory/runs/" "$TEST_DIR/merge-review-args-log"; then
     printf '    FAIL: merge reviewer prompt contains legacy run review path\n'

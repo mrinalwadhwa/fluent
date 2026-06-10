@@ -274,7 +274,7 @@ output, with the candidate workspace id and path, source branch, and
 candidate commit. Follow-up write Tasks include `input_artifacts` when
 reviewers fail an Attempt; each entry names the producing review Task
 and the artifact path, such as
-`.factory/work/artifacts/attempt-1/attempt-1-review-tests/review.md`.
+`.factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md`.
 The Attempt loop uses those producer task ids to choose the reviewers
 for the next follow-up review round.
 JSON omits `input_artifacts` when the list is empty. Incomplete Tasks do

@@ -188,7 +188,7 @@ significant deviations, pause and renegotiate via `needs-user`.
 ### 6. Review
 
 Reviewers evaluate your output. In the Work model, review Tasks write
-artifacts under `.factory/work/artifacts/<attempt-id>/<task-id>/`, and
+artifacts under `.factory/work/artifacts/<work-item-id>/<attempt-id>/<task-id>/`, and
 Attempt review state decides whether to create a Merge Candidate,
 schedule follow-up write Tasks, or ask the user. In the legacy fallback,
 review results go in the run's `reviews/` directory. Verdicts: pass
@@ -224,8 +224,8 @@ Durable Work model state lives under `.factory/work/`:
 | `.factory/work/attempts/<work-item-id>/<attempt-id>.json` | Stored Attempt records |
 | `.factory/work/tasks/<work-item-id>/<attempt-id>/<task-id>.json` | Stored Task records |
 | `.factory/work/merge-candidates/<work-item-id>/<candidate-id>.json` | Stored Merge Candidate records |
-| `.factory/work/artifacts/<attempt-id>/<task-id>/` | Task artifacts such as review output |
-| `.factory/work/artifacts/<attempt-id>/<candidate-id>/merge/` | Merge-time review and execution artifacts |
+| `.factory/work/artifacts/<work-item-id>/<attempt-id>/<task-id>/` | Task artifacts such as review output |
+| `.factory/work/artifacts/<work-item-id>/<attempt-id>/<candidate-id>/merge/` | Merge-time review and execution artifacts |
 
 Managed candidate worktrees live beside the source checkout as
 `../work-<work-item-id-byte-len>-<work-item-id>-<attempt-id>`.

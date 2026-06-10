@@ -1322,7 +1322,7 @@ fn work_review_plans_review_tasks_for_completed_attempt() {
     );
     assert_eq!(
         review_task["artifact_area"]["path"],
-        ".factory/work/artifacts/attempt-1/attempt-1-review-tests"
+        ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests"
     );
     assert_eq!(
         review_task["review_context"]["candidate_workspace_id"],
@@ -1432,7 +1432,7 @@ fn work_review_codebase_creates_review_only_attempt() {
     );
     assert_eq!(
         review_task["artifact_area"]["path"],
-        ".factory/work/artifacts/attempt-review/attempt-review-review-tests"
+        ".factory/work/artifacts/work-1/attempt-review/attempt-review-review-tests"
     );
     assert_eq!(
         review_task["review_context"]["candidate_workspace_id"],
@@ -1631,7 +1631,7 @@ exit 0
         ));
 
     let review_path =
-        main_dir.join(".factory/work/artifacts/attempt-1/attempt-1-review-tests/review.md");
+        main_dir.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md");
     assert!(
         fs::read_to_string(&review_path)
             .unwrap()
@@ -1671,7 +1671,7 @@ exit 0
             .unwrap()
             .last()
             .unwrap()["path"],
-        ".factory/work/artifacts/attempt-1/attempt-1-review-tests/review.md"
+        ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
     );
 }
 
@@ -1845,8 +1845,9 @@ exit 0
             "Completed Task attempt-review-review-tests",
         ));
 
-    let review_path = main_dir
-        .join(".factory/work/artifacts/attempt-review/attempt-review-review-tests/review.md");
+    let review_path = main_dir.join(
+        ".factory/work/artifacts/work-1/attempt-review/attempt-review-review-tests/review.md",
+    );
     let source_checkout = fs::canonicalize(&main_dir).unwrap();
     let prompt = fs::read_to_string(prompt_log).unwrap();
     assert!(prompt.contains("Readable source checkout:"));
@@ -1920,7 +1921,7 @@ fn work_task_run_completes_attempt_after_all_review_tasks_complete() {
         assert!(
             main_dir
                 .join(format!(
-                    ".factory/work/artifacts/attempt-1/attempt-1-review-{role}/review.md"
+                    ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-{role}/review.md"
                 ))
                 .exists()
         );
@@ -1987,7 +1988,7 @@ fn work_attempt_run_drives_write_reviews_and_passes() {
     assert_eq!(candidate["review_state"], "pending");
     assert!(
         main_dir
-            .join(".factory/work/artifacts/attempt-1/attempt-1-review-tests/review.md")
+            .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md")
             .exists()
     );
 
@@ -2537,14 +2538,14 @@ fn work_attempt_run_review_only_uncertain_needs_user() {
             .unwrap()
             .iter()
             .any(|artifact| {
-                artifact["path"] == ".factory/work/artifacts/attempt-review/needs-user.md"
+                artifact["path"] == ".factory/work/artifacts/work-1/attempt-review/needs-user.md"
             })
     );
     assert_eq!(review_only_write_task_count(attempt), 0);
     assert!(merge_candidates_are_empty(&value));
     assert!(
         main_dir
-            .join(".factory/work/artifacts/attempt-review/needs-user.md")
+            .join(".factory/work/artifacts/work-1/attempt-review/needs-user.md")
             .is_file()
     );
     assert_no_non_factory_changes(&main_dir);
@@ -2700,7 +2701,7 @@ fn work_merge_candidate_lands_after_merge_time_reviews() {
     assert!(
         main_dir
             .join(
-                ".factory/work/artifacts/attempt-1/attempt-1-merge-candidate/merge/review-state.json"
+                ".factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/review-state.json"
             )
             .is_file()
     );
@@ -3558,7 +3559,7 @@ fn work_attempt_run_plans_followup_for_failed_reviews() {
     assert_eq!(followup["input_artifacts"].as_array().unwrap().len(), 5);
     assert_eq!(
         followup["input_artifacts"][0]["path"],
-        ".factory/work/artifacts/attempt-1/attempt-1-review-documentation/review.md"
+        ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-documentation/review.md"
     );
     assert_eq!(
         followup["instructions"],
@@ -3731,7 +3732,7 @@ fn work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews() {
     assert_eq!(attempt["review_state"], "failed");
     assert!(
         !main_dir
-            .join(".factory/work/artifacts/attempt-1/needs-user.md")
+            .join(".factory/work/artifacts/work-1/attempt-1/needs-user.md")
             .exists()
     );
     let followup = attempt["tasks"]
@@ -3744,7 +3745,7 @@ fn work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews() {
     assert_eq!(input_artifacts.len(), 1);
     assert_eq!(
         input_artifacts[0]["path"],
-        ".factory/work/artifacts/attempt-1/attempt-1-review-documentation/review.md"
+        ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-documentation/review.md"
     );
 
     factory_cmd()
@@ -3953,10 +3954,11 @@ exec "$@"
             "Completed Task attempt-1-followup-1",
         ));
 
-    let expected_artifact = fs::canonicalize(
-        main_dir.join(".factory/work/artifacts/attempt-1/attempt-1-review-documentation/review.md"),
-    )
-    .unwrap();
+    let expected_artifact =
+        fs::canonicalize(main_dir.join(
+            ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-documentation/review.md",
+        ))
+        .unwrap();
     let expected_artifact_dir = expected_artifact.parent().unwrap();
     let prompt = fs::read_to_string(prompt_log).unwrap();
     assert!(prompt.contains("Input artifacts:"));
@@ -4073,7 +4075,7 @@ fn work_attempt_run_marks_uncertain_reviews_needs_user() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Attempt attempt-1 needs user input: .factory/work/artifacts/attempt-1/needs-user.md",
+            "Attempt attempt-1 needs user input: .factory/work/artifacts/work-1/attempt-1/needs-user.md",
         ));
 
     let value = read_work_show_json(&main_dir, "work-1");
@@ -4081,7 +4083,7 @@ fn work_attempt_run_marks_uncertain_reviews_needs_user() {
     assert_eq!(attempt["status"], "needs-user");
     assert_eq!(attempt["review_state"], "uncertain");
     let handoff =
-        fs::read_to_string(main_dir.join(".factory/work/artifacts/attempt-1/needs-user.md"))
+        fs::read_to_string(main_dir.join(".factory/work/artifacts/work-1/attempt-1/needs-user.md"))
             .unwrap();
     assert!(handoff.contains("attempt-1-review-tests/review.md"));
 }
@@ -4109,7 +4111,7 @@ fn work_attempt_run_marks_missing_verdict_needs_user() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Attempt attempt-1 needs user input: .factory/work/artifacts/attempt-1/needs-user.md",
+            "Attempt attempt-1 needs user input: .factory/work/artifacts/work-1/attempt-1/needs-user.md",
         ));
 
     let value = read_work_show_json(&main_dir, "work-1");
@@ -4117,7 +4119,7 @@ fn work_attempt_run_marks_missing_verdict_needs_user() {
     assert_eq!(attempt["status"], "needs-user");
     assert_eq!(attempt["review_state"], "uncertain");
     let handoff =
-        fs::read_to_string(main_dir.join(".factory/work/artifacts/attempt-1/needs-user.md"))
+        fs::read_to_string(main_dir.join(".factory/work/artifacts/work-1/attempt-1/needs-user.md"))
             .unwrap();
     assert!(handoff.contains("uncertain or missing review verdicts"));
     assert!(handoff.contains("attempt-1-review-tests/review.md"));
@@ -4212,7 +4214,7 @@ fn work_task_run_rejects_unmanaged_review_read_workspace_path() {
     }
     assert!(
         !main_dir
-            .join(".factory/work/artifacts/attempt-1/attempt-1-review-tests")
+            .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests")
             .exists()
     );
 }
@@ -4285,7 +4287,7 @@ fn work_task_run_rejects_malformed_review_context() {
     }
     assert!(
         !main_dir
-            .join(".factory/work/artifacts/attempt-1/attempt-1-review-tests")
+            .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests")
             .exists()
     );
 }
@@ -4341,7 +4343,8 @@ fn work_task_run_ignores_stale_review_artifact() {
         .assert()
         .success();
 
-    let review_dir = main_dir.join(".factory/work/artifacts/attempt-1/attempt-1-review-tests");
+    let review_dir =
+        main_dir.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests");
     let review_path = review_dir.join("review.md");
     fs::create_dir_all(&review_dir).unwrap();
     fs::write(&review_path, "Verdict: pass\n\nstale\n").unwrap();
@@ -4725,9 +4728,10 @@ fn work_task_run_sandboxes_review_with_read_only_candidate() {
     let profile = fs::read_to_string(profile_copy).unwrap();
     let candidate = fs::canonicalize(main_dir.join("../work-6-work-1-attempt-1")).unwrap();
     let common_git_dir = fs::canonicalize(git_common_dir(&candidate)).unwrap();
-    let artifact_dir =
-        fs::canonicalize(main_dir.join(".factory/work/artifacts/attempt-1/attempt-1-review-tests"))
-            .unwrap();
+    let artifact_dir = fs::canonicalize(
+        main_dir.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests"),
+    )
+    .unwrap();
     assert!(
         profile.contains(&format!(
             "(allow file-read*  (subpath \"{}\"))",
@@ -5959,7 +5963,7 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
     let mut task = read_json_path(&task_path);
     task["status"] = serde_json::Value::String("complete".to_string());
     task["artifact_area"] = serde_json::json!({
-        "path": ".factory/work/artifacts/attempt-1/attempt-1-write"
+        "path": ".factory/work/artifacts/work-1/attempt-1/attempt-1-write"
     });
     task["output"] = serde_json::json!({
         "workspace_id": "candidate",
@@ -5969,7 +5973,7 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
     });
     write_json_path(&task_path, &task);
 
-    let artifact_dir = main_dir.join(".factory/work/artifacts/attempt-1/attempt-1-write");
+    let artifact_dir = main_dir.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-write");
     fs::create_dir_all(&artifact_dir).unwrap();
     fs::write(artifact_dir.join("result.md"), "artifact").unwrap();
 
@@ -5998,11 +6002,12 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
     let mut active_task = read_json_path(&active_task_path);
     active_task["status"] = serde_json::Value::String("executing".to_string());
     active_task["artifact_area"] = serde_json::json!({
-        "path": ".factory/work/artifacts/attempt-1/attempt-1-active"
+        "path": ".factory/work/artifacts/work-active/attempt-1/attempt-1-active"
     });
     write_json_path(&active_task_path, &active_task);
 
-    let active_artifact_dir = main_dir.join(".factory/work/artifacts/attempt-1/attempt-1-active");
+    let active_artifact_dir =
+        main_dir.join(".factory/work/artifacts/work-active/attempt-1/attempt-1-active");
     fs::create_dir_all(&active_artifact_dir).unwrap();
     fs::write(active_artifact_dir.join("result.md"), "active artifact").unwrap();
 
@@ -6304,11 +6309,12 @@ fn cleanup_work_items_skips_failed_attempt_with_active_task() {
     let mut task = read_json_path(&task_path);
     task["status"] = serde_json::Value::String("executing".to_string());
     task["artifact_area"] = serde_json::json!({
-        "path": ".factory/work/artifacts/attempt-1/attempt-1-write"
+        "path": ".factory/work/artifacts/work-active-task/attempt-1/attempt-1-write"
     });
     write_json_path(&task_path, &task);
 
-    let artifact_dir = main_dir.join(".factory/work/artifacts/attempt-1/attempt-1-write");
+    let artifact_dir =
+        main_dir.join(".factory/work/artifacts/work-active-task/attempt-1/attempt-1-write");
     fs::create_dir_all(&artifact_dir).unwrap();
     fs::write(artifact_dir.join("result.md"), "active task artifact").unwrap();
 
@@ -6417,23 +6423,24 @@ fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() 
                 "check_artifacts": [
                     {
                         "producer_id": "merge-check",
-                        "path": ".factory/work/artifacts/attempt-1/candidate-1/merge/checks/checks.json"
+                        "path": ".factory/work/artifacts/work-merge-cleanup/attempt-1/candidate-1/merge/checks/checks.json"
                     }
                 ],
                 "review_artifacts": [
                     {
                         "producer_id": "merge-review-tests",
-                        "path": ".factory/work/artifacts/attempt-1/candidate-1/merge/reviews/tests/review.md"
+                        "path": ".factory/work/artifacts/work-merge-cleanup/attempt-1/candidate-1/merge/reviews/tests/review.md"
                     }
                 ]
             }
         }),
     );
 
-    let check_artifact =
-        main_dir.join(".factory/work/artifacts/attempt-1/candidate-1/merge/checks/checks.json");
+    let check_artifact = main_dir.join(
+        ".factory/work/artifacts/work-merge-cleanup/attempt-1/candidate-1/merge/checks/checks.json",
+    );
     let review_artifact = main_dir
-        .join(".factory/work/artifacts/attempt-1/candidate-1/merge/reviews/tests/review.md");
+        .join(".factory/work/artifacts/work-merge-cleanup/attempt-1/candidate-1/merge/reviews/tests/review.md");
     fs::create_dir_all(check_artifact.parent().unwrap()).unwrap();
     fs::create_dir_all(review_artifact.parent().unwrap()).unwrap();
     fs::write(&check_artifact, "{}").unwrap();
@@ -6482,7 +6489,7 @@ fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() 
     assert!(!review_artifact.exists());
     assert!(
         !main_dir
-            .join(".factory/work/artifacts/attempt-1/candidate-1")
+            .join(".factory/work/artifacts/work-merge-cleanup/attempt-1/candidate-1")
             .exists()
     );
 
@@ -7148,7 +7155,7 @@ exit 0
 
 fn review_only_dirty_source_mock_script() -> String {
     r##"#!/bin/bash
-printf 'reviewer edit\n' >> ../../../../../README.md
+printf 'reviewer edit\n' >> ../../../../../../README.md
 printf 'Verdict: pass\n\nReview-only result.\n' > review.md
 exit 0
 "##
@@ -7157,7 +7164,7 @@ exit 0
 
 fn review_only_changed_head_mock_script() -> String {
     r##"#!/bin/bash
-repo="$(pwd)/../../../../../"
+repo="$(pwd)/../../../../../../"
 git -C "$repo" config user.email test@example.com
 git -C "$repo" config user.name "Test User"
 printf 'reviewer commit\n' > "$repo/reviewer-commit.txt"
@@ -7171,7 +7178,7 @@ exit 0
 
 fn review_only_dirty_factory_mock_script() -> String {
     r##"#!/bin/bash
-printf 'reviewer edit\n' >> ../../../../../.factory/expertise/decisions.md
+printf 'reviewer edit\n' >> ../../../../../../.factory/expertise/decisions.md
 printf 'Verdict: pass\n\nReview-only result.\n' > review.md
 exit 0
 "##
@@ -7180,7 +7187,7 @@ exit 0
 
 fn review_only_dirty_work_state_mock_script() -> String {
     r##"#!/bin/bash
-printf 'reviewer edit\n' >> ../../../items/work-1.json
+printf 'reviewer edit\n' >> ../../../../items/work-1.json
 printf 'Verdict: pass\n\nReview-only result.\n' > review.md
 exit 0
 "##
@@ -7189,8 +7196,8 @@ exit 0
 
 fn review_only_dirty_source_and_factory_mock_script() -> String {
     r##"#!/bin/bash
-printf 'reviewer source edit\n' >> ../../../../../README.md
-printf 'reviewer factory edit\n' >> ../../../../../.factory/expertise/decisions.md
+printf 'reviewer source edit\n' >> ../../../../../../README.md
+printf 'reviewer factory edit\n' >> ../../../../../../.factory/expertise/decisions.md
 printf 'Verdict: pass\n\nReview-only result.\n' > review.md
 exit 0
 "##

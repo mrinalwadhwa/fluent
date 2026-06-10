@@ -104,7 +104,7 @@ test_review_codebase_intake() {
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review")] | length')" = "5" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-review-review-tests") | .workspace_access.reads[0].id')" = "source" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-review-review-tests") | .workspace_access.reads[0].path')" = "." ] || RESULT=1
-  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-review-review-tests") | .artifact_area.path')" = ".factory/work/artifacts/attempt-review/attempt-review-review-tests" ] || RESULT=1
+  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-review-review-tests") | .artifact_area.path')" = ".factory/work/artifacts/work-1/attempt-review/attempt-review-review-tests" ] || RESULT=1
 
   return $RESULT
 }
@@ -169,7 +169,7 @@ test_review_codebase_rejects_source_changes() {
   RESULT=0
   assert_fails env PATH="${TEST_DIR}/bin:$PATH" "$FACTORY_BIN" work attempt run \
     work-1 attempt-review --no-sandbox || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/stderr")" "Review Task changed non-Factory source files" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stderr")" "changed source checkout outside managed artifact area" || RESULT=1
   [ "$(json_value '(.merge_candidates // []) | length')" = "0" ] || RESULT=1
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "write")] | length')" = "0" ] || RESULT=1
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review" and .status == "failed")] | length')" = "1" ] || RESULT=1
@@ -191,8 +191,8 @@ test_review_codebase_uncertain_needs_user() {
   assert_contains "$(cat "$TEST_DIR/stdout")" "Attempt attempt-review needs user input" || RESULT=1
   [ "$(json_value '.attempts[0].status')" = "needs-user" ] || RESULT=1
   [ "$(json_value '.attempts[0].review_state')" = "uncertain" ] || RESULT=1
-  [ -f .factory/work/artifacts/attempt-review/needs-user.md ] || RESULT=1
-  assert_contains "$(cat .factory/work/artifacts/attempt-review/needs-user.md)" "attempt-review-review-tests/review.md" || RESULT=1
+  [ -f .factory/work/artifacts/work-1/attempt-review/needs-user.md ] || RESULT=1
+  assert_contains "$(cat .factory/work/artifacts/work-1/attempt-review/needs-user.md)" "attempt-review-review-tests/review.md" || RESULT=1
   [ "$(json_value '(.merge_candidates // []) | length')" = "0" ] || RESULT=1
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "write")] | length')" = "0" ] || RESULT=1
 

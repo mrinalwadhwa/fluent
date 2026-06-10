@@ -106,7 +106,7 @@ case "${TASK_RUN_MOCK_MODE:-commit}" in
     printf 'Verdict: uncertain\n\nCould not verify.\n' > review.md
     ;;
   review-read-candidate)
-    cat ../../../../../../work-6-work-1-attempt-1/README.md > candidate-read.txt
+    cat ../../../../../../../work-6-work-1-attempt-1/README.md > candidate-read.txt
     printf 'Verdict: pass\n\nRead candidate workspace.\n' > review.md
     ;;
   review-missing)
@@ -341,7 +341,7 @@ test_review_planning_adds_read_only_task_without_changing_candidate() {
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-tests") | .workspace_access.writes | length')" = "0" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-tests") | .workspace_access.reads | length')" -ge "1" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-tests") | .workspace_access.reads[0].path')" = "$(workspace_path)" ] || RESULT=1
-  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-tests") | .artifact_area.path')" = ".factory/work/artifacts/attempt-1/attempt-1-review-tests" ] || RESULT=1
+  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-tests") | .artifact_area.path')" = ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests" ] || RESULT=1
   [ "$(git -C "$(workspace_path)" rev-parse HEAD)" = "$CANDIDATE_COMMIT" ] || RESULT=1
   [ "$(git -C "$(workspace_path)" status --porcelain)" = "$CANDIDATE_STATUS" ] || RESULT=1
 
@@ -363,18 +363,18 @@ test_review_task_with_fail_verdict_completes() {
   CANDIDATE_COMMIT="$(git -C "$(workspace_path)" rev-parse HEAD)"
   [ "$(json_value '.attempts[0].status')" = "reviewing" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-tests") | .workspace_access.writes | length')" = "0" ] || RESULT=1
-  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-tests") | .artifact_area.path')" = ".factory/work/artifacts/attempt-1/attempt-1-review-tests" ] || RESULT=1
+  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-tests") | .artifact_area.path')" = ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests" ] || RESULT=1
   run_review_task review-fail > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
   PROMPT="$(cat "$TEST_DIR/coder-prompt.log")"
   assert_contains "$PROMPT" "Execute this Factory review Task" || RESULT=1
   assert_contains "$PROMPT" "- candidate: $(physical_workspace_path)" || RESULT=1
-  assert_contains "$PROMPT" ".factory/work/artifacts/attempt-1/attempt-1-review-tests" || RESULT=1
+  assert_contains "$PROMPT" ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests" || RESULT=1
   REVIEW_CWD="$(tail -n 1 "$TEST_DIR/coder-cwd.log")"
-  EXPECTED_ARTIFACT_CWD="$(cd .factory/work/artifacts/attempt-1/attempt-1-review-tests && pwd -P)"
+  EXPECTED_ARTIFACT_CWD="$(cd .factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests && pwd -P)"
   [ "$REVIEW_CWD" = "$EXPECTED_ARTIFACT_CWD" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-tests") | .status')" = "complete" ] || RESULT=1
-  [ "$(json_value '.attempts[0].artifacts[] | select(.path == ".factory/work/artifacts/attempt-1/attempt-1-review-tests/review.md") | .path')" = ".factory/work/artifacts/attempt-1/attempt-1-review-tests/review.md" ] || RESULT=1
-  grep -q 'Verdict: fail' .factory/work/artifacts/attempt-1/attempt-1-review-tests/review.md || RESULT=1
+  [ "$(json_value '.attempts[0].artifacts[] | select(.path == ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md") | .path')" = ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md" ] || RESULT=1
+  grep -q 'Verdict: fail' .factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md || RESULT=1
   [ "$(git -C "$(workspace_path)" rev-parse HEAD)" = "$CANDIDATE_COMMIT" ] || RESULT=1
   [ -z "$(git -C "$(workspace_path)" status --porcelain)" ] || RESULT=1
 
@@ -394,7 +394,7 @@ test_review_task_can_read_candidate_workspace() {
 
   RESULT=0
   run_review_task review-read-candidate > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
-  [ "$(cat .factory/work/artifacts/attempt-1/attempt-1-review-tests/candidate-read.txt)" = "test" ] || RESULT=1
+  [ "$(cat .factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/candidate-read.txt)" = "test" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-tests") | .status')" = "complete" ] || RESULT=1
 
   cleanup_test_project
@@ -414,7 +414,7 @@ test_review_task_with_uncertain_verdict_completes() {
   RESULT=0
   run_review_task review-uncertain > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-tests") | .status')" = "complete" ] || RESULT=1
-  grep -q 'Verdict: uncertain' .factory/work/artifacts/attempt-1/attempt-1-review-tests/review.md || RESULT=1
+  grep -q 'Verdict: uncertain' .factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md || RESULT=1
 
   cleanup_test_project
   return $RESULT

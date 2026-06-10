@@ -82,8 +82,12 @@ pub fn merge_candidate(config: WorkMergeConfig<'_>) -> Result<WorkMergeOutcome> 
     )?;
     let target_workspace =
         resolve_workspace_path(config.project_root, &candidate.target_workspace.path);
-    let artifact_dir =
-        merge_artifact_dir(config.project_root, &candidate.attempt_id, &candidate.id);
+    let artifact_dir = merge_artifact_dir(
+        config.project_root,
+        config.work_item_id,
+        &candidate.attempt_id,
+        &candidate.id,
+    );
     fs::create_dir_all(&artifact_dir)?;
 
     set_candidate_executing(config.store, config.work_item_id, &candidate.id)?;
@@ -726,9 +730,15 @@ fn read_work_item_or_not_found(store: &WorkModelStore, id: &str) -> Result<WorkI
     }
 }
 
-fn merge_artifact_dir(project_root: &Path, attempt_id: &str, candidate_id: &str) -> PathBuf {
+fn merge_artifact_dir(
+    project_root: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    candidate_id: &str,
+) -> PathBuf {
     project_root
         .join(WORK_ARTIFACTS_DIR)
+        .join(work_item_id)
         .join(attempt_id)
         .join(candidate_id)
         .join("merge")

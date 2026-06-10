@@ -263,7 +263,7 @@ path = Path(".factory/work/tasks/work-1/attempt-1/attempt-1-write.json")
 task = json.loads(path.read_text())
 task["status"] = "complete"
 task["artifact_area"] = {
-    "path": ".factory/work/artifacts/attempt-1/attempt-1-write"
+    "path": ".factory/work/artifacts/work-1/attempt-1/attempt-1-write"
 }
 task["output"] = {
     "workspace_id": "candidate",
@@ -282,15 +282,15 @@ path = Path(".factory/work/tasks/work-active/attempt-1/attempt-1-write.json")
 task = json.loads(path.read_text())
 task["status"] = "executing"
 task["artifact_area"] = {
-    "path": ".factory/work/artifacts/attempt-1/attempt-1-active"
+    "path": ".factory/work/artifacts/work-active/attempt-1/attempt-1-active"
 }
 path.write_text(json.dumps(task, indent=2) + "\n")
 PY
 
-  ARTIFACT_DIR=".factory/work/artifacts/attempt-1/attempt-1-write"
+  ARTIFACT_DIR=".factory/work/artifacts/work-1/attempt-1/attempt-1-write"
   mkdir -p "$ARTIFACT_DIR"
   printf 'artifact' > "$ARTIFACT_DIR/result.md"
-  ACTIVE_ARTIFACT_DIR=".factory/work/artifacts/attempt-1/attempt-1-active"
+  ACTIVE_ARTIFACT_DIR=".factory/work/artifacts/work-active/attempt-1/attempt-1-active"
   mkdir -p "$ACTIVE_ARTIFACT_DIR"
   printf 'active artifact' > "$ACTIVE_ARTIFACT_DIR/result.md"
 
@@ -403,7 +403,7 @@ attempt["artifacts"] = [
     {"producer_id": "outside-parent", "path": parent_escape_path},
     {
         "producer_id": "managed",
-        "path": ".factory/work/artifacts/attempt-1/attempt-1-review/review.md",
+        "path": ".factory/work/artifacts/work-1/attempt-1/attempt-1-review/review.md",
     },
 ]
 path.write_text(json.dumps(attempt, indent=2) + "\n")
@@ -412,7 +412,7 @@ path = Path(".factory/work/tasks/work-1/attempt-1/attempt-1-write.json")
 task = json.loads(path.read_text())
 task["status"] = "complete"
 task["artifact_area"] = {
-    "path": ".factory/work/artifacts/attempt-1/attempt-1-write"
+    "path": ".factory/work/artifacts/work-1/attempt-1/attempt-1-write"
 }
 task["output"] = {
     "workspace_id": "candidate",
@@ -423,8 +423,8 @@ task["output"] = {
 path.write_text(json.dumps(task, indent=2) + "\n")
 PY
 
-  ARTIFACT_DIR=".factory/work/artifacts/attempt-1/attempt-1-write"
-  MANAGED_REVIEW_ARTIFACT=".factory/work/artifacts/attempt-1/attempt-1-review/review.md"
+  ARTIFACT_DIR=".factory/work/artifacts/work-1/attempt-1/attempt-1-write"
+  MANAGED_REVIEW_ARTIFACT=".factory/work/artifacts/work-1/attempt-1/attempt-1-review/review.md"
   mkdir -p "$ARTIFACT_DIR" "$(dirname "$MANAGED_REVIEW_ARTIFACT")"
   printf 'artifact' > "$ARTIFACT_DIR/result.md"
   printf 'review' > "$MANAGED_REVIEW_ARTIFACT"

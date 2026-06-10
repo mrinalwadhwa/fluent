@@ -14,6 +14,10 @@ pub const WORK_TASKS_DIR: &str = "tasks";
 pub const WORK_MERGE_CANDIDATES_DIR: &str = "merge-candidates";
 pub const WORK_ARTIFACTS_DIR: &str = ".factory/work/artifacts";
 
+pub fn work_artifact_path(work_item_id: &str, attempt_id: &str, artifact: &str) -> String {
+    format!("{WORK_ARTIFACTS_DIR}/{work_item_id}/{attempt_id}/{artifact}")
+}
+
 pub fn initial_candidate_workspace_path(work_item_id: &str, attempt_id: &str) -> String {
     format!("../work-{}-{work_item_id}-{attempt_id}", work_item_id.len())
 }
@@ -243,7 +247,7 @@ impl WorkItem {
                 attempt_id: Some(attempt_id.clone()),
                 workspace_access: WorkspaceAccess::read_only(vec![source.clone()]),
                 artifact_area: Some(TaskArtifactArea {
-                    path: format!("{WORK_ARTIFACTS_DIR}/{attempt_id}/{task_id}"),
+                    path: work_artifact_path(&self.id, &attempt_id, &task_id),
                 }),
                 review_context: Some(ReviewContext {
                     candidate_workspace_id: source.id.clone(),
@@ -362,7 +366,7 @@ impl WorkItem {
                 attempt_id: Some(attempt_id.to_string()),
                 workspace_access: WorkspaceAccess::read_only(vec![candidate.clone()]),
                 artifact_area: Some(TaskArtifactArea {
-                    path: format!("{WORK_ARTIFACTS_DIR}/{attempt_id}/{task_id}"),
+                    path: work_artifact_path(&self.id, attempt_id, &task_id),
                 }),
                 review_context: Some(ReviewContext {
                     candidate_workspace_id: write_output.workspace_id.clone(),
@@ -679,7 +683,7 @@ impl Attempt {
             }
         }
         if self.kind == AttemptKind::ReviewOnly {
-            self.validate_review_only_shape()?;
+            self.validate_review_only_shape(work_item_id)?;
         }
         for task in &self.tasks {
             task.validate()?;
@@ -694,7 +698,7 @@ impl Attempt {
         Ok(())
     }
 
-    fn validate_review_only_shape(&self) -> Result<(), WorkModelError> {
+    fn validate_review_only_shape(&self, work_item_id: &str) -> Result<(), WorkModelError> {
         for task in &self.tasks {
             if task.kind != TaskKind::Review {
                 return Err(WorkModelError::ReviewOnlyAttemptInvalidTask {
@@ -729,7 +733,7 @@ impl Attempt {
                     field: "review_context.candidate_workspace",
                 });
             }
-            let expected_artifact_path = format!("{WORK_ARTIFACTS_DIR}/{}/{}", self.id, task.id);
+            let expected_artifact_path = work_artifact_path(work_item_id, &self.id, &task.id);
             if task
                 .artifact_area
                 .as_ref()
@@ -1884,6 +1888,7 @@ impl WorkModelStore {
         if self.has_split_records(&work_item.id)? {
             work_item = self.assemble_split_work_item(&work_item.id, path, validate)?;
         }
+        self.normalize_work_artifact_paths(&mut work_item)?;
         if validate {
             work_item
                 .validate()
@@ -2234,6 +2239,104 @@ impl WorkModelStore {
         }
         Ok(candidates)
     }
+
+    fn normalize_work_artifact_paths(
+        &self,
+        work_item: &mut WorkItem,
+    ) -> Result<(), WorkModelStorageError> {
+        for attempt in &mut work_item.attempts {
+            for task in &mut attempt.tasks {
+                if let Some(area) = &mut task.artifact_area {
+                    self.normalize_artifact_path_value(&work_item.id, &attempt.id, &mut area.path)?;
+                }
+                for artifact in &mut task.input_artifacts {
+                    self.normalize_artifact_path_value(
+                        &work_item.id,
+                        &attempt.id,
+                        &mut artifact.path,
+                    )?;
+                }
+            }
+            for artifact in &mut attempt.artifacts {
+                self.normalize_artifact_path_value(&work_item.id, &attempt.id, &mut artifact.path)?;
+            }
+        }
+        for candidate in &mut work_item.merge_candidates {
+            for artifact in candidate
+                .merge_state
+                .check_artifacts
+                .iter_mut()
+                .chain(candidate.merge_state.review_artifacts.iter_mut())
+            {
+                self.normalize_artifact_path_value(
+                    &work_item.id,
+                    &candidate.attempt_id,
+                    &mut artifact.path,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn normalize_artifact_path_value(
+        &self,
+        work_item_id: &str,
+        attempt_id: &str,
+        path: &mut String,
+    ) -> Result<(), WorkModelStorageError> {
+        let Some(normalized) = namespace_legacy_artifact_path(work_item_id, attempt_id, path)
+        else {
+            return Ok(());
+        };
+        self.migrate_artifact_path(path, &normalized)?;
+        *path = normalized;
+        Ok(())
+    }
+
+    fn migrate_artifact_path(
+        &self,
+        old_relative: &str,
+        new_relative: &str,
+    ) -> Result<(), WorkModelStorageError> {
+        let old_path = self.project_root.join(old_relative);
+        if !old_path.exists() {
+            return Ok(());
+        }
+        let new_path = self.project_root.join(new_relative);
+        if new_path.exists() {
+            return Ok(());
+        }
+        if let Some(parent) = new_path.parent() {
+            fs::create_dir_all(parent).map_err(|source| {
+                WorkModelStorageError::CreateDirectory {
+                    path: parent.to_path_buf(),
+                    source,
+                }
+            })?;
+        }
+        fs::rename(&old_path, &new_path).map_err(|source| WorkModelStorageError::WriteFile {
+            path: new_path,
+            source,
+        })
+    }
+}
+
+fn namespace_legacy_artifact_path(
+    work_item_id: &str,
+    attempt_id: &str,
+    path: &str,
+) -> Option<String> {
+    let prefix = format!("{WORK_ARTIFACTS_DIR}/");
+    let rest = path.strip_prefix(&prefix)?;
+    if rest
+        .split('/')
+        .next()
+        .is_some_and(|segment| segment == work_item_id)
+    {
+        return None;
+    }
+    let legacy_rest = rest.strip_prefix(attempt_id)?.strip_prefix('/')?;
+    Some(format!("{prefix}{work_item_id}/{attempt_id}/{legacy_rest}"))
 }
 
 fn work_item_file_name(id: &str) -> Result<String, WorkModelStorageError> {
@@ -2773,6 +2876,103 @@ mod tests {
     }
 
     #[test]
+    fn review_artifact_paths_include_work_item_namespace() {
+        let mut first = work_item_with_completed_write("work-alpha");
+        let mut second = work_item_with_completed_write("work-beta");
+
+        first
+            .add_next_review_tasks("attempt-1", &["tests"])
+            .unwrap();
+        second
+            .add_next_review_tasks("attempt-1", &["tests"])
+            .unwrap();
+
+        let first_path = first.attempts[0].tasks[1]
+            .artifact_area
+            .as_ref()
+            .unwrap()
+            .path
+            .as_str();
+        let second_path = second.attempts[0].tasks[1]
+            .artifact_area
+            .as_ref()
+            .unwrap()
+            .path
+            .as_str();
+        assert_eq!(
+            first_path,
+            ".factory/work/artifacts/work-alpha/attempt-1/attempt-1-review-tests"
+        );
+        assert_eq!(
+            second_path,
+            ".factory/work/artifacts/work-beta/attempt-1/attempt-1-review-tests"
+        );
+        assert_ne!(first_path, second_path);
+    }
+
+    #[test]
+    fn store_migrates_legacy_attempt_artifact_paths_on_read() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut work_item = work_item_with_completed_write("work-1");
+        work_item
+            .add_next_review_tasks("attempt-1", &["tests"])
+            .unwrap();
+        work_item.attempts[0].tasks[1].status = TaskStatus::Complete;
+        work_item.attempts[0].artifacts.push(ArtifactRef {
+            producer_id: "attempt-1-review-tests".to_string(),
+            path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
+                .to_string(),
+        });
+        store.create_work_item(&work_item).unwrap();
+
+        let task_path = store
+            .work_task_path("work-1", "attempt-1", "attempt-1-review-tests")
+            .unwrap();
+        let mut task_record: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&task_path).unwrap()).unwrap();
+        task_record["artifact_area"]["path"] = serde_json::Value::String(
+            ".factory/work/artifacts/attempt-1/attempt-1-review-tests".to_string(),
+        );
+        fs::write(&task_path, to_json_pretty(&task_record).unwrap()).unwrap();
+
+        let attempt_path = store.work_attempt_path("work-1", "attempt-1").unwrap();
+        let mut attempt_record: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&attempt_path).unwrap()).unwrap();
+        attempt_record["artifacts"][0]["path"] = serde_json::Value::String(
+            ".factory/work/artifacts/attempt-1/attempt-1-review-tests/review.md".to_string(),
+        );
+        fs::write(&attempt_path, to_json_pretty(&attempt_record).unwrap()).unwrap();
+
+        let legacy_dir = tmp
+            .path()
+            .join(".factory/work/artifacts/attempt-1/attempt-1-review-tests");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        fs::write(legacy_dir.join("review.md"), "Verdict: pass\n").unwrap();
+
+        let read = store.read_work_item("work-1").unwrap();
+
+        assert_eq!(
+            read.attempts[0].tasks[1]
+                .artifact_area
+                .as_ref()
+                .unwrap()
+                .path,
+            ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests"
+        );
+        assert_eq!(
+            read.attempts[0].artifacts[0].path,
+            ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
+        );
+        assert!(
+            tmp.path()
+                .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md")
+                .is_file()
+        );
+        assert!(!legacy_dir.exists());
+    }
+
+    #[test]
     fn next_review_tasks_keep_round_number_after_full_round() {
         let mut work_item = WorkItem {
             id: "work-1".to_string(),
@@ -2797,7 +2997,7 @@ mod tests {
                         workspace_access: WorkspaceAccess::read_only(vec![workspace("candidate")]),
                         artifact_area: Some(TaskArtifactArea {
                             path:
-                                ".factory/work/artifacts/attempt-1/attempt-1-review-documentation"
+                                ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-documentation"
                                     .to_string(),
                         }),
                         review_context: Some(ReviewContext {
@@ -2819,7 +3019,7 @@ mod tests {
                         attempt_id: Some("attempt-1".to_string()),
                         workspace_access: WorkspaceAccess::read_only(vec![workspace("candidate")]),
                         artifact_area: Some(TaskArtifactArea {
-                            path: ".factory/work/artifacts/attempt-1/attempt-1-review-behaviors"
+                            path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-behaviors"
                                 .to_string(),
                         }),
                         review_context: Some(ReviewContext {
@@ -3257,7 +3457,7 @@ mod tests {
                         attempt_id: Some("attempt-1".to_string()),
                         workspace_access: WorkspaceAccess::read_only(vec![workspace("candidate")]),
                         artifact_area: Some(TaskArtifactArea {
-                            path: ".factory/work/artifacts/attempt-1/attempt-1-review-tests"
+                            path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests"
                                 .to_string(),
                         }),
                         review_context: Some(ReviewContext {
@@ -3323,6 +3523,28 @@ mod tests {
                 source_branch: "main".to_string(),
                 commit: format!("commit-{suffix}"),
             }),
+        }
+    }
+
+    fn work_item_with_completed_write(id: &str) -> WorkItem {
+        WorkItem {
+            id: id.to_string(),
+            title: "Review latest candidate".to_string(),
+            planning_context: None,
+            instructions: None,
+            attempts: vec![Attempt {
+                id: "attempt-1".to_string(),
+                work_item_id: id.to_string(),
+                kind: AttemptKind::Write,
+                status: AttemptStatus::Complete,
+                tasks: vec![Task {
+                    work_item_id: id.to_string(),
+                    ..completed_write_task("attempt-1-write", "initial")
+                }],
+                review_state: Some(AttemptReviewState::NotReviewed),
+                artifacts: Vec::new(),
+            }],
+            merge_candidates: Vec::new(),
         }
     }
 }

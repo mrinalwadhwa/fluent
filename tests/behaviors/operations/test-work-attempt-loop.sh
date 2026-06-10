@@ -248,8 +248,8 @@ test_attempt_loop_plans_followup_with_mixed_failed_and_missing_reviews() {
   [ "$(json_value '.attempts[0].status')" = "planned" ] || RESULT=1
   [ "$(json_value '.attempts[0].review_state')" = "failed" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[-1].input_artifacts | length')" = "1" ] || RESULT=1
-  [ "$(json_value '.attempts[0].tasks[-1].input_artifacts[0].path')" = ".factory/work/artifacts/attempt-1/attempt-1-review-documentation/review.md" ] || RESULT=1
-  [ ! -f .factory/work/artifacts/attempt-1/needs-user.md ] || RESULT=1
+  [ "$(json_value '.attempts[0].tasks[-1].input_artifacts[0].path')" = ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-documentation/review.md" ] || RESULT=1
+  [ ! -f .factory/work/artifacts/work-1/attempt-1/needs-user.md ] || RESULT=1
 
   run_attempt_loop > "$TEST_DIR/followup-stdout" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Completed Task attempt-1-followup-1" || RESULT=1
@@ -295,8 +295,8 @@ test_attempt_loop_marks_uncertain_reviews_needs_user() {
   assert_contains "$(cat "$TEST_DIR/stdout")" "Attempt attempt-1 needs user input" || RESULT=1
   [ "$(json_value '.attempts[0].status')" = "needs-user" ] || RESULT=1
   [ "$(json_value '.attempts[0].review_state')" = "uncertain" ] || RESULT=1
-  [ -f .factory/work/artifacts/attempt-1/needs-user.md ] || RESULT=1
-  assert_contains "$(cat .factory/work/artifacts/attempt-1/needs-user.md)" "attempt-1-review-tests/review.md" || RESULT=1
+  [ -f .factory/work/artifacts/work-1/attempt-1/needs-user.md ] || RESULT=1
+  assert_contains "$(cat .factory/work/artifacts/work-1/attempt-1/needs-user.md)" "attempt-1-review-tests/review.md" || RESULT=1
   return $RESULT
 }
 
@@ -309,8 +309,8 @@ test_attempt_loop_marks_missing_verdict_needs_user() {
   run_attempt_loop > "$TEST_DIR/stdout" || RESULT=1
   [ "$(json_value '.attempts[0].status')" = "needs-user" ] || RESULT=1
   [ "$(json_value '.attempts[0].review_state')" = "uncertain" ] || RESULT=1
-  [ -f .factory/work/artifacts/attempt-1/needs-user.md ] || RESULT=1
-  assert_contains "$(cat .factory/work/artifacts/attempt-1/needs-user.md)" "uncertain or missing review verdicts" || RESULT=1
+  [ -f .factory/work/artifacts/work-1/attempt-1/needs-user.md ] || RESULT=1
+  assert_contains "$(cat .factory/work/artifacts/work-1/attempt-1/needs-user.md)" "uncertain or missing review verdicts" || RESULT=1
   return $RESULT
 }
 

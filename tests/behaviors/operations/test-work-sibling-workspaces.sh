@@ -214,7 +214,7 @@ test_attempt_run_keeps_state_and_artifacts_in_source_checkout() {
       work-alpha attempt-one > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
 
   [ -f .factory/work/items/work-alpha.json ] || RESULT=1
-  [ -d .factory/work/artifacts/attempt-one ] || RESULT=1
+  [ -d .factory/work/artifacts/work-alpha/attempt-one ] || RESULT=1
   [ "$(work_json_value work-alpha '.merge_candidates[0].source_workspace.path')" = "../work-10-work-alpha-attempt-one" ] || RESULT=1
   [ -d ../work-10-work-alpha-attempt-one ] || RESULT=1
   [ ! -d ../work-10-work-alpha-attempt-one/.factory/work/artifacts ] || RESULT=1
