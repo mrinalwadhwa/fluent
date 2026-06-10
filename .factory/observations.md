@@ -121,6 +121,11 @@ Recent Work Item runs suggest several promising measurements:
   to discover that after the first author pass. Better author prompts
   and brief-to-plan checks could reduce this churn without skipping
   reviewers.
+- Assess whether Work Items finish slower when they touch high-churn
+  shared files by nature, such as `tests/binary.rs`. Large shared test
+  files create merge contention, expand reviewer context, and make small
+  logical changes look broad. Splitting tests by domain or behavior area
+  might reduce elapsed time and conflicts without reducing coverage.
 - Assess whether some extensive reviews should move from the pre-merge
   path to periodic post-merge review on `main`. One possible shape: keep
   deterministic tests as the hard rebase regression gate before merge,
