@@ -844,18 +844,16 @@ Progress:
   distinguish active pre-Work-Item planning context from durable Work
   Item planning context after `factory work create`; legacy
   `.factory/runs` planning files are fallback or recovery state only.
+- `3b9d0aa` made Work write Tasks use a Work-native author prompt.
+  Work write Task execution now resolves `prompts/work-author.md`
+  instead of the legacy `prompts/author.md`, the Task completion prompt
+  accurately states that no committed Task output fails under the current
+  executor contract, and tests assert that Work write prompts exclude
+  legacy `.factory/runs` status and handoff instructions.
 
 The next adoption slices should keep using the Work path end to end, then
 delete legacy `.factory/runs` compatibility once the replacement path is
 stable enough to stop carrying the old model.
-
-2026-06-09 — Work write Task prompts still carry a legacy run status-file
-contract. During `work-planning-bridge-cleanup`, a Work follow-up author
-was told to write `.factory/runs/[run-id]/status`, and the candidate
-ended up with `.factory/runs/attempt-1-write/status = complete`.
-Work write Tasks should be Work-native: task completion should mean a
-clean committed workspace plus durable Task/Attempt state, not delegated
-authors writing legacy run status files.
 
 2026-06-09 — Some behavior shell tests assume the repository's default
 `target/debug/factory` build output. During merge review for
