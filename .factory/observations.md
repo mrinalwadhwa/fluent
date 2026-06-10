@@ -144,6 +144,13 @@ Recent Work Item runs suggest several promising measurements:
   candidate, write build outputs and scratch files only under the review
   artifact area, and run tests with redirected target/cache paths when the
   tool normally writes into the checkout.
+- Even with artifact-local `CARGO_TARGET_DIR` guidance, reviewer tooling
+  can still accidentally interact with ignored build outputs in the
+  candidate workspace. During `work-native-review-prompts`, one
+  merge-time reviewer tried to remove a candidate `target/` directory and
+  hit permission errors. The candidate stayed clean, but Factory should
+  make reviewer build/cache isolation more automatic and auditable instead
+  of relying only on prompt guidance.
 
 2026-06-05 — Wrote expertise/terminal-ui.md without following the
 factory process. A proper run with reviewers would have caught:
@@ -827,10 +834,16 @@ Progress:
   split collections. Nested operational collections in item JSON are
   ignored, and architecture/behavior docs plus storage tests describe the
   split collections as the Work storage contract.
+- `201e8a5` made reviewer prompts Work-native. Bundled reviewer prompts
+  now provide `[work-system]` sections for Work review Tasks, Work review
+  prompt construction names Work artifact paths and artifact-local
+  writable output locations, merge-time reviewers prefer `[work-system]`
+  with legacy fallback, and architecture/behavior docs describe the
+  prompt contract.
 
-The next adoption slices should remove remaining legacy `.factory/runs`
-assumptions from prompts and reviewers, then delete legacy `.factory/runs`
-compatibility once the Work execution path is used end to end.
+The next adoption slices should keep using the Work path end to end, then
+delete legacy `.factory/runs` compatibility once the replacement path is
+stable enough to stop carrying the old model.
 
 2026-06-07 — Authors are increasingly using expertise, especially when
 the approach lists specific expertise files, but Factory should make this
