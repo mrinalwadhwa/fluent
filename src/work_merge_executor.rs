@@ -103,6 +103,18 @@ pub fn merge_candidate(config: WorkMergeConfig<'_>) -> Result<WorkMergeOutcome> 
     match result {
         Ok(outcome) => Ok(outcome),
         Err(error) => {
+            if let Some(landed_commit) =
+                candidate_landed_commit(config.store, config.work_item_id, &candidate.id)?
+            {
+                eprintln!(
+                    "  Warning: Merge Candidate {} landed, but post-landing merge cleanup failed: {error}",
+                    candidate.id
+                );
+                return Ok(WorkMergeOutcome {
+                    merge_candidate_id: candidate.id,
+                    landed_commit,
+                });
+            }
             if !candidate_has_failure(config.store, config.work_item_id, &candidate.id)? {
                 record_candidate_failure(
                     config.store,
@@ -633,6 +645,11 @@ fn record_candidate_failure(
     review_artifacts: Vec<ArtifactRef>,
 ) -> Result<()> {
     update_candidate(store, work_item_id, candidate_id, |candidate| {
+        if candidate.merge_state.status == MergeCandidateMergeStatus::Landed
+            && candidate.merge_state.landed_commit.is_some()
+        {
+            return;
+        }
         if !review_artifacts.is_empty()
             || candidate.review_state == MergeCandidateReviewState::Reviewing
         {
@@ -689,6 +706,30 @@ fn update_candidate(
     update(candidate);
     store.write_work_item(&item)?;
     Ok(())
+}
+
+fn candidate_landed_commit(
+    store: &WorkModelStore,
+    work_item_id: &str,
+    candidate_id: &str,
+) -> Result<Option<String>> {
+    let item = read_work_item_or_not_found(store, work_item_id)?;
+    let candidate = item
+        .merge_candidates
+        .iter()
+        .find(|candidate| candidate.id == candidate_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Merge Candidate {:?} not found in Work Item {:?}",
+                candidate_id,
+                work_item_id
+            )
+        })?;
+    if candidate.merge_state.status == MergeCandidateMergeStatus::Landed {
+        Ok(candidate.merge_state.landed_commit.clone())
+    } else {
+        Ok(None)
+    }
 }
 
 fn candidate_has_failure(

@@ -3222,6 +3222,99 @@ fn work_merge_candidate_warns_when_cleanup_fails_after_landing() {
 }
 
 #[test]
+fn work_merge_candidate_rerun_after_cleanup_preserves_landed_state() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Cleanup rerun"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-cleanup-rerun-pass");
+    write_mock_claude(&bin_dir, &loop_mock_script("pass"));
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
+    let candidate_head = git_head(&candidate_workspace);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "merge",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Merged Merge Candidate attempt-1-merge-candidate",
+        ));
+
+    assert_eq!(git_head(&main_dir), candidate_head);
+    assert!(!candidate_workspace.exists());
+
+    fs::write(
+        main_dir.join(".factory/config.toml"),
+        r#"
+[checks.fail_if_rerun]
+command = "printf should-not-run >&2; exit 1"
+run_before_land = true
+"#,
+    )
+    .unwrap();
+    let fail_bin = tmp.path().join("bin-cleanup-rerun-should-not-run");
+    write_mock_claude(
+        &fail_bin,
+        "#!/bin/bash\nprintf 'reviewer should not rerun' >&2\nexit 42\n",
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "merge",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&fail_bin))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(candidate_head.clone()))
+        .stderr(predicate::str::contains("should-not-run").not())
+        .stderr(predicate::str::contains("reviewer should not rerun").not());
+
+    assert_eq!(git_head(&main_dir), candidate_head);
+    assert!(!candidate_workspace.exists());
+    let value = read_work_show_json(&main_dir, "work-1");
+    let candidate = &value["merge_candidates"][0];
+    assert_eq!(candidate["review_state"], "passed");
+    assert_eq!(candidate["merge_state"]["status"], "landed");
+    assert_eq!(candidate["merge_state"]["landed_commit"], candidate_head);
+}
+
+#[test]
 fn work_merge_candidate_rejects_stale_stored_provenance_without_rewrite() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
