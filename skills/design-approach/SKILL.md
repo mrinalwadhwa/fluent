@@ -26,8 +26,10 @@ was actually built.
 ### Phase 1 — Read the inputs
 
 Read:
-- Work Item context from `factory work show <work-item-id>`, or
-  `.factory/runs/[run-id]/brief.md` in the legacy fallback — the intent
+- Work Item planning context from `factory work show <work-item-id>` —
+  the default source of intent for Work-model planning
+- `.factory/runs/[run-id]/brief.md` only in a legacy fallback or
+  recovery path
 - `behaviors.diff.md` from the active planning context — what the system
   must do
 - `documentation/architecture.md` — how the system is built today
@@ -161,7 +163,10 @@ short reason for each file. If no additional expertise beyond
 architecture applied, say so explicitly rather than omitting the
 section.
 
-Set status to `approach-designed`.
+After user approval, keep the approved approach with the planning
+context that will be passed to `factory work create --approach-file`.
+Set legacy status to `approach-designed` only when operating in a
+legacy fallback or recovery path.
 
 ---
 
@@ -170,7 +175,7 @@ Set status to `approach-designed`.
 ```markdown
 # Approach
 
-Run: [run-id]
+Work Item: [work-item-id]
 Brief: [one-line summary]
 
 ## Expertise

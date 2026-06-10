@@ -21,8 +21,10 @@ the executing agent but is expected to evolve during implementation.
 ### Phase 1 — Read the inputs
 
 Read:
-- Work Item context from `factory work show <work-item-id>`, or
-  `.factory/runs/[run-id]/brief.md` in the legacy fallback — the intent
+- Work Item planning context from `factory work show <work-item-id>` —
+  the default source of intent for Work-model planning
+- `.factory/runs/[run-id]/brief.md` only in a legacy fallback or
+  recovery path
 - `behaviors.diff.md` from the active planning context — what the system
   must do
 - `approach.md` from the active planning context — how the system should
@@ -39,7 +41,9 @@ action, tell the user:
 > "This looks straightforward enough to execute directly. Any reason
 > to plan further, or should we proceed?"
 
-If they agree, write a minimal plan and set status to `planned`.
+If they agree, write a minimal plan. For Work-model planning, keep that
+minimal plan as planning context for `factory work create`; set legacy
+status to `planned` only in a legacy fallback or recovery path.
 
 ### Phase 2 — Assess scope
 
@@ -158,8 +162,9 @@ Assemble `plan.md` and show the full plan:
 > "Here's the complete plan. Does the full picture hold together?"
 
 After the user approves the plan, create the Work Item with planning
-context stored directly in Work state. Pass the approved planning files
-in this order:
+context stored directly in Work state. This is the normal path for
+delegated Work execution. Pass the approved planning files in this
+order:
 
 1. the approved brief
 2. the approved behaviors diff
@@ -169,10 +174,14 @@ in this order:
 Use `factory work create --brief-file --behaviors-file --approach-file
 --plan-file` so Factory stores the approved context on the Work Item and
 derives write Task instructions from durable Work state. Assemble a
-legacy run `execution-instructions.md` file only when a compatibility
-path still requires one.
+legacy run `execution-instructions.md` file only when a compatibility,
+fallback, or recovery path still requires one. Do not write
+`.factory/runs/[run-id]/brief.md`, `status`, or `.factory/active-run`
+for ordinary Work-model planning when `factory work create` can express
+the delegated execution.
 
-Set status to `planned`.
+Set legacy status to `planned` only when operating in a legacy fallback
+or recovery path.
 
 ---
 
@@ -181,7 +190,7 @@ Set status to `planned`.
 ```markdown
 # Plan
 
-Run: [run-id]
+Work Item: [work-item-id]
 Brief: [one-line summary]
 
 ## Steps

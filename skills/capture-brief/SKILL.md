@@ -3,8 +3,8 @@ name: capture-brief
 description: >
   Capture the user's intent for a new piece of work through a structured
   interview. Adapt depth to the clarity of the idea — sharpen vague ideas,
-  ground clear ones in the codebase. Produce a brief.md that starts a
-  Factory Work Item or legacy run.
+  ground clear ones in the codebase. Produce a brief that becomes Work
+  Item planning context, or a legacy run input only for fallback paths.
 ---
 
 # Capture Brief
@@ -195,8 +195,9 @@ note it as an unknown. The define-behaviors stage will resolve it.
 ### Phase 6 — Write the brief
 
 Generate a work-id using the format `YYYYMMDD-HHMMSS-kebab-title`
-(e.g., `20260507-143022-cache-status`) and a matching legacy run-id
-using the timestamp prefix when fallback artifacts are needed.
+(e.g., `20260507-143022-cache-status`). Generate a matching legacy
+run-id from the timestamp prefix only when a fallback or recovery path
+requires legacy run artifacts.
 
 Prefer the Work model for new delegated build work, but do not create
 the Work Item immediately after writing only the brief. Work Item
@@ -217,8 +218,12 @@ factory work create <work-id> --title "<short title>" \
 Store approved planning text in Work Item planning context with
 `--planning-context <text>`, `--planning-context-file <path>`, or the
 separate planning file flags so write Tasks receive the context through
-durable Work state. Write bridge planning artifacts when later skills
-need files to review, revise, or pass to legacy fallback:
+durable Work state. Do not create `.factory/runs/[run-id]/brief.md`,
+`status`, or `.factory/active-run` for ordinary Work-model planning.
+
+Write legacy bridge planning artifacts only when a later skill must
+review or revise file inputs that the Work path cannot yet carry, or
+when an explicit legacy fallback or recovery path needs them:
 
 ```
 .factory/runs/[run-id]/
@@ -226,8 +231,8 @@ need files to review, revise, or pass to legacy fallback:
   status          ← write "briefed"
 ```
 
-Write `.factory/active-run` containing the run-id only for the legacy
-fallback path.
+Write `.factory/active-run` containing the run-id only for that legacy
+fallback or recovery path.
 
 If the brief is a full-codebase review request, write the review target,
 focus areas, and any requested reviewers in the brief. Do not start

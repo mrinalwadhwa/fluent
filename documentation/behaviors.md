@@ -69,6 +69,15 @@ in stored Work Item state and make that context visible through
 instructions file.
 Test: tests/binary.rs (work_create_persists_planning_context_and_attempt_copies_it_to_write_task)
 
+WHEN planning skills describe how to pass approved planning context to
+delegated Work execution,
+THE SYSTEM SHALL describe Work Item planning context through
+`factory work create --brief-file --behaviors-file --approach-file
+--plan-file` as the default path and SHALL confine
+`.factory/runs/<run-id>/` planning files to legacy fallback or recovery
+language.
+Test: tests/behaviors/operations/test-planning-skills-work-context.sh
+
 WHEN `factory work list` is invoked,
 THE SYSTEM SHALL read stored Work Items from `.factory/work/items/` and
 assemble Attempts, Tasks, and Merge Candidates only from their split
@@ -647,8 +656,9 @@ Test: tests/behaviors/operations/test-work-attempt-intake-review.sh (invalid ids
 WHEN the user invokes the capture-brief skill,
 THE SYSTEM SHALL interview the user, research the codebase, and write
 a brief for a Work Item, using `.factory/runs/[run-id]/brief.md` only
-as a legacy fallback or bridge planning artifact.
+as legacy fallback or recovery state.
 Test: tests/behaviors/skills/code-reviewer.md (test-skill)
+Test: tests/behaviors/operations/test-planning-skills-work-context.sh
 
 WHEN the user invokes the build-in-the-factory skill for new delegated
 build work,
@@ -669,7 +679,9 @@ EARS-format behavioral statements, and write behaviors.diff.md.
 Test: tests/behaviors/skills/run-summary-behaviors.md (test-skill)
 
 WHEN behaviors are approved by the user,
-THE SYSTEM SHALL set status to `behaviors-defined`.
+THE SYSTEM SHALL keep the behavior diff available for Work Item planning
+context and set legacy status to `behaviors-defined` only when using the
+legacy fallback.
 Test: tests/behaviors/skills/run-summary-behaviors.md (test-skill)
 
 ## Approach design
@@ -680,7 +692,9 @@ approach.md with relevant expertise references, key technical decisions,
 and solution direction.
 
 WHEN the approach is approved by the user,
-THE SYSTEM SHALL set status to `approach-designed`.
+THE SYSTEM SHALL keep the approach available for Work Item planning
+context and set legacy status to `approach-designed` only when using the
+legacy fallback.
 
 ## Execution planning
 
@@ -689,7 +703,8 @@ THE SYSTEM SHALL break the approach into executable steps and write
 plan.md.
 
 WHEN the plan is approved by the user,
-THE SYSTEM SHALL set status to `planned`.
+THE SYSTEM SHALL create the Work Item with approved planning context and
+set legacy status to `planned` only when using the legacy fallback.
 
 ## Worktree isolation
 

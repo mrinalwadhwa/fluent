@@ -111,8 +111,9 @@ present for conversation and review.
 ### 1. Capture brief
 
 Follow the `capture-brief` skill. Interview the user to capture their
-intent. Read the codebase for context. Write `brief.md`. Set status to
-`briefed`.
+intent. Read the codebase for context. Write a brief that will become
+Work Item planning context. Write legacy `brief.md` and set legacy
+status to `briefed` only for fallback or recovery paths.
 
 **Review-only work:** If the user wants a full-codebase review (not
 building something new), capture enough context to create a Work Item.
@@ -123,14 +124,18 @@ Use the Work-model review-only flow in the autonomous stages below.
 Follow the `define-behaviors` skill. Read the brief and existing
 behaviors. Elaborate into EARS-format behavioral statements. Write
 `behaviors.diff.md`. Present to the user for critical review. On
-approval, set status to `behaviors-defined`.
+approval, keep the diff as approved planning context for the Work Item.
+Set legacy status to `behaviors-defined` only for fallback or recovery
+paths.
 
 ### 3. Design approach
 
 Follow the `design-approach` skill. Research external systems, evaluate
 options, make technical choices, and record the expertise files that
 should guide execution. Write `approach.md`. Present to the user for
-review. On approval, set status to `approach-designed`.
+review. On approval, keep it as approved planning context for the Work
+Item. Set legacy status to `approach-designed` only for fallback or
+recovery paths.
 
 ### 4. Plan execution
 
@@ -138,7 +143,9 @@ Follow the `plan-execution` skill. Break the approach into executable
 steps. Determine whether the work should stay in one Attempt, split
 into separate peer Work Items, or use legacy child-run decomposition as
 a fallback for one large effort. Write `plan.md`. Present to the user
-for review. On approval, set status to `planned`.
+for review. On approval, create the Work Item with the approved planning
+files and set legacy status to `planned` only for fallback or recovery
+paths.
 
 ---
 
@@ -277,6 +284,11 @@ Legacy run state lives in `.factory/runs/[run-id]/`:
 | `reviews/` | Review artifacts |
 | `children` | Child run IDs, one per line (parallel runs only, written by the factory) |
 | `parent` | Parent run ID (child runs only, written by the factory) |
+
+These files are not the normal planning handoff for Work-model
+execution. Create or update them only when using legacy `factory run`,
+coordinated child-run decomposition, Fargate-only execution, or explicit
+recovery of existing run state.
 
 `factory cleanup` also handles complete or landed legacy runs. It
 defaults to a dry run and requires `--apply` before removing registered

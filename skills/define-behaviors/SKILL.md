@@ -24,8 +24,10 @@ in `documentation/behaviors.md`, not a restatement.
 ### Phase 1 — Read the inputs
 
 Read:
-- Work Item context from `factory work show <work-item-id>`, or
-  `.factory/runs/[run-id]/brief.md` in the legacy fallback — the intent
+- Work Item planning context from `factory work show <work-item-id>` —
+  the default source of intent for Work-model planning
+- `.factory/runs/[run-id]/brief.md` only in a legacy fallback or
+  recovery path
 - `documentation/behaviors.md` — what the system already does
 - Relevant code in the areas the brief describes
 
@@ -143,7 +145,10 @@ Once all areas have been discussed, assemble the full
 This is a final coherence check, not a repeat of the area-by-area
 review. If something needs changing, fix it and confirm again.
 
-Set status to `behaviors-defined`.
+After user approval, keep the approved behavior diff with the planning
+context that will be passed to `factory work create --behaviors-file`.
+Set legacy status to `behaviors-defined` only when operating in a
+legacy fallback or recovery path.
 
 ---
 
@@ -152,7 +157,7 @@ Set status to `behaviors-defined`.
 ```markdown
 # Behaviors (diff)
 
-Run: [run-id]
+Work Item: [work-item-id]
 Brief: [one-line summary from the brief]
 
 ## Vocabulary

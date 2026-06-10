@@ -72,8 +72,11 @@ Callers may attach approved planning context directly to the Work Item with
 separate `--brief-file`, `--behaviors-file`, `--approach-file`, and
 `--plan-file` inputs. Factory stores that context as optional
 `WorkItem.planning_context` so `factory work show <id>` exposes the
-brief, behaviors, approach, and plan that write Tasks use. Callers may
-also pass explicit prompt text with `--instructions <text>` or
+brief, behaviors, approach, and plan that write Tasks use. Planning
+skills treat this Work Item planning context as the normal handoff to
+delegated Work execution; legacy `.factory/runs/<run-id>/` planning
+files are fallback or recovery state for paths the Work model cannot yet
+carry. Callers may also pass explicit prompt text with `--instructions <text>` or
 `--instructions-file <path>`; Factory stores that text as optional
 `WorkItem.instructions` and gives it precedence over derived planning
 context when it creates write Task instructions. `factory work attempt
