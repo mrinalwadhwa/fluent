@@ -1689,6 +1689,25 @@ Keep this Work-native sentence.
     }
 
     #[test]
+    fn merge_review_readable_sandbox_roots_includes_attempt_artifact_subtree() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let source_workspace = tmp.path().join("workspace");
+        fs::create_dir_all(&source_workspace).unwrap();
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&source_workspace)
+            .output()
+            .unwrap();
+        let attempt_root = tmp.path().join("artifacts/work-1/attempt-1");
+        fs::create_dir_all(&attempt_root).unwrap();
+
+        let roots = merge_review_readable_sandbox_roots(&source_workspace, &attempt_root).unwrap();
+
+        assert!(roots.contains(&source_workspace.to_path_buf()));
+        assert!(roots.contains(&attempt_root));
+    }
+
+    #[test]
     fn merge_reviewer_writable_outputs_guidance_uses_artifact_directory() {
         let guidance =
             merge_reviewer_writable_outputs_guidance(Path::new("/tmp/factory/merge/reviews/tests"));

@@ -846,7 +846,10 @@ fn write_cleaned_marker(run: &Run, status: &RunStatus, worktree: &WorktreeCleanu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::work_model::{WorkItemAbandonment, WorkspaceAccess};
+    use crate::work_model::{
+        AttemptReviewState, AttemptStatus, TaskOutput, TaskStatus, WorkItemAbandonment,
+        WorkspaceAccess,
+    };
     use tempfile::TempDir;
 
     fn create_run(root: &Path, id: &str, status: &str) -> PathBuf {
@@ -1167,8 +1170,194 @@ mod tests {
         )
         .unwrap();
 
-        let work_item_ids: Vec<_> = results.iter().map(|r| r.work_item_id.as_str()).collect();
-        assert!(work_item_ids.contains(&"work-1"));
         assert_eq!(results.len(), 2);
+        let arch = results
+            .iter()
+            .find(|r| r.reviewer == "architecture")
+            .expect("architecture result");
+        assert_eq!(arch.work_item_id, "work-1");
+        assert_eq!(arch.attempt_id, "attempt-1");
+        assert!(
+            arch.path
+                .ends_with("review-6-work-1-attempt-1-architecture"),
+            "unexpected path: {:?}",
+            arch.path
+        );
+        assert!(!arch.applied);
+        let tests_result = results
+            .iter()
+            .find(|r| r.reviewer == "tests")
+            .expect("tests result");
+        assert_eq!(tests_result.work_item_id, "work-1");
+        assert_eq!(tests_result.attempt_id, "attempt-1");
+        assert!(
+            tests_result
+                .path
+                .ends_with("review-6-work-1-attempt-1-tests"),
+            "unexpected path: {:?}",
+            tests_result.path
+        );
+        assert!(!tests_result.applied);
+    }
+
+    #[test]
+    fn stranded_reviewer_worktree_preserved_for_executing_merge_candidate() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        Command::new("git")
+            .args(["-C", &project.to_string_lossy(), "init", "-b", "main"])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args([
+                "-C",
+                &project.to_string_lossy(),
+                "config",
+                "user.email",
+                "test@test",
+            ])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args([
+                "-C",
+                &project.to_string_lossy(),
+                "config",
+                "user.name",
+                "test",
+            ])
+            .output()
+            .unwrap();
+        fs::write(project.join("README.md"), "test\n").unwrap();
+        Command::new("git")
+            .args(["-C", &project.to_string_lossy(), "add", "README.md"])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["-C", &project.to_string_lossy(), "commit", "-m", "init"])
+            .output()
+            .unwrap();
+
+        let store = WorkModelStore::new(&project);
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Active merge".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        let attempt = item.attempts.first_mut().unwrap();
+        attempt.status = AttemptStatus::Complete;
+        attempt.review_state = Some(AttemptReviewState::Passed);
+        let task = attempt.tasks.first_mut().unwrap();
+        task.status = TaskStatus::Complete;
+        task.output = Some(TaskOutput {
+            workspace_id: "candidate".to_string(),
+            workspace_path: "../work-6-work-1-attempt-1".to_string(),
+            source_branch: "main".to_string(),
+            commit: "abc123".to_string(),
+        });
+        let candidate_id = item.create_or_get_merge_candidate("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+
+        let mut stored = store.read_work_item("work-1").unwrap();
+        let candidate = stored
+            .merge_candidates
+            .iter_mut()
+            .find(|c| c.id == candidate_id)
+            .unwrap();
+        candidate.merge_state.status = MergeCandidateMergeStatus::Executing;
+        store.write_work_item(&stored).unwrap();
+
+        let reviewer_dir = tmp.path().join("review-6-work-1-attempt-1-tests");
+        fs::create_dir_all(&reviewer_dir).unwrap();
+
+        let results = cleanup_stranded_reviewer_worktrees(
+            &project,
+            &CleanupOptions {
+                run_id: None,
+                apply: true,
+            },
+        )
+        .unwrap();
+
+        assert!(results.is_empty());
+        assert!(reviewer_dir.exists());
+    }
+
+    #[test]
+    fn stranded_reviewer_worktree_removed_on_apply() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        Command::new("git")
+            .args(["-C", &project.to_string_lossy(), "init", "-b", "main"])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args([
+                "-C",
+                &project.to_string_lossy(),
+                "config",
+                "user.email",
+                "test@test",
+            ])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args([
+                "-C",
+                &project.to_string_lossy(),
+                "config",
+                "user.name",
+                "test",
+            ])
+            .output()
+            .unwrap();
+        fs::write(project.join("README.md"), "test\n").unwrap();
+        Command::new("git")
+            .args(["-C", &project.to_string_lossy(), "add", "README.md"])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["-C", &project.to_string_lossy(), "commit", "-m", "init"])
+            .output()
+            .unwrap();
+
+        let store = WorkModelStore::new(&project);
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Stranded apply test".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+
+        let reviewer_dir = tmp.path().join("review-6-work-1-attempt-1-tests");
+        fs::create_dir_all(&reviewer_dir).unwrap();
+
+        let results = cleanup_stranded_reviewer_worktrees(
+            &project,
+            &CleanupOptions {
+                run_id: None,
+                apply: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].work_item_id, "work-1");
+        assert_eq!(results[0].attempt_id, "attempt-1");
+        assert_eq!(results[0].reviewer, "tests");
+        assert!(results[0].applied);
+        assert!(!reviewer_dir.exists());
     }
 }

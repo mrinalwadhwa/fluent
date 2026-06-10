@@ -267,9 +267,10 @@ EOF
     RESULT=1
   fi
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Factory sets CARGO_TARGET_DIR=" || RESULT=1
-  if grep -Fq 'CARGO_TARGET_DIR="' "$TEST_DIR/merge-review-args-log" 2>/dev/null || \
-     grep -Fq 'CARGO_TARGET_DIR=' "$TEST_DIR/merge-review-args-log" | grep -Fq 'cargo test' 2>/dev/null; then
-    :
+  if grep -Eq 'CARGO_TARGET_DIR="[^"]*"\s*cargo' "$TEST_DIR/merge-review-args-log" 2>/dev/null || \
+     grep -Eq 'export CARGO_TARGET_DIR=' "$TEST_DIR/merge-review-args-log" 2>/dev/null; then
+    printf '    FAIL: merge reviewer prompt contains manual CARGO_TARGET_DIR instruction\n'
+    RESULT=1
   fi
   if [ -f "$TEST_DIR/merge-review-env-log" ]; then
     assert_contains "$(cat "$TEST_DIR/merge-review-env-log")" "CARGO_TARGET_DIR=" || RESULT=1

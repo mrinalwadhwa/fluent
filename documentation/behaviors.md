@@ -451,6 +451,7 @@ THE SYSTEM SHALL grant the reviewer process read access to the whole
 `.factory/work/artifacts/<work-item-id>/<attempt-id>/` subtree through
 the sandbox profile, so referenced merge-check and prior-review
 artifact paths are readable.
+Test: src/work_merge_executor.rs (merge_review_readable_sandbox_roots_includes_attempt_artifact_subtree)
 
 WHEN Factory generates a merge-time reviewer prompt,
 THE SYSTEM SHALL NOT instruct the reviewer to copy the candidate
@@ -464,6 +465,7 @@ Work Item has no merge candidate currently executing,
 THE SYSTEM SHALL list the directory in the dry-run report; with
 `--apply`, THE SYSTEM SHALL remove the directory and any registered
 git worktree pointing at it.
+Test: src/cleanup.rs (parse_reviewer_worktree_name_extracts_components, parse_reviewer_worktree_name_handles_long_work_item_id, parse_reviewer_worktree_name_rejects_non_reviewer_suffix, parse_reviewer_worktree_name_rejects_non_matching_names, stranded_reviewer_worktree_detected_for_non_executing_work_item, stranded_reviewer_worktree_preserved_for_executing_merge_candidate, stranded_reviewer_worktree_removed_on_apply)
 
 WHEN all review Tasks for an Attempt review round complete and all
 review artifacts have passing verdicts,
