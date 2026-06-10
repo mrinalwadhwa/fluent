@@ -218,6 +218,11 @@ test_run_passes_task_context_to_coder_prompt() {
   assert_contains "$PROMPT" "Completion contract:" || RESULT=1
   assert_contains "$PROMPT" "Commit all Task output" || RESULT=1
   assert_contains "$PROMPT" "Leave the writable workspace clean" || RESULT=1
+  assert_contains "$PROMPT" "Author preflight:" || RESULT=1
+  assert_contains "$PROMPT" "Before editing, identify the likely touched surfaces" || RESULT=1
+  assert_contains "$PROMPT" "behavior statements, user-facing docs, tests, skills/expertise, and verification commands" || RESULT=1
+  assert_contains "$PROMPT" "update the applicable behavior contract, docs, tests, and verification notes" || RESULT=1
+  assert_contains "$PROMPT" "record why the other related artifacts do not apply" || RESULT=1
   assert_contains "$PROMPT" "Current Task model:" || RESULT=1
   assert_contains "$PROMPT" '"id": "attempt-1-write"' || RESULT=1
   assert_contains "$PROMPT" '"kind": "write"' || RESULT=1
