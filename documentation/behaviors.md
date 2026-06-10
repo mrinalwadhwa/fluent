@@ -445,7 +445,7 @@ for a Merge Candidate with merge status `landed` and a stored
 THE SYSTEM SHALL report the stored landed commit without resolving
 workspaces, rebasing, running checks, running reviewers, or moving the
 target branch.
-Test: tests/binary.rs (work_merge_candidate_lands_after_merge_time_reviews)
+Test: tests/binary.rs (work_merge_candidate_rerun_after_cleanup_preserves_landed_state)
 
 IF `factory work merge <work-item-id> <merge-candidate-id>` is invoked
 for a Merge Candidate whose stored provenance no longer matches the

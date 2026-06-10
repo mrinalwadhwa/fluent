@@ -100,26 +100,33 @@ pub fn merge_candidate(config: WorkMergeConfig<'_>) -> Result<WorkMergeOutcome> 
         &target_workspace,
         &artifact_dir,
     );
+    recover_landed_candidate_result(config.store, config.work_item_id, &candidate.id, result)
+}
+
+fn recover_landed_candidate_result(
+    store: &WorkModelStore,
+    work_item_id: &str,
+    candidate_id: &str,
+    result: Result<WorkMergeOutcome>,
+) -> Result<WorkMergeOutcome> {
     match result {
         Ok(outcome) => Ok(outcome),
         Err(error) => {
-            if let Some(landed_commit) =
-                candidate_landed_commit(config.store, config.work_item_id, &candidate.id)?
+            if let Some(landed_commit) = candidate_landed_commit(store, work_item_id, candidate_id)?
             {
                 eprintln!(
-                    "  Warning: Merge Candidate {} landed, but post-landing merge cleanup failed: {error}",
-                    candidate.id
+                    "  Warning: Merge Candidate {candidate_id} landed, but post-landing merge cleanup failed: {error}",
                 );
                 return Ok(WorkMergeOutcome {
-                    merge_candidate_id: candidate.id,
+                    merge_candidate_id: candidate_id.to_string(),
                     landed_commit,
                 });
             }
-            if !candidate_has_failure(config.store, config.work_item_id, &candidate.id)? {
+            if !candidate_has_failure(store, work_item_id, candidate_id)? {
                 record_candidate_failure(
-                    config.store,
-                    config.work_item_id,
-                    &candidate.id,
+                    store,
+                    work_item_id,
+                    candidate_id,
                     error.to_string(),
                     Vec::new(),
                     Vec::new(),
@@ -1121,4 +1128,130 @@ fn path_for_model(project_root: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::work_model::{AttemptReviewState, AttemptStatus, TaskOutput, TaskStatus, WorkItem};
+
+    fn landed_candidate_store() -> (tempfile::TempDir, WorkModelStore, String, String, String) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Preserve landed state".to_string(),
+            planning_context: None,
+            instructions: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+
+        let attempt = item.attempts.first_mut().unwrap();
+        attempt.status = AttemptStatus::Complete;
+        attempt.review_state = Some(AttemptReviewState::Passed);
+        let task = attempt.tasks.first_mut().unwrap();
+        let workspace = task.workspace_access.writes.first().unwrap().clone();
+        task.status = TaskStatus::Complete;
+        task.output = Some(TaskOutput {
+            workspace_id: workspace.id,
+            workspace_path: workspace.path,
+            source_branch: "main".to_string(),
+            commit: "abc123".to_string(),
+        });
+
+        let candidate_id = item.create_or_get_merge_candidate("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+        record_candidate_landed(
+            &store,
+            "work-1",
+            &candidate_id,
+            "abc123",
+            vec![ArtifactRef {
+                producer_id: "checks".to_string(),
+                path: ".factory/work/artifacts/checks.json".to_string(),
+            }],
+            vec![ArtifactRef {
+                producer_id: "reviewer".to_string(),
+                path: ".factory/work/artifacts/review.md".to_string(),
+            }],
+        )
+        .unwrap();
+
+        (
+            tmp,
+            store,
+            "work-1".to_string(),
+            candidate_id,
+            "abc123".to_string(),
+        )
+    }
+
+    #[test]
+    fn post_landing_error_returns_landed_outcome_without_rewriting_state() {
+        let (_tmp, store, work_item_id, candidate_id, landed_commit) = landed_candidate_store();
+
+        let outcome = recover_landed_candidate_result(
+            &store,
+            &work_item_id,
+            &candidate_id,
+            Err(anyhow::anyhow!("candidate workspace is gone")),
+        )
+        .unwrap();
+
+        assert_eq!(outcome.merge_candidate_id, candidate_id);
+        assert_eq!(outcome.landed_commit, landed_commit);
+
+        let item = store.read_work_item(&work_item_id).unwrap();
+        let candidate = item
+            .merge_candidates
+            .iter()
+            .find(|candidate| candidate.id == candidate_id)
+            .unwrap();
+        assert_eq!(candidate.review_state, MergeCandidateReviewState::Passed);
+        assert_eq!(
+            candidate.merge_state.status,
+            MergeCandidateMergeStatus::Landed
+        );
+        assert_eq!(
+            candidate.merge_state.landed_commit.as_deref(),
+            Some(landed_commit.as_str())
+        );
+        assert!(candidate.merge_state.failure_reason.is_none());
+        assert_eq!(candidate.merge_state.check_artifacts.len(), 1);
+        assert_eq!(candidate.merge_state.review_artifacts.len(), 1);
+    }
+
+    #[test]
+    fn record_failure_keeps_landed_candidate_landed() {
+        let (_tmp, store, work_item_id, candidate_id, landed_commit) = landed_candidate_store();
+
+        record_candidate_failure(
+            &store,
+            &work_item_id,
+            &candidate_id,
+            "late cleanup failed".to_string(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+
+        let item = store.read_work_item(&work_item_id).unwrap();
+        let candidate = item
+            .merge_candidates
+            .iter()
+            .find(|candidate| candidate.id == candidate_id)
+            .unwrap();
+        assert_eq!(candidate.review_state, MergeCandidateReviewState::Passed);
+        assert_eq!(
+            candidate.merge_state.status,
+            MergeCandidateMergeStatus::Landed
+        );
+        assert_eq!(
+            candidate.merge_state.landed_commit.as_deref(),
+            Some(landed_commit.as_str())
+        );
+        assert!(candidate.merge_state.failure_reason.is_none());
+    }
 }
