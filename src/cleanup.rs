@@ -250,12 +250,31 @@ fn cleanup_work_item_candidates(work_items: Vec<WorkItem>) -> Vec<WorkItem> {
 }
 
 fn work_item_is_cleanable(work_item: &WorkItem) -> bool {
+    if work_item.abandonment.is_some() {
+        return work_item_has_no_active_execution(work_item);
+    }
+
     !work_item.attempts.is_empty()
         && work_item.attempts.iter().all(attempt_is_terminal)
         && work_item
             .merge_candidates
             .iter()
             .all(merge_candidate_is_terminal)
+}
+
+fn work_item_has_no_active_execution(work_item: &WorkItem) -> bool {
+    work_item.attempts.iter().all(|attempt| {
+        !matches!(
+            attempt.status,
+            AttemptStatus::Executing | AttemptStatus::Reviewing
+        ) && attempt
+            .tasks
+            .iter()
+            .all(|task| task.status != TaskStatus::Executing)
+    }) && work_item.merge_candidates.iter().all(|candidate| {
+        candidate.review_state != MergeCandidateReviewState::Reviewing
+            && candidate.merge_state.status != MergeCandidateMergeStatus::Executing
+    })
 }
 
 fn attempt_is_terminal(attempt: &Attempt) -> bool {
@@ -732,6 +751,7 @@ fn write_cleaned_marker(run: &Run, status: &RunStatus, worktree: &WorktreeCleanu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::work_model::{WorkItemAbandonment, WorkspaceAccess};
     use tempfile::TempDir;
 
     fn create_run(root: &Path, id: &str, status: &str) -> PathBuf {
@@ -823,5 +843,51 @@ mod tests {
             results[0].worktree,
             WorktreeCleanup::SkippedUnregistered(path)
         );
+    }
+
+    #[test]
+    fn abandoned_needs_user_work_item_is_cleanup_candidate() {
+        let mut item = WorkItem {
+            id: "work-stale".to_string(),
+            title: "Stale work".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: Some(WorkItemAbandonment {
+                reason: Some("replacement landed".to_string()),
+            }),
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.attempts[0].status = AttemptStatus::NeedsUser;
+        item.attempts[0].tasks[0].status = TaskStatus::NeedsUser;
+
+        let candidates = cleanup_work_item_candidates(vec![item]);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].id, "work-stale");
+    }
+
+    #[test]
+    fn abandoned_work_item_with_executing_task_is_not_cleanup_candidate() {
+        let mut item = WorkItem {
+            id: "work-active".to_string(),
+            title: "Active work".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: Some(WorkItemAbandonment {
+                reason: Some("replacement landed".to_string()),
+            }),
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.attempts[0].status = AttemptStatus::Failed;
+        item.attempts[0].tasks[0].status = TaskStatus::Executing;
+        item.attempts[0].tasks[0].workspace_access = WorkspaceAccess::read_only(Vec::new());
+
+        let candidates = cleanup_work_item_candidates(vec![item]);
+
+        assert!(candidates.is_empty());
     }
 }

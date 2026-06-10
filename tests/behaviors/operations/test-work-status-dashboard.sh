@@ -270,6 +270,35 @@ test_status_surfaces_needs_user_state() {
   return $RESULT
 }
 
+test_status_surfaces_abandoned_work_as_terminal() {
+  setup_test_project
+  trap cleanup_test_project RETURN
+  "$FACTORY_BIN" work create work-abandoned --title "Abandoned Work" > /dev/null
+  "$FACTORY_BIN" work attempt work-abandoned attempt-abandoned > /dev/null
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+attempt_path = Path(".factory/work/attempts/work-abandoned/attempt-abandoned.json")
+attempt = json.loads(attempt_path.read_text())
+attempt["status"] = "needs-user"
+attempt_path.write_text(json.dumps(attempt, indent=2) + "\n")
+
+task_path = Path(".factory/work/tasks/work-abandoned/attempt-abandoned/attempt-abandoned-write.json")
+task = json.loads(task_path.read_text())
+task["status"] = "needs-user"
+task_path.write_text(json.dumps(task, indent=2) + "\n")
+PY
+  "$FACTORY_BIN" work abandon work-abandoned --reason "replacement landed" > /dev/null
+
+  RESULT=0
+  OUTPUT="$("$FACTORY_BIN" status 2>&1)"
+  assert_contains "$OUTPUT" "work-abandoned" || RESULT=1
+  assert_contains "$OUTPUT" "attempt-abandoned" || RESULT=1
+  assert_contains "$OUTPUT" "abandoned" || RESULT=1
+  return $RESULT
+}
+
 test_status_reports_invalid_work_without_hiding_valid_state() {
   setup_test_project
   trap cleanup_test_project RETURN
@@ -417,6 +446,8 @@ run_test "status --runs prints legacy runs and Work summary" \
 run_test "status prints Work summary without legacy runs" test_status_prints_work_without_legacy_runs
 run_test "status summarizes Work model vocabulary" test_status_summarizes_work_model_vocabulary
 run_test "status surfaces needs-user state" test_status_surfaces_needs_user_state
+run_test "status surfaces abandoned Work as terminal" \
+  test_status_surfaces_abandoned_work_as_terminal
 run_test "status reports invalid Work without hiding valid state" test_status_reports_invalid_work_without_hiding_valid_state
 run_test "dashboard lists Work Items" test_dashboard_lists_work_items
 run_test "dashboard shows Work Items alongside legacy runs" test_dashboard_shows_work_items_alongside_legacy_runs

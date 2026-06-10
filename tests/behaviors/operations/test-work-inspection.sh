@@ -268,6 +268,65 @@ test_work_show_missing_item_fails() {
   return $RESULT
 }
 
+test_work_abandon_persists_reason() {
+  setup_test_project
+  "$FACTORY_BIN" work create work-stale --title "Stale work" > /dev/null
+  "$FACTORY_BIN" work attempt work-stale attempt-1 > /dev/null
+
+  OUTPUT="$("$FACTORY_BIN" work abandon work-stale --reason "replacement landed" 2>&1)"
+  SHOW_OUTPUT="$("$FACTORY_BIN" work show work-stale 2>&1)"
+
+  RESULT=0
+  assert_contains "$OUTPUT" "Abandoned Work Item work-stale" || RESULT=1
+  assert_contains "$SHOW_OUTPUT" '"abandonment": {' || RESULT=1
+  assert_contains "$SHOW_OUTPUT" '"reason": "replacement landed"' || RESULT=1
+
+  cleanup_test_project
+  return $RESULT
+}
+
+test_work_abandon_missing_item_fails() {
+  setup_test_project
+
+  RESULT=0
+  assert_fails "$FACTORY_BIN" work abandon missing-work --reason "obsolete" || RESULT=1
+  ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
+  assert_contains "$ERROR_OUTPUT" "missing-work" || RESULT=1
+  assert_contains "$ERROR_OUTPUT" "not found" || RESULT=1
+
+  cleanup_test_project
+  return $RESULT
+}
+
+test_work_abandon_active_item_fails_without_state_change() {
+  setup_test_project
+  "$FACTORY_BIN" work create work-active --title "Active work" > /dev/null
+  "$FACTORY_BIN" work attempt work-active attempt-1 > /dev/null
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+attempt_path = Path(".factory/work/attempts/work-active/attempt-1.json")
+attempt = json.loads(attempt_path.read_text())
+attempt["status"] = "executing"
+attempt_path.write_text(json.dumps(attempt, indent=2) + "\n")
+
+task_path = Path(".factory/work/tasks/work-active/attempt-1/attempt-1-write.json")
+task = json.loads(task_path.read_text())
+task["status"] = "executing"
+task_path.write_text(json.dumps(task, indent=2) + "\n")
+PY
+
+  RESULT=0
+  assert_fails "$FACTORY_BIN" work abandon work-active --reason "obsolete" || RESULT=1
+  ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
+  assert_contains "$ERROR_OUTPUT" "cannot be abandoned" || RESULT=1
+  assert_not_contains "$(cat .factory/work/items/work-active.json)" "abandonment" || RESULT=1
+
+  cleanup_test_project
+  return $RESULT
+}
+
 test_work_list_invalid_state_fails() {
   setup_test_project
   mkdir -p .factory/work/items
@@ -374,6 +433,10 @@ run_test "work list prints stored Work Items" test_work_list_outputs_stored_item
 run_test "work list prints empty state" test_work_list_empty_state_succeeds
 run_test "work show prints pretty JSON" test_work_show_outputs_pretty_json
 run_test "work show missing item fails" test_work_show_missing_item_fails
+run_test "work abandon persists reason" test_work_abandon_persists_reason
+run_test "work abandon missing item fails" test_work_abandon_missing_item_fails
+run_test "work abandon active item fails without state change" \
+  test_work_abandon_active_item_fails_without_state_change
 run_test "work list reports invalid stored state" test_work_list_invalid_state_fails
 run_test "work list reports id mismatch" test_work_list_id_mismatch_fails
 run_test "legacy runs and work inspection are independent" test_runs_and_work_items_are_independent

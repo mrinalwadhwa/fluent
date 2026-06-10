@@ -152,6 +152,8 @@ pub struct WorkItem {
     pub planning_context: Option<PlanningContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abandonment: Option<WorkItemAbandonment>,
     #[serde(default)]
     pub attempts: Vec<Attempt>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -541,6 +543,48 @@ impl WorkItem {
         Ok(candidate_id)
     }
 
+    pub fn abandon(&mut self, reason: Option<String>) -> Result<(), WorkModelError> {
+        if let Some(attempt) = self.attempts.iter().find(|attempt| {
+            matches!(
+                attempt.status,
+                AttemptStatus::Executing | AttemptStatus::Reviewing
+            )
+        }) {
+            return Err(WorkModelError::WorkItemAbandonmentBlocked {
+                work_item_id: self.id.clone(),
+                reason: format!("Attempt {:?} is {}", attempt.id, attempt.status.as_str()),
+            });
+        }
+        if let Some(task) = self
+            .attempts
+            .iter()
+            .flat_map(|attempt| attempt.tasks.iter())
+            .find(|task| task.status == TaskStatus::Executing)
+        {
+            return Err(WorkModelError::WorkItemAbandonmentBlocked {
+                work_item_id: self.id.clone(),
+                reason: format!("Task {:?} is executing", task.id),
+            });
+        }
+        if let Some(candidate) = self.merge_candidates.iter().find(|candidate| {
+            candidate.review_state == MergeCandidateReviewState::Reviewing
+                || candidate.merge_state.status == MergeCandidateMergeStatus::Executing
+        }) {
+            return Err(WorkModelError::WorkItemAbandonmentBlocked {
+                work_item_id: self.id.clone(),
+                reason: format!("Merge Candidate {:?} is active", candidate.id),
+            });
+        }
+
+        self.abandonment = Some(WorkItemAbandonment {
+            reason: reason.and_then(|reason| {
+                let reason = reason.trim().to_string();
+                (!reason.is_empty()).then_some(reason)
+            }),
+        });
+        self.validate()
+    }
+
     pub fn validate(&self) -> Result<(), WorkModelError> {
         for attempt in &self.attempts {
             if attempt.work_item_id != self.id {
@@ -571,6 +615,13 @@ impl WorkItem {
         }
         Ok(())
     }
+}
+
+/// Durable marker that a Work Item was explicitly abandoned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkItemAbandonment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Approved planning context attached directly to a Work Item.
@@ -781,6 +832,19 @@ pub enum AttemptStatus {
     Complete,
     Failed,
     NeedsUser,
+}
+
+impl AttemptStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Planned => "planned",
+            Self::Executing => "executing",
+            Self::Reviewing => "reviewing",
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+            Self::NeedsUser => "needs-user",
+        }
+    }
 }
 
 /// Review state attached to an attempt as a whole.
@@ -1273,6 +1337,10 @@ pub enum WorkModelError {
         task_id: String,
         task_status: TaskStatus,
     },
+    WorkItemAbandonmentBlocked {
+        work_item_id: String,
+        reason: String,
+    },
 }
 
 impl fmt::Display for WorkModelError {
@@ -1433,6 +1501,15 @@ impl fmt::Display for WorkModelError {
                     "complete attempt {attempt_id} contains task {task_id} with status {task_status}"
                 )
             }
+            Self::WorkItemAbandonmentBlocked {
+                work_item_id,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "Work Item {work_item_id:?} cannot be abandoned: {reason}"
+                )
+            }
         }
     }
 }
@@ -1566,6 +1643,8 @@ struct WorkItemRecord {
     planning_context: Option<PlanningContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    abandonment: Option<WorkItemAbandonment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1598,6 +1677,7 @@ impl From<&WorkItem> for WorkItemRecord {
             title: work_item.title.clone(),
             planning_context: work_item.planning_context.clone(),
             instructions: work_item.instructions.clone(),
+            abandonment: work_item.abandonment.clone(),
         }
     }
 }
@@ -1609,6 +1689,7 @@ impl From<WorkItemRecord> for WorkItem {
             title: record.title,
             planning_context: record.planning_context,
             instructions: record.instructions,
+            abandonment: record.abandonment,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         }
@@ -2580,6 +2661,7 @@ mod tests {
             title: "Review the codebase".to_string(),
             planning_context: None,
             instructions: None,
+            abandonment: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -2587,6 +2669,55 @@ mod tests {
             .add_review_only_attempt("attempt-review", &["tests"], "main", "abc123")
             .unwrap();
         work_item
+    }
+
+    #[test]
+    fn abandon_records_reason_on_inactive_work_item() {
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Abandon stale work".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        work_item.add_initial_attempt("attempt-1").unwrap();
+        work_item.attempts[0].status = AttemptStatus::NeedsUser;
+        work_item.attempts[0].tasks[0].status = TaskStatus::NeedsUser;
+
+        work_item
+            .abandon(Some("replacement landed".to_string()))
+            .unwrap();
+
+        assert_eq!(
+            work_item.abandonment.unwrap().reason.as_deref(),
+            Some("replacement landed")
+        );
+    }
+
+    #[test]
+    fn abandon_rejects_executing_attempt_without_changing_marker() {
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Keep active work visible".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        work_item.add_initial_attempt("attempt-1").unwrap();
+        work_item.attempts[0].status = AttemptStatus::Executing;
+        work_item.attempts[0].tasks[0].status = TaskStatus::Executing;
+
+        let error = work_item.abandon(Some("stale".to_string())).unwrap_err();
+
+        assert!(matches!(
+            error,
+            WorkModelError::WorkItemAbandonmentBlocked { .. }
+        ));
+        assert!(work_item.abandonment.is_none());
     }
 
     #[test]
@@ -2711,6 +2842,7 @@ mod tests {
                 ..PlanningContext::default()
             }),
             instructions: None,
+            abandonment: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -2829,6 +2961,7 @@ mod tests {
             title: "Review latest candidate".to_string(),
             planning_context: None,
             instructions: None,
+            abandonment: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -3051,6 +3184,7 @@ mod tests {
             title: "Review latest candidate".to_string(),
             planning_context: None,
             instructions: None,
+            abandonment: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -3125,6 +3259,7 @@ mod tests {
             title: "Define the core work model".to_string(),
             planning_context: None,
             instructions: None,
+            abandonment: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -3157,6 +3292,7 @@ mod tests {
             title: "Create merge candidate".to_string(),
             planning_context: None,
             instructions: None,
+            abandonment: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -3201,6 +3337,7 @@ mod tests {
             title: "Create merge candidate once".to_string(),
             planning_context: None,
             instructions: None,
+            abandonment: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -3232,6 +3369,7 @@ mod tests {
             title: "Keep one merge candidate per attempt".to_string(),
             planning_context: None,
             instructions: None,
+            abandonment: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -3265,6 +3403,7 @@ mod tests {
             title: "Validate merge candidate attempt state".to_string(),
             planning_context: None,
             instructions: None,
+            abandonment: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -3310,6 +3449,7 @@ mod tests {
             title: "Validate merge candidate provenance".to_string(),
             planning_context: None,
             instructions: None,
+            abandonment: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -3355,6 +3495,7 @@ mod tests {
             title: "Preserve merge failure state".to_string(),
             planning_context: None,
             instructions: None,
+            abandonment: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -3400,6 +3541,7 @@ mod tests {
             title: "Validate failed merge candidate provenance".to_string(),
             planning_context: None,
             instructions: None,
+            abandonment: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -3480,6 +3622,7 @@ mod tests {
             title: "Split task orphan".to_string(),
             planning_context: None,
             instructions: None,
+            abandonment: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -3512,6 +3655,7 @@ mod tests {
             title: "Split task order".to_string(),
             planning_context: None,
             instructions: None,
+            abandonment: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -3604,6 +3748,7 @@ mod tests {
             title: "Review latest candidate".to_string(),
             planning_context: None,
             instructions: None,
+            abandonment: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: id.to_string(),

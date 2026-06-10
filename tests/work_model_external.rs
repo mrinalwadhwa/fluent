@@ -46,6 +46,7 @@ fn work_item() -> WorkItem {
         title: "Add durable model storage".to_string(),
         planning_context: None,
         instructions: None,
+        abandonment: None,
         attempts: vec![Attempt {
             id: "attempt-1".to_string(),
             work_item_id: "work-1".to_string(),
@@ -194,6 +195,7 @@ fn work_model_store_preserves_attempt_append_order() {
         title: "Order attempts".to_string(),
         planning_context: None,
         instructions: None,
+        abandonment: None,
         attempts: Vec::new(),
         merge_candidates: Vec::new(),
     };
@@ -308,6 +310,7 @@ fn work_model_store_ignores_nested_operational_collections() {
         title: nested_item.title.clone(),
         planning_context: nested_item.planning_context.clone(),
         instructions: nested_item.instructions.clone(),
+        abandonment: None,
         attempts: Vec::new(),
         merge_candidates: Vec::new(),
     };
@@ -688,6 +691,7 @@ fn work_item_add_initial_attempt_creates_scheduler_facing_write_task() {
         title: "Add attempt intake".to_string(),
         planning_context: None,
         instructions: None,
+        abandonment: None,
         attempts: Vec::new(),
         merge_candidates: Vec::new(),
     };
@@ -753,6 +757,7 @@ fn work_item_add_initial_attempt_rejects_duplicate_attempt_id() {
         title: "Add attempt intake".to_string(),
         planning_context: None,
         instructions: None,
+        abandonment: None,
         attempts: Vec::new(),
         merge_candidates: Vec::new(),
     };
@@ -775,6 +780,7 @@ fn work_item_add_initial_attempt_rejects_invalid_attempt_id() {
         title: "Add attempt intake".to_string(),
         planning_context: None,
         instructions: None,
+        abandonment: None,
         attempts: Vec::new(),
         merge_candidates: Vec::new(),
     };

@@ -107,6 +107,25 @@ not found.
 Test: tests/binary.rs (work_show_missing_item_reports_not_found)
 Test: tests/behaviors/operations/test-work-inspection.sh (work show missing item fails)
 
+WHEN `factory work abandon <id>` is invoked for a stored Work Item
+without executing or reviewing Attempts, Tasks, or Merge Candidates,
+THE SYSTEM SHALL record durable Work Item abandonment state and persist
+the supplied reason when one is provided.
+Test: src/work_model.rs (abandon_records_reason_on_inactive_work_item)
+Test: tests/behaviors/operations/test-work-inspection.sh (work abandon persists reason)
+
+IF `factory work abandon <id>` is invoked for a missing Work Item,
+THEN THE SYSTEM SHALL exit non-zero, report that the Work Item was not
+found, and leave Work state unchanged.
+Test: tests/behaviors/operations/test-work-inspection.sh (work abandon missing item fails)
+
+IF `factory work abandon <id>` is invoked for a Work Item with an
+executing or reviewing Attempt, executing Task, reviewing Merge
+Candidate, or executing Merge Candidate merge,
+THEN THE SYSTEM SHALL exit non-zero and leave Work Item state unchanged.
+Test: src/work_model.rs (abandon_rejects_executing_attempt_without_changing_marker)
+Test: tests/behaviors/operations/test-work-inspection.sh (work abandon active item fails without state change)
+
 IF stored Work Item state contains invalid JSON, an invalid id, or a
 model validation error,
 THEN THE SYSTEM SHALL exit non-zero and report the invalid file or
@@ -871,6 +890,12 @@ latest Attempt, selected Task, review state, Merge Candidate, merge
 state, actionable label, and title.
 Test: tests/binary.rs (status_shows_work_items_without_runs, status_runs_shows_runs_and_work_items_together)
 
+WHEN `factory status` lists an abandoned Work Item before cleanup,
+THE SYSTEM SHALL surface it as terminal abandoned Work rather than as
+Work that still needs human planning input.
+Test: src/work_status.rs (summarize_abandoned_work_item_shows_terminal_action)
+Test: tests/behaviors/operations/test-work-status-dashboard.sh (status surfaces abandoned Work as terminal)
+
 WHEN `factory status` is invoked for a project with Work Items and no
 legacy runs,
 THE SYSTEM SHALL display the Work Items section instead of reporting
@@ -999,6 +1024,12 @@ WHEN `factory cleanup --apply` cleans a terminal Work Item,
 THE SYSTEM SHALL remove the Work Item state, referenced managed Work
 artifacts, registered managed candidate worktrees, and Work branches.
 Test: tests/binary.rs (cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch), tests/binary.rs (cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree)
+
+WHEN `factory cleanup` sees an abandoned Work Item whose Attempts, Tasks,
+and Merge Candidates are not executing or reviewing,
+THE SYSTEM SHALL select it for cleanup, including its managed sibling
+worktree, Work branch, state records, and Work artifacts.
+Test: tests/behaviors/operations/test-cleanup.sh (cleanup selects abandoned needs-user Work Items)
 
 WHEN Factory reads stored Work state with legacy artifact references
 under `.factory/work/artifacts/<attempt-id>/...`,

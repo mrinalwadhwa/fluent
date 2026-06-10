@@ -259,6 +259,7 @@ fn cmd_work(
                 title,
                 planning_context,
                 instructions,
+                abandonment: None,
                 attempts: Vec::new(),
                 merge_candidates: Vec::new(),
             };
@@ -287,6 +288,20 @@ fn cmd_work(
             }
             Err(error) => return Err(error.into()),
         },
+        WorkCommands::Abandon { id, reason } => {
+            let mut item = match store.read_work_item(&id) {
+                Ok(item) => item,
+                Err(WorkModelStorageError::ReadFile { source, .. })
+                    if source.kind() == ErrorKind::NotFound =>
+                {
+                    bail!("Work Item {id:?} not found");
+                }
+                Err(error) => return Err(error.into()),
+            };
+            item.abandon(reason)?;
+            store.write_work_item(&item)?;
+            println!("Abandoned Work Item {}", item.id);
+        }
         WorkCommands::Attempt {
             command,
             work_item_id,

@@ -515,6 +515,65 @@ PY
   return $RESULT
 }
 
+test_cleanup_selects_abandoned_needs_user_work_item() {
+  create_project_with_unique_sibling_parent
+  "$FACTORY_BIN" work create work-stale --title "Stale needs-user work" >/dev/null
+  "$FACTORY_BIN" work attempt work-stale attempt-1 >/dev/null
+
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+attempt_path = Path(".factory/work/attempts/work-stale/attempt-1.json")
+attempt = json.loads(attempt_path.read_text())
+attempt["status"] = "needs-user"
+attempt_path.write_text(json.dumps(attempt, indent=2) + "\n")
+
+task_path = Path(".factory/work/tasks/work-stale/attempt-1/attempt-1-write.json")
+task = json.loads(task_path.read_text())
+task["status"] = "needs-user"
+task_path.write_text(json.dumps(task, indent=2) + "\n")
+PY
+
+  "$FACTORY_BIN" work abandon work-stale --reason "replacement landed" >/dev/null
+
+  WORKTREE_DIR="$(cd .. && pwd)/work-10-work-stale-attempt-1"
+  BRANCH_NAME="work/work-stale/attempt-1/attempt-1-write"
+  git worktree add -q -b "$BRANCH_NAME" "$WORKTREE_DIR" HEAD
+
+  OUTPUT="$("$FACTORY_BIN" cleanup 2>&1)"
+
+  RESULT=0
+  assert_output_contains "$OUTPUT" "would clean Work Item work-stale" || RESULT=1
+  assert_output_contains "$OUTPUT" "would remove registered worktree" || RESULT=1
+  assert_output_contains "$OUTPUT" "would remove Work branch" || RESULT=1
+  if [ ! -f ".factory/work/items/work-stale.json" ]; then
+    printf '    FAIL: dry run removed abandoned Work Item state\n'
+    RESULT=1
+  fi
+
+  APPLY_OUTPUT="$("$FACTORY_BIN" cleanup --apply 2>&1)"
+  assert_output_contains "$APPLY_OUTPUT" "cleaned Work Item work-stale" || RESULT=1
+  assert_output_contains "$APPLY_OUTPUT" "removed registered worktree" || RESULT=1
+  if [ -f ".factory/work/items/work-stale.json" ]; then
+    printf '    FAIL: apply kept abandoned Work Item state\n'
+    RESULT=1
+  fi
+  if [ -d "$WORKTREE_DIR" ]; then
+    printf '    FAIL: apply kept abandoned Work worktree\n'
+    RESULT=1
+  fi
+  if git show-ref --verify --quiet "refs/heads/${BRANCH_NAME}"; then
+    printf '    FAIL: apply kept abandoned Work branch\n'
+    RESULT=1
+  fi
+
+  git worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1 || true
+  rm -rf "$TEST_PARENT_DIR"
+  rm -rf "$WORKTREE_DIR"
+  return $RESULT
+}
+
 printf 'test-cleanup\n\n'
 
 run_test "cleanup selects stale complete and landed runs by default" \
@@ -537,6 +596,8 @@ run_test "cleanup removes orphan Work artifact roots" \
   test_cleanup_work_items_remove_orphan_artifact_roots
 run_test "cleanup ignores unmanaged Work artifact paths" \
   test_cleanup_work_items_ignore_unmanaged_artifacts
+run_test "cleanup selects abandoned needs-user Work Items" \
+  test_cleanup_selects_abandoned_needs_user_work_item
 
 printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
 

@@ -216,8 +216,12 @@ executing, failed, needs-user, or landed.
 `factory cleanup` owns the terminal Work model cleanup lifecycle. It
 defaults to a dry run and only mutates state with `--apply`. A Work Item
 is eligible when every Attempt is terminal, every Task in those Attempts
-is terminal, and every Merge Candidate is terminal. Cleanup removes the
-stored Work Item, referenced managed Work artifacts, managed candidate
+is terminal, and every Merge Candidate is terminal. Operators can also
+run `factory work abandon <work-item-id> [--reason <text>]` to mark a
+stale Work Item as intentionally abandoned; cleanup treats that marker as
+terminal only when no Attempt is executing or reviewing, no Task is
+executing, and no Merge Candidate is reviewing or merging. Cleanup removes
+the stored Work Item, referenced managed Work artifacts, managed candidate
 worktrees, and Work task branches. Managed artifact references must be
 relative paths made only of normal path components and must resolve under
 `.factory/work/artifacts/`; cleanup ignores absolute paths and parent
@@ -1092,16 +1096,18 @@ arbitrary directories.
 
 Work cleanup runs from the same `factory cleanup` command when no
 `--run-id` is supplied. It selects Work Items only after every Attempt,
-Task, and Merge Candidate is terminal. Applying cleanup removes the Work
-Item metadata JSON, split Attempt records, split Task records, split
-Merge Candidate records, referenced managed Work artifact files or
-directories, managed candidate worktrees, and Work task branches. Managed
-artifact references must be relative paths made only of normal path
-components and must resolve under `.factory/work/artifacts/`; cleanup
-ignores absolute paths and parent escapes. Managed Work worktrees are
-resolved with the same expected workspace path rules used by Work task
-and merge execution, and registered worktrees are removed through
-`git worktree remove --force`. Missing worktree paths and unregistered
+Task, and Merge Candidate is terminal, or after an operator explicitly
+marks the Work Item abandoned and no Attempt, Task, or Merge Candidate is
+executing or reviewing. Applying cleanup removes the Work Item metadata
+JSON, split Attempt records, split Task records, split Merge Candidate
+records, referenced managed Work artifact files or directories, managed
+candidate worktrees, and Work task branches. Managed artifact references
+must be relative paths made only of normal path components and must
+resolve under `.factory/work/artifacts/`; cleanup ignores absolute paths
+and parent escapes. Managed Work worktrees are resolved with the same
+expected workspace path rules used by Work task and merge execution, and
+registered worktrees are removed through `git worktree remove --force`.
+Missing worktree paths and unregistered
 directories are reported without deleting arbitrary filesystem paths.
 After planning stored Work Item cleanup, cleanup scans the top level of
 `.factory/work/artifacts/` for directories whose names do not match any

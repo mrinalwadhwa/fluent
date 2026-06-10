@@ -47,6 +47,7 @@ done <<<"$reference"
 
 for required_phrase in \
   "factory work create" \
+  "factory work abandon" \
   "factory work attempt" \
   "factory work task run" \
   "factory work merge-candidate" \

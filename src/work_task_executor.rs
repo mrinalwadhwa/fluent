@@ -1176,6 +1176,7 @@ mod tests {
             title: "Review prompts".to_string(),
             planning_context: None,
             instructions: None,
+            abandonment: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };

@@ -312,6 +312,7 @@ factory work create <id> --title <t> --instructions <text> # store prompt text
 factory work create <id> --title <t> --instructions-file <path> # load prompt file
 factory work list                    # list stored Work Items
 factory work show <id>               # show one Work Item as JSON
+factory work abandon <id> --reason <text> # mark a stale Work Item abandoned
 factory work attempt <id> <attempt>  # add an Attempt with a write Task
 factory work attempt run <id> <attempt> # advance an Attempt
 factory work review <id> <attempt>   # plan review Tasks

@@ -74,7 +74,7 @@ pub fn summarize_work_item(item: &WorkItem) -> WorkItemStatus {
         merge: merge_candidate
             .map(format_merge_state)
             .unwrap_or_else(|| "-".to_string()),
-        action: action_label(attempt, merge_candidate).to_string(),
+        action: action_label(item, attempt, merge_candidate).to_string(),
     }
 }
 
@@ -188,9 +188,14 @@ fn format_merge_state(candidate: &MergeCandidate) -> String {
 }
 
 fn action_label(
+    item: &WorkItem,
     attempt: Option<&Attempt>,
     merge_candidate: Option<&MergeCandidate>,
 ) -> &'static str {
+    if item.abandonment.is_some() {
+        return "abandoned";
+    }
+
     if let Some(attempt) = attempt {
         if attempt.status == AttemptStatus::NeedsUser
             || attempt
@@ -247,14 +252,7 @@ fn action_label(
 }
 
 fn attempt_status_label(status: &AttemptStatus) -> &'static str {
-    match status {
-        AttemptStatus::Planned => "planned",
-        AttemptStatus::Executing => "executing",
-        AttemptStatus::Reviewing => "reviewing",
-        AttemptStatus::Complete => "complete",
-        AttemptStatus::Failed => "failed",
-        AttemptStatus::NeedsUser => "needs-user",
-    }
+    status.as_str()
 }
 
 fn attempt_review_label(review: &AttemptReviewState) -> &'static str {
@@ -298,6 +296,7 @@ mod tests {
             title: "Build status view".to_string(),
             planning_context: None,
             instructions: None,
+            abandonment: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -318,6 +317,7 @@ mod tests {
             title: "Build status view".to_string(),
             planning_context: None,
             instructions: None,
+            abandonment: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -359,6 +359,7 @@ mod tests {
             title: "Build status view".to_string(),
             planning_context: None,
             instructions: None,
+            abandonment: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -369,6 +370,29 @@ mod tests {
 
         assert_eq!(row.task, "write:attempt-1-write [needs-user]");
         assert_eq!(row.action, "needs-user");
+    }
+
+    #[test]
+    fn summarize_abandoned_work_item_shows_terminal_action() {
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Build status view".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.attempts[0].status = AttemptStatus::NeedsUser;
+        item.attempts[0].tasks[0].status = TaskStatus::NeedsUser;
+        item.abandon(Some("replacement landed".to_string()))
+            .unwrap();
+
+        let row = summarize_work_item(&item);
+
+        assert_eq!(row.task, "write:attempt-1-write [needs-user]");
+        assert_eq!(row.action, "abandoned");
     }
 
     #[test]
@@ -426,6 +450,7 @@ mod tests {
             title: "Build status view".to_string(),
             planning_context: None,
             instructions: None,
+            abandonment: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };

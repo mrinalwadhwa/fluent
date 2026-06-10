@@ -249,6 +249,16 @@ pub enum WorkCommands {
         id: String,
     },
 
+    /// Mark a Work Item as intentionally abandoned
+    Abandon {
+        /// Work Item ID
+        id: String,
+
+        /// Reason to store with the abandoned Work Item
+        #[arg(long)]
+        reason: Option<String>,
+    },
+
     /// Create a planned Attempt with an initial write Task
     Attempt {
         #[command(subcommand)]
