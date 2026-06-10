@@ -408,8 +408,35 @@ Test: src/work_attempt_loop.rs (unmappable_followup_inputs_fall_back_to_full_rev
 WHEN `factory work attempt run <work-item-id> <attempt-id>` is invoked
 for an Attempt with planned review Tasks,
 THE SYSTEM SHALL run the planned review Tasks through the existing Task
-executor before planning later transitions.
+executor serially before planning later transitions.
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop runs planned review Tasks)
+
+WHEN Factory executes merge-time Work reviewers for a Merge Candidate,
+THE SYSTEM SHALL prepare one dedicated candidate review worktree per
+reviewer at the post-rebase Merge Candidate commit, run reviewer roles
+in parallel when those worktrees can be prepared, and give each reviewer
+only its own writable merge review artifact directory.
+Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge reviewers run in parallel)
+
+WHEN parallel merge-time Work reviewers finish,
+THE SYSTEM SHALL aggregate reviewer verdicts in the configured reviewer
+order, write one combined merge review state, and land only when all
+required reviewer verdicts pass.
+Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge lands after update, checks, and reviewers)
+
+IF a parallel merge-time Work reviewer fails, returns a failing verdict,
+does not write `review.md`, or dirties its reviewer worktree,
+THEN THE SYSTEM SHALL fail the Merge Candidate without changing the
+target branch.
+Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge failed reviewer leaves target unchanged)
+Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge missing reviewer artifact leaves target unchanged)
+Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge dirty reviewer leaves target unchanged)
+
+WHEN Factory uses merge reviewer worktrees,
+THE SYSTEM SHALL remove those reviewer worktrees after successful merge
+or failed review handling while preserving durable review artifacts
+under `.factory/work/artifacts/`.
+Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge reviewers run in parallel)
 
 WHEN all review Tasks for an Attempt review round complete and all
 review artifacts have passing verdicts,

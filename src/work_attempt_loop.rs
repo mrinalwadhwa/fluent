@@ -69,6 +69,10 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             .iter()
             .find(|task| task.status == TaskStatus::Planned)
         {
+            // Review Tasks stay serial here because run_task mutates shared Work
+            // Item JSON for each Task. Parallel Attempt reviews need a batch
+            // transition that marks all selected Tasks executing, runs them,
+            // then writes final states in one consolidated update.
             let result = work_task_executor::run_task(WorkTaskRunConfig {
                 project_root: config.project_root,
                 store: config.store,

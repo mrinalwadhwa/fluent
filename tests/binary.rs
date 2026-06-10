@@ -2707,10 +2707,10 @@ fn work_merge_candidate_lands_after_merge_time_reviews() {
         .success();
 
     let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
-    let documentation_skill =
-        fs::canonicalize(candidate_workspace.join("skills/review-documentation/SKILL.md")).unwrap();
-    let decisions_file =
-        fs::canonicalize(candidate_workspace.join(".factory/expertise/decisions.md")).unwrap();
+    let documentation_skill = main_dir
+        .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/review-worktrees/documentation/skills/review-documentation/SKILL.md");
+    let decisions_file = main_dir
+        .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/review-worktrees/documentation/.factory/expertise/decisions.md");
     let candidate_head = git_head(&candidate_workspace);
     let main_before = git_head(&main_dir);
     assert_ne!(main_before, candidate_head);
@@ -3007,15 +3007,15 @@ fn work_merge_candidate_dirty_reviewer_fails_before_landing() {
         .success();
 
     let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
-    let canonical_candidate_workspace = fs::canonicalize(&candidate_workspace).unwrap();
     let candidate_head = git_head(&candidate_workspace);
     let main_before = git_head(&main_dir);
     let dirty_bin = tmp.path().join("bin-merge-dirty");
     write_mock_claude(
         &dirty_bin,
         r##"#!/bin/bash
+REVIEW_WORKSPACE="$(printf '%s\n' "$*" | awk -F': ' '/Candidate workspace:/ { print $2; exit }')"
 printf 'Verdict: pass\n\nReviewer dirtied the candidate.\n' > review.md
-printf 'dirty merge review\n' > "$CANDIDATE/dirty-merge-review.txt"
+printf 'dirty merge review\n' > "$REVIEW_WORKSPACE/dirty-merge-review.txt"
 exit 0
 "##,
     );
@@ -3030,19 +3030,21 @@ exit 0
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&dirty_bin))
-        .env("CANDIDATE", &candidate_workspace)
         .assert()
         .failure()
         .stderr(predicate::str::contains(
             "Merge-time reviewer documentation dirtied candidate workspace",
         ))
-        .stderr(predicate::str::contains(
-            canonical_candidate_workspace.to_string_lossy().as_ref(),
-        ));
+        .stderr(predicate::str::contains("review-worktrees/documentation"));
 
     assert_eq!(git_head(&main_dir), main_before);
     assert_eq!(git_head(&candidate_workspace), candidate_head);
-    assert!(candidate_workspace.join("dirty-merge-review.txt").is_file());
+    assert!(!candidate_workspace.join("dirty-merge-review.txt").is_file());
+    assert!(
+        !main_dir
+            .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/review-worktrees")
+            .exists()
+    );
     let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];
     assert_eq!(candidate["review_state"], "failed");
@@ -3105,9 +3107,10 @@ fn work_merge_candidate_dirty_ignored_reviewer_fails_before_landing() {
     write_mock_claude(
         &dirty_bin,
         r##"#!/bin/bash
+REVIEW_WORKSPACE="$(printf '%s\n' "$*" | awk -F': ' '/Candidate workspace:/ { print $2; exit }')"
 printf 'Verdict: pass\n\nReviewer dirtied ignored Factory state.\n' > review.md
-mkdir -p "$CANDIDATE/.factory/review-scratch"
-printf 'dirty ignored merge review\n' > "$CANDIDATE/.factory/review-scratch/dirty.txt"
+mkdir -p "$REVIEW_WORKSPACE/.factory/review-scratch"
+printf 'dirty ignored merge review\n' > "$REVIEW_WORKSPACE/.factory/review-scratch/dirty.txt"
 exit 0
 "##,
     );
@@ -3122,7 +3125,6 @@ exit 0
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&dirty_bin))
-        .env("CANDIDATE", &candidate_workspace)
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -3133,6 +3135,16 @@ exit 0
         ));
 
     assert_eq!(git_head(&main_dir), main_before);
+    assert!(
+        !candidate_workspace
+            .join(".factory/review-scratch/dirty.txt")
+            .is_file()
+    );
+    assert!(
+        !main_dir
+            .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/review-worktrees")
+            .exists()
+    );
     let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];
     assert_eq!(candidate["review_state"], "failed");

@@ -5,6 +5,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::thread;
 
 use crate::checks;
 use crate::coder::{CoderKind, CoderSandbox};
@@ -192,7 +193,6 @@ fn execute_merge(
         config,
         item,
         candidate,
-        source_workspace,
         artifact_dir,
         &check_artifacts,
         &target_head_before,
@@ -310,7 +310,6 @@ fn run_merge_reviews(
     config: &WorkMergeConfig<'_>,
     item: &WorkItem,
     candidate: &crate::work_model::MergeCandidate,
-    source_workspace: &Path,
     artifact_dir: &Path,
     check_artifacts: &[ArtifactRef],
     target_head_before: &str,
@@ -320,74 +319,407 @@ fn run_merge_reviews(
     fs::create_dir_all(&reviews_dir)?;
     let mut verdicts = std::collections::BTreeMap::new();
     let mut artifacts = Vec::new();
+    let reviewer_worktrees = MergeReviewerWorktrees::prepare(
+        config.project_root,
+        artifact_dir,
+        candidate_head_after_rebase,
+    )?;
 
-    for reviewer in review::REVIEWERS {
-        let reviewer_dir = reviews_dir.join(reviewer);
-        fs::create_dir_all(&reviewer_dir)?;
-        let review_path = reviewer_dir.join("review.md");
-        if review_path.exists() {
-            fs::remove_file(&review_path)?;
+    if !config.no_sandbox {
+        os::check_prerequisites_for(config.coder_kind)?;
+        credential::inject_credentials()?;
+        credential::setup_git_signing();
+    }
+
+    let review_result = (|| {
+        let mut jobs = Vec::new();
+        for reviewer in review::REVIEWERS {
+            let reviewer_dir = reviews_dir.join(reviewer);
+            fs::create_dir_all(&reviewer_dir)?;
+            let review_path = reviewer_dir.join("review.md");
+            if review_path.exists() {
+                fs::remove_file(&review_path)?;
+            }
+            let review_artifact = ArtifactRef {
+                producer_id: format!("merge-review-{reviewer}"),
+                path: path_for_model(config.project_root, &review_path),
+            };
+            let review_workspace = reviewer_worktrees.path_for(reviewer)?;
+            jobs.push(MergeReviewerJob {
+                reviewer,
+                reviewer_dir,
+                review_path,
+                review_artifact,
+                review_workspace,
+            });
         }
-        let review_artifact = ArtifactRef {
-            producer_id: format!("merge-review-{reviewer}"),
-            path: path_for_model(config.project_root, &review_path),
-        };
-        let review_guard_baseline = review_guard_file_snapshot(source_workspace)?;
-        let verdict_result = run_one_merge_reviewer(
-            config,
-            item,
-            candidate,
-            source_workspace,
-            &reviewer_dir,
-            &review_path,
-            reviewer,
-            check_artifacts,
-            target_head_before,
-            candidate_head_after_rebase,
-        );
-        if let Err(error) = ensure_merge_reviewer_kept_candidate_clean(
-            source_workspace,
-            reviewer,
-            &review_guard_baseline,
-        ) {
-            artifacts.push(review_artifact);
-            verdicts.insert((*reviewer).to_string(), review::Verdict::Fail);
-            let state = ReviewState::from_verdicts(1, verdicts);
-            review::write_review_state(artifact_dir, &state)?;
+
+        let mut results = thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for job in jobs {
+                let reviewer = job.reviewer;
+                let review_artifact = job.review_artifact.clone();
+                handles.push((
+                    reviewer,
+                    review_artifact,
+                    scope.spawn(move || {
+                        run_merge_reviewer_job(
+                            config,
+                            item,
+                            candidate,
+                            job,
+                            check_artifacts,
+                            target_head_before,
+                            candidate_head_after_rebase,
+                        )
+                    }),
+                ));
+            }
+
+            let mut results = Vec::new();
+            for (reviewer, review_artifact, handle) in handles {
+                results.push(match handle.join() {
+                    Ok(result) => result,
+                    Err(_) => Err(MergeReviewerFailure {
+                        reviewer,
+                        error: anyhow::anyhow!("Merge-time reviewer {reviewer} thread panicked"),
+                        review_artifact,
+                    }),
+                });
+            }
+            results
+        });
+
+        results.sort_by_key(|result| match result {
+            Ok(result) => reviewer_order(result.reviewer),
+            Err(result) => reviewer_order(result.reviewer),
+        });
+
+        let mut first_error = None;
+        for result in results {
+            match result {
+                Ok(result) => {
+                    verdicts.insert(result.reviewer.to_string(), result.verdict);
+                    artifacts.push(result.review_artifact);
+                }
+                Err(result) => {
+                    verdicts.insert(result.reviewer.to_string(), review::Verdict::Fail);
+                    artifacts.push(result.review_artifact);
+                    if first_error.is_none() {
+                        first_error = Some(result.error);
+                    }
+                }
+            }
+        }
+
+        let state = ReviewState::from_verdicts(1, verdicts.clone());
+        review::write_review_state(artifact_dir, &state)?;
+        artifacts.push(ArtifactRef {
+            producer_id: "merge-review-state".to_string(),
+            path: path_for_model(config.project_root, &artifact_dir.join("review-state.json")),
+        });
+
+        if let Some(error) = first_error {
             record_candidate_failure(
                 config.store,
                 config.work_item_id,
                 &candidate.id,
                 error.to_string(),
                 check_artifacts.to_vec(),
-                artifacts,
+                artifacts.clone(),
             )?;
             return Err(error);
         }
-        let verdict = verdict_result?;
-        verdicts.insert((*reviewer).to_string(), verdict);
-        artifacts.push(review_artifact);
+        if !state.is_accepted() {
+            record_candidate_failure(
+                config.store,
+                config.work_item_id,
+                &candidate.id,
+                format!("Merge-time reviewers returned {}", state.state.as_str()),
+                check_artifacts.to_vec(),
+                artifacts.clone(),
+            )?;
+            bail!("Merge-time reviewers did not pass");
+        }
+
+        Ok(artifacts)
+    })();
+
+    let cleanup_result = reviewer_worktrees.cleanup();
+    match (review_result, cleanup_result) {
+        (Ok(artifacts), Ok(())) => Ok(artifacts),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
+        (Err(error), Err(cleanup_error)) => {
+            eprintln!("  Warning: merge reviewer worktree cleanup failed: {cleanup_error}");
+            Err(error)
+        }
+    }
+}
+
+struct MergeReviewerJob<'a> {
+    reviewer: &'a str,
+    reviewer_dir: PathBuf,
+    review_path: PathBuf,
+    review_artifact: ArtifactRef,
+    review_workspace: PathBuf,
+}
+
+struct MergeReviewerSuccess {
+    reviewer: &'static str,
+    verdict: review::Verdict,
+    review_artifact: ArtifactRef,
+}
+
+struct MergeReviewerFailure {
+    reviewer: &'static str,
+    error: anyhow::Error,
+    review_artifact: ArtifactRef,
+}
+
+fn run_merge_reviewer_job(
+    config: &WorkMergeConfig<'_>,
+    item: &WorkItem,
+    candidate: &crate::work_model::MergeCandidate,
+    job: MergeReviewerJob<'static>,
+    check_artifacts: &[ArtifactRef],
+    target_head_before: &str,
+    candidate_head_after_rebase: &str,
+) -> Result<MergeReviewerSuccess, MergeReviewerFailure> {
+    let baseline = match review_guard_file_snapshot(&job.review_workspace) {
+        Ok(baseline) => baseline,
+        Err(error) => {
+            return Err(MergeReviewerFailure {
+                reviewer: job.reviewer,
+                error,
+                review_artifact: job.review_artifact,
+            });
+        }
+    };
+    let verdict_result = run_one_merge_reviewer(
+        config,
+        item,
+        candidate,
+        &job.review_workspace,
+        &job.reviewer_dir,
+        &job.review_path,
+        job.reviewer,
+        check_artifacts,
+        target_head_before,
+        candidate_head_after_rebase,
+    );
+    if let Err(error) =
+        ensure_merge_reviewer_kept_candidate_clean(&job.review_workspace, job.reviewer, &baseline)
+    {
+        return Err(MergeReviewerFailure {
+            reviewer: job.reviewer,
+            error,
+            review_artifact: job.review_artifact,
+        });
+    }
+    match verdict_result {
+        Ok(verdict) => Ok(MergeReviewerSuccess {
+            reviewer: job.reviewer,
+            verdict,
+            review_artifact: job.review_artifact,
+        }),
+        Err(error) => Err(MergeReviewerFailure {
+            reviewer: job.reviewer,
+            error,
+            review_artifact: job.review_artifact,
+        }),
+    }
+}
+
+fn reviewer_order(reviewer: &str) -> usize {
+    review::REVIEWERS
+        .iter()
+        .position(|candidate| *candidate == reviewer)
+        .unwrap_or(review::REVIEWERS.len())
+}
+
+struct MergeReviewerWorktrees {
+    project_root: PathBuf,
+    root: PathBuf,
+    entries: Vec<MergeReviewerWorktree>,
+}
+
+struct MergeReviewerWorktree {
+    reviewer: &'static str,
+    path: PathBuf,
+}
+
+impl MergeReviewerWorktrees {
+    fn prepare(project_root: &Path, artifact_dir: &Path, commit: &str) -> Result<Self> {
+        let root = artifact_dir.join("review-worktrees");
+        fs::create_dir_all(&root)?;
+        let mut entries = Vec::new();
+        for reviewer in review::REVIEWERS {
+            let entry = match prepare_one_reviewer_worktree(project_root, &root, reviewer, commit) {
+                Ok(entry) => entry,
+                Err(error) => {
+                    if let Err(cleanup_error) =
+                        cleanup_reviewer_worktree_paths(project_root, &root, &entries)
+                    {
+                        eprintln!(
+                            "  Warning: partial merge reviewer worktree cleanup failed: {cleanup_error}"
+                        );
+                    }
+                    return Err(error);
+                }
+            };
+            entries.push(entry);
+        }
+        Ok(Self {
+            project_root: project_root.to_path_buf(),
+            root,
+            entries,
+        })
     }
 
-    let state = ReviewState::from_verdicts(1, verdicts);
-    review::write_review_state(artifact_dir, &state)?;
-    artifacts.push(ArtifactRef {
-        producer_id: "merge-review-state".to_string(),
-        path: path_for_model(config.project_root, &artifact_dir.join("review-state.json")),
-    });
-    if !state.is_accepted() {
-        record_candidate_failure(
-            config.store,
-            config.work_item_id,
-            &candidate.id,
-            format!("Merge-time reviewers returned {}", state.state.as_str()),
-            check_artifacts.to_vec(),
-            artifacts,
-        )?;
-        bail!("Merge-time reviewers did not pass");
+    fn path_for(&self, reviewer: &str) -> Result<PathBuf> {
+        self.entries
+            .iter()
+            .find(|entry| entry.reviewer == reviewer)
+            .map(|entry| entry.path.clone())
+            .ok_or_else(|| anyhow::anyhow!("Reviewer worktree for {reviewer} was not prepared"))
     }
 
-    Ok(artifacts)
+    fn cleanup(&self) -> Result<()> {
+        let mut errors = Vec::new();
+        for entry in &self.entries {
+            if let Err(error) = remove_reviewer_worktree_if_present(&self.project_root, &entry.path)
+            {
+                errors.push(format!("{}: {error}", entry.path.display()));
+            }
+            if entry.path.exists() {
+                if let Err(error) = fs::remove_dir_all(&entry.path) {
+                    errors.push(format!("{}: {error}", entry.path.display()));
+                }
+            }
+        }
+        if self.root.exists() {
+            if let Err(error) = fs::remove_dir(&self.root) {
+                errors.push(format!("{}: {error}", self.root.display()));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            bail!("Failed to clean reviewer worktrees:\n{}", errors.join("\n"))
+        }
+    }
+}
+
+fn prepare_one_reviewer_worktree(
+    project_root: &Path,
+    root: &Path,
+    reviewer: &'static str,
+    commit: &str,
+) -> Result<MergeReviewerWorktree> {
+    let path = root.join(reviewer);
+    remove_reviewer_worktree_if_present(project_root, &path)?;
+    if path.exists() {
+        fs::remove_dir_all(&path)
+            .with_context(|| format!("Failed to clear reviewer worktree {}", path.display()))?;
+    }
+    let output = Command::new("git")
+        .args(["-C", &project_root.to_string_lossy()])
+        .args([
+            "worktree",
+            "add",
+            "--detach",
+            &path.to_string_lossy(),
+            commit,
+        ])
+        .output()
+        .context("Failed to create reviewer worktree")?;
+    if !output.status.success() {
+        bail!(
+            "Failed to create reviewer worktree {}:\n{}",
+            path.display(),
+            command_output(&output)
+        );
+    }
+    worktree::disable_commit_signing(&path)?;
+    Ok(MergeReviewerWorktree { reviewer, path })
+}
+
+fn cleanup_reviewer_worktree_paths(
+    project_root: &Path,
+    root: &Path,
+    entries: &[MergeReviewerWorktree],
+) -> Result<()> {
+    let mut errors = Vec::new();
+    for entry in entries {
+        if let Err(error) = remove_reviewer_worktree_if_present(project_root, &entry.path) {
+            errors.push(format!("{}: {error}", entry.path.display()));
+        }
+        if entry.path.exists() {
+            if let Err(error) = fs::remove_dir_all(&entry.path) {
+                errors.push(format!("{}: {error}", entry.path.display()));
+            }
+        }
+    }
+    if root.exists() {
+        if let Err(error) = fs::remove_dir(root) {
+            errors.push(format!("{}: {error}", root.display()));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        bail!("Failed to clean reviewer worktrees:\n{}", errors.join("\n"))
+    }
+}
+
+fn remove_reviewer_worktree_if_present(project_root: &Path, path: &Path) -> Result<()> {
+    if !is_registered_worktree(project_root, path)? {
+        return Ok(());
+    }
+    let output = Command::new("git")
+        .args(["-C", &project_root.to_string_lossy()])
+        .args(["worktree", "remove", "--force", &path.to_string_lossy()])
+        .output()
+        .context("Failed to remove reviewer worktree")?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        bail!(
+            "Failed to remove reviewer worktree {}:\n{}",
+            path.display(),
+            command_output(&output)
+        )
+    }
+}
+
+fn is_registered_worktree(project_root: &Path, path: &Path) -> Result<bool> {
+    let expected = match fs::canonicalize(path) {
+        Ok(path) => path,
+        Err(error) if error.kind() == ErrorKind::NotFound => path.to_path_buf(),
+        Err(error) => return Err(error.into()),
+    };
+    let output = Command::new("git")
+        .args(["-C", &project_root.to_string_lossy()])
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .context("Failed to list git worktrees")?;
+    if !output.status.success() {
+        bail!(
+            "Failed to list git worktrees: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Some(actual_path) = line.strip_prefix("worktree ") else {
+            continue;
+        };
+        if fs::canonicalize(actual_path).is_ok_and(|actual| actual == expected) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn run_one_merge_reviewer(
@@ -461,12 +793,6 @@ fn run_one_merge_reviewer(
         review_artifact_path,
         writable_outputs_guidance
     );
-    if !config.no_sandbox {
-        os::check_prerequisites_for(config.coder_kind)?;
-        credential::inject_credentials()?;
-        credential::setup_git_signing();
-    }
-
     let (sandbox, _sandbox_profile) = if config.no_sandbox {
         (CoderSandbox::None, None)
     } else {
