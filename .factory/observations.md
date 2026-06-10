@@ -840,10 +840,39 @@ Progress:
   writable output locations, merge-time reviewers prefer `[work-system]`
   with legacy fallback, and architecture/behavior docs describe the
   prompt contract.
+- `c10bd34` demoted legacy planning bridge guidance. Planning skills now
+  distinguish active pre-Work-Item planning context from durable Work
+  Item planning context after `factory work create`; legacy
+  `.factory/runs` planning files are fallback or recovery state only.
 
 The next adoption slices should keep using the Work path end to end, then
 delete legacy `.factory/runs` compatibility once the replacement path is
 stable enough to stop carrying the old model.
+
+2026-06-09 — Work write Task prompts still carry a legacy run status-file
+contract. During `work-planning-bridge-cleanup`, a Work follow-up author
+was told to write `.factory/runs/[run-id]/status`, and the candidate
+ended up with `.factory/runs/attempt-1-write/status = complete`.
+Work write Tasks should be Work-native: task completion should mean a
+clean committed workspace plus durable Task/Attempt state, not delegated
+authors writing legacy run status files.
+
+2026-06-09 — Some behavior shell tests assume the repository's default
+`target/debug/factory` build output. During merge review for
+`work-planning-bridge-cleanup`, `test-work-task-instructions.sh` was
+awkward to run from a read-only candidate workspace because merge
+reviewers are supposed to redirect Cargo output into artifact-local
+directories. Behavior scripts should consistently support an explicit
+Factory binary path or artifact-local build output so reviewers can run
+them without writing into candidate workspaces.
+
+2026-06-09 — Work merge reviewers sometimes cannot read merge check or
+prior artifact directories even when prompts mention them. During
+`work-planning-bridge-cleanup`, multiple merge reviewers saw
+`Operation not permitted` while trying to inspect merge check or review
+artifact paths. Work merge review should either grant reviewers access
+to the referenced artifacts or avoid prompting reviewers to inspect paths
+they cannot read.
 
 2026-06-07 — Authors are increasingly using expertise, especially when
 the approach lists specific expertise files, but Factory should make this
