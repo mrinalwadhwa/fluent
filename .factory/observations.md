@@ -855,10 +855,10 @@ paths such as
 dashboard, and merge follow-up work should treat `.factory/work/` as
 durable state and managed sibling worktrees as transient execution roots.
 
-2026-06-08 — Work Attempt follow-up review policy can become more
-selective after the first targeted reviewer slice. Factory now reruns
-the failed reviewer roles that fed a follow-up write Task, with the full
-reviewer set kept as the merge-queue safety gate. A later policy pass
-can decide whether passed reviewers receive scoped stale-review context
-or whether touched domains, broad shared changes, and explicit review
-policy should add reviewers back into intermediate Attempt rounds.
+2026-06-08 — A later Work Attempt follow-up review policy pass should
+decide whether passed reviewers receive scoped stale-review context or
+whether touched domains, broad shared changes, and explicit review policy
+should add reviewers back into intermediate Attempt rounds. Factory now
+passes role-matched failed review artifacts into targeted follow-up
+review Tasks; the remaining question is when selective review is too
+narrow before the full merge-time reviewer set runs.
