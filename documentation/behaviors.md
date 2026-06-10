@@ -108,7 +108,8 @@ Test: tests/binary.rs (work_show_missing_item_reports_not_found)
 Test: tests/behaviors/operations/test-work-inspection.sh (work show missing item fails)
 
 WHEN `factory work abandon <id>` is invoked for a stored Work Item
-without executing or reviewing Attempts, Tasks, or Merge Candidates,
+without executing or reviewing Attempts, executing Tasks, reviewing
+Merge Candidates, or executing Merge Candidate merges,
 THE SYSTEM SHALL record durable Work Item abandonment state and persist
 the supplied reason when one is provided.
 Test: src/work_model.rs (abandon_records_reason_on_inactive_work_item)
@@ -124,7 +125,19 @@ executing or reviewing Attempt, executing Task, reviewing Merge
 Candidate, or executing Merge Candidate merge,
 THEN THE SYSTEM SHALL exit non-zero and leave Work Item state unchanged.
 Test: src/work_model.rs (abandon_rejects_executing_attempt_without_changing_marker)
+Test: src/work_model.rs (abandon_rejects_reviewing_attempt_without_changing_marker)
+Test: src/work_model.rs (abandon_rejects_executing_task_without_changing_marker)
+Test: src/work_model.rs (abandon_rejects_active_merge_candidate_without_changing_marker)
 Test: tests/behaviors/operations/test-work-inspection.sh (work abandon active item fails without state change)
+Test: tests/behaviors/operations/test-work-inspection.sh (work abandon reviewing attempt fails without state change)
+Test: tests/behaviors/operations/test-work-inspection.sh (work abandon executing task fails without state change)
+Test: tests/behaviors/operations/test-work-inspection.sh (work abandon active merge candidate fails without state change)
+
+IF Work lifecycle commands try to plan, execute, review, or merge an
+abandoned Work Item,
+THEN THE SYSTEM SHALL exit non-zero and leave abandoned Work state
+terminal.
+Test: src/work_model.rs (abandoned_work_item_rejects_lifecycle_mutations)
 
 IF stored Work Item state contains invalid JSON, an invalid id, or a
 model validation error,
@@ -1025,11 +1038,14 @@ THE SYSTEM SHALL remove the Work Item state, referenced managed Work
 artifacts, registered managed candidate worktrees, and Work branches.
 Test: tests/binary.rs (cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch), tests/binary.rs (cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree)
 
-WHEN `factory cleanup` sees an abandoned Work Item whose Attempts, Tasks,
-and Merge Candidates are not executing or reviewing,
+WHEN `factory cleanup` sees an abandoned Work Item with no executing or
+reviewing Attempts, no executing Tasks, no reviewing Merge Candidates,
+and no executing Merge Candidate merges,
 THE SYSTEM SHALL select it for cleanup, including its managed sibling
 worktree, Work branch, state records, and Work artifacts.
 Test: tests/behaviors/operations/test-cleanup.sh (cleanup selects abandoned needs-user Work Items)
+Test: tests/behaviors/operations/test-cleanup.sh (cleanup skips abandoned Work with reviewing Attempt)
+Test: tests/behaviors/operations/test-cleanup.sh (cleanup skips abandoned Work with active Merge Candidate)
 
 WHEN Factory reads stored Work state with legacy artifact references
 under `.factory/work/artifacts/<attempt-id>/...`,

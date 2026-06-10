@@ -36,6 +36,7 @@ pub struct WorkTaskRunResult {
 
 pub fn run_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+    item.ensure_not_abandoned()?;
     let (attempt_index, task_index) =
         find_attempt_task_indexes(&item, config.attempt_id, config.task_id)
             .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", config.task_id))?;

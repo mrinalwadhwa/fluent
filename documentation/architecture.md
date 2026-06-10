@@ -368,8 +368,9 @@ The Work storage contract is:
 ```
 
 Each file in `items/` stores Work Item metadata and planning context:
-the Work Item id, title, optional explicit instructions, and optional
-brief/behaviors/approach/plan context. Attempts live in
+the Work Item id, title, optional explicit instructions, optional
+brief/behaviors/approach/plan context, and optional abandonment marker
+with the operator-provided reason. Attempts live in
 `attempts/<work-item-id>/<attempt-id>.json`, Tasks live in
 `tasks/<work-item-id>/<attempt-id>/<task-id>.json`, and Merge Candidates
 live in `merge-candidates/<work-item-id>/<merge-candidate-id>.json`.
@@ -1097,8 +1098,9 @@ arbitrary directories.
 Work cleanup runs from the same `factory cleanup` command when no
 `--run-id` is supplied. It selects Work Items only after every Attempt,
 Task, and Merge Candidate is terminal, or after an operator explicitly
-marks the Work Item abandoned and no Attempt, Task, or Merge Candidate is
-executing or reviewing. Applying cleanup removes the Work Item metadata
+marks the Work Item abandoned with no executing or reviewing Attempts,
+no executing Tasks, no reviewing Merge Candidates, and no executing
+Merge Candidate merges. Applying cleanup removes the Work Item metadata
 JSON, split Attempt records, split Task records, split Merge Candidate
 records, referenced managed Work artifact files or directories, managed
 candidate worktrees, and Work task branches. Managed artifact references

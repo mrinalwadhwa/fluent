@@ -852,13 +852,14 @@ mod tests {
             title: "Stale work".to_string(),
             planning_context: None,
             instructions: None,
-            abandonment: Some(WorkItemAbandonment {
-                reason: Some("replacement landed".to_string()),
-            }),
+            abandonment: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
         item.add_initial_attempt("attempt-1").unwrap();
+        item.abandonment = Some(WorkItemAbandonment {
+            reason: Some("replacement landed".to_string()),
+        });
         item.attempts[0].status = AttemptStatus::NeedsUser;
         item.attempts[0].tasks[0].status = TaskStatus::NeedsUser;
 
@@ -875,13 +876,14 @@ mod tests {
             title: "Active work".to_string(),
             planning_context: None,
             instructions: None,
-            abandonment: Some(WorkItemAbandonment {
-                reason: Some("replacement landed".to_string()),
-            }),
+            abandonment: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
         item.add_initial_attempt("attempt-1").unwrap();
+        item.abandonment = Some(WorkItemAbandonment {
+            reason: Some("replacement landed".to_string()),
+        });
         item.attempts[0].status = AttemptStatus::Failed;
         item.attempts[0].tasks[0].status = TaskStatus::Executing;
         item.attempts[0].tasks[0].workspace_access = WorkspaceAccess::read_only(Vec::new());
@@ -889,5 +891,70 @@ mod tests {
         let candidates = cleanup_work_item_candidates(vec![item]);
 
         assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn abandoned_work_item_with_reviewing_attempt_is_not_cleanup_candidate() {
+        let mut item = WorkItem {
+            id: "work-active".to_string(),
+            title: "Active review".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.abandonment = Some(WorkItemAbandonment {
+            reason: Some("replacement landed".to_string()),
+        });
+        item.attempts[0].status = AttemptStatus::Reviewing;
+
+        let candidates = cleanup_work_item_candidates(vec![item]);
+
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn abandoned_work_item_with_active_merge_candidate_is_not_cleanup_candidate() {
+        let reviewing_candidate = MergeCandidate {
+            id: "candidate-reviewing".to_string(),
+            attempt_id: "attempt-1".to_string(),
+            source_workspace: crate::work_model::WorkspaceRef {
+                id: "candidate".to_string(),
+                path: "../work-6-work-active-attempt-1".to_string(),
+            },
+            target_workspace: crate::work_model::WorkspaceRef {
+                id: "target".to_string(),
+                path: ".".to_string(),
+            },
+            source_branch: "main".to_string(),
+            target_branch: "main".to_string(),
+            candidate_commit: "abc123".to_string(),
+            review_state: MergeCandidateReviewState::Reviewing,
+            merge_state: crate::work_model::MergeCandidateMergeState::default(),
+        };
+        let mut merging_candidate = reviewing_candidate.clone();
+        merging_candidate.id = "candidate-merging".to_string();
+        merging_candidate.review_state = MergeCandidateReviewState::Pending;
+        merging_candidate.merge_state.status = MergeCandidateMergeStatus::Executing;
+
+        for candidate in [reviewing_candidate, merging_candidate] {
+            let item = WorkItem {
+                id: "work-active".to_string(),
+                title: "Active candidate".to_string(),
+                planning_context: None,
+                instructions: None,
+                abandonment: Some(WorkItemAbandonment {
+                    reason: Some("replacement landed".to_string()),
+                }),
+                attempts: Vec::new(),
+                merge_candidates: vec![candidate],
+            };
+
+            let candidates = cleanup_work_item_candidates(vec![item]);
+
+            assert!(candidates.is_empty());
+        }
     }
 }

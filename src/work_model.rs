@@ -171,6 +171,7 @@ impl WorkItem {
         &mut self,
         attempt_id: impl Into<String>,
     ) -> Result<(), WorkModelError> {
+        self.ensure_not_abandoned()?;
         let attempt_id = attempt_id.into();
         validate_id("work item", &self.id)?;
         validate_id("attempt", &attempt_id)?;
@@ -219,6 +220,7 @@ impl WorkItem {
         source_ref: impl Into<String>,
         source_commit: impl Into<String>,
     ) -> Result<Vec<String>, WorkModelError> {
+        self.ensure_not_abandoned()?;
         let attempt_id = attempt_id.into();
         validate_id("work item", &self.id)?;
         validate_id("attempt", &attempt_id)?;
@@ -320,6 +322,7 @@ impl WorkItem {
         roles: &[&str],
         round: Option<usize>,
     ) -> Result<Vec<String>, WorkModelError> {
+        self.ensure_not_abandoned()?;
         let Some(attempt) = self
             .attempts
             .iter_mut()
@@ -468,6 +471,7 @@ impl WorkItem {
         &mut self,
         attempt_id: &str,
     ) -> Result<String, WorkModelError> {
+        self.ensure_not_abandoned()?;
         let candidate_id = format!("{attempt_id}-merge-candidate");
         validate_id("merge candidate", &candidate_id)?;
         if let Some(candidate) = self
@@ -583,6 +587,15 @@ impl WorkItem {
             }),
         });
         self.validate()
+    }
+
+    pub fn ensure_not_abandoned(&self) -> Result<(), WorkModelError> {
+        if self.abandonment.is_some() {
+            return Err(WorkModelError::WorkItemAbandoned {
+                work_item_id: self.id.clone(),
+            });
+        }
+        Ok(())
     }
 
     pub fn validate(&self) -> Result<(), WorkModelError> {
@@ -1287,6 +1300,9 @@ pub enum WorkModelError {
         candidate_id: String,
         field: &'static str,
     },
+    WorkItemAbandoned {
+        work_item_id: String,
+    },
     MultipleWriteWorkspaces {
         count: usize,
     },
@@ -1417,6 +1433,9 @@ impl fmt::Display for WorkModelError {
                     f,
                     "Merge Candidate {candidate_id:?} {field} does not match the latest completed write Task"
                 )
+            }
+            Self::WorkItemAbandoned { work_item_id } => {
+                write!(f, "Work Item {work_item_id:?} is abandoned")
             }
             Self::MultipleWriteWorkspaces { count } => {
                 write!(f, "task writes {count} workspaces; at most one is allowed")
@@ -2718,6 +2737,114 @@ mod tests {
             WorkModelError::WorkItemAbandonmentBlocked { .. }
         ));
         assert!(work_item.abandonment.is_none());
+    }
+
+    #[test]
+    fn abandon_rejects_reviewing_attempt_without_changing_marker() {
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Keep active review visible".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        work_item.add_initial_attempt("attempt-1").unwrap();
+        work_item.attempts[0].status = AttemptStatus::Reviewing;
+
+        let error = work_item.abandon(Some("stale".to_string())).unwrap_err();
+
+        assert!(matches!(
+            error,
+            WorkModelError::WorkItemAbandonmentBlocked { .. }
+        ));
+        assert!(work_item.abandonment.is_none());
+    }
+
+    #[test]
+    fn abandon_rejects_executing_task_without_changing_marker() {
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Keep active task visible".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        work_item.add_initial_attempt("attempt-1").unwrap();
+        work_item.attempts[0].status = AttemptStatus::Failed;
+        work_item.attempts[0].tasks[0].status = TaskStatus::Executing;
+
+        let error = work_item.abandon(Some("stale".to_string())).unwrap_err();
+
+        assert!(matches!(
+            error,
+            WorkModelError::WorkItemAbandonmentBlocked { .. }
+        ));
+        assert!(work_item.abandonment.is_none());
+    }
+
+    #[test]
+    fn abandon_rejects_active_merge_candidate_without_changing_marker() {
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Keep active candidate visible".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: vec![MergeCandidate {
+                id: "candidate-1".to_string(),
+                attempt_id: "attempt-1".to_string(),
+                source_workspace: workspace("candidate"),
+                target_workspace: workspace("target"),
+                source_branch: "main".to_string(),
+                target_branch: "main".to_string(),
+                candidate_commit: "abc123".to_string(),
+                review_state: MergeCandidateReviewState::Reviewing,
+                merge_state: MergeCandidateMergeState::default(),
+            }],
+        };
+
+        let error = work_item.abandon(Some("stale".to_string())).unwrap_err();
+
+        assert!(matches!(
+            error,
+            WorkModelError::WorkItemAbandonmentBlocked { .. }
+        ));
+        assert!(work_item.abandonment.is_none());
+
+        work_item.merge_candidates[0].review_state = MergeCandidateReviewState::Pending;
+        work_item.merge_candidates[0].merge_state.status = MergeCandidateMergeStatus::Executing;
+
+        let error = work_item.abandon(Some("stale".to_string())).unwrap_err();
+
+        assert!(matches!(
+            error,
+            WorkModelError::WorkItemAbandonmentBlocked { .. }
+        ));
+        assert!(work_item.abandonment.is_none());
+    }
+
+    #[test]
+    fn abandoned_work_item_rejects_lifecycle_mutations() {
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Keep abandoned work terminal".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: Some(WorkItemAbandonment {
+                reason: Some("replacement landed".to_string()),
+            }),
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+
+        let error = work_item.add_initial_attempt("attempt-1").unwrap_err();
+
+        assert!(matches!(error, WorkModelError::WorkItemAbandoned { .. }));
     }
 
     #[test]

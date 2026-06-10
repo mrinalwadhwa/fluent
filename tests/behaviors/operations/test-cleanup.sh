@@ -574,6 +574,102 @@ PY
   return $RESULT
 }
 
+test_cleanup_skips_abandoned_work_item_with_reviewing_attempt() {
+  create_project
+  "$FACTORY_BIN" work create work-active --title "Active review work" >/dev/null
+  "$FACTORY_BIN" work attempt work-active attempt-1 >/dev/null
+  "$FACTORY_BIN" work abandon work-active --reason "replacement landed" >/dev/null
+
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+attempt_path = Path(".factory/work/attempts/work-active/attempt-1.json")
+attempt = json.loads(attempt_path.read_text())
+attempt["status"] = "reviewing"
+attempt_path.write_text(json.dumps(attempt, indent=2) + "\n")
+PY
+
+  OUTPUT="$("$FACTORY_BIN" cleanup 2>&1)"
+
+  RESULT=0
+  assert_output_not_contains "$OUTPUT" "work-active" || RESULT=1
+
+  rm -rf "$TEST_DIR"
+  return $RESULT
+}
+
+test_cleanup_skips_abandoned_work_item_with_active_merge_candidate() {
+  create_project
+  "$FACTORY_BIN" work create work-active --title "Active candidate work" >/dev/null
+  "$FACTORY_BIN" work attempt work-active attempt-1 >/dev/null
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+attempt_path = Path(".factory/work/attempts/work-active/attempt-1.json")
+attempt = json.loads(attempt_path.read_text())
+attempt["status"] = "complete"
+attempt["review_state"] = "passed"
+attempt_path.write_text(json.dumps(attempt, indent=2) + "\n")
+
+task_path = Path(".factory/work/tasks/work-active/attempt-1/attempt-1-write.json")
+task = json.loads(task_path.read_text())
+task["status"] = "complete"
+task["output"] = {
+    "workspace_id": "candidate",
+    "workspace_path": "../work-6-work-active-attempt-1",
+    "source_branch": "main",
+    "commit": "abc123",
+}
+task_path.write_text(json.dumps(task, indent=2) + "\n")
+PY
+  "$FACTORY_BIN" work abandon work-active --reason "replacement landed" >/dev/null
+  mkdir -p .factory/work/merge-candidates/work-active
+  printf '%s\n' \
+    '{' \
+    '  "id": "candidate-1",' \
+    '  "attempt_id": "attempt-1",' \
+    '  "source_workspace": {' \
+    '    "id": "candidate",' \
+    '    "path": "../work-6-work-active-attempt-1"' \
+    '  },' \
+    '  "target_workspace": {' \
+    '    "id": "target",' \
+    '    "path": "."' \
+    '  },' \
+    '  "source_branch": "main",' \
+    '  "target_branch": "main",' \
+    '  "candidate_commit": "abc123",' \
+    '  "review_state": "reviewing",' \
+    '  "merge_state": {' \
+    '    "status": "pending"' \
+    '  }' \
+    '}' > .factory/work/merge-candidates/work-active/candidate-1.json
+
+  REVIEW_OUTPUT="$("$FACTORY_BIN" cleanup 2>&1)"
+
+  RESULT=0
+  assert_output_not_contains "$REVIEW_OUTPUT" "work-active" || RESULT=1
+
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+candidate_path = Path(".factory/work/merge-candidates/work-active/candidate-1.json")
+candidate = json.loads(candidate_path.read_text())
+candidate["review_state"] = "pending"
+candidate["merge_state"]["status"] = "executing"
+candidate_path.write_text(json.dumps(candidate, indent=2) + "\n")
+PY
+
+  MERGE_OUTPUT="$("$FACTORY_BIN" cleanup 2>&1)"
+  assert_output_not_contains "$MERGE_OUTPUT" "work-active" || RESULT=1
+
+  rm -rf "$TEST_DIR"
+  return $RESULT
+}
+
 printf 'test-cleanup\n\n'
 
 run_test "cleanup selects stale complete and landed runs by default" \
@@ -598,6 +694,10 @@ run_test "cleanup ignores unmanaged Work artifact paths" \
   test_cleanup_work_items_ignore_unmanaged_artifacts
 run_test "cleanup selects abandoned needs-user Work Items" \
   test_cleanup_selects_abandoned_needs_user_work_item
+run_test "cleanup skips abandoned Work with reviewing Attempt" \
+  test_cleanup_skips_abandoned_work_item_with_reviewing_attempt
+run_test "cleanup skips abandoned Work with active Merge Candidate" \
+  test_cleanup_skips_abandoned_work_item_with_active_merge_candidate
 
 printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
 

@@ -327,6 +327,132 @@ PY
   return $RESULT
 }
 
+test_work_abandon_reviewing_attempt_fails_without_state_change() {
+  setup_test_project
+  "$FACTORY_BIN" work create work-active --title "Active review" > /dev/null
+  "$FACTORY_BIN" work attempt work-active attempt-1 > /dev/null
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+attempt_path = Path(".factory/work/attempts/work-active/attempt-1.json")
+attempt = json.loads(attempt_path.read_text())
+attempt["status"] = "reviewing"
+attempt_path.write_text(json.dumps(attempt, indent=2) + "\n")
+PY
+
+  RESULT=0
+  assert_fails "$FACTORY_BIN" work abandon work-active --reason "obsolete" || RESULT=1
+  ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
+  assert_contains "$ERROR_OUTPUT" "cannot be abandoned" || RESULT=1
+  assert_not_contains "$(cat .factory/work/items/work-active.json)" "abandonment" || RESULT=1
+
+  cleanup_test_project
+  return $RESULT
+}
+
+test_work_abandon_executing_task_fails_without_state_change() {
+  setup_test_project
+  "$FACTORY_BIN" work create work-active --title "Active task" > /dev/null
+  "$FACTORY_BIN" work attempt work-active attempt-1 > /dev/null
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+attempt_path = Path(".factory/work/attempts/work-active/attempt-1.json")
+attempt = json.loads(attempt_path.read_text())
+attempt["status"] = "failed"
+attempt_path.write_text(json.dumps(attempt, indent=2) + "\n")
+
+task_path = Path(".factory/work/tasks/work-active/attempt-1/attempt-1-write.json")
+task = json.loads(task_path.read_text())
+task["status"] = "executing"
+task_path.write_text(json.dumps(task, indent=2) + "\n")
+PY
+
+  RESULT=0
+  assert_fails "$FACTORY_BIN" work abandon work-active --reason "obsolete" || RESULT=1
+  ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
+  assert_contains "$ERROR_OUTPUT" "cannot be abandoned" || RESULT=1
+  assert_not_contains "$(cat .factory/work/items/work-active.json)" "abandonment" || RESULT=1
+
+  cleanup_test_project
+  return $RESULT
+}
+
+test_work_abandon_active_merge_candidate_fails_without_state_change() {
+  setup_test_project
+  "$FACTORY_BIN" work create work-active --title "Active merge candidate" > /dev/null
+  "$FACTORY_BIN" work attempt work-active attempt-1 > /dev/null
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+attempt_path = Path(".factory/work/attempts/work-active/attempt-1.json")
+attempt = json.loads(attempt_path.read_text())
+attempt["status"] = "complete"
+attempt["review_state"] = "passed"
+attempt_path.write_text(json.dumps(attempt, indent=2) + "\n")
+
+task_path = Path(".factory/work/tasks/work-active/attempt-1/attempt-1-write.json")
+task = json.loads(task_path.read_text())
+task["status"] = "complete"
+task["output"] = {
+    "workspace_id": "candidate",
+    "workspace_path": "../work-6-work-active-attempt-1",
+    "source_branch": "main",
+    "commit": "abc123",
+}
+task_path.write_text(json.dumps(task, indent=2) + "\n")
+PY
+  mkdir -p .factory/work/merge-candidates/work-active
+  printf '%s\n' \
+    '{' \
+    '  "id": "candidate-1",' \
+    '  "attempt_id": "attempt-1",' \
+    '  "source_workspace": {' \
+    '    "id": "candidate",' \
+    '    "path": "../work-6-work-active-attempt-1"' \
+    '  },' \
+    '  "target_workspace": {' \
+    '    "id": "target",' \
+    '    "path": "."' \
+    '  },' \
+    '  "source_branch": "main",' \
+    '  "target_branch": "main",' \
+    '  "candidate_commit": "abc123",' \
+    '  "review_state": "reviewing",' \
+    '  "merge_state": {' \
+    '    "status": "pending"' \
+    '  }' \
+    '}' > .factory/work/merge-candidates/work-active/candidate-1.json
+
+  RESULT=0
+  assert_fails "$FACTORY_BIN" work abandon work-active --reason "obsolete" || RESULT=1
+  ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
+  assert_contains "$ERROR_OUTPUT" "cannot be abandoned" || RESULT=1
+  assert_not_contains "$(cat .factory/work/items/work-active.json)" "abandonment" || RESULT=1
+
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+candidate_path = Path(".factory/work/merge-candidates/work-active/candidate-1.json")
+candidate = json.loads(candidate_path.read_text())
+candidate["review_state"] = "pending"
+candidate["merge_state"]["status"] = "executing"
+candidate_path.write_text(json.dumps(candidate, indent=2) + "\n")
+PY
+
+  assert_fails "$FACTORY_BIN" work abandon work-active --reason "obsolete" || RESULT=1
+  ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
+  assert_contains "$ERROR_OUTPUT" "cannot be abandoned" || RESULT=1
+  assert_not_contains "$(cat .factory/work/items/work-active.json)" "abandonment" || RESULT=1
+
+  cleanup_test_project
+  return $RESULT
+}
+
 test_work_list_invalid_state_fails() {
   setup_test_project
   mkdir -p .factory/work/items
@@ -437,6 +563,12 @@ run_test "work abandon persists reason" test_work_abandon_persists_reason
 run_test "work abandon missing item fails" test_work_abandon_missing_item_fails
 run_test "work abandon active item fails without state change" \
   test_work_abandon_active_item_fails_without_state_change
+run_test "work abandon reviewing attempt fails without state change" \
+  test_work_abandon_reviewing_attempt_fails_without_state_change
+run_test "work abandon executing task fails without state change" \
+  test_work_abandon_executing_task_fails_without_state_change
+run_test "work abandon active merge candidate fails without state change" \
+  test_work_abandon_active_merge_candidate_fails_without_state_change
 run_test "work list reports invalid stored state" test_work_list_invalid_state_fails
 run_test "work list reports id mismatch" test_work_list_id_mismatch_fails
 run_test "legacy runs and work inspection are independent" test_runs_and_work_items_are_independent

@@ -40,6 +40,7 @@ pub struct WorkMergeOutcome {
 
 pub fn merge_candidate(config: WorkMergeConfig<'_>) -> Result<WorkMergeOutcome> {
     let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+    item.ensure_not_abandoned()?;
     let candidate = item
         .merge_candidates
         .iter()

@@ -44,6 +44,7 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
 
     loop {
         let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+        item.ensure_not_abandoned()?;
         let attempt = item
             .attempts
             .iter()
