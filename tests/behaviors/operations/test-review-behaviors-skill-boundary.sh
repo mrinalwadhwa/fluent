@@ -77,7 +77,9 @@ if ! grep -Fq 'passing deterministic behavior check covers the same behavior' "$
   failures=$((failures + 1))
 fi
 
-if ! grep -Fq 'return' "$SKILL" || ! grep -Fq '`uncertain`' "$SKILL"; then
+if ! grep -Fq 'When no deterministic check covers the behavior and the only' "$SKILL" ||
+    ! grep -Fq 'available test cannot run because of an environment limitation, return' "$SKILL" ||
+    ! grep -Fq '`uncertain`' "$SKILL"; then
   echo "review-behaviors no longer keeps uncertain for uncovered environment-limited behavior" >&2
   failures=$((failures + 1))
 fi
