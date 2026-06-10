@@ -69,6 +69,13 @@ case "$PWD" in
       sleep 1
       printf 'end %s\n' "$REVIEWER" >> "$MERGE_REVIEW_TIMING_LOG"
     fi
+    if [ "${MERGE_MOCK_MODE:-pass}" = "dirty-merge-review-out-of-order" ]; then
+      if [ "$REVIEWER" = "documentation" ]; then
+        sleep 1
+      elif [ "$REVIEWER" = "behaviors" ]; then
+        sleep 0.1
+      fi
+    fi
     if [ -n "${MERGE_REVIEW_ARGS_LOG:-}" ]; then
       printf '%s\n' "$*" >> "$MERGE_REVIEW_ARGS_LOG"
     fi
@@ -76,6 +83,10 @@ case "$PWD" in
       printf 'Verdict: fail\n\nMerge behavior review failed.\n' > review.md
     elif [ "$REVIEWER" = "behaviors" ] && [ "${MERGE_MOCK_MODE:-pass}" = "missing-merge-review" ]; then
       :
+    elif { [ "$REVIEWER" = "documentation" ] || [ "$REVIEWER" = "behaviors" ]; } \
+      && [ "${MERGE_MOCK_MODE:-pass}" = "dirty-merge-review-out-of-order" ]; then
+      printf 'Verdict: pass\n\nMerge review dirtied the candidate.\n' > review.md
+      printf 'dirty merge review\n' > "${REVIEW_WORKSPACE}/dirty-${REVIEWER}.txt"
     elif [ "$REVIEWER" = "behaviors" ] && [ "${MERGE_MOCK_MODE:-pass}" = "dirty-merge-review" ]; then
       printf 'Verdict: pass\n\nMerge behavior review dirtied the candidate.\n' > review.md
       printf 'dirty merge review\n' > "${REVIEW_WORKSPACE}/dirty-merge-review.txt"
@@ -166,6 +177,25 @@ assert_no_merge_reviewer_worktrees() {
   fi
 }
 
+assert_merge_review_artifacts_in_reviewer_order() {
+  EXPECTED="$TEST_DIR/expected-review-artifacts"
+  ACTUAL="$TEST_DIR/actual-review-artifacts"
+  cat > "$EXPECTED" <<'EOF'
+merge-review-documentation:.factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/documentation/review.md
+merge-review-behaviors:.factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/behaviors/review.md
+merge-review-architecture:.factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/architecture/review.md
+merge-review-skills:.factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/skills/review.md
+merge-review-tests:.factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/tests/review.md
+merge-review-state:.factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/review-state.json
+EOF
+  json_value '.merge_candidates[0].merge_state.review_artifacts[] | "\(.producer_id):\(.path)"' \
+    > "$ACTUAL"
+  if ! diff -u "$EXPECTED" "$ACTUAL"; then
+    printf '    FAIL: merge review artifacts are not in reviewer order\n'
+    return 1
+  fi
+}
+
 test_work_merge_lands_after_update_checks_and_reviewers() {
   setup_test_project
   trap cleanup_test_project RETURN
@@ -199,6 +229,7 @@ EOF
   [ "$(json_value '.merge_candidates[0].review_state')" = "passed" ] || RESULT=1
   [ "$(json_value '.merge_candidates[0].merge_state.check_artifacts | length')" = "1" ] || RESULT=1
   [ "$(json_value '.merge_candidates[0].merge_state.review_artifacts | length')" = "6" ] || RESULT=1
+  assert_merge_review_artifacts_in_reviewer_order || RESULT=1
   [ "$(wc -l < "$TEST_DIR/merge-review-log" | tr -d ' ')" = "5" ] || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "work-1" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "attempt-1" || RESULT=1
@@ -463,6 +494,25 @@ test_work_merge_missing_reviewer_artifact_leaves_target_unchanged() {
   return $RESULT
 }
 
+test_work_merge_aggregates_reviewer_errors_in_order() {
+  setup_test_project
+  trap cleanup_test_project RETURN
+  write_mock_claude
+  create_passed_merge_candidate
+  MAIN_BEFORE="$(git rev-parse main)"
+
+  RESULT=0
+  assert_fails run_merge dirty-merge-review-out-of-order || RESULT=1
+  [ "$(git rev-parse main)" = "$MAIN_BEFORE" ] || RESULT=1
+  [ "$(json_value '.merge_candidates[0].merge_state.status')" = "failed" ] || RESULT=1
+  [ "$(json_value '.merge_candidates[0].review_state')" = "failed" ] || RESULT=1
+  assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" "Merge-time reviewer documentation dirtied candidate workspace" || RESULT=1
+  assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" "dirty-documentation.txt" || RESULT=1
+  assert_merge_review_artifacts_in_reviewer_order || RESULT=1
+  assert_no_merge_reviewer_worktrees || RESULT=1
+  return $RESULT
+}
+
 test_work_merge_dirty_reviewer_leaves_target_unchanged() {
   setup_test_project
   trap cleanup_test_project RETURN
@@ -576,6 +626,8 @@ run_test "work merge failed reviewer leaves target unchanged" \
   test_work_merge_failed_reviewer_leaves_target_unchanged
 run_test "work merge missing reviewer artifact leaves target unchanged" \
   test_work_merge_missing_reviewer_artifact_leaves_target_unchanged
+run_test "work merge aggregates reviewer errors in order" \
+  test_work_merge_aggregates_reviewer_errors_in_order
 run_test "work merge dirty reviewer leaves target unchanged" \
   test_work_merge_dirty_reviewer_leaves_target_unchanged
 run_test "work merge dirty Factory state reviewer leaves target unchanged" \
