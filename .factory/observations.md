@@ -113,6 +113,14 @@ Recent Work Item runs suggest several promising measurements:
 - Record whether a delay came from scarce model capacity, sandbox/tooling
   failure, missing context, or real design uncertainty. These categories
   should drive different scheduling or process improvements.
+- Track cases where a small change takes a full review loop even though
+  the review findings are predictable from the initial brief. The
+  `resume --no-sandbox` work item is a useful example: the author could
+  have been guided up front to update the general resume behavior docs
+  and add persisted operation coverage, rather than relying on reviewers
+  to discover that after the first author pass. Better author prompts
+  and brief-to-plan checks could reduce this churn without skipping
+  reviewers.
 - Assess whether some extensive reviews should move from the pre-merge
   path to periodic post-merge review on `main`. One possible shape: keep
   deterministic tests as the hard rebase regression gate before merge,
