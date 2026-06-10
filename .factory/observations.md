@@ -89,6 +89,31 @@ not faster ones. Reviewers should always view what the author
 says with skepticism — the author's explanation of what changed
 is context, not evidence. The reviewer verifies independently.
 
+2026-06-09 — Start gathering signals for how to reduce Work Item
+end-to-end elapsed time without lowering quality. Useful signals include
+time spent in authoring, review loops, merge reviews, verification,
+scheduler/capacity waits, tool invocation failures, invalid test-command
+guessing, and human intervention. Separate latency that buys confidence
+from latency caused by orchestration friction.
+
+Recent Work Item runs suggest several promising measurements:
+
+- Compare attempt-review findings with merge-review findings to identify
+  which checks must always re-run after rebase and which prior review
+  signals can be reused as focused context.
+- Track reviewer time lost to poor prompt ergonomics, such as commands
+  that are not copy-safe or missing the exact `main..HEAD` diff form.
+- Track test and verification retries caused by bespoke shell assertions
+  or invalid command guesses. Factory could derive valid verification
+  commands from behavior/test metadata instead of asking agents to infer
+  them.
+- Keep reviewer-owned tests in artifact directories when reviewers need
+  extra evidence. This preserves candidate cleanliness while improving
+  confidence.
+- Record whether a delay came from scarce model capacity, sandbox/tooling
+  failure, missing context, or real design uncertainty. These categories
+  should drive different scheduling or process improvements.
+
 2026-06-05 — Wrote expertise/terminal-ui.md without following the
 factory process. A proper run with reviewers would have caught:
 missing testing approaches for the expertise itself, unclear
