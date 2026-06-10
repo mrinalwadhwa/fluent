@@ -303,27 +303,26 @@ fn work_model_store_ignores_nested_operational_collections() {
     let temp = tempfile::tempdir().unwrap();
     let store = WorkModelStore::new(temp.path());
 
-    let mut nested_item = work_item();
-    nested_item.merge_candidates.push(merge_candidate());
-    let expected = WorkItem {
-        id: nested_item.id.clone(),
-        title: nested_item.title.clone(),
-        planning_context: nested_item.planning_context.clone(),
-        instructions: nested_item.instructions.clone(),
-        abandonment: None,
-        attempts: Vec::new(),
-        merge_candidates: Vec::new(),
-    };
+    let mut split_item = work_item();
+    split_item.merge_candidates.push(merge_candidate());
+    store.write_work_item(&split_item).unwrap();
 
-    fs::create_dir_all(temp.path().join(".factory/work/items")).unwrap();
+    let mut nested_item = work_item();
+    nested_item.attempts[0].id = "nested-attempt".to_string();
+    nested_item.attempts[0].tasks[0].id = "nested-task".to_string();
+    nested_item.merge_candidates.push(MergeCandidate {
+        id: "nested-merge-candidate".to_string(),
+        attempt_id: "nested-attempt".to_string(),
+        ..merge_candidate()
+    });
     fs::write(
         temp.path().join(".factory/work/items/work-1.json"),
         serde_json::to_string_pretty(&nested_item).unwrap(),
     )
     .unwrap();
 
-    assert_eq!(store.read_work_item("work-1").unwrap(), expected);
-    assert_eq!(store.list_work_items().unwrap(), vec![expected]);
+    assert_eq!(store.read_work_item("work-1").unwrap(), split_item);
+    assert_eq!(store.list_work_items().unwrap(), vec![split_item]);
 }
 
 #[test]
