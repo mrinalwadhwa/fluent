@@ -1619,6 +1619,7 @@ fn work_task_run_completes_review_task_with_fail_verdict_artifact() {
     let bin_dir = tmp.path().join("bin-review");
     let prompt_log = tmp.path().join("review-prompt.log");
     let system_log = tmp.path().join("review-system.log");
+    let sandbox_profile_log = tmp.path().join("review-sandbox.sb");
     write_mock_claude(
         &bin_dir,
         r##"#!/bin/bash
@@ -1638,6 +1639,17 @@ printf 'Verdict: fail\n\nFinding remains.\n' > review.md
 exit 0
 "##,
     );
+    write_mock_executable(
+        &bin_dir,
+        "sandbox-exec",
+        r##"#!/bin/bash
+if [ "$1" = "-f" ]; then
+  cp "$2" "$SANDBOX_PROFILE_LOG"
+  shift 2
+fi
+exec "$@"
+"##,
+    );
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -1648,11 +1660,14 @@ exit 0
             "work-1",
             "attempt-1",
             "attempt-1-review-tests",
-            "--no-sandbox",
         ])
         .env("PATH", mock_path(&bin_dir))
         .env("PROMPT_LOG", &prompt_log)
         .env("SYSTEM_LOG", &system_log)
+        .env("SANDBOX_PROFILE_LOG", &sandbox_profile_log)
+        .env("CLAUDE_CODE_OAUTH_TOKEN", "mock-token")
+        .env("BRAVE_SEARCH_API_KEY", "mock-key")
+        .env("AWS_ACCESS_KEY_ID", "mock-access")
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -1688,6 +1703,22 @@ exit 0
     assert!(system.contains(&candidate_skill.to_string_lossy().to_string()));
     assert!(system.contains(&review_path.to_string_lossy().to_string()));
     assert!(!system.contains(".factory/runs/{{RUN_ID}}/reviews"));
+    let expected_prior_review_dir = fs::canonicalize(prior_review_path.parent().unwrap()).unwrap();
+    let sandbox_profile = fs::read_to_string(sandbox_profile_log).unwrap();
+    assert!(
+        sandbox_profile.contains(&format!(
+            "(allow file-read*  (subpath \"{}\"))",
+            expected_prior_review_dir.display()
+        )),
+        "{sandbox_profile}"
+    );
+    assert!(
+        !sandbox_profile.contains(&format!(
+            "(allow file-write* (subpath \"{}\"))",
+            expected_prior_review_dir.display()
+        )),
+        "{sandbox_profile}"
+    );
 
     let value = read_work_show_json(&main_dir, "work-1");
     let review_task = value["attempts"][0]["tasks"]

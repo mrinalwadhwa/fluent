@@ -276,7 +276,11 @@ reviewers fail an Attempt; each entry names the producing review Task
 and the artifact path, such as
 `.factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md`.
 The Attempt loop uses those producer task ids to choose the reviewers
-for the next follow-up review round.
+for the next follow-up review round. When Factory plans that targeted
+round, each review Task receives the matching prior failed review
+artifact for its role in `input_artifacts`, so the executor can prompt
+the reviewer to verify the follow-up against the concrete findings and
+grant sandboxed read access to that artifact.
 JSON omits `input_artifacts` when the list is empty. Incomplete Tasks do
 not carry output. Attempt
 completion is derived from its Tasks; a complete Attempt must not contain
