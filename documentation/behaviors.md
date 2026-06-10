@@ -640,7 +640,9 @@ status `failed`, a failure reason, and check artifacts on the stored
 Merge Candidate.
 Test: tests/binary.rs (work_merge_candidate_failed_check_leaves_target_unchanged)
 
-WHEN any completed review artifact has a failing verdict,
+WHEN any completed review artifact has a failing verdict and the
+same-invocation follow-up write budget permits another follow-up write
+Task,
 THE SYSTEM SHALL mark the Attempt review state as `failed` and create a
 planned follow-up write Task with deterministic id
 `<attempt-id>-followup-<n>`, the candidate workspace as writable access,
