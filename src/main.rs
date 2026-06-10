@@ -181,6 +181,7 @@ fn main() -> Result<()> {
         }
         Some(Commands::Resume {
             run_id,
+            no_sandbox,
             coder,
             extra_args,
         }) => {
@@ -191,7 +192,7 @@ fn main() -> Result<()> {
                 &resolver,
                 &extra_args,
                 coder_kind,
-                cli.no_sandbox,
+                no_sandbox || cli.no_sandbox,
             )?;
         }
         Some(Commands::Init) => {
@@ -1035,7 +1036,11 @@ fn cmd_resume(
         );
     }
 
-    os::check_prerequisites_for(coder_kind)?;
+    if no_sandbox {
+        os::check_coder_prerequisite(coder_kind)?;
+    } else {
+        os::check_prerequisites_for(coder_kind)?;
+    }
     credential::inject_credentials()?;
     credential::setup_git_signing();
 
@@ -1070,7 +1075,11 @@ fn cmd_resume_headless(
         );
     }
 
-    os::check_prerequisites_for(coder_kind)?;
+    if no_sandbox {
+        os::check_coder_prerequisite(coder_kind)?;
+    } else {
+        os::check_prerequisites_for(coder_kind)?;
+    }
     credential::inject_credentials()?;
     credential::setup_git_signing();
 

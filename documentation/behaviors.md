@@ -1128,6 +1128,21 @@ THE SYSTEM SHALL restart the selected run's session loop without
 launching an interactive agent.
 Test: tests/binary.rs (headless_resume_restarts_selected_run_loop), tests/behaviors/operations/test-headless-resume.sh
 
+WHEN `factory resume [RUN_ID] --no-sandbox --coder codex` is invoked
+without a terminal on stdin,
+THE SYSTEM SHALL restart the selected run's session loop without
+invoking `sandbox-exec`, and SHALL require the selected coder without
+requiring the local Seatbelt runtime.
+Test: tests/binary.rs (headless_resume_restarts_selected_run_loop, headless_resume_no_sandbox_does_not_require_sandbox_exec)
+
+WHEN `factory --no-sandbox resume [RUN_ID] --coder codex` is invoked,
+THE SYSTEM SHALL preserve the top-level no-sandbox behavior for resume.
+Test: tests/behaviors/operations/test-live-run-state.sh (resume uses live status rule)
+
+WHEN `factory resume --help` is shown,
+THE SYSTEM SHALL list `--no-sandbox` as a resume option.
+Test: tests/binary.rs (resume_help_lists_no_sandbox)
+
 WHEN `factory resume` is invoked without a run ID and without a terminal
 on stdin,
 THE SYSTEM SHALL find a run with status `needs-user` or `failed` and

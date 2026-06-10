@@ -160,6 +160,10 @@ pub enum Commands {
         /// Run ID to resume
         run_id: Option<String>,
 
+        /// Disable sandbox
+        #[arg(long)]
+        no_sandbox: bool,
+
         /// Coding agent to launch: claude or codex
         #[arg(long)]
         coder: Option<String>,

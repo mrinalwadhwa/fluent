@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use std::env;
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
@@ -135,6 +136,12 @@ pub fn check_prerequisites_for(coder_kind: CoderKind) -> Result<()> {
     {
         bail!("sandbox-exec not found (macOS only)");
     }
+    check_coder_prerequisite(coder_kind)?;
+    Ok(())
+}
+
+/// Check that the selected coder is available.
+pub fn check_coder_prerequisite(coder_kind: CoderKind) -> Result<()> {
     let command = coder_kind.as_str();
     if !command_exists(command) {
         bail!("{command} not found in PATH");
@@ -143,10 +150,28 @@ pub fn check_prerequisites_for(coder_kind: CoderKind) -> Result<()> {
 }
 
 fn command_exists(name: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(name)
-        .output()
-        .is_ok_and(|o| o.status.success())
+    env::var_os("PATH")
+        .map(|paths| {
+            env::split_paths(&paths).any(|dir| {
+                let candidate = dir.join(name);
+                candidate.is_file() && is_executable(&candidate)
+            })
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    path.metadata()
+        .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &std::path::Path) -> bool {
+    path.exists()
 }
 
 #[cfg(test)]
