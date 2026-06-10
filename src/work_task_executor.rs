@@ -865,7 +865,7 @@ fn run_task_coder(
 
     let workspace_resolver = ContentResolver::new(Some(workspace_path));
     let system_prompt = workspace_resolver
-        .resolve_content("prompts/author.md")
+        .resolve_content("prompts/work-author.md")
         .unwrap_or_default();
     let (sandbox, _sandbox_profile) = if no_sandbox {
         (CoderSandbox::None, None)

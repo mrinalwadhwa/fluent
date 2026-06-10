@@ -70,6 +70,7 @@ pub fn bundled_content(relative: &str) -> Option<String> {
     // Prompts
     match relative {
         "prompts/author.md" => Some(include_str!("../prompts/author.md").to_string()),
+        "prompts/work-author.md" => Some(include_str!("../prompts/work-author.md").to_string()),
         "prompts/review-architecture.md" => {
             Some(include_str!("../prompts/review-architecture.md").to_string())
         }
@@ -212,11 +213,22 @@ Review run {{RUN_ID}}.
     #[test]
     fn test_bundled_content_prompts() {
         assert!(bundled_content("prompts/author.md").is_some());
+        assert!(bundled_content("prompts/work-author.md").is_some());
         assert!(bundled_content("prompts/review-architecture.md").is_some());
         assert!(bundled_content("prompts/review-behaviors.md").is_some());
         assert!(bundled_content("prompts/review-documentation.md").is_some());
         assert!(bundled_content("prompts/review-skills.md").is_some());
         assert!(bundled_content("prompts/review-tests.md").is_some());
+    }
+
+    #[test]
+    fn bundled_work_author_prompt_avoids_legacy_run_state_contract() {
+        let content = bundled_content("prompts/work-author.md").unwrap();
+
+        assert!(content.contains("Factory Work model"));
+        assert!(!content.contains("Status file contract"));
+        assert!(!content.contains(".factory/runs/"));
+        assert!(!content.contains("handoff.md"));
     }
 
     #[test]

@@ -842,10 +842,15 @@ fn work_task_run_passes_task_context_to_coder_prompt() {
     let main_dir = setup_git_project(&tmp);
     let bin_dir = tmp.path().join("bin");
     let prompt_log = tmp.path().join("prompt.log");
+    let system_log = tmp.path().join("system.log");
     write_mock_claude(
         &bin_dir,
         r##"#!/bin/bash
 while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--append-system-prompt" ]; then
+    shift
+    printf '%s\n' "$1" > "$SYSTEM_LOG"
+  fi
   if [ "$1" = "-p" ]; then
     shift
     printf '%s\n' "$1" > "$PROMPT_LOG"
@@ -884,10 +889,12 @@ exit 0
         ])
         .env("PATH", mock_path(&bin_dir))
         .env("PROMPT_LOG", &prompt_log)
+        .env("SYSTEM_LOG", &system_log)
         .assert()
         .success();
 
     let prompt = fs::read_to_string(prompt_log).unwrap();
+    let system_prompt = fs::read_to_string(system_log).unwrap();
     assert!(prompt.contains("Work Item: work-1 - Prompt contract"));
     assert!(prompt.contains("Attempt: attempt-1"));
     assert!(prompt.contains("Task: attempt-1-write"));
@@ -897,6 +904,10 @@ exit 0
     assert!(prompt.contains("Leave the writable workspace clean"));
     assert!(prompt.contains("no committed Task output makes the Task fail"));
     assert!(!prompt.contains("mark the Task needs-user"));
+    assert!(system_prompt.contains("Factory Work model"));
+    assert!(!system_prompt.contains("Status file contract"));
+    assert!(!system_prompt.contains(".factory/runs/"));
+    assert!(!system_prompt.contains("handoff.md"));
     assert!(prompt.contains("Author preflight:"));
     assert!(prompt.contains("Before editing, identify the likely touched surfaces"));
     assert!(prompt.contains(

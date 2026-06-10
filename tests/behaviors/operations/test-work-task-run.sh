@@ -219,6 +219,19 @@ test_run_passes_task_context_to_coder_prompt() {
   assert_contains "$PROMPT" "Commit all Task output" || RESULT=1
   assert_contains "$PROMPT" "Leave the writable workspace clean" || RESULT=1
   assert_contains "$PROMPT" "no committed Task output makes the Task fail" || RESULT=1
+  assert_contains "$PROMPT" "Factory Work model" || RESULT=1
+  if printf '%s' "$PROMPT" | grep -Fq "Status file contract"; then
+    printf '    FAIL: Work prompt should not include legacy status file contract\n'
+    RESULT=1
+  fi
+  if printf '%s' "$PROMPT" | grep -Fq ".factory/runs/"; then
+    printf '    FAIL: Work prompt should not include legacy run state paths\n'
+    RESULT=1
+  fi
+  if printf '%s' "$PROMPT" | grep -Fq "handoff.md"; then
+    printf '    FAIL: Work prompt should not include legacy handoff instructions\n'
+    RESULT=1
+  fi
   if printf '%s' "$PROMPT" | grep -Fq "mark the Task needs-user"; then
     printf '    FAIL: prompt should not tell write Task authors to mark needs-user\n'
     RESULT=1
