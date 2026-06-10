@@ -85,6 +85,36 @@ require_in_file "$PLAN" \
 require_in_file "$PLAN" \
   'when `factory work create` can express' \
   "plan-execution skill"
+require_in_file "$PLAN" \
+  '## Output format (Work Item planning)' \
+  "plan-execution skill"
+require_in_file "$PLAN" \
+  'Work Item with one Attempt and one write Task' \
+  "plan-execution skill"
+require_in_file "$PLAN" \
+  'peer Work Items with their own Attempts, Workspaces, and Merge' \
+  "plan-execution skill"
+require_in_file "$PLAN" \
+  'record likely follow-up Tasks or sequencing notes without' \
+  "plan-execution skill"
+require_in_file "$PLAN" \
+  '## Output format (peer Work Items)' \
+  "plan-execution skill"
+require_in_file "$PLAN" \
+  '| Step | Work unit | State reached | Behaviors | Verification | Req? |' \
+  "plan-execution skill"
+require_in_file "$PLAN" \
+  '**Work unit**' \
+  "plan-execution skill"
+require_in_file "$PLAN" \
+  '## Dependencies and sync points' \
+  "plan-execution skill"
+require_in_file "$PLAN" \
+  '## Legacy fallback format (parallel child runs)' \
+  "plan-execution skill"
+require_in_file "$PLAN" \
+  'Use the legacy group/step format only when the Work model cannot yet' \
+  "plan-execution skill"
 
 require_in_file "$BUILD" \
   "Write a brief that will become" \
@@ -107,6 +137,26 @@ require_in_file "$BEHAVIORS" \
 require_in_file "$BEHAVIORS" \
   "keep the approved brief available for later planning" \
   "behavior documentation"
+require_in_file "$BEHAVIORS" \
+  'Test: tests/behaviors/skills/parallel-work-items-plan.md (test-skill)' \
+  "behavior documentation"
+
+require_in_file "$ROOT/tests/behaviors/README.md" \
+  'Prefer peer Work Items for independent parallel work' \
+  "behavior mapping"
+require_in_file "$ROOT/tests/behaviors/README.md" \
+  'Define sync points without default Task dependencies or child-run groups' \
+  "behavior mapping"
+
+require_in_file "$ROOT/tests/behaviors/skills/parallel-work-items-plan.md" \
+  'peer Work Items rather than one Work Item with parallel Tasks' \
+  "parallel Work Items skill scenario"
+require_in_file "$ROOT/tests/behaviors/skills/parallel-work-items-plan.md" \
+  'sync point around the shared user identity contract' \
+  "parallel Work Items skill scenario"
+require_in_file "$ROOT/tests/behaviors/skills/parallel-work-items-plan.md" \
+  'avoid using legacy child-run groups as the default plan shape' \
+  "parallel Work Items skill scenario"
 
 require_not_in_file "$CAPTURE" \
   "Write bridge planning artifacts when later skills" \
@@ -114,6 +164,27 @@ require_not_in_file "$CAPTURE" \
 require_not_in_file "$PLAN" \
   'Assemble a legacy run `execution-instructions.md` file only when a compatibility' \
   "plan-execution skill"
+require_not_in_file "$PLAN" \
+  'Determine whether the work can be executed as a single run (leaf)' \
+  "plan-execution skill"
+require_not_in_file "$PLAN" \
+  '## Output format (leaf run)' \
+  "plan-execution skill"
+require_not_in_file "$PLAN" \
+  'When the plan has parallel child runs, identify where they must converge' \
+  "plan-execution skill"
+require_not_in_file "$PLAN" \
+  'When the work decomposes into independent child runs, use the group/step' \
+  "plan-execution skill"
+require_not_in_file "$PLAN" \
+  'Work-model Tasks with explicit dependencies' \
+  "plan-execution skill"
+require_not_in_file "$PLAN" \
+  'parallel Work-model Tasks' \
+  "plan-execution skill"
+require_not_in_file "$BEHAVIORS" \
+  'Work-model task/dependency structure' \
+  "behavior documentation"
 
 if [ "$failures" -ne 0 ]; then
   exit 1

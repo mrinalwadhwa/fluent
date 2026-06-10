@@ -764,12 +764,23 @@ legacy fallback.
 ## Execution planning
 
 WHEN the user invokes the plan-execution skill,
-THE SYSTEM SHALL break the approach into executable steps and write
-plan.md.
+THE SYSTEM SHALL break the approach into executable Work Item steps,
+describe one Work Item with an Attempt and Task notes or peer Work Items
+as the default planning units, and write plan.md.
+Test: tests/behaviors/skills/format-check-plan.md (test-skill)
+Test: tests/behaviors/operations/test-planning-skills-work-context.sh
 
 WHEN the plan is approved by the user,
 THE SYSTEM SHALL create the Work Item with approved planning context and
 set legacy status to `planned` only when using the legacy fallback.
+Test: tests/behaviors/operations/test-planning-skills-work-context.sh
+
+WHEN the plan-execution skill describes parallel execution,
+THE SYSTEM SHALL describe peer Work Items first, keep Attempt and Task
+sequencing as planning notes rather than executable dependencies, and
+label child-run decomposition as a legacy fallback.
+Test: tests/behaviors/skills/parallel-work-items-plan.md (test-skill)
+Test: tests/behaviors/operations/test-planning-skills-work-context.sh
 
 ## Worktree isolation
 

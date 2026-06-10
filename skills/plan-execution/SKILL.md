@@ -50,28 +50,34 @@ status to `planned` only in a legacy fallback or recovery path.
 
 ### Phase 2 — Assess scope
 
-Determine whether the work can be executed as a single run (leaf) or
-needs decomposition into child runs.
+Determine whether the work can use one of these Work-model shapes:
+
+- Work Item with one Attempt and one write Task
+- peer Work Items that can proceed independently
+- Work Item with one Attempt, plus likely follow-up Task notes for future
+  execution
 
 Indicators that decomposition is needed:
 - The work spans multiple independent areas of the codebase
 - The work would exceed a single session's context window
 - Parts can proceed in parallel without knowing each other's results
 
-Indicators that direct execution is fine:
+Indicators that one Work Item with one write Task is fine:
 - The work is focused on one area
 - Everything depends on everything else
 - The approach fits in one session
 
 Share your assessment with the user:
 
-> "I think this can be done in a single run — the work is focused on
-> [area]. Does that match your sense, or do you see independent pieces?"
+> "I think this can be done as one Work Item with one Attempt and one
+> write Task — the work is focused on [area]. Does that match your
+> sense, or do you see independent pieces?"
 
 Or:
 
-> "I see two independent areas here: [X] and [Y]. They could run in
-> parallel. Does it make sense to split them?"
+> "I see two independent areas here: [X] and [Y]. They could become peer
+> Work Items so each can have its own Attempt, Workspace, and Merge
+> Candidate. Does it make sense to split them?"
 
 ### Phase 3 — Identify the first step
 
@@ -98,6 +104,10 @@ Present steps one at a time or in small groups. For each step, discuss:
 - **Behaviors delivered** — which behaviors from behaviors.diff.md does
   this step satisfy?
 
+- **Work unit** — does the state belong in the initial write Task, a
+  likely follow-up Task note, or a peer Work Item? Treat Task sequencing
+  as planning notes unless Factory can execute that dependency.
+
 - **Verification** — how does the agent know the step is done? A test
   to run, an endpoint to hit, a file to check. Without this, the agent
   doesn't know when to move on.
@@ -107,11 +117,11 @@ Present steps one at a time or in small groups. For each step, discuss:
 
 Present as a table for easy scanning:
 
-> | Step | State reached | Behaviors | Verification | Req? |
-> |------|--------------|-----------|-------------|------|
-> | 1 | Users can log in via API | B1, B2 | `curl POST /login` returns 200 | Yes |
-> | 2 | Invalid credentials rejected | B3 | `curl` with bad password returns 401 | Yes |
-> | 3 | Rate limiting on login | B4 | 10 rapid requests → 429 | Optional |
+> | Step | Work unit | State reached | Behaviors | Verification | Req? |
+> |------|-----------|---------------|-----------|--------------|------|
+> | 1 | Attempt: auth-work, Task: write | Users can log in via API | B1, B2 | `curl POST /login` returns 200 | Yes |
+> | 2 | Likely follow-up Task note | Invalid credentials rejected | B3 | `curl` with bad password returns 401 | Yes |
+> | 3 | Peer Work Item: login-hardening | Rate limiting on login | B4 | 10 rapid requests -> 429 | Optional |
 
 Ask after each group:
 
@@ -143,20 +153,20 @@ Before finalizing, surface:
 > defer — it's valuable but not blocking. The risk I see is [X] — if
 > that doesn't work, we'd need to reconsider [Y]."
 
-### Phase 7 — Sync points (parallel plans only)
+### Phase 7 — Sync points (parallel Work only)
 
-When the plan has parallel child runs, identify where they must converge:
+When the plan has peer Work Items, identify where they must converge:
 
-- Which child runs are involved?
+- Which Work Items, Attempts, Workspaces, or Merge Candidates are involved?
 - What must be true at the convergence point?
-- Is it blocking (one child run can't continue without it) or non-blocking?
+- Is it blocking (one Work Item can't continue without it) or non-blocking?
 
-> "After child run A finishes the API and child run B finishes the UI,
-> they need to integrate. The API contract needs to be locked before B
-> can start integration work."
+> "After the API Work Item publishes its contract and the UI Work Item
+> consumes it, they need to integrate. The API contract needs to be
+> locked before the UI Work Item starts integration work."
 
-Define interface contracts between child runs before execution — this
-prevents parallel child runs from diverging.
+Define interface contracts between peer Work Items before execution.
+This prevents parallel work from diverging.
 
 ### Phase 8 — Assemble and confirm
 
@@ -188,22 +198,29 @@ or recovery path.
 
 ---
 
-## Output format (leaf run)
+## Output format (Work Item planning)
 
 ```markdown
 # Plan
 
 Work Item: [work-item-id]
 Brief: [one-line summary]
+Attempt: [attempt-id or planned first attempt]
 
 ## Steps
 
-| Step | State reached | Behaviors | Verification | Req? |
-|------|--------------|-----------|-------------|------|
-| 1 | [observable state] | [B1, B2] | [how to verify] | Yes |
-| 2 | [observable state] | [B3] | [how to verify] | Yes |
-| 3 | [observable state] | [B4] | [how to verify] | Optional |
-| 4+ | TBD — depends on [what] | | | |
+| Step | Work unit | State reached | Behaviors | Verification | Req? |
+|------|-----------|---------------|-----------|--------------|------|
+| 1 | Attempt: [attempt-id], Task: write | [observable state] | [B1, B2] | [how to verify] | Yes |
+| 2 | Likely follow-up Task note | [observable state] | [B3] | [how to verify] | Yes |
+| 3 | Peer Work Item: [id] | [observable state] | [B4] | [how to verify] | Optional |
+| 4+ | TBD — depends on [what] | | | | |
+
+## Dependencies and sync points
+
+- [Peer Work Item sync point, what must be true, blocking or not]
+- [Attempt/Task sequencing note, if useful; do not present as an
+  executable dependency unless Factory supports it]
 
 ## Scope trades
 
@@ -214,41 +231,68 @@ Brief: [one-line summary]
 - [Risk and what it affects]
 ```
 
-## Output format (parallel plan)
+## Output format (peer Work Items)
 
-When the work decomposes into independent child runs, use the group/step
-format. The factory parses this structure and creates child runs
-automatically. Each H2 is a group (executed in sequence). Each H3 is a
-step. Groups marked `(parallel)` launch their steps concurrently; unmarked
-groups run steps one at a time.
+When the work decomposes into independent efforts, treat these as the
+normal parallel planning vocabulary:
 
-Child run IDs are `{parent-id}-{group-idx}-{step-idx}` (1-indexed).
+- peer Work Items with their own Attempts, Workspaces, and Merge
+  Candidates
+
+Use peer Work Items when each effort can be reviewed and landed
+separately. If several pieces must share one candidate, keep them in one
+Work Item and record likely follow-up Tasks or sequencing notes without
+claiming Factory can pre-schedule Task dependencies.
+
+Ask the user to confirm the split before writing the final plan.
 
 ```markdown
-## Group 1 (parallel)
+# Work Item planning
 
-### Step: [step title]
+## Peer Work Items
 
-[Brief for this child run — scope, behaviors it delivers, what it produces.]
+### Work Item: [api-work-item-id]
 
-### Step: [step title]
+[Brief for this Work Item — scope, behaviors it delivers, what it
+produces.]
 
-[Brief for this child run.]
+### Work Item: [ui-work-item-id]
 
-## Group 2
+[Brief for this Work Item.]
 
-### Step: [step title]
+## Shared Attempt/Task notes
 
-[Brief — this runs after group 1 merges.]
+### Attempt: [attempt-id]
+
+- Initial write Task: [scope and output]
+- Likely follow-up Task: [scope and output, if the first Task reveals it
+  is needed]
+
+## Merge Candidates
+
+- [Which Attempt produces each Merge Candidate, and what must pass before
+  it lands]
 
 ## Sync points
 
-- [Which child runs converge, what must be true, blocking or not]
+- [Which peer Work Items converge, what must be true, blocking
+  or not]
 
 ## Interfaces
 
-- [Contract between parallel child runs — shared types, API shape, file paths]
+- [Contract between parallel work — shared types, API shape, file paths]
 ```
+
+## Legacy fallback format (parallel child runs)
+
+Use the legacy group/step format only when the Work model cannot yet
+express the required coordination, such as coordinated child-run
+decomposition for one large effort or an explicit recovery path. In that
+case, the factory parses the structure and creates child runs
+automatically. Each H2 is a group executed in sequence. Each H3 is a
+step. Groups marked `(parallel)` launch their steps concurrently; unmarked
+groups run steps one at a time. Child run IDs are
+`{parent-id}-{group-idx}-{step-idx}` (1-indexed).
 
 ---
 
@@ -266,8 +310,8 @@ Child run IDs are `{parent-id}-{group-idx}-{step-idx}` (1-indexed).
 - **Walking skeleton first.** The first step should prove the approach
   works end-to-end, even if the functionality is minimal.
 - **Every behavior must have a home.** Each behavior in behaviors.diff.md
-  maps to a step or child run. If a behavior has no home, the plan is
-  incomplete.
+  maps to a step, Attempt, Task note, or peer Work Item. If a behavior
+  has no home, the plan is incomplete.
 - **Verification is required.** Every step needs a way for the agent to
   confirm it's done. No verification → the agent can't know when to
   move on.
@@ -275,11 +319,11 @@ Child run IDs are `{parent-id}-{group-idx}-{step-idx}` (1-indexed).
   the rest TBD. The plan evolves during execution.
 - **Classify scope early.** Mark steps as required or optional from the
   start. This makes scope trading possible when problems arise.
-- **Decompose by scope, not by task.** Child runs own areas of the
-  codebase, not individual tasks. "Auth system" is a good child run.
-  "Write tests" is not.
-- **Interfaces before execution.** When parallel child runs produce code
-  that must integrate, define the contract in the plan.
+- **Decompose by scope, not by chore.** Use Work Items and Task notes to
+  capture coherent areas of behavior, not checklist activities. "Auth
+  system" is a good Work Item. "Write tests" is not.
+- **Interfaces before execution.** When peer Work Items produce code that
+  must integrate, define the contract in the plan.
 - **Don't over-plan.** The plan breaks the approach into steps. It does
   not redesign the approach. If planning reveals the approach is wrong,
   go back to design-approach.

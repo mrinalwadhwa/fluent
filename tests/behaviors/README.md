@@ -92,12 +92,14 @@ FACTORY_BIN_OVERRIDE="$REVIEW_ARTIFACT_DIR/target/debug/factory" \
 | Behavior | Scenarios |
 |---|---|
 | Break approach into steps, write plan.md | `format-check-plan` |
-| Assess single run versus child-run decomposition | `format-check-plan` |
+| Assess one Work Item, likely follow-up Task notes, or peer Work Items | `format-check-plan`, `parallel-work-items-plan` |
 | Start with a walking skeleton | `format-check-plan` |
 | Phrase steps as observable states with verification | `format-check-plan` |
 | Map every behavior to a step or explicit TBD | `format-check-plan` |
 | Identify scope trades and risks | `format-check-plan` |
-| Set status to `planned` | `format-check-plan` |
+| Create Work Item planning context or use legacy planned fallback | `format-check-plan` |
+| Prefer peer Work Items for independent parallel work | `parallel-work-items-plan` |
+| Define sync points without default Task dependencies or child-run groups | `parallel-work-items-plan` |
 
 ### Operational (tested by test-run, binary.rs, and others)
 
