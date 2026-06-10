@@ -190,7 +190,7 @@ EOF
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "attempt-1" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "attempt-1-merge-candidate" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Target branch: main" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Review diff:" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Review diff: git -C '$CANDIDATE_PWD' diff '$TARGET_BEFORE..$LANDED_COMMIT'" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" ".factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/behaviors/review.md" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "$TEST_PROJECT_PWD/.factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/behaviors/review.md" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "candidate workspace as read-only" || RESULT=1
@@ -206,7 +206,12 @@ EOF
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "$TARGET_BEFORE" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "source_workspace" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "candidate_commit" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Check artifacts:" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Merge check status:" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Merge checks ran before reviewers" || RESULT=1
+  if grep -Fq "Check artifacts:" "$TEST_DIR/merge-review-args-log"; then
+    printf '    FAIL: merge reviewer prompt contains check artifact path list\n'
+    RESULT=1
+  fi
   assert_contains "$(cat "$TEST_DIR/stdout")" "Merged Merge Candidate attempt-1-merge-candidate" || RESULT=1
   "$FACTORY_BIN" work merge-candidate work-1 attempt-1-merge-candidate \
     > "$TEST_DIR/landed-candidate" 2> "$TEST_DIR/stderr" || RESULT=1

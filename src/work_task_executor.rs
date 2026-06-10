@@ -9,6 +9,7 @@ use crate::coder::{CoderKind, CoderSandbox};
 use crate::content::ContentResolver;
 use crate::credential;
 use crate::os;
+use crate::review_diff_command::render_review_diff_command;
 use crate::work_model::{
     ArtifactRef, AttemptKind, AttemptStatus, TaskKind, TaskOutput, TaskStatus, WorkItem,
     WorkModelStorageError, WorkModelStore, WorkspaceRef, resolve_expected_candidate_workspace_path,
@@ -1070,15 +1071,27 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
             review_context.candidate_commit
         )
     } else {
+        let candidate_workspace = task
+            .workspace_access
+            .reads
+            .iter()
+            .zip(input.readable_workspaces.iter())
+            .find(|(workspace, _)| workspace.id == review_context.candidate_workspace_id)
+            .map(|(_, resolved_path)| resolved_path.as_path())
+            .unwrap_or_else(|| Path::new(&review_context.candidate_workspace_path));
+        let review_range = format!(
+            "{}..{}",
+            review_context.source_branch, review_context.candidate_commit
+        );
+        let review_diff_command = render_review_diff_command(candidate_workspace, &review_range);
         format!(
-            "Readable candidate workspaces:\n{}\n\nReview context:\n- Candidate workspace: {} ({})\n- Source branch: {}\n- Candidate commit: {}\n- Review diff: git -C <candidate-workspace> diff {}..{}\n",
+            "Readable candidate workspaces:\n{}\n\nReview context:\n- Candidate workspace: {} ({})\n- Source branch: {}\n- Candidate commit: {}\n- Review diff: {}\n",
             read_paths,
             review_context.candidate_workspace_id,
             review_context.candidate_workspace_path,
             review_context.source_branch,
             review_context.candidate_commit,
-            review_context.source_branch,
-            review_context.candidate_commit
+            review_diff_command
         )
     };
     let edit_target = if input.review_only {
@@ -1155,6 +1168,7 @@ fn reviewer_writable_outputs_guidance(artifact_dir: &Path) -> String {
 mod tests {
     use super::*;
     use crate::work_model::{TaskOutput, TaskStatus, WorkItem};
+    use std::os::unix::fs::PermissionsExt;
 
     fn review_item() -> WorkItem {
         let mut item = WorkItem {
@@ -1211,6 +1225,81 @@ mod tests {
         ));
         assert!(prompts.system_prompt.contains("CARGO_TARGET_DIR"));
         assert!(!prompts.system_prompt.contains(".factory/runs/"));
+    }
+
+    #[test]
+    fn work_review_prompt_includes_shell_safe_executable_diff_command() {
+        let item = review_item();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path().join("candidate'space");
+        let review_path = tmp.path().join("review.md");
+        let prompts = build_work_review_prompts(WorkReviewPromptInput {
+            item: &item,
+            attempt_id: "attempt-1",
+            task_id: "attempt-1-review-tests",
+            artifact_dir: tmp.path(),
+            review_path: &review_path,
+            readable_workspaces: &[workspace.clone()],
+            input_artifacts: &[],
+            review_only: false,
+        })
+        .unwrap();
+        let command = prompts
+            .review_prompt
+            .lines()
+            .find_map(|line| line.strip_prefix("- Review diff: "))
+            .unwrap();
+
+        assert_eq!(
+            command,
+            render_review_diff_command(&workspace, "main..abc123")
+        );
+        assert!(command.contains("'\\''"));
+        assert_shell_command_invokes_fake_git(
+            command,
+            &[
+                "-C".to_string(),
+                workspace.display().to_string(),
+                "diff".to_string(),
+                "main..abc123".to_string(),
+            ],
+        );
+    }
+
+    fn assert_shell_command_invokes_fake_git(command: &str, expected_args: &[String]) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir(&bin_dir).unwrap();
+        let log_path = tmp.path().join("args.log");
+        let git_path = bin_dir.join("git");
+        fs::write(
+            &git_path,
+            format!(
+                "#!/bin/sh\nprintf '<%s>\\n' \"$@\" > '{}'\n",
+                log_path.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&git_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&git_path, permissions).unwrap();
+
+        let output = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected_log = expected_args
+            .iter()
+            .map(|arg| format!("<{arg}>\n"))
+            .collect::<String>();
+        assert_eq!(fs::read_to_string(log_path).unwrap(), expected_log);
     }
 }
 

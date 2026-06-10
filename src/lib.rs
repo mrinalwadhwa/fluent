@@ -13,6 +13,7 @@ pub mod parallel;
 pub mod plan;
 pub mod report;
 pub mod review;
+pub mod review_diff_command;
 pub mod run;
 pub mod session;
 pub mod summary;

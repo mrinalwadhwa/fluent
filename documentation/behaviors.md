@@ -234,6 +234,15 @@ NOT instruct the reviewer to write legacy
 `.factory/runs/<run-id>/reviews/...` artifacts.
 Test: src/work_task_executor.rs (work_review_prompt_names_work_artifacts_and_writable_outputs)
 
+WHEN Factory launches a Work-model `review` Task for a candidate
+workspace,
+THE SYSTEM SHALL include a `git -C <candidate-workspace> diff <range>`
+review diff command that shell-quotes the resolved candidate workspace
+path and exact revision range so the command can execute through
+`/bin/sh`.
+Test: src/work_task_executor.rs (work_review_prompt_includes_shell_safe_executable_diff_command)
+Test: src/review_diff_command.rs (review_diff_command_survives_apostrophes_through_sh)
+
 WHEN a behavior operation script invokes the Factory binary,
 THE SYSTEM SHALL allow callers to set `FACTORY_BIN_OVERRIDE` to an
 explicit binary path; when no override is set, the script SHALL keep the
@@ -484,6 +493,17 @@ THE SYSTEM SHALL tell the reviewer that the candidate workspace is
 read-only for review purposes and that scratch tests, suggested patches,
 or proposed documentation edits belong in merge review artifacts rather
 than in the candidate workspace.
+Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge lands after update, checks, and reviewers)
+
+WHEN Factory launches a merge-time Work reviewer,
+THE SYSTEM SHALL include a `git -C <candidate-workspace> diff <range>`
+review diff command that shell-quotes the candidate workspace path and
+the exact target-to-candidate commit range.
+Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge lands after update, checks, and reviewers)
+
+WHEN merge checks have already run before merge-time reviewers,
+THE SYSTEM SHALL tell reviewers that checks ran before reviewers without
+presenting merge-check artifact paths as required reviewer inputs.
 Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge lands after update, checks, and reviewers)
 
 WHEN `factory work merge <work-item-id> <merge-candidate-id>` is invoked

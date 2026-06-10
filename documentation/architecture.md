@@ -101,11 +101,12 @@ exists. Each review Task reads the candidate workspace, carries review
 context copied from the write output, and writes only under
 `.factory/work/artifacts/<work-item-id>/<attempt-id>/<task-id>/`. The
 review context names the candidate workspace, source branch, and
-candidate commit so a reviewer can inspect the scoped diff without
-rediscovering the author Task. Running a review Task requires `review.md`
-in that artifact area; the Task can complete even when that artifact
-says `Verdict: fail` or `Verdict: uncertain` because verdict acceptance
-belongs to later review or merge policy.
+candidate commit and includes a shell-quoted `git -C <workspace> diff
+<range>` command so a reviewer can inspect the scoped diff without
+rediscovering the author Task. Running a review Task requires
+`review.md` in that artifact area; the Task can complete even when that
+artifact says `Verdict: fail` or `Verdict: uncertain` because verdict
+acceptance belongs to later review or merge policy.
 `factory work review-codebase <work-item-id> <attempt-id>` appends a
 review-only Attempt for full-codebase review of the current source
 checkout. Review-only Attempts contain review Tasks only, read the source
@@ -179,13 +180,17 @@ merge-time context, then fast-forwards the target branch to the updated
 candidate head. Merge-time reviewers receive the exact
 `.factory/work/artifacts/<work-item-id>/<attempt-id>/<candidate-id>/merge/reviews/<role>/review.md`
 artifact path for their output and the absolute filesystem path the
-reviewer must write. When Factory builds the Work merge reviewer system
-prompt, it uses the prompt's `[work-system]` section when one exists and
-falls back to the raw `[system]` section otherwise. Bundled reviewer
-prompts keep legacy `.factory/runs` artifact paths in `[system]` and put
-Work-native artifact guidance in `[work-system]`, so Work merge reviews
-do not depend on filtering legacy run guidance out of bundled prompt
-text. Factory then points the reviewer at the absolute candidate
+reviewer must write. They also receive a shell-quoted `git -C
+<workspace> diff <target-commit>..<candidate-commit>` command and a
+merge-check status note; Factory does not ask them to inspect
+merge-check artifact paths from the reviewer sandbox. When Factory
+builds the Work merge reviewer system prompt, it uses the prompt's
+`[work-system]` section when one exists and falls back to the raw
+`[system]` section otherwise. Bundled reviewer prompts keep legacy
+`.factory/runs` artifact paths in `[system]` and put Work-native
+artifact guidance in `[work-system]`, so Work merge reviews do not
+depend on filtering legacy run guidance out of bundled prompt text.
+Factory then points the reviewer at the absolute candidate
 workspace skill path when that skill exists; if the candidate does not
 contain that skill file, the prompt tells the reviewer to apply the
 reviewer role directly. If the candidate workspace contains

@@ -14,6 +14,7 @@ use crate::credential;
 use crate::land;
 use crate::os;
 use crate::review::{self, ReviewState};
+use crate::review_diff_command::render_review_diff_command;
 use crate::work_model::{
     ArtifactRef, MergeCandidateMergeState, MergeCandidateMergeStatus, MergeCandidateReviewState,
     WORK_ARTIFACTS_DIR, WorkItem, WorkModelError, WorkModelStorageError, WorkModelStore,
@@ -416,14 +417,13 @@ fn run_one_merge_reviewer(
     let review_artifact_path = path_for_model(config.project_root, review_path);
     let review_absolute_path = review_path.display();
     let reviewer_artifact_dir = path_for_model(config.project_root, reviewer_dir);
-    let check_text = if check_artifacts.is_empty() {
-        "None.".to_string()
+    let check_status_text = if check_artifacts.is_empty() {
+        "No merge checks ran before reviewers.".to_string()
     } else {
-        check_artifacts
-            .iter()
-            .map(|artifact| format!("- {}: {}", artifact.producer_id, artifact.path))
-            .collect::<Vec<_>>()
-            .join("\n")
+        format!(
+            "Merge checks ran before reviewers and produced {} artifact record(s). Reviewers are not required to inspect check artifact paths from this sandbox.",
+            check_artifacts.len()
+        )
     };
     let behavior_review_input = if reviewer == "behaviors" {
         format!("{}\n", work_behavior_review_input(item))
@@ -431,22 +431,23 @@ fn run_one_merge_reviewer(
         String::new()
     };
     let writable_outputs_guidance = merge_reviewer_writable_outputs_guidance(reviewer_dir);
+    let review_range = format!("{target_head_before}..{candidate_head_after_rebase}");
+    let review_diff_command = render_review_diff_command(source_workspace, &review_range);
     let prompt = format!(
-        "Execute a merge-time Work model review.\n\nWork Item: {}\nMerge Candidate: {}\nReviewer: {}\nCandidate workspace: {}\nTarget branch: {}\nReview diff: git -C {} diff {}..HEAD\n\nCandidate workspace access:\n- Treat the candidate workspace as read-only for review purposes.\n- Do not modify, stage, unstage, commit, create, or delete files in the candidate workspace.\n\n{}\n\n{}Attempt history:\n{}\n\nRebase/update state:\n- Rebased candidate workspace onto target branch {} before checks and reviewers.\n- Target branch head before merge checks/reviews: {}\n- Candidate head after rebase/update: {}\n\nCheck artifacts:\n{}\n\nWork merge review artifact path:\n{}\nWrite the review artifact to exactly this filesystem path:\n{}\nYour reviewer artifact directory is:\n{}\n\nMerge Candidate model:\n{}\n",
+        "Execute a merge-time Work model review.\n\nWork Item: {}\nMerge Candidate: {}\nReviewer: {}\nCandidate workspace: {}\nTarget branch: {}\nReview diff: {}\n\nCandidate workspace access:\n- Treat the candidate workspace as read-only for review purposes.\n- Do not modify, stage, unstage, commit, create, or delete files in the candidate workspace.\n\n{}\n\n{}Attempt history:\n{}\n\nRebase/update state:\n- Rebased candidate workspace onto target branch {} before checks and reviewers.\n- Target branch head before merge checks/reviews: {}\n- Candidate head after rebase/update: {}\n\nMerge check status:\n{}\n\nWork merge review artifact path:\n{}\nWrite the review artifact to exactly this filesystem path:\n{}\nYour reviewer artifact directory is:\n{}\n\nMerge Candidate model:\n{}\n",
         config.work_item_id,
         candidate.id,
         reviewer,
         source_workspace.display(),
         candidate.target_branch,
-        source_workspace.display(),
-        candidate.target_branch,
+        review_diff_command,
         writable_outputs_guidance,
         behavior_review_input,
         attempt_history,
         candidate.target_branch,
         target_head_before,
         candidate_head_after_rebase,
-        check_text,
+        check_status_text,
         review_artifact_path,
         review_absolute_path,
         reviewer_artifact_dir,

@@ -1708,7 +1708,10 @@ exec "$@"
     assert!(!prompt.contains("- candidate: ../work-6-work-1-attempt-1"));
     assert!(prompt.contains("Review context:"));
     assert!(prompt.contains("- Source branch: main"));
-    assert!(prompt.contains("- Review diff: git -C <candidate-workspace> diff main.."));
+    assert!(prompt.contains(&format!(
+        "- Review diff: git -C '{}' diff 'main..",
+        candidate_workspace.display()
+    )));
     assert!(prompt.contains(&review_path.to_string_lossy().to_string()));
     let system = fs::read_to_string(system_log).unwrap();
     assert!(system.contains("Factory tests reviewer"));
