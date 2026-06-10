@@ -50,12 +50,28 @@ require_in_file "$CAPTURE" \
 
 for skill in "$DEFINE" "$APPROACH" "$PLAN"; do
   require_in_file "$skill" \
-    'Work Item planning context from `factory work show <work-item-id>`' \
+    "normal source of intent" \
+    "$skill"
+  require_in_file "$skill" \
+    "stores Work Item planning context" \
+    "$skill"
+  require_in_file "$skill" \
+    'Work Item planning context from `factory work show <work-item-id>` only' \
     "$skill"
   require_in_file "$skill" \
     "only in a legacy fallback or" \
     "$skill"
 done
+
+require_in_file "$DEFINE" \
+  "The approved brief from the active planning conversation or draft" \
+  "define-behaviors skill"
+require_in_file "$APPROACH" \
+  "The approved brief and behavior diff from the active planning" \
+  "design-approach skill"
+require_in_file "$PLAN" \
+  "The approved brief, behavior diff, and approach from the active" \
+  "plan-execution skill"
 
 require_in_file "$PLAN" \
   "This is the normal path for" \
@@ -87,6 +103,9 @@ require_in_file "$BEHAVIORS" \
   "behavior documentation"
 require_in_file "$BEHAVIORS" \
   "create the Work Item with approved planning context" \
+  "behavior documentation"
+require_in_file "$BEHAVIORS" \
+  "keep the approved brief available for later planning" \
   "behavior documentation"
 
 require_not_in_file "$CAPTURE" \

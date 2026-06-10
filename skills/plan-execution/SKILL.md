@@ -21,8 +21,11 @@ the executing agent but is expected to evolve during implementation.
 ### Phase 1 — Read the inputs
 
 Read:
-- Work Item planning context from `factory work show <work-item-id>` —
-  the default source of intent for Work-model planning
+- The approved brief, behavior diff, and approach from the active
+  planning conversation or draft artifacts — the normal source of intent
+  before `factory work create` stores Work Item planning context
+- Work Item planning context from `factory work show <work-item-id>` only
+  when the Work Item already exists
 - `.factory/runs/[run-id]/brief.md` only in a legacy fallback or
   recovery path
 - `behaviors.diff.md` from the active planning context — what the system

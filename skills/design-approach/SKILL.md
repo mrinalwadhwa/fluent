@@ -26,8 +26,11 @@ was actually built.
 ### Phase 1 — Read the inputs
 
 Read:
-- Work Item planning context from `factory work show <work-item-id>` —
-  the default source of intent for Work-model planning
+- The approved brief and behavior diff from the active planning
+  conversation or draft artifacts — the normal source of intent before
+  `factory work create` stores Work Item planning context
+- Work Item planning context from `factory work show <work-item-id>` only
+  when the Work Item already exists
 - `.factory/runs/[run-id]/brief.md` only in a legacy fallback or
   recovery path
 - `behaviors.diff.md` from the active planning context — what the system
@@ -163,10 +166,10 @@ short reason for each file. If no additional expertise beyond
 architecture applied, say so explicitly rather than omitting the
 section.
 
-After user approval, keep the approved approach with the planning
-context that will be passed to `factory work create --approach-file`.
-Set legacy status to `approach-designed` only when operating in a
-legacy fallback or recovery path.
+After user approval, keep the approved approach with the active planning
+context that will be passed to `factory work create --approach-file`
+after the plan is approved. Set legacy status to `approach-designed`
+only when operating in a legacy fallback or recovery path.
 
 ---
 

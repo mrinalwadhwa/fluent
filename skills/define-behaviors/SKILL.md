@@ -24,8 +24,11 @@ in `documentation/behaviors.md`, not a restatement.
 ### Phase 1 — Read the inputs
 
 Read:
-- Work Item planning context from `factory work show <work-item-id>` —
-  the default source of intent for Work-model planning
+- The approved brief from the active planning conversation or draft
+  artifact — the normal source of intent before `factory work create`
+  stores Work Item planning context
+- Work Item planning context from `factory work show <work-item-id>` only
+  when the Work Item already exists
 - `.factory/runs/[run-id]/brief.md` only in a legacy fallback or
   recovery path
 - `documentation/behaviors.md` — what the system already does
@@ -145,10 +148,11 @@ Once all areas have been discussed, assemble the full
 This is a final coherence check, not a repeat of the area-by-area
 review. If something needs changing, fix it and confirm again.
 
-After user approval, keep the approved behavior diff with the planning
-context that will be passed to `factory work create --behaviors-file`.
-Set legacy status to `behaviors-defined` only when operating in a
-legacy fallback or recovery path.
+After user approval, keep the approved behavior diff with the active
+planning context that will be passed to `factory work create
+--behaviors-file` after the plan is approved. Set legacy status to
+`behaviors-defined` only when operating in a legacy fallback or recovery
+path.
 
 ---
 

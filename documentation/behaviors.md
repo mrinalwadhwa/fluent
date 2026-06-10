@@ -668,8 +668,8 @@ transitional fallback.
 Test: tests/behaviors/operations/test-build-in-factory-work-model-guidance.sh
 
 WHEN the brief is confirmed by the user,
-THE SYSTEM SHALL leave the Work Item available for later planning and set
-legacy status to `briefed` only when using the legacy fallback.
+THE SYSTEM SHALL keep the approved brief available for later planning and
+set legacy status to `briefed` only when using the legacy fallback.
 
 ## Behavior definition
 
