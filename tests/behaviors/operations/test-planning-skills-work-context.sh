@@ -74,7 +74,7 @@ require_in_file "$PLAN" \
   "plan-execution skill"
 
 require_in_file "$PLAN" \
-  "This is the normal path for" \
+  "normal path for delegated Work execution" \
   "plan-execution skill"
 require_in_file "$PLAN" \
   'Do not write' \
@@ -93,6 +93,12 @@ require_in_file "$PLAN" \
   "plan-execution skill"
 require_in_file "$PLAN" \
   'peer Work Items with their own Attempts, Workspaces, and Merge' \
+  "plan-execution skill"
+require_in_file "$PLAN" \
+  'create each approved Work Item separately' \
+  "plan-execution skill"
+require_in_file "$PLAN" \
+  'collapse peer Work Items into one shared Attempt or Task sequence' \
   "plan-execution skill"
 require_in_file "$PLAN" \
   'record likely follow-up Tasks or sequencing notes without' \
@@ -161,6 +167,9 @@ require_in_file "$ROOT/tests/behaviors/skills/parallel-work-items-plan.md" \
 require_not_in_file "$CAPTURE" \
   "Write bridge planning artifacts when later skills" \
   "capture-brief skill"
+require_not_in_file "$PLAN" \
+  '## Shared Attempt/Task notes' \
+  "plan-execution skill"
 require_not_in_file "$PLAN" \
   'Assemble a legacy run `execution-instructions.md` file only when a compatibility' \
   "plan-execution skill"

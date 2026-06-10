@@ -174,10 +174,16 @@ Assemble `plan.md` and show the full plan:
 
 > "Here's the complete plan. Does the full picture hold together?"
 
-After the user approves the plan, create the Work Item with planning
-context stored directly in Work state. This is the normal path for
-delegated Work execution. Pass the approved planning files in this
-order:
+After the user approves the plan, create the Work Item or peer Work
+Items with planning context stored directly in Work state. This is the
+normal path for delegated Work execution. For a confirmed peer Work Item
+plan, create each approved Work Item separately with its own brief,
+behaviors, approach slice, plan slice, Attempt, Workspace, Merge
+Candidate expectations, verification, and sync notes. Keep shared
+sequencing as coordination notes outside the executable Work model; do
+not collapse peer Work Items into one shared Attempt or Task sequence.
+
+Pass the approved planning files in this order:
 
 1. the approved brief
 2. the approved behaviors diff
@@ -186,8 +192,8 @@ order:
 
 Use `factory work create --brief-file --behaviors-file --approach-file
 --plan-file` so Factory stores the approved context on the Work Item and
-derives write Task instructions from durable Work state. Assemble a
-legacy run `execution-instructions.md` file only when a compatibility,
+derives write Task instructions from durable Work state. Create a legacy
+run `execution-instructions.md` file only when a compatibility,
 fallback, or recovery path still requires one. Do not write
 `.factory/runs/[run-id]/brief.md`, `status`, or `.factory/active-run`
 for ordinary Work-model planning when `factory work create` can express
@@ -256,22 +262,25 @@ Ask the user to confirm the split before writing the final plan.
 [Brief for this Work Item — scope, behaviors it delivers, what it
 produces.]
 
+Attempt: [attempt-id]
+Workspace: [workspace expectation]
+Merge Candidate: [candidate expectation and landing checks]
+
+- Initial write Task: [scope and output]
+- Likely follow-up Task note: [scope and output, if the first Task
+  reveals it is needed]
+
 ### Work Item: [ui-work-item-id]
 
 [Brief for this Work Item.]
 
-## Shared Attempt/Task notes
-
-### Attempt: [attempt-id]
+Attempt: [attempt-id]
+Workspace: [workspace expectation]
+Merge Candidate: [candidate expectation and landing checks]
 
 - Initial write Task: [scope and output]
-- Likely follow-up Task: [scope and output, if the first Task reveals it
-  is needed]
-
-## Merge Candidates
-
-- [Which Attempt produces each Merge Candidate, and what must pass before
-  it lands]
+- Likely follow-up Task note: [scope and output, if the first Task
+  reveals it is needed]
 
 ## Sync points
 

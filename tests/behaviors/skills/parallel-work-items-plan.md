@@ -22,6 +22,9 @@ me plan the execution.
   says the Work model cannot express the required coordination.
 - Work-model Task dependencies are not available as a default execution
   structure; likely follow-up Tasks may be notes only.
+- Each peer Work Item should own its own Attempt, Workspace, Merge
+  Candidate expectation, and Task notes. Shared sequencing belongs in
+  sync points or interface notes, not in a shared Attempt/Task section.
 
 ## Evaluation criteria
 - Did the agent assess that the two independent areas should become
@@ -31,6 +34,8 @@ me plan the execution.
 - Did it avoid using legacy child-run groups as the default plan shape?
 - Did it name separate Work Items, Attempts, Workspaces, and Merge
   Candidates for the independent efforts?
+- Did it avoid creating a shared Attempt or Task sequence across the
+  peer Work Items?
 - Did it define a sync point around the shared user identity contract
   and say whether it blocks either Work Item from landing?
 - Did it keep the discussion paced by asking about the split before
