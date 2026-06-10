@@ -345,7 +345,50 @@ fn latest_review_artifacts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::content::ContentResolver;
+    use crate::work_model::WorkItemAbandonment;
     use crate::work_model::{Attempt, TaskArtifactArea, WorkspaceAccess};
+
+    #[test]
+    fn run_attempt_rejects_abandoned_work_item_without_mutating_state() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Keep abandoned attempt terminal".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.abandonment = Some(WorkItemAbandonment {
+            reason: Some("replacement landed".to_string()),
+        });
+        store.create_work_item(&item).unwrap();
+        let resolver = ContentResolver::new(None);
+
+        let error = match run_attempt(WorkAttemptRunConfig {
+            project_root: tmp.path(),
+            store: &store,
+            work_item_id: "work-1",
+            attempt_id: "attempt-1",
+            resolver: &resolver,
+            extra_args: &[],
+            coder_kind: CoderKind::Codex,
+            no_sandbox: true,
+        }) {
+            Ok(_) => panic!("abandoned Work Item should reject attempt run"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("is abandoned"));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert!(stored.abandonment.is_some());
+        assert_eq!(stored.attempts[0].status, AttemptStatus::Planned);
+        assert_eq!(stored.attempts[0].tasks[0].status, TaskStatus::Planned);
+    }
 
     #[test]
     fn completed_review_round_is_not_open() {

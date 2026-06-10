@@ -1168,7 +1168,8 @@ fn reviewer_writable_outputs_guidance(artifact_dir: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::work_model::{TaskOutput, TaskStatus, WorkItem};
+    use crate::content::ContentResolver;
+    use crate::work_model::{TaskOutput, TaskStatus, WorkItem, WorkItemAbandonment};
     use std::os::unix::fs::PermissionsExt;
 
     fn review_item() -> WorkItem {
@@ -1194,6 +1195,48 @@ mod tests {
         });
         item.add_review_tasks("attempt-1", &["tests"]).unwrap();
         item
+    }
+
+    #[test]
+    fn run_task_rejects_abandoned_work_item_without_mutating_state() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Keep abandoned task terminal".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.abandonment = Some(WorkItemAbandonment {
+            reason: Some("replacement landed".to_string()),
+        });
+        store.create_work_item(&item).unwrap();
+        let resolver = ContentResolver::new(None);
+
+        let error = match run_task(WorkTaskRunConfig {
+            project_root: tmp.path(),
+            store: &store,
+            work_item_id: "work-1",
+            attempt_id: "attempt-1",
+            task_id: "attempt-1-write",
+            resolver: &resolver,
+            extra_args: &[],
+            coder_kind: CoderKind::Codex,
+            no_sandbox: true,
+        }) {
+            Ok(_) => panic!("abandoned Work Item should reject task run"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("is abandoned"));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert!(stored.abandonment.is_some());
+        assert_eq!(stored.attempts[0].status, AttemptStatus::Planned);
+        assert_eq!(stored.attempts[0].tasks[0].status, TaskStatus::Planned);
     }
 
     #[test]

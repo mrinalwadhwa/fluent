@@ -1144,7 +1144,49 @@ fn path_for_model(project_root: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::content::ContentResolver;
+    use crate::work_model::WorkItemAbandonment;
     use crate::work_model::{AttemptReviewState, AttemptStatus, TaskOutput, TaskStatus, WorkItem};
+
+    #[test]
+    fn merge_candidate_rejects_abandoned_work_item_without_mutating_state() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Keep abandoned merge terminal".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.abandonment = Some(WorkItemAbandonment {
+            reason: Some("replacement landed".to_string()),
+        });
+        store.create_work_item(&item).unwrap();
+        let resolver = ContentResolver::new(None);
+
+        let error = match merge_candidate(WorkMergeConfig {
+            project_root: tmp.path(),
+            store: &store,
+            work_item_id: "work-1",
+            merge_candidate_id: "attempt-1-merge-candidate",
+            resolver: &resolver,
+            extra_args: &[],
+            coder_kind: CoderKind::Codex,
+            no_sandbox: true,
+        }) {
+            Ok(_) => panic!("abandoned Work Item should reject merge execution"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("is abandoned"));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert!(stored.abandonment.is_some());
+        assert!(stored.merge_candidates.is_empty());
+    }
 
     fn landed_candidate_store() -> (tempfile::TempDir, WorkModelStore, String, String, String) {
         let tmp = tempfile::TempDir::new().unwrap();

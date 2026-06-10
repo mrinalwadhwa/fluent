@@ -137,7 +137,14 @@ IF Work lifecycle commands try to plan, execute, review, or merge an
 abandoned Work Item,
 THEN THE SYSTEM SHALL exit non-zero and leave abandoned Work state
 terminal.
-Test: src/work_model.rs (abandoned_work_item_rejects_lifecycle_mutations)
+Test: src/work_model.rs (abandoned_work_item_rejects_initial_attempt_planning)
+Test: src/work_model.rs (abandoned_work_item_rejects_review_only_attempt_planning)
+Test: src/work_model.rs (abandoned_work_item_rejects_review_task_planning)
+Test: src/work_model.rs (abandoned_work_item_rejects_followup_write_planning)
+Test: src/work_model.rs (abandoned_work_item_rejects_merge_candidate_planning)
+Test: src/work_attempt_loop.rs (run_attempt_rejects_abandoned_work_item_without_mutating_state)
+Test: src/work_task_executor.rs (run_task_rejects_abandoned_work_item_without_mutating_state)
+Test: src/work_merge_executor.rs (merge_candidate_rejects_abandoned_work_item_without_mutating_state)
 
 IF stored Work Item state contains invalid JSON, an invalid id, or a
 model validation error,

@@ -404,6 +404,7 @@ impl WorkItem {
         attempt_id: &str,
         input_artifacts: Vec<ArtifactRef>,
     ) -> Result<String, WorkModelError> {
+        self.ensure_not_abandoned()?;
         let write_task_instructions = self.write_task_instructions();
         let Some(attempt) = self
             .attempts
@@ -2829,7 +2830,7 @@ mod tests {
     }
 
     #[test]
-    fn abandoned_work_item_rejects_lifecycle_mutations() {
+    fn abandoned_work_item_rejects_initial_attempt_planning() {
         let mut work_item = WorkItem {
             id: "work-1".to_string(),
             title: "Keep abandoned work terminal".to_string(),
@@ -2845,6 +2846,74 @@ mod tests {
         let error = work_item.add_initial_attempt("attempt-1").unwrap_err();
 
         assert!(matches!(error, WorkModelError::WorkItemAbandoned { .. }));
+    }
+
+    #[test]
+    fn abandoned_work_item_rejects_review_only_attempt_planning() {
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Keep abandoned review-only work terminal".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: Some(WorkItemAbandonment {
+                reason: Some("replacement landed".to_string()),
+            }),
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+
+        let error = work_item
+            .add_review_only_attempt("attempt-review", &["tests"], "main", "abc123")
+            .unwrap_err();
+
+        assert!(matches!(error, WorkModelError::WorkItemAbandoned { .. }));
+        assert!(work_item.attempts.is_empty());
+    }
+
+    #[test]
+    fn abandoned_work_item_rejects_review_task_planning() {
+        let mut work_item = work_item_with_completed_write("work-1");
+        work_item.abandonment = Some(WorkItemAbandonment {
+            reason: Some("replacement landed".to_string()),
+        });
+
+        let error = work_item
+            .add_next_review_tasks("attempt-1", &["tests"])
+            .unwrap_err();
+
+        assert!(matches!(error, WorkModelError::WorkItemAbandoned { .. }));
+        assert_eq!(work_item.attempts[0].tasks.len(), 1);
+    }
+
+    #[test]
+    fn abandoned_work_item_rejects_followup_write_planning() {
+        let mut work_item = work_item_with_completed_write("work-1");
+        work_item.abandonment = Some(WorkItemAbandonment {
+            reason: Some("replacement landed".to_string()),
+        });
+
+        let error = work_item
+            .add_followup_write_task("attempt-1", Vec::new())
+            .unwrap_err();
+
+        assert!(matches!(error, WorkModelError::WorkItemAbandoned { .. }));
+        assert_eq!(work_item.attempts[0].tasks.len(), 1);
+    }
+
+    #[test]
+    fn abandoned_work_item_rejects_merge_candidate_planning() {
+        let mut work_item = work_item_with_completed_write("work-1");
+        work_item.attempts[0].review_state = Some(AttemptReviewState::Passed);
+        work_item.abandonment = Some(WorkItemAbandonment {
+            reason: Some("replacement landed".to_string()),
+        });
+
+        let error = work_item
+            .create_or_get_merge_candidate("attempt-1")
+            .unwrap_err();
+
+        assert!(matches!(error, WorkModelError::WorkItemAbandoned { .. }));
+        assert!(work_item.merge_candidates.is_empty());
     }
 
     #[test]
