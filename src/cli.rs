@@ -341,6 +341,17 @@ pub enum WorkCommands {
         merge_candidate_id: String,
     },
 
+    /// Watch a Fargate-executed Merge Candidate's ECS task until it stops.
+    MergeWatch {
+        /// Work Item ID
+        work_item_id: String,
+        /// Merge Candidate ID
+        merge_candidate_id: String,
+        /// Poll interval in seconds (default 15)
+        #[arg(long, default_value_t = 15)]
+        interval: u64,
+    },
+
     /// Execute stored Work Item Tasks
     Task {
         #[command(subcommand)]
@@ -388,6 +399,16 @@ pub enum WorkAttemptCommands {
         work_item_id: String,
         /// Attempt ID
         attempt_id: String,
+    },
+    /// Watch a Fargate-executed Attempt's ECS task until it stops.
+    Watch {
+        /// Work Item ID
+        work_item_id: String,
+        /// Attempt ID
+        attempt_id: String,
+        /// Poll interval in seconds (default 15)
+        #[arg(long, default_value_t = 15)]
+        interval: u64,
     },
 }
 

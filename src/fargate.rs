@@ -112,6 +112,127 @@ fn stop_ecs_task(config: &FargateConfig, task_arn: &str) -> Result<()> {
     Ok(())
 }
 
+/// Snapshot of an ECS task's current status, suitable for printing.
+struct EcsTaskStatus {
+    last_status: String,
+    desired_status: String,
+    stop_code: Option<String>,
+    stopped_reason: Option<String>,
+}
+
+fn describe_ecs_task(config: &FargateConfig, task_arn: &str) -> Result<EcsTaskStatus> {
+    let output = Command::new("aws")
+        .args(["ecs", "describe-tasks"])
+        .args(["--region", &config.region])
+        .args(["--cluster", &config.cluster])
+        .args(["--tasks", task_arn])
+        .args(["--output", "json"])
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to describe Fargate task: {}", stderr.trim());
+    }
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .context("Failed to parse aws ecs describe-tasks output as JSON")?;
+    let task = json
+        .get("tasks")
+        .and_then(|t| t.as_array())
+        .and_then(|arr| arr.first())
+        .ok_or_else(|| anyhow::anyhow!("No task returned for ARN {task_arn}"))?;
+    let last_status = task
+        .get("lastStatus")
+        .and_then(|s| s.as_str())
+        .unwrap_or("UNKNOWN")
+        .to_string();
+    let desired_status = task
+        .get("desiredStatus")
+        .and_then(|s| s.as_str())
+        .unwrap_or("UNKNOWN")
+        .to_string();
+    let stop_code = task
+        .get("stopCode")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string());
+    let stopped_reason = task
+        .get("stoppedReason")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string());
+    Ok(EcsTaskStatus {
+        last_status,
+        desired_status,
+        stop_code,
+        stopped_reason,
+    })
+}
+
+fn watch_ecs_task(config: &FargateConfig, task_arn: &str, interval_secs: u64) -> Result<()> {
+    let interval = std::time::Duration::from_secs(interval_secs.max(1));
+    let mut previous_status: Option<String> = None;
+    eprintln!("  Watching Fargate task {task_arn}");
+    eprintln!("  Poll interval: {interval_secs}s. Ctrl+C to stop watching (task keeps running).");
+    loop {
+        let status = describe_ecs_task(config, task_arn)?;
+        if Some(&status.last_status) != previous_status.as_ref() {
+            eprintln!(
+                "  [{}] last={} desired={}",
+                chrono::Utc::now().to_rfc3339(),
+                status.last_status,
+                status.desired_status
+            );
+            previous_status = Some(status.last_status.clone());
+        }
+        if status.last_status == "STOPPED" {
+            if let Some(code) = &status.stop_code {
+                eprintln!("  stopCode: {code}");
+            }
+            if let Some(reason) = &status.stopped_reason {
+                eprintln!("  stoppedReason: {reason}");
+            }
+            return Ok(());
+        }
+        std::thread::sleep(interval);
+    }
+}
+
+/// Watch the Fargate task associated with a Work Attempt until it
+/// reaches the STOPPED state. Prints state transitions and the
+/// final stopCode + stoppedReason.
+pub fn watch_work_attempt(
+    project_root: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    interval_secs: u64,
+) -> Result<()> {
+    let runtime_dir = work_attempt_runtime_dir(project_root, work_item_id, attempt_id);
+    let task_arn = read_recorded_task_arn(&runtime_dir).ok_or_else(|| {
+        anyhow::anyhow!(
+            "No Fargate task recorded for Work Attempt {work_item_id}/{attempt_id}; was it launched with --runtime fargate?"
+        )
+    })?;
+    let config = load_config()?;
+    credential::inject_credentials()?;
+    watch_ecs_task(&config, &task_arn, interval_secs)
+}
+
+/// Watch the Fargate task associated with a Merge Candidate until
+/// it reaches the STOPPED state.
+pub fn watch_work_merge(
+    project_root: &Path,
+    work_item_id: &str,
+    merge_candidate_id: &str,
+    interval_secs: u64,
+) -> Result<()> {
+    let runtime_dir = work_merge_runtime_dir(project_root, work_item_id, merge_candidate_id);
+    let task_arn = read_recorded_task_arn(&runtime_dir).ok_or_else(|| {
+        anyhow::anyhow!(
+            "No Fargate task recorded for Merge Candidate {work_item_id}/{merge_candidate_id}; was it launched with --runtime fargate?"
+        )
+    })?;
+    let config = load_config()?;
+    credential::inject_credentials()?;
+    watch_ecs_task(&config, &task_arn, interval_secs)
+}
+
 /// Stop a Fargate-executed Work Attempt's ECS task. Idempotent: if
 /// no task ARN is recorded or the task is already gone, returns Ok.
 pub fn stop_work_attempt(project_root: &Path, work_item_id: &str, attempt_id: &str) -> Result<()> {

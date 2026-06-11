@@ -393,6 +393,16 @@ fn cmd_work(
                     "Stop requested for Attempt {attempt_id} of Work Item {work_item_id} (Fargate)"
                 );
             }
+            Some(WorkAttemptCommands::Watch {
+                work_item_id,
+                attempt_id,
+                interval,
+            }) => {
+                fargate::watch_work_attempt(project_root, &work_item_id, &attempt_id, interval)?;
+                println!(
+                    "Fargate task for Attempt {attempt_id} of Work Item {work_item_id} reached STOPPED"
+                );
+            }
             None => {
                 let work_item_id =
                     work_item_id.ok_or_else(|| anyhow::anyhow!("work item id is required"))?;
@@ -543,6 +553,21 @@ fn cmd_work(
             fargate::stop_work_merge(project_root, &work_item_id, &merge_candidate_id)?;
             println!(
                 "Stop requested for Merge Candidate {merge_candidate_id} of Work Item {work_item_id} (Fargate)"
+            );
+        }
+        WorkCommands::MergeWatch {
+            work_item_id,
+            merge_candidate_id,
+            interval,
+        } => {
+            fargate::watch_work_merge(
+                project_root,
+                &work_item_id,
+                &merge_candidate_id,
+                interval,
+            )?;
+            println!(
+                "Fargate task for Merge Candidate {merge_candidate_id} of Work Item {work_item_id} reached STOPPED"
             );
         }
         WorkCommands::Task { command } => match command {
