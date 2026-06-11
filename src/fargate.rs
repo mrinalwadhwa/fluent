@@ -309,11 +309,13 @@ fn upload_project_workspace(config: &FargateConfig, project_root: &Path, key: &s
     ];
     let parent_str = parent.to_string_lossy().into_owned();
     let mut tar_args: Vec<String> = vec!["cf".into(), "-".into()];
-    // macOS Finder writes AppleDouble metadata files (._*) and
-    // .DS_Store next to every regular file when a directory is
-    // browsed. These break Work model JSON readers in the container
-    // ("stream did not contain valid UTF-8") and are never useful
-    // remotely.
+    // bsdtar on macOS embeds extended attributes / resource forks as
+    // PAX header data and AppleDouble (._<file>) entries. On Linux
+    // extraction those become literal ._<file> files that confuse
+    // Work model JSON readers ("stream did not contain valid
+    // UTF-8"). Disable that.
+    tar_args.push("--no-mac-metadata".into());
+    tar_args.push("--no-xattrs".into());
     tar_args.push("--exclude=._*".into());
     tar_args.push("--exclude=.DS_Store".into());
     for ex in &excludes {
@@ -324,6 +326,7 @@ fn upload_project_workspace(config: &FargateConfig, project_root: &Path, key: &s
     tar_args.push(name);
 
     let mut tar_child = Command::new("tar")
+        .env("COPYFILE_DISABLE", "1")
         .args(&tar_args)
         .stdout(std::process::Stdio::piped())
         .spawn()?;
