@@ -43,16 +43,6 @@ careful design pass:
 
 
 
-2026-06-10 — `factory cleanup --apply` should not delete a Work
-Item whose only Attempt is `failed` due to a rate-limit error. The
-current cleanup logic treats any non-running Attempt as terminal
-and removes the whole Work Item including its durable planning
-context. After the rate-limit observation above is fixed, this
-should follow naturally: a rate-limited Attempt is not terminal.
-Until then, cleanup should at minimum require explicit
-confirmation before removing a Work Item that has no landed Merge
-Candidate and was last touched by a known-recoverable failure.
-
 2026-05-11 — During the interactive stages, there were loops where
 the user just typed "yes, keep going" repeatedly. These indicate
 steps that are potentially automatable and may not need a human in

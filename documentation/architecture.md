@@ -247,6 +247,29 @@ moving the target branch. Merge artifacts live under
 `.factory/work/artifacts/<work-item-id>/<attempt-id>/<candidate-id>/merge/`,
 and the stored Merge Candidate records whether execution is pending,
 executing, failed, needs-user, or landed.
+
+Merge execution auto-continues through failed merge-time review
+rounds within a same-invocation budget. The merge loop iterates
+rebase → checks → reviews. If reviewers return fail (and not a
+reviewer launch panic), Factory invokes the same Coder used at
+Attempt time against the candidate workspace, passing the failed
+merge review artifact paths as input, asking the coder to address
+the findings and commit. After the follow-up writer commits, the
+loop restarts at rebase. One `factory work merge` invocation may
+advance at most `MAX_MERGE_FOLLOWUP_WRITES_PER_INVOCATION = 2`
+follow-up write cycles. If a third round would be needed, Factory
+marks the Merge Candidate `needs-user`, writes a handoff under
+`.factory/work/artifacts/<work-item-id>/<attempt-id>/<candidate-id>/merge/needs-user.md`
+naming the failed review artifact paths, and bails. Reviewer launch
+panics or non-verdict errors are never retried — they fail the
+merge immediately.
+
+Coder runs whose transcript contains a session-limit or rate-limit
+marker are not treated as Task failures. The Coder wrapper sleeps
+`FACTORY_RATE_LIMIT_RETRY_AFTER_SECS` (default 1800 seconds) and
+retries the same coder invocation up to two more times before
+propagating the exit code. Author and reviewer Tasks inherit this
+behavior without further plumbing.
 `factory cleanup` owns the terminal Work model cleanup lifecycle. It
 defaults to a dry run and only mutates state with `--apply`. A Work Item
 is eligible when every Attempt is terminal, every Task in those Attempts

@@ -658,11 +658,31 @@ system shall warn without changing the landed merge state.
 Test: tests/binary.rs (work_merge_candidate_lands_after_merge_time_reviews)
 
 IF merge-time reviewers fail while `factory work merge <work-item-id>
-<merge-candidate-id>` executes,
-THEN THE SYSTEM SHALL leave the target branch unchanged and record merge
-status `failed`, review state `failed`, a failure reason, and review
-artifacts on the stored Merge Candidate.
-Test: tests/binary.rs (work_merge_candidate_failed_review_leaves_target_unchanged)
+<merge-candidate-id>` executes and the same-invocation follow-up
+write budget (`MAX_MERGE_FOLLOWUP_WRITES_PER_INVOCATION = 2`) is
+exhausted,
+THEN THE SYSTEM SHALL leave the target branch unchanged, record merge
+status `needs-user`, review state `failed`, a failure reason naming
+the exhausted budget, and review artifacts on the stored Merge
+Candidate, and write a `needs-user.md` handoff under the merge
+artifact directory naming the failed review artifact paths.
+Test: src/work_merge_executor.rs (failed_review_paths_picks_only_fail_and_uncertain_verdicts)
+Test: src/work_merge_executor.rs (write_merge_needs_user_handoff_lists_failed_review_paths)
+
+WHEN merge-time reviewers return any fail or uncertain verdict and the
+same-invocation follow-up write budget permits another cycle,
+THE SYSTEM SHALL invoke the configured Coder against the candidate
+workspace with the failed merge-time review artifact paths as input
+artifacts, ask the coder to address the findings and commit, verify
+the workspace is clean and new commits were produced, then restart
+the merge loop from rebase, checks, and merge-time review.
+
+IF merge-time reviewer execution panics, launch-fails, or returns a
+non-verdict error,
+THEN THE SYSTEM SHALL leave the target branch unchanged, record merge
+status `failed`, review state `failed`, the underlying error as the
+failure reason, and the partial review artifacts on the stored Merge
+Candidate. The merge loop SHALL NOT retry these non-verdict failures.
 
 IF a merge-time reviewer modifies, stages, unstages, or creates files in
 the candidate workspace while `factory work merge <work-item-id>
@@ -804,6 +824,23 @@ Test: tests/binary.rs (work_attempt_rejects_invalid_attempt_id_without_changes)
 Test: tests/behaviors/operations/test-work-attempt-intake-review.sh (missing Work Item does not create state)
 Test: tests/behaviors/operations/test-work-attempt-intake-review.sh (duplicate Attempt id leaves item unchanged)
 Test: tests/behaviors/operations/test-work-attempt-intake-review.sh (invalid ids leave Work Item state unchanged)
+
+## Coder transient failures
+
+WHEN a `Coder::run` invocation exits non-zero and its transcript
+file contains a session-limit or rate-limit marker,
+THE SYSTEM SHALL sleep for
+`FACTORY_RATE_LIMIT_RETRY_AFTER_SECS` seconds (default 1800) and
+retry the same Coder invocation, up to two retries before
+propagating the original exit code as a Task failure.
+Test: src/coder.rs (transcript_rate_limit_tests::detects_session_limit_marker)
+Test: src/coder.rs (transcript_rate_limit_tests::detects_generic_rate_limit_phrase)
+Test: src/coder.rs (transcript_rate_limit_tests::no_marker_returns_false)
+
+WHEN no transcript file is configured for a Coder invocation,
+THE SYSTEM SHALL propagate the original exit code without rate-
+limit retry, since transient failure cannot be detected without
+the transcript content.
 
 ## Brief capture
 
