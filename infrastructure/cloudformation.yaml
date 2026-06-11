@@ -128,16 +128,24 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              # S3 — workspace transfer, restricted to runs/ prefix
+              # S3 — workspace transfer for legacy runs and the Work
+              # model (Work Attempt and Work Merge). All Factory keys
+              # live under runs/, work/, or work-merge/.
               - Effect: Allow
                 Action:
                   - s3:GetObject
                   - s3:PutObject
-                Resource: !Sub '${WorkspaceBucket.Arn}/runs/*'
-              # Deny access to anything outside runs/ prefix
+                Resource:
+                  - !Sub '${WorkspaceBucket.Arn}/runs/*'
+                  - !Sub '${WorkspaceBucket.Arn}/work/*'
+                  - !Sub '${WorkspaceBucket.Arn}/work-merge/*'
+              # Deny access to anything outside the allowed prefixes
               - Effect: Deny
                 Action: 's3:*'
-                NotResource: !Sub '${WorkspaceBucket.Arn}/runs/*'
+                NotResource:
+                  - !Sub '${WorkspaceBucket.Arn}/runs/*'
+                  - !Sub '${WorkspaceBucket.Arn}/work/*'
+                  - !Sub '${WorkspaceBucket.Arn}/work-merge/*'
               # ECS Exec — accept incoming sessions only
               - Effect: Allow
                 Action:

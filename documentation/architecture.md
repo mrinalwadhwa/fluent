@@ -942,14 +942,17 @@ factory pull ────────────► (download from S3 into work
 
 | Permission | Scope | Purpose |
 |---|---|---|
-| `s3:GetObject` | `runs/*` prefix | Pull input workspace |
-| `s3:PutObject` | `runs/*` prefix | Upload completed workspace |
-| `s3:*` Deny | Outside `runs/*` | Explicit deny on everything else |
+| `s3:GetObject` | `runs/*`, `work/*`, `work-merge/*` | Pull input workspace |
+| `s3:PutObject` | `runs/*`, `work/*`, `work-merge/*` | Upload completed workspace |
+| `s3:*` Deny | Outside the allowed prefixes | Explicit deny on everything else |
 | `ssmmessages:*` | `*` | Accept incoming ECS Exec sessions |
 
 Six actions total. No ECS, IAM, STS, or other AWS permissions. The
 container can be connected to (ECS Exec) but cannot connect out to other
-containers via SSM.
+containers via SSM. `work/` covers Work Attempt artifacts and
+`work-merge/` covers Merge Candidate artifacts; the legacy `runs/`
+prefix remains for the existing legacy `factory run --runtime fargate`
+flow.
 
 #### Infrastructure (CloudFormation)
 
