@@ -131,18 +131,23 @@ impl Coder for SandboxedClaudeCode {
         extra_env: &[(String, String)],
         transcript_file: Option<&Path>,
     ) -> Result<i32> {
-        let mut cmd = self.build_command(working_dir);
-        for (key, value) in extra_env {
-            cmd.env(key, value);
-        }
-        if transcript_file.is_some() {
-            cmd.args(["--verbose", "--output-format", "stream-json"]);
-        }
-        cmd.args(["--append-system-prompt", system_prompt]);
-        cmd.args(["-p", prompt]);
-        cmd.args(extra_args);
-
-        run_with_transcript(cmd, transcript_file)
+        let want_transcript = transcript_file.is_some();
+        run_with_transcript_retrying(
+            || {
+                let mut cmd = self.build_command(working_dir);
+                for (key, value) in extra_env {
+                    cmd.env(key, value);
+                }
+                if want_transcript {
+                    cmd.args(["--verbose", "--output-format", "stream-json"]);
+                }
+                cmd.args(["--append-system-prompt", system_prompt]);
+                cmd.args(["-p", prompt]);
+                cmd.args(extra_args);
+                cmd
+            },
+            transcript_file,
+        )
     }
 
     fn run_interactive(
@@ -195,21 +200,26 @@ impl Coder for BareClaudeCode {
         extra_env: &[(String, String)],
         transcript_file: Option<&Path>,
     ) -> Result<i32> {
-        let mut cmd = Command::new("claude");
-        cmd.current_dir(working_dir);
-        for (key, value) in extra_env {
-            cmd.env(key, value);
-        }
-        cmd.args(["--dangerously-skip-permissions"]);
-        cmd.args(["--model", &claude_model()]);
-        if transcript_file.is_some() {
-            cmd.args(["--verbose", "--output-format", "stream-json"]);
-        }
-        cmd.args(["--append-system-prompt", system_prompt]);
-        cmd.args(["-p", prompt]);
-        cmd.args(extra_args);
-
-        run_with_transcript(cmd, transcript_file)
+        let want_transcript = transcript_file.is_some();
+        run_with_transcript_retrying(
+            || {
+                let mut cmd = Command::new("claude");
+                cmd.current_dir(working_dir);
+                for (key, value) in extra_env {
+                    cmd.env(key, value);
+                }
+                cmd.args(["--dangerously-skip-permissions"]);
+                cmd.args(["--model", &claude_model()]);
+                if want_transcript {
+                    cmd.args(["--verbose", "--output-format", "stream-json"]);
+                }
+                cmd.args(["--append-system-prompt", system_prompt]);
+                cmd.args(["-p", prompt]);
+                cmd.args(extra_args);
+                cmd
+            },
+            transcript_file,
+        )
     }
 
     fn run_interactive(
@@ -248,18 +258,23 @@ impl Coder for CodexCode {
         extra_env: &[(String, String)],
         transcript_file: Option<&Path>,
     ) -> Result<i32> {
-        let mut cmd = self.build_command(working_dir, true);
-        for (key, value) in extra_env {
-            cmd.env(key, value);
-        }
-        if transcript_file.is_some() {
-            cmd.arg("--json");
-        }
+        let want_transcript = transcript_file.is_some();
         let combined_prompt = format!("{system_prompt}\n\n---\n\n{prompt}");
-        cmd.arg(combined_prompt);
-        cmd.args(extra_args);
-
-        run_with_transcript(cmd, transcript_file)
+        run_with_transcript_retrying(
+            || {
+                let mut cmd = self.build_command(working_dir, true);
+                for (key, value) in extra_env {
+                    cmd.env(key, value);
+                }
+                if want_transcript {
+                    cmd.arg("--json");
+                }
+                cmd.arg(&combined_prompt);
+                cmd.args(extra_args);
+                cmd
+            },
+            transcript_file,
+        )
     }
 
     fn run_interactive(
@@ -342,6 +357,73 @@ fn run_with_transcript(mut cmd: Command, transcript_file: Option<&Path>) -> Resu
     }
 }
 
+const DEFAULT_RATE_LIMIT_RETRY_AFTER_SECS: u64 = 1800;
+const RATE_LIMIT_MAX_RETRIES: u32 = 2;
+
+fn rate_limit_retry_after() -> std::time::Duration {
+    let secs = std::env::var("FACTORY_RATE_LIMIT_RETRY_AFTER_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_RATE_LIMIT_RETRY_AFTER_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Scan a transcript for a Claude session-limit marker. Returns true if the
+/// session was rate-limited (i.e. the non-zero exit is a transient capacity
+/// failure, not a real Task failure).
+pub fn transcript_indicates_rate_limit(transcript_path: &Path) -> bool {
+    let Ok(file) = File::open(transcript_path) else {
+        return false;
+    };
+    let reader = BufReader::new(file);
+    for line in reader.lines().map_while(Result::ok) {
+        let l = line.to_lowercase();
+        if l.contains("session limit") || l.contains("rate limit") || l.contains("rate-limit") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Run a Coder command with rate-limit-aware retry. After a non-zero exit
+/// whose transcript contains a session-limit marker, sleep for the
+/// configured retry-after window and try again (up to a small bounded
+/// number of attempts). If no transcript is available the function behaves
+/// the same as `run_with_transcript`.
+fn run_with_transcript_retrying<F>(build_cmd: F, transcript_file: Option<&Path>) -> Result<i32>
+where
+    F: Fn() -> Command,
+{
+    let mut attempt: u32 = 0;
+    loop {
+        let exit = run_with_transcript(build_cmd(), transcript_file)?;
+        if exit == 0 {
+            return Ok(exit);
+        }
+        let Some(path) = transcript_file else {
+            return Ok(exit);
+        };
+        if !transcript_indicates_rate_limit(path) {
+            return Ok(exit);
+        }
+        if attempt >= RATE_LIMIT_MAX_RETRIES {
+            eprintln!(
+                "  Rate-limit detected on attempt {}; retry budget exhausted, propagating exit code {exit}.",
+                attempt + 1
+            );
+            return Ok(exit);
+        }
+        let wait = rate_limit_retry_after();
+        eprintln!(
+            "  Rate-limit detected on attempt {}; sleeping {}s before retry.",
+            attempt + 1,
+            wait.as_secs()
+        );
+        std::thread::sleep(wait);
+        attempt += 1;
+    }
+}
+
 /// Mock coder for testing. Calls a closure to determine behavior.
 #[cfg(test)]
 pub struct MockCoder<F>
@@ -384,5 +466,56 @@ where
         _extra_env: &[(String, String)],
     ) -> Result<i32> {
         Ok(0)
+    }
+}
+
+#[cfg(test)]
+mod transcript_rate_limit_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn detects_session_limit_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.txt");
+        let mut f = File::create(&path).unwrap();
+        writeln!(f, "Some normal output line").unwrap();
+        writeln!(
+            f,
+            "You've hit your session limit · resets 7:10pm (America/Los_Angeles)"
+        )
+        .unwrap();
+        writeln!(f, "Error: Coder exited with code 1").unwrap();
+        drop(f);
+        assert!(transcript_indicates_rate_limit(&path));
+    }
+
+    #[test]
+    fn detects_generic_rate_limit_phrase() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.txt");
+        let mut f = File::create(&path).unwrap();
+        writeln!(f, "Some normal output line").unwrap();
+        writeln!(f, "rate-limit exceeded").unwrap();
+        drop(f);
+        assert!(transcript_indicates_rate_limit(&path));
+    }
+
+    #[test]
+    fn no_marker_returns_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.txt");
+        let mut f = File::create(&path).unwrap();
+        writeln!(f, "All good, no limit hit here").unwrap();
+        writeln!(f, "Some other text").unwrap();
+        drop(f);
+        assert!(!transcript_indicates_rate_limit(&path));
+    }
+
+    #[test]
+    fn missing_file_returns_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.txt");
+        assert!(!transcript_indicates_rate_limit(&path));
     }
 }
