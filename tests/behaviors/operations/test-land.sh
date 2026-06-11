@@ -80,9 +80,16 @@ setup_run_with_worktree() {
   printf 'Report from run' > "${wt_path}/.factory/runs/${run_id}/report.md"
 }
 
-write_check_config() {
-  mkdir -p .factory
-  cat > .factory/config.toml
+write_check_hook() {
+  mkdir -p .factory/hooks
+  cat > .factory/hooks/check-pre-land
+  chmod +x .factory/hooks/check-pre-land
+}
+
+write_fix_hook() {
+  mkdir -p .factory/hooks
+  cat > .factory/hooks/fix-pre-land
+  chmod +x .factory/hooks/fix-pre-land
 }
 
 write_mock_reviewer() {
@@ -566,10 +573,9 @@ test_land_runs_blocking_check_in_worktree() {
   setup_run_with_worktree "$RUN_ID" pass
   WT_PATH="${TEST_DIR}/${RUN_ID}-wt"
 
-  write_check_config <<EOF
-[checks.probe]
-command = "printf '%s' \"\$PWD\" > '${TEST_DIR}/check-pwd'"
-run_before_land = true
+  write_check_hook <<EOF
+#!/usr/bin/env bash
+printf '%s' "\$PWD" > '${TEST_DIR}/check-pwd'
 EOF
 
   set +e
@@ -604,12 +610,10 @@ test_land_failed_check_keeps_worktree_and_reports_details() {
   setup_run_with_worktree "$RUN_ID" pass
   WT_PATH="${TEST_DIR}/${RUN_ID}-wt"
 
-  write_check_config <<'EOF'
-[checks.quality]
-command = "printf 'quality output'; exit 42"
-fix_command = "printf fix-command"
-autofix = false
-run_before_land = true
+  write_check_hook <<'EOF'
+#!/usr/bin/env bash
+printf 'quality output\n' >&2
+exit 42
 EOF
 
   set +e
@@ -630,20 +634,20 @@ EOF
     printf '    FAIL: run branch should remain unlanded after check failure\n'
     RESULT=1
   fi
-  if ! printf '%s' "$OUTPUT" | grep -q "quality"; then
-    printf '    FAIL: output should include check name, got: %s\n' "$OUTPUT"
+  if ! printf '%s' "$OUTPUT" | grep -q "check-pre-land failed"; then
+    printf '    FAIL: output should report hook failure, got: %s\n' "$OUTPUT"
     RESULT=1
   fi
-  if ! printf '%s' "$OUTPUT" | grep -q "quality output"; then
-    printf '    FAIL: output should include check output, got: %s\n' "$OUTPUT"
+  if ! printf '%s' "$OUTPUT" | grep -q "exit 42"; then
+    printf '    FAIL: output should include hook exit code, got: %s\n' "$OUTPUT"
     RESULT=1
   fi
-  if ! printf '%s' "$OUTPUT" | grep -q "printf 'quality output'; exit 42"; then
-    printf '    FAIL: output should include failed command, got: %s\n' "$OUTPUT"
+  LOG_PATH="$(printf '%s' "$OUTPUT" | sed -n 's#.*Log: \([^[:space:]]*\).*#\1#p' | head -1)"
+  if [ -z "$LOG_PATH" ] || [ ! -f "$LOG_PATH" ]; then
+    printf '    FAIL: output should point at hook log file, got: %s\n' "$OUTPUT"
     RESULT=1
-  fi
-  if ! printf '%s' "$OUTPUT" | grep -q "printf fix-command"; then
-    printf '    FAIL: output should include configured fix command, got: %s\n' "$OUTPUT"
+  elif ! grep -q "quality output" "$LOG_PATH"; then
+    printf '    FAIL: hook log should capture hook output, got: %s\n' "$(cat "$LOG_PATH" 2>/dev/null)"
     RESULT=1
   fi
 
@@ -662,12 +666,14 @@ test_land_autofix_commits_reruns_checks_and_reviewers() {
   git -C "$WT_PATH" commit -m "add unformatted file" > /dev/null 2>&1
 
   write_mock_reviewer pass
-  write_check_config <<EOF
-[checks.format]
-command = "printf check >> '${TEST_DIR}/check-count'; grep -q fixed format.txt"
-fix_command = "printf fixed > format.txt"
-autofix = true
-run_before_land = true
+  write_check_hook <<EOF
+#!/usr/bin/env bash
+printf check >> '${TEST_DIR}/check-count'
+grep -q fixed format.txt
+EOF
+  write_fix_hook <<EOF
+#!/usr/bin/env bash
+printf fixed > format.txt
 EOF
 
   set +e
@@ -697,7 +703,7 @@ EOF
     printf '    FAIL: reviewers should rerun after autofix\n'
     RESULT=1
   fi
-  if ! printf '%s' "$OUTPUT" | grep -q "Rerunning reviewers after autofix"; then
+  if ! printf '%s' "$OUTPUT" | grep -q "Rerunning reviewers after fix-pre-land autofix"; then
     printf '    FAIL: output should report reviewer rerun after autofix, got: %s\n' "$OUTPUT"
     RESULT=1
   fi
@@ -718,12 +724,14 @@ test_land_autofix_requires_clean_worktree() {
 
   printf 'dirty user change\n' > "${WT_PATH}/dirty.txt"
 
-  write_check_config <<EOF
-[checks.format]
-command = "printf check-output; exit 1"
-fix_command = "printf fixed > '${TEST_DIR}/fix-ran'"
-autofix = true
-run_before_land = true
+  write_check_hook <<'EOF'
+#!/usr/bin/env bash
+printf 'check-output\n' >&2
+exit 1
+EOF
+  write_fix_hook <<EOF
+#!/usr/bin/env bash
+printf fixed > '${TEST_DIR}/fix-ran'
 EOF
 
   set +e
@@ -763,12 +771,15 @@ test_land_autofix_command_failure_keeps_worktree() {
   setup_run_with_worktree "$RUN_ID" pass
   WT_PATH="${TEST_DIR}/${RUN_ID}-wt"
 
-  write_check_config <<'EOF'
-[checks.format]
-command = "printf check-output; exit 1"
-fix_command = "printf fix-output; exit 2"
-autofix = true
-run_before_land = true
+  write_check_hook <<'EOF'
+#!/usr/bin/env bash
+printf 'check-output\n' >&2
+exit 1
+EOF
+  write_fix_hook <<'EOF'
+#!/usr/bin/env bash
+printf 'fix-output\n' >&2
+exit 2
 EOF
 
   set +e
@@ -793,12 +804,17 @@ EOF
     printf '    FAIL: run should not be marked landed after autofix command failure\n'
     RESULT=1
   fi
-  if ! printf '%s' "$OUTPUT" | grep -q "fix-output"; then
-    printf '    FAIL: output should include failed fix command output, got: %s\n' "$OUTPUT"
+  if ! printf '%s' "$OUTPUT" | grep -q "fix-pre-land failed"; then
+    printf '    FAIL: output should report fix-pre-land failure, got: %s\n' "$OUTPUT"
     RESULT=1
   fi
-  if ! printf '%s' "$OUTPUT" | grep -q "printf fix-output; exit 2"; then
-    printf '    FAIL: output should include failed fix command, got: %s\n' "$OUTPUT"
+  if ! printf '%s' "$OUTPUT" | grep -q "exit 2"; then
+    printf '    FAIL: output should include fix hook exit code, got: %s\n' "$OUTPUT"
+    RESULT=1
+  fi
+  LOG_PATH="$(printf '%s' "$OUTPUT" | sed -n 's#.*Log: \([^[:space:]]*\).*#\1#p' | head -1)"
+  if [ -z "$LOG_PATH" ] || [ ! -f "$LOG_PATH" ] || ! grep -q "fix-output" "$LOG_PATH"; then
+    printf '    FAIL: fix hook log should capture hook stderr, got log %s, output %s\n' "$LOG_PATH" "$OUTPUT"
     RESULT=1
   fi
 
@@ -816,16 +832,19 @@ test_land_autofix_rerun_failure_keeps_worktree() {
   git -C "$WT_PATH" add format.txt
   git -C "$WT_PATH" commit -m "add unformatted file" > /dev/null 2>&1
 
-  write_check_config <<EOF
-[checks.format]
-command = "printf check >> '${TEST_DIR}/check-count'; grep -q fixed format.txt && grep -q approved format.txt"
-fix_command = "printf fixed > format.txt"
-autofix = true
-run_before_land = true
+  write_mock_reviewer pass
+  write_check_hook <<EOF
+#!/usr/bin/env bash
+printf check >> '${TEST_DIR}/check-count'
+grep -q fixed format.txt && grep -q approved format.txt
+EOF
+  write_fix_hook <<EOF
+#!/usr/bin/env bash
+printf fixed > format.txt
 EOF
 
   set +e
-  OUTPUT="$("$BINARY" land "$RUN_ID" 2>&1)"
+  OUTPUT="$(PATH="${MOCK_BIN}:$PATH" "$BINARY" land "$RUN_ID" 2>&1)"
   EXIT_CODE=$?
   set -e
 
@@ -858,8 +877,8 @@ EOF
     printf '    FAIL: autofix change should be committed before the rerun failure\n'
     RESULT=1
   fi
-  if ! printf '%s' "$OUTPUT" | grep -q "grep -q fixed format.txt"; then
-    printf '    FAIL: output should include the failed rerun command, got: %s\n' "$OUTPUT"
+  if ! printf '%s' "$OUTPUT" | grep -q "check-pre-land failed after fix-pre-land"; then
+    printf '    FAIL: output should report rerun check failure, got: %s\n' "$OUTPUT"
     RESULT=1
   fi
 
@@ -878,12 +897,13 @@ test_land_autofix_review_failure_keeps_worktree() {
   git -C "$WT_PATH" commit -m "add unformatted file" > /dev/null 2>&1
 
   write_mock_reviewer fail tests
-  write_check_config <<EOF
-[checks.format]
-command = "grep -q fixed format.txt"
-fix_command = "printf fixed > format.txt"
-autofix = true
-run_before_land = true
+  write_check_hook <<EOF
+#!/usr/bin/env bash
+grep -q fixed format.txt
+EOF
+  write_fix_hook <<EOF
+#!/usr/bin/env bash
+printf fixed > format.txt
 EOF
 
   set +e
@@ -923,30 +943,23 @@ EOF
 
 test_factory_config_defines_format_check() {
   RESULT=0
-  CONFIG="${PROJECT_DIR}/.factory/config.toml"
+  CHECK_HOOK="${PROJECT_DIR}/.factory/hooks/check-pre-land"
+  FIX_HOOK="${PROJECT_DIR}/.factory/hooks/fix-pre-land"
 
-  if [ ! -f "$CONFIG" ]; then
-    printf '    FAIL: .factory/config.toml should exist\n'
+  if [ ! -x "$CHECK_HOOK" ]; then
+    printf '    FAIL: %s should exist and be executable\n' "$CHECK_HOOK"
     return 1
   fi
-  if ! grep -q '^\[checks\.format\]' "$CONFIG"; then
-    printf '    FAIL: config should define checks.format\n'
+  if [ ! -x "$FIX_HOOK" ]; then
+    printf '    FAIL: %s should exist and be executable\n' "$FIX_HOOK"
+    return 1
+  fi
+  if ! grep -q 'cargo fmt --all -- --check' "$CHECK_HOOK"; then
+    printf '    FAIL: check-pre-land hook should run cargo fmt --all -- --check\n'
     RESULT=1
   fi
-  if ! grep -q '^command = "cargo fmt --all -- --check"' "$CONFIG"; then
-    printf '    FAIL: format check should run cargo fmt --all -- --check\n'
-    RESULT=1
-  fi
-  if ! grep -q '^fix_command = "cargo fmt --all"' "$CONFIG"; then
-    printf '    FAIL: format check should autofix with cargo fmt --all\n'
-    RESULT=1
-  fi
-  if ! grep -q '^autofix = true' "$CONFIG"; then
-    printf '    FAIL: format check should enable autofix\n'
-    RESULT=1
-  fi
-  if ! grep -q '^run_before_land = true' "$CONFIG"; then
-    printf '    FAIL: format check should run before land\n'
+  if ! grep -q 'cargo fmt --all' "$FIX_HOOK"; then
+    printf '    FAIL: fix-pre-land hook should run cargo fmt --all\n'
     RESULT=1
   fi
 

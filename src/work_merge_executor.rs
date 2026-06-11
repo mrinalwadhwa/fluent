@@ -1443,7 +1443,10 @@ fn candidate_has_failure(
                 work_item_id
             )
         })?;
-    Ok(candidate.merge_state.status == MergeCandidateMergeStatus::Failed)
+    Ok(matches!(
+        candidate.merge_state.status,
+        MergeCandidateMergeStatus::Failed | MergeCandidateMergeStatus::NeedsUser
+    ))
 }
 
 fn can_record_validation_failure(error: &WorkModelError) -> bool {

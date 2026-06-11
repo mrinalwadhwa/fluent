@@ -54,9 +54,19 @@ write_mock_claude() {
 #!/usr/bin/env bash
 case "$PWD" in
   */work-6-work-1-attempt-1)
-    printf 'merge output\n' > merge-output.txt
-    git add merge-output.txt
-    git commit -m "Add merge output" > /dev/null 2>&1
+    if printf '%s' "$*" | grep -q "Address the following merge-time review findings"; then
+      # Acting as merge follow-up writer. Commit a uniquely-named
+      # file so the merge loop can iterate (the executor requires
+      # a new commit before retrying).
+      MARKER="followup-$$-$RANDOM.txt"
+      printf 'followup %s\n' "$MARKER" > "$MARKER"
+      git add "$MARKER"
+      git commit -m "Followup commit $MARKER" > /dev/null 2>&1
+    else
+      printf 'merge output\n' > merge-output.txt
+      git add merge-output.txt
+      git commit -m "Add merge output" > /dev/null 2>&1
+    fi
     ;;
   */merge/reviews/*)
     REVIEWER="$(basename "$PWD")"
@@ -215,12 +225,12 @@ test_work_merge_lands_after_update_checks_and_reviewers() {
   git add target.txt && git commit -m "Add target update" > /dev/null 2>&1
   TARGET_BEFORE="$(git rev-parse main)"
 
-  mkdir -p .factory
-  cat > .factory/config.toml <<EOF
-[checks.probe]
-command = "test -f merge-output.txt && test -f target.txt && printf '%s' \"\$PWD\" > '${TEST_DIR}/check-pwd'"
-run_before_land = true
+  mkdir -p .factory/hooks
+  cat > .factory/hooks/check-pre-land <<EOF
+#!/usr/bin/env bash
+test -f merge-output.txt && test -f target.txt && printf '%s' "\$PWD" > '${TEST_DIR}/check-pwd'
 EOF
+  chmod +x .factory/hooks/check-pre-land
 
   RESULT=0
   run_merge pass > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
@@ -459,12 +469,14 @@ test_work_merge_failed_check_leaves_target_unchanged() {
   create_passed_merge_candidate
   MAIN_BEFORE="$(git rev-parse main)"
 
-  mkdir -p .factory
-  cat > .factory/config.toml <<EOF
-[checks.quality]
-command = "printf check-ran > '${TEST_DIR}/check-marker'; printf failing-check-output; exit 3"
-run_before_land = true
+  mkdir -p .factory/hooks
+  cat > .factory/hooks/check-pre-land <<EOF
+#!/usr/bin/env bash
+printf check-ran > '${TEST_DIR}/check-marker'
+printf 'failing-check-output\n' >&2
+exit 3
 EOF
+  chmod +x .factory/hooks/check-pre-land
 
   RESULT=0
   assert_fails run_merge pass || RESULT=1
@@ -472,9 +484,11 @@ EOF
   [ "$(cat "$TEST_DIR/check-marker")" = "check-ran" ] || RESULT=1
   [ "$(json_value '.merge_candidates[0].merge_state.status')" = "failed" ] || RESULT=1
   [ "$(json_value '.merge_candidates[0].review_state')" = "pending" ] || RESULT=1
-  assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" "Pre-land check 'quality' failed" || RESULT=1
+  assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" "check-pre-land failed" || RESULT=1
   [ "$(json_value '.merge_candidates[0].merge_state.check_artifacts | length')" = "1" ] || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/stderr")" "failing-check-output" || RESULT=1
+  HOOKS_DIR="$(json_value '.merge_candidates[0].merge_state.check_artifacts[0].path')"
+  [ -n "$HOOKS_DIR" ] && [ -d "$HOOKS_DIR" ] || RESULT=1
+  grep -q "failing-check-output" "$HOOKS_DIR/check-pre-land.log" || RESULT=1
   return $RESULT
 }
 
@@ -488,9 +502,9 @@ test_work_merge_failed_reviewer_leaves_target_unchanged() {
   RESULT=0
   assert_fails run_merge fail-merge-review || RESULT=1
   [ "$(git rev-parse main)" = "$MAIN_BEFORE" ] || RESULT=1
-  [ "$(json_value '.merge_candidates[0].merge_state.status')" = "failed" ] || RESULT=1
+  [ "$(json_value '.merge_candidates[0].merge_state.status')" = "needs-user" ] || RESULT=1
   [ "$(json_value '.merge_candidates[0].review_state')" = "failed" ] || RESULT=1
-  assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" "Merge-time reviewers returned failed" || RESULT=1
+  assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" "Merge-time reviewers did not pass" || RESULT=1
   [ "$(json_value '.merge_candidates[0].merge_state.review_artifacts | length')" = "6" ] || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "Merge-time reviewers did not pass" || RESULT=1
   assert_no_merge_reviewer_worktrees || RESULT=1
@@ -507,7 +521,7 @@ test_work_merge_missing_reviewer_artifact_leaves_target_unchanged() {
   RESULT=0
   assert_fails run_merge missing-merge-review || RESULT=1
   [ "$(git rev-parse main)" = "$MAIN_BEFORE" ] || RESULT=1
-  [ "$(json_value '.merge_candidates[0].merge_state.status')" = "failed" ] || RESULT=1
+  [ "$(json_value '.merge_candidates[0].merge_state.status')" = "needs-user" ] || RESULT=1
   [ "$(json_value '.merge_candidates[0].review_state')" = "failed" ] || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "Merge-time reviewers did not pass" || RESULT=1
   grep -q "completed without writing" \

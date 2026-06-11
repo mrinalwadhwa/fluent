@@ -1229,7 +1229,6 @@ factory/main/
       Dockerfile
       entrypoint.sh
     teardown.sh
-    teardown.sh
   tests/
     behaviors/
       operations/            ← behavioral tests for the Rust binary

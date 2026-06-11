@@ -45,6 +45,46 @@ manages" capability.
 
 
 
+2026-06-11 — Tests should never be run without saving their output to a
+durable file. When a shell behavior test fails inside a chain of dozens
+of cases, the only way to read the failing case's full stdout/stderr is
+to rerun the whole test — slow and wasteful. The harness should write
+each test's output to a per-test artifact (e.g.,
+`tests/output/<test-name>/<case>.log`) so post-failure inspection does
+not require a rerun. Apply this to the Rust binary suite as well: capture
+full stdout/stderr for every `tests/binary.rs` case to disk on first run.
+
+2026-06-11 — Two follow-up writer issues found while fixing migration
+tests. (1) `candidate_has_failure` in `src/work_merge_executor.rs` only
+checked for `MergeCandidateMergeStatus::Failed`, so when the merge loop
+recorded `NeedsUser` after follow-up budget exhaustion, the outer
+fallback recorder overwrote it back to `Failed`. Fixed in this session
+by widening the predicate to match both `Failed` and `NeedsUser`. (2)
+The merge follow-up writer requires the mock to produce a brand new
+commit each invocation (`if new_head == baseline_commit { bail }`), but
+several shell mocks always wrote the same filename, so the writer's
+second cycle errored on "did not produce any new commits" and the merge
+ended with status=failed instead of going through the budget-exhaustion
+path. Both issues only surface once `MAX_MERGE_FOLLOWUP_WRITES_PER_INVOCATION`
+is non-zero — worth a project-level reviewer that flags new mock claude
+scripts that don't distinguish writer/reviewer roles or don't make
+progress on each invocation.
+
+2026-06-11 — `merge` and `land` are used as overlapping verbs across
+the codebase and need a vocabulary decision. Examples: `factory work
+merge` (CLI verb, but the operation includes landing into target),
+`MergeCandidateMergeStatus::Landed` (success state),
+`record_candidate_landed`, `check-pre-land` (hook phase),
+`finalize_landing`, "Merge-time reviewers", `land.rs`,
+`work_merge_executor.rs`, `infrastructure/run/entrypoint.sh` work-merge
+mode. Possible reading: `merge` = the whole multi-step operation that
+makes a Merge Candidate's commit appear on the target branch (rebase +
+hooks + reviewers + fast-forward + status update); `land` = the final
+step that actually moves the branch ref. If that's the intended
+distinction, decisions/expertise should say so and the existing names
+should be audited. If they're meant as synonyms, pick one and rename.
+Related to the vocabulary-map observation above.
+
 2026-06-11 — Fargate container is missing the toolchains the
 configured Factory merge checks invoke. The smoke test merge ran
 `factory work merge` end to end on Fargate; rebase succeeded but

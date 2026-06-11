@@ -1493,31 +1493,36 @@ THE SYSTEM SHALL prefer live worktree status and review artifacts before
 falling back to source run artifacts.
 Test: tests/binary.rs (land_rejects_live_failed_reviews), tests/behaviors/operations/test-live-run-state.sh (land uses live status and reviews)
 
-WHEN the project has no `.factory/config.toml`,
+WHEN the project has no executable `.factory/hooks/check-pre-land`,
 THE SYSTEM SHALL run `factory land` without requiring project checks.
 Test: tests/binary.rs (land_completes_full_lifecycle)
 
-WHEN `.factory/config.toml` defines a check with `run_before_land = true`,
-THE SYSTEM SHALL run the check command in the run worktree before
-removing the worktree, rebasing, merging, or marking the run landed.
+WHEN `.factory/hooks/check-pre-land` exists and is executable,
+THE SYSTEM SHALL run it in the run worktree before removing the
+worktree, rebasing, merging, or marking the run landed, with Factory
+context (`FACTORY_HOOK`, `FACTORY_ARTIFACT_DIR`, and any available
+work/attempt/task identifiers) exposed as environment variables and
+stdout+stderr captured to `<run_dir>/hooks/check-pre-land.log`.
 Test: tests/binary.rs (land_runs_configured_check_before_landing)
 
-WHEN a pre-land check fails and has no enabled autofix command,
+WHEN `check-pre-land` exits non-zero and no executable
+`.factory/hooks/fix-pre-land` is present,
 THE SYSTEM SHALL exit non-zero, keep the worktree intact, keep the run
-unlanded, and print the check name, failed command, command output, and
-configured fix command if present.
+unlanded, and print the hook's exit code and the path to its captured
+log file.
 Test: tests/binary.rs (land_runs_configured_check_before_landing)
 
-WHEN a pre-land check fails and has `autofix = true` with a
-`fix_command`,
+WHEN `check-pre-land` exits non-zero and an executable
+`.factory/hooks/fix-pre-land` is present,
 THE SYSTEM SHALL require no uncommitted changes outside `.factory`
-before running the fix command, run the fix command in the run worktree,
+before running `fix-pre-land`, run `fix-pre-land` in the run worktree,
 commit project changes outside `.factory` when the fix changes project
-files, rerun pre-land checks, rerun reviewers after an autofix commit,
-and continue landing only if the required checks and reviews pass.
+files, rerun reviewers after the autofix commit, rerun `check-pre-land`,
+and continue landing only if `fix-pre-land` succeeds, the rerun
+reviewers pass, and the recheck passes.
 Test: tests/binary.rs (land_refuses_autofix_when_worktree_has_user_changes, land_autofixes_and_reruns_reviewers)
 
-WHEN an autofix command changes files and the subsequent reviewer rerun
+WHEN `fix-pre-land` changes files and the subsequent reviewer rerun
 fails or is uncertain,
 THE SYSTEM SHALL keep the worktree intact, leave the run unlanded, copy
 the new review artifacts to the source run directory, and exit non-zero.

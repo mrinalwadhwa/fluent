@@ -2788,15 +2788,11 @@ fn work_merge_candidate_lands_after_merge_time_reviews() {
             .is_file()
     );
 
-    fs::write(
-        main_dir.join(".factory/config.toml"),
-        r#"
-[checks.fail_if_rerun]
-command = "printf should-not-run >&2; exit 1"
-run_before_land = true
-"#,
-    )
-    .unwrap();
+    write_executable_hook(
+        &main_dir,
+        "check-pre-land",
+        "#!/bin/sh\nprintf should-not-run >&2\nexit 1\n",
+    );
     let fail_bin = tmp.path().join("bin-idempotent-should-not-run");
     write_mock_claude(
         &fail_bin,
@@ -2924,13 +2920,23 @@ fn work_merge_candidate_failed_review_leaves_target_unchanged() {
         .assert()
         .success();
 
-    let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
-    let candidate_head = git_head(&candidate_workspace);
     let main_before = git_head(&main_dir);
     let fail_bin = tmp.path().join("bin-merge-fail");
     write_mock_claude(
         &fail_bin,
-        "#!/bin/bash\nprintf 'Verdict: fail\\n\\nStill risky.\\n' > review.md\nexit 0\n",
+        r##"#!/bin/bash
+case "$PWD" in
+  */work-6-work-1-attempt-1)
+    printf 'followup %s\n' "$$" > "followup-$$.txt"
+    git add "followup-$$.txt"
+    git commit -m "Followup commit" >/dev/null
+    ;;
+  *)
+    printf 'Verdict: fail\n\nStill risky.\n' > review.md
+    ;;
+esac
+exit 0
+"##,
     );
 
     factory_cmd()
@@ -2950,16 +2956,15 @@ fn work_merge_candidate_failed_review_leaves_target_unchanged() {
         ));
 
     assert_eq!(git_head(&main_dir), main_before);
-    assert_eq!(git_head(&candidate_workspace), candidate_head);
     let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];
     assert_eq!(candidate["review_state"], "failed");
-    assert_eq!(candidate["merge_state"]["status"], "failed");
+    assert_eq!(candidate["merge_state"]["status"], "needs-user");
     assert!(
         candidate["merge_state"]["failure_reason"]
             .as_str()
             .unwrap()
-            .contains("Merge-time reviewers")
+            .contains("Merge-time reviewers did not pass")
     );
     assert!(
         candidate["merge_state"]["review_artifacts"]
@@ -3180,16 +3185,11 @@ fn work_merge_candidate_failed_check_leaves_target_unchanged() {
         .env("PATH", mock_path(&bin_dir))
         .assert()
         .success();
-    fs::create_dir_all(main_dir.join(".factory")).unwrap();
-    fs::write(
-        main_dir.join(".factory/config.toml"),
-        r#"
-[checks.fail]
-command = "printf check-failed >&2; exit 1"
-run_before_land = true
-"#,
-    )
-    .unwrap();
+    write_executable_hook(
+        &main_dir,
+        "check-pre-land",
+        "#!/bin/sh\nprintf check-failed >&2\nexit 1\n",
+    );
 
     let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
     let candidate_head = git_head(&candidate_workspace);
@@ -3206,7 +3206,7 @@ run_before_land = true
         .env("PATH", mock_path(&bin_dir))
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Pre-land check 'fail' failed"));
+        .stderr(predicate::str::contains("check-pre-land failed (exit 1)"));
 
     assert_eq!(git_head(&main_dir), main_before);
     assert_eq!(git_head(&candidate_workspace), candidate_head);
@@ -3218,14 +3218,14 @@ run_before_land = true
         candidate["merge_state"]["failure_reason"]
             .as_str()
             .unwrap()
-            .contains("Pre-land check")
+            .contains("check-pre-land failed")
     );
     assert!(
         candidate["merge_state"]["check_artifacts"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|artifact| artifact["producer_id"] == "merge-checks")
+            .any(|artifact| artifact["producer_id"] == "merge-hooks")
     );
 }
 
@@ -3349,15 +3349,11 @@ fn work_merge_candidate_rerun_after_cleanup_preserves_landed_state() {
     assert_eq!(git_head(&main_dir), candidate_head);
     assert!(!candidate_workspace.exists());
 
-    fs::write(
-        main_dir.join(".factory/config.toml"),
-        r#"
-[checks.fail_if_rerun]
-command = "printf should-not-run >&2; exit 1"
-run_before_land = true
-"#,
-    )
-    .unwrap();
+    write_executable_hook(
+        &main_dir,
+        "check-pre-land",
+        "#!/bin/sh\nprintf should-not-run >&2\nexit 1\n",
+    );
     let fail_bin = tmp.path().join("bin-cleanup-rerun-should-not-run");
     write_mock_claude(
         &fail_bin,
@@ -7680,6 +7676,18 @@ fn write_mock_claude(bin_dir: &Path, script: &str) {
     }
 }
 
+fn write_executable_hook(project_root: &Path, name: &str, script: &str) {
+    let hooks_dir = project_root.join(".factory/hooks");
+    fs::create_dir_all(&hooks_dir).unwrap();
+    let path = hooks_dir.join(name);
+    fs::write(&path, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
 fn write_mock_codex(bin_dir: &Path, script: &str) {
     fs::create_dir_all(bin_dir).unwrap();
 
@@ -10488,29 +10496,24 @@ fn land_runs_configured_check_before_landing() {
     let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
     let wt_path_str = fs::read_to_string(run_dir.join("worktree")).unwrap();
     let wt_path = Path::new(wt_path_str.trim());
-    fs::create_dir_all(main_dir.join(".factory")).unwrap();
-    fs::write(
-        main_dir.join(".factory/config.toml"),
-        r#"
-[checks.format]
-command = "printf check-failed >&2; exit 1"
-fix_command = "cargo fmt --all"
-run_before_land = true
-"#,
-    )
-    .unwrap();
+    write_executable_hook(
+        &main_dir,
+        "check-pre-land",
+        "#!/bin/sh\nprintf check-failed >&2\nexit 1\n",
+    );
 
     factory_cmd()
         .current_dir(&main_dir)
         .args(["land", &run_id])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Pre-land check 'format' failed"))
-        .stderr(predicate::str::contains(
-            "Configured fix command: cargo fmt --all",
-        ))
-        .stderr(predicate::str::contains("check-failed"));
+        .stderr(predicate::str::contains("check-pre-land failed (exit 1)"))
+        .stderr(predicate::str::contains("Log: "));
 
+    let log_path = run_dir.join("hooks/check-pre-land.log");
+    assert!(log_path.is_file(), "hook log should be written");
+    let log = fs::read_to_string(&log_path).unwrap();
+    assert!(log.contains("check-failed"), "hook log should capture stderr, got: {log}");
     assert!(wt_path.is_dir(), "failed check should keep worktree");
 }
 
@@ -10523,25 +10526,25 @@ fn land_refuses_autofix_when_worktree_has_user_changes() {
     let wt_path = Path::new(wt_path_str.trim());
 
     fs::write(wt_path.join("dirty-user-file"), "do not commit me\n").unwrap();
-    fs::write(
-        main_dir.join(".factory/config.toml"),
-        r#"
-[checks.format]
-command = "test -f already-fixed"
-fix_command = "touch already-fixed"
-autofix = true
-run_before_land = true
-"#,
-    )
-    .unwrap();
+    write_executable_hook(
+        &main_dir,
+        "check-pre-land",
+        "#!/bin/sh\ntest -f already-fixed\n",
+    );
+    write_executable_hook(
+        &main_dir,
+        "fix-pre-land",
+        "#!/bin/sh\ntouch already-fixed\n",
+    );
 
     factory_cmd()
         .current_dir(&main_dir)
         .args(["land", &run_id])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Cannot autofix check 'format'"))
-        .stderr(predicate::str::contains("uncommitted changes"));
+        .stderr(predicate::str::contains(
+            "fix-pre-land cannot run: worktree has uncommitted changes",
+        ));
 
     assert!(
         !wt_path.join("already-fixed").exists(),
@@ -10576,17 +10579,16 @@ fn land_autofixes_and_reruns_reviewers() {
         .output()
         .unwrap();
 
-    fs::write(
-        main_dir.join(".factory/config.toml"),
-        r#"
-[checks.format]
-command = "test ! -f needs-format"
-fix_command = "rm needs-format"
-autofix = true
-run_before_land = true
-"#,
-    )
-    .unwrap();
+    write_executable_hook(
+        &main_dir,
+        "check-pre-land",
+        "#!/bin/sh\ntest ! -f needs-format\n",
+    );
+    write_executable_hook(
+        &main_dir,
+        "fix-pre-land",
+        "#!/bin/sh\nrm -f needs-format\n",
+    );
 
     let bin_dir = tmp.path().join("land-bin");
     write_mock_claude(
@@ -10608,8 +10610,9 @@ exit 0
         .env("PATH", mock_path(&bin_dir))
         .assert()
         .success()
-        .stderr(predicate::str::contains("Autofix changes committed"))
-        .stderr(predicate::str::contains("Rerunning reviewers"));
+        .stderr(predicate::str::contains(
+            "Rerunning reviewers after fix-pre-land autofix",
+        ));
 
     let log = std::process::Command::new("git")
         .args(["-C", &main_dir.to_string_lossy()])
@@ -10617,7 +10620,7 @@ exit 0
         .output()
         .unwrap();
     let log = String::from_utf8_lossy(&log.stdout);
-    assert!(log.contains("Apply project check autofix"));
+    assert!(log.contains("Apply fix-pre-land changes"));
     let review = fs::read_to_string(run_dir.join("reviews/review-tests.md")).unwrap();
     assert!(review.contains("Autofix review passed"));
     assert!(!main_dir.join("needs-format").exists());
@@ -10646,17 +10649,16 @@ fn land_keeps_worktree_when_autofix_review_fails() {
         .output()
         .unwrap();
 
-    fs::write(
-        main_dir.join(".factory/config.toml"),
-        r#"
-[checks.format]
-command = "test ! -f needs-format"
-fix_command = "rm needs-format"
-autofix = true
-run_before_land = true
-"#,
-    )
-    .unwrap();
+    write_executable_hook(
+        &main_dir,
+        "check-pre-land",
+        "#!/bin/sh\ntest ! -f needs-format\n",
+    );
+    write_executable_hook(
+        &main_dir,
+        "fix-pre-land",
+        "#!/bin/sh\nrm -f needs-format\n",
+    );
 
     let bin_dir = tmp.path().join("land-bin-fail");
     write_mock_claude(
@@ -10678,7 +10680,7 @@ exit 0
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "reviewers did not pass after autofix",
+            "reviewers did not pass after fix-pre-land",
         ));
 
     assert!(wt_path.is_dir(), "review failure should keep worktree");
