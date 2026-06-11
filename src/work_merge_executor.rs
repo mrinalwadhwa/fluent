@@ -40,6 +40,21 @@ pub struct WorkMergeOutcome {
     pub landed_commit: String,
 }
 
+/// The maximum number of follow-up writer cycles a single
+/// `factory work merge` invocation will run when merge-time reviewers
+/// return fail. Mirrors the Attempt-time
+/// `MAX_FOLLOWUP_WRITES_PER_INVOCATION` budget.
+const MAX_MERGE_FOLLOWUP_WRITES_PER_INVOCATION: usize = 2;
+
+/// Outcome of one merge-time review round. Splits the "pass" and
+/// "fail" cases so the merge loop can decide whether to land, retry
+/// with a follow-up writer, or escalate to the user.
+struct MergeReviewExecution {
+    review_artifacts: Vec<ArtifactRef>,
+    state: ReviewState,
+    first_error: Option<anyhow::Error>,
+}
+
 pub fn merge_candidate(config: WorkMergeConfig<'_>) -> Result<WorkMergeOutcome> {
     let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
     item.ensure_not_abandoned()?;
@@ -169,38 +184,118 @@ fn execute_merge(
         );
     }
 
-    rebase_candidate(source_workspace, &candidate.target_branch)?;
-    ensure_clean_worktree(source_workspace)?;
+    let mut followup_writes_advanced: usize = 0;
+    loop {
+        ensure_clean_worktree(source_workspace)?;
+        rebase_candidate(source_workspace, &candidate.target_branch)?;
+        ensure_clean_worktree(source_workspace)?;
 
-    let check_artifacts =
-        match run_merge_checks(config.project_root, source_workspace, artifact_dir) {
-            Ok(artifacts) => artifacts,
-            Err(error) => {
-                let artifacts = check_artifacts_for_failure(config.project_root, artifact_dir);
-                record_candidate_failure(
-                    config.store,
-                    config.work_item_id,
-                    &candidate.id,
-                    error.to_string(),
-                    artifacts,
-                    Vec::new(),
-                )?;
-                return Err(error);
-            }
-        };
-    let candidate_head_after_rebase = head_commit(source_workspace)?;
-    set_candidate_reviewing(config.store, config.work_item_id, &candidate.id)?;
-    let review_artifacts = run_merge_reviews(
-        config,
-        item,
-        candidate,
-        artifact_dir,
-        &check_artifacts,
-        &target_head_before,
-        &candidate_head_after_rebase,
-    )?;
-    record_candidate_reviews_passed(config.store, config.work_item_id, &candidate.id)?;
+        let check_artifacts =
+            match run_merge_checks(config.project_root, source_workspace, artifact_dir) {
+                Ok(artifacts) => artifacts,
+                Err(error) => {
+                    let artifacts = check_artifacts_for_failure(config.project_root, artifact_dir);
+                    record_candidate_failure(
+                        config.store,
+                        config.work_item_id,
+                        &candidate.id,
+                        error.to_string(),
+                        artifacts,
+                        Vec::new(),
+                    )?;
+                    return Err(error);
+                }
+            };
 
+        let candidate_head_after_rebase = head_commit(source_workspace)?;
+        set_candidate_reviewing(config.store, config.work_item_id, &candidate.id)?;
+        let review_outcome = run_merge_reviews(
+            config,
+            item,
+            candidate,
+            artifact_dir,
+            &check_artifacts,
+            &target_head_before,
+            &candidate_head_after_rebase,
+        )?;
+
+        if let Some(error) = review_outcome.first_error {
+            // Reviewer crashed or launch-failed. Not retried because the
+            // failure is not a reviewer verdict the writer can address.
+            record_candidate_failure(
+                config.store,
+                config.work_item_id,
+                &candidate.id,
+                error.to_string(),
+                check_artifacts.to_vec(),
+                review_outcome.review_artifacts.clone(),
+            )?;
+            return Err(error);
+        }
+
+        if review_outcome.state.is_accepted() {
+            // All merge-time reviewers passed; proceed to land.
+            record_candidate_reviews_passed(config.store, config.work_item_id, &candidate.id)?;
+            return finalize_landing(
+                config,
+                candidate,
+                source_workspace,
+                target_workspace,
+                &target_head_before,
+                check_artifacts,
+                review_outcome.review_artifacts,
+            );
+        }
+
+        // Merge-time reviewers returned fail/uncertain. Try a follow-up
+        // writer cycle if budget remains; otherwise mark needs-user.
+        if followup_writes_advanced >= MAX_MERGE_FOLLOWUP_WRITES_PER_INVOCATION {
+            let failed_paths = failed_review_paths(
+                config.project_root,
+                &review_outcome.review_artifacts,
+                &review_outcome.state,
+            );
+            let handoff_path = write_merge_needs_user_handoff(
+                config.project_root,
+                artifact_dir,
+                &candidate.id,
+                &failed_paths,
+            )?;
+            record_candidate_needs_user(
+                config.store,
+                config.work_item_id,
+                &candidate.id,
+                check_artifacts.clone(),
+                review_outcome.review_artifacts.clone(),
+                handoff_path.clone(),
+            )?;
+            bail!(
+                "Merge-time reviewers did not pass; follow-up write budget ({}) exhausted. Handoff: {}",
+                MAX_MERGE_FOLLOWUP_WRITES_PER_INVOCATION,
+                handoff_path.display()
+            );
+        }
+
+        let failed_paths = failed_review_paths(
+            config.project_root,
+            &review_outcome.review_artifacts,
+            &review_outcome.state,
+        );
+        run_merge_followup_writer(config, source_workspace, &failed_paths)?;
+        set_candidate_executing(config.store, config.work_item_id, &candidate.id)?;
+        followup_writes_advanced += 1;
+    }
+}
+
+fn finalize_landing(
+    config: &WorkMergeConfig<'_>,
+    candidate: &crate::work_model::MergeCandidate,
+    source_workspace: &Path,
+    target_workspace: &Path,
+    target_head_before: &str,
+    check_artifacts: Vec<ArtifactRef>,
+    review_artifacts: Vec<ArtifactRef>,
+) -> Result<WorkMergeOutcome> {
     let landed_commit = head_commit(source_workspace)?;
     let target_head_now = git_stdout(
         target_workspace,
@@ -246,6 +341,185 @@ fn execute_merge(
         merge_candidate_id: candidate.id.clone(),
         landed_commit,
     })
+}
+
+/// Extract artifact paths for failed/uncertain reviewers so the
+/// follow-up writer can read concrete findings.
+fn failed_review_paths(
+    project_root: &Path,
+    review_artifacts: &[ArtifactRef],
+    state: &ReviewState,
+) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for artifact in review_artifacts {
+        let producer = &artifact.producer_id;
+        let Some(reviewer) = producer.strip_prefix("merge-review-") else {
+            continue;
+        };
+        if reviewer == "state" {
+            continue;
+        }
+        let verdict_failed = state
+            .verdicts
+            .get(reviewer)
+            .map(|v| matches!(v, review::Verdict::Fail | review::Verdict::Uncertain))
+            .unwrap_or(false);
+        if verdict_failed {
+            paths.push(project_root.join(&artifact.path));
+        }
+    }
+    paths
+}
+
+fn write_merge_needs_user_handoff(
+    project_root: &Path,
+    artifact_dir: &Path,
+    candidate_id: &str,
+    failed_review_paths: &[PathBuf],
+) -> Result<PathBuf> {
+    let handoff_path = artifact_dir.join("needs-user.md");
+    let mut content = format!(
+        "# Merge Candidate {candidate_id} needs user input\n\nThe merge loop exhausted the same-invocation follow-up write budget after advancing {MAX_MERGE_FOLLOWUP_WRITES_PER_INVOCATION} follow-up write cycles.\n\nFailed merge-time review artifacts still need attention:\n\n"
+    );
+    if failed_review_paths.is_empty() {
+        content.push_str("- (no specific reviewer artifact paths recorded)\n");
+    } else {
+        for path in failed_review_paths {
+            content.push_str(&format!("- {}\n", path_for_model(project_root, path)));
+        }
+    }
+    content.push_str(
+        "\nResume by rerunning `factory work merge <work-item-id> <merge-candidate-id>` after addressing the findings.\n",
+    );
+    fs::write(&handoff_path, content)?;
+    Ok(handoff_path)
+}
+
+fn record_candidate_needs_user(
+    store: &WorkModelStore,
+    work_item_id: &str,
+    candidate_id: &str,
+    check_artifacts: Vec<ArtifactRef>,
+    review_artifacts: Vec<ArtifactRef>,
+    handoff_path: PathBuf,
+) -> Result<()> {
+    update_candidate(store, work_item_id, candidate_id, |candidate| {
+        candidate.review_state = MergeCandidateReviewState::Failed;
+        candidate.merge_state = MergeCandidateMergeState {
+            status: MergeCandidateMergeStatus::NeedsUser,
+            landed_commit: None,
+            failure_reason: Some(format!(
+                "Merge-time reviewers did not pass; follow-up write budget ({}) exhausted; handoff at {}",
+                MAX_MERGE_FOLLOWUP_WRITES_PER_INVOCATION,
+                handoff_path.display()
+            )),
+            check_artifacts,
+            review_artifacts,
+        };
+    })
+}
+
+/// Invoke the configured coder against the candidate workspace with
+/// the failed merge-time review artifacts as input, asking the
+/// coder to address the findings and commit. Errors if no new
+/// commits result or the worktree is left dirty.
+fn run_merge_followup_writer(
+    config: &WorkMergeConfig<'_>,
+    source_workspace: &Path,
+    failed_review_paths: &[PathBuf],
+) -> Result<()> {
+    if !config.no_sandbox {
+        os::check_prerequisites_for(config.coder_kind)?;
+        credential::inject_credentials()?;
+        credential::setup_git_signing();
+    }
+
+    let baseline_commit = head_commit(source_workspace)?;
+
+    let mut findings_block = String::new();
+    for path in failed_review_paths {
+        findings_block.push_str("\n---\n");
+        findings_block.push_str(&format!("{}\n\n", path.display()));
+        if let Ok(text) = fs::read_to_string(path) {
+            findings_block.push_str(&text);
+            findings_block.push('\n');
+        }
+    }
+
+    let prompt = format!(
+        "Address the following merge-time review findings against the candidate workspace at {workspace}.\n\nCompletion contract:\n- Make whatever code, documentation, and test changes are needed to address every finding.\n- Commit all changes before exiting.\n- Leave the workspace clean: no unstaged, staged, or untracked changes.\n- Do not rewrite or amend existing commits; add new commits on top.\n\nMerge-time review findings:\n{findings}\n",
+        workspace = source_workspace.display(),
+        findings = if findings_block.is_empty() {
+            "(none recorded)\n".to_string()
+        } else {
+            findings_block
+        }
+    );
+
+    let workspace_resolver = ContentResolver::new(Some(source_workspace));
+    let system_prompt = workspace_resolver
+        .resolve_content("prompts/work-author.md")
+        .unwrap_or_default();
+
+    let (sandbox, _sandbox_profile) = if config.no_sandbox {
+        (CoderSandbox::None, None)
+    } else {
+        let common_git_dir = worktree::git_common_dir(source_workspace)?;
+        let mut readable_roots = vec![common_git_dir];
+        for path in failed_review_paths {
+            if let Some(parent) = path.parent() {
+                readable_roots.push(parent.to_path_buf());
+            }
+        }
+        build_followup_writer_sandbox(
+            config.coder_kind,
+            config.resolver,
+            source_workspace,
+            &readable_roots,
+        )?
+    };
+
+    eprintln!("  Factory           work merge followup-write");
+    eprintln!("  Workspace         {}", source_workspace.display());
+
+    let coder = config.coder_kind.boxed(sandbox);
+    let exit_code = coder.run(
+        &prompt,
+        &system_prompt,
+        source_workspace,
+        config.extra_args,
+        &[],
+        None,
+    )?;
+    if exit_code != 0 {
+        bail!("Merge follow-up coder exited with code {exit_code}");
+    }
+
+    ensure_clean_worktree(source_workspace)?;
+    let new_head = head_commit(source_workspace)?;
+    if new_head == baseline_commit {
+        bail!("Merge follow-up coder did not produce any new commits on top of {baseline_commit}");
+    }
+    Ok(())
+}
+
+fn build_followup_writer_sandbox(
+    coder_kind: CoderKind,
+    resolver: &ContentResolver,
+    source_workspace: &Path,
+    readable_roots: &[PathBuf],
+) -> Result<(CoderSandbox, Option<os::SandboxProfile>)> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let writable_roots = vec![source_workspace.to_path_buf()];
+    let profile = os::render_profile_for_access_for_coder(
+        resolver,
+        &home,
+        &writable_roots,
+        readable_roots,
+        coder_kind,
+    )?;
+    let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
+    Ok((sandbox, Some(profile)))
 }
 
 fn run_merge_checks(
@@ -315,7 +589,7 @@ fn run_merge_reviews(
     check_artifacts: &[ArtifactRef],
     target_head_before: &str,
     candidate_head_after_rebase: &str,
-) -> Result<Vec<ArtifactRef>> {
+) -> Result<MergeReviewExecution> {
     let reviews_dir = artifact_dir.join("reviews");
     fs::create_dir_all(&reviews_dir)?;
     let mut verdicts = std::collections::BTreeMap::new();
@@ -421,35 +695,16 @@ fn run_merge_reviews(
             path: path_for_model(config.project_root, &artifact_dir.join("review-state.json")),
         });
 
-        if let Some(error) = first_error {
-            record_candidate_failure(
-                config.store,
-                config.work_item_id,
-                &candidate.id,
-                error.to_string(),
-                check_artifacts.to_vec(),
-                artifacts.clone(),
-            )?;
-            return Err(error);
-        }
-        if !state.is_accepted() {
-            record_candidate_failure(
-                config.store,
-                config.work_item_id,
-                &candidate.id,
-                format!("Merge-time reviewers returned {}", state.state.as_str()),
-                check_artifacts.to_vec(),
-                artifacts.clone(),
-            )?;
-            bail!("Merge-time reviewers did not pass");
-        }
-
-        Ok(artifacts)
+        Ok(MergeReviewExecution {
+            review_artifacts: artifacts,
+            state,
+            first_error,
+        })
     })();
 
     let cleanup_result = reviewer_worktrees.cleanup();
     match (review_result, cleanup_result) {
-        (Ok(artifacts), Ok(())) => Ok(artifacts),
+        (Ok(outcome), Ok(())) => Ok(outcome),
         (Err(error), Ok(())) => Err(error),
         (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
         (Err(error), Err(cleanup_error)) => {
@@ -1717,5 +1972,82 @@ Keep this Work-native sentence.
         assert!(guidance.contains("Factory sets CARGO_TARGET_DIR"));
         assert!(guidance.contains("reviewer artifact directory"));
         assert!(!guidance.contains(".factory/runs/"));
+    }
+
+    #[test]
+    fn failed_review_paths_picks_only_fail_and_uncertain_verdicts() {
+        let project_root = tempfile::tempdir().unwrap();
+        let mut verdicts = std::collections::BTreeMap::new();
+        verdicts.insert("architecture".to_string(), review::Verdict::Pass);
+        verdicts.insert("tests".to_string(), review::Verdict::Fail);
+        verdicts.insert("documentation".to_string(), review::Verdict::Uncertain);
+        verdicts.insert("skills".to_string(), review::Verdict::Pass);
+        let state = ReviewState::from_verdicts(1, verdicts);
+        let review_artifacts = vec![
+            ArtifactRef {
+                producer_id: "merge-review-architecture".to_string(),
+                path: ".factory/work/artifacts/work-1/attempt-1/cand/merge/reviews/architecture/review.md".to_string(),
+            },
+            ArtifactRef {
+                producer_id: "merge-review-tests".to_string(),
+                path: ".factory/work/artifacts/work-1/attempt-1/cand/merge/reviews/tests/review.md".to_string(),
+            },
+            ArtifactRef {
+                producer_id: "merge-review-documentation".to_string(),
+                path: ".factory/work/artifacts/work-1/attempt-1/cand/merge/reviews/documentation/review.md".to_string(),
+            },
+            ArtifactRef {
+                producer_id: "merge-review-skills".to_string(),
+                path: ".factory/work/artifacts/work-1/attempt-1/cand/merge/reviews/skills/review.md".to_string(),
+            },
+            ArtifactRef {
+                producer_id: "merge-review-state".to_string(),
+                path: ".factory/work/artifacts/work-1/attempt-1/cand/merge/review-state.json".to_string(),
+            },
+        ];
+
+        let paths = failed_review_paths(project_root.path(), &review_artifacts, &state);
+
+        let names: Vec<String> = paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(paths.len(), 2);
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.to_string_lossy().contains("reviews/tests/"))
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.to_string_lossy().contains("reviews/documentation/"))
+        );
+        assert!(names.iter().all(|n| n == "review.md"));
+    }
+
+    #[test]
+    fn write_merge_needs_user_handoff_lists_failed_review_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let artifact_dir = tmp.path().join("artifacts/work-1/attempt-1/cand/merge");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        let failed = vec![
+            artifact_dir.join("reviews/tests/review.md"),
+            artifact_dir.join("reviews/documentation/review.md"),
+        ];
+
+        let handoff = write_merge_needs_user_handoff(
+            tmp.path(),
+            &artifact_dir,
+            "attempt-1-merge-candidate",
+            &failed,
+        )
+        .unwrap();
+
+        let content = fs::read_to_string(&handoff).unwrap();
+        assert!(content.contains("attempt-1-merge-candidate"));
+        assert!(content.contains("follow-up write budget"));
+        assert!(content.contains("reviews/tests/review.md"));
+        assert!(content.contains("reviews/documentation/review.md"));
     }
 }
