@@ -271,6 +271,46 @@ pub fn stop_work_merge(
     Ok(())
 }
 
+/// Read the Merge Candidate from the Work model store and return the
+/// basenames of any sibling worktrees that exist next to the project
+/// root and need to be uploaded for the merge to operate on. Today
+/// that is just the candidate's source workspace; review-time sibling
+/// worktrees are created in-container.
+fn merge_candidate_sibling_worktrees(
+    project_root: &Path,
+    work_item_id: &str,
+    merge_candidate_id: &str,
+) -> Result<Vec<String>> {
+    let store = crate::work_model::WorkModelStore::new(project_root);
+    let item = store
+        .read_work_item(work_item_id)
+        .map_err(|e| anyhow::anyhow!("Failed to read Work Item {work_item_id}: {e}"))?;
+    let candidate = item
+        .merge_candidates
+        .iter()
+        .find(|c| c.id == merge_candidate_id)
+        .ok_or_else(|| anyhow::anyhow!(
+            "Merge Candidate {merge_candidate_id} not found in Work Item {work_item_id}"
+        ))?;
+    let source_path = Path::new(&candidate.source_workspace.path);
+    let Some(basename) = source_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
+    else {
+        return Ok(Vec::new());
+    };
+    let parent = project_root
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Project root has no parent"))?;
+    let absolute = parent.join(&basename);
+    if absolute.is_dir() {
+        Ok(vec![basename])
+    } else {
+        Ok(Vec::new())
+    }
+}
+
 /// Resolve project_root → (parent, basename). The parent becomes the
 /// tar `-C` directory and the basename is the single top-level entry
 /// included in the tar (matching the `/worktrees/<name>` container
@@ -295,6 +335,19 @@ fn project_root_components(project_root: &Path) -> Result<(PathBuf, String)> {
 /// scratch, the local Fargate ARN tracking dir) are excluded to keep
 /// the upload small.
 fn upload_project_workspace(config: &FargateConfig, project_root: &Path, key: &str) -> Result<()> {
+    upload_worktrees(config, project_root, key, &[])
+}
+
+/// Upload the project worktree plus any named sibling worktrees that
+/// live next to it as a single tar archive matching the `/worktrees`
+/// container layout. Used for merge launches that need the candidate
+/// (and optionally review) worktrees alongside the project.
+fn upload_worktrees(
+    config: &FargateConfig,
+    project_root: &Path,
+    key: &str,
+    extra_siblings: &[String],
+) -> Result<()> {
     let (parent, name) = project_root_components(project_root)?;
     eprintln!(
         "  Uploading project workspace to s3://{}/{key}",
@@ -324,6 +377,10 @@ fn upload_project_workspace(config: &FargateConfig, project_root: &Path, key: &s
     tar_args.push("-C".into());
     tar_args.push(parent_str);
     tar_args.push(name);
+    for sibling in extra_siblings {
+        eprintln!("  Including sibling worktree: {sibling}");
+        tar_args.push(sibling.clone());
+    }
 
     let mut tar_child = Command::new("tar")
         .env("COPYFILE_DISABLE", "1")
@@ -475,8 +532,9 @@ pub fn pull_work_attempt(project_root: &Path, work_item_id: &str, attempt_id: &s
     pull_worktrees(&config, project_root, &key)
 }
 
-/// Upload the project workspace to S3 and launch a Fargate task that
-/// runs `factory work merge` for the given Work Item + Merge Candidate.
+/// Upload the project workspace plus the Merge Candidate's source
+/// worktree to S3 and launch a Fargate task that runs
+/// `factory work merge`.
 pub fn launch_work_merge(
     project_root: &Path,
     work_item_id: &str,
@@ -489,9 +547,11 @@ pub fn launch_work_merge(
         .map_err(|_| anyhow::anyhow!("No Claude auth token available"))?;
     let (_parent, project_name) = project_root_components(project_root)?;
 
+    let sibling_worktrees =
+        merge_candidate_sibling_worktrees(project_root, work_item_id, merge_candidate_id)?;
     let upload_key = format!("work-merge/{work_item_id}/{merge_candidate_id}/workspace-in.tar");
     eprintln!("  Factory           fargate work merge ({work_item_id} {merge_candidate_id})");
-    upload_project_workspace(&config, project_root, &upload_key)?;
+    upload_worktrees(&config, project_root, &upload_key, &sibling_worktrees)?;
 
     eprintln!("  Starting Fargate task...");
     let task_arn = run_ecs_task(
