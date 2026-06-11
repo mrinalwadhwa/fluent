@@ -309,6 +309,13 @@ fn upload_project_workspace(config: &FargateConfig, project_root: &Path, key: &s
     ];
     let parent_str = parent.to_string_lossy().into_owned();
     let mut tar_args: Vec<String> = vec!["cf".into(), "-".into()];
+    // macOS Finder writes AppleDouble metadata files (._*) and
+    // .DS_Store next to every regular file when a directory is
+    // browsed. These break Work model JSON readers in the container
+    // ("stream did not contain valid UTF-8") and are never useful
+    // remotely.
+    tar_args.push("--exclude=._*".into());
+    tar_args.push("--exclude=.DS_Store".into());
     for ex in &excludes {
         tar_args.push(format!("--exclude={ex}"));
     }
