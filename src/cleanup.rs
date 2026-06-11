@@ -448,10 +448,16 @@ fn work_cleanup_plan(
     }
 
     let item_path = store.work_item_path(&work_item.id)?;
+    let work_root = source_root.join(".factory/work");
     let state_paths = vec![
         store.work_attempts_dir().join(&work_item.id),
         store.work_tasks_dir().join(&work_item.id),
         store.work_merge_candidates_dir().join(&work_item.id),
+        // Fargate runtime metadata (recorded task ARNs etc.). Safe to
+        // remove with the rest of the terminal Work Item state because
+        // the referenced ECS tasks are stopped by the time cleanup runs.
+        work_root.join("runtime/attempts").join(&work_item.id),
+        work_root.join("runtime/merges").join(&work_item.id),
     ];
     let artifacts = work_item_artifact_paths(source_root, work_item);
 
@@ -1359,5 +1365,59 @@ mod tests {
         assert_eq!(results[0].reviewer, "tests");
         assert!(results[0].applied);
         assert!(!reviewer_dir.exists());
+    }
+
+    #[test]
+    fn terminal_work_item_cleanup_removes_runtime_arn_dirs() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let store = WorkModelStore::new(&project);
+
+        // Build an abandoned Work Item with no Attempts so cleanup is
+        // immediately eligible.
+        let item = WorkItem {
+            id: "runtime-cleanup".to_string(),
+            title: "Cleanup removes Fargate runtime ARN dirs".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: Some(crate::work_model::WorkItemAbandonment {
+                reason: Some("test cleanup".to_string()),
+            }),
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        store.create_work_item(&item).unwrap();
+
+        // Place a Fargate ARN file under the runtime tree, mirroring
+        // what launch_work_attempt records.
+        let attempts_runtime = project
+            .join(".factory/work/runtime/attempts/runtime-cleanup/attempt-1");
+        fs::create_dir_all(&attempts_runtime).unwrap();
+        fs::write(attempts_runtime.join("fargate-task-arn"), "arn-1").unwrap();
+        let merges_runtime = project
+            .join(".factory/work/runtime/merges/runtime-cleanup/cand-1");
+        fs::create_dir_all(&merges_runtime).unwrap();
+        fs::write(merges_runtime.join("fargate-task-arn"), "arn-2").unwrap();
+
+        let results = cleanup_work_items(
+            &project,
+            &CleanupOptions {
+                run_id: None,
+                apply: true,
+            },
+        )
+        .unwrap();
+
+        let work_item_result = results
+            .iter()
+            .find_map(|r| match r {
+                WorkCleanupResult::WorkItem(item) => Some(item),
+                _ => None,
+            })
+            .expect("Work Item cleanup result present");
+        assert!(work_item_result.applied);
+        assert!(!attempts_runtime.exists());
+        assert!(!merges_runtime.exists());
     }
 }
