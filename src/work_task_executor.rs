@@ -1854,7 +1854,7 @@ mod tests {
             task_id: "attempt-1-review-tests",
             artifact_dir: tmp.path(),
             review_path: &review_path,
-            readable_workspaces: &[workspace.clone()],
+            readable_workspaces: std::slice::from_ref(&workspace),
             input_artifacts: &[],
             review_only: false,
         })

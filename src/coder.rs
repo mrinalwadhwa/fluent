@@ -319,11 +319,7 @@ impl CodexCode {
             cmd.arg("exec");
         }
         cmd.args(["--cd", &working_dir.to_string_lossy()]);
-        if self.sandbox_profile.is_some() {
-            cmd.args(["--dangerously-bypass-approvals-and-sandbox"]);
-        } else {
-            cmd.args(["--dangerously-bypass-approvals-and-sandbox"]);
-        }
+        cmd.args(["--dangerously-bypass-approvals-and-sandbox"]);
         if let Some(model) = codex_model() {
             cmd.args(["--model", &model]);
         }

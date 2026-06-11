@@ -423,9 +423,9 @@ fn archive_previous_round(run_dir: &Path, review_round: u32) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            if name_str.starts_with("review-") && name_str.ends_with(".md") {
-                let _ = fs::rename(entry.path(), archive_dir.join(&name));
-            } else if name_str.starts_with("transcript-") && name_str.ends_with(".jsonl") {
+            let is_review_md = name_str.starts_with("review-") && name_str.ends_with(".md");
+            let is_transcript = name_str.starts_with("transcript-") && name_str.ends_with(".jsonl");
+            if is_review_md || is_transcript {
                 let _ = fs::rename(entry.path(), archive_dir.join(&name));
             }
         }
