@@ -314,9 +314,31 @@ pub enum WorkCommands {
         #[arg(long)]
         coder: Option<String>,
 
+        /// Execution runtime: local (default) or fargate
+        #[arg(long)]
+        runtime: Option<String>,
+
         /// Extra args passed through to the agent
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
+    },
+
+    /// Download a Fargate-executed Merge Candidate's workspace +
+    /// Work state from S3 back into the project workspace.
+    MergePull {
+        /// Work Item ID
+        work_item_id: String,
+        /// Merge Candidate ID
+        merge_candidate_id: String,
+    },
+
+    /// Stop a Fargate-executed Merge Candidate's ECS task
+    /// (best-effort, idempotent).
+    MergeStop {
+        /// Work Item ID
+        work_item_id: String,
+        /// Merge Candidate ID
+        merge_candidate_id: String,
     },
 
     /// Execute stored Work Item Tasks
@@ -351,6 +373,21 @@ pub enum WorkAttemptCommands {
         /// Extra args passed through to the agent
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
+    },
+    /// Download a Fargate-executed Attempt's workspace + Work state
+    /// from S3 back into the project workspace.
+    Pull {
+        /// Work Item ID
+        work_item_id: String,
+        /// Attempt ID
+        attempt_id: String,
+    },
+    /// Stop a Fargate-executed Attempt's ECS task (best-effort, idempotent).
+    Stop {
+        /// Work Item ID
+        work_item_id: String,
+        /// Attempt ID
+        attempt_id: String,
     },
 }
 

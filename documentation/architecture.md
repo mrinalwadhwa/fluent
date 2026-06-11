@@ -964,6 +964,56 @@ containers via SSM.
 
 No EFS. Fargate ephemeral storage is sufficient for a single container.
 
+#### Work model on Fargate
+
+The same Fargate task definition and entrypoint serve the Work model:
+
+```
+factory work attempt run --runtime fargate <work-item-id> <attempt-id>
+factory work merge --runtime fargate <work-item-id> <candidate-id>
+```
+
+The local-side launcher (`fargate::launch_work_attempt`,
+`fargate::launch_work_merge`) uploads the project workspace (including
+`.factory/work/items/<id>.json`, attempts/, tasks/, candidate sibling
+worktrees if present) to
+`s3://<bucket>/work/<work-item-id>/<attempt-id>/workspace-in.tar` or
+`s3://<bucket>/work-merge/<work-item-id>/<candidate-id>/workspace-in.tar`,
+launches the ECS task with `FACTORY_WORK_ITEM_ID` plus either
+`FACTORY_WORK_ATTEMPT_ID` or `FACTORY_WORK_MERGE_CANDIDATE_ID` as
+task overrides, and records the task ARN under
+`.factory/work/runtime/{attempts,merges}/<id>/.../fargate-task-arn` so
+follow-up `factory work attempt stop` or `factory work merge-stop`
+commands can locate and cancel the task.
+
+The container's entrypoint (`infrastructure/run/entrypoint.sh`) picks
+its mode from those env vars: Work Attempt, Work Merge, or legacy run.
+Each mode pulls the workspace from S3, runs the appropriate
+`factory ...` command in-container with `--no-sandbox`, then uploads
+the completed workspace back to a `workspace-out.tar` (Work model) or
+`workspace.tar` (legacy) key. Local commands retrieve those:
+
+```
+factory work attempt pull <work-item-id> <attempt-id>
+factory work merge-pull   <work-item-id> <candidate-id>
+```
+
+Operators can stop a running Fargate Work task at any time:
+
+```
+factory work attempt stop <work-item-id> <attempt-id>
+factory work merge-stop   <work-item-id> <candidate-id>
+```
+
+`stop` reads the recorded task ARN and calls `aws ecs stop-task`. The
+call is idempotent: an already-stopped or absent task returns Ok.
+
+After landing changes to `entrypoint.sh` or the Factory binary the
+container image must be rebuilt and the task definition redeployed
+before Work-on-Fargate launches pick up the new behavior. The same
+`infrastructure/setup.sh` flow that builds for legacy runs covers the
+Work model — the entrypoint and binary are shared.
+
 ## Credential management
 
 ### Local runtime

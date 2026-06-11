@@ -49,23 +49,32 @@ resolve_task_handle() {
 [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || die "No Claude auth token"
 
 MODE=""
-if [ -n "${FACTORY_WORK_ITEM_ID:-}" ] && [ -n "${FACTORY_WORK_ATTEMPT_ID:-}" ]; then
-  MODE="work"
+if [ -n "${FACTORY_WORK_ITEM_ID:-}" ] && [ -n "${FACTORY_WORK_MERGE_CANDIDATE_ID:-}" ]; then
+  MODE="work-merge"
+elif [ -n "${FACTORY_WORK_ITEM_ID:-}" ] && [ -n "${FACTORY_WORK_ATTEMPT_ID:-}" ]; then
+  MODE="work-attempt"
 elif [ -n "${FACTORY_RUN_ID:-}" ]; then
   MODE="run"
 else
-  die "Set FACTORY_RUN_ID (legacy mode) or FACTORY_WORK_ITEM_ID + FACTORY_WORK_ATTEMPT_ID (Work mode)"
+  die "Set FACTORY_RUN_ID (legacy mode), FACTORY_WORK_ITEM_ID + FACTORY_WORK_ATTEMPT_ID (Work attempt mode), or FACTORY_WORK_ITEM_ID + FACTORY_WORK_MERGE_CANDIDATE_ID (Work merge mode)"
 fi
 
 S3_REGION="${FACTORY_REGION:-us-west-1}"
 
-if [ "$MODE" = "run" ]; then
-  S3_IN_KEY="runs/${FACTORY_RUN_ID}/workspace-in.tar"
-  S3_OUT_KEY="runs/${FACTORY_RUN_ID}/workspace.tar"
-else
-  S3_IN_KEY="work/${FACTORY_WORK_ITEM_ID}/${FACTORY_WORK_ATTEMPT_ID}/workspace-in.tar"
-  S3_OUT_KEY="work/${FACTORY_WORK_ITEM_ID}/${FACTORY_WORK_ATTEMPT_ID}/workspace-out.tar"
-fi
+case "$MODE" in
+  run)
+    S3_IN_KEY="runs/${FACTORY_RUN_ID}/workspace-in.tar"
+    S3_OUT_KEY="runs/${FACTORY_RUN_ID}/workspace.tar"
+    ;;
+  work-attempt)
+    S3_IN_KEY="work/${FACTORY_WORK_ITEM_ID}/${FACTORY_WORK_ATTEMPT_ID}/workspace-in.tar"
+    S3_OUT_KEY="work/${FACTORY_WORK_ITEM_ID}/${FACTORY_WORK_ATTEMPT_ID}/workspace-out.tar"
+    ;;
+  work-merge)
+    S3_IN_KEY="work-merge/${FACTORY_WORK_ITEM_ID}/${FACTORY_WORK_MERGE_CANDIDATE_ID}/workspace-in.tar"
+    S3_OUT_KEY="work-merge/${FACTORY_WORK_ITEM_ID}/${FACTORY_WORK_MERGE_CANDIDATE_ID}/workspace-out.tar"
+    ;;
+esac
 
 # --------------------------------------------------------------------------
 # Pull workspace from S3
@@ -103,33 +112,46 @@ else
   die "no factory binary available"
 fi
 
-if [ "$MODE" = "run" ]; then
-  RUN_DIR="${WORKSPACE}/.factory/runs/${FACTORY_RUN_ID}"
-  [ -d "$RUN_DIR" ] || die "Run directory not found: $RUN_DIR"
-  printf '%s' "$FACTORY_RUN_ID" > "${WORKSPACE}/.factory/active-run"
-  printf 'fargate' > "${RUN_DIR}/runtime"
-  TASK_HANDLE="$(resolve_task_handle)"
-  if [ -n "$TASK_HANDLE" ]; then
-    printf '%s' "$TASK_HANDLE" > "${RUN_DIR}/handle"
-  fi
+case "$MODE" in
+  run)
+    RUN_DIR="${WORKSPACE}/.factory/runs/${FACTORY_RUN_ID}"
+    [ -d "$RUN_DIR" ] || die "Run directory not found: $RUN_DIR"
+    printf '%s' "$FACTORY_RUN_ID" > "${WORKSPACE}/.factory/active-run"
+    printf 'fargate' > "${RUN_DIR}/runtime"
+    TASK_HANDLE="$(resolve_task_handle)"
+    if [ -n "$TASK_HANDLE" ]; then
+      printf '%s' "$TASK_HANDLE" > "${RUN_DIR}/handle"
+    fi
 
-  "$FACTORY_BIN" run \
-    --runtime local \
-    --no-sandbox \
-    --in-place \
-    --preserve-run-metadata \
-    --coder claude \
-    --run-id "$FACTORY_RUN_ID"
-else
-  printf 'factory-run: running factory work attempt run %s %s\n' \
-    "$FACTORY_WORK_ITEM_ID" "$FACTORY_WORK_ATTEMPT_ID"
+    "$FACTORY_BIN" run \
+      --runtime local \
+      --no-sandbox \
+      --in-place \
+      --preserve-run-metadata \
+      --coder claude \
+      --run-id "$FACTORY_RUN_ID"
+    ;;
+  work-attempt)
+    printf 'factory-run: running factory work attempt run %s %s\n' \
+      "$FACTORY_WORK_ITEM_ID" "$FACTORY_WORK_ATTEMPT_ID"
 
-  "$FACTORY_BIN" work attempt run \
-    --no-sandbox \
-    --coder claude \
-    "$FACTORY_WORK_ITEM_ID" \
-    "$FACTORY_WORK_ATTEMPT_ID"
-fi
+    "$FACTORY_BIN" work attempt run \
+      --no-sandbox \
+      --coder claude \
+      "$FACTORY_WORK_ITEM_ID" \
+      "$FACTORY_WORK_ATTEMPT_ID"
+    ;;
+  work-merge)
+    printf 'factory-run: running factory work merge %s %s\n' \
+      "$FACTORY_WORK_ITEM_ID" "$FACTORY_WORK_MERGE_CANDIDATE_ID"
+
+    "$FACTORY_BIN" work merge \
+      --no-sandbox \
+      --coder claude \
+      "$FACTORY_WORK_ITEM_ID" \
+      "$FACTORY_WORK_MERGE_CANDIDATE_ID"
+    ;;
+esac
 
 # --------------------------------------------------------------------------
 # Upload workspace to S3

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::credential;
@@ -48,6 +48,246 @@ fn env_required(name: &str) -> Result<String> {
             "{name} not set. Run infrastructure/setup.sh or set in ~/.config/factory/fargate.env"
         )
     })
+}
+
+/// Path where Factory records the ECS task ARN for a running
+/// Fargate-executed Work Attempt. Lives outside of the durable
+/// Work model JSON so it can be cleaned up freely after the task
+/// finishes.
+fn work_attempt_runtime_dir(project_root: &Path, work_item_id: &str, attempt_id: &str) -> PathBuf {
+    project_root
+        .join(".factory/work/runtime/attempts")
+        .join(work_item_id)
+        .join(attempt_id)
+}
+
+fn work_merge_runtime_dir(
+    project_root: &Path,
+    work_item_id: &str,
+    merge_candidate_id: &str,
+) -> PathBuf {
+    project_root
+        .join(".factory/work/runtime/merges")
+        .join(work_item_id)
+        .join(merge_candidate_id)
+}
+
+fn record_task_arn(runtime_dir: &Path, task_arn: &str) -> Result<()> {
+    fs::create_dir_all(runtime_dir)?;
+    fs::write(runtime_dir.join("fargate-task-arn"), task_arn)?;
+    Ok(())
+}
+
+fn read_recorded_task_arn(runtime_dir: &Path) -> Option<String> {
+    fs::read_to_string(runtime_dir.join("fargate-task-arn"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn stop_ecs_task(config: &FargateConfig, task_arn: &str) -> Result<()> {
+    let output = Command::new("aws")
+        .args(["ecs", "stop-task"])
+        .args(["--region", &config.region])
+        .args(["--cluster", &config.cluster])
+        .args(["--task", task_arn])
+        .args([
+            "--reason",
+            "factory work attempt/merge stop requested by operator",
+        ])
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let s = stderr.trim();
+        if s.contains("InvalidParameterException")
+            || s.to_lowercase().contains("not found")
+            || s.to_lowercase().contains("stopped")
+        {
+            eprintln!("  Task already stopped or not found.");
+            return Ok(());
+        }
+        anyhow::bail!("Failed to stop Fargate task: {s}");
+    }
+    eprintln!("  Stopped Fargate task: {task_arn}");
+    Ok(())
+}
+
+/// Stop a Fargate-executed Work Attempt's ECS task. Idempotent: if
+/// no task ARN is recorded or the task is already gone, returns Ok.
+pub fn stop_work_attempt(project_root: &Path, work_item_id: &str, attempt_id: &str) -> Result<()> {
+    let runtime_dir = work_attempt_runtime_dir(project_root, work_item_id, attempt_id);
+    let Some(task_arn) = read_recorded_task_arn(&runtime_dir) else {
+        eprintln!(
+            "  No Fargate task recorded for Work Attempt {work_item_id}/{attempt_id}; nothing to stop."
+        );
+        return Ok(());
+    };
+    let config = load_config()?;
+    credential::inject_credentials()?;
+    stop_ecs_task(&config, &task_arn)?;
+    // Leave the recorded ARN in place so a follow-up pull can correlate
+    // S3 keys; cleanup of the runtime dir is the user's call via
+    // `factory cleanup --apply`.
+    Ok(())
+}
+
+/// Stop a Fargate-executed Merge Candidate's ECS task. Idempotent.
+pub fn stop_work_merge(
+    project_root: &Path,
+    work_item_id: &str,
+    merge_candidate_id: &str,
+) -> Result<()> {
+    let runtime_dir = work_merge_runtime_dir(project_root, work_item_id, merge_candidate_id);
+    let Some(task_arn) = read_recorded_task_arn(&runtime_dir) else {
+        eprintln!(
+            "  No Fargate task recorded for Merge Candidate {work_item_id}/{merge_candidate_id}; nothing to stop."
+        );
+        return Ok(());
+    };
+    let config = load_config()?;
+    credential::inject_credentials()?;
+    stop_ecs_task(&config, &task_arn)?;
+    Ok(())
+}
+
+/// Upload Merge Candidate workspace + state to S3 and launch a
+/// Fargate task that runs `factory work merge` for the given Work
+/// Item + Merge Candidate.
+pub fn launch_work_merge(
+    project_root: &Path,
+    work_item_id: &str,
+    merge_candidate_id: &str,
+) -> Result<()> {
+    let config = load_config()?;
+    credential::inject_credentials()?;
+
+    let oauth = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
+        .map_err(|_| anyhow::anyhow!("No Claude auth token available"))?;
+
+    let upload_key = format!("work-merge/{work_item_id}/{merge_candidate_id}/workspace-in.tar");
+    eprintln!("  Factory           fargate work merge ({work_item_id} {merge_candidate_id})");
+    eprintln!(
+        "  Uploading project workspace to s3://{}/{upload_key}",
+        config.s3_bucket
+    );
+    let mut tar_child = Command::new("tar")
+        .args(["cf", "-", "-C", &project_root.to_string_lossy(), "."])
+        .stdout(std::process::Stdio::piped())
+        .spawn()?;
+
+    let tar_stdout = tar_child
+        .stdout
+        .take()
+        .context("Failed to capture workspace archive output")?;
+    let upload_status = Command::new("aws")
+        .args(["s3", "cp", "--region", &config.region])
+        .args(["-", &format!("s3://{}/{upload_key}", config.s3_bucket)])
+        .stdin(tar_stdout)
+        .status()?;
+    let tar_status = tar_child
+        .wait()
+        .context("Failed to wait for workspace archive command")?;
+    if !upload_status.success() {
+        anyhow::bail!("Failed to upload workspace to S3");
+    }
+    if !tar_status.success() {
+        anyhow::bail!("Failed to archive workspace for upload");
+    }
+
+    eprintln!("  Starting Fargate task...");
+    let overrides = serde_json::json!({
+        "containerOverrides": [{
+            "name": "run",
+            "environment": [
+                {"name": "FACTORY_WORK_ITEM_ID", "value": work_item_id},
+                {"name": "FACTORY_WORK_MERGE_CANDIDATE_ID", "value": merge_candidate_id},
+                {"name": "FACTORY_S3_BUCKET", "value": config.s3_bucket},
+                {"name": "FACTORY_REGION", "value": config.region},
+                {"name": "CLAUDE_CODE_OAUTH_TOKEN", "value": oauth}
+            ]
+        }]
+    });
+
+    let output = Command::new("aws")
+        .args(["ecs", "run-task"])
+        .args(["--region", &config.region])
+        .args(["--cluster", &config.cluster])
+        .args(["--task-definition", &config.run_task])
+        .args(["--launch-type", "FARGATE"])
+        .args(["--enable-execute-command"])
+        .args([
+            "--network-configuration",
+            &format!(
+                "awsvpcConfiguration={{subnets=[{}],securityGroups=[{}],assignPublicIp=ENABLED}}",
+                config.subnets, config.security_group
+            ),
+        ])
+        .args(["--overrides", &overrides.to_string()])
+        .args(["--query", "tasks[0].taskArn"])
+        .args(["--output", "text"])
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to start Fargate task: {}", stderr.trim());
+    }
+
+    let task_arn = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if task_arn.is_empty() || task_arn == "None" {
+        anyhow::bail!("Failed to start Fargate task: no task ARN returned");
+    }
+    eprintln!("  Task: {task_arn}");
+
+    let runtime_dir = work_merge_runtime_dir(project_root, work_item_id, merge_candidate_id);
+    record_task_arn(&runtime_dir, &task_arn)?;
+
+    eprintln!("  Merge is executing on Fargate.");
+    eprintln!(
+        "  Use \"factory work attempt merge-pull {work_item_id} {merge_candidate_id}\" to retrieve results."
+    );
+    eprintln!(
+        "  Use \"factory work attempt merge-stop {work_item_id} {merge_candidate_id}\" to stop the task."
+    );
+
+    Ok(())
+}
+
+/// Download the completed Merge Candidate workspace + state from S3.
+pub fn pull_work_merge(
+    project_root: &Path,
+    work_item_id: &str,
+    merge_candidate_id: &str,
+) -> Result<()> {
+    let config = load_config()?;
+    let key = format!("work-merge/{work_item_id}/{merge_candidate_id}/workspace-out.tar");
+
+    eprintln!(
+        "  Downloading completed Merge Candidate {work_item_id}/{merge_candidate_id} from S3..."
+    );
+    eprintln!("  Source: s3://{}/{key}", config.s3_bucket);
+    eprintln!("  Target: {}", project_root.display());
+
+    let mut child = Command::new("aws")
+        .args(["s3", "cp", "--region", &config.region])
+        .args([&format!("s3://{}/{key}", config.s3_bucket), "-"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Failed to capture s3 stream"))?;
+    let tar_status = Command::new("tar")
+        .args(["xf", "-", "-C", &project_root.to_string_lossy()])
+        .stdin(stdout)
+        .status()?;
+    let s3_status = child.wait().context("Failed to wait for s3 cp command")?;
+    if !s3_status.success() {
+        anyhow::bail!("Failed to download workspace from S3");
+    }
+    if !tar_status.success() {
+        anyhow::bail!("Failed to extract workspace");
+    }
+    eprintln!("  Workspace and Work state extracted from S3.");
+    Ok(())
 }
 
 /// Upload Work Item state + source workspace to S3 and launch a
@@ -137,10 +377,14 @@ pub fn launch_work_attempt(
     }
     eprintln!("  Task: {task_arn}");
 
+    let runtime_dir = work_attempt_runtime_dir(project_root, work_item_id, attempt_id);
+    record_task_arn(&runtime_dir, &task_arn)?;
+
     eprintln!("  Attempt is executing on Fargate.");
     eprintln!(
-        "  Use \"factory work pull-attempt {work_item_id} {attempt_id}\" to retrieve results when the task finishes."
+        "  Use \"factory work attempt pull {work_item_id} {attempt_id}\" to retrieve results when the task finishes."
     );
+    eprintln!("  Use \"factory work attempt stop {work_item_id} {attempt_id}\" to stop the task.");
 
     Ok(())
 }
@@ -157,19 +401,11 @@ pub fn pull_work_attempt(project_root: &Path, work_item_id: &str, attempt_id: &s
     eprintln!("  Source: s3://{}/{key}", config.s3_bucket);
     eprintln!("  Target: {}", project_root.display());
 
-    let s3_pipe = Command::new("aws")
+    let mut child = Command::new("aws")
         .args(["s3", "cp", "--region", &config.region])
         .args([&format!("s3://{}/{key}", config.s3_bucket), "-"])
         .stdout(std::process::Stdio::piped())
         .spawn()?;
-    let s3_stdout = s3_pipe
-        .stdout
-        .as_ref()
-        .map(|_| ())
-        .ok_or_else(|| anyhow::anyhow!("Failed to capture s3 stream"))?;
-    let _ = s3_stdout;
-
-    let mut child = s3_pipe;
     let stdout = child
         .stdout
         .take()

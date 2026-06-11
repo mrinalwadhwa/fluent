@@ -375,6 +375,24 @@ fn cmd_work(
                     }
                 }
             }
+            Some(WorkAttemptCommands::Pull {
+                work_item_id,
+                attempt_id,
+            }) => {
+                fargate::pull_work_attempt(project_root, &work_item_id, &attempt_id)?;
+                println!(
+                    "Pulled Attempt {attempt_id} workspace for Work Item {work_item_id} from Fargate"
+                );
+            }
+            Some(WorkAttemptCommands::Stop {
+                work_item_id,
+                attempt_id,
+            }) => {
+                fargate::stop_work_attempt(project_root, &work_item_id, &attempt_id)?;
+                println!(
+                    "Stop requested for Attempt {attempt_id} of Work Item {work_item_id} (Fargate)"
+                );
+            }
             None => {
                 let work_item_id =
                     work_item_id.ok_or_else(|| anyhow::anyhow!("work item id is required"))?;
@@ -475,9 +493,25 @@ fn cmd_work(
             merge_candidate_id,
             no_sandbox,
             coder,
+            runtime,
             extra_args,
         } => {
             let coder_kind = CoderKind::resolve(coder.as_deref().or(global_coder))?;
+            let runtime = runtime.unwrap_or_else(|| "local".to_string());
+            match runtime.as_str() {
+                "fargate" => {
+                    if coder_kind != CoderKind::Claude {
+                        bail!("Fargate runtime currently supports only the claude coder");
+                    }
+                    fargate::launch_work_merge(project_root, &work_item_id, &merge_candidate_id)?;
+                    println!(
+                        "Launched merge of {merge_candidate_id} for Work Item {work_item_id} on Fargate"
+                    );
+                    return Ok(());
+                }
+                "local" => {}
+                other => bail!("Unknown runtime '{other}'. Available: local, fargate."),
+            }
             let result = work_merge_executor::merge_candidate(WorkMergeConfig {
                 project_root,
                 store: &store,
@@ -491,6 +525,24 @@ fn cmd_work(
             println!(
                 "Merged Merge Candidate {} at {}",
                 result.merge_candidate_id, result.landed_commit
+            );
+        }
+        WorkCommands::MergePull {
+            work_item_id,
+            merge_candidate_id,
+        } => {
+            fargate::pull_work_merge(project_root, &work_item_id, &merge_candidate_id)?;
+            println!(
+                "Pulled Merge Candidate {merge_candidate_id} workspace for Work Item {work_item_id} from Fargate"
+            );
+        }
+        WorkCommands::MergeStop {
+            work_item_id,
+            merge_candidate_id,
+        } => {
+            fargate::stop_work_merge(project_root, &work_item_id, &merge_candidate_id)?;
+            println!(
+                "Stop requested for Merge Candidate {merge_candidate_id} of Work Item {work_item_id} (Fargate)"
             );
         }
         WorkCommands::Task { command } => match command {
