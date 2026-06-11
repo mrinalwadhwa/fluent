@@ -83,11 +83,11 @@ pub fn bundled_content(relative: &str) -> Option<String> {
         "prompts/review-skills.md" => Some(include_str!("../prompts/review-skills.md").to_string()),
         "prompts/review-tests.md" => Some(include_str!("../prompts/review-tests.md").to_string()),
         // Sandbox profiles
-        "sandbox/common.sb" => Some(include_str!("../scripts/assets/common.sb").to_string()),
+        "sandbox/common.sb" => Some(include_str!("../sandboxes/common.sb").to_string()),
         "sandbox/claude-code.sb" => {
-            Some(include_str!("../scripts/assets/claude-code.sb").to_string())
+            Some(include_str!("../sandboxes/claude-code.sb").to_string())
         }
-        "sandbox/codex.sb" => Some(include_str!("../scripts/assets/codex.sb").to_string()),
+        "sandbox/codex.sb" => Some(include_str!("../sandboxes/codex.sb").to_string()),
         _ => None,
     }
 }

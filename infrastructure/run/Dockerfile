@@ -5,7 +5,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY build.rs ./
 COPY prompts ./prompts
-COPY scripts/assets ./scripts/assets
+COPY sandboxes ./sandboxes
 COPY src ./src
 RUN cargo build --release
 
