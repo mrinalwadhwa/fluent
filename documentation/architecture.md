@@ -531,31 +531,40 @@ project/
     src/                     ← agent works here
 ```
 
-When done, landing a worktree run loads project checks from
-`.factory/config.toml`, runs enabled pre-land checks in the worktree,
-copies artifacts back from the worktree, removes the worktree, rebases
-the run branch onto the source branch, fast-forward merges, deletes the
-branch, and sets the status to `landed`. This policy applies to normal
-`factory land` runs and to child runs that the parallel orchestrator
-lands after each group completes.
+When done, landing a worktree run executes the project's
+`check-pre-land` hook (if present) against the worktree, copies
+artifacts back from the worktree, removes the worktree, rebases the
+run branch onto the source branch, fast-forward merges, deletes the
+branch, and sets the status to `landed`. This policy applies to
+normal `factory land` runs and to child runs that the parallel
+orchestrator lands after each group completes.
 
-Projects opt into checks with this shape:
+Projects wire pre-land verification through the hooks system. A
+single executable at `.factory/hooks/check-pre-land` gates landing:
+exit 0 lets it proceed, non-zero stops before any destructive step.
+A sibling executable at `.factory/hooks/fix-pre-land` (optional)
+is invoked when `check-pre-land` fails. Factory requires the
+worktree to be clean before running the fix hook, commits any
+changes the fix produces outside `.factory/`, reruns
+`check-pre-land`, reruns reviewers after the fix commit, and
+continues only when the required checks and reviews pass. The
+project decides what each script invokes — `cargo fmt`,
+`make ci`, `pre-commit run --all-files`, anything else.
 
-```toml
-[checks.format]
-command = "cargo fmt --all -- --check"
-fix_command = "cargo fmt --all"
-autofix = true
-run_before_land = true
+Example:
+
+```sh
+#!/bin/sh
+# .factory/hooks/check-pre-land
+set -e
+cargo fmt --all -- --check
 ```
 
-Factory treats checks generically. If a pre-land check fails without
-autofix, land stops before any destructive step. If a check has
-`autofix = true` and a `fix_command`, Factory first requires no
-uncommitted changes outside `.factory`, runs the fix command, commits
-changes outside `.factory` when the fix changes project files, reruns
-checks, reruns reviewers after an autofix commit, and continues only
-when the required checks and reviews pass.
+```sh
+#!/bin/sh
+# .factory/hooks/fix-pre-land
+cargo fmt --all
+```
 
 ### Run state
 
@@ -934,11 +943,13 @@ runs with `--dangerously-bypass-approvals-and-sandbox`.
 
 Single-container model on AWS ECS Fargate.
 
-`infrastructure/setup.sh` builds the run image from the repository root
-with `infrastructure/run/Dockerfile`. The Dockerfile compiles the Rust
-Factory binary in a builder stage and copies it into the task image at
-`/usr/local/bin/factory`, so task startup only transfers the workspace
-and invokes the binary.
+The `fargate_bootstrap.rs` module deploys infrastructure and builds
+images just-in-time on the first `--runtime fargate` invocation
+(and again whenever inputs change). The Dockerfile at
+`infrastructure/run/Dockerfile` compiles the Rust Factory binary in
+a builder stage and copies it into the task image at
+`/usr/local/bin/factory`, so task startup only transfers the
+workspace and invokes the binary.
 
 ```
 Local machine                    Fargate task
@@ -1059,10 +1070,49 @@ printing transitions and the final `stopCode`/`stoppedReason`.
 `stop` reads the recorded task ARN and calls `aws ecs stop-task`. The
 call is idempotent: an already-stopped or absent task returns Ok.
 
-After changes to `entrypoint.sh` or the Factory binary, rebuild the
-container image and redeploy the task definition via
-`infrastructure/setup.sh` before Work-on-Fargate launches see the new
-behavior.
+After changes to `entrypoint.sh`, the base image's Dockerfile, or
+the Factory binary, the next `--runtime fargate` invocation detects
+the input change via the hash recorded in
+`~/.config/factory/fargate.state.json` and rebuilds + pushes the
+base image automatically. A rebuilt base also triggers a rebuild
+of any project image that FROMs it. The `FACTORY_FARGATE_FORCE_REBUILD`
+environment variable forces the chain regardless of cached state.
+
+#### Just-in-time bootstrap
+
+`src/fargate_bootstrap.rs::ensure_setup` is called before every
+Fargate launch. It is idempotent: on first use it discovers the
+default VPC and subnets, deploys the CloudFormation stack named
+`factory`, reads stack outputs (cluster ARN, task-definition ARN,
+ECR repository URI, S3 bucket, security group), authenticates
+Docker with ECR, builds the Factory base image from the embedded
+`infrastructure/run/Dockerfile` (tagged both as
+`<repo>:latest` and as `factory-runtime:latest` for the local
+build context), pushes it, and writes everything to
+`~/.config/factory/fargate.state.json`. The state file records
+the deployed region, stack output values, a hash of the base image
+inputs, and per-project hashes of `.factory/Dockerfile`. On later
+invocations Factory recomputes the hashes and only rebuilds when
+they change. The Factory source tree must be locatable: either
+`FACTORY_SOURCE_ROOT` is set explicitly, or Factory walks up from
+the project root looking for a directory that contains both
+`Cargo.toml` and `infrastructure/run/Dockerfile`.
+
+#### BYO project Dockerfile
+
+Each Factory-managed project that needs project-specific toolchains
+in its Fargate container provides `.factory/Dockerfile`. Factory's
+bootstrap builds that Dockerfile after the base image is in place,
+tags it as `<repo>:project-<project-name>`, and pushes. The
+project Dockerfile uses a literal `FROM factory-runtime:latest` —
+Factory tags the just-pushed base image locally before invoking
+`docker build` so the FROM resolves. The base image and project
+image lifecycles are coupled: when the base image hash changes,
+all project images that FROM it are rebuilt on their next launch.
+Projects with no `.factory/Dockerfile` use the base image
+directly and have access only to what the base ships
+(`factory` binary, `aws-cli`, `git`, `bash`, `jq`, `tmux`,
+`curl`, `claude-code`).
 
 ## Credential management
 
@@ -1096,12 +1146,12 @@ factory/main/
     lib.rs                   ← public API for tests
     coder.rs                 ← Coder trait + Claude/Codex implementations
     cli.rs                   ← CLI argument types
-    checks.rs                ← Project check execution and autofix commits
     cleanup.rs               ← Cleanup of terminal run and Work state
-    config.rs                ← .factory/config.toml parsing
     content.rs               ← Runtime content resolution (project → user → bundled)
     credential.rs            ← Keychain credential injection
-    land.rs                  ← Landing policy and pre-land check orchestration
+    fargate_bootstrap.rs     ← JIT Fargate setup (CFN, base + project image builds)
+    hooks.rs                 ← Project hook execution (.factory/hooks/<name>)
+    land.rs                  ← Landing policy and pre-land hook orchestration
     run.rs                   ← Run state, resolution, status
     session.rs               ← Session loop orchestration
     review.rs                ← Review loop, verdict parsing
@@ -1133,7 +1183,11 @@ factory/main/
   .factory/
     observations.md          ← feedback log (tracked)
     expertise/               ← project-level learnings (tracked)
+    hooks/                   ← project hook scripts (tracked)
+      check-pre-land
+      fix-pre-land
     runs/                    ← working state (not tracked)
+    work/                    ← Work model durable state (not tracked)
   prompts/                   ← agent system prompts
     author.md
     review-architecture.md
@@ -1141,8 +1195,7 @@ factory/main/
     review-documentation.md
     review-skills.md
     review-tests.md
-  scripts/
-    assets/
+  sandboxes/                 ← Seatbelt profile templates
       common.sb              ← Shared Seatbelt profile template
       claude-code.sb         ← Claude-specific Seatbelt profile layer
       codex.sb               ← Codex-specific Seatbelt profile layer
@@ -1175,7 +1228,7 @@ factory/main/
     run/
       Dockerfile
       entrypoint.sh
-    setup.sh
+    teardown.sh
     teardown.sh
   tests/
     behaviors/
@@ -1189,32 +1242,39 @@ factory/main/
 Several modules own operational policy that would otherwise blur across
 the CLI, run model, and git helpers.
 
-### Project configuration and checks
+### Project hooks
 
-`config.rs` is the parser for project-owned Factory configuration at
-`.factory/config.toml`. Today it exposes configured project checks. A
-check has a stable name, a shell `command`, optional `fix_command`,
-`autofix`, and `run_before_land`. Projects opt into checks; absence of
-`.factory/config.toml` means landing proceeds without project checks.
+`hooks.rs` is the project-hook execution surface. Factory invokes
+executable scripts at `.factory/hooks/<name>` at known lifecycle
+events. The naming convention encodes both the action and the
+phase: `check-pre-<phase>` are gates (non-zero exit blocks the
+phase), `fix-pre-<phase>` are autofixes (run when the matching
+`check-pre-<phase>` failed), and `post-<phase>` are notifications
+(non-zero exit is logged but does not block). The `<phase>` suffix
+aligns with existing Factory state vocabulary (`land`,
+`attempt-failed`, `merge-needs-user`, `write`, `review`).
 
-`checks.rs` executes those configured checks in the run worktree. It
-returns structured pass/fail results with command output, stops at the
-first failing pre-land check, formats actionable failure messages, and
-can run an autofix command for checks that explicitly opt in. Autofix
-requires a clean worktree outside `.factory`, runs the configured fix
-command, stages project changes outside `.factory`, and commits them as
-`Apply project check autofix` when the fix changed files.
+Each hook receives Factory context as environment variables
+(`FACTORY_HOOK`, `FACTORY_WORK_ITEM_ID`, `FACTORY_ATTEMPT_ID`,
+`FACTORY_TASK_ID`, `FACTORY_MERGE_CANDIDATE_ID`,
+`FACTORY_CANDIDATE_COMMIT`, `FACTORY_ARTIFACT_DIR`) and runs with
+the candidate workspace as its working directory. Stdout and
+stderr are captured to `<log_dir>/<hook-name>.log` so failures stay
+inspectable after the fact. Hooks that are missing or not
+executable are silently skipped — no central registry, no
+configuration file, the filesystem is the manifest.
 
 ### Landing
 
-`land.rs` owns the policy that happens immediately before a run branch is
-merged. It loads project config from the source root, filters checks with
-`run_before_land = true`, runs them against the recorded run worktree,
-and calls the worktree landing implementation only after checks pass. If
-an enabled check fails with autofix configured, `land.rs` asks
-`checks.rs` to apply the fix, reruns checks, reruns reviewers after an
-autofix commit, copies updated run artifacts back to the source run
-directory, and lands only when checks and reviewers pass.
+`land.rs` owns the policy that happens immediately before a run
+branch is merged. It calls the `check-pre-land` hook (if present)
+against the recorded run worktree and proceeds with landing only
+after the hook exits 0. If `check-pre-land` fails and a
+`fix-pre-land` hook is also present, `land.rs` requires a clean
+worktree outside `.factory/`, runs the fix hook, commits any
+changes outside `.factory/`, reruns reviewers, reruns
+`check-pre-land`, copies updated run artifacts back to the source
+run directory, and lands only when the recheck and reviewers pass.
 
 The lower-level git mechanics remain in `worktree.rs`: copying run
 artifacts, checking dirty worktrees, rebasing the run branch onto the
