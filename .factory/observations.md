@@ -6,6 +6,16 @@ observations-resolved.md with the resolution context.
 
 ---
 
+2026-06-10 — `factory cleanup --apply` should not delete a Work
+Item whose only Attempt is `failed` due to a rate-limit error. The
+current cleanup logic treats any non-running Attempt as terminal
+and removes the whole Work Item including its durable planning
+context. After the rate-limit observation above is fixed, this
+should follow naturally: a rate-limited Attempt is not terminal.
+Until then, cleanup should at minimum require explicit
+confirmation before removing a Work Item that has no landed Merge
+Candidate and was last touched by a known-recoverable failure.
+
 2026-05-11 — During the interactive stages, there were loops where
 the user just typed "yes, keep going" repeatedly. These indicate
 steps that are potentially automatable and may not need a human in
@@ -697,23 +707,11 @@ Independent runs need dependency metadata only when one run must start
 or land after another; otherwise they should execute and land
 independently.
 
-2026-06-09 — The first attempt to run independent peer Work Items in
-parallel exposed a Work artifact namespace bug. Two Work Items
-(`cleanup-empty-work-artifact-dirs` and `build-skill-work-default`) both
-used `attempt-1` and review task ids such as
-`attempt-1-review-documentation`, so reviewers from both items wrote to
-the same `.factory/work/artifacts/attempt-1/...` paths. One review
-artifact was overwritten with findings for the other Work Item. The
-author commits were intact on separate branches, but review state was
-not trustworthy. Before using peer Work Items in parallel, Work artifact
-paths need to include the Work Item id, or another globally unique run
-namespace, so attempt/task ids only need to be unique within a Work Item.
-independently so one parent failure cannot tangle unrelated work.
-The PDF/YouTube expertise work moved to a separate conversation thread
-because Factory does not yet let the coordinating agent trigger several
-independent peer runs in parallel from one planning conversation. That is
-a workflow smell: separate chat threads are being used as a substitute
-for a first-class independent run queue.
+2026-06-07 — The PDF/YouTube expertise work moved to a separate
+conversation thread because Factory does not yet let the coordinating
+agent trigger several independent peer runs in parallel from one
+planning conversation. That is a workflow smell: separate chat threads
+are being used as a substitute for a first-class independent run queue.
 
 2026-06-07 — Factory scheduling should use Codex `/status` as the live
 subscription-capacity signal when scheduling Codex-backed runs. The
@@ -868,15 +866,6 @@ Progress:
 The next adoption slices should keep using the Work path end to end, then
 delete legacy `.factory/runs` compatibility once the replacement path is
 stable enough to stop carrying the old model.
-
-2026-06-09 — Some behavior shell tests assume the repository's default
-`target/debug/factory` build output. During merge review for
-`work-planning-bridge-cleanup`, `test-work-task-instructions.sh` was
-awkward to run from a read-only candidate workspace because merge
-reviewers are supposed to redirect Cargo output into artifact-local
-directories. Behavior scripts should consistently support an explicit
-Factory binary path or artifact-local build output so reviewers can run
-them without writing into candidate workspaces.
 
 2026-06-09 — Work merge reviewers sometimes cannot read merge check or
 prior artifact directories even when prompts mention them. During

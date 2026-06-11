@@ -5,6 +5,85 @@ analysis later.
 
 ---
 
+2026-06-10 — `FACTORY_MAX_PARALLEL_REVIEWERS` env var is read but
+not enforced. The `parallel-attempt-reviewers` Work Item's tests
+reviewer flagged this as an advisory finding: the cap value is read
+into `_cap` (underscore prefix) and never used, so all planned
+review Tasks always spawn unconditionally.
+→ Resolved: `915eb3c` (landed directly via fast-forward merge per
+the Factory-too-slow override) replaced the `_cap` read with a
+`Mutex<usize> + Condvar` semaphore guarded by an RAII `SlotGuard`,
+serialized Work Item store access during parallel review with a
+`store_lock` mutex, kept review-only Attempts serial, and added a
+`cap_enforcement_limits_in_flight_reviewers` test that asserts peak
+in-flight count never exceeds the cap.
+
+2026-06-10 — Merge-time review failure should not require the
+conversation agent to intervene. Today when a Merge Candidate's
+merge-time reviewers return `fail`, the Merge Candidate transitions
+to `failed` and the lifecycle stops. The conversation agent then has
+to draft a new Work Item that cherry-picks the prior candidate
+commits and applies fixes for the merge-time findings, then runs
+that new Work Item from scratch.
+→ Resolved: `4949b04` added `MAX_MERGE_FOLLOWUP_WRITES_PER_INVOCATION`
+(2) and refactored `execute_merge` into a loop. On merge-time review
+failure with budget remaining, Factory now invokes a follow-up writer
+against the candidate workspace with the failed review artifacts as
+input, then restarts the rebase + checks + reviews cycle. Budget
+exhaustion produces a `needs-user` Merge Candidate state plus a
+handoff naming the failed review paths.
+
+2026-06-10 — A coder rate-limit response should not become a hard
+Task failure. When Claude returned `You've hit your session limit · resets 7:10pm`,
+Factory recorded the exit code as a Task failure and marked the
+Attempt `failed`. The conversation agent then had to cleanup,
+re-create the Work Item, and re-run.
+→ Resolved: `27c8fbd` added `transcript_indicates_rate_limit` and
+`run_with_transcript_retrying`. Coder runs whose transcripts contain
+session-limit or rate-limit markers now sleep
+`FACTORY_RATE_LIMIT_RETRY_AFTER_SECS` (default 1800) and retry up to
+2 times before propagating the exit code. Author and reviewer Tasks
+inherit the retry without a Coder trait surface change.
+
+2026-06-09 — Some behavior shell tests assume the repository's default
+`target/debug/factory` build output. During merge review for
+`work-planning-bridge-cleanup`, `test-work-task-instructions.sh` was
+awkward to run from a read-only candidate workspace because merge
+reviewers are supposed to redirect Cargo output into artifact-local
+directories. Behavior scripts should consistently support an explicit
+Factory binary path or artifact-local build output so reviewers can run
+them without writing into candidate workspaces.
+→ Resolved: `1f69ab3` added `FACTORY_BIN_OVERRIDE` plumbing to selected
+Work behavior scripts and added a mock-binary operation test. `8f69a10`
+extended override coverage to operation scripts more broadly and aligned
+behavior docs with the suite-wide contract. `90190f6` tightened
+override behavior for `test-run-curation.sh` and confirmed the override
+test surface. `test-work-task-instructions.sh` and the rest of the
+behavior suite now read `FACTORY_BIN_OVERRIDE` with a `target/debug/factory`
+default, so reviewers can point them at the artifact-local candidate
+build.
+
+2026-06-09 — The first attempt to run independent peer Work Items in
+parallel exposed a Work artifact namespace bug. Two Work Items
+(`cleanup-empty-work-artifact-dirs` and `build-skill-work-default`) both
+used `attempt-1` and review task ids such as
+`attempt-1-review-documentation`, so reviewers from both items wrote to
+the same `.factory/work/artifacts/attempt-1/...` paths. One review
+artifact was overwritten with findings for the other Work Item. The
+author commits were intact on separate branches, but review state was
+not trustworthy. Before using peer Work Items in parallel, Work artifact
+paths need to include the Work Item id, or another globally unique run
+namespace, so attempt/task ids only need to be unique within a Work Item.
+→ Resolved: `af7d61f` added `work_artifact_path(work_item_id, attempt_id,
+artifact)` and routed task, attempt, and merge artifact construction
+through it so new artifacts live under
+`.factory/work/artifacts/<work-item-id>/<attempt-id>/<artifact>`.
+`WorkModelStore` normalizes legacy `attempt-only` paths at the storage
+boundary on read, and `1088f6e` documented the migration. Tests
+`review_artifact_paths_include_work_item_namespace` and
+`store_migrates_legacy_work_artifact_paths_on_read` lock in the new
+layout and the migration.
+
 2026-06-09 — Work write Task prompts still carry a legacy run status-file
 contract. During `work-planning-bridge-cleanup`, a Work follow-up author
 was told to write `.factory/runs/[run-id]/status`, and the candidate
