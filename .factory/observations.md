@@ -70,20 +70,23 @@ is non-zero — worth a project-level reviewer that flags new mock claude
 scripts that don't distinguish writer/reviewer roles or don't make
 progress on each invocation.
 
-2026-06-11 — `merge` and `land` are used as overlapping verbs across
-the codebase and need a vocabulary decision. Examples: `factory work
-merge` (CLI verb, but the operation includes landing into target),
-`MergeCandidateMergeStatus::Landed` (success state),
-`record_candidate_landed`, `check-pre-land` (hook phase),
-`finalize_landing`, "Merge-time reviewers", `land.rs`,
-`work_merge_executor.rs`, `infrastructure/run/entrypoint.sh` work-merge
-mode. Possible reading: `merge` = the whole multi-step operation that
-makes a Merge Candidate's commit appear on the target branch (rebase +
-hooks + reviewers + fast-forward + status update); `land` = the final
-step that actually moves the branch ref. If that's the intended
-distinction, decisions/expertise should say so and the existing names
-should be audited. If they're meant as synonyms, pick one and rename.
-Related to the vocabulary-map observation above.
+2026-06-11 — Resolved: standardized on `merge` as the single verb for
+the whole rebase + hooks + reviewers + fast-forward operation across
+the codebase. Renames: `MergeCandidateMergeStatus::Landed` → `Merged`,
+`RunStatus::Landed` → `Merged`, `landed_commit` → `merged_commit`,
+`finalize_landing` → `finalize_merge`, `record_candidate_landed` →
+`record_candidate_merged`, `candidate_landed_commit` →
+`candidate_merged_commit`, `land_worktree_run` → `merge_worktree_run`,
+`worktree::land_run` → `merge_run`, `run_pre_land_hooks_for_run` →
+`run_pre_merge_hooks_for_run`, `resolve_landable_run` →
+`resolve_mergeable_run`, file `src/land.rs` → `src/merge.rs`. Hook
+files renamed: `check-pre-land` → `check-pre-merge`, `fix-pre-land` →
+`fix-pre-merge`. CLI verb: `factory land [RUN_ID]` → `factory merge
+[RUN_ID]`. Test names: `fn land_*` → `fn run_merge_*` to distinguish
+legacy Run model merge from Work model `work_merge_*`. The shell test
+file `tests/behaviors/operations/test-land.sh` keeps its filename for
+git history continuity but its diagnostic strings still say "land";
+worth a future cosmetic rename.
 
 2026-06-11 — Fargate container is missing the toolchains the
 configured Factory merge checks invoke. The smoke test merge ran

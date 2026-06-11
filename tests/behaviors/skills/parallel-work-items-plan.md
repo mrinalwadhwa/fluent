@@ -37,7 +37,7 @@ me plan the execution.
 - Did it avoid creating a shared Attempt or Task sequence across the
   peer Work Items?
 - Did it define a sync point around the shared user identity contract
-  and say whether it blocks either Work Item from landing?
+  and say whether it blocks either Work Item from merging?
 - Did it keep the discussion paced by asking about the split before
   finalizing the full plan?
 - Did the final plan use Work Item planning vocabulary and include

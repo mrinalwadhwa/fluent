@@ -13,7 +13,7 @@ Task, Workspace, and Merge Candidate.
 
 Do not implement substantial product/code changes directly on `main`.
 Use Factory Work Items and Attempts for delegated build work that needs
-isolation, reviewers, and landing. Use legacy `factory run` only for
+isolation, reviewers, and merging. Use legacy `factory run` only for
 explicit fallback, Fargate-only execution, coordinated child-run
 decomposition, or recovery of existing run state.
 
@@ -24,13 +24,13 @@ curation, and similar durable notes. These edits are part of shaping
 work, not delegated run execution.
 
 Do not meddle with live run execution state directly: run branches,
-worktrees, statuses, session artifacts, child-run metadata, and landing
+worktrees, statuses, session artifacts, child-run metadata, and merging
 state belong to the run system. Modify them only during explicit
 recovery with the user.
 
 Keep `main` available as a stable integration branch for runs to rebase
 from and merge into. If conversation-state edits could overlap with
-active runs or parent landing, make them on a lightweight discussion
+active runs or parent merging, make them on a lightweight discussion
 branch or worktree and land them separately instead of dirtying `main`.
 Use `.factory/observations.md` to record future work and lessons.
 

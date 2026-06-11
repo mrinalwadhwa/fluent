@@ -9,23 +9,23 @@ use crate::review;
 use crate::run::{self, Run};
 use crate::worktree;
 
-pub fn land_worktree_run(source_root: &Path, run: &Run) -> Result<()> {
-    run_pre_land_hooks_for_run(source_root, run)?;
-    worktree::land_run(source_root, &run.id, &run.dir)
+pub fn merge_worktree_run(source_root: &Path, run: &Run) -> Result<()> {
+    run_pre_merge_hooks_for_run(source_root, run)?;
+    worktree::merge_run(source_root, &run.id, &run.dir)
 }
 
-/// Run the `check-pre-land` hook (and `fix-pre-land` if it exists)
+/// Run the `check-pre-merge` hook (and `fix-pre-merge` if it exists)
 /// against the legacy run's worktree before landing. Skips silently
 /// if no hook is configured.
-fn run_pre_land_hooks_for_run(source_root: &Path, run: &Run) -> Result<()> {
-    if hooks::find_hook(source_root, "check-pre-land").is_none() {
+fn run_pre_merge_hooks_for_run(source_root: &Path, run: &Run) -> Result<()> {
+    if hooks::find_hook(source_root, "check-pre-merge").is_none() {
         return Ok(());
     }
 
     let worktree_dir = run
         .worktree_dir()
         .context("No worktree path recorded for this run")?;
-    eprintln!("  Running check-pre-land hook...");
+    eprintln!("  Running check-pre-merge hook...");
 
     let context = HookContext {
         artifact_dir: Some(run.dir.clone()),
@@ -33,30 +33,30 @@ fn run_pre_land_hooks_for_run(source_root: &Path, run: &Run) -> Result<()> {
         ..Default::default()
     };
 
-    let check_outcome = hooks::run_hook(source_root, "check-pre-land", &worktree_dir, &context)?
-        .expect("check-pre-land presence confirmed above");
+    let check_outcome = hooks::run_hook(source_root, "check-pre-merge", &worktree_dir, &context)?
+        .expect("check-pre-merge presence confirmed above");
     if check_outcome.passed {
         return Ok(());
     }
 
-    if hooks::find_hook(source_root, "fix-pre-land").is_none() {
+    if hooks::find_hook(source_root, "fix-pre-merge").is_none() {
         bail!(
-            "check-pre-land failed (exit {}). Log: {}",
+            "check-pre-merge failed (exit {}). Log: {}",
             check_outcome.exit_code,
             check_outcome.log_path.display()
         );
     }
 
     if worktree_is_dirty(&worktree_dir)? {
-        bail!("check-pre-land failed and fix-pre-land cannot run: worktree has uncommitted changes");
+        bail!("check-pre-merge failed and fix-pre-merge cannot run: worktree has uncommitted changes");
     }
 
-    eprintln!("  check-pre-land failed; running fix-pre-land...");
-    let fix_outcome = hooks::run_hook(source_root, "fix-pre-land", &worktree_dir, &context)?
-        .expect("fix-pre-land presence confirmed above");
+    eprintln!("  check-pre-merge failed; running fix-pre-merge...");
+    let fix_outcome = hooks::run_hook(source_root, "fix-pre-merge", &worktree_dir, &context)?
+        .expect("fix-pre-merge presence confirmed above");
     if !fix_outcome.passed {
         bail!(
-            "fix-pre-land failed (exit {}). Log: {}",
+            "fix-pre-merge failed (exit {}). Log: {}",
             fix_outcome.exit_code,
             fix_outcome.log_path.display()
         );
@@ -66,11 +66,11 @@ fn run_pre_land_hooks_for_run(source_root: &Path, run: &Run) -> Result<()> {
         rerun_reviews_after_autofix(source_root, run, &worktree_dir)?;
     }
 
-    let recheck = hooks::run_hook(source_root, "check-pre-land", &worktree_dir, &context)?
-        .expect("check-pre-land presence already confirmed");
+    let recheck = hooks::run_hook(source_root, "check-pre-merge", &worktree_dir, &context)?
+        .expect("check-pre-merge presence already confirmed");
     if !recheck.passed {
         bail!(
-            "check-pre-land failed after fix-pre-land (exit {}). Log: {}",
+            "check-pre-merge failed after fix-pre-merge (exit {}). Log: {}",
             recheck.exit_code,
             recheck.log_path.display()
         );
@@ -98,18 +98,18 @@ fn commit_autofix(worktree_dir: &Path) -> Result<()> {
     git(
         worktree_dir,
         &["add", "--", ".", ":(exclude).factory"],
-        "stage fix-pre-land changes",
+        "stage fix-pre-merge changes",
     )?;
     git(
         worktree_dir,
         &[
             "commit",
             "-m",
-            "Apply fix-pre-land changes",
+            "Apply fix-pre-merge changes",
             "-m",
-            "- Apply changes produced by the project's fix-pre-land hook before landing.",
+            "- Apply changes produced by the project's fix-pre-merge hook before landing.",
         ],
-        "commit fix-pre-land changes",
+        "commit fix-pre-merge changes",
     )
 }
 
@@ -142,7 +142,7 @@ fn rerun_reviews_after_autofix(source_root: &Path, run: &Run, worktree_dir: &Pat
     let coder_kind = CoderKind::resolve(Some(&coder_name))?;
     let resolver = ContentResolver::new(Some(worktree_dir));
 
-    eprintln!("  Rerunning reviewers after fix-pre-land autofix...");
+    eprintln!("  Rerunning reviewers after fix-pre-merge autofix...");
     let reviews_passed = review::run_reviews(
         &wt_run_dir,
         &run.id,
@@ -156,7 +156,7 @@ fn rerun_reviews_after_autofix(source_root: &Path, run: &Run, worktree_dir: &Pat
 
     if !reviews_passed {
         bail!(
-            "Cannot land run {}: reviewers did not pass after fix-pre-land",
+            "Cannot land run {}: reviewers did not pass after fix-pre-merge",
             run.id
         );
     }

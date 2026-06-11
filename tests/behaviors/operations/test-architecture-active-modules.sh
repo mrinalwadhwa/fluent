@@ -19,7 +19,7 @@ if [ -z "$section" ]; then
   exit 1
 fi
 
-for module in 'hooks.rs' 'land.rs' 'cleanup.rs' 'coder.rs'; do
+for module in 'hooks.rs' 'merge.rs' 'cleanup.rs' 'coder.rs'; do
   if ! grep -Fq "$module" <<<"$section"; then
     echo "architecture active module section does not mention $module" >&2
     exit 1
@@ -30,8 +30,8 @@ for concept in \
   '.factory/hooks/<name>' \
   'check-pre-<phase>' \
   'fix-pre-<phase>' \
-  'check-pre-land' \
-  'fix-pre-land' \
+  'check-pre-merge' \
+  'fix-pre-merge' \
   'git worktree remove --force' \
   'cleaned.md'
 do
@@ -41,7 +41,7 @@ do
   fi
 done
 
-for module in 'hooks.rs' 'fargate_bootstrap.rs' 'cleanup.rs' 'land.rs'; do
+for module in 'hooks.rs' 'fargate_bootstrap.rs' 'cleanup.rs' 'merge.rs'; do
   if ! grep -Fq "$module" "$ARCH"; then
     echo "architecture repository structure does not list $module" >&2
     exit 1

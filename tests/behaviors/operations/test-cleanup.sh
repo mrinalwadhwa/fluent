@@ -98,10 +98,10 @@ capture_dashboard_default() {
   rm -f "$OUTPUT_FILE"
 }
 
-test_cleanup_selects_stale_complete_and_landed_runs_by_default() {
+test_cleanup_selects_stale_complete_and_merged_runs_by_default() {
   create_project
   create_run "run-complete" "complete" "Complete brief"
-  create_run "run-landed" "landed" "Landed brief"
+  create_run "run-merged" "merged" "Merged brief"
   create_run "run-failed" "failed" "Failed brief"
   create_run "run-executing" "executing" "Executing brief"
 
@@ -109,7 +109,7 @@ test_cleanup_selects_stale_complete_and_landed_runs_by_default() {
 
   RESULT=0
   assert_output_contains "$OUTPUT" "would clean run-complete (complete)" || RESULT=1
-  assert_output_contains "$OUTPUT" "would clean run-landed (landed)" || RESULT=1
+  assert_output_contains "$OUTPUT" "would clean run-merged (merged)" || RESULT=1
   assert_output_not_contains "$OUTPUT" "run-failed" || RESULT=1
   assert_output_not_contains "$OUTPUT" "run-executing" || RESULT=1
 
@@ -673,7 +673,7 @@ PY
 printf 'test-cleanup\n\n'
 
 run_test "cleanup selects stale complete and landed runs by default" \
-  test_cleanup_selects_stale_complete_and_landed_runs_by_default
+  test_cleanup_selects_stale_complete_and_merged_runs_by_default
 run_test "cleanup preserves run directory and writes context" \
   test_cleanup_preserves_run_directory_and_writes_context
 run_test "cleanup removes registered worktree" \

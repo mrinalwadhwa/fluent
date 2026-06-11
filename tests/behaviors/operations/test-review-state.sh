@@ -381,7 +381,7 @@ test_land_accepts_passed_review_state_over_stale_artifact() {
   setup_complete_run_with_worktree review-state-land-passed passed fail
 
   set +e
-  OUTPUT="$("$FACTORY_BIN" land "$RUN_ID" 2>&1)"
+  OUTPUT="$("$FACTORY_BIN" merge "$RUN_ID" 2>&1)"
   EXIT_CODE=$?
   set -e
 
@@ -415,7 +415,7 @@ test_land_accepts_review_state_over_stale_artifact() {
   setup_complete_run_with_worktree review-state-land accepted-review-limit fail
 
   set +e
-  OUTPUT="$("$FACTORY_BIN" land "$RUN_ID" 2>&1)"
+  OUTPUT="$("$FACTORY_BIN" merge "$RUN_ID" 2>&1)"
   EXIT_CODE=$?
   set -e
 
@@ -449,7 +449,7 @@ test_land_rejects_failed_review_state_over_pass_artifact() {
   setup_complete_run_with_worktree review-state-land-fail failed pass
 
   set +e
-  OUTPUT="$("$FACTORY_BIN" land "$RUN_ID" 2>&1)"
+  OUTPUT="$("$FACTORY_BIN" merge "$RUN_ID" 2>&1)"
   EXIT_CODE=$?
   set -e
 
@@ -468,7 +468,7 @@ test_land_rejects_uncertain_review_state_over_pass_artifact() {
   setup_complete_run_with_worktree review-state-land-uncertain uncertain pass
 
   set +e
-  OUTPUT="$("$FACTORY_BIN" land "$RUN_ID" 2>&1)"
+  OUTPUT="$("$FACTORY_BIN" merge "$RUN_ID" 2>&1)"
   EXIT_CODE=$?
   set -e
 

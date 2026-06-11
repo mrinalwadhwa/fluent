@@ -130,7 +130,7 @@ FACTORY_BIN_OVERRIDE="$REVIEW_ARTIFACT_DIR/target/debug/factory" \
 | Work merge executes ready Merge Candidates only after validating candidate ownership, provenance, source branch, target safety, checks, and reviewers | `binary.rs`, `test-work-merge-candidate.sh` |
 | Work merge rejects invalid stored candidate provenance without rewriting state | `binary.rs`, `test-work-merge-candidate.sh` |
 | Work merge records durable failed state for rebase, check, review, and late target-move failures | `binary.rs`, `test-work-merge-candidate.sh` |
-| Work merge records landed commit and artifacts after fast-forwarding the target branch | `binary.rs`, `test-work-merge-candidate.sh` |
+| Work merge records merged commit and artifacts after fast-forwarding the target branch | `binary.rs`, `test-work-merge-candidate.sh` |
 | Create worktree from current HEAD | `test-run` |
 | Branch from non-main branch | `test-run` |
 | Run-id resolution priority chain | `test-run` |

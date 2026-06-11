@@ -193,7 +193,7 @@ Factory does not append them as additional prompt text.
 one stored Merge Candidate as pretty JSON. This command only reads the
 boundary object. `factory work merge <work-item-id> <merge-candidate-id>`
 executes a Merge Candidate that still needs to land: it rebases the
-candidate workspace against the target branch, runs configured pre-land
+candidate workspace against the target branch, runs configured pre-merge
 checks in the candidate workspace, runs the required reviewer set with
 merge-time context, then fast-forwards the target branch to the updated
 candidate head. Merge-time review prepares one detached reviewer
@@ -232,21 +232,21 @@ without reviewer cooperation. The reviewer sandbox grants read access to
 the whole `.factory/work/artifacts/<work-item-id>/<attempt-id>/` subtree
 so merge-check and prior-review artifacts are readable. After reviewers exit, merge execution checks each reviewer
 worktree for staged, unstaged, untracked, and ignored file changes,
-including changes under `.factory`, and fails before landing if any
+including changes under `.factory`, and fails before merging if any
 reviewer dirtied its isolated candidate. It writes one combined review
 state after all reviewer jobs finish and cleans up reviewer worktrees
 after successful merge or failed review handling. After it records the
-landed state, it removes the managed candidate worktree. If cleanup
-fails after the target branch has landed, merge execution prints a
-warning and leaves the landed Merge Candidate state intact. Running the
+merged state, it removes the managed candidate worktree. If cleanup
+fails after the target branch has merged, merge execution prints a
+warning and leaves the merged Merge Candidate state intact. Running the
 command again
-for a Merge Candidate that already has merge status `landed` and a stored
-`landed_commit` succeeds idempotently and reports the stored commit
+for a Merge Candidate that already has merge status `merged` and a stored
+`merged_commit` succeeds idempotently and reports the stored commit
 without resolving workspaces, rerunning checks, rerunning reviewers, or
 moving the target branch. Merge artifacts live under
 `.factory/work/artifacts/<work-item-id>/<attempt-id>/<candidate-id>/merge/`,
 and the stored Merge Candidate records whether execution is pending,
-executing, failed, needs-user, or landed.
+executing, failed, needs-user, or merged.
 
 Merge execution auto-continues through failed merge-time review
 rounds within a same-invocation budget. The merge loop iterates
@@ -531,22 +531,22 @@ project/
     src/                     ← agent works here
 ```
 
-When done, landing a worktree run executes the project's
-`check-pre-land` hook (if present) against the worktree, copies
+When done, merging a worktree run executes the project's
+`check-pre-merge` hook (if present) against the worktree, copies
 artifacts back from the worktree, removes the worktree, rebases the
 run branch onto the source branch, fast-forward merges, deletes the
-branch, and sets the status to `landed`. This policy applies to
-normal `factory land` runs and to child runs that the parallel
+branch, and sets the status to `merged`. This policy applies to
+normal `factory merge` runs and to child runs that the parallel
 orchestrator lands after each group completes.
 
-Projects wire pre-land verification through the hooks system. A
-single executable at `.factory/hooks/check-pre-land` gates landing:
+Projects wire pre-merge verification through the hooks system. A
+single executable at `.factory/hooks/check-pre-merge` gates merging:
 exit 0 lets it proceed, non-zero stops before any destructive step.
-A sibling executable at `.factory/hooks/fix-pre-land` (optional)
-is invoked when `check-pre-land` fails. Factory requires the
+A sibling executable at `.factory/hooks/fix-pre-merge` (optional)
+is invoked when `check-pre-merge` fails. Factory requires the
 worktree to be clean before running the fix hook, commits any
 changes the fix produces outside `.factory/`, reruns
-`check-pre-land`, reruns reviewers after the fix commit, and
+`check-pre-merge`, reruns reviewers after the fix commit, and
 continues only when the required checks and reviews pass. The
 project decides what each script invokes — `cargo fmt`,
 `make ci`, `pre-commit run --all-files`, anything else.
@@ -555,14 +555,14 @@ Example:
 
 ```sh
 #!/bin/sh
-# .factory/hooks/check-pre-land
+# .factory/hooks/check-pre-merge
 set -e
 cargo fmt --all -- --check
 ```
 
 ```sh
 #!/bin/sh
-# .factory/hooks/fix-pre-land
+# .factory/hooks/fix-pre-merge
 cargo fmt --all
 ```
 
@@ -574,7 +574,7 @@ cargo fmt --all
 | `behaviors.diff.md` | New behaviors this run adds |
 | `approach.md` | Solution direction and expertise references |
 | `plan.md` | Execution steps |
-| `status` | `briefed`, `behaviors-defined`, `approach-designed`, `planned`, `executing`, `reviewing`, `rate-limited`, `needs-user`, `complete`, `failed`, `landed` |
+| `status` | `briefed`, `behaviors-defined`, `approach-designed`, `planned`, `executing`, `reviewing`, `rate-limited`, `needs-user`, `complete`, `failed`, `merged` |
 | `handoff.md` | Context for the next session |
 | `active-run` | Current run-id (in `.factory/`) |
 | `source-branch` | Branch the run forked from |
@@ -597,7 +597,7 @@ cargo fmt --all
 
 The source run directory under `.factory/runs/<id>` remains the registry
 for known runs and durable metadata such as `worktree`, `runtime`,
-`coder`, `source-branch`, landing records, and cleanup records. When the
+`coder`, `source-branch`, merging records, and cleanup records. When the
 source run directory has a `worktree` file that points at an existing
 worktree containing `.factory/runs/<id>/`, Factory treats that worktree
 run directory as the live artifact directory for current session-loop
@@ -610,7 +610,7 @@ artifacts. Effective reads prefer the live worktree run directory for
 directory when the live artifact does not exist or the worktree pointer
 is invalid. This shared rule covers status listings, watch
 notifications, summaries, implicit resume selection, headless resume,
-landable-run scans, and review checks before landing. Dashboard views
+mergeable-run scans, and review checks before merging. Dashboard views
 use the effective status and review-state rules and fall back from live
 `report.md` to source `report.md`; transcript and current reviewer tabs
 list artifacts from the resolved live artifact directory.
@@ -683,8 +683,8 @@ for each group in plan:
     else: run children one at a time
     wait for all children to complete
     if any child failed: set parent to failed, stop
-    run pre-land checks and merge each child's branch into parent branch
-    set each child's status to landed
+    run pre-merge checks and merge each child's branch into parent branch
+    set each child's status to merged
 record children list in parent run dir
 set parent status to complete
 ```
@@ -694,8 +694,8 @@ The parent run's session loop never executes — the orchestrator
 gets its own session loop in its own worktree.
 
 After the orchestrator completes, all children are already merged and
-landed. `factory land` on the parent run verifies all children are
-landed and sets the parent status to `landed` — there is no worktree
+merged. `factory merge` on the parent run verifies all children are
+merged and sets the parent status to `merged` — there is no worktree
 to remove or branch to rebase for the parent itself.
 
 The agent writes one word to `status` before exiting. The loop reads that
@@ -742,7 +742,7 @@ the run back to `executing` so the next author session can commit,
 revert, or intentionally ignore the remaining work. Review-only runs do
 not launch an author to modify the worktree; passing review-only runs
 set status to `complete`, and non-passing review-only runs set status to
-`failed`. The landing path also rejects dirty completed worktrees before
+`failed`. The merging path also rejects dirty completed worktrees before
 removing them, so uncommitted author output is not discarded during
 land.
 
@@ -1151,7 +1151,7 @@ factory/main/
     credential.rs            ← Keychain credential injection
     fargate_bootstrap.rs     ← JIT Fargate setup (CFN, base + project image builds)
     hooks.rs                 ← Project hook execution (.factory/hooks/<name>)
-    land.rs                  ← Landing policy and pre-land hook orchestration
+    merge.rs                  ← Merging policy and pre-merge hook orchestration
     run.rs                   ← Run state, resolution, status
     session.rs               ← Session loop orchestration
     review.rs                ← Review loop, verdict parsing
@@ -1184,8 +1184,8 @@ factory/main/
     observations.md          ← feedback log (tracked)
     expertise/               ← project-level learnings (tracked)
     hooks/                   ← project hook scripts (tracked)
-      check-pre-land
-      fix-pre-land
+      check-pre-merge
+      fix-pre-merge
     runs/                    ← working state (not tracked)
     work/                    ← Work model durable state (not tracked)
   prompts/                   ← agent system prompts
@@ -1263,27 +1263,27 @@ inspectable after the fact. Hooks that are missing or not
 executable are silently skipped — no central registry, no
 configuration file, the filesystem is the manifest.
 
-### Landing
+### Merging
 
-`land.rs` owns the policy that happens immediately before a run
-branch is merged. It calls the `check-pre-land` hook (if present)
-against the recorded run worktree and proceeds with landing only
-after the hook exits 0. If `check-pre-land` fails and a
-`fix-pre-land` hook is also present, `land.rs` requires a clean
+`merge.rs` owns the policy that happens immediately before a run
+branch is merged. It calls the `check-pre-merge` hook (if present)
+against the recorded run worktree and proceeds with merging only
+after the hook exits 0. If `check-pre-merge` fails and a
+`fix-pre-merge` hook is also present, `merge.rs` requires a clean
 worktree outside `.factory/`, runs the fix hook, commits any
 changes outside `.factory/`, reruns reviewers, reruns
-`check-pre-land`, copies updated run artifacts back to the source
+`check-pre-merge`, copies updated run artifacts back to the source
 run directory, and lands only when the recheck and reviewers pass.
 
 The lower-level git mechanics remain in `worktree.rs`: copying run
 artifacts, checking dirty worktrees, rebasing the run branch onto the
 source branch, fast-forward merging, deleting the run branch, removing
-the worktree, and setting status to `landed`.
+the worktree, and setting status to `merged`.
 
 ### Cleanup
 
 `cleanup.rs` owns cleanup of terminal legacy run artifacts and terminal
-Work model state. Legacy cleanup selects `complete` and `landed` runs by
+Work model state. Legacy cleanup selects `complete` and `merged` runs by
 default, rejects non-terminal targets, and preserves the source run
 directory. Applying legacy cleanup writes `cleaned.md` with the original
 status, cleanup time, and worktree outcome. If a run records a

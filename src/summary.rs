@@ -111,7 +111,7 @@ fn phase_label(status: &RunStatus) -> &'static str {
         RunStatus::NeedsUser => "needs user",
         RunStatus::Complete => "complete",
         RunStatus::Failed => "failed",
-        RunStatus::Landed => "landed",
+        RunStatus::Merged => "merged",
         RunStatus::Unknown(_) => "unknown",
     }
 }
@@ -169,7 +169,7 @@ fn author_state(status: &RunStatus) -> &'static str {
         RunStatus::Reviewing => "waiting for review",
         RunStatus::RateLimited => "rate limited",
         RunStatus::NeedsUser => "blocked",
-        RunStatus::Complete | RunStatus::Landed => "recent",
+        RunStatus::Complete | RunStatus::Merged => "recent",
         RunStatus::Failed => "stopped",
         RunStatus::Unknown(_) => "unknown",
     }
@@ -362,7 +362,7 @@ fn next_action(status: &RunStatus) -> &'static str {
         RunStatus::NeedsUser => "read handoff.md and answer the open question.",
         RunStatus::Complete => "ready to land if checks still pass.",
         RunStatus::Failed => "inspect handoff and failure evidence before resuming.",
-        RunStatus::Landed => "no action needed.",
+        RunStatus::Merged => "no action needed.",
         RunStatus::Unknown(_) => "inspect run artifacts.",
     }
 }

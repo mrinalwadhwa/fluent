@@ -35,7 +35,7 @@ pub struct WorkMergeConfig<'a> {
 
 pub struct WorkMergeOutcome {
     pub merge_candidate_id: String,
-    pub landed_commit: String,
+    pub merged_commit: String,
 }
 
 /// The maximum number of follow-up writer cycles a single
@@ -82,12 +82,12 @@ pub fn merge_candidate(config: WorkMergeConfig<'_>) -> Result<WorkMergeOutcome> 
         bail!("{error}");
     }
 
-    if candidate.merge_state.status == MergeCandidateMergeStatus::Landed
-        && let Some(landed_commit) = candidate.merge_state.landed_commit.clone()
+    if candidate.merge_state.status == MergeCandidateMergeStatus::Merged
+        && let Some(merged_commit) = candidate.merge_state.merged_commit.clone()
     {
         return Ok(WorkMergeOutcome {
             merge_candidate_id: candidate.id,
-            landed_commit,
+            merged_commit,
         });
     }
 
@@ -129,14 +129,14 @@ fn recover_landed_candidate_result(
     match result {
         Ok(outcome) => Ok(outcome),
         Err(error) => {
-            if let Some(landed_commit) = candidate_landed_commit(store, work_item_id, candidate_id)?
+            if let Some(merged_commit) = candidate_merged_commit(store, work_item_id, candidate_id)?
             {
                 eprintln!(
                     "  Warning: Merge Candidate {candidate_id} landed, but post-landing merge cleanup failed: {error}",
                 );
                 return Ok(WorkMergeOutcome {
                     merge_candidate_id: candidate_id.to_string(),
-                    landed_commit,
+                    merged_commit,
                 });
             }
             if !candidate_has_failure(store, work_item_id, candidate_id)? {
@@ -234,7 +234,7 @@ fn execute_merge(
         if review_outcome.state.is_accepted() {
             // All merge-time reviewers passed; proceed to land.
             record_candidate_reviews_passed(config.store, config.work_item_id, &candidate.id)?;
-            return finalize_landing(
+            return finalize_merge(
                 config,
                 candidate,
                 source_workspace,
@@ -285,7 +285,7 @@ fn execute_merge(
     }
 }
 
-fn finalize_landing(
+fn finalize_merge(
     config: &WorkMergeConfig<'_>,
     candidate: &crate::work_model::MergeCandidate,
     source_workspace: &Path,
@@ -294,7 +294,7 @@ fn finalize_landing(
     check_artifacts: Vec<ArtifactRef>,
     review_artifacts: Vec<ArtifactRef>,
 ) -> Result<WorkMergeOutcome> {
-    let landed_commit = head_commit(source_workspace)?;
+    let merged_commit = head_commit(source_workspace)?;
     let target_head_now = git_stdout(
         target_workspace,
         &["rev-parse", &candidate.target_branch],
@@ -316,15 +316,15 @@ fn finalize_landing(
     )?;
     git(
         target_workspace,
-        &["merge", "--ff-only", &landed_commit],
+        &["merge", "--ff-only", &merged_commit],
         "fast-forward target branch",
     )?;
 
-    record_candidate_landed(
+    record_candidate_merged(
         config.store,
         config.work_item_id,
         &candidate.id,
-        &landed_commit,
+        &merged_commit,
         check_artifacts,
         review_artifacts,
     )?;
@@ -337,7 +337,7 @@ fn finalize_landing(
 
     Ok(WorkMergeOutcome {
         merge_candidate_id: candidate.id.clone(),
-        landed_commit,
+        merged_commit,
     })
 }
 
@@ -405,7 +405,7 @@ fn record_candidate_needs_user(
         candidate.review_state = MergeCandidateReviewState::Failed;
         candidate.merge_state = MergeCandidateMergeState {
             status: MergeCandidateMergeStatus::NeedsUser,
-            landed_commit: None,
+            merged_commit: None,
             failure_reason: Some(format!(
                 "Merge-time reviewers did not pass; follow-up write budget ({}) exhausted; handoff at {}",
                 MAX_MERGE_FOLLOWUP_WRITES_PER_INVOCATION,
@@ -520,9 +520,9 @@ fn build_followup_writer_sandbox(
     Ok((sandbox, Some(profile)))
 }
 
-/// Run the `check-pre-land` hook against the rebased candidate
-/// workspace. If it fails and a `fix-pre-land` hook exists, run that,
-/// commit any changes it produced, and re-run `check-pre-land`.
+/// Run the `check-pre-merge` hook against the rebased candidate
+/// workspace. If it fails and a `fix-pre-merge` hook exists, run that,
+/// commit any changes it produced, and re-run `check-pre-merge`.
 ///
 /// Returns the merge-check artifacts (hook log paths) so they can be
 /// recorded on the Merge Candidate.
@@ -546,7 +546,7 @@ fn run_merge_checks(
     let mut artifacts = Vec::new();
 
     let Some(check_outcome) =
-        hooks::run_hook(config.project_root, "check-pre-land", source_workspace, &context)?
+        hooks::run_hook(config.project_root, "check-pre-merge", source_workspace, &context)?
     else {
         return Ok(artifacts);
     };
@@ -555,10 +555,10 @@ fn run_merge_checks(
         return Ok(artifacts);
     }
 
-    // check-pre-land failed; try fix-pre-land before giving up.
-    if hooks::find_hook(config.project_root, "fix-pre-land").is_none() {
+    // check-pre-merge failed; try fix-pre-merge before giving up.
+    if hooks::find_hook(config.project_root, "fix-pre-merge").is_none() {
         bail!(
-            "check-pre-land failed (exit {}). Log: {}",
+            "check-pre-merge failed (exit {}). Log: {}",
             check_outcome.exit_code,
             check_outcome.log_path.display()
         );
@@ -566,18 +566,18 @@ fn run_merge_checks(
 
     if worktree_is_dirty(source_workspace)? {
         bail!(
-            "check-pre-land failed and fix-pre-land cannot run: candidate worktree is dirty"
+            "check-pre-merge failed and fix-pre-merge cannot run: candidate worktree is dirty"
         );
     }
 
     let baseline_commit = head_commit(source_workspace)?;
     let fix_outcome =
-        hooks::run_hook(config.project_root, "fix-pre-land", source_workspace, &context)?
-            .expect("fix-pre-land presence checked above");
+        hooks::run_hook(config.project_root, "fix-pre-merge", source_workspace, &context)?
+            .expect("fix-pre-merge presence checked above");
     artifacts.push(hook_artifact(config.project_root, &fix_outcome));
     if !fix_outcome.passed {
         bail!(
-            "fix-pre-land failed (exit {}). Log: {}",
+            "fix-pre-merge failed (exit {}). Log: {}",
             fix_outcome.exit_code,
             fix_outcome.log_path.display()
         );
@@ -593,12 +593,12 @@ fn run_merge_checks(
     }
 
     let recheck_outcome =
-        hooks::run_hook(config.project_root, "check-pre-land", source_workspace, &context)?
-            .expect("check-pre-land presence already confirmed");
+        hooks::run_hook(config.project_root, "check-pre-merge", source_workspace, &context)?
+            .expect("check-pre-merge presence already confirmed");
     artifacts.push(hook_artifact(config.project_root, &recheck_outcome));
     if !recheck_outcome.passed {
         bail!(
-            "check-pre-land failed after fix-pre-land (exit {}). Log: {}",
+            "check-pre-merge failed after fix-pre-merge (exit {}). Log: {}",
             recheck_outcome.exit_code,
             recheck_outcome.log_path.display()
         );
@@ -633,18 +633,18 @@ fn commit_autofix(worktree_dir: &Path) -> Result<()> {
     git(
         worktree_dir,
         &["add", "--", ".", ":(exclude).factory"],
-        "stage fix-pre-land changes",
+        "stage fix-pre-merge changes",
     )?;
     git(
         worktree_dir,
         &[
             "commit",
             "-m",
-            "Apply fix-pre-land changes",
+            "Apply fix-pre-merge changes",
             "-m",
-            "- Apply changes produced by the project's fix-pre-land hook before landing.",
+            "- Apply changes produced by the project's fix-pre-merge hook before landing.",
         ],
-        "commit fix-pre-land changes",
+        "commit fix-pre-merge changes",
     )
 }
 
@@ -1302,7 +1302,7 @@ fn set_candidate_executing(
         candidate.review_state = MergeCandidateReviewState::Pending;
         candidate.merge_state = MergeCandidateMergeState {
             status: MergeCandidateMergeStatus::Executing,
-            landed_commit: None,
+            merged_commit: None,
             failure_reason: None,
             check_artifacts: Vec::new(),
             review_artifacts: Vec::new(),
@@ -1339,8 +1339,8 @@ fn record_candidate_failure(
     review_artifacts: Vec<ArtifactRef>,
 ) -> Result<()> {
     update_candidate(store, work_item_id, candidate_id, |candidate| {
-        if candidate.merge_state.status == MergeCandidateMergeStatus::Landed
-            && candidate.merge_state.landed_commit.is_some()
+        if candidate.merge_state.status == MergeCandidateMergeStatus::Merged
+            && candidate.merge_state.merged_commit.is_some()
         {
             return;
         }
@@ -1351,7 +1351,7 @@ fn record_candidate_failure(
         }
         candidate.merge_state = MergeCandidateMergeState {
             status: MergeCandidateMergeStatus::Failed,
-            landed_commit: None,
+            merged_commit: None,
             failure_reason: Some(reason),
             check_artifacts,
             review_artifacts,
@@ -1359,19 +1359,19 @@ fn record_candidate_failure(
     })
 }
 
-fn record_candidate_landed(
+fn record_candidate_merged(
     store: &WorkModelStore,
     work_item_id: &str,
     candidate_id: &str,
-    landed_commit: &str,
+    merged_commit: &str,
     check_artifacts: Vec<ArtifactRef>,
     review_artifacts: Vec<ArtifactRef>,
 ) -> Result<()> {
     update_candidate(store, work_item_id, candidate_id, |candidate| {
         candidate.review_state = MergeCandidateReviewState::Passed;
         candidate.merge_state = MergeCandidateMergeState {
-            status: MergeCandidateMergeStatus::Landed,
-            landed_commit: Some(landed_commit.to_string()),
+            status: MergeCandidateMergeStatus::Merged,
+            merged_commit: Some(merged_commit.to_string()),
             failure_reason: None,
             check_artifacts,
             review_artifacts,
@@ -1402,7 +1402,7 @@ fn update_candidate(
     Ok(())
 }
 
-fn candidate_landed_commit(
+fn candidate_merged_commit(
     store: &WorkModelStore,
     work_item_id: &str,
     candidate_id: &str,
@@ -1419,8 +1419,8 @@ fn candidate_landed_commit(
                 work_item_id
             )
         })?;
-    if candidate.merge_state.status == MergeCandidateMergeStatus::Landed {
-        Ok(candidate.merge_state.landed_commit.clone())
+    if candidate.merge_state.status == MergeCandidateMergeStatus::Merged {
+        Ok(candidate.merge_state.merged_commit.clone())
     } else {
         Ok(None)
     }
@@ -1896,7 +1896,7 @@ mod tests {
 
         let candidate_id = item.create_or_get_merge_candidate("attempt-1").unwrap();
         store.create_work_item(&item).unwrap();
-        record_candidate_landed(
+        record_candidate_merged(
             &store,
             "work-1",
             &candidate_id,
@@ -1923,7 +1923,7 @@ mod tests {
 
     #[test]
     fn post_landing_error_returns_landed_outcome_without_rewriting_state() {
-        let (_tmp, store, work_item_id, candidate_id, landed_commit) = landed_candidate_store();
+        let (_tmp, store, work_item_id, candidate_id, merged_commit) = landed_candidate_store();
 
         let outcome = recover_landed_candidate_result(
             &store,
@@ -1934,7 +1934,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(outcome.merge_candidate_id, candidate_id);
-        assert_eq!(outcome.landed_commit, landed_commit);
+        assert_eq!(outcome.merged_commit, merged_commit);
 
         let item = store.read_work_item(&work_item_id).unwrap();
         let candidate = item
@@ -1945,11 +1945,11 @@ mod tests {
         assert_eq!(candidate.review_state, MergeCandidateReviewState::Passed);
         assert_eq!(
             candidate.merge_state.status,
-            MergeCandidateMergeStatus::Landed
+            MergeCandidateMergeStatus::Merged
         );
         assert_eq!(
-            candidate.merge_state.landed_commit.as_deref(),
-            Some(landed_commit.as_str())
+            candidate.merge_state.merged_commit.as_deref(),
+            Some(merged_commit.as_str())
         );
         assert!(candidate.merge_state.failure_reason.is_none());
         assert_eq!(candidate.merge_state.check_artifacts.len(), 1);
@@ -1958,7 +1958,7 @@ mod tests {
 
     #[test]
     fn record_failure_keeps_landed_candidate_landed() {
-        let (_tmp, store, work_item_id, candidate_id, landed_commit) = landed_candidate_store();
+        let (_tmp, store, work_item_id, candidate_id, merged_commit) = landed_candidate_store();
 
         record_candidate_failure(
             &store,
@@ -1979,11 +1979,11 @@ mod tests {
         assert_eq!(candidate.review_state, MergeCandidateReviewState::Passed);
         assert_eq!(
             candidate.merge_state.status,
-            MergeCandidateMergeStatus::Landed
+            MergeCandidateMergeStatus::Merged
         );
         assert_eq!(
-            candidate.merge_state.landed_commit.as_deref(),
-            Some(landed_commit.as_str())
+            candidate.merge_state.merged_commit.as_deref(),
+            Some(merged_commit.as_str())
         );
         assert!(candidate.merge_state.failure_reason.is_none());
     }

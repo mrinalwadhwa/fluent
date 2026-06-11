@@ -235,7 +235,7 @@ fn action_label(
             MergeCandidateMergeStatus::NeedsUser => "needs-user",
             MergeCandidateMergeStatus::Executing => "merging",
             MergeCandidateMergeStatus::Failed => "merge-failed",
-            MergeCandidateMergeStatus::Landed => "landed",
+            MergeCandidateMergeStatus::Merged => "merged",
             MergeCandidateMergeStatus::Pending => "merge-ready",
         };
     }
@@ -278,7 +278,7 @@ fn merge_status_label(status: &MergeCandidateMergeStatus) -> &'static str {
         MergeCandidateMergeStatus::Executing => "executing",
         MergeCandidateMergeStatus::Failed => "failed",
         MergeCandidateMergeStatus::NeedsUser => "needs-user",
-        MergeCandidateMergeStatus::Landed => "landed",
+        MergeCandidateMergeStatus::Merged => "merged",
     }
 }
 
@@ -478,8 +478,8 @@ mod tests {
         attempt.review_state = Some(AttemptReviewState::Passed);
         item.create_or_get_merge_candidate("attempt-1").unwrap();
         item.merge_candidates[0].merge_state = MergeCandidateMergeState {
-            status: MergeCandidateMergeStatus::Landed,
-            landed_commit: Some("def456".to_string()),
+            status: MergeCandidateMergeStatus::Merged,
+            merged_commit: Some("def456".to_string()),
             failure_reason: None,
             check_artifacts: Vec::new(),
             review_artifacts: Vec::new(),
@@ -487,7 +487,7 @@ mod tests {
 
         let row = summarize_work_item(&item);
 
-        assert_eq!(row.action, "landed");
-        assert_eq!(row.merge, "landed review:pending");
+        assert_eq!(row.action, "merged");
+        assert_eq!(row.merge, "merged review:pending");
     }
 }

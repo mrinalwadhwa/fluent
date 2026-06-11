@@ -245,7 +245,7 @@ normal parallel planning vocabulary:
 - peer Work Items with their own Attempts, Workspaces, and Merge
   Candidates
 
-Use peer Work Items when each effort can be reviewed and landed
+Use peer Work Items when each effort can be reviewed and merged
 separately. If several pieces must share one candidate, keep them in one
 Work Item and record likely follow-up Tasks or sequencing notes without
 claiming Factory can pre-schedule Task dependencies.
@@ -264,7 +264,7 @@ produces.]
 
 Attempt: [attempt-id]
 Workspace: [workspace expectation]
-Merge Candidate: [candidate expectation and landing checks]
+Merge Candidate: [candidate expectation and merging checks]
 
 - Initial write Task: [scope and output]
 - Likely follow-up Task note: [scope and output, if the first Task
@@ -276,7 +276,7 @@ Merge Candidate: [candidate expectation and landing checks]
 
 Attempt: [attempt-id]
 Workspace: [workspace expectation]
-Merge Candidate: [candidate expectation and landing checks]
+Merge Candidate: [candidate expectation and merging checks]
 
 - Initial write Task: [scope and output]
 - Likely follow-up Task note: [scope and output, if the first Task

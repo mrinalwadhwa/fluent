@@ -69,7 +69,7 @@ Merge Candidate asks for user input.
 Candidate, inspect it with `factory work merge-candidate <work-item-id>
 <merge-candidate-id>`. Land it with `factory work merge <work-item-id>
 <merge-candidate-id>` after the user accepts the candidate or the run
-policy says autonomous landing is allowed.
+policy says autonomous merging is allowed.
 
 Then check `.factory/runs/` only for legacy compatibility or recovery
 runs that need attention:
@@ -270,7 +270,7 @@ Legacy run state is compatibility and recovery state. It lives in
 | `behaviors.diff.md` | New behaviors this run adds (from define-behaviors) |
 | `approach.md` | Solution direction (from design-approach) |
 | `plan.md` | Execution steps (from plan-execution) |
-| `status` | `briefed`, `behaviors-defined`, `approach-designed`, `planned`, `executing`, `reviewing`, `rate-limited`, `needs-user`, `complete`, `failed`, `landed` |
+| `status` | `briefed`, `behaviors-defined`, `approach-designed`, `planned`, `executing`, `reviewing`, `rate-limited`, `needs-user`, `complete`, `failed`, `merged` |
 | `handoff.md` | Context for the next session |
 | `active-run` | Current run-id (in `.factory/`) |
 | `source-branch` | Branch the run forked from |
@@ -284,7 +284,7 @@ Legacy run state is compatibility and recovery state. It lives in
 | `sessions/` | Per-session transcript directories |
 | `sessions.log` | Per-session metadata log |
 | `report.md` | Generated run report |
-| `cleaned.md` | Cleanup context for complete or landed runs cleaned by `factory cleanup` |
+| `cleaned.md` | Cleanup context for complete or merged runs cleaned by `factory cleanup` |
 | `reviews/` | Review artifacts |
 | `children` | Child run IDs, one per line (parallel runs only, written by the factory) |
 | `parent` | Parent run ID (child runs only, written by the factory) |
@@ -294,13 +294,13 @@ execution. Create or update them only when using legacy `factory run`,
 coordinated child-run decomposition, Fargate-only execution, or explicit
 recovery of existing run state.
 
-`factory cleanup` also handles complete or landed legacy runs. It
+`factory cleanup` also handles complete or merged legacy runs. It
 defaults to a dry run and requires `--apply` before removing registered
 run worktrees or writing cleanup markers.
 
 Each legacy run executes in its own git worktree (a sibling of the
 source worktree). The factory command creates the worktree at launch
-time. When done, `factory land` rebases the worktree branch onto the
+time. When done, `factory merge` rebases the worktree branch onto the
 source branch, fast-forward merges, captures artifacts, and removes the
 worktree.
 
@@ -345,7 +345,7 @@ factory review                       # create or reuse a legacy review run
 factory pull                         # download legacy workspace from S3
 factory shell                        # shell into a legacy remote task
 factory resume                       # restart a paused legacy run
-factory land                         # land a completed legacy run
+factory merge                         # land a completed legacy run
 factory init                         # initialize .factory/ directories
 factory version                      # print version and build commit
 ```

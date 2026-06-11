@@ -7,7 +7,7 @@ pub mod dashboard;
 pub mod fargate;
 pub mod fargate_bootstrap;
 pub mod hooks;
-pub mod land;
+pub mod merge;
 pub mod os;
 pub mod parallel;
 pub mod plan;

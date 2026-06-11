@@ -161,16 +161,16 @@ mod tests {
 
     #[test]
     fn infers_kind_from_name() {
-        assert_eq!(infer_kind("check-pre-land"), HookKind::Check);
-        assert_eq!(infer_kind("fix-pre-land"), HookKind::Fix);
+        assert_eq!(infer_kind("check-pre-merge"), HookKind::Check);
+        assert_eq!(infer_kind("fix-pre-merge"), HookKind::Fix);
         assert_eq!(infer_kind("post-land"), HookKind::Post);
-        assert_eq!(infer_kind("verify-pre-land"), HookKind::Unknown);
+        assert_eq!(infer_kind("verify-pre-merge"), HookKind::Unknown);
     }
 
     #[test]
     fn returns_none_when_hook_is_absent() {
         let tmp = TempDir::new().unwrap();
-        let result = find_hook(tmp.path(), "check-pre-land");
+        let result = find_hook(tmp.path(), "check-pre-merge");
         assert!(result.is_none());
     }
 
@@ -179,8 +179,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let hooks_dir = tmp.path().join(".factory/hooks");
         fs::create_dir_all(&hooks_dir).unwrap();
-        fs::write(hooks_dir.join("check-pre-land"), "#!/bin/sh\nexit 0\n").unwrap();
-        let result = find_hook(tmp.path(), "check-pre-land");
+        fs::write(hooks_dir.join("check-pre-merge"), "#!/bin/sh\nexit 0\n").unwrap();
+        let result = find_hook(tmp.path(), "check-pre-merge");
         assert!(result.is_none());
     }
 
@@ -189,7 +189,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_hook(
             tmp.path(),
-            "check-pre-land",
+            "check-pre-merge",
             "#!/bin/sh\nprintf 'hello stdout\\n'\nprintf 'hello stderr\\n' >&2\nexit 0\n",
         );
         let log_dir = tmp.path().join("logs");
@@ -197,7 +197,7 @@ mod tests {
             log_dir: log_dir.clone(),
             ..Default::default()
         };
-        let outcome = run_hook(tmp.path(), "check-pre-land", tmp.path(), &context)
+        let outcome = run_hook(tmp.path(), "check-pre-merge", tmp.path(), &context)
             .unwrap()
             .unwrap();
         assert_eq!(outcome.kind, HookKind::Check);
@@ -213,7 +213,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_hook(
             tmp.path(),
-            "check-pre-land",
+            "check-pre-merge",
             "#!/bin/sh\nprintf 'boom\\n' >&2\nexit 7\n",
         );
         let log_dir = tmp.path().join("logs");
@@ -221,7 +221,7 @@ mod tests {
             log_dir,
             ..Default::default()
         };
-        let outcome = run_hook(tmp.path(), "check-pre-land", tmp.path(), &context)
+        let outcome = run_hook(tmp.path(), "check-pre-merge", tmp.path(), &context)
             .unwrap()
             .unwrap();
         assert_eq!(outcome.exit_code, 7);
@@ -233,7 +233,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_hook(
             tmp.path(),
-            "check-pre-land",
+            "check-pre-merge",
             "#!/bin/sh\nprintf 'work=%s attempt=%s task=%s candidate=%s commit=%s\\n' \
                 \"$FACTORY_WORK_ITEM_ID\" \"$FACTORY_ATTEMPT_ID\" \"$FACTORY_TASK_ID\" \
                 \"$FACTORY_MERGE_CANDIDATE_ID\" \"$FACTORY_CANDIDATE_COMMIT\"\nexit 0\n",
@@ -248,7 +248,7 @@ mod tests {
             log_dir,
             ..Default::default()
         };
-        let outcome = run_hook(tmp.path(), "check-pre-land", tmp.path(), &context)
+        let outcome = run_hook(tmp.path(), "check-pre-merge", tmp.path(), &context)
             .unwrap()
             .unwrap();
         let log = fs::read_to_string(&outcome.log_path).unwrap();

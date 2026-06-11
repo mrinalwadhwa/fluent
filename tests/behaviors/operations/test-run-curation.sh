@@ -93,7 +93,7 @@ test_smoke_runs_are_marked_non_actionable() {
       RESULT=1
     fi
 
-    assert_contains "${RUN_DIR}/status" "landed" || RESULT=1
+    assert_contains "${RUN_DIR}/status" "merged" || RESULT=1
     assert_contains "${RUN_DIR}/handoff.md" "non-actionable" || RESULT=1
     assert_contains "${RUN_DIR}/handoff.md" "superseded" || RESULT=1
     assert_contains "${RUN_DIR}/report.md" "later landed verification" || RESULT=1

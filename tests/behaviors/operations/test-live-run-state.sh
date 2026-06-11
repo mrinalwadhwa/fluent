@@ -279,7 +279,7 @@ test_land_uses_live_status_and_reviews() {
   printf 'live report' > "${LIVE_WT}/.factory/runs/${RUN_ID}/report.md"
 
   set +e
-  OUTPUT="$("$FACTORY_BIN" land "$RUN_ID" 2>&1)"
+  OUTPUT="$("$FACTORY_BIN" merge "$RUN_ID" 2>&1)"
   EXIT_CODE=$?
   set -e
 
@@ -289,7 +289,7 @@ test_land_uses_live_status_and_reviews() {
     printf '    Output: %s\n' "$OUTPUT"
     RESULT=1
   fi
-  if [ "$(cat ".factory/runs/${RUN_ID}/status" 2>/dev/null)" != "landed" ]; then
+  if [ "$(cat ".factory/runs/${RUN_ID}/status" 2>/dev/null)" != "merged" ]; then
     printf '    FAIL: land did not mark the run landed\n'
     RESULT=1
   fi

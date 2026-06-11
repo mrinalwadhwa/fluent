@@ -568,7 +568,7 @@ Test: tests/binary.rs (work_merge_candidate_missing_item_or_candidate_reports_er
 WHEN `factory work merge <work-item-id> <merge-candidate-id>` is invoked
 for a stored Merge Candidate that still needs to land,
 THE SYSTEM SHALL update the candidate workspace against the target
-branch, run configured pre-land checks, run the full merge-time reviewer
+branch, run configured pre-merge checks, run the full merge-time reviewer
 set, and fast-forward the target branch only after those steps pass.
 Test: tests/binary.rs (work_merge_candidate_lands_after_merge_time_reviews)
 
@@ -624,9 +624,9 @@ presenting merge-check artifact paths as required reviewer inputs.
 Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge lands after update, checks, and reviewers)
 
 WHEN `factory work merge <work-item-id> <merge-candidate-id>` is invoked
-for a Merge Candidate with merge status `landed` and a stored
-`landed_commit`,
-THE SYSTEM SHALL report the stored landed commit without resolving
+for a Merge Candidate with merge status `merged` and a stored
+`merged_commit`,
+THE SYSTEM SHALL report the stored merged commit without resolving
 workspaces, rebasing, running checks, running reviewers, or moving the
 target branch.
 Test: tests/binary.rs (work_merge_candidate_rerun_after_cleanup_preserves_landed_state)
@@ -659,10 +659,10 @@ Test: tests/binary.rs (work_merge_candidate_rebase_failure_leaves_target_unchang
 
 WHEN `factory work merge <work-item-id> <merge-candidate-id>` lands a
 Merge Candidate,
-THE SYSTEM SHALL record merge status `landed`, the landed commit, and
+THE SYSTEM SHALL record merge status `merged`, the merged commit, and
 merge-time review artifacts on the stored Merge Candidate, then remove the
-managed candidate worktree. If worktree cleanup fails after landing, the
-system shall warn without changing the landed merge state.
+managed candidate worktree. If worktree cleanup fails after merging, the
+system shall warn without changing the merged merge state.
 Test: tests/binary.rs (work_merge_candidate_lands_after_merge_time_reviews)
 
 IF merge-time reviewers fail while `factory work merge <work-item-id>
@@ -695,16 +695,16 @@ Candidate. The merge loop SHALL NOT retry these non-verdict failures.
 IF a merge-time reviewer modifies, stages, unstages, or creates files in
 the candidate workspace while `factory work merge <work-item-id>
 <merge-candidate-id>` executes,
-THEN THE SYSTEM SHALL stop before landing, leave the target branch
+THEN THE SYSTEM SHALL stop before merging, leave the target branch
 unchanged, record the reviewer as non-passing, and expose an error that
 names the reviewer and dirty candidate workspace. This includes ignored
 files such as files under the candidate workspace's `.factory` tree.
-Test: tests/binary.rs (work_merge_candidate_dirty_reviewer_fails_before_landing)
-Test: tests/binary.rs (work_merge_candidate_dirty_ignored_reviewer_fails_before_landing)
+Test: tests/binary.rs (work_merge_candidate_dirty_reviewer_fails_before_merging)
+Test: tests/binary.rs (work_merge_candidate_dirty_ignored_reviewer_fails_before_merging)
 Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge dirty reviewer leaves target unchanged)
 Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge dirty Factory state reviewer leaves target unchanged)
 
-IF configured pre-land checks fail while `factory work merge
+IF configured pre-merge checks fail while `factory work merge
 <work-item-id> <merge-candidate-id>` executes,
 THEN THE SYSTEM SHALL leave the target branch unchanged and record merge
 status `failed`, a failure reason, and check artifacts on the stored
@@ -1156,7 +1156,7 @@ Test: tests/binary.rs (summary_fails_without_resolved_run)
 
 WHEN `factory cleanup` is invoked,
 THE SYSTEM SHALL scan the source `.factory/runs` registry and select
-stale complete and landed runs by default.
+stale complete and merged runs by default.
 Test: tests/binary.rs (cleanup_dry_run_reports_without_changes)
 
 WHEN `factory cleanup --apply` cleans a run,
@@ -1398,17 +1398,17 @@ Test: src/session.rs (test_loop_review_limit_dirty_worktree_restarts_author)
 
 ## Effective review state
 
-WHEN `factory land` validates a complete run with `review-state.json`,
+WHEN `factory merge` validates a complete run with `review-state.json`,
 THE SYSTEM SHALL use that file as the effective review state before
 consulting current review artifacts.
-Test: src/run.rs (review-state tests), tests/binary.rs (land_accepts_review_limit_state_with_stale_fail_artifact)
+Test: src/run.rs (review-state tests), tests/binary.rs (run_merge_accepts_review_limit_state_with_stale_fail_artifact)
 
-WHEN `factory land` validates a complete run with review state `passed`
+WHEN `factory merge` validates a complete run with review state `passed`
 or `accepted-review-limit`,
 THE SYSTEM SHALL treat the review state as accepted.
-Test: src/run.rs (test_reviews_passed_prefers_review_state), tests/binary.rs (land_accepts_review_limit_state_with_stale_fail_artifact)
+Test: src/run.rs (test_reviews_passed_prefers_review_state), tests/binary.rs (run_merge_accepts_review_limit_state_with_stale_fail_artifact)
 
-WHEN `factory land` validates a complete run with review state `failed`,
+WHEN `factory merge` validates a complete run with review state `failed`,
 `uncertain`, or malformed JSON,
 THE SYSTEM SHALL refuse to land.
 Test: src/run.rs (test_reviews_passed_rejects_failed_review_state, test_reviews_passed_rejects_malformed_review_state)
@@ -1475,87 +1475,87 @@ WHEN headless `factory resume [RUN_ID]` targets a parallel parent run,
 THE SYSTEM SHALL reject the resume without launching an agent.
 Test: tests/binary.rs (headless_resume_rejects_parallel_parent), tests/behaviors/operations/test-headless-resume.sh
 
-## Land
+## Merge
 
-WHEN `factory land` is invoked and the run status is not `complete`,
+WHEN `factory merge` is invoked and the run status is not `complete`,
 THE SYSTEM SHALL refuse and exit non-zero.
-Test: tests/behaviors/operations/test-land.sh (land rejects non-complete run), tests/binary.rs (land_rejects_non_complete_run)
+Test: tests/behaviors/operations/test-land.sh (land rejects non-complete run), tests/binary.rs (run_merge_rejects_non_complete_run)
 
-WHEN `factory land` is invoked for a run without `review-state.json` and
+WHEN `factory merge` is invoked for a run without `review-state.json` and
 any current review artifact has verdict `fail`, `uncertain`, or is
 missing a verdict line,
 THE SYSTEM SHALL refuse and exit non-zero.
-Test: tests/behaviors/operations/test-land.sh (land rejects fail review verdict, land rejects uncertain review verdict), tests/binary.rs (land_rejects_failed_reviews, land_rejects_live_failed_reviews)
+Test: tests/behaviors/operations/test-land.sh (land rejects fail review verdict, land rejects uncertain review verdict), tests/binary.rs (run_merge_rejects_failed_reviews, run_merge_rejects_live_failed_reviews)
 
-WHEN `factory land [RUN_ID]` validates status and review artifacts before
-landing,
+WHEN `factory merge [RUN_ID]` validates status and review artifacts before
+merging,
 THE SYSTEM SHALL prefer live worktree status and review artifacts before
 falling back to source run artifacts.
-Test: tests/binary.rs (land_rejects_live_failed_reviews), tests/behaviors/operations/test-live-run-state.sh (land uses live status and reviews)
+Test: tests/binary.rs (run_merge_rejects_live_failed_reviews), tests/behaviors/operations/test-live-run-state.sh (land uses live status and reviews)
 
-WHEN the project has no executable `.factory/hooks/check-pre-land`,
-THE SYSTEM SHALL run `factory land` without requiring project checks.
-Test: tests/binary.rs (land_completes_full_lifecycle)
+WHEN the project has no executable `.factory/hooks/check-pre-merge`,
+THE SYSTEM SHALL run `factory merge` without requiring project checks.
+Test: tests/binary.rs (run_merge_completes_full_lifecycle)
 
-WHEN `.factory/hooks/check-pre-land` exists and is executable,
+WHEN `.factory/hooks/check-pre-merge` exists and is executable,
 THE SYSTEM SHALL run it in the run worktree before removing the
-worktree, rebasing, merging, or marking the run landed, with Factory
+worktree, rebasing, merging, or marking the run merged, with Factory
 context (`FACTORY_HOOK`, `FACTORY_ARTIFACT_DIR`, and any available
 work/attempt/task identifiers) exposed as environment variables and
-stdout+stderr captured to `<run_dir>/hooks/check-pre-land.log`.
-Test: tests/binary.rs (land_runs_configured_check_before_landing)
+stdout+stderr captured to `<run_dir>/hooks/check-pre-merge.log`.
+Test: tests/binary.rs (run_merge_runs_configured_check_before_merging)
 
-WHEN `check-pre-land` exits non-zero and no executable
-`.factory/hooks/fix-pre-land` is present,
+WHEN `check-pre-merge` exits non-zero and no executable
+`.factory/hooks/fix-pre-merge` is present,
 THE SYSTEM SHALL exit non-zero, keep the worktree intact, keep the run
 unlanded, and print the hook's exit code and the path to its captured
 log file.
-Test: tests/binary.rs (land_runs_configured_check_before_landing)
+Test: tests/binary.rs (run_merge_runs_configured_check_before_merging)
 
-WHEN `check-pre-land` exits non-zero and an executable
-`.factory/hooks/fix-pre-land` is present,
+WHEN `check-pre-merge` exits non-zero and an executable
+`.factory/hooks/fix-pre-merge` is present,
 THE SYSTEM SHALL require no uncommitted changes outside `.factory`
-before running `fix-pre-land`, run `fix-pre-land` in the run worktree,
+before running `fix-pre-merge`, run `fix-pre-merge` in the run worktree,
 commit project changes outside `.factory` when the fix changes project
-files, rerun reviewers after the autofix commit, rerun `check-pre-land`,
-and continue landing only if `fix-pre-land` succeeds, the rerun
+files, rerun reviewers after the autofix commit, rerun `check-pre-merge`,
+and continue merging only if `fix-pre-merge` succeeds, the rerun
 reviewers pass, and the recheck passes.
-Test: tests/binary.rs (land_refuses_autofix_when_worktree_has_user_changes, land_autofixes_and_reruns_reviewers)
+Test: tests/binary.rs (run_merge_refuses_autofix_when_worktree_has_user_changes, run_merge_autofixes_and_reruns_reviewers)
 
-WHEN `fix-pre-land` changes files and the subsequent reviewer rerun
+WHEN `fix-pre-merge` changes files and the subsequent reviewer rerun
 fails or is uncertain,
 THE SYSTEM SHALL keep the worktree intact, leave the run unlanded, copy
 the new review artifacts to the source run directory, and exit non-zero.
-Test: tests/binary.rs (land_keeps_worktree_when_autofix_review_fails)
+Test: tests/binary.rs (run_merge_keeps_worktree_when_autofix_review_fails)
 
-WHEN `factory land` is invoked and the run worktree has tracked changes,
+WHEN `factory merge` is invoked and the run worktree has tracked changes,
 staged changes, or untracked non-ignored files outside `.factory`,
 THE SYSTEM SHALL refuse and exit non-zero.
-Test: tests/binary.rs (land_rejects_dirty_completed_worktree)
+Test: tests/binary.rs (run_merge_rejects_dirty_completed_worktree)
 
-WHEN `factory land` completes successfully,
+WHEN `factory merge` completes successfully,
 THE SYSTEM SHALL copy sessions/, sessions.log, reviews/, report.md, and
 status from the worktree back to the source run directory.
-Test: tests/behaviors/operations/test-land.sh (land copies artifacts from worktree), tests/binary.rs (land_completes_full_lifecycle)
+Test: tests/behaviors/operations/test-land.sh (land copies artifacts from worktree), tests/binary.rs (run_merge_completes_full_lifecycle)
 
-WHEN `factory land` completes successfully,
+WHEN `factory merge` completes successfully,
 THE SYSTEM SHALL remove the worktree, rebase the run branch onto the
 source branch, fast-forward merge into the source branch, and delete the
 run branch.
-Test: tests/behaviors/operations/test-land.sh (land removes worktree, land deletes run branch, land merges run commits into main), tests/binary.rs (land_completes_full_lifecycle, land_preserves_linear_history)
+Test: tests/behaviors/operations/test-land.sh (land removes worktree, land deletes run branch, land merges run commits into main), tests/binary.rs (run_merge_completes_full_lifecycle, run_merge_preserves_linear_history)
 
-WHEN `factory land` completes successfully,
-THE SYSTEM SHALL set the run status to `landed`.
-Test: tests/binary.rs (land_completes_full_lifecycle)
+WHEN `factory merge` completes successfully,
+THE SYSTEM SHALL set the run status to `merged`.
+Test: tests/binary.rs (run_merge_completes_full_lifecycle)
 
-WHEN `factory land` is invoked and the rebase has conflicts,
+WHEN `factory merge` is invoked and the rebase has conflicts,
 THE SYSTEM SHALL abort the rebase, exit non-zero, and leave the
 repository in a clean state.
-Test: tests/behaviors/operations/test-land.sh (land fails on rebase conflict), tests/binary.rs (land_fails_on_rebase_conflict)
+Test: tests/behaviors/operations/test-land.sh (land fails on rebase conflict), tests/binary.rs (run_merge_fails_on_rebase_conflict)
 
-WHEN `factory land` is invoked without a run ID,
+WHEN `factory merge` is invoked without a run ID,
 THE SYSTEM SHALL land the most recent complete run.
-Test: tests/behaviors/operations/test-land.sh, tests/binary.rs (land_resolves_most_recent_complete_run)
+Test: tests/behaviors/operations/test-land.sh, tests/binary.rs (run_merge_resolves_most_recent_complete_run)
 
 ## Dashboard
 
@@ -1633,7 +1633,7 @@ WHEN `factory dashboard` is invoked,
 THE SYSTEM SHALL not modify any run state files.
 Test: tests/behaviors/operations/test-dashboard.sh (dashboard does not modify run state)
 
-WHEN the dashboard displays a run with status `complete` or `landed`
+WHEN the dashboard displays a run with status `complete` or `merged`
 and that run has `report.md`,
 THE SYSTEM SHALL show the run report in the activity feed by default.
 Test: dashboard::tests::test_completed_run_with_report_shows_report_by_default
@@ -1643,7 +1643,7 @@ THE SYSTEM SHALL continue to show the available transcript activity.
 Test: dashboard::tests::test_completed_run_without_report_shows_author_transcript
 
 WHEN the dashboard displays a run whose status is not `complete` or
-`landed`,
+`merged`,
 THE SYSTEM SHALL continue to show live transcript activity by default,
 even when `report.md` exists.
 Test: dashboard::tests::test_nonterminal_run_with_report_shows_author_transcript
@@ -1816,7 +1816,7 @@ Test: tests/behaviors/operations/test-parallel-runs.sh (child runs shown in dash
 ### Merging
 
 WHEN all child runs in a parallel group complete successfully,
-THE SYSTEM SHALL run configured pre-land checks for each child run and
+THE SYSTEM SHALL run configured pre-merge checks for each child run and
 merge their changes into the parent branch before launching the next
 group.
 Test: tests/behaviors/operations/test-parallel-runs.sh (sequential groups run in order), src/parallel.rs (test_parallel_children_run_pre_land_checks)

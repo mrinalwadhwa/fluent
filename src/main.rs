@@ -17,7 +17,7 @@ use factory::content::ContentResolver;
 use factory::credential;
 use factory::dashboard;
 use factory::fargate;
-use factory::land;
+use factory::merge;
 use factory::os;
 use factory::parallel;
 use factory::plan;
@@ -204,8 +204,8 @@ fn main() -> Result<()> {
             let search_root = path.map(PathBuf::from).unwrap_or(cwd);
             dashboard::run_dashboard(&search_root, run_id.as_deref())?;
         }
-        Some(Commands::Land { run_id }) => {
-            cmd_land(&cwd, run_id.as_deref())?;
+        Some(Commands::Merge { run_id }) => {
+            cmd_merge(&cwd, run_id.as_deref())?;
         }
         Some(Commands::Version) => {
             println!("{}", version::version_string());
@@ -534,7 +534,7 @@ fn cmd_work(
             })?;
             println!(
                 "Merged Merge Candidate {} at {}",
-                result.merge_candidate_id, result.landed_commit
+                result.merge_candidate_id, result.merged_commit
             );
         }
         WorkCommands::MergePull {
@@ -1287,18 +1287,18 @@ fn cmd_init(cwd: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_land(search_root: &Path, run_id: Option<&str>) -> Result<()> {
-    let run = run::resolve_landable_run(search_root, run_id)?;
+fn cmd_merge(search_root: &Path, run_id: Option<&str>) -> Result<()> {
+    let run = run::resolve_mergeable_run(search_root, run_id)?;
 
     // Verify reviews passed using the same live artifact rule as status.
     if run.effective_reviews_passed() == Some(false) {
-        bail!("Cannot land run {}: reviews did not pass", run.id);
+        bail!("Cannot merge run {}: reviews did not pass", run.id);
     }
 
-    eprintln!("  Landing run {}...", run.id);
+    eprintln!("  Merging run {}...", run.id);
 
     // Parallel parent runs have no worktree — their children were already
-    // merged by the orchestrator. Just verify children are landed and set
+    // merged by the orchestrator. Just verify children are merged and set
     // the parent status.
     let children_file = run.dir.join("children");
     if children_file.exists() {
@@ -1311,9 +1311,9 @@ fn cmd_land(search_root: &Path, run_id: Option<&str>) -> Result<()> {
                 dir: child_dir,
             };
             let status = child_run.effective_status()?;
-            if status != run::RunStatus::Landed {
+            if status != run::RunStatus::Merged {
                 bail!(
-                    "Cannot land parent run {}: child {} has status '{}', expected 'landed'",
+                    "Cannot merge parent run {}: child {} has status '{}', expected 'merged'",
                     run.id,
                     child_id,
                     status
@@ -1321,12 +1321,12 @@ fn cmd_land(search_root: &Path, run_id: Option<&str>) -> Result<()> {
             }
         }
     } else {
-        land::land_worktree_run(search_root, &run)?;
+        merge::merge_worktree_run(search_root, &run)?;
     }
 
-    run.set_status(&run::RunStatus::Landed)?;
+    run.set_status(&run::RunStatus::Merged)?;
 
-    eprintln!("  Run {} landed successfully.", run.id);
+    eprintln!("  Run {} merged successfully.", run.id);
     Ok(())
 }
 

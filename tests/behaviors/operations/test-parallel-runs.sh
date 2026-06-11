@@ -384,13 +384,13 @@ Second group step — must run after group 1.
     result=1
   fi
 
-  # Verify ordering: group 1's landed status confirms it merged before group 2 ran.
-  # The child status is set to "landed" after merge; if group 1 children are
-  # landed but group 2 exists, sequential gating worked.
+  # Verify ordering: group 1's merged status confirms it merged before group 2 ran.
+  # The child status is set to "merged" after merge; if group 1 children are
+  # merged but group 2 exists, sequential gating worked.
   local g1_status
   g1_status="$(cat ".factory/runs/test-seqgroup-1-1/status" 2>/dev/null || echo "missing")"
-  if [ "$g1_status" != "landed" ]; then
-    printf '    FAIL: group-1 child status is "%s", expected "landed" (merge before group 2)\n' "$g1_status"
+  if [ "$g1_status" != "merged" ]; then
+    printf '    FAIL: group-1 child status is "%s", expected "merged" (merge before group 2)\n' "$g1_status"
     result=1
   fi
 

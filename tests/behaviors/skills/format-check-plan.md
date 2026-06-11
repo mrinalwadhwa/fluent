@@ -13,7 +13,7 @@ The approach for project checks is approved. Help me plan the execution.
   manual intervention for expected formatter changes.
 - This probably fits one Work Item with one Attempt and one write Task,
   not peer Work Items, because config parsing, command execution, and
-  landing behavior need to fit together. Later Tasks can be noted as
+  merging behavior need to fit together. Later Tasks can be noted as
   likely follow-up planning, but they are not executable dependencies.
 - The user wants verification points at each step, not a vague to-do
   list.

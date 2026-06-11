@@ -324,7 +324,7 @@ fn ensure_cleanable(run: &Run) -> Result<()> {
     let status = run.status()?;
     if !is_cleanable_status(&status) {
         bail!(
-            "Run {} has status '{}', expected complete or landed",
+            "Run {} has status '{}', expected complete or merged",
             run.id,
             status
         );
@@ -333,7 +333,7 @@ fn ensure_cleanable(run: &Run) -> Result<()> {
 }
 
 fn is_cleanable_status(status: &RunStatus) -> bool {
-    matches!(status, RunStatus::Complete | RunStatus::Landed)
+    matches!(status, RunStatus::Complete | RunStatus::Merged)
 }
 
 fn cleanup_work_item_candidates(work_items: Vec<WorkItem>) -> Vec<WorkItem> {
@@ -386,7 +386,7 @@ fn task_is_terminal(task: &Task) -> bool {
 fn merge_candidate_is_terminal(candidate: &MergeCandidate) -> bool {
     matches!(
         candidate.merge_state.status,
-        MergeCandidateMergeStatus::Landed | MergeCandidateMergeStatus::Failed
+        MergeCandidateMergeStatus::Merged | MergeCandidateMergeStatus::Failed
     ) || matches!(candidate.review_state, MergeCandidateReviewState::Failed)
 }
 
@@ -885,7 +885,7 @@ mod tests {
     #[test]
     fn apply_writes_marker_without_status_change() {
         let tmp = TempDir::new().unwrap();
-        create_run(tmp.path(), "done", "landed");
+        create_run(tmp.path(), "done", "merged");
 
         cleanup_runs(
             tmp.path(),
@@ -899,7 +899,7 @@ mod tests {
         let run_dir = tmp.path().join(".factory/runs/done");
         assert_eq!(
             fs::read_to_string(run_dir.join("status")).unwrap(),
-            "landed"
+            "merged"
         );
         let marker = fs::read_to_string(run_dir.join("cleaned.md")).unwrap();
         assert!(marker.contains("Reason: stale terminal run cleanup"));

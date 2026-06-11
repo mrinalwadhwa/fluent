@@ -82,14 +82,14 @@ setup_run_with_worktree() {
 
 write_check_hook() {
   mkdir -p .factory/hooks
-  cat > .factory/hooks/check-pre-land
-  chmod +x .factory/hooks/check-pre-land
+  cat > .factory/hooks/check-pre-merge
+  chmod +x .factory/hooks/check-pre-merge
 }
 
 write_fix_hook() {
   mkdir -p .factory/hooks
-  cat > .factory/hooks/fix-pre-land
-  chmod +x .factory/hooks/fix-pre-land
+  cat > .factory/hooks/fix-pre-merge
+  chmod +x .factory/hooks/fix-pre-merge
 }
 
 write_mock_reviewer() {
@@ -174,7 +174,7 @@ test_land_rejects_non_complete_status() {
   printf 'Verdict: pass\n' > ".factory/runs/${RUN_ID}/reviews/review-behaviors.md"
 
   set +e
-  OUTPUT="$("$BINARY" land "$RUN_ID" 2>&1)"
+  OUTPUT="$("$BINARY" merge "$RUN_ID" 2>&1)"
   EXIT_CODE=$?
   set -e
 
@@ -203,7 +203,7 @@ test_land_rejects_failed_review() {
   printf 'Verdict: fail\n' > ".factory/runs/${RUN_ID}/reviews/review-b.md"
 
   set +e
-  OUTPUT="$("$BINARY" land "$RUN_ID" 2>&1)"
+  OUTPUT="$("$BINARY" merge "$RUN_ID" 2>&1)"
   EXIT_CODE=$?
   set -e
 
@@ -227,7 +227,7 @@ test_land_rejects_uncertain_review() {
   printf 'Verdict: uncertain\n' > ".factory/runs/${RUN_ID}/reviews/review-a.md"
 
   set +e
-  OUTPUT="$("$BINARY" land "$RUN_ID" 2>&1)"
+  OUTPUT="$("$BINARY" merge "$RUN_ID" 2>&1)"
   EXIT_CODE=$?
   set -e
 
@@ -247,7 +247,7 @@ test_land_copies_artifacts() {
   setup_run_with_worktree "$RUN_ID" pass
 
   set +e
-  "$BINARY" land "$RUN_ID" > /dev/null 2>&1
+  "$BINARY" merge "$RUN_ID" > /dev/null 2>&1
   EXIT_CODE=$?
   set -e
 
@@ -296,7 +296,7 @@ test_land_removes_worktree() {
   WT_PATH="${TEST_DIR}/${RUN_ID}-wt"
 
   set +e
-  "$BINARY" land "$RUN_ID" > /dev/null 2>&1
+  "$BINARY" merge "$RUN_ID" > /dev/null 2>&1
   set -e
 
   RESULT=0
@@ -315,7 +315,7 @@ test_land_deletes_branch() {
   setup_run_with_worktree "$RUN_ID" pass
 
   set +e
-  "$BINARY" land "$RUN_ID" > /dev/null 2>&1
+  "$BINARY" merge "$RUN_ID" > /dev/null 2>&1
   set -e
 
   RESULT=0
@@ -334,7 +334,7 @@ test_land_merges_to_main() {
   setup_run_with_worktree "$RUN_ID" pass
 
   set +e
-  "$BINARY" land "$RUN_ID" > /dev/null 2>&1
+  "$BINARY" merge "$RUN_ID" > /dev/null 2>&1
   set -e
 
   RESULT=0
@@ -385,7 +385,7 @@ test_land_fails_on_rebase_conflict() {
   printf 'Verdict: pass\n' > "${WT_PATH}/.factory/runs/${RUN_ID}/reviews/review-behaviors.md"
 
   set +e
-  OUTPUT="$("$BINARY" land "$RUN_ID" 2>&1)"
+  OUTPUT="$("$BINARY" merge "$RUN_ID" 2>&1)"
   EXIT_CODE=$?
   set -e
 
@@ -417,7 +417,7 @@ test_shell_land_rejects_non_complete_status() {
   printf 'Verdict: pass\n' > ".factory/runs/${RUN_ID}/reviews/review-behaviors.md"
 
   set +e
-  OUTPUT="$("$FACTORY" land "$RUN_ID" 2>&1)"
+  OUTPUT="$("$FACTORY" merge "$RUN_ID" 2>&1)"
   EXIT_CODE=$?
   set -e
 
@@ -440,7 +440,7 @@ test_shell_land_full_workflow() {
   WT_PATH="${TEST_DIR}/${RUN_ID}-wt"
 
   set +e
-  OUTPUT="$("$FACTORY" land "$RUN_ID" 2>&1)"
+  OUTPUT="$("$FACTORY" merge "$RUN_ID" 2>&1)"
   EXIT_CODE=$?
   set -e
 
@@ -511,7 +511,7 @@ test_land_allows_no_reviews() {
   printf 'Report' > "${WT_PATH}/.factory/runs/${RUN_ID}/report.md"
 
   set +e
-  OUTPUT="$("$BINARY" land "$RUN_ID" 2>&1)"
+  OUTPUT="$("$BINARY" merge "$RUN_ID" 2>&1)"
   EXIT_CODE=$?
   set -e
 
@@ -548,7 +548,7 @@ EOF
   chmod +x "${MOCK_BIN}/cargo"
 
   set +e
-  PATH="${MOCK_BIN}:$PATH" "$BINARY" land "$RUN_ID" > "${TEST_DIR}/land.out" 2>&1
+  PATH="${MOCK_BIN}:$PATH" "$BINARY" merge "$RUN_ID" > "${TEST_DIR}/land.out" 2>&1
   EXIT_CODE=$?
   set -e
 
@@ -579,7 +579,7 @@ printf '%s' "\$PWD" > '${TEST_DIR}/check-pwd'
 EOF
 
   set +e
-  OUTPUT="$("$BINARY" land "$RUN_ID" 2>&1)"
+  OUTPUT="$("$BINARY" merge "$RUN_ID" 2>&1)"
   EXIT_CODE=$?
   set -e
 
@@ -617,7 +617,7 @@ exit 42
 EOF
 
   set +e
-  OUTPUT="$("$BINARY" land "$RUN_ID" 2>&1)"
+  OUTPUT="$("$BINARY" merge "$RUN_ID" 2>&1)"
   EXIT_CODE=$?
   set -e
 
@@ -634,7 +634,7 @@ EOF
     printf '    FAIL: run branch should remain unlanded after check failure\n'
     RESULT=1
   fi
-  if ! printf '%s' "$OUTPUT" | grep -q "check-pre-land failed"; then
+  if ! printf '%s' "$OUTPUT" | grep -q "check-pre-merge failed"; then
     printf '    FAIL: output should report hook failure, got: %s\n' "$OUTPUT"
     RESULT=1
   fi
@@ -677,7 +677,7 @@ printf fixed > format.txt
 EOF
 
   set +e
-  OUTPUT="$(PATH="${MOCK_BIN}:$PATH" "$BINARY" land "$RUN_ID" 2>&1)"
+  OUTPUT="$(PATH="${MOCK_BIN}:$PATH" "$BINARY" merge "$RUN_ID" 2>&1)"
   EXIT_CODE=$?
   set -e
 
@@ -696,14 +696,14 @@ EOF
     RESULT=1
   fi
   if [ ! -f "${TEST_DIR}/check-count" ] || [ "$(wc -c < "${TEST_DIR}/check-count")" -lt 10 ]; then
-    printf '    FAIL: pre-land check should run before and after autofix\n'
+    printf '    FAIL: pre-merge check should run before and after autofix\n'
     RESULT=1
   fi
   if [ ! -f "${TEST_DIR}/review-calls.log" ] || [ "$(wc -l < "${TEST_DIR}/review-calls.log")" -lt 5 ]; then
     printf '    FAIL: reviewers should rerun after autofix\n'
     RESULT=1
   fi
-  if ! printf '%s' "$OUTPUT" | grep -q "Rerunning reviewers after fix-pre-land autofix"; then
+  if ! printf '%s' "$OUTPUT" | grep -q "Rerunning reviewers after fix-pre-merge autofix"; then
     printf '    FAIL: output should report reviewer rerun after autofix, got: %s\n' "$OUTPUT"
     RESULT=1
   fi
@@ -735,7 +735,7 @@ printf fixed > '${TEST_DIR}/fix-ran'
 EOF
 
   set +e
-  OUTPUT="$("$BINARY" land "$RUN_ID" 2>&1)"
+  OUTPUT="$("$BINARY" merge "$RUN_ID" 2>&1)"
   EXIT_CODE=$?
   set -e
 
@@ -752,7 +752,7 @@ EOF
     printf '    FAIL: worktree should remain when autofix refuses a dirty worktree\n'
     RESULT=1
   fi
-  if [ "$(cat ".factory/runs/${RUN_ID}/status")" = "landed" ]; then
+  if [ "$(cat ".factory/runs/${RUN_ID}/status")" = "merged" ]; then
     printf '    FAIL: run should not be marked landed when autofix refuses a dirty worktree\n'
     RESULT=1
   fi
@@ -783,7 +783,7 @@ exit 2
 EOF
 
   set +e
-  OUTPUT="$("$BINARY" land "$RUN_ID" 2>&1)"
+  OUTPUT="$("$BINARY" merge "$RUN_ID" 2>&1)"
   EXIT_CODE=$?
   set -e
 
@@ -800,12 +800,12 @@ EOF
     printf '    FAIL: run branch should remain after autofix command failure\n'
     RESULT=1
   fi
-  if [ "$(cat ".factory/runs/${RUN_ID}/status")" = "landed" ]; then
+  if [ "$(cat ".factory/runs/${RUN_ID}/status")" = "merged" ]; then
     printf '    FAIL: run should not be marked landed after autofix command failure\n'
     RESULT=1
   fi
-  if ! printf '%s' "$OUTPUT" | grep -q "fix-pre-land failed"; then
-    printf '    FAIL: output should report fix-pre-land failure, got: %s\n' "$OUTPUT"
+  if ! printf '%s' "$OUTPUT" | grep -q "fix-pre-merge failed"; then
+    printf '    FAIL: output should report fix-pre-merge failure, got: %s\n' "$OUTPUT"
     RESULT=1
   fi
   if ! printf '%s' "$OUTPUT" | grep -q "exit 2"; then
@@ -844,7 +844,7 @@ printf fixed > format.txt
 EOF
 
   set +e
-  OUTPUT="$(PATH="${MOCK_BIN}:$PATH" "$BINARY" land "$RUN_ID" 2>&1)"
+  OUTPUT="$(PATH="${MOCK_BIN}:$PATH" "$BINARY" merge "$RUN_ID" 2>&1)"
   EXIT_CODE=$?
   set -e
 
@@ -861,7 +861,7 @@ EOF
     printf '    FAIL: run branch should remain after post-autofix check failure\n'
     RESULT=1
   fi
-  if [ "$(cat ".factory/runs/${RUN_ID}/status")" = "landed" ]; then
+  if [ "$(cat ".factory/runs/${RUN_ID}/status")" = "merged" ]; then
     printf '    FAIL: run should not be marked landed after post-autofix check failure\n'
     RESULT=1
   fi
@@ -877,7 +877,7 @@ EOF
     printf '    FAIL: autofix change should be committed before the rerun failure\n'
     RESULT=1
   fi
-  if ! printf '%s' "$OUTPUT" | grep -q "check-pre-land failed after fix-pre-land"; then
+  if ! printf '%s' "$OUTPUT" | grep -q "check-pre-merge failed after fix-pre-merge"; then
     printf '    FAIL: output should report rerun check failure, got: %s\n' "$OUTPUT"
     RESULT=1
   fi
@@ -907,7 +907,7 @@ printf fixed > format.txt
 EOF
 
   set +e
-  OUTPUT="$(PATH="${MOCK_BIN}:$PATH" "$BINARY" land "$RUN_ID" 2>&1)"
+  OUTPUT="$(PATH="${MOCK_BIN}:$PATH" "$BINARY" merge "$RUN_ID" 2>&1)"
   EXIT_CODE=$?
   set -e
 
@@ -924,7 +924,7 @@ EOF
     printf '    FAIL: run branch should remain unlanded after autofix reviewer failure\n'
     RESULT=1
   fi
-  if [ "$(cat ".factory/runs/${RUN_ID}/status")" = "landed" ]; then
+  if [ "$(cat ".factory/runs/${RUN_ID}/status")" = "merged" ]; then
     printf '    FAIL: run should not be marked landed after autofix reviewer failure\n'
     RESULT=1
   fi
@@ -943,8 +943,8 @@ EOF
 
 test_factory_config_defines_format_check() {
   RESULT=0
-  CHECK_HOOK="${PROJECT_DIR}/.factory/hooks/check-pre-land"
-  FIX_HOOK="${PROJECT_DIR}/.factory/hooks/fix-pre-land"
+  CHECK_HOOK="${PROJECT_DIR}/.factory/hooks/check-pre-merge"
+  FIX_HOOK="${PROJECT_DIR}/.factory/hooks/fix-pre-merge"
 
   if [ ! -x "$CHECK_HOOK" ]; then
     printf '    FAIL: %s should exist and be executable\n' "$CHECK_HOOK"
@@ -955,11 +955,11 @@ test_factory_config_defines_format_check() {
     return 1
   fi
   if ! grep -q 'cargo fmt --all -- --check' "$CHECK_HOOK"; then
-    printf '    FAIL: check-pre-land hook should run cargo fmt --all -- --check\n'
+    printf '    FAIL: check-pre-merge hook should run cargo fmt --all -- --check\n'
     RESULT=1
   fi
   if ! grep -q 'cargo fmt --all' "$FIX_HOOK"; then
-    printf '    FAIL: fix-pre-land hook should run cargo fmt --all\n'
+    printf '    FAIL: fix-pre-merge hook should run cargo fmt --all\n'
     RESULT=1
   fi
 
@@ -989,7 +989,7 @@ run_test "land autofix requires clean worktree" test_land_autofix_requires_clean
 run_test "land autofix command failure keeps worktree" test_land_autofix_command_failure_keeps_worktree
 run_test "land autofix rerun failure keeps worktree" test_land_autofix_rerun_failure_keeps_worktree
 run_test "land autofix reviewer failure keeps worktree" test_land_autofix_review_failure_keeps_worktree
-run_test "this repo defines a pre-land format check" test_factory_config_defines_format_check
+run_test "this repo defines a pre-merge format check" test_factory_config_defines_format_check
 run_test "shell: land rejects non-complete run (exit code)" test_shell_land_rejects_non_complete_status
 run_test "shell: land full workflow" test_shell_land_full_workflow
 

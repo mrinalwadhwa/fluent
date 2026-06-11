@@ -19,7 +19,7 @@ pub enum RunStatus {
     NeedsUser,
     Complete,
     Failed,
-    Landed,
+    Merged,
     Unknown(String),
 }
 
@@ -36,7 +36,7 @@ impl RunStatus {
             "needs-user" => Self::NeedsUser,
             "complete" => Self::Complete,
             "failed" => Self::Failed,
-            "landed" => Self::Landed,
+            "merged" => Self::Merged,
             other => Self::Unknown(other.to_string()),
         }
     }
@@ -53,7 +53,7 @@ impl RunStatus {
             Self::NeedsUser => "needs-user",
             Self::Complete => "complete",
             Self::Failed => "failed",
-            Self::Landed => "landed",
+            Self::Merged => "merged",
             Self::Unknown(s) => s.as_str(),
         }
     }
@@ -578,7 +578,7 @@ fn scan_active_run(runs_dir: &Path) -> Result<Option<Run>> {
 ///
 /// Checks both the source run directory and the worktree run directory
 /// for status, since the agent writes status to the worktree.
-pub fn resolve_landable_run(search_root: &Path, run_id: Option<&str>) -> Result<Run> {
+pub fn resolve_mergeable_run(search_root: &Path, run_id: Option<&str>) -> Result<Run> {
     let runs_dir = search_root.join(".factory/runs");
 
     if let Some(id) = run_id {
@@ -1070,7 +1070,7 @@ mod tests {
             "needs-user",
             "complete",
             "failed",
-            "landed",
+            "merged",
         ] {
             let status = RunStatus::parse(s);
             assert_eq!(status.as_str(), *s);
@@ -1432,7 +1432,7 @@ mod tests {
         let tmp = setup_test_project();
         create_run(tmp.path(), "run-land", "complete");
 
-        let run = resolve_landable_run(tmp.path(), Some("run-land")).unwrap();
+        let run = resolve_mergeable_run(tmp.path(), Some("run-land")).unwrap();
         assert_eq!(run.id, "run-land");
     }
 
@@ -1442,7 +1442,7 @@ mod tests {
         let tmp = setup_test_project();
         create_run(tmp.path(), "run-exec", "executing");
 
-        let result = resolve_landable_run(tmp.path(), Some("run-exec"));
+        let result = resolve_mergeable_run(tmp.path(), Some("run-exec"));
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("executing"));
@@ -1453,7 +1453,7 @@ mod tests {
     fn test_resolve_landable_explicit_id_missing() {
         let tmp = setup_test_project();
 
-        let result = resolve_landable_run(tmp.path(), Some("nonexistent"));
+        let result = resolve_mergeable_run(tmp.path(), Some("nonexistent"));
         assert!(result.is_err());
     }
 
@@ -1464,7 +1464,7 @@ mod tests {
         create_run(tmp.path(), "run-old", "complete");
         create_run(tmp.path(), "run-active", "executing");
 
-        let run = resolve_landable_run(tmp.path(), None).unwrap();
+        let run = resolve_mergeable_run(tmp.path(), None).unwrap();
         assert_eq!(run.id, "run-old");
     }
 
@@ -1475,7 +1475,7 @@ mod tests {
         create_run(tmp.path(), "run-live-complete", "planned");
         create_live_run(tmp.path(), "run-live-complete", "complete");
 
-        let run = resolve_landable_run(tmp.path(), None).unwrap();
+        let run = resolve_mergeable_run(tmp.path(), None).unwrap();
 
         assert_eq!(run.id, "run-live-complete");
     }
@@ -1487,7 +1487,7 @@ mod tests {
         create_run(tmp.path(), "run-exec", "executing");
         create_run(tmp.path(), "run-fail", "failed");
 
-        let result = resolve_landable_run(tmp.path(), None);
+        let result = resolve_mergeable_run(tmp.path(), None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("No complete run"));
     }

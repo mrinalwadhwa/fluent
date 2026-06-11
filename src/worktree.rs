@@ -149,11 +149,11 @@ const RUN_ARTIFACTS: &[&str] = &[
     "status",
 ];
 
-/// Land a completed run: copy artifacts back, remove the worktree,
+/// Merge a completed run: copy artifacts back, remove the worktree,
 /// rebase onto the source branch, fast-forward merge, and delete the
-/// branch. The caller sets the run status to `landed` after this
+/// branch. The caller sets the run status to `merged` after this
 /// returns.
-pub fn land_run(source_root: &Path, run_id: &str, run_dir: &Path) -> Result<()> {
+pub fn merge_run(source_root: &Path, run_id: &str, run_dir: &Path) -> Result<()> {
     // Read worktree path
     let wt_path_str = fs::read_to_string(run_dir.join("worktree"))
         .context("No worktree path recorded for this run")?;

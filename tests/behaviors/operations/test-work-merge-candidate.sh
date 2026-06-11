@@ -226,15 +226,15 @@ test_work_merge_lands_after_update_checks_and_reviewers() {
   TARGET_BEFORE="$(git rev-parse main)"
 
   mkdir -p .factory/hooks
-  cat > .factory/hooks/check-pre-land <<EOF
+  cat > .factory/hooks/check-pre-merge <<EOF
 #!/usr/bin/env bash
 test -f merge-output.txt && test -f target.txt && printf '%s' "\$PWD" > '${TEST_DIR}/check-pwd'
 EOF
-  chmod +x .factory/hooks/check-pre-land
+  chmod +x .factory/hooks/check-pre-merge
 
   RESULT=0
   run_merge pass > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
-  LANDED_COMMIT="$(json_value '.merge_candidates[0].merge_state.landed_commit')"
+  LANDED_COMMIT="$(json_value '.merge_candidates[0].merge_state.merged_commit')"
 
   [ "$(git rev-parse main)" = "$LANDED_COMMIT" ] || RESULT=1
   [ "$(git rev-parse main)" != "$OLD_CANDIDATE" ] || RESULT=1
@@ -242,7 +242,7 @@ EOF
   [ "$(cat merge-output.txt)" = "merge output" ] || RESULT=1
   [ "$(cat target.txt)" = "target update" ] || RESULT=1
   [ "$(cat "$TEST_DIR/check-pwd")" = "$CANDIDATE_PWD" ] || RESULT=1
-  [ "$(json_value '.merge_candidates[0].merge_state.status')" = "landed" ] || RESULT=1
+  [ "$(json_value '.merge_candidates[0].merge_state.status')" = "merged" ] || RESULT=1
   [ "$(json_value '.merge_candidates[0].review_state')" = "passed" ] || RESULT=1
   [ "$(json_value '.merge_candidates[0].merge_state.check_artifacts | length')" = "1" ] || RESULT=1
   [ "$(json_value '.merge_candidates[0].merge_state.review_artifacts | length')" = "6" ] || RESULT=1
@@ -293,8 +293,8 @@ EOF
   assert_contains "$(cat "$TEST_DIR/stdout")" "Merged Merge Candidate attempt-1-merge-candidate" || RESULT=1
   "$FACTORY_BIN" work merge-candidate work-1 attempt-1-merge-candidate \
     > "$TEST_DIR/landed-candidate" 2> "$TEST_DIR/stderr" || RESULT=1
-  [ "$(jq -r '.merge_state.status' "$TEST_DIR/landed-candidate")" = "landed" ] || RESULT=1
-  [ "$(jq -r '.merge_state.landed_commit' "$TEST_DIR/landed-candidate")" = "$LANDED_COMMIT" ] || RESULT=1
+  [ "$(jq -r '.merge_state.status' "$TEST_DIR/landed-candidate")" = "merged" ] || RESULT=1
+  [ "$(jq -r '.merge_state.merged_commit' "$TEST_DIR/landed-candidate")" = "$LANDED_COMMIT" ] || RESULT=1
   if git worktree list --porcelain | grep -Fq "../work-6-work-1-attempt-1"; then
     printf '    FAIL: managed candidate workspace remains registered after merge\n'
     RESULT=1
@@ -470,13 +470,13 @@ test_work_merge_failed_check_leaves_target_unchanged() {
   MAIN_BEFORE="$(git rev-parse main)"
 
   mkdir -p .factory/hooks
-  cat > .factory/hooks/check-pre-land <<EOF
+  cat > .factory/hooks/check-pre-merge <<EOF
 #!/usr/bin/env bash
 printf check-ran > '${TEST_DIR}/check-marker'
 printf 'failing-check-output\n' >&2
 exit 3
 EOF
-  chmod +x .factory/hooks/check-pre-land
+  chmod +x .factory/hooks/check-pre-merge
 
   RESULT=0
   assert_fails run_merge pass || RESULT=1
@@ -484,11 +484,11 @@ EOF
   [ "$(cat "$TEST_DIR/check-marker")" = "check-ran" ] || RESULT=1
   [ "$(json_value '.merge_candidates[0].merge_state.status')" = "failed" ] || RESULT=1
   [ "$(json_value '.merge_candidates[0].review_state')" = "pending" ] || RESULT=1
-  assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" "check-pre-land failed" || RESULT=1
+  assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" "check-pre-merge failed" || RESULT=1
   [ "$(json_value '.merge_candidates[0].merge_state.check_artifacts | length')" = "1" ] || RESULT=1
   HOOKS_DIR="$(json_value '.merge_candidates[0].merge_state.check_artifacts[0].path')"
   [ -n "$HOOKS_DIR" ] && [ -d "$HOOKS_DIR" ] || RESULT=1
-  grep -q "failing-check-output" "$HOOKS_DIR/check-pre-land.log" || RESULT=1
+  grep -q "failing-check-output" "$HOOKS_DIR/check-pre-merge.log" || RESULT=1
   return $RESULT
 }
 

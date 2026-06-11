@@ -183,7 +183,7 @@ impl RunView {
     }
 
     fn should_default_to_report(&self) -> bool {
-        matches!(self.cached_status.as_str(), "complete" | "landed")
+        matches!(self.cached_status.as_str(), "complete" | "merged")
             && !self.agent_selection_touched
     }
 
@@ -983,7 +983,7 @@ fn compute_phase(view: &RunView, status: &str) -> (String, Color, bool) {
     {
         // All reviewers done, check overall status
         match status {
-            "complete" | "landed" => ("Complete".into(), Color::Blue, false),
+            "complete" | "merged" => ("Complete".into(), Color::Blue, false),
             "failed" => ("Failed".into(), Color::Red, false),
             "needs-user" => ("Needs input".into(), Color::Yellow, false),
             _ => (status.into(), Color::White, false),
@@ -1888,7 +1888,7 @@ mod tests {
         assert_eq!(view.current_agent().name, "behaviors");
 
         std::fs::write(run_dir.join("report.md"), "Final report summary").unwrap();
-        std::fs::write(run_dir.join("status"), "landed").unwrap();
+        std::fs::write(run_dir.join("status"), "merged").unwrap();
         view.poll();
 
         assert_eq!(view.current_agent().name, "behaviors");

@@ -187,8 +187,8 @@ pub enum Commands {
     },
 
     /// Rebase, merge, capture artifacts, and clean up a completed run
-    Land {
-        /// Run ID to land (default: most recent complete run)
+    Merge {
+        /// Run ID to merge (default: most recent complete run)
         run_id: Option<String>,
     },
 

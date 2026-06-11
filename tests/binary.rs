@@ -2771,8 +2771,8 @@ fn work_merge_candidate_lands_after_merge_time_reviews() {
     let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];
     assert_eq!(candidate["review_state"], "passed");
-    assert_eq!(candidate["merge_state"]["status"], "landed");
-    assert_eq!(candidate["merge_state"]["landed_commit"], candidate_head);
+    assert_eq!(candidate["merge_state"]["status"], "merged");
+    assert_eq!(candidate["merge_state"]["merged_commit"], candidate_head);
     assert!(
         candidate["merge_state"]["review_artifacts"]
             .as_array()
@@ -2790,7 +2790,7 @@ fn work_merge_candidate_lands_after_merge_time_reviews() {
 
     write_executable_hook(
         &main_dir,
-        "check-pre-land",
+        "check-pre-merge",
         "#!/bin/sh\nprintf should-not-run >&2\nexit 1\n",
     );
     let fail_bin = tmp.path().join("bin-idempotent-should-not-run");
@@ -2824,9 +2824,9 @@ fn work_merge_candidate_lands_after_merge_time_reviews() {
     assert!(!candidate_workspace.exists());
     let value_after_rerun = read_work_show_json(&main_dir, "work-1");
     let candidate_after_rerun = &value_after_rerun["merge_candidates"][0];
-    assert_eq!(candidate_after_rerun["merge_state"]["status"], "landed");
+    assert_eq!(candidate_after_rerun["merge_state"]["status"], "merged");
     assert_eq!(
-        candidate_after_rerun["merge_state"]["landed_commit"],
+        candidate_after_rerun["merge_state"]["merged_commit"],
         candidate_head
     );
 }
@@ -2976,7 +2976,7 @@ exit 0
 }
 
 #[test]
-fn work_merge_candidate_dirty_reviewer_fails_before_landing() {
+fn work_merge_candidate_dirty_reviewer_fails_before_merging() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
@@ -3068,7 +3068,7 @@ exit 0
 }
 
 #[test]
-fn work_merge_candidate_dirty_ignored_reviewer_fails_before_landing() {
+fn work_merge_candidate_dirty_ignored_reviewer_fails_before_merging() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
@@ -3187,7 +3187,7 @@ fn work_merge_candidate_failed_check_leaves_target_unchanged() {
         .success();
     write_executable_hook(
         &main_dir,
-        "check-pre-land",
+        "check-pre-merge",
         "#!/bin/sh\nprintf check-failed >&2\nexit 1\n",
     );
 
@@ -3206,7 +3206,7 @@ fn work_merge_candidate_failed_check_leaves_target_unchanged() {
         .env("PATH", mock_path(&bin_dir))
         .assert()
         .failure()
-        .stderr(predicate::str::contains("check-pre-land failed (exit 1)"));
+        .stderr(predicate::str::contains("check-pre-merge failed (exit 1)"));
 
     assert_eq!(git_head(&main_dir), main_before);
     assert_eq!(git_head(&candidate_workspace), candidate_head);
@@ -3218,7 +3218,7 @@ fn work_merge_candidate_failed_check_leaves_target_unchanged() {
         candidate["merge_state"]["failure_reason"]
             .as_str()
             .unwrap()
-            .contains("check-pre-land failed")
+            .contains("check-pre-merge failed")
     );
     assert!(
         candidate["merge_state"]["check_artifacts"]
@@ -3292,8 +3292,8 @@ fn work_merge_candidate_warns_when_cleanup_fails_after_landing() {
     let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];
     assert_eq!(candidate["review_state"], "passed");
-    assert_eq!(candidate["merge_state"]["status"], "landed");
-    assert_eq!(candidate["merge_state"]["landed_commit"], candidate_head);
+    assert_eq!(candidate["merge_state"]["status"], "merged");
+    assert_eq!(candidate["merge_state"]["merged_commit"], candidate_head);
 }
 
 #[test]
@@ -3351,7 +3351,7 @@ fn work_merge_candidate_rerun_after_cleanup_preserves_landed_state() {
 
     write_executable_hook(
         &main_dir,
-        "check-pre-land",
+        "check-pre-merge",
         "#!/bin/sh\nprintf should-not-run >&2\nexit 1\n",
     );
     let fail_bin = tmp.path().join("bin-cleanup-rerun-should-not-run");
@@ -3381,8 +3381,8 @@ fn work_merge_candidate_rerun_after_cleanup_preserves_landed_state() {
     let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];
     assert_eq!(candidate["review_state"], "passed");
-    assert_eq!(candidate["merge_state"]["status"], "landed");
-    assert_eq!(candidate["merge_state"]["landed_commit"], candidate_head);
+    assert_eq!(candidate["merge_state"]["status"], "merged");
+    assert_eq!(candidate["merge_state"]["merged_commit"], candidate_head);
 }
 
 #[test]
@@ -3511,8 +3511,8 @@ fn work_merge_candidate_rebases_when_target_advanced() {
     assert!(main_dir.join("loop-output.txt").is_file());
     let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];
-    assert_eq!(candidate["merge_state"]["status"], "landed");
-    assert_eq!(candidate["merge_state"]["landed_commit"], main_after_merge);
+    assert_eq!(candidate["merge_state"]["status"], "merged");
+    assert_eq!(candidate["merge_state"]["merged_commit"], main_after_merge);
 }
 
 #[test]
@@ -5957,7 +5957,7 @@ fn cleanup_apply_writes_marker_without_changing_status() {
     let tmp = TempDir::new().unwrap();
     let run_dir = tmp.path().join(".factory/runs/landed-run");
     fs::create_dir_all(&run_dir).unwrap();
-    fs::write(run_dir.join("status"), "landed").unwrap();
+    fs::write(run_dir.join("status"), "merged").unwrap();
 
     factory_cmd()
         .current_dir(tmp.path())
@@ -5968,7 +5968,7 @@ fn cleanup_apply_writes_marker_without_changing_status() {
 
     assert_eq!(
         fs::read_to_string(run_dir.join("status")).unwrap(),
-        "landed"
+        "merged"
     );
     let marker = fs::read_to_string(run_dir.join("cleaned.md")).unwrap();
     assert!(marker.contains("Reason: stale terminal run cleanup"));
@@ -5986,7 +5986,7 @@ fn cleanup_refuses_active_run() {
         .args(["cleanup", "--run-id", "active-run", "--apply"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("expected complete or landed"));
+        .stderr(predicate::str::contains("expected complete or merged"));
 
     assert!(!run_dir.join("cleaned.md").exists());
 }
@@ -6003,7 +6003,7 @@ fn cleanup_refuses_failed_run() {
         .args(["cleanup", "--run-id", "failed-run", "--apply"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("expected complete or landed"));
+        .stderr(predicate::str::contains("expected complete or merged"));
 
     assert!(!run_dir.join("cleaned.md").exists());
 }
@@ -6703,8 +6703,8 @@ fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() 
             "candidate_commit": candidate_head,
             "review_state": "passed",
             "merge_state": {
-                "status": "landed",
-                "landed_commit": git_head(&main_dir),
+                "status": "merged",
+                "merged_commit": git_head(&main_dir),
                 "check_artifacts": [
                     {
                         "producer_id": "merge-check",
@@ -10366,7 +10366,7 @@ exit 0
 }
 
 #[test]
-fn land_completes_full_lifecycle() {
+fn run_merge_completes_full_lifecycle() {
     let tmp = TempDir::new().unwrap();
     let (main_dir, run_id) = setup_completed_run(&tmp);
     let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
@@ -10378,11 +10378,11 @@ fn land_completes_full_lifecycle() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["land", &run_id])
+        .args(["merge", &run_id])
         .assert()
         .success()
-        .stderr(predicate::str::contains("Landing run"))
-        .stderr(predicate::str::contains("landed successfully"));
+        .stderr(predicate::str::contains("Merging run"))
+        .stderr(predicate::str::contains("merged successfully"));
 
     // Verify artifacts were copied back
     assert!(
@@ -10404,7 +10404,7 @@ fn land_completes_full_lifecycle() {
 
     // Verify status is landed
     let status = fs::read_to_string(run_dir.join("status")).unwrap();
-    assert_eq!(status.trim(), "landed");
+    assert_eq!(status.trim(), "merged");
 
     // Verify worktree was removed
     assert!(
@@ -10438,21 +10438,21 @@ fn land_completes_full_lifecycle() {
 }
 
 #[test]
-fn land_resolves_most_recent_complete_run() {
+fn run_merge_resolves_most_recent_complete_run() {
     let tmp = TempDir::new().unwrap();
     let (main_dir, run_id) = setup_completed_run(&tmp);
 
     // Land without specifying run ID
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["land"])
+        .args(["merge"])
         .assert()
         .success()
         .stderr(predicate::str::contains(&run_id));
 }
 
 #[test]
-fn land_rejects_non_complete_run() {
+fn run_merge_rejects_non_complete_run() {
     let tmp = TempDir::new().unwrap();
     let run_dir = tmp.path().join(".factory/runs/test-not-complete");
     fs::create_dir_all(&run_dir).unwrap();
@@ -10460,14 +10460,14 @@ fn land_rejects_non_complete_run() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["land", "test-not-complete"])
+        .args(["merge", "test-not-complete"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("expected 'complete'"));
 }
 
 #[test]
-fn land_rejects_dirty_completed_worktree() {
+fn run_merge_rejects_dirty_completed_worktree() {
     let tmp = TempDir::new().unwrap();
     let (main_dir, run_id) = setup_completed_run(&tmp);
     let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
@@ -10478,7 +10478,7 @@ fn land_rejects_dirty_completed_worktree() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["land", &run_id])
+        .args(["merge", &run_id])
         .assert()
         .failure()
         .stderr(predicate::str::contains("uncommitted worktree changes"));
@@ -10490,7 +10490,7 @@ fn land_rejects_dirty_completed_worktree() {
 }
 
 #[test]
-fn land_runs_configured_check_before_landing() {
+fn run_merge_runs_configured_check_before_merging() {
     let tmp = TempDir::new().unwrap();
     let (main_dir, run_id) = setup_completed_run(&tmp);
     let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
@@ -10498,19 +10498,19 @@ fn land_runs_configured_check_before_landing() {
     let wt_path = Path::new(wt_path_str.trim());
     write_executable_hook(
         &main_dir,
-        "check-pre-land",
+        "check-pre-merge",
         "#!/bin/sh\nprintf check-failed >&2\nexit 1\n",
     );
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["land", &run_id])
+        .args(["merge", &run_id])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("check-pre-land failed (exit 1)"))
+        .stderr(predicate::str::contains("check-pre-merge failed (exit 1)"))
         .stderr(predicate::str::contains("Log: "));
 
-    let log_path = run_dir.join("hooks/check-pre-land.log");
+    let log_path = run_dir.join("hooks/check-pre-merge.log");
     assert!(log_path.is_file(), "hook log should be written");
     let log = fs::read_to_string(&log_path).unwrap();
     assert!(log.contains("check-failed"), "hook log should capture stderr, got: {log}");
@@ -10518,7 +10518,7 @@ fn land_runs_configured_check_before_landing() {
 }
 
 #[test]
-fn land_refuses_autofix_when_worktree_has_user_changes() {
+fn run_merge_refuses_autofix_when_worktree_has_user_changes() {
     let tmp = TempDir::new().unwrap();
     let (main_dir, run_id) = setup_completed_run(&tmp);
     let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
@@ -10528,22 +10528,22 @@ fn land_refuses_autofix_when_worktree_has_user_changes() {
     fs::write(wt_path.join("dirty-user-file"), "do not commit me\n").unwrap();
     write_executable_hook(
         &main_dir,
-        "check-pre-land",
+        "check-pre-merge",
         "#!/bin/sh\ntest -f already-fixed\n",
     );
     write_executable_hook(
         &main_dir,
-        "fix-pre-land",
+        "fix-pre-merge",
         "#!/bin/sh\ntouch already-fixed\n",
     );
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["land", &run_id])
+        .args(["merge", &run_id])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "fix-pre-land cannot run: worktree has uncommitted changes",
+            "fix-pre-merge cannot run: worktree has uncommitted changes",
         ));
 
     assert!(
@@ -10557,7 +10557,7 @@ fn land_refuses_autofix_when_worktree_has_user_changes() {
 }
 
 #[test]
-fn land_autofixes_and_reruns_reviewers() {
+fn run_merge_autofixes_and_reruns_reviewers() {
     let tmp = TempDir::new().unwrap();
     let (main_dir, run_id) = setup_completed_run(&tmp);
     let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
@@ -10581,12 +10581,12 @@ fn land_autofixes_and_reruns_reviewers() {
 
     write_executable_hook(
         &main_dir,
-        "check-pre-land",
+        "check-pre-merge",
         "#!/bin/sh\ntest ! -f needs-format\n",
     );
     write_executable_hook(
         &main_dir,
-        "fix-pre-land",
+        "fix-pre-merge",
         "#!/bin/sh\nrm -f needs-format\n",
     );
 
@@ -10606,12 +10606,12 @@ exit 0
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["land", &run_id])
+        .args(["merge", &run_id])
         .env("PATH", mock_path(&bin_dir))
         .assert()
         .success()
         .stderr(predicate::str::contains(
-            "Rerunning reviewers after fix-pre-land autofix",
+            "Rerunning reviewers after fix-pre-merge autofix",
         ));
 
     let log = std::process::Command::new("git")
@@ -10620,14 +10620,14 @@ exit 0
         .output()
         .unwrap();
     let log = String::from_utf8_lossy(&log.stdout);
-    assert!(log.contains("Apply fix-pre-land changes"));
+    assert!(log.contains("Apply fix-pre-merge changes"));
     let review = fs::read_to_string(run_dir.join("reviews/review-tests.md")).unwrap();
     assert!(review.contains("Autofix review passed"));
     assert!(!main_dir.join("needs-format").exists());
 }
 
 #[test]
-fn land_keeps_worktree_when_autofix_review_fails() {
+fn run_merge_keeps_worktree_when_autofix_review_fails() {
     let tmp = TempDir::new().unwrap();
     let (main_dir, run_id) = setup_completed_run(&tmp);
     let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
@@ -10651,12 +10651,12 @@ fn land_keeps_worktree_when_autofix_review_fails() {
 
     write_executable_hook(
         &main_dir,
-        "check-pre-land",
+        "check-pre-merge",
         "#!/bin/sh\ntest ! -f needs-format\n",
     );
     write_executable_hook(
         &main_dir,
-        "fix-pre-land",
+        "fix-pre-merge",
         "#!/bin/sh\nrm -f needs-format\n",
     );
 
@@ -10675,23 +10675,23 @@ exit 0
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["land", &run_id])
+        .args(["merge", &run_id])
         .env("PATH", mock_path(&bin_dir))
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "reviewers did not pass after fix-pre-land",
+            "reviewers did not pass after fix-pre-merge",
         ));
 
     assert!(wt_path.is_dir(), "review failure should keep worktree");
     let review = fs::read_to_string(run_dir.join("reviews/review-tests.md")).unwrap();
     assert!(review.contains("Verdict: fail"));
     let status = fs::read_to_string(run_dir.join("status")).unwrap();
-    assert_ne!(status.trim(), "landed");
+    assert_ne!(status.trim(), "merged");
 }
 
 #[test]
-fn land_rejects_failed_reviews() {
+fn run_merge_rejects_failed_reviews() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
 
@@ -10716,14 +10716,14 @@ fn land_rejects_failed_reviews() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["land", run_id])
+        .args(["merge", run_id])
         .assert()
         .failure()
         .stderr(predicate::str::contains("reviews did not pass"));
 }
 
 #[test]
-fn land_accepts_review_limit_state_with_stale_fail_artifact() {
+fn run_merge_accepts_review_limit_state_with_stale_fail_artifact() {
     let tmp = TempDir::new().unwrap();
     let (main_dir, run_id) = setup_completed_run(&tmp);
     let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
@@ -10753,21 +10753,21 @@ fn land_accepts_review_limit_state_with_stale_fail_artifact() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["land", &run_id])
+        .args(["merge", &run_id])
         .assert()
         .success()
-        .stderr(predicate::str::contains("landed successfully"));
+        .stderr(predicate::str::contains("merged successfully"));
 
     let landed_state = fs::read_to_string(run_dir.join("review-state.json")).unwrap();
     assert!(landed_state.contains(r#""state": "accepted-review-limit""#));
     assert!(landed_state.contains(r#""tests": "fail""#));
 
     let status = fs::read_to_string(run_dir.join("status")).unwrap();
-    assert_eq!(status.trim(), "landed");
+    assert_eq!(status.trim(), "merged");
 }
 
 #[test]
-fn land_rejects_live_failed_reviews() {
+fn run_merge_rejects_live_failed_reviews() {
     let tmp = TempDir::new().unwrap();
     let (main_dir, run_id) = setup_completed_run(&tmp);
     let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
@@ -10797,7 +10797,7 @@ fn land_rejects_live_failed_reviews() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["land", &run_id])
+        .args(["merge", &run_id])
         .assert()
         .failure()
         .stderr(predicate::str::contains("reviews did not pass"));
@@ -10809,7 +10809,7 @@ fn land_rejects_live_failed_reviews() {
 }
 
 #[test]
-fn land_fails_when_no_complete_run() {
+fn run_merge_fails_when_no_complete_run() {
     let tmp = TempDir::new().unwrap();
     fs::create_dir_all(tmp.path().join(".factory/runs/some-run")).unwrap();
     fs::write(
@@ -10820,20 +10820,20 @@ fn land_fails_when_no_complete_run() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["land"])
+        .args(["merge"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("No complete run found"));
 }
 
 #[test]
-fn land_preserves_linear_history() {
+fn run_merge_preserves_linear_history() {
     let tmp = TempDir::new().unwrap();
     let (main_dir, run_id) = setup_completed_run(&tmp);
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["land", &run_id])
+        .args(["merge", &run_id])
         .assert()
         .success();
 
@@ -10851,7 +10851,7 @@ fn land_preserves_linear_history() {
 }
 
 #[test]
-fn land_fails_on_rebase_conflict() {
+fn run_merge_fails_on_rebase_conflict() {
     let tmp = TempDir::new().unwrap();
     let (main_dir, run_id) = setup_completed_run(&tmp);
     let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
@@ -10871,7 +10871,7 @@ fn land_fails_on_rebase_conflict() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["land", &run_id])
+        .args(["merge", &run_id])
         .assert()
         .failure()
         .stderr(predicate::str::contains("Rebase failed"));
@@ -10887,13 +10887,13 @@ fn land_fails_on_rebase_conflict() {
     let run_status = fs::read_to_string(run_dir.join("status")).unwrap();
     assert_ne!(
         run_status.trim(),
-        "landed",
+        "merged",
         "status should not be landed after failed rebase"
     );
 }
 
 #[test]
-fn land_fails_when_worktree_file_missing() {
+fn run_merge_fails_when_worktree_file_missing() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
 
@@ -10906,7 +10906,7 @@ fn land_fails_when_worktree_file_missing() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["land", run_id])
+        .args(["merge", run_id])
         .assert()
         .failure()
         .stderr(predicate::str::contains("worktree"));

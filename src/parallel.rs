@@ -5,7 +5,7 @@ use std::thread;
 
 use crate::coder::{CoderKind, CoderSandbox};
 use crate::content::ContentResolver;
-use crate::land;
+use crate::merge;
 use crate::os;
 use crate::plan::Plan;
 use crate::run::{Run, RunStatus};
@@ -214,8 +214,8 @@ where
                 id: info.id.clone(),
                 dir: info.source_dir.clone(),
             };
-            land::land_worktree_run(source_root, &child_run)?;
-            child_run.set_status(&RunStatus::Landed)?;
+            merge::merge_worktree_run(source_root, &child_run)?;
+            child_run.set_status(&RunStatus::Merged)?;
             eprintln!("  Merged step {}", info.id);
         }
 
@@ -473,8 +473,8 @@ mod tests {
         let main_dir = tmp.path().join("main");
         let hooks_dir = main_dir.join(".factory/hooks");
         fs::create_dir_all(&hooks_dir).unwrap();
-        // check-pre-land fails unless a marker file exists.
-        let hook_path = hooks_dir.join("check-pre-land");
+        // check-pre-merge fails unless a marker file exists.
+        let hook_path = hooks_dir.join("check-pre-merge");
         let mut opts = fs::OpenOptions::new();
         opts.create(true).write(true).truncate(true).mode(0o755);
         let mut file = opts.open(&hook_path).unwrap();
@@ -510,8 +510,8 @@ mod tests {
 
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().to_string().contains("check-pre-land"),
-            "pre-land check failure should bubble up"
+            result.unwrap_err().to_string().contains("check-pre-merge"),
+            "pre-merge check failure should bubble up"
         );
         assert!(
             !main_dir.join(format!("{parent_id}-1-1.txt")).exists(),

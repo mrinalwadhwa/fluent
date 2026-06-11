@@ -1228,7 +1228,7 @@ pub enum MergeCandidateReviewState {
 pub struct MergeCandidateMergeState {
     pub status: MergeCandidateMergeStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub landed_commit: Option<String>,
+    pub merged_commit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1241,7 +1241,7 @@ impl Default for MergeCandidateMergeState {
     fn default() -> Self {
         Self {
             status: MergeCandidateMergeStatus::Pending,
-            landed_commit: None,
+            merged_commit: None,
             failure_reason: None,
             check_artifacts: Vec::new(),
             review_artifacts: Vec::new(),
@@ -1258,7 +1258,7 @@ pub enum MergeCandidateMergeStatus {
     Executing,
     Failed,
     NeedsUser,
-    Landed,
+    Merged,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3291,7 +3291,7 @@ mod tests {
             review_state: MergeCandidateReviewState::Failed,
             merge_state: MergeCandidateMergeState {
                 status: MergeCandidateMergeStatus::Failed,
-                landed_commit: None,
+                merged_commit: None,
                 failure_reason: Some("Review failed".to_string()),
                 check_artifacts: vec![ArtifactRef {
                     producer_id: "merge-check".to_string(),
@@ -3738,7 +3738,7 @@ mod tests {
             review_state: MergeCandidateReviewState::Pending,
             merge_state: MergeCandidateMergeState {
                 status: MergeCandidateMergeStatus::Failed,
-                landed_commit: None,
+                merged_commit: None,
                 failure_reason: Some("Attempt review failed".to_string()),
                 check_artifacts: Vec::new(),
                 review_artifacts: Vec::new(),
@@ -3784,7 +3784,7 @@ mod tests {
             review_state: MergeCandidateReviewState::Pending,
             merge_state: MergeCandidateMergeState {
                 status: MergeCandidateMergeStatus::Failed,
-                landed_commit: None,
+                merged_commit: None,
                 failure_reason: Some("candidate_commit mismatch".to_string()),
                 check_artifacts: Vec::new(),
                 review_artifacts: Vec::new(),
