@@ -3,6 +3,8 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
 
 use crate::coder::CoderKind;
 use crate::content::ContentResolver;
@@ -14,6 +16,15 @@ use crate::work_model::{
 use crate::work_task_executor::{self, WorkTaskRunConfig};
 
 const MAX_FOLLOWUP_WRITES_PER_INVOCATION: usize = 2;
+const DEFAULT_MAX_PARALLEL_REVIEWERS: usize = 5;
+
+fn max_parallel_reviewers() -> usize {
+    std::env::var("FACTORY_MAX_PARALLEL_REVIEWERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_MAX_PARALLEL_REVIEWERS)
+        .max(1)
+}
 
 pub struct WorkAttemptRunConfig<'a> {
     pub project_root: &'a Path,
@@ -72,12 +83,19 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             .iter()
             .find(|task| task.status == TaskStatus::Planned)
         {
+            if task.kind == TaskKind::Review && attempt.kind != AttemptKind::ReviewOnly {
+                let planned_review_ids: Vec<String> = attempt
+                    .tasks
+                    .iter()
+                    .filter(|t| t.kind == TaskKind::Review && t.status == TaskStatus::Planned)
+                    .map(|t| t.id.clone())
+                    .collect();
+                run_parallel_reviews(&config, &planned_review_ids, &mut outcomes)?;
+                continue;
+            }
+
             let is_followup_write =
                 task.kind == TaskKind::Write && is_followup_write_task(config.attempt_id, &task.id);
-            // Review Tasks stay serial here because run_task mutates shared Work
-            // Item JSON for each Task. Parallel Attempt reviews need a batch
-            // transition that marks all selected Tasks executing, runs them,
-            // then writes final states in one consolidated update.
             let result = work_task_executor::run_task(WorkTaskRunConfig {
                 project_root: config.project_root,
                 store: config.store,
@@ -88,6 +106,7 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                 extra_args: config.extra_args,
                 coder_kind: config.coder_kind,
                 no_sandbox: config.no_sandbox,
+                store_lock: None,
             })?;
             outcomes.push(WorkAttemptRunOutcome::RanTask {
                 task_id: result.task_id,
@@ -167,6 +186,96 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             config.attempt_id
         );
     }
+}
+
+struct SlotGuard {
+    state: Arc<(Mutex<usize>, Condvar)>,
+}
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        let (lock, cvar) = &*self.state;
+        let mut count = lock.lock().unwrap_or_else(|e| e.into_inner());
+        *count -= 1;
+        cvar.notify_one();
+    }
+}
+
+fn acquire_slot(state: &Arc<(Mutex<usize>, Condvar)>, cap: usize) -> SlotGuard {
+    let (lock, cvar) = &**state;
+    let mut count = lock.lock().unwrap_or_else(|e| e.into_inner());
+    while *count >= cap {
+        count = cvar.wait(count).unwrap_or_else(|e| e.into_inner());
+    }
+    *count += 1;
+    SlotGuard {
+        state: Arc::clone(state),
+    }
+}
+
+fn run_parallel_reviews(
+    config: &WorkAttemptRunConfig<'_>,
+    task_ids: &[String],
+    outcomes: &mut Vec<WorkAttemptRunOutcome>,
+) -> Result<()> {
+    let cap = max_parallel_reviewers();
+    let semaphore = Arc::new((Mutex::new(0_usize), Condvar::new()));
+    let store_lock = Mutex::new(());
+
+    let results: Vec<Result<work_task_executor::WorkTaskRunResult>> = thread::scope(|scope| {
+        let store_lock_ref = &store_lock;
+        let handles: Vec<_> = task_ids
+            .iter()
+            .map(|task_id| {
+                let sem = Arc::clone(&semaphore);
+                scope.spawn(move || {
+                    let _guard = acquire_slot(&sem, cap);
+                    work_task_executor::run_task(WorkTaskRunConfig {
+                        project_root: config.project_root,
+                        store: config.store,
+                        work_item_id: config.work_item_id,
+                        attempt_id: config.attempt_id,
+                        task_id,
+                        resolver: config.resolver,
+                        extra_args: config.extra_args,
+                        coder_kind: config.coder_kind,
+                        no_sandbox: config.no_sandbox,
+                        store_lock: Some(store_lock_ref),
+                    })
+                })
+            })
+            .collect();
+
+        handles
+            .into_iter()
+            .map(|h| match h.join() {
+                Ok(result) => result,
+                Err(_) => Err(anyhow::anyhow!("Reviewer thread panicked")),
+            })
+            .collect()
+    });
+
+    let mut first_error = None;
+    for result in results {
+        match result {
+            Ok(run_result) => {
+                outcomes.push(WorkAttemptRunOutcome::RanTask {
+                    task_id: run_result.task_id,
+                    output: run_result.output,
+                });
+            }
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn reject_terminal_attempt(status: AttemptStatus) -> Result<()> {
@@ -593,6 +702,60 @@ mod tests {
         ]);
 
         assert_eq!(next_review_roles(&attempt), review::REVIEWERS);
+    }
+
+    #[test]
+    fn cap_enforcement_limits_in_flight_reviewers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let cap = 2_usize;
+        let total_tasks = 5_usize;
+        let semaphore = Arc::new((Mutex::new(0_usize), Condvar::new()));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        thread::scope(|scope| {
+            let handles: Vec<_> = (0..total_tasks)
+                .map(|_| {
+                    let sem = Arc::clone(&semaphore);
+                    let in_flight = Arc::clone(&in_flight);
+                    let peak = Arc::clone(&peak);
+                    scope.spawn(move || {
+                        let _guard = acquire_slot(&sem, cap);
+                        let current = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                        loop {
+                            let old = peak.load(Ordering::SeqCst);
+                            if current <= old
+                                || peak
+                                    .compare_exchange(
+                                        old,
+                                        current,
+                                        Ordering::SeqCst,
+                                        Ordering::SeqCst,
+                                    )
+                                    .is_ok()
+                            {
+                                break;
+                            }
+                        }
+                        thread::sleep(Duration::from_millis(50));
+                        in_flight.fetch_sub(1, Ordering::SeqCst);
+                    })
+                })
+                .collect();
+
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        });
+
+        let observed_peak = peak.load(Ordering::SeqCst);
+        assert!(
+            observed_peak <= cap,
+            "peak in-flight {observed_peak} exceeded cap {cap}"
+        );
+        assert!(observed_peak >= 1, "expected at least 1 in-flight reviewer");
     }
 
     fn attempt_with_tasks(tasks: Vec<Task>) -> Attempt {

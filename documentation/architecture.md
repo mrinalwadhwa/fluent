@@ -127,8 +127,12 @@ state outside the Task artifact area, the guard restores protected
 checkout state before failing the Task.
 `factory work attempt run <work-item-id> <attempt-id>` is the first
 Attempt-level orchestration path. It advances one Attempt by running the
-next planned write or review Task through the same Task executor, then
-reloads stored state before deciding the next transition. After the
+next planned write Task serially through the Task executor, or by running
+planned review Tasks in parallel with concurrency limited to
+`FACTORY_MAX_PARALLEL_REVIEWERS` (default 5, minimum 1). Review-only
+Attempts run review Tasks serially because their reviewers share a source
+checkout. The loop reloads stored state before deciding the next
+transition. After the
 initial write output completes it plans review Tasks for the full Work
 reviewer set. After a follow-up write output completes it derives the
 next review roles from that Task's failed review input artifacts; when

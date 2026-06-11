@@ -406,10 +406,24 @@ reviewer set.
 Test: src/work_attempt_loop.rs (unmappable_followup_inputs_fall_back_to_full_review_roles)
 
 WHEN `factory work attempt run <work-item-id> <attempt-id>` is invoked
-for an Attempt with planned review Tasks,
-THE SYSTEM SHALL run the planned review Tasks through the existing Task
-executor serially before planning later transitions.
+for a normal Work Attempt with planned review Tasks,
+THE SYSTEM SHALL run the planned review Tasks in parallel with
+concurrency limited to `FACTORY_MAX_PARALLEL_REVIEWERS` (default 5,
+minimum 1) before planning later transitions.
+Test: src/work_attempt_loop.rs (cap_enforcement_limits_in_flight_reviewers)
+Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop passes review round)
+
+WHEN `factory work attempt run <work-item-id> <attempt-id>` is invoked
+for a review-only Attempt with planned review Tasks,
+THE SYSTEM SHALL run the planned review Tasks serially because
+review-only reviewers share a source checkout.
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop runs planned review Tasks)
+
+WHEN the planned review-task count for a round exceeds the configured
+`FACTORY_MAX_PARALLEL_REVIEWERS` cap,
+THE SYSTEM SHALL queue excess tasks and launch each as in-flight slots
+free up, keeping at most `cap` reviewer threads in flight at any time.
+Test: src/work_attempt_loop.rs (cap_enforcement_limits_in_flight_reviewers)
 
 WHEN Factory executes merge-time Work reviewers for a Merge Candidate,
 THE SYSTEM SHALL create each reviewer's worktree at

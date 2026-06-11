@@ -497,6 +497,7 @@ fn cmd_work(
                     extra_args: &extra_args,
                     coder_kind,
                     no_sandbox: no_sandbox || global_no_sandbox,
+                    store_lock: None,
                 })?;
                 println!("Completed Task {} at {}", result.task_id, result.output);
             }

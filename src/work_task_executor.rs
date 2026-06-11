@@ -27,6 +27,7 @@ pub struct WorkTaskRunConfig<'a> {
     pub extra_args: &'a [String],
     pub coder_kind: CoderKind,
     pub no_sandbox: bool,
+    pub store_lock: Option<&'a std::sync::Mutex<()>>,
 }
 
 pub struct WorkTaskRunResult {
@@ -210,84 +211,108 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
 }
 
 fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
-    let mut item = read_work_item_or_not_found(config.store, config.work_item_id)?;
-    let (attempt_index, task_index) =
-        find_attempt_task_indexes(&item, config.attempt_id, config.task_id)
-            .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", config.task_id))?;
+    let (
+        attempt_kind,
+        workspace_reads,
+        candidate_commit,
+        input_artifacts,
+        artifact_dir,
+        review_path,
+    ) = {
+        let _lock = config
+            .store_lock
+            .map(|m| m.lock().unwrap_or_else(|e| e.into_inner()));
+        let mut item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+        let (attempt_index, task_index) =
+            find_attempt_task_indexes(&item, config.attempt_id, config.task_id)
+                .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", config.task_id))?;
 
-    let task = &item.attempts[attempt_index].tasks[task_index];
-    let attempt_kind = item.attempts[attempt_index].kind.clone();
-    if task.status != TaskStatus::Planned {
-        bail!(
-            "Task {:?} is {}; expected planned",
-            config.task_id,
-            task.status
-        );
-    }
-    if !task.workspace_access.writes.is_empty() {
-        bail!("Review Task {:?} cannot write a workspace", config.task_id);
-    }
-    if task.workspace_access.reads.is_empty() {
-        bail!(
-            "Review Task {:?} must declare at least one readable candidate workspace",
-            config.task_id
-        );
-    }
-    let artifact_area = task
-        .artifact_area
-        .as_ref()
-        .ok_or_else(|| {
+        let task = &item.attempts[attempt_index].tasks[task_index];
+        let attempt_kind = item.attempts[attempt_index].kind.clone();
+        if task.status != TaskStatus::Planned {
+            bail!(
+                "Task {:?} is {}; expected planned",
+                config.task_id,
+                task.status
+            );
+        }
+        if !task.workspace_access.writes.is_empty() {
+            bail!("Review Task {:?} cannot write a workspace", config.task_id);
+        }
+        if task.workspace_access.reads.is_empty() {
+            bail!(
+                "Review Task {:?} must declare at least one readable candidate workspace",
+                config.task_id
+            );
+        }
+        let artifact_area = task
+            .artifact_area
+            .as_ref()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Review Task {:?} must declare an artifact area",
+                    config.task_id
+                )
+            })?
+            .path
+            .clone();
+        let review_context = task.review_context.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
-                "Review Task {:?} must declare an artifact area",
+                "Review Task {:?} must declare review context",
                 config.task_id
             )
-        })?
-        .path
-        .clone();
-    let review_context = task.review_context.as_ref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "Review Task {:?} must declare review context",
-            config.task_id
+        })?;
+        let workspace_reads = task.workspace_access.reads.clone();
+        let candidate_commit = review_context.candidate_commit.clone();
+        let input_artifacts =
+            resolve_input_artifact_paths(config.project_root, &task.input_artifacts)?;
+        let artifact_dir = resolve_managed_artifact_area_path(config.project_root, &artifact_area)?;
+        let review_path = artifact_dir.join("review.md");
+
+        if !workspace_reads.iter().any(|workspace| {
+            workspace.id == review_context.candidate_workspace_id
+                && workspace.path == review_context.candidate_workspace_path
+        }) {
+            bail!(
+                "Review Task {:?} review context candidate must match a readable workspace",
+                config.task_id
+            );
+        }
+        ReviewReadableWorkspaces::preflight(
+            config.project_root,
+            config.work_item_id,
+            config.attempt_id,
+            &attempt_kind,
+            &workspace_reads,
+            &candidate_commit,
+        )?;
+        fs::create_dir_all(&artifact_dir)?;
+        if review_path.is_file() {
+            fs::remove_file(&review_path)?;
+        } else if review_path.exists() {
+            bail!(
+                "Review Task {:?} artifact path exists but is not a file: {}",
+                config.task_id,
+                review_path.display()
+            );
+        }
+
+        item.attempts[attempt_index].status = AttemptStatus::Reviewing;
+        item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Executing;
+        item.attempts[attempt_index].tasks[task_index].output = None;
+        config.store.write_work_item(&item)?;
+
+        (
+            attempt_kind,
+            workspace_reads,
+            candidate_commit,
+            input_artifacts,
+            artifact_dir,
+            review_path,
         )
-    })?;
-    let workspace_reads = task.workspace_access.reads.clone();
-    let candidate_commit = review_context.candidate_commit.clone();
-    let input_artifacts = resolve_input_artifact_paths(config.project_root, &task.input_artifacts)?;
-    let artifact_dir = resolve_managed_artifact_area_path(config.project_root, &artifact_area)?;
-    let review_path = artifact_dir.join("review.md");
+    };
 
-    if !workspace_reads.iter().any(|workspace| {
-        workspace.id == review_context.candidate_workspace_id
-            && workspace.path == review_context.candidate_workspace_path
-    }) {
-        bail!(
-            "Review Task {:?} review context candidate must match a readable workspace",
-            config.task_id
-        );
-    }
-    ReviewReadableWorkspaces::preflight(
-        config.project_root,
-        config.work_item_id,
-        config.attempt_id,
-        &attempt_kind,
-        &workspace_reads,
-        &candidate_commit,
-    )?;
-    fs::create_dir_all(&artifact_dir)?;
-    if review_path.is_file() {
-        fs::remove_file(&review_path)?;
-    } else if review_path.exists() {
-        bail!(
-            "Review Task {:?} artifact path exists but is not a file: {}",
-            config.task_id,
-            review_path.display()
-        );
-    }
-
-    item.attempts[attempt_index].status = AttemptStatus::Reviewing;
-    item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Executing;
-    item.attempts[attempt_index].tasks[task_index].output = None;
-    config.store.write_work_item(&item)?;
+    let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
 
     let readable_workspaces = match ReviewReadableWorkspaces::resolve(
         config.project_root,
@@ -300,8 +325,9 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     ) {
         Ok(workspaces) => workspaces,
         Err(error) => {
-            mark_task_failed(
+            lock_mark_task_failed(
                 config.store,
+                config.store_lock,
                 config.work_item_id,
                 config.attempt_id,
                 config.task_id,
@@ -327,8 +353,9 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     );
 
     if let Err(error) = readable_workspaces.finish() {
-        mark_task_failed(
+        lock_mark_task_failed(
             config.store,
+            config.store_lock,
             config.work_item_id,
             config.attempt_id,
             config.task_id,
@@ -337,8 +364,9 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     }
 
     if let Err(error) = run_result {
-        mark_task_failed(
+        lock_mark_task_failed(
             config.store,
+            config.store_lock,
             config.work_item_id,
             config.attempt_id,
             config.task_id,
@@ -347,8 +375,9 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     }
 
     if !review_path.is_file() {
-        mark_task_failed(
+        lock_mark_task_failed(
             config.store,
+            config.store_lock,
             config.work_item_id,
             config.attempt_id,
             config.task_id,
@@ -360,27 +389,32 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         );
     }
 
-    let mut completed_item = read_work_item_or_not_found(config.store, config.work_item_id)?;
-    let (attempt_index, task_index) =
-        find_attempt_task_indexes(&completed_item, config.attempt_id, config.task_id)
-            .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", config.task_id))?;
-    completed_item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Complete;
-    completed_item.attempts[attempt_index]
-        .artifacts
-        .push(ArtifactRef {
-            producer_id: config.task_id.to_string(),
-            path: path_for_model(config.project_root, &review_path),
-        });
-    completed_item.attempts[attempt_index].status = if completed_item.attempts[attempt_index]
-        .tasks
-        .iter()
-        .all(|task| task.status == TaskStatus::Complete)
     {
-        AttemptStatus::Complete
-    } else {
-        AttemptStatus::Reviewing
-    };
-    config.store.write_work_item(&completed_item)?;
+        let _lock = config
+            .store_lock
+            .map(|m| m.lock().unwrap_or_else(|e| e.into_inner()));
+        let mut completed_item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+        let (attempt_index, task_index) =
+            find_attempt_task_indexes(&completed_item, config.attempt_id, config.task_id)
+                .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", config.task_id))?;
+        completed_item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Complete;
+        completed_item.attempts[attempt_index]
+            .artifacts
+            .push(ArtifactRef {
+                producer_id: config.task_id.to_string(),
+                path: path_for_model(config.project_root, &review_path),
+            });
+        completed_item.attempts[attempt_index].status = if completed_item.attempts[attempt_index]
+            .tasks
+            .iter()
+            .all(|task| task.status == TaskStatus::Complete)
+        {
+            AttemptStatus::Complete
+        } else {
+            AttemptStatus::Reviewing
+        };
+        config.store.write_work_item(&completed_item)?;
+    }
 
     Ok(WorkTaskRunResult {
         task_id: config.task_id.to_string(),
@@ -591,6 +625,17 @@ fn mark_task_failed(
         store.write_work_item(&item)?;
     }
     Ok(())
+}
+
+fn lock_mark_task_failed(
+    store: &WorkModelStore,
+    store_lock: Option<&std::sync::Mutex<()>>,
+    work_item_id: &str,
+    attempt_id: &str,
+    task_id: &str,
+) -> Result<()> {
+    let _lock = store_lock.map(|m| m.lock().unwrap_or_else(|e| e.into_inner()));
+    mark_task_failed(store, work_item_id, attempt_id, task_id)
 }
 
 fn resolve_workspace_path(project_root: &Path, path: &str) -> PathBuf {
@@ -1235,6 +1280,7 @@ mod tests {
             extra_args: &[],
             coder_kind: CoderKind::Codex,
             no_sandbox: true,
+            store_lock: None,
         }) {
             Ok(_) => panic!("abandoned Work Item should reject task run"),
             Err(error) => error,
