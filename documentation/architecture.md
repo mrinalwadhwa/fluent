@@ -966,53 +966,77 @@ No EFS. Fargate ephemeral storage is sufficient for a single container.
 
 #### Work model on Fargate
 
-The same Fargate task definition and entrypoint serve the Work model:
+The Work model Fargate path uses a worktrees-root layout that
+matches the local layout (project root + sibling candidate/review
+worktrees, all under a single parent directory).
+
+Container layout:
 
 ```
-factory work attempt run --runtime fargate <work-item-id> <attempt-id>
-factory work merge --runtime fargate <work-item-id> <candidate-id>
+/worktrees/
+├── ${FACTORY_PROJECT_NAME}/              project root
+├── work-<bytelen>-<id>-<attempt>/        candidate worktree
+└── review-<bytelen>-<id>-<attempt>-...   review worktrees
 ```
 
-The local-side launcher (`fargate::launch_work_attempt`,
-`fargate::launch_work_merge`) uploads the project workspace (including
-`.factory/work/items/<id>.json`, attempts/, tasks/, candidate sibling
-worktrees if present) to
-`s3://<bucket>/work/<work-item-id>/<attempt-id>/workspace-in.tar` or
-`s3://<bucket>/work-merge/<work-item-id>/<candidate-id>/workspace-in.tar`,
-launches the ECS task with `FACTORY_WORK_ITEM_ID` plus either
-`FACTORY_WORK_ATTEMPT_ID` or `FACTORY_WORK_MERGE_CANDIDATE_ID` as
-task overrides, and records the task ARN under
-`.factory/work/runtime/{attempts,merges}/<id>/.../fargate-task-arn` so
-follow-up `factory work attempt stop` or `factory work merge-stop`
-commands can locate and cancel the task.
+`FACTORY_PROJECT_NAME` is the basename of the local project root
+(e.g. `main`) passed as a task environment override. The container's
+`WORKSPACE` then resolves to `/worktrees/${FACTORY_PROJECT_NAME}`, so
+Factory's `initial_candidate_workspace_path = "../<name>"` naturally
+lands siblings at `/worktrees/work-...` and `/worktrees/review-...`
+beside the project root.
 
-The container's entrypoint (`infrastructure/run/entrypoint.sh`) picks
-its mode from those env vars: Work Attempt, Work Merge, or legacy run.
-Each mode pulls the workspace from S3, runs the appropriate
-`factory ...` command in-container with `--no-sandbox`, then uploads
-the completed workspace back to a `workspace-out.tar` (Work model) or
-`workspace.tar` (legacy) key. Local commands retrieve those:
+Local layout mirrors this:
 
 ```
-factory work attempt pull <work-item-id> <attempt-id>
-factory work merge-pull   <work-item-id> <candidate-id>
+<project_root>/..  (e.g. /Users/mrinal/Workspace/factory/)
+├── main/                                project root
+├── work-<bytelen>-<id>-<attempt>/
+└── review-<bytelen>-<id>-<attempt>-...
 ```
 
-Operators can stop a running Fargate Work task at any time:
+Tarball format (symmetric input and output): one top-level entry per
+worktree, no wrapper directories.
+
+| Direction | Tar `-C` directory | Contents |
+|-----------|--------------------|----------|
+| Local → S3 (input) | `<project_root>/..` | the project basename only |
+| S3 → container (input) | `/worktrees` | files restored under `/worktrees/<project>/` |
+| Container → S3 (output) | `/worktrees` | project + any sibling worktrees |
+| S3 → local (output) | `<project_root>/..` | project overwritten and siblings restored |
+
+Commands:
 
 ```
-factory work attempt stop <work-item-id> <attempt-id>
-factory work merge-stop   <work-item-id> <candidate-id>
+factory work attempt run   --runtime fargate <work-item-id> <attempt-id>
+factory work attempt watch                   <work-item-id> <attempt-id>
+factory work attempt pull                    <work-item-id> <attempt-id>
+factory work attempt stop                    <work-item-id> <attempt-id>
+
+factory work merge   --runtime fargate <work-item-id> <candidate-id>
+factory work merge-watch                <work-item-id> <candidate-id>
+factory work merge-pull                 <work-item-id> <candidate-id>
+factory work merge-stop                 <work-item-id> <candidate-id>
 ```
+
+The local launcher uploads the project workspace to
+`s3://<bucket>/work/<work-item-id>/<attempt-id>/workspace-in.tar` (or
+`work-merge/<work-item-id>/<candidate-id>/workspace-in.tar`), launches
+the ECS task with `FACTORY_WORK_ITEM_ID`, `FACTORY_PROJECT_NAME`, and
+either `FACTORY_WORK_ATTEMPT_ID` or `FACTORY_WORK_MERGE_CANDIDATE_ID`,
+and records the task ARN under
+`.factory/work/runtime/{attempts,merges}/<id>/.../fargate-task-arn`.
+
+`watch` polls `aws ecs describe-tasks` until `lastStatus=STOPPED`,
+printing transitions and the final `stopCode`/`stoppedReason`.
 
 `stop` reads the recorded task ARN and calls `aws ecs stop-task`. The
 call is idempotent: an already-stopped or absent task returns Ok.
 
-After landing changes to `entrypoint.sh` or the Factory binary the
-container image must be rebuilt and the task definition redeployed
-before Work-on-Fargate launches pick up the new behavior. The same
-`infrastructure/setup.sh` flow that builds for legacy runs covers the
-Work model — the entrypoint and binary are shared.
+After changes to `entrypoint.sh` or the Factory binary, rebuild the
+container image and redeploy the task definition via
+`infrastructure/setup.sh` before Work-on-Fargate launches see the new
+behavior.
 
 ## Credential management
 

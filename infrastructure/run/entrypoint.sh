@@ -1,71 +1,57 @@
 #!/usr/bin/env bash
-# entrypoint.sh — Single-container Fargate entrypoint for factory runs
-# and Work Item Attempts.
+# entrypoint.sh — Single-container Fargate entrypoint for Factory
+# Work Item Attempts and Merges. The container layout uses a single
+# worktrees root that contains the project root plus any sibling
+# candidate / review worktrees Factory creates:
 #
-# Two modes, selected by which env vars are set:
+#   /worktrees/${FACTORY_PROJECT_NAME}/   project root
+#   /worktrees/work-<...>/                candidate worktrees
+#   /worktrees/review-<...>/              review worktrees
 #
-# Legacy run mode (FACTORY_RUN_ID set):
-#   Pull workspace from S3, run the legacy Rust session loop, upload
-#   completed workspace to S3.
+# Two modes, selected by env vars:
 #
-# Work model mode (FACTORY_WORK_ITEM_ID + FACTORY_WORK_ATTEMPT_ID set):
-#   Pull workspace + .factory/work state from S3, run
-#   `factory work attempt run`, upload everything back to S3.
+#   Work Attempt mode (FACTORY_WORK_ITEM_ID + FACTORY_WORK_ATTEMPT_ID):
+#     Pull tar into /worktrees, run `factory work attempt run`, upload
+#     /worktrees back to S3.
+#
+#   Work Merge mode (FACTORY_WORK_ITEM_ID +
+#   FACTORY_WORK_MERGE_CANDIDATE_ID): same shape, runs
+#   `factory work merge` instead.
 #
 # Environment variables (passed as task overrides):
-#   FACTORY_RUN_ID         — the legacy run identifier (mode A)
-#   FACTORY_WORK_ITEM_ID   — the Work Item ID (mode B)
-#   FACTORY_WORK_ATTEMPT_ID — the Attempt ID (mode B)
-#   FACTORY_S3_BUCKET      — S3 bucket for workspace transfer
-#   FACTORY_REGION         — AWS region
-#   CLAUDE_CODE_OAUTH_TOKEN — Claude auth token
+#   FACTORY_WORK_ITEM_ID              Work Item ID
+#   FACTORY_WORK_ATTEMPT_ID           Attempt ID  (Attempt mode)
+#   FACTORY_WORK_MERGE_CANDIDATE_ID   Merge Candidate ID (Merge mode)
+#   FACTORY_PROJECT_NAME              basename of the project root
+#                                     (e.g. "main")
+#   FACTORY_S3_BUCKET                 S3 bucket for workspace transfer
+#   FACTORY_REGION                    AWS region
+#   CLAUDE_CODE_OAUTH_TOKEN           Claude auth token
 
 set -euo pipefail
 
-WORKSPACE="${WORKSPACE:-/workspace}"
+WORKTREES_ROOT="/worktrees"
 
 die() { printf 'factory-run: %s\n' "$1" >&2; exit 1; }
 
-resolve_task_handle() {
-  if [ -n "${FACTORY_TASK_ARN:-}" ]; then
-    printf '%s' "$FACTORY_TASK_ARN"
-    return 0
-  fi
-
-  if [ -n "${ECS_CONTAINER_METADATA_URI_V4:-}" ] &&
-    command -v curl >/dev/null 2>&1 &&
-    command -v jq >/dev/null 2>&1; then
-    local task_json
-    if task_json="$(curl -fsS "${ECS_CONTAINER_METADATA_URI_V4}/task" 2>/dev/null)"; then
-      printf '%s' "$task_json" | jq -r '.TaskARN // empty'
-    fi
-    return 0
-  fi
-
-  printf ''
-}
-
 [ -n "${FACTORY_S3_BUCKET:-}" ] || die "FACTORY_S3_BUCKET not set"
 [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || die "No Claude auth token"
+[ -n "${FACTORY_WORK_ITEM_ID:-}" ] || die "FACTORY_WORK_ITEM_ID not set"
+[ -n "${FACTORY_PROJECT_NAME:-}" ] || die "FACTORY_PROJECT_NAME not set"
 
 MODE=""
-if [ -n "${FACTORY_WORK_ITEM_ID:-}" ] && [ -n "${FACTORY_WORK_MERGE_CANDIDATE_ID:-}" ]; then
+if [ -n "${FACTORY_WORK_MERGE_CANDIDATE_ID:-}" ]; then
   MODE="work-merge"
-elif [ -n "${FACTORY_WORK_ITEM_ID:-}" ] && [ -n "${FACTORY_WORK_ATTEMPT_ID:-}" ]; then
+elif [ -n "${FACTORY_WORK_ATTEMPT_ID:-}" ]; then
   MODE="work-attempt"
-elif [ -n "${FACTORY_RUN_ID:-}" ]; then
-  MODE="run"
 else
-  die "Set FACTORY_RUN_ID (legacy mode), FACTORY_WORK_ITEM_ID + FACTORY_WORK_ATTEMPT_ID (Work attempt mode), or FACTORY_WORK_ITEM_ID + FACTORY_WORK_MERGE_CANDIDATE_ID (Work merge mode)"
+  die "Set FACTORY_WORK_ATTEMPT_ID (Work Attempt mode) or FACTORY_WORK_MERGE_CANDIDATE_ID (Work Merge mode)"
 fi
 
 S3_REGION="${FACTORY_REGION:-us-west-1}"
+WORKSPACE="${WORKTREES_ROOT}/${FACTORY_PROJECT_NAME}"
 
 case "$MODE" in
-  run)
-    S3_IN_KEY="runs/${FACTORY_RUN_ID}/workspace-in.tar"
-    S3_OUT_KEY="runs/${FACTORY_RUN_ID}/workspace.tar"
-    ;;
   work-attempt)
     S3_IN_KEY="work/${FACTORY_WORK_ITEM_ID}/${FACTORY_WORK_ATTEMPT_ID}/workspace-in.tar"
     S3_OUT_KEY="work/${FACTORY_WORK_ITEM_ID}/${FACTORY_WORK_ATTEMPT_ID}/workspace-out.tar"
@@ -76,8 +62,10 @@ case "$MODE" in
     ;;
 esac
 
+mkdir -p "$WORKTREES_ROOT"
+
 # --------------------------------------------------------------------------
-# Pull workspace from S3
+# Pull workspace from S3 into /worktrees
 # --------------------------------------------------------------------------
 
 printf 'factory-run: pulling workspace from s3://%s/%s\n' "$FACTORY_S3_BUCKET" "$S3_IN_KEY"
@@ -87,7 +75,7 @@ while true; do
   if aws s3 cp \
     --region "$S3_REGION" \
     "s3://${FACTORY_S3_BUCKET}/${S3_IN_KEY}" \
-    - 2>/dev/null | tar xf - -C "$WORKSPACE"; then
+    - 2>/dev/null | tar xf - -C "$WORKTREES_ROOT"; then
     printf 'factory-run: workspace received\n'
     break
   fi
@@ -97,6 +85,8 @@ while true; do
     die "Timed out waiting for workspace in S3 (5 minutes)"
   fi
 done
+
+[ -d "$WORKSPACE" ] || die "Expected project root at $WORKSPACE after extracting tarball"
 
 cd "$WORKSPACE"
 
@@ -113,24 +103,6 @@ else
 fi
 
 case "$MODE" in
-  run)
-    RUN_DIR="${WORKSPACE}/.factory/runs/${FACTORY_RUN_ID}"
-    [ -d "$RUN_DIR" ] || die "Run directory not found: $RUN_DIR"
-    printf '%s' "$FACTORY_RUN_ID" > "${WORKSPACE}/.factory/active-run"
-    printf 'fargate' > "${RUN_DIR}/runtime"
-    TASK_HANDLE="$(resolve_task_handle)"
-    if [ -n "$TASK_HANDLE" ]; then
-      printf '%s' "$TASK_HANDLE" > "${RUN_DIR}/handle"
-    fi
-
-    "$FACTORY_BIN" run \
-      --runtime local \
-      --no-sandbox \
-      --in-place \
-      --preserve-run-metadata \
-      --coder claude \
-      --run-id "$FACTORY_RUN_ID"
-    ;;
   work-attempt)
     printf 'factory-run: running factory work attempt run %s %s\n' \
       "$FACTORY_WORK_ITEM_ID" "$FACTORY_WORK_ATTEMPT_ID"
@@ -154,11 +126,12 @@ case "$MODE" in
 esac
 
 # --------------------------------------------------------------------------
-# Upload workspace to S3
+# Upload /worktrees back to S3
 # --------------------------------------------------------------------------
 
-printf 'factory-run: uploading workspace to s3://%s/%s\n' "$FACTORY_S3_BUCKET" "$S3_OUT_KEY"
-tar cf - -C "$WORKSPACE" . | \
+printf 'factory-run: uploading worktrees to s3://%s/%s\n' "$FACTORY_S3_BUCKET" "$S3_OUT_KEY"
+
+tar cf - -C "$WORKTREES_ROOT" . | \
   aws s3 cp \
     --region "$S3_REGION" \
     - "s3://${FACTORY_S3_BUCKET}/${S3_OUT_KEY}"
