@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
-# test-land — Verify factory land behaviors.
+# test-run-merge — Verify factory merge behaviors for legacy Run model.
 #
-# Tests that `factory land` completes the run lifecycle: rebases the run
-# branch onto main, fast-forward merges, copies artifacts from the worktree
-# back to the source run directory, removes the worktree, and deletes the
-# branch.
+# Tests that `factory merge <run-id>` completes the run lifecycle:
+# rebases the run branch onto main, fast-forward merges, copies
+# artifacts from the worktree back to the source run directory,
+# removes the worktree, and deletes the branch.
 #
 # Covers:
-#   - land refuses to land a run with status other than 'complete'
-#   - land refuses to land when any review verdict is not 'pass'
-#   - land allows landing when no reviews exist
-#   - land copies sessions/, sessions.log, reviews/, report.md, status back
-#   - land removes the worktree
-#   - land deletes the run's branch
-#   - land fast-forward merges run commits into main
+#   - merge refuses a run with status other than 'complete'
+#   - merge refuses when any review verdict is not 'pass'
+#   - merge allows runs with no reviews
+#   - merge copies sessions/, sessions.log, reviews/, report.md, status back
+#   - merge removes the worktree
+#   - merge deletes the run's branch
+#   - merge fast-forward merges run commits into main
 #
 # Usage:
-#   tests/behaviors/operations/test-land.sh
+#   tests/behaviors/operations/test-run-merge.sh
 
 set -euo pipefail
 
@@ -33,7 +33,7 @@ ERRORS=""
 # -------------------------------------------------------------------------
 
 setup_test_project() {
-  TEST_DIR="$(mktemp -d -t factory-test-land-XXXXXX)"
+  TEST_DIR="$(mktemp -d -t factory-test-run-merge-XXXXXX)"
   mkdir -p "${TEST_DIR}/main"
   cd "${TEST_DIR}/main"
   git init -b main > /dev/null 2>&1
@@ -164,7 +164,7 @@ run_test() {
 # Tests
 # -------------------------------------------------------------------------
 
-test_land_rejects_non_complete_status() {
+test_merge_rejects_non_complete_status() {
   setup_test_project
 
   RUN_ID="run-not-complete"
@@ -180,7 +180,7 @@ test_land_rejects_non_complete_status() {
 
   RESULT=0
   if [ "$EXIT_CODE" -eq 0 ]; then
-    printf '    FAIL: land should exit non-zero for non-complete run, got exit 0\n'
+    printf '    FAIL: merge should exit non-zero for non-complete run, got exit 0\n'
     RESULT=1
   fi
   if ! echo "$OUTPUT" | grep -qi "executing"; then
@@ -192,7 +192,7 @@ test_land_rejects_non_complete_status() {
   return $RESULT
 }
 
-test_land_rejects_failed_review() {
+test_merge_rejects_failed_review() {
   setup_test_project
 
   RUN_ID="run-failed-review"
@@ -209,7 +209,7 @@ test_land_rejects_failed_review() {
 
   RESULT=0
   if [ "$EXIT_CODE" -eq 0 ]; then
-    printf '    FAIL: land should exit non-zero when review has fail verdict\n'
+    printf '    FAIL: merge should exit non-zero when review has fail verdict\n'
     RESULT=1
   fi
 
@@ -217,7 +217,7 @@ test_land_rejects_failed_review() {
   return $RESULT
 }
 
-test_land_rejects_uncertain_review() {
+test_merge_rejects_uncertain_review() {
   setup_test_project
 
   RUN_ID="run-uncertain-review"
@@ -233,7 +233,7 @@ test_land_rejects_uncertain_review() {
 
   RESULT=0
   if [ "$EXIT_CODE" -eq 0 ]; then
-    printf '    FAIL: land should exit non-zero when review has uncertain verdict\n'
+    printf '    FAIL: merge should exit non-zero when review has uncertain verdict\n'
     RESULT=1
   fi
 
@@ -241,7 +241,7 @@ test_land_rejects_uncertain_review() {
   return $RESULT
 }
 
-test_land_copies_artifacts() {
+test_merge_copies_artifacts() {
   setup_test_project
   RUN_ID="run-copy-artifacts"
   setup_run_with_worktree "$RUN_ID" pass
@@ -253,7 +253,7 @@ test_land_copies_artifacts() {
 
   RESULT=0
   if [ "$EXIT_CODE" -ne 0 ]; then
-    printf '    FAIL: land command should succeed, exit code %d\n' "$EXIT_CODE"
+    printf '    FAIL: merge command should succeed, exit code %d\n' "$EXIT_CODE"
     RESULT=1
   fi
 
@@ -288,7 +288,7 @@ test_land_copies_artifacts() {
   return $RESULT
 }
 
-test_land_removes_worktree() {
+test_merge_removes_worktree() {
   setup_test_project
   RUN_ID="run-remove-wt"
   setup_run_with_worktree "$RUN_ID" pass
@@ -309,7 +309,7 @@ test_land_removes_worktree() {
   return $RESULT
 }
 
-test_land_deletes_branch() {
+test_merge_deletes_branch() {
   setup_test_project
   RUN_ID="run-del-branch"
   setup_run_with_worktree "$RUN_ID" pass
@@ -320,7 +320,7 @@ test_land_deletes_branch() {
 
   RESULT=0
   if git branch --list "$RUN_ID" | grep -q "$RUN_ID"; then
-    printf '    FAIL: run branch should have been deleted after landing\n'
+    printf '    FAIL: run branch should have been deleted after merging\n'
     RESULT=1
   fi
 
@@ -328,7 +328,7 @@ test_land_deletes_branch() {
   return $RESULT
 }
 
-test_land_merges_to_main() {
+test_merge_merges_to_main() {
   setup_test_project
   RUN_ID="run-merge-main"
   setup_run_with_worktree "$RUN_ID" pass
@@ -341,7 +341,7 @@ test_land_merges_to_main() {
   # main should now contain the run's commit
   LOG="$(git log --oneline)"
   if ! echo "$LOG" | grep -q "run commit for ${RUN_ID}"; then
-    printf '    FAIL: main should contain run commit after landing\n'
+    printf '    FAIL: main should contain run commit after merging\n'
     RESULT=1
   fi
 
@@ -349,7 +349,7 @@ test_land_merges_to_main() {
   return $RESULT
 }
 
-test_land_fails_on_rebase_conflict() {
+test_merge_fails_on_rebase_conflict() {
   setup_test_project
 
   # Setup conflicting state: main has a commit that conflicts with run branch
@@ -391,7 +391,7 @@ test_land_fails_on_rebase_conflict() {
 
   RESULT=0
   if [ "$EXIT_CODE" -eq 0 ]; then
-    printf '    FAIL: land should exit non-zero when rebase has conflicts\n'
+    printf '    FAIL: merge should exit non-zero when rebase has conflicts\n'
     RESULT=1
   fi
   if ! echo "$OUTPUT" | grep -qi "conflict\|rebase"; then
@@ -406,7 +406,7 @@ test_land_fails_on_rebase_conflict() {
   return $RESULT
 }
 
-test_shell_land_rejects_non_complete_status() {
+test_shell_merge_rejects_non_complete_status() {
   FACTORY="$BINARY"
   setup_test_project
 
@@ -423,7 +423,7 @@ test_shell_land_rejects_non_complete_status() {
 
   RESULT=0
   if [ "$EXIT_CODE" -eq 0 ]; then
-    printf '    FAIL: land should exit non-zero for non-complete run, got exit 0\n'
+    printf '    FAIL: merge should exit non-zero for non-complete run, got exit 0\n'
     RESULT=1
   fi
 
@@ -431,7 +431,7 @@ test_shell_land_rejects_non_complete_status() {
   return $RESULT
 }
 
-test_shell_land_full_workflow() {
+test_shell_merge_full_workflow() {
   FACTORY="$BINARY"
   setup_test_project
   RUN_ID="run-shell-full"
@@ -446,33 +446,33 @@ test_shell_land_full_workflow() {
 
   RESULT=0
   if [ "$EXIT_CODE" -ne 0 ]; then
-    printf '    FAIL: land should succeed, exit code %d\n' "$EXIT_CODE"
+    printf '    FAIL: merge should succeed, exit code %d\n' "$EXIT_CODE"
     printf '    Output: %s\n' "$OUTPUT"
     RESULT=1
   fi
 
   # worktree removed
   if [ -d "$WT_PATH" ]; then
-    printf '    FAIL: shell land should remove worktree\n'
+    printf '    FAIL: shell merge should remove worktree\n'
     RESULT=1
   fi
 
   # branch deleted
   if git branch --list "$RUN_ID" | grep -q "$RUN_ID"; then
-    printf '    FAIL: shell land should delete run branch\n'
+    printf '    FAIL: shell merge should delete run branch\n'
     RESULT=1
   fi
 
   # artifacts copied
   if [ ! -f ".factory/runs/${RUN_ID}/sessions.log" ]; then
-    printf '    FAIL: shell land should copy sessions.log back\n'
+    printf '    FAIL: shell merge should copy sessions.log back\n'
     RESULT=1
   fi
 
   # main updated
   LOG="$(git log --oneline)"
   if ! echo "$LOG" | grep -q "run commit for ${RUN_ID}"; then
-    printf '    FAIL: shell land should merge run commits into main\n'
+    printf '    FAIL: shell merge should merge run commits into main\n'
     RESULT=1
   fi
 
@@ -480,7 +480,7 @@ test_shell_land_full_workflow() {
   return $RESULT
 }
 
-test_land_allows_no_reviews() {
+test_merge_allows_no_reviews() {
   setup_test_project
 
   RUN_ID="run-no-reviews"
@@ -517,7 +517,7 @@ test_land_allows_no_reviews() {
 
   RESULT=0
   if [ "$EXIT_CODE" -ne 0 ]; then
-    printf '    FAIL: land should succeed when no reviews exist, exit code %d\n' "$EXIT_CODE"
+    printf '    FAIL: merge should succeed when no reviews exist, exit code %d\n' "$EXIT_CODE"
     printf '    Output: %s\n' "$OUTPUT"
     RESULT=1
   fi
@@ -525,7 +525,7 @@ test_land_allows_no_reviews() {
   # Verify it actually landed — main should contain the run commit
   LOG="$(git log --oneline)"
   if ! echo "$LOG" | grep -q "run commit for ${RUN_ID}"; then
-    printf '    FAIL: main should contain run commit after landing with no reviews\n'
+    printf '    FAIL: main should contain run commit after merging with no reviews\n'
     RESULT=1
   fi
 
@@ -533,7 +533,7 @@ test_land_allows_no_reviews() {
   return $RESULT
 }
 
-test_land_without_check_config_does_not_require_formatter() {
+test_merge_without_check_config_does_not_require_formatter() {
   setup_test_project
   RUN_ID="run-no-check-config"
   setup_run_with_worktree "$RUN_ID" pass
@@ -554,12 +554,12 @@ EOF
 
   RESULT=0
   if [ "$EXIT_CODE" -ne 0 ]; then
-    printf '    FAIL: land should succeed without check config, exit code %d\n' "$EXIT_CODE"
+    printf '    FAIL: merge should succeed without check config, exit code %d\n' "$EXIT_CODE"
     printf '    Output: %s\n' "$(cat "${TEST_DIR}/land.out")"
     RESULT=1
   fi
   if [ -d "${TEST_DIR}/${RUN_ID}-wt" ]; then
-    printf '    FAIL: land should still remove the worktree\n'
+    printf '    FAIL: merge should still remove the worktree\n'
     RESULT=1
   fi
 
@@ -567,7 +567,7 @@ EOF
   return $RESULT
 }
 
-test_land_runs_blocking_check_in_worktree() {
+test_merge_runs_blocking_check_in_worktree() {
   setup_test_project
   RUN_ID="run-check-pwd"
   setup_run_with_worktree "$RUN_ID" pass
@@ -585,7 +585,7 @@ EOF
 
   RESULT=0
   if [ "$EXIT_CODE" -ne 0 ]; then
-    printf '    FAIL: land should succeed when the configured check passes\n'
+    printf '    FAIL: merge should succeed when the configured check passes\n'
     printf '    Output: %s\n' "$OUTPUT"
     RESULT=1
   fi
@@ -604,7 +604,7 @@ EOF
   return $RESULT
 }
 
-test_land_failed_check_keeps_worktree_and_reports_details() {
+test_merge_failed_check_keeps_worktree_and_reports_details() {
   setup_test_project
   RUN_ID="run-check-fails"
   setup_run_with_worktree "$RUN_ID" pass
@@ -623,7 +623,7 @@ EOF
 
   RESULT=0
   if [ "$EXIT_CODE" -eq 0 ]; then
-    printf '    FAIL: land should exit non-zero when a blocking check fails\n'
+    printf '    FAIL: merge should exit non-zero when a blocking check fails\n'
     RESULT=1
   fi
   if [ ! -d "$WT_PATH" ]; then
@@ -655,7 +655,7 @@ EOF
   return $RESULT
 }
 
-test_land_autofix_commits_reruns_checks_and_reviewers() {
+test_merge_autofix_commits_reruns_checks_and_reviewers() {
   setup_test_project
   RUN_ID="run-autofix-pass"
   setup_run_with_worktree "$RUN_ID" pass
@@ -683,7 +683,7 @@ EOF
 
   RESULT=0
   if [ "$EXIT_CODE" -ne 0 ]; then
-    printf '    FAIL: land should succeed after autofix and passing reviews, exit code %d\n' "$EXIT_CODE"
+    printf '    FAIL: merge should succeed after autofix and passing reviews, exit code %d\n' "$EXIT_CODE"
     printf '    Output: %s\n' "$OUTPUT"
     RESULT=1
   fi
@@ -716,7 +716,7 @@ EOF
   return $RESULT
 }
 
-test_land_autofix_requires_clean_worktree() {
+test_merge_autofix_requires_clean_worktree() {
   setup_test_project
   RUN_ID="run-autofix-dirty"
   setup_run_with_worktree "$RUN_ID" pass
@@ -741,7 +741,7 @@ EOF
 
   RESULT=0
   if [ "$EXIT_CODE" -eq 0 ]; then
-    printf '    FAIL: land should exit non-zero when autofix needs a dirty worktree\n'
+    printf '    FAIL: merge should exit non-zero when autofix needs a dirty worktree\n'
     RESULT=1
   fi
   if [ -f "${TEST_DIR}/fix-ran" ]; then
@@ -765,7 +765,7 @@ EOF
   return $RESULT
 }
 
-test_land_autofix_command_failure_keeps_worktree() {
+test_merge_autofix_command_failure_keeps_worktree() {
   setup_test_project
   RUN_ID="run-autofix-command-fails"
   setup_run_with_worktree "$RUN_ID" pass
@@ -789,7 +789,7 @@ EOF
 
   RESULT=0
   if [ "$EXIT_CODE" -eq 0 ]; then
-    printf '    FAIL: land should exit non-zero when autofix command fails\n'
+    printf '    FAIL: merge should exit non-zero when autofix command fails\n'
     RESULT=1
   fi
   if [ ! -d "$WT_PATH" ]; then
@@ -822,7 +822,7 @@ EOF
   return $RESULT
 }
 
-test_land_autofix_rerun_failure_keeps_worktree() {
+test_merge_autofix_rerun_failure_keeps_worktree() {
   setup_test_project
   RUN_ID="run-autofix-rerun-fails"
   setup_run_with_worktree "$RUN_ID" pass
@@ -850,7 +850,7 @@ EOF
 
   RESULT=0
   if [ "$EXIT_CODE" -eq 0 ]; then
-    printf '    FAIL: land should exit non-zero when checks fail after autofix\n'
+    printf '    FAIL: merge should exit non-zero when checks fail after autofix\n'
     RESULT=1
   fi
   if [ ! -d "$WT_PATH" ]; then
@@ -886,7 +886,7 @@ EOF
   return $RESULT
 }
 
-test_land_autofix_review_failure_keeps_worktree() {
+test_merge_autofix_review_failure_keeps_worktree() {
   setup_test_project
   RUN_ID="run-autofix-review-fails"
   setup_run_with_worktree "$RUN_ID" pass
@@ -913,7 +913,7 @@ EOF
 
   RESULT=0
   if [ "$EXIT_CODE" -eq 0 ]; then
-    printf '    FAIL: land should exit non-zero when reviewers fail after autofix\n'
+    printf '    FAIL: merge should exit non-zero when reviewers fail after autofix\n'
     RESULT=1
   fi
   if [ ! -d "$WT_PATH" ]; then
@@ -970,28 +970,28 @@ test_factory_config_defines_format_check() {
 # Run all tests
 # -------------------------------------------------------------------------
 
-printf 'test-land\n\n'
+printf 'test-run-merge\n\n'
 
-run_test "land rejects non-complete run" test_land_rejects_non_complete_status
-run_test "land rejects fail review verdict" test_land_rejects_failed_review
-run_test "land rejects uncertain review verdict" test_land_rejects_uncertain_review
-run_test "land copies artifacts from worktree" test_land_copies_artifacts
-run_test "land removes worktree" test_land_removes_worktree
-run_test "land deletes run branch" test_land_deletes_branch
-run_test "land merges run commits into main" test_land_merges_to_main
-run_test "land fails on rebase conflict" test_land_fails_on_rebase_conflict
-run_test "land allows run with no reviews" test_land_allows_no_reviews
-run_test "land without check config does not require formatter" test_land_without_check_config_does_not_require_formatter
-run_test "land runs blocking check in worktree" test_land_runs_blocking_check_in_worktree
-run_test "land failed check keeps worktree and reports details" test_land_failed_check_keeps_worktree_and_reports_details
-run_test "land autofix commits, reruns checks, and reruns reviewers" test_land_autofix_commits_reruns_checks_and_reviewers
-run_test "land autofix requires clean worktree" test_land_autofix_requires_clean_worktree
-run_test "land autofix command failure keeps worktree" test_land_autofix_command_failure_keeps_worktree
-run_test "land autofix rerun failure keeps worktree" test_land_autofix_rerun_failure_keeps_worktree
-run_test "land autofix reviewer failure keeps worktree" test_land_autofix_review_failure_keeps_worktree
+run_test "merge rejects non-complete run" test_merge_rejects_non_complete_status
+run_test "merge rejects fail review verdict" test_merge_rejects_failed_review
+run_test "merge rejects uncertain review verdict" test_merge_rejects_uncertain_review
+run_test "merge copies artifacts from worktree" test_merge_copies_artifacts
+run_test "merge removes worktree" test_merge_removes_worktree
+run_test "merge deletes run branch" test_merge_deletes_branch
+run_test "merge merges run commits into main" test_merge_merges_to_main
+run_test "merge fails on rebase conflict" test_merge_fails_on_rebase_conflict
+run_test "merge allows run with no reviews" test_merge_allows_no_reviews
+run_test "merge without check config does not require formatter" test_merge_without_check_config_does_not_require_formatter
+run_test "merge runs blocking check in worktree" test_merge_runs_blocking_check_in_worktree
+run_test "merge failed check keeps worktree and reports details" test_merge_failed_check_keeps_worktree_and_reports_details
+run_test "merge autofix commits, reruns checks, and reruns reviewers" test_merge_autofix_commits_reruns_checks_and_reviewers
+run_test "merge autofix requires clean worktree" test_merge_autofix_requires_clean_worktree
+run_test "merge autofix command failure keeps worktree" test_merge_autofix_command_failure_keeps_worktree
+run_test "merge autofix rerun failure keeps worktree" test_merge_autofix_rerun_failure_keeps_worktree
+run_test "merge autofix reviewer failure keeps worktree" test_merge_autofix_review_failure_keeps_worktree
 run_test "this repo defines a pre-merge format check" test_factory_config_defines_format_check
-run_test "shell: land rejects non-complete run (exit code)" test_shell_land_rejects_non_complete_status
-run_test "shell: land full workflow" test_shell_land_full_workflow
+run_test "shell: merge rejects non-complete run (exit code)" test_shell_merge_rejects_non_complete_status
+run_test "shell: merge full workflow" test_shell_merge_full_workflow
 
 printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
 

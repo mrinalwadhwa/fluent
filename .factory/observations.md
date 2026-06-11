@@ -84,9 +84,10 @@ files renamed: `check-pre-land` → `check-pre-merge`, `fix-pre-land` →
 `fix-pre-merge`. CLI verb: `factory land [RUN_ID]` → `factory merge
 [RUN_ID]`. Test names: `fn land_*` → `fn run_merge_*` to distinguish
 legacy Run model merge from Work model `work_merge_*`. The shell test
-file `tests/behaviors/operations/test-land.sh` keeps its filename for
-git history continuity but its diagnostic strings still say "land";
-worth a future cosmetic rename.
+file `tests/behaviors/operations/test-land.sh` is renamed to
+`test-run-merge.sh` to match the `fn run_merge_*` convention in
+`tests/binary.rs`; internal function names and display strings updated
+to match.
 
 2026-06-11 — Fargate container is missing the toolchains the
 configured Factory merge checks invoke. The smoke test merge ran

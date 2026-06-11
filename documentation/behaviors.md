@@ -1479,13 +1479,13 @@ Test: tests/binary.rs (headless_resume_rejects_parallel_parent), tests/behaviors
 
 WHEN `factory merge` is invoked and the run status is not `complete`,
 THE SYSTEM SHALL refuse and exit non-zero.
-Test: tests/behaviors/operations/test-land.sh (land rejects non-complete run), tests/binary.rs (run_merge_rejects_non_complete_run)
+Test: tests/behaviors/operations/test-run-merge.sh (land rejects non-complete run), tests/binary.rs (run_merge_rejects_non_complete_run)
 
 WHEN `factory merge` is invoked for a run without `review-state.json` and
 any current review artifact has verdict `fail`, `uncertain`, or is
 missing a verdict line,
 THE SYSTEM SHALL refuse and exit non-zero.
-Test: tests/behaviors/operations/test-land.sh (land rejects fail review verdict, land rejects uncertain review verdict), tests/binary.rs (run_merge_rejects_failed_reviews, run_merge_rejects_live_failed_reviews)
+Test: tests/behaviors/operations/test-run-merge.sh (land rejects fail review verdict, land rejects uncertain review verdict), tests/binary.rs (run_merge_rejects_failed_reviews, run_merge_rejects_live_failed_reviews)
 
 WHEN `factory merge [RUN_ID]` validates status and review artifacts before
 merging,
@@ -1536,13 +1536,13 @@ Test: tests/binary.rs (run_merge_rejects_dirty_completed_worktree)
 WHEN `factory merge` completes successfully,
 THE SYSTEM SHALL copy sessions/, sessions.log, reviews/, report.md, and
 status from the worktree back to the source run directory.
-Test: tests/behaviors/operations/test-land.sh (land copies artifacts from worktree), tests/binary.rs (run_merge_completes_full_lifecycle)
+Test: tests/behaviors/operations/test-run-merge.sh (land copies artifacts from worktree), tests/binary.rs (run_merge_completes_full_lifecycle)
 
 WHEN `factory merge` completes successfully,
 THE SYSTEM SHALL remove the worktree, rebase the run branch onto the
 source branch, fast-forward merge into the source branch, and delete the
 run branch.
-Test: tests/behaviors/operations/test-land.sh (land removes worktree, land deletes run branch, land merges run commits into main), tests/binary.rs (run_merge_completes_full_lifecycle, run_merge_preserves_linear_history)
+Test: tests/behaviors/operations/test-run-merge.sh (land removes worktree, land deletes run branch, land merges run commits into main), tests/binary.rs (run_merge_completes_full_lifecycle, run_merge_preserves_linear_history)
 
 WHEN `factory merge` completes successfully,
 THE SYSTEM SHALL set the run status to `merged`.
@@ -1551,11 +1551,11 @@ Test: tests/binary.rs (run_merge_completes_full_lifecycle)
 WHEN `factory merge` is invoked and the rebase has conflicts,
 THE SYSTEM SHALL abort the rebase, exit non-zero, and leave the
 repository in a clean state.
-Test: tests/behaviors/operations/test-land.sh (land fails on rebase conflict), tests/binary.rs (run_merge_fails_on_rebase_conflict)
+Test: tests/behaviors/operations/test-run-merge.sh (land fails on rebase conflict), tests/binary.rs (run_merge_fails_on_rebase_conflict)
 
 WHEN `factory merge` is invoked without a run ID,
 THE SYSTEM SHALL land the most recent complete run.
-Test: tests/behaviors/operations/test-land.sh, tests/binary.rs (run_merge_resolves_most_recent_complete_run)
+Test: tests/behaviors/operations/test-run-merge.sh, tests/binary.rs (run_merge_resolves_most_recent_complete_run)
 
 ## Dashboard
 
