@@ -16,10 +16,33 @@ struct FargateConfig {
     region: String,
 }
 
+/// Resolve FargateConfig from the JIT bootstrap state file. If the
+/// state file is missing or incomplete, fall back to `fargate.env`
+/// (legacy) for backward compatibility with hand-deployed setups.
 fn load_config() -> Result<FargateConfig> {
     let home = std::env::var("HOME").unwrap_or_default();
-    let cfg_path = format!("{home}/.config/factory/fargate.env");
 
+    if let Ok(state) = crate::fargate_bootstrap::FargateState::load() {
+        if state.stack_deployed
+            && state.cluster_arn.is_some()
+            && state.s3_bucket.is_some()
+            && state.subnets.is_some()
+            && state.security_group_id.is_some()
+        {
+            return Ok(FargateConfig {
+                cluster: state.cluster_arn.unwrap(),
+                run_task: state
+                    .task_def_arn
+                    .unwrap_or_else(|| "factory-run".to_string()),
+                s3_bucket: state.s3_bucket.unwrap(),
+                subnets: state.subnets.unwrap(),
+                security_group: state.security_group_id.unwrap(),
+                region: state.region.unwrap_or_else(|| "us-west-1".to_string()),
+            });
+        }
+    }
+
+    let cfg_path = format!("{home}/.config/factory/fargate.env");
     if Path::new(&cfg_path).exists() {
         let content = fs::read_to_string(&cfg_path)?;
         for line in content.lines() {
@@ -40,6 +63,61 @@ fn load_config() -> Result<FargateConfig> {
             .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
             .unwrap_or_else(|_| "us-west-1".into()),
     })
+}
+
+/// Resolve the Factory source root used by the JIT bootstrap to build
+/// images. Order:
+///   1. `FACTORY_SOURCE_ROOT` env var if set
+///   2. Walk up from the project root looking for a directory that
+///      contains both `Cargo.toml` and `infrastructure/run/Dockerfile`
+///   3. Use the project root itself if it looks like the Factory
+///      source tree.
+fn resolve_factory_source_root(project_root: &Path) -> Result<std::path::PathBuf> {
+    if let Ok(env_path) = std::env::var("FACTORY_SOURCE_ROOT") {
+        let path = std::path::PathBuf::from(&env_path);
+        if !path.join("infrastructure/run/Dockerfile").exists() {
+            anyhow::bail!(
+                "FACTORY_SOURCE_ROOT={} does not contain infrastructure/run/Dockerfile",
+                env_path
+            );
+        }
+        return Ok(path);
+    }
+    let mut candidate = project_root.to_path_buf();
+    loop {
+        if candidate.join("infrastructure/run/Dockerfile").exists()
+            && candidate.join("Cargo.toml").exists()
+        {
+            return Ok(candidate);
+        }
+        if !candidate.pop() {
+            break;
+        }
+    }
+    anyhow::bail!(
+        "Could not locate the Factory source tree. Set FACTORY_SOURCE_ROOT to the directory containing infrastructure/run/Dockerfile and Cargo.toml."
+    )
+}
+
+/// Run JIT bootstrap (CFN deploy + base image + project image) and
+/// return the resulting FargateConfig. Called by Work-model launches
+/// before each Fargate task.
+fn bootstrap_and_load_config(project_root: &Path) -> Result<FargateConfig> {
+    let factory_source_root = resolve_factory_source_root(project_root)?;
+    let region = std::env::var("FACTORY_REGION")
+        .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
+        .unwrap_or_else(|_| "us-west-1".to_string());
+    let force_rebuild = std::env::var("FACTORY_FARGATE_FORCE_REBUILD")
+        .ok()
+        .map(|v| !matches!(v.as_str(), "" | "0" | "false" | "no"))
+        .unwrap_or(false);
+    crate::fargate_bootstrap::ensure_setup(&crate::fargate_bootstrap::BootstrapConfig {
+        project_root: project_root.to_path_buf(),
+        factory_source_root,
+        region,
+        force_rebuild,
+    })?;
+    load_config()
 }
 
 fn env_required(name: &str) -> Result<String> {
@@ -525,7 +603,7 @@ pub fn launch_work_attempt(
     work_item_id: &str,
     attempt_id: &str,
 ) -> Result<()> {
-    let config = load_config()?;
+    let config = bootstrap_and_load_config(project_root)?;
     credential::inject_credentials()?;
 
     let oauth = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
@@ -580,7 +658,7 @@ pub fn launch_work_merge(
     work_item_id: &str,
     merge_candidate_id: &str,
 ) -> Result<()> {
-    let config = load_config()?;
+    let config = bootstrap_and_load_config(project_root)?;
     credential::inject_credentials()?;
 
     let oauth = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")

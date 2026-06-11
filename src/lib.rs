@@ -5,6 +5,7 @@ pub mod content;
 pub mod credential;
 pub mod dashboard;
 pub mod fargate;
+pub mod fargate_bootstrap;
 pub mod hooks;
 pub mod land;
 pub mod os;
