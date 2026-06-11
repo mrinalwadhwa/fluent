@@ -767,6 +767,63 @@ mod tests {
     }
 
     #[test]
+    fn cap_allows_multiple_reviewers_in_flight_simultaneously() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        // No effective throttle: cap is well above the number of
+        // spawned tasks. This proves parallel execution actually
+        // overlaps, not just that the cap path doesn't crash with
+        // a single task.
+        let cap = 5_usize;
+        let total_tasks = 4_usize;
+        let semaphore = Arc::new((Mutex::new(0_usize), Condvar::new()));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        thread::scope(|scope| {
+            let handles: Vec<_> = (0..total_tasks)
+                .map(|_| {
+                    let sem = Arc::clone(&semaphore);
+                    let in_flight = Arc::clone(&in_flight);
+                    let peak = Arc::clone(&peak);
+                    scope.spawn(move || {
+                        let _guard = acquire_slot(&sem, cap);
+                        let current = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                        loop {
+                            let old = peak.load(Ordering::SeqCst);
+                            if current <= old
+                                || peak
+                                    .compare_exchange(
+                                        old,
+                                        current,
+                                        Ordering::SeqCst,
+                                        Ordering::SeqCst,
+                                    )
+                                    .is_ok()
+                            {
+                                break;
+                            }
+                        }
+                        thread::sleep(Duration::from_millis(80));
+                        in_flight.fetch_sub(1, Ordering::SeqCst);
+                    })
+                })
+                .collect();
+
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        });
+
+        let observed_peak = peak.load(Ordering::SeqCst);
+        assert!(
+            observed_peak >= 2,
+            "expected at least 2 reviewers in flight simultaneously under cap {cap}; observed peak was {observed_peak}"
+        );
+    }
+
+    #[test]
     fn cap_enforcement_limits_in_flight_reviewers() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::Duration;
