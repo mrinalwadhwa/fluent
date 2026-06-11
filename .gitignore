@@ -15,12 +15,12 @@ __pycache__/
 # Dependencies
 node_modules/
 
-# Factory — working state, except observations and expertise
+# Factory — working state, except observations, expertise, and hooks
 .factory/*
-!.factory/config.toml
 !.factory/observations.md
 !.factory/observations-resolved.md
 !.factory/expertise/
+!.factory/hooks/
 
 
 # Added by cargo

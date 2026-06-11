@@ -1,0 +1,5 @@
+#!/bin/sh
+# check-pre-land — verify the candidate is in a landable state.
+# Project-owned: extend with whatever checks should gate a merge.
+set -e
+cargo fmt --all -- --check

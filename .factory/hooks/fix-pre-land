@@ -1,0 +1,5 @@
+#!/bin/sh
+# fix-pre-land — auto-repair anything check-pre-land would catch.
+# The merge executor commits any worktree changes this produces.
+set -e
+cargo fmt --all
