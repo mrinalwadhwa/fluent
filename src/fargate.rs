@@ -50,6 +50,145 @@ fn env_required(name: &str) -> Result<String> {
     })
 }
 
+/// Upload Work Item state + source workspace to S3 and launch a
+/// Fargate task that runs `factory work attempt run` for the given
+/// Work Item / Attempt pair.
+pub fn launch_work_attempt(
+    project_root: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+) -> Result<()> {
+    let config = load_config()?;
+    credential::inject_credentials()?;
+
+    let oauth = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
+        .map_err(|_| anyhow::anyhow!("No Claude auth token available"))?;
+
+    let upload_key = format!("work/{work_item_id}/{attempt_id}/workspace-in.tar");
+    eprintln!("  Factory           fargate work attempt run ({work_item_id} {attempt_id})");
+    eprintln!(
+        "  Uploading project workspace to s3://{}/{upload_key}",
+        config.s3_bucket
+    );
+    let mut tar_child = Command::new("tar")
+        .args(["cf", "-", "-C", &project_root.to_string_lossy(), "."])
+        .stdout(std::process::Stdio::piped())
+        .spawn()?;
+
+    let tar_stdout = tar_child
+        .stdout
+        .take()
+        .context("Failed to capture workspace archive output")?;
+    let upload_status = Command::new("aws")
+        .args(["s3", "cp", "--region", &config.region])
+        .args(["-", &format!("s3://{}/{upload_key}", config.s3_bucket)])
+        .stdin(tar_stdout)
+        .status()?;
+    let tar_status = tar_child
+        .wait()
+        .context("Failed to wait for workspace archive command")?;
+    if !upload_status.success() {
+        anyhow::bail!("Failed to upload workspace to S3");
+    }
+    if !tar_status.success() {
+        anyhow::bail!("Failed to archive workspace for upload");
+    }
+
+    eprintln!("  Starting Fargate task...");
+    let overrides = serde_json::json!({
+        "containerOverrides": [{
+            "name": "run",
+            "environment": [
+                {"name": "FACTORY_WORK_ITEM_ID", "value": work_item_id},
+                {"name": "FACTORY_WORK_ATTEMPT_ID", "value": attempt_id},
+                {"name": "FACTORY_S3_BUCKET", "value": config.s3_bucket},
+                {"name": "FACTORY_REGION", "value": config.region},
+                {"name": "CLAUDE_CODE_OAUTH_TOKEN", "value": oauth}
+            ]
+        }]
+    });
+
+    let output = Command::new("aws")
+        .args(["ecs", "run-task"])
+        .args(["--region", &config.region])
+        .args(["--cluster", &config.cluster])
+        .args(["--task-definition", &config.run_task])
+        .args(["--launch-type", "FARGATE"])
+        .args(["--enable-execute-command"])
+        .args([
+            "--network-configuration",
+            &format!(
+                "awsvpcConfiguration={{subnets=[{}],securityGroups=[{}],assignPublicIp=ENABLED}}",
+                config.subnets, config.security_group
+            ),
+        ])
+        .args(["--overrides", &overrides.to_string()])
+        .args(["--query", "tasks[0].taskArn"])
+        .args(["--output", "text"])
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to start Fargate task: {}", stderr.trim());
+    }
+
+    let task_arn = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if task_arn.is_empty() || task_arn == "None" {
+        anyhow::bail!("Failed to start Fargate task: no task ARN returned");
+    }
+    eprintln!("  Task: {task_arn}");
+
+    eprintln!("  Attempt is executing on Fargate.");
+    eprintln!(
+        "  Use \"factory work pull-attempt {work_item_id} {attempt_id}\" to retrieve results when the task finishes."
+    );
+
+    Ok(())
+}
+
+/// Download the completed Work Attempt workspace + state from S3
+/// into the project workspace, overlaying changes back into local
+/// `.factory/work/` and any sibling candidate worktrees the remote
+/// created or modified.
+pub fn pull_work_attempt(project_root: &Path, work_item_id: &str, attempt_id: &str) -> Result<()> {
+    let config = load_config()?;
+    let key = format!("work/{work_item_id}/{attempt_id}/workspace-out.tar");
+
+    eprintln!("  Downloading completed Work Attempt {work_item_id}/{attempt_id} from S3...");
+    eprintln!("  Source: s3://{}/{key}", config.s3_bucket);
+    eprintln!("  Target: {}", project_root.display());
+
+    let s3_pipe = Command::new("aws")
+        .args(["s3", "cp", "--region", &config.region])
+        .args([&format!("s3://{}/{key}", config.s3_bucket), "-"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()?;
+    let s3_stdout = s3_pipe
+        .stdout
+        .as_ref()
+        .map(|_| ())
+        .ok_or_else(|| anyhow::anyhow!("Failed to capture s3 stream"))?;
+    let _ = s3_stdout;
+
+    let mut child = s3_pipe;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Failed to capture s3 stream"))?;
+    let tar_status = Command::new("tar")
+        .args(["xf", "-", "-C", &project_root.to_string_lossy()])
+        .stdin(stdout)
+        .status()?;
+    let s3_status = child.wait().context("Failed to wait for s3 cp command")?;
+    if !s3_status.success() {
+        anyhow::bail!("Failed to download workspace from S3");
+    }
+    if !tar_status.success() {
+        anyhow::bail!("Failed to extract workspace");
+    }
+    eprintln!("  Workspace and Work state extracted from S3.");
+    Ok(())
+}
+
 /// Upload worktree to S3, start Fargate task, record runtime metadata.
 pub fn launch(source_root: &Path, run_id: Option<&str>) -> Result<()> {
     let config = load_config()?;

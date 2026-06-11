@@ -312,9 +312,25 @@ fn cmd_work(
                 attempt_id,
                 no_sandbox,
                 coder,
+                runtime,
                 extra_args,
             }) => {
                 let coder_kind = CoderKind::resolve(coder.as_deref().or(global_coder))?;
+                let runtime = runtime.unwrap_or_else(|| "local".to_string());
+                match runtime.as_str() {
+                    "fargate" => {
+                        if coder_kind != CoderKind::Claude {
+                            bail!("Fargate runtime currently supports only the claude coder");
+                        }
+                        fargate::launch_work_attempt(project_root, &work_item_id, &attempt_id)?;
+                        println!(
+                            "Launched Attempt {attempt_id} for Work Item {work_item_id} on Fargate"
+                        );
+                        return Ok(());
+                    }
+                    "local" => {}
+                    other => bail!("Unknown runtime '{other}'. Available: local, fargate."),
+                }
                 let result = work_attempt_loop::run_attempt(WorkAttemptRunConfig {
                     project_root,
                     store: &store,

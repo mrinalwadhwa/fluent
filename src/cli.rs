@@ -344,6 +344,10 @@ pub enum WorkAttemptCommands {
         #[arg(long)]
         coder: Option<String>,
 
+        /// Execution runtime: local (default) or fargate
+        #[arg(long)]
+        runtime: Option<String>,
+
         /// Extra args passed through to the agent
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
