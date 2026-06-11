@@ -7,12 +7,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::thread;
 
-use crate::checks;
 use crate::coder::{CoderKind, CoderSandbox};
-use crate::config;
 use crate::content::{ContentResolver, prompt_section};
 use crate::credential;
-use crate::land;
+use crate::hooks::{self, HookContext, HookOutcome};
 use crate::os;
 use crate::review::{self, ReviewState};
 use crate::review_diff_command::render_review_diff_command;
@@ -191,7 +189,7 @@ fn execute_merge(
         ensure_clean_worktree(source_workspace)?;
 
         let check_artifacts =
-            match run_merge_checks(config.project_root, source_workspace, artifact_dir) {
+            match run_merge_checks(config, candidate, source_workspace, artifact_dir) {
                 Ok(artifacts) => artifacts,
                 Err(error) => {
                     let artifacts = check_artifacts_for_failure(config.project_root, artifact_dir);
@@ -522,59 +520,140 @@ fn build_followup_writer_sandbox(
     Ok((sandbox, Some(profile)))
 }
 
+/// Run the `check-pre-land` hook against the rebased candidate
+/// workspace. If it fails and a `fix-pre-land` hook exists, run that,
+/// commit any changes it produced, and re-run `check-pre-land`.
+///
+/// Returns the merge-check artifacts (hook log paths) so they can be
+/// recorded on the Merge Candidate.
 fn run_merge_checks(
-    project_root: &Path,
+    config: &WorkMergeConfig<'_>,
+    candidate: &crate::work_model::MergeCandidate,
     source_workspace: &Path,
     artifact_dir: &Path,
 ) -> Result<Vec<ArtifactRef>> {
-    let Some(config) = config::load_factory_config(project_root)? else {
-        return Ok(Vec::new());
+    let hooks_dir = artifact_dir.join("hooks");
+    let context = HookContext {
+        work_item_id: Some(config.work_item_id.to_string()),
+        attempt_id: Some(candidate.attempt_id.clone()),
+        merge_candidate_id: Some(candidate.id.clone()),
+        candidate_commit: Some(candidate.candidate_commit.clone()),
+        artifact_dir: Some(artifact_dir.to_path_buf()),
+        log_dir: hooks_dir.clone(),
+        ..Default::default()
     };
-    let checks: Vec<_> = config
-        .checks
-        .into_iter()
-        .filter(|check| check.run_before_land)
-        .collect();
-    if checks.is_empty() {
-        return Ok(Vec::new());
+
+    let mut artifacts = Vec::new();
+
+    let Some(check_outcome) =
+        hooks::run_hook(config.project_root, "check-pre-land", source_workspace, &context)?
+    else {
+        return Ok(artifacts);
+    };
+    artifacts.push(hook_artifact(config.project_root, &check_outcome));
+    if check_outcome.passed {
+        return Ok(artifacts);
     }
 
-    let checks_dir = artifact_dir.join("checks");
-    fs::create_dir_all(&checks_dir)?;
-    let outcome = land::run_pre_land_checks_for_worktree(source_workspace, &checks)?;
-    write_check_results(&checks_dir.join("check-results.txt"), &outcome.results)?;
-    if let Some(rerun_results) = outcome.after_autofix {
-        write_check_results(
-            &checks_dir.join("check-results-after-autofix.txt"),
-            &rerun_results,
-        )?;
-        ensure_clean_worktree(source_workspace)?;
+    // check-pre-land failed; try fix-pre-land before giving up.
+    if hooks::find_hook(config.project_root, "fix-pre-land").is_none() {
+        bail!(
+            "check-pre-land failed (exit {}). Log: {}",
+            check_outcome.exit_code,
+            check_outcome.log_path.display()
+        );
     }
 
-    Ok(vec![ArtifactRef {
-        producer_id: "merge-checks".to_string(),
-        path: path_for_model(project_root, &checks_dir),
-    }])
+    if worktree_is_dirty(source_workspace)? {
+        bail!(
+            "check-pre-land failed and fix-pre-land cannot run: candidate worktree is dirty"
+        );
+    }
+
+    let baseline_commit = head_commit(source_workspace)?;
+    let fix_outcome =
+        hooks::run_hook(config.project_root, "fix-pre-land", source_workspace, &context)?
+            .expect("fix-pre-land presence checked above");
+    artifacts.push(hook_artifact(config.project_root, &fix_outcome));
+    if !fix_outcome.passed {
+        bail!(
+            "fix-pre-land failed (exit {}). Log: {}",
+            fix_outcome.exit_code,
+            fix_outcome.log_path.display()
+        );
+    }
+
+    if worktree_is_dirty(source_workspace)? {
+        commit_autofix(source_workspace)?;
+    }
+    let after_commit = head_commit(source_workspace)?;
+    if after_commit == baseline_commit {
+        // Nothing produced; fix didn't help. Re-run check anyway to
+        // surface the original failure once more for the artifact.
+    }
+
+    let recheck_outcome =
+        hooks::run_hook(config.project_root, "check-pre-land", source_workspace, &context)?
+            .expect("check-pre-land presence already confirmed");
+    artifacts.push(hook_artifact(config.project_root, &recheck_outcome));
+    if !recheck_outcome.passed {
+        bail!(
+            "check-pre-land failed after fix-pre-land (exit {}). Log: {}",
+            recheck_outcome.exit_code,
+            recheck_outcome.log_path.display()
+        );
+    }
+    Ok(artifacts)
 }
 
-fn write_check_results(path: &Path, results: &[checks::CheckRunResult]) -> Result<()> {
-    let mut content = String::new();
-    for result in results {
-        content.push_str(&format!(
-            "Check: {}\nCommand: {}\nPassed: {}\n\n{}\n",
-            result.check.name, result.check.command, result.passed, result.output
-        ));
+fn hook_artifact(project_root: &Path, outcome: &HookOutcome) -> ArtifactRef {
+    ArtifactRef {
+        producer_id: format!("merge-hook-{}", outcome.name),
+        path: path_for_model(project_root, &outcome.log_path),
     }
-    fs::write(path, content)?;
-    Ok(())
+}
+
+fn worktree_is_dirty(worktree_dir: &Path) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["-C", &worktree_dir.to_string_lossy()])
+        .args([
+            "status",
+            "--porcelain",
+            "--untracked-files=normal",
+            "--",
+            ".",
+            ":(exclude).factory",
+        ])
+        .output()
+        .context("Failed to run git status")?;
+    Ok(!output.stdout.is_empty())
+}
+
+fn commit_autofix(worktree_dir: &Path) -> Result<()> {
+    git(
+        worktree_dir,
+        &["add", "--", ".", ":(exclude).factory"],
+        "stage fix-pre-land changes",
+    )?;
+    git(
+        worktree_dir,
+        &[
+            "commit",
+            "-m",
+            "Apply fix-pre-land changes",
+            "-m",
+            "- Apply changes produced by the project's fix-pre-land hook before landing.",
+        ],
+        "commit fix-pre-land changes",
+    )
 }
 
 fn check_artifacts_for_failure(project_root: &Path, artifact_dir: &Path) -> Vec<ArtifactRef> {
-    let checks_dir = artifact_dir.join("checks");
-    if checks_dir.is_dir() {
+    let hooks_dir = artifact_dir.join("hooks");
+    if hooks_dir.is_dir() {
         vec![ArtifactRef {
-            producer_id: "merge-checks".to_string(),
-            path: path_for_model(project_root, &checks_dir),
+            producer_id: "merge-hooks".to_string(),
+            path: path_for_model(project_root, &hooks_dir),
         }]
     } else {
         Vec::new()

@@ -467,17 +467,23 @@ mod tests {
 
     #[test]
     fn test_parallel_children_run_pre_land_checks() {
+        use std::os::unix::fs::OpenOptionsExt;
+
         let tmp = setup_git_project();
         let main_dir = tmp.path().join("main");
-        fs::write(
-            main_dir.join(".factory/config.toml"),
-            r#"
-[checks.required]
-command = "test -f required-check-passed"
-run_before_land = true
-"#,
+        let hooks_dir = main_dir.join(".factory/hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        // check-pre-land fails unless a marker file exists.
+        let hook_path = hooks_dir.join("check-pre-land");
+        let mut opts = fs::OpenOptions::new();
+        opts.create(true).write(true).truncate(true).mode(0o755);
+        let mut file = opts.open(&hook_path).unwrap();
+        use std::io::Write;
+        file.write_all(
+            b"#!/bin/sh\nif [ -f required-check-passed ]; then exit 0; else echo 'required marker absent' >&2; exit 1; fi\n",
         )
         .unwrap();
+        drop(file);
 
         let parent_id = "test-child-check";
         let parent_dir = main_dir.join(format!(".factory/runs/{parent_id}"));
@@ -504,7 +510,7 @@ run_before_land = true
 
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().to_string().contains("required"),
+            result.unwrap_err().to_string().contains("check-pre-land"),
             "pre-land check failure should bubble up"
         );
         assert!(

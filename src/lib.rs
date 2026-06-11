@@ -1,12 +1,11 @@
-pub mod checks;
 pub mod cleanup;
 pub mod cli;
 pub mod coder;
-pub mod config;
 pub mod content;
 pub mod credential;
 pub mod dashboard;
 pub mod fargate;
+pub mod hooks;
 pub mod land;
 pub mod os;
 pub mod parallel;
