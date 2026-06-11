@@ -290,15 +290,34 @@ fn project_root_components(project_root: &Path) -> Result<(PathBuf, String)> {
 
 /// Upload the project worktree to S3 as `<bucket>/<key>`. The tar's
 /// single top-level entry is the project basename — matching what the
-/// container entrypoint expects to find under `/worktrees`.
+/// container entrypoint expects to find under `/worktrees`. Common
+/// regeneratable directories (build artifacts, node modules, local
+/// scratch, the local Fargate ARN tracking dir) are excluded to keep
+/// the upload small.
 fn upload_project_workspace(config: &FargateConfig, project_root: &Path, key: &str) -> Result<()> {
     let (parent, name) = project_root_components(project_root)?;
     eprintln!(
         "  Uploading project workspace to s3://{}/{key}",
         config.s3_bucket
     );
+    let excludes = [
+        format!("{name}/target"),
+        format!("{name}/node_modules"),
+        format!("{name}/.scratch"),
+        format!("{name}/.factory/work/runtime"),
+        format!("{name}/.git/lfs"),
+    ];
+    let parent_str = parent.to_string_lossy().into_owned();
+    let mut tar_args: Vec<String> = vec!["cf".into(), "-".into()];
+    for ex in &excludes {
+        tar_args.push(format!("--exclude={ex}"));
+    }
+    tar_args.push("-C".into());
+    tar_args.push(parent_str);
+    tar_args.push(name);
+
     let mut tar_child = Command::new("tar")
-        .args(["cf", "-", "-C", &parent.to_string_lossy(), &name])
+        .args(&tar_args)
         .stdout(std::process::Stdio::piped())
         .spawn()?;
     let tar_stdout = tar_child
