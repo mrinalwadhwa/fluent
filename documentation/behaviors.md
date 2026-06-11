@@ -29,6 +29,14 @@ Test: tests/behaviors/operations/test-version.sh
 
 ## Work Item intake and inspection
 
+WHEN two threads create, read, and write distinct Work Items
+through the same `WorkModelStore` instance,
+THE SYSTEM SHALL keep each Work Item's split-storage records
+consistent — no thread observes another's state, and each Work
+Item's items/, attempts/, tasks/, merge-candidates/, and artifacts/
+paths are written without race or partial state.
+Test: src/work_model.rs (concurrent_writes_to_distinct_work_items_do_not_race)
+
 WHEN `factory work create <id> --title <title>` is invoked from a
 directory,
 THE SYSTEM SHALL create `.factory/work/items/<id>.json` containing Work
@@ -1182,7 +1190,10 @@ Test: tests/binary.rs (cleanup_work_items_dry_run_and_apply_manage_state_worktre
 WHEN `factory cleanup --apply` cleans a terminal Work Item,
 THE SYSTEM SHALL remove the Work Item state, referenced managed Work
 artifacts, registered managed candidate worktrees, and Work branches.
-Test: tests/binary.rs (cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch), tests/binary.rs (cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree)
+The cleanup SHALL also remove any Fargate runtime metadata directories
+recorded under `.factory/work/runtime/attempts/<work-item-id>/` and
+`.factory/work/runtime/merges/<work-item-id>/`.
+Test: tests/binary.rs (cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch), tests/binary.rs (cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree), src/cleanup.rs (terminal_work_item_cleanup_removes_runtime_arn_dirs)
 
 WHEN `factory cleanup` sees an abandoned Work Item with no executing or
 reviewing Attempts, no executing Tasks, no reviewing Merge Candidates,
