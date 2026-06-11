@@ -979,6 +979,16 @@ fn cmd_cleanup(search_root: &Path, run_id: Option<String>, apply: bool) -> Resul
                         result.item_path.display()
                     );
                 }
+                for state_path in &result.state_paths {
+                    if !state_path.exists() {
+                        continue;
+                    }
+                    if result.applied {
+                        println!("    removed Work state {}", state_path.display());
+                    } else {
+                        println!("    would remove Work state {}", state_path.display());
+                    }
+                }
                 for worktree in result.worktrees {
                     match worktree {
                         WorktreeCleanup::None => {}
