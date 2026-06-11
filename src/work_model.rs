@@ -2188,16 +2188,16 @@ impl WorkModelStore {
                     path: path.clone(),
                     source,
                 })?;
-            if let Some(order) = record.order {
-                if !task_orders.insert(order) {
-                    return Err(WorkModelStorageError::InvalidModel {
-                        path,
-                        source: WorkModelError::TaskOrderAlreadyExists {
-                            attempt_id: attempt_id.to_string(),
-                            order,
-                        },
-                    });
-                }
+            if let Some(order) = record.order
+                && !task_orders.insert(order)
+            {
+                return Err(WorkModelStorageError::InvalidModel {
+                    path,
+                    source: WorkModelError::TaskOrderAlreadyExists {
+                        attempt_id: attempt_id.to_string(),
+                        order,
+                    },
+                });
             }
             tasks.push((order_key, task));
         }
@@ -2487,14 +2487,13 @@ fn task_order_key(attempt_id: &str, task: &Task) -> (usize, usize, String) {
     }
 
     let followup_prefix = format!("{attempt_id}-followup-");
-    if task.kind == TaskKind::Write {
-        if let Some(round) = task
+    if task.kind == TaskKind::Write
+        && let Some(round) = task
             .id
             .strip_prefix(&followup_prefix)
             .and_then(|round| round.parse::<usize>().ok())
-        {
-            return (round * 2, 0, task.id.clone());
-        }
+    {
+        return (round * 2, 0, task.id.clone());
     }
 
     (usize::MAX, 0, task.id.clone())

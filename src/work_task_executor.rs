@@ -1218,190 +1218,6 @@ fn reviewer_writable_outputs_guidance(artifact_dir: &Path) -> String {
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::content::ContentResolver;
-    use crate::work_model::{TaskOutput, TaskStatus, WorkItem, WorkItemAbandonment};
-    use std::os::unix::fs::PermissionsExt;
-
-    fn review_item() -> WorkItem {
-        let mut item = WorkItem {
-            id: "work-1".to_string(),
-            title: "Review prompts".to_string(),
-            planning_context: None,
-            instructions: None,
-            abandonment: None,
-            attempts: Vec::new(),
-            merge_candidates: Vec::new(),
-        };
-        item.add_initial_attempt("attempt-1").unwrap();
-        let attempt = item.attempts.first_mut().unwrap();
-        let task = attempt.tasks.first_mut().unwrap();
-        let workspace = task.workspace_access.writes.first().unwrap().clone();
-        task.status = TaskStatus::Complete;
-        task.output = Some(TaskOutput {
-            workspace_id: workspace.id,
-            workspace_path: workspace.path,
-            source_branch: "main".to_string(),
-            commit: "abc123".to_string(),
-        });
-        item.add_review_tasks("attempt-1", &["tests"]).unwrap();
-        item
-    }
-
-    #[test]
-    fn run_task_rejects_abandoned_work_item_without_mutating_state() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let store = WorkModelStore::new(tmp.path());
-        let mut item = WorkItem {
-            id: "work-1".to_string(),
-            title: "Keep abandoned task terminal".to_string(),
-            planning_context: None,
-            instructions: None,
-            abandonment: None,
-            attempts: Vec::new(),
-            merge_candidates: Vec::new(),
-        };
-        item.add_initial_attempt("attempt-1").unwrap();
-        item.abandonment = Some(WorkItemAbandonment {
-            reason: Some("replacement landed".to_string()),
-        });
-        store.create_work_item(&item).unwrap();
-        let resolver = ContentResolver::new(None);
-
-        let error = match run_task(WorkTaskRunConfig {
-            project_root: tmp.path(),
-            store: &store,
-            work_item_id: "work-1",
-            attempt_id: "attempt-1",
-            task_id: "attempt-1-write",
-            resolver: &resolver,
-            extra_args: &[],
-            coder_kind: CoderKind::Codex,
-            no_sandbox: true,
-            store_lock: None,
-        }) {
-            Ok(_) => panic!("abandoned Work Item should reject task run"),
-            Err(error) => error,
-        };
-
-        assert!(error.to_string().contains("is abandoned"));
-        let stored = store.read_work_item("work-1").unwrap();
-        assert!(stored.abandonment.is_some());
-        assert_eq!(stored.attempts[0].status, AttemptStatus::Planned);
-        assert_eq!(stored.attempts[0].tasks[0].status, TaskStatus::Planned);
-    }
-
-    #[test]
-    fn work_review_prompt_names_work_artifacts_and_writable_outputs() {
-        let item = review_item();
-        let prompts = build_work_review_prompts(WorkReviewPromptInput {
-            item: &item,
-            attempt_id: "attempt-1",
-            task_id: "attempt-1-review-tests",
-            artifact_dir: Path::new("/tmp/project/.factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests"),
-            review_path: Path::new("/tmp/project/.factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"),
-            readable_workspaces: &[PathBuf::from("/tmp/project/../work-6-work-1-attempt-1")],
-            input_artifacts: &[],
-            review_only: false,
-        })
-        .unwrap();
-
-        assert!(prompts.review_prompt.contains(
-            "Work review artifact path:\n.factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
-        ));
-        assert!(
-            prompts
-                .review_prompt
-                .contains("Your reviewer artifact directory is:")
-        );
-        assert!(prompts.review_prompt.contains("CARGO_TARGET_DIR"));
-        assert!(prompts.review_prompt.contains("cargo test"));
-        assert!(!prompts.review_prompt.contains(".factory/runs/"));
-        assert!(prompts.system_prompt.contains(
-            "The Work review artifact path is .factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
-        ));
-        assert!(prompts.system_prompt.contains("CARGO_TARGET_DIR"));
-        assert!(!prompts.system_prompt.contains(".factory/runs/"));
-    }
-
-    #[test]
-    fn work_review_prompt_includes_shell_safe_executable_diff_command() {
-        let item = review_item();
-        let tmp = tempfile::TempDir::new().unwrap();
-        let workspace = tmp.path().join("candidate'space");
-        let review_path = tmp.path().join("review.md");
-        let prompts = build_work_review_prompts(WorkReviewPromptInput {
-            item: &item,
-            attempt_id: "attempt-1",
-            task_id: "attempt-1-review-tests",
-            artifact_dir: tmp.path(),
-            review_path: &review_path,
-            readable_workspaces: &[workspace.clone()],
-            input_artifacts: &[],
-            review_only: false,
-        })
-        .unwrap();
-        let command = prompts
-            .review_prompt
-            .lines()
-            .find_map(|line| line.strip_prefix("- Review diff: "))
-            .unwrap();
-
-        assert_eq!(
-            command,
-            render_review_diff_command(&workspace, "main..abc123")
-        );
-        assert!(command.contains("'\\''"));
-        assert_shell_command_invokes_fake_git(
-            command,
-            &[
-                "-C".to_string(),
-                workspace.display().to_string(),
-                "diff".to_string(),
-                "main..abc123".to_string(),
-            ],
-        );
-    }
-
-    fn assert_shell_command_invokes_fake_git(command: &str, expected_args: &[String]) {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let bin_dir = tmp.path().join("bin");
-        fs::create_dir(&bin_dir).unwrap();
-        let log_path = tmp.path().join("args.log");
-        let git_path = bin_dir.join("git");
-        fs::write(
-            &git_path,
-            format!(
-                "#!/bin/sh\nprintf '<%s>\\n' \"$@\" > '{}'\n",
-                log_path.display()
-            ),
-        )
-        .unwrap();
-        let mut permissions = fs::metadata(&git_path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&git_path, permissions).unwrap();
-
-        let output = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(command)
-            .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let expected_log = expected_args
-            .iter()
-            .map(|arg| format!("<{arg}>\n"))
-            .collect::<String>();
-        assert_eq!(fs::read_to_string(log_path).unwrap(), expected_log);
-    }
-}
-
 fn review_input_artifacts_prompt(input_artifacts: &[PathBuf]) -> String {
     if input_artifacts.is_empty() {
         return String::new();
@@ -1916,4 +1732,188 @@ fn current_branch(project_root: &Path) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::content::ContentResolver;
+    use crate::work_model::{TaskOutput, TaskStatus, WorkItem, WorkItemAbandonment};
+    use std::os::unix::fs::PermissionsExt;
+
+    fn review_item() -> WorkItem {
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Review prompts".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        let attempt = item.attempts.first_mut().unwrap();
+        let task = attempt.tasks.first_mut().unwrap();
+        let workspace = task.workspace_access.writes.first().unwrap().clone();
+        task.status = TaskStatus::Complete;
+        task.output = Some(TaskOutput {
+            workspace_id: workspace.id,
+            workspace_path: workspace.path,
+            source_branch: "main".to_string(),
+            commit: "abc123".to_string(),
+        });
+        item.add_review_tasks("attempt-1", &["tests"]).unwrap();
+        item
+    }
+
+    #[test]
+    fn run_task_rejects_abandoned_work_item_without_mutating_state() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Keep abandoned task terminal".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.abandonment = Some(WorkItemAbandonment {
+            reason: Some("replacement landed".to_string()),
+        });
+        store.create_work_item(&item).unwrap();
+        let resolver = ContentResolver::new(None);
+
+        let error = match run_task(WorkTaskRunConfig {
+            project_root: tmp.path(),
+            store: &store,
+            work_item_id: "work-1",
+            attempt_id: "attempt-1",
+            task_id: "attempt-1-write",
+            resolver: &resolver,
+            extra_args: &[],
+            coder_kind: CoderKind::Codex,
+            no_sandbox: true,
+            store_lock: None,
+        }) {
+            Ok(_) => panic!("abandoned Work Item should reject task run"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("is abandoned"));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert!(stored.abandonment.is_some());
+        assert_eq!(stored.attempts[0].status, AttemptStatus::Planned);
+        assert_eq!(stored.attempts[0].tasks[0].status, TaskStatus::Planned);
+    }
+
+    #[test]
+    fn work_review_prompt_names_work_artifacts_and_writable_outputs() {
+        let item = review_item();
+        let prompts = build_work_review_prompts(WorkReviewPromptInput {
+            item: &item,
+            attempt_id: "attempt-1",
+            task_id: "attempt-1-review-tests",
+            artifact_dir: Path::new("/tmp/project/.factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests"),
+            review_path: Path::new("/tmp/project/.factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"),
+            readable_workspaces: &[PathBuf::from("/tmp/project/../work-6-work-1-attempt-1")],
+            input_artifacts: &[],
+            review_only: false,
+        })
+        .unwrap();
+
+        assert!(prompts.review_prompt.contains(
+            "Work review artifact path:\n.factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
+        ));
+        assert!(
+            prompts
+                .review_prompt
+                .contains("Your reviewer artifact directory is:")
+        );
+        assert!(prompts.review_prompt.contains("CARGO_TARGET_DIR"));
+        assert!(prompts.review_prompt.contains("cargo test"));
+        assert!(!prompts.review_prompt.contains(".factory/runs/"));
+        assert!(prompts.system_prompt.contains(
+            "The Work review artifact path is .factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
+        ));
+        assert!(prompts.system_prompt.contains("CARGO_TARGET_DIR"));
+        assert!(!prompts.system_prompt.contains(".factory/runs/"));
+    }
+
+    #[test]
+    fn work_review_prompt_includes_shell_safe_executable_diff_command() {
+        let item = review_item();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path().join("candidate'space");
+        let review_path = tmp.path().join("review.md");
+        let prompts = build_work_review_prompts(WorkReviewPromptInput {
+            item: &item,
+            attempt_id: "attempt-1",
+            task_id: "attempt-1-review-tests",
+            artifact_dir: tmp.path(),
+            review_path: &review_path,
+            readable_workspaces: &[workspace.clone()],
+            input_artifacts: &[],
+            review_only: false,
+        })
+        .unwrap();
+        let command = prompts
+            .review_prompt
+            .lines()
+            .find_map(|line| line.strip_prefix("- Review diff: "))
+            .unwrap();
+
+        assert_eq!(
+            command,
+            render_review_diff_command(&workspace, "main..abc123")
+        );
+        assert!(command.contains("'\\''"));
+        assert_shell_command_invokes_fake_git(
+            command,
+            &[
+                "-C".to_string(),
+                workspace.display().to_string(),
+                "diff".to_string(),
+                "main..abc123".to_string(),
+            ],
+        );
+    }
+
+    fn assert_shell_command_invokes_fake_git(command: &str, expected_args: &[String]) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir(&bin_dir).unwrap();
+        let log_path = tmp.path().join("args.log");
+        let git_path = bin_dir.join("git");
+        fs::write(
+            &git_path,
+            format!(
+                "#!/bin/sh\nprintf '<%s>\\n' \"$@\" > '{}'\n",
+                log_path.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&git_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&git_path, permissions).unwrap();
+
+        let output = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected_log = expected_args
+            .iter()
+            .map(|arg| format!("<{arg}>\n"))
+            .collect::<String>();
+        assert_eq!(fs::read_to_string(log_path).unwrap(), expected_log);
+    }
 }

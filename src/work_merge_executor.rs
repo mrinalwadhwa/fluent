@@ -84,13 +84,13 @@ pub fn merge_candidate(config: WorkMergeConfig<'_>) -> Result<WorkMergeOutcome> 
         bail!("{error}");
     }
 
-    if candidate.merge_state.status == MergeCandidateMergeStatus::Landed {
-        if let Some(landed_commit) = candidate.merge_state.landed_commit.clone() {
-            return Ok(WorkMergeOutcome {
-                merge_candidate_id: candidate.id,
-                landed_commit,
-            });
-        }
+    if candidate.merge_state.status == MergeCandidateMergeStatus::Landed
+        && let Some(landed_commit) = candidate.merge_state.landed_commit.clone()
+    {
+        return Ok(WorkMergeOutcome {
+            merge_candidate_id: candidate.id,
+            landed_commit,
+        });
     }
 
     let source_workspace = resolve_managed_candidate_workspace_path(
@@ -854,10 +854,10 @@ impl MergeReviewerWorktrees {
             {
                 errors.push(format!("{}: {error}", entry.path.display()));
             }
-            if entry.path.exists() {
-                if let Err(error) = fs::remove_dir_all(&entry.path) {
-                    errors.push(format!("{}: {error}", entry.path.display()));
-                }
+            if entry.path.exists()
+                && let Err(error) = fs::remove_dir_all(&entry.path)
+            {
+                errors.push(format!("{}: {error}", entry.path.display()));
             }
         }
         if errors.is_empty() {
@@ -913,10 +913,10 @@ fn cleanup_reviewer_worktree_paths(
         if let Err(error) = remove_reviewer_worktree_if_present(project_root, &entry.path) {
             errors.push(format!("{}: {error}", entry.path.display()));
         }
-        if entry.path.exists() {
-            if let Err(error) = fs::remove_dir_all(&entry.path) {
-                errors.push(format!("{}: {error}", entry.path.display()));
-            }
+        if entry.path.exists()
+            && let Err(error) = fs::remove_dir_all(&entry.path)
+        {
+            errors.push(format!("{}: {error}", entry.path.display()));
         }
     }
     if errors.is_empty() {

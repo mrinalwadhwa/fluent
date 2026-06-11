@@ -292,15 +292,14 @@ impl RunView {
                 || current_reviewers.contains(&agent.name)
         });
 
-        if let Some(selected_name) = selected_name {
-            if let Some(index) = self
+        if let Some(selected_name) = selected_name
+            && let Some(index) = self
                 .agents
                 .iter()
                 .position(|agent| agent.name == selected_name)
-            {
-                self.selected_agent = index;
-                return;
-            }
+        {
+            self.selected_agent = index;
+            return;
         }
 
         self.selected_agent = 0;
@@ -527,7 +526,7 @@ impl App {
     fn new(search_root: &Path, target_run_id: Option<&str>) -> Result<Self> {
         let all_runs = run::list_runs(search_root)?;
 
-        let mut views: Vec<RunView> = all_runs.into_iter().map(|r| RunView::new(r)).collect();
+        let mut views: Vec<RunView> = all_runs.into_iter().map(RunView::new).collect();
         if target_run_id.is_none() {
             sort_views_for_dashboard(&mut views);
         }
@@ -967,7 +966,7 @@ fn compute_phase(view: &RunView, status: &str) -> (String, Color, bool) {
         .filter(|a| a.name != "author" && a.name != "report")
         .map(|a| a.status.as_str())
         .collect();
-    let reviewers_running = reviewer_statuses.iter().any(|status| *status == "running");
+    let reviewers_running = reviewer_statuses.contains(&"running");
     let has_reviewers = !reviewer_statuses.is_empty();
 
     if reviewers_running {

@@ -772,24 +772,24 @@ fn cmd_run_bare(
     fs::write(run.dir.join("coder"), coder_kind.as_str())?;
 
     // Check for a parallel plan (requires git)
-    if worktree::is_git_repo(search_root) {
-        if let Some(parsed_plan) = try_parse_parallel_plan(&run) {
-            let system_prompt = resolver
-                .resolve_content("prompts/author.md")
-                .unwrap_or_default();
+    if worktree::is_git_repo(search_root)
+        && let Some(parsed_plan) = try_parse_parallel_plan(&run)
+    {
+        let system_prompt = resolver
+            .resolve_content("prompts/author.md")
+            .unwrap_or_default();
 
-            eprintln!("factory: bare parallel plan (run: {})", run.id);
+        eprintln!("factory: bare parallel plan (run: {})", run.id);
 
-            return parallel::run_parallel_plan(
-                search_root,
-                &run,
-                &parsed_plan,
-                &system_prompt,
-                extra_args,
-                coder_kind,
-                CoderSandbox::None,
-            );
-        }
+        return parallel::run_parallel_plan(
+            search_root,
+            &run,
+            &parsed_plan,
+            &system_prompt,
+            extra_args,
+            coder_kind,
+            CoderSandbox::None,
+        );
     }
 
     let (working_dir, wt_run) = if worktree::is_git_repo(search_root) {
@@ -899,14 +899,8 @@ fn cmd_status(search_root: &Path, show_runs: bool) -> Result<()> {
         if !work_status.is_empty() {
             println!();
         }
-        println!(
-            "{:<20} {:<16} {:<10} {}",
-            "RUN", "STATUS", "RUNTIME", "BRIEF"
-        );
-        println!(
-            "{:<20} {:<16} {:<10} {}",
-            "---", "------", "-------", "-----"
-        );
+        println!("{:<20} {:<16} {:<10} BRIEF", "RUN", "STATUS", "RUNTIME");
+        println!("{:<20} {:<16} {:<10} -----", "---", "------", "-------");
 
         for run in &runs {
             let status = run
@@ -1391,33 +1385,33 @@ fn dirs_log_file() -> PathBuf {
 
 fn kill_existing_claude() -> Result<()> {
     let output = Command::new("pgrep").args(["-f", "claude"]).output();
-    if let Ok(output) = output {
-        if output.status.success() {
+    if let Ok(output) = output
+        && output.status.success()
+    {
+        let pids = String::from_utf8_lossy(&output.stdout);
+        eprintln!("  Stopping existing Claude Code process(es)...");
+        for pid in pids.lines() {
+            let pid = pid.trim();
+            if !pid.is_empty() {
+                Command::new("kill").arg(pid).output().ok();
+            }
+        }
+        thread::sleep(Duration::from_secs(3));
+
+        let output = Command::new("pgrep").args(["-f", "claude"]).output();
+        if let Ok(output) = output
+            && output.status.success()
+        {
             let pids = String::from_utf8_lossy(&output.stdout);
-            eprintln!("  Stopping existing Claude Code process(es)...");
             for pid in pids.lines() {
                 let pid = pid.trim();
                 if !pid.is_empty() {
-                    Command::new("kill").arg(pid).output().ok();
+                    Command::new("kill").args(["-9", pid]).output().ok();
                 }
             }
-            thread::sleep(Duration::from_secs(3));
-
-            let output = Command::new("pgrep").args(["-f", "claude"]).output();
-            if let Ok(output) = output {
-                if output.status.success() {
-                    let pids = String::from_utf8_lossy(&output.stdout);
-                    for pid in pids.lines() {
-                        let pid = pid.trim();
-                        if !pid.is_empty() {
-                            Command::new("kill").args(["-9", pid]).output().ok();
-                        }
-                    }
-                    thread::sleep(Duration::from_millis(500));
-                }
-            }
-            eprintln!("  Existing Claude Code stopped.");
+            thread::sleep(Duration::from_millis(500));
         }
+        eprintln!("  Existing Claude Code stopped.");
     }
     Ok(())
 }

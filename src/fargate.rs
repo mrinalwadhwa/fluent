@@ -289,9 +289,11 @@ fn merge_candidate_sibling_worktrees(
         .merge_candidates
         .iter()
         .find(|c| c.id == merge_candidate_id)
-        .ok_or_else(|| anyhow::anyhow!(
-            "Merge Candidate {merge_candidate_id} not found in Work Item {work_item_id}"
-        ))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Merge Candidate {merge_candidate_id} not found in Work Item {work_item_id}"
+            )
+        })?;
     let source_path = Path::new(&candidate.source_workspace.path);
     let Some(basename) = source_path
         .file_name()

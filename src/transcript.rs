@@ -365,13 +365,13 @@ pub fn find_latest_transcript(run_dir: &Path) -> Option<PathBuf> {
     if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if let Some(num_str) = name.strip_prefix("session-") {
-                if let Ok(num) = num_str.parse::<u32>() {
-                    let transcript = entry.path().join("transcript.jsonl");
-                    if transcript.exists() && num >= max_num {
-                        max_num = num;
-                        best = Some(transcript);
-                    }
+            if let Some(num_str) = name.strip_prefix("session-")
+                && let Ok(num) = num_str.parse::<u32>()
+            {
+                let transcript = entry.path().join("transcript.jsonl");
+                if transcript.exists() && num >= max_num {
+                    max_num = num;
+                    best = Some(transcript);
                 }
             }
         }
@@ -391,12 +391,12 @@ pub fn list_transcripts(run_dir: &Path) -> Vec<(u32, PathBuf)> {
     if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if let Some(num_str) = name.strip_prefix("session-") {
-                if let Ok(num) = num_str.parse::<u32>() {
-                    let transcript = entry.path().join("transcript.jsonl");
-                    if transcript.exists() {
-                        results.push((num, transcript));
-                    }
+            if let Some(num_str) = name.strip_prefix("session-")
+                && let Ok(num) = num_str.parse::<u32>()
+            {
+                let transcript = entry.path().join("transcript.jsonl");
+                if transcript.exists() {
+                    results.push((num, transcript));
                 }
             }
         }

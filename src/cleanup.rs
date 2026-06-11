@@ -201,14 +201,14 @@ fn parse_reviewer_worktree_name(name: &str) -> Option<(String, String, String)> 
     let work_item_id = &rest[..bytelen];
     let rest = rest.get(bytelen + 1..)?;
     for &reviewer in review::REVIEWERS {
-        if let Some(attempt_id) = rest.strip_suffix(&format!("-{reviewer}")) {
-            if !attempt_id.is_empty() {
-                return Some((
-                    work_item_id.to_string(),
-                    attempt_id.to_string(),
-                    reviewer.to_string(),
-                ));
-            }
+        if let Some(attempt_id) = rest.strip_suffix(&format!("-{reviewer}"))
+            && !attempt_id.is_empty()
+        {
+            return Some((
+                work_item_id.to_string(),
+                attempt_id.to_string(),
+                reviewer.to_string(),
+            ));
         }
     }
     None
@@ -289,10 +289,9 @@ fn registry_points_to_worktree(registry_root: &Path, worktree_root: &Path) -> Re
             return Ok(true);
         }
         if let (Some(worktree), Ok(recorded)) = (&canonical_worktree, recorded_path.canonicalize())
+            && recorded == *worktree
         {
-            if recorded == *worktree {
-                return Ok(true);
-            }
+            return Ok(true);
         }
     }
 
@@ -1391,12 +1390,11 @@ mod tests {
 
         // Place a Fargate ARN file under the runtime tree, mirroring
         // what launch_work_attempt records.
-        let attempts_runtime = project
-            .join(".factory/work/runtime/attempts/runtime-cleanup/attempt-1");
+        let attempts_runtime =
+            project.join(".factory/work/runtime/attempts/runtime-cleanup/attempt-1");
         fs::create_dir_all(&attempts_runtime).unwrap();
         fs::write(attempts_runtime.join("fargate-task-arn"), "arn-1").unwrap();
-        let merges_runtime = project
-            .join(".factory/work/runtime/merges/runtime-cleanup/cand-1");
+        let merges_runtime = project.join(".factory/work/runtime/merges/runtime-cleanup/cand-1");
         fs::create_dir_all(&merges_runtime).unwrap();
         fs::write(merges_runtime.join("fargate-task-arn"), "arn-2").unwrap();
 

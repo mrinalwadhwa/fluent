@@ -147,8 +147,7 @@ impl Run {
         match fs::read_to_string(&path) {
             Ok(content) => content
                 .lines()
-                .filter(|l| !l.starts_with('#') && !l.is_empty())
-                .next()
+                .find(|l| !l.starts_with('#') && !l.is_empty())
                 .map(|l| {
                     if l.len() > 50 {
                         format!("{}...", &l[..47])
@@ -415,14 +414,14 @@ pub fn resolve_run(search_root: &Path, explicit_id: Option<&str>) -> Result<Run>
     }
 
     // 2. FACTORY_RUN_ID env var
-    if let Ok(id) = std::env::var("FACTORY_RUN_ID") {
-        if !id.is_empty() {
-            let dir = runs_dir.join(&id);
-            if !dir.is_dir() {
-                bail!("Run directory not found: {}", dir.display());
-            }
-            return Ok(Run { id, dir });
+    if let Ok(id) = std::env::var("FACTORY_RUN_ID")
+        && !id.is_empty()
+    {
+        let dir = runs_dir.join(&id);
+        if !dir.is_dir() {
+            bail!("Run directory not found: {}", dir.display());
         }
+        return Ok(Run { id, dir });
     }
 
     // 3. active-run pointer
@@ -440,10 +439,10 @@ pub fn resolve_run(search_root: &Path, explicit_id: Option<&str>) -> Result<Run>
     }
 
     // 4. Scan for active run
-    if runs_dir.is_dir() {
-        if let Some(run) = scan_active_run(&runs_dir)? {
-            return Ok(run);
-        }
+    if runs_dir.is_dir()
+        && let Some(run) = scan_active_run(&runs_dir)?
+    {
+        return Ok(run);
     }
 
     bail!("No active run found. Create a brief and plan first.")

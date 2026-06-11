@@ -90,13 +90,13 @@ fn inject_oauth_token() -> Result<()> {
             ])
             .output();
 
-        if let Ok(output) = output {
-            if output.status.success() {
-                let key = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !key.is_empty() {
-                    set_env_var("ANTHROPIC_API_KEY", &key);
-                    eprintln!("  Anthropic key injected from Keychain");
-                }
+        if let Ok(output) = output
+            && output.status.success()
+        {
+            let key = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !key.is_empty() {
+                set_env_var("ANTHROPIC_API_KEY", &key);
+                eprintln!("  Anthropic key injected from Keychain");
             }
         }
     }
@@ -136,13 +136,13 @@ fn inject_brave_search_key() -> Result<()> {
         ])
         .output();
 
-    if let Ok(output) = output {
-        if output.status.success() {
-            let key = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !key.is_empty() {
-                set_env_var("BRAVE_SEARCH_API_KEY", &key);
-                eprintln!("  Brave Search key injected from Keychain");
-            }
+    if let Ok(output) = output
+        && output.status.success()
+    {
+        let key = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !key.is_empty() {
+            set_env_var("BRAVE_SEARCH_API_KEY", &key);
+            eprintln!("  Brave Search key injected from Keychain");
         }
     }
 
@@ -167,32 +167,32 @@ fn inject_aws_credentials() -> Result<()> {
         ])
         .output();
 
-    if let Ok(output) = output {
-        if output.status.success() {
-            let creds = String::from_utf8_lossy(&output.stdout);
-            for line in creds.lines() {
-                if let Some((key, value)) = line.split_once('=') {
-                    let key = key.trim();
-                    let value = value.trim().trim_matches('"');
-                    if key.starts_with("AWS_") {
-                        set_env_var(key, value);
-                    }
+    if let Ok(output) = output
+        && output.status.success()
+    {
+        let creds = String::from_utf8_lossy(&output.stdout);
+        for line in creds.lines() {
+            if let Some((key, value)) = line.split_once('=') {
+                let key = key.trim();
+                let value = value.trim().trim_matches('"');
+                if key.starts_with("AWS_") {
+                    set_env_var(key, value);
                 }
             }
-            // Get region
-            let region_output = Command::new("aws")
-                .args(["configure", "get", "region"])
-                .output();
-            if let Ok(output) = region_output {
-                if output.status.success() {
-                    let region = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if !region.is_empty() {
-                        set_env_var("AWS_DEFAULT_REGION", &region);
-                    }
-                }
-            }
-            eprintln!("  AWS credentials injected (STS temporary)");
         }
+        // Get region
+        let region_output = Command::new("aws")
+            .args(["configure", "get", "region"])
+            .output();
+        if let Ok(output) = region_output
+            && output.status.success()
+        {
+            let region = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !region.is_empty() {
+                set_env_var("AWS_DEFAULT_REGION", &region);
+            }
+        }
+        eprintln!("  AWS credentials injected (STS temporary)");
     }
 
     Ok(())

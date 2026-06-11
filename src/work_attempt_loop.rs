@@ -484,6 +484,68 @@ fn latest_review_artifacts(
         .collect()
 }
 
+fn write_needs_user_handoff(
+    project_root: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    uncertain: &[ArtifactRef],
+) -> Result<String> {
+    let relative_path = work_artifact_path(work_item_id, attempt_id, "needs-user.md");
+    let path = project_root.join(&relative_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let artifacts = uncertain
+        .iter()
+        .map(|artifact| format!("- {}", artifact.path))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(
+        &path,
+        format!(
+            "# Attempt needs user input\n\nThe Attempt loop found uncertain or missing review verdicts.\n\n{artifacts}\n"
+        ),
+    )?;
+    Ok(relative_path)
+}
+
+fn write_budget_exhausted_handoff(
+    project_root: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    failed: &[ArtifactRef],
+) -> Result<String> {
+    let relative_path = work_artifact_path(work_item_id, attempt_id, "needs-user.md");
+    let path = project_root.join(&relative_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let artifacts = failed
+        .iter()
+        .map(|artifact| format!("- {}", artifact.path))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(
+        &path,
+        format!(
+            "# Attempt needs user input\n\nThe Attempt loop exhausted the same-invocation follow-up write budget after advancing {MAX_FOLLOWUP_WRITES_PER_INVOCATION} follow-up write Tasks.\n\nFailed review artifacts still need attention:\n\n{artifacts}\n"
+        ),
+    )?;
+    Ok(relative_path)
+}
+
+fn read_work_item_or_not_found(store: &WorkModelStore, id: &str) -> Result<WorkItem> {
+    match store.read_work_item(id) {
+        Ok(item) => Ok(item),
+        Err(WorkModelStorageError::ReadFile { source, .. })
+            if source.kind() == ErrorKind::NotFound =>
+        {
+            bail!("Work Item {id:?} not found")
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -808,67 +870,5 @@ mod tests {
             input_artifacts: Vec::new(),
             output: None,
         }
-    }
-}
-
-fn write_needs_user_handoff(
-    project_root: &Path,
-    work_item_id: &str,
-    attempt_id: &str,
-    uncertain: &[ArtifactRef],
-) -> Result<String> {
-    let relative_path = work_artifact_path(work_item_id, attempt_id, "needs-user.md");
-    let path = project_root.join(&relative_path);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let artifacts = uncertain
-        .iter()
-        .map(|artifact| format!("- {}", artifact.path))
-        .collect::<Vec<_>>()
-        .join("\n");
-    fs::write(
-        &path,
-        format!(
-            "# Attempt needs user input\n\nThe Attempt loop found uncertain or missing review verdicts.\n\n{artifacts}\n"
-        ),
-    )?;
-    Ok(relative_path)
-}
-
-fn write_budget_exhausted_handoff(
-    project_root: &Path,
-    work_item_id: &str,
-    attempt_id: &str,
-    failed: &[ArtifactRef],
-) -> Result<String> {
-    let relative_path = work_artifact_path(work_item_id, attempt_id, "needs-user.md");
-    let path = project_root.join(&relative_path);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let artifacts = failed
-        .iter()
-        .map(|artifact| format!("- {}", artifact.path))
-        .collect::<Vec<_>>()
-        .join("\n");
-    fs::write(
-        &path,
-        format!(
-            "# Attempt needs user input\n\nThe Attempt loop exhausted the same-invocation follow-up write budget after advancing {MAX_FOLLOWUP_WRITES_PER_INVOCATION} follow-up write Tasks.\n\nFailed review artifacts still need attention:\n\n{artifacts}\n"
-        ),
-    )?;
-    Ok(relative_path)
-}
-
-fn read_work_item_or_not_found(store: &WorkModelStore, id: &str) -> Result<WorkItem> {
-    match store.read_work_item(id) {
-        Ok(item) => Ok(item),
-        Err(WorkModelStorageError::ReadFile { source, .. })
-            if source.kind() == ErrorKind::NotFound =>
-        {
-            bail!("Work Item {id:?} not found")
-        }
-        Err(error) => Err(error.into()),
     }
 }
