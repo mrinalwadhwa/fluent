@@ -70,13 +70,17 @@ mkdir -p "$WORKTREES_ROOT"
 
 printf 'factory-run: pulling workspace from s3://%s/%s\n' "$FACTORY_S3_BUCKET" "$S3_IN_KEY"
 
+# Download to a local file first, then extract. Streaming `aws s3 cp -`
+# directly into tar has produced "tar: short read" on the chainguard
+# aws-cli, so a two-step approach is more robust.
+INPUT_TAR="/tmp/workspace-in-$$.tar"
 WAIT=0
 while true; do
   if aws s3 cp \
     --region "$S3_REGION" \
+    --no-progress \
     "s3://${FACTORY_S3_BUCKET}/${S3_IN_KEY}" \
-    - 2>/dev/null | tar xf - -C "$WORKTREES_ROOT"; then
-    printf 'factory-run: workspace received\n'
+    "$INPUT_TAR" 2>/dev/null; then
     break
   fi
   sleep 5
@@ -85,6 +89,10 @@ while true; do
     die "Timed out waiting for workspace in S3 (5 minutes)"
   fi
 done
+
+tar xf "$INPUT_TAR" -C "$WORKTREES_ROOT" || die "Failed to extract input tarball"
+rm -f "$INPUT_TAR"
+printf 'factory-run: workspace received\n'
 
 [ -d "$WORKSPACE" ] || die "Expected project root at $WORKSPACE after extracting tarball"
 
@@ -131,10 +139,16 @@ esac
 
 printf 'factory-run: uploading worktrees to s3://%s/%s\n' "$FACTORY_S3_BUCKET" "$S3_OUT_KEY"
 
-tar cf - -C "$WORKTREES_ROOT" . | \
-  aws s3 cp \
+# Tar to a file first, then upload, for the same robustness reason
+# as the input download.
+OUTPUT_TAR="/tmp/workspace-out-$$.tar"
+tar cf "$OUTPUT_TAR" -C "$WORKTREES_ROOT" . || die "Failed to archive worktrees for upload"
+aws s3 cp \
     --region "$S3_REGION" \
-    - "s3://${FACTORY_S3_BUCKET}/${S3_OUT_KEY}"
+    --no-progress \
+    "$OUTPUT_TAR" \
+    "s3://${FACTORY_S3_BUCKET}/${S3_OUT_KEY}" || die "Failed to upload worktrees to S3"
+rm -f "$OUTPUT_TAR"
 
 printf 'factory-run: uploaded to s3://%s/%s\n' "$FACTORY_S3_BUCKET" "$S3_OUT_KEY"
 printf 'factory-run: done\n'
