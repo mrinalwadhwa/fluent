@@ -98,6 +98,17 @@ printf 'factory-run: workspace received\n'
 
 cd "$WORKSPACE"
 
+# The uploaded tarball embeds the local machine's absolute paths in
+# any sibling worktrees' .git files and the main .git/worktrees/*
+# gitdir entries. Re-link them to this container's layout.
+if [ -d .git ] || [ -f .git ]; then
+  for sib in "$WORKTREES_ROOT"/work-* "$WORKTREES_ROOT"/review-*; do
+    if [ -d "$sib" ]; then
+      git worktree repair "$sib" 2>/dev/null || true
+    fi
+  done
+fi
+
 if [ -n "${FACTORY_BIN:-}" ]; then
   [ -x "$FACTORY_BIN" ] || die "FACTORY_BIN is not executable: $FACTORY_BIN"
 elif [ -x "/usr/local/bin/factory" ]; then

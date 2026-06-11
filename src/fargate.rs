@@ -410,7 +410,11 @@ fn upload_worktrees(
 
 /// Download a Factory worktrees tarball at `<bucket>/<key>` into
 /// `project_root`'s parent — restoring the project worktree plus any
-/// sibling candidate/review worktrees the remote produced.
+/// sibling candidate/review worktrees the remote produced. Runs
+/// `git worktree repair` afterwards so the sibling `.git` gitfiles
+/// and the main `.git/worktrees/*` gitdir entries relink against the
+/// local absolute paths instead of the remote's `/worktrees/...`
+/// container paths.
 fn pull_worktrees(config: &FargateConfig, project_root: &Path, key: &str) -> Result<()> {
     let parent = project_root
         .parent()
@@ -438,7 +442,41 @@ fn pull_worktrees(config: &FargateConfig, project_root: &Path, key: &str) -> Res
     if !tar_status.success() {
         anyhow::bail!("Failed to extract workspace");
     }
+
+    repair_sibling_worktrees(project_root)?;
+
     eprintln!("  Project and sibling worktrees extracted from S3.");
+    Ok(())
+}
+
+/// Run `git worktree repair` on each sibling worktree next to the
+/// project root so the embedded `.git` gitfile and the main
+/// `.git/worktrees/*` gitdir entries point at the current local
+/// absolute paths.
+fn repair_sibling_worktrees(project_root: &Path) -> Result<()> {
+    let Some(parent) = project_root.parent() else {
+        return Ok(());
+    };
+    let Ok(entries) = fs::read_dir(parent) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !path.is_dir() {
+            continue;
+        }
+        if !name.starts_with("work-") && !name.starts_with("review-") {
+            continue;
+        }
+        eprintln!("  Repairing sibling worktree linkage: {}", path.display());
+        let _ = Command::new("git")
+            .args(["-C", &project_root.to_string_lossy()])
+            .args(["worktree", "repair", &path.to_string_lossy()])
+            .status();
+    }
     Ok(())
 }
 
