@@ -560,12 +560,7 @@ fn cmd_work(
             merge_candidate_id,
             interval,
         } => {
-            fargate::watch_work_merge(
-                project_root,
-                &work_item_id,
-                &merge_candidate_id,
-                interval,
-            )?;
+            fargate::watch_work_merge(project_root, &work_item_id, &merge_candidate_id, interval)?;
             println!(
                 "Fargate task for Merge Candidate {merge_candidate_id} of Work Item {work_item_id} reached STOPPED"
             );
