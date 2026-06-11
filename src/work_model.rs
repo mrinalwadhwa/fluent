@@ -3979,4 +3979,54 @@ mod tests {
             merge_candidates: Vec::new(),
         }
     }
+
+    #[test]
+    fn concurrent_writes_to_distinct_work_items_do_not_race() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(WorkModelStore::new(tmp.path()));
+
+        let mut handles = Vec::new();
+        for index in 0..6 {
+            let store = Arc::clone(&store);
+            handles.push(thread::spawn(move || -> Result<(), WorkModelStorageError> {
+                let id = format!("concurrent-work-{index}");
+                let mut item = WorkItem {
+                    id: id.clone(),
+                    title: format!("Concurrent Work Item {index}"),
+                    planning_context: None,
+                    instructions: None,
+                    abandonment: None,
+                    attempts: Vec::new(),
+                    merge_candidates: Vec::new(),
+                };
+                item.add_initial_attempt("attempt-1").unwrap();
+                store.create_work_item(&item)?;
+
+                // Read, mutate, write — simulates the attempt-loop write
+                // pattern: every thread should only touch its own item's
+                // split files.
+                let mut item = store.read_work_item(&id)?;
+                item.attempts[0].status = AttemptStatus::Executing;
+                item.attempts[0].tasks[0].status = TaskStatus::Executing;
+                store.write_work_item(&item)?;
+                Ok(())
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+
+        for index in 0..6 {
+            let id = format!("concurrent-work-{index}");
+            let item = store.read_work_item(&id).unwrap();
+            assert_eq!(item.id, id);
+            assert_eq!(item.attempts.len(), 1);
+            assert_eq!(item.attempts[0].status, AttemptStatus::Executing);
+            assert_eq!(item.attempts[0].tasks[0].status, TaskStatus::Executing);
+        }
+    }
 }
