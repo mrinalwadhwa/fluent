@@ -6,6 +6,43 @@ observations-resolved.md with the resolution context.
 
 ---
 
+2026-06-11 — Fargate container is missing the toolchains the
+configured Factory merge checks invoke. The smoke test merge ran
+`factory work merge` end to end on Fargate; rebase succeeded but
+the `format` check failed with `cargo: not found` because the
+chainguard/node base image only ships node, git, bash, aws-cli, jq,
+tmux, and curl. Two reasonable directions: (a) extend the
+Dockerfile to install the Rust toolchain so this repo's `cargo fmt`
+and `cargo test` checks run in the container, or (b) make
+project-specific check tooling pluggable so the Fargate image
+ships a thin runtime and each project provides its own check
+container or sidecar. Option (b) generalizes better to non-Rust
+Factory-managed projects.
+
+2026-06-11 — Several Fargate Work model fixes landed during the
+first end-to-end smoke test and should be folded back into a more
+careful design pass:
+- Local upload tar must disable bsdtar's macOS metadata
+  (`--no-mac-metadata`, `--no-xattrs`, `COPYFILE_DISABLE=1`,
+  `--exclude=._*`, `--exclude=.DS_Store`).
+- Local upload excludes for `target`, `node_modules`, `.scratch`,
+  `.factory/work/runtime`, `.git/lfs` to keep payloads small;
+  consider a generic `.gitignore`-aware filter.
+- Container `/worktrees` parent must be pre-created with non-root
+  ownership in the Dockerfile.
+- IAM policy must allow GetObject/PutObject for `work/*` and
+  `work-merge/*` prefixes alongside `runs/*`.
+- Streaming `aws s3 cp - | tar xf -` was unreliable on the
+  chainguard aws-cli; both ends use file-based transfers now.
+- Embedded absolute `.git` gitfile paths must be repaired via
+  `git worktree repair` after each tar extraction (entrypoint and
+  local pull).
+- Merge launches must include the candidate sibling worktree in
+  the upload because the merge executor cd's into it; otherwise
+  the container reports `fatal: cannot change to /worktrees/work-<...>: No such file or directory`.
+
+
+
 2026-06-10 — `factory cleanup --apply` should not delete a Work
 Item whose only Attempt is `failed` due to a rate-limit error. The
 current cleanup logic treats any non-running Attempt as terminal
