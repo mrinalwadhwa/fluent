@@ -7989,12 +7989,132 @@ fn resume_with_explicit_run_id() {
 }
 
 #[test]
-fn resume_help_lists_no_sandbox() {
-    factory_cmd()
+fn resume_help_lists_local_runtime_flags() {
+    let output = factory_cmd()
         .args(["resume", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("--no-sandbox"));
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "resume --help failed");
+    assert!(
+        stdout.contains("--no-sandbox"),
+        "resume --help should list --no-sandbox: {stdout}"
+    );
+    assert!(
+        stdout.contains("--coder"),
+        "resume --help should list --coder: {stdout}"
+    );
+}
+
+#[test]
+fn resume_local_no_sandbox_does_not_leak_into_extra_args() {
+    let tmp = TempDir::new().unwrap();
+
+    let run_id = "20260612-no-leak";
+    let run_dir = tmp.path().join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "needs-user").unwrap();
+    fs::write(run_dir.join("source-branch"), "main").unwrap();
+    fs::write(run_dir.join("brief.md"), "# Brief\n\nNo leak test\n").unwrap();
+    fs::write(run_dir.join("handoff.md"), "## Handoff\nContinue.\n").unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_codex(
+        &bin_dir,
+        r##"#!/bin/bash
+RUN_DIR="$PWD/.factory/runs/20260612-no-leak"
+printf '%s\n' "$@" > "$RUN_DIR/codex-args"
+echo "complete" > "$RUN_DIR/status"
+exit 0
+"##,
+    );
+    write_mock_executable(
+        &bin_dir,
+        "git",
+        r##"#!/bin/bash
+exit 0
+"##,
+    );
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["resume", run_id, "--no-sandbox", "--coder", "codex"])
+        .env("PATH", &bin_dir)
+        .write_stdin("")
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "resume should succeed: {stderr}"
+    );
+
+    let args = fs::read_to_string(run_dir.join("codex-args")).unwrap();
+    assert!(
+        !args.contains("--no-sandbox"),
+        "--no-sandbox should not leak into coder args: {args}"
+    );
+}
+
+#[test]
+fn resume_local_coder_takes_precedence_over_global() {
+    let tmp = TempDir::new().unwrap();
+
+    let run_id = "20260612-coder-precedence";
+    let run_dir = tmp.path().join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "needs-user").unwrap();
+    fs::write(run_dir.join("source-branch"), "main").unwrap();
+    fs::write(run_dir.join("brief.md"), "# Brief\n\nPrecedence test\n").unwrap();
+    fs::write(run_dir.join("handoff.md"), "## Handoff\nContinue.\n").unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    write_mock_codex(
+        &bin_dir,
+        r##"#!/bin/bash
+RUN_DIR="$PWD/.factory/runs/20260612-coder-precedence"
+printf '%s\n' "$@" > "$RUN_DIR/codex-args"
+echo "complete" > "$RUN_DIR/status"
+exit 0
+"##,
+    );
+    write_mock_executable(
+        &bin_dir,
+        "git",
+        r##"#!/bin/bash
+exit 0
+"##,
+    );
+
+    // Global --coder claude, local --coder codex → local should win
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["--coder", "claude", "resume", run_id, "--no-sandbox", "--coder", "codex"])
+        .env("PATH", &bin_dir)
+        .write_stdin("")
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "resume should succeed: {stderr}"
+    );
+
+    // If the local --coder codex won, the mock codex binary was invoked
+    // (not claude). The codex-args file existing proves the codex binary
+    // ran.
+    assert!(
+        run_dir.join("codex-args").exists(),
+        "local --coder codex should take precedence over global --coder claude"
+    );
+
+    let args = fs::read_to_string(run_dir.join("codex-args")).unwrap();
+    assert!(
+        args.lines().any(|line| line == "exec"),
+        "codex should be invoked with exec subcommand: {args}"
+    );
 }
 
 #[test]

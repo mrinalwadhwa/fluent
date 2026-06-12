@@ -1591,9 +1591,26 @@ THE SYSTEM SHALL preserve the top-level no-sandbox behavior for resume.
 Test: tests/binary.rs (headless_resume_global_no_sandbox_does_not_require_sandbox_exec),
 tests/behaviors/operations/test-live-run-state.sh (resume uses live status rule)
 
+WHEN both the top-level form (`factory --no-sandbox resume ...`) and
+the local form (`factory resume ... --no-sandbox`) are present on the
+same invocation,
+THE SYSTEM SHALL honor the local form.
+Test: tests/binary.rs (resume_local_coder_takes_precedence_over_global, headless_resume_global_no_sandbox_does_not_require_sandbox_exec)
+
+WHEN neither `--no-sandbox` nor `--coder` is provided to `factory resume`,
+THE SYSTEM SHALL apply the same defaults as `factory run` (sandbox
+enabled, default coder).
+Test: tests/binary.rs (resume_finds_needs_user_run)
+
+WHEN `factory resume [RUN_ID] --no-sandbox` is invoked,
+THE SYSTEM SHALL NOT pass `--no-sandbox` to the underlying coder as an
+extra agent argument.
+Test: tests/binary.rs (resume_local_no_sandbox_does_not_leak_into_extra_args)
+
 WHEN `factory resume --help` is shown,
-THE SYSTEM SHALL list `--no-sandbox` as a resume option.
-Test: tests/binary.rs (resume_help_lists_no_sandbox)
+THE SYSTEM SHALL list the same local runtime flags as `factory run --help`,
+including `--no-sandbox` and `--coder`.
+Test: tests/binary.rs (resume_help_lists_local_runtime_flags)
 
 WHEN `factory resume` is invoked without a run ID and without a terminal
 on stdin,

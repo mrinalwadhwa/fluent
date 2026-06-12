@@ -546,12 +546,6 @@ needs a launch mode that allows the delegated Codex runtime to initialize
 and reach the model endpoint, or Factory needs a different Codex
 execution surface for nested runs.
 
-Related CLI footgun: `factory resume --no-sandbox ...` currently treats
-`--no-sandbox` as an extra agent argument because `resume` only reads the
-top-level `factory --no-sandbox resume ...` flag. `resume` should accept
-the same local runtime flags as `run` so recovery commands do what users
-expect.
-
 2026-06-05 — After landing the Codex approval-flag fix, installed smoke
 run `20260605-codex-installed-smoke-3` verified the fixed command shape.
 The installed Factory binary launched installed Codex without the
