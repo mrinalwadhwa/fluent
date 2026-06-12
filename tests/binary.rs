@@ -7990,10 +7990,7 @@ fn resume_with_explicit_run_id() {
 
 #[test]
 fn resume_help_lists_local_runtime_flags() {
-    let output = factory_cmd()
-        .args(["resume", "--help"])
-        .output()
-        .unwrap();
+    let output = factory_cmd().args(["resume", "--help"]).output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "resume --help failed");
     assert!(
@@ -8045,10 +8042,7 @@ exit 0
         .unwrap();
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "resume should succeed: {stderr}"
-    );
+    assert!(output.status.success(), "resume should succeed: {stderr}");
 
     let args = fs::read_to_string(run_dir.join("codex-args")).unwrap();
     assert!(
@@ -8090,17 +8084,22 @@ exit 0
     // Global --coder claude, local --coder codex → local should win
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .args(["--coder", "claude", "resume", run_id, "--no-sandbox", "--coder", "codex"])
+        .args([
+            "--coder",
+            "claude",
+            "resume",
+            run_id,
+            "--no-sandbox",
+            "--coder",
+            "codex",
+        ])
         .env("PATH", &bin_dir)
         .write_stdin("")
         .output()
         .unwrap();
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "resume should succeed: {stderr}"
-    );
+    assert!(output.status.success(), "resume should succeed: {stderr}");
 
     // If the local --coder codex won, the mock codex binary was invoked
     // (not claude). The codex-args file existing proves the codex binary
