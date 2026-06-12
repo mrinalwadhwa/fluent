@@ -1696,11 +1696,11 @@ exec "$@"
     );
     let prompt = fs::read_to_string(prompt_log).unwrap();
     assert!(prompt.contains("Execute this Factory review Task"));
-    assert!(prompt.contains("Review input artifacts:"));
+    assert!(prompt.contains("A previous review of this candidate"));
     let expected_prior_review_path = fs::canonicalize(&prior_review_path).unwrap();
     assert!(prompt.contains(&format!("- {}", expected_prior_review_path.display())));
-    assert!(prompt.contains("Read these input artifacts first"));
-    assert!(prompt.contains("Verify whether the follow-up addressed the concrete findings"));
+    assert!(prompt.contains("Treat that previous review as another reviewer's findings"));
+    assert!(prompt.contains("Progress:"));
     assert!(prompt.contains("Readable candidate workspaces:"));
     let candidate_workspace =
         fs::canonicalize(main_dir.join("../work-6-work-1-attempt-1")).unwrap();
@@ -3706,6 +3706,7 @@ fn work_attempt_run_plans_followup_for_failed_reviews() {
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&bin_dir))
+        .env("FACTORY_MAX_TOTAL_WRITE_ROUNDS", "3")
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -3794,7 +3795,7 @@ fn work_attempt_run_plans_followup_for_failed_reviews() {
     let handoff =
         fs::read_to_string(main_dir.join(".factory/work/artifacts/work-1/attempt-1/needs-user.md"))
             .unwrap();
-    assert!(handoff.contains("write-round budget"));
+    assert!(handoff.contains("write-round ceiling"));
     assert!(handoff.contains("attempt-1-review-3-tests/review.md"));
 }
 
@@ -3982,6 +3983,7 @@ fn work_attempt_run_counts_already_planned_followup_against_budget() {
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&bin_dir))
+        .env("FACTORY_MAX_TOTAL_WRITE_ROUNDS", "3")
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -4035,7 +4037,7 @@ fn work_attempt_run_counts_already_planned_followup_against_budget() {
     let handoff =
         fs::read_to_string(main_dir.join(".factory/work/artifacts/work-1/attempt-1/needs-user.md"))
             .unwrap();
-    assert!(handoff.contains("write-round budget"));
+    assert!(handoff.contains("write-round ceiling"));
     assert!(handoff.contains("attempt-1-review-2-tests/review.md"));
 }
 

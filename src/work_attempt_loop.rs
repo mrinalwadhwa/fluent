@@ -15,14 +15,31 @@ use crate::work_model::{
 };
 use crate::work_task_executor::{self, WorkTaskRunConfig};
 
-const MAX_WRITE_ROUNDS_PER_INVOCATION: usize = 3;
 const DEFAULT_MAX_PARALLEL_REVIEWERS: usize = 5;
+const DEFAULT_MAX_TOTAL_WRITE_ROUNDS: usize = 10;
+const DEFAULT_MAX_NO_PROGRESS_ROUNDS: usize = 2;
 
 fn max_parallel_reviewers() -> usize {
     std::env::var("FACTORY_MAX_PARALLEL_REVIEWERS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(DEFAULT_MAX_PARALLEL_REVIEWERS)
+        .max(1)
+}
+
+fn max_total_write_rounds() -> usize {
+    std::env::var("FACTORY_MAX_TOTAL_WRITE_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_MAX_TOTAL_WRITE_ROUNDS)
+        .max(1)
+}
+
+fn max_no_progress_rounds() -> usize {
+    std::env::var("FACTORY_MAX_NO_PROGRESS_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_MAX_NO_PROGRESS_ROUNDS)
         .max(1)
 }
 
@@ -154,17 +171,13 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             .is_some()
             && !has_open_review_round(attempt.tasks.as_slice())
         {
-            let attempt_write_count = attempt
-                .tasks
-                .iter()
-                .filter(|task| task.kind == TaskKind::Write)
-                .count();
+            let can_advance = can_advance_loop(config.project_root, attempt)?;
             let outcome = interpret_reviews(
                 config.project_root,
                 config.store,
                 item,
                 config.attempt_id,
-                attempt_write_count < MAX_WRITE_ROUNDS_PER_INVOCATION,
+                can_advance,
             )?;
             let should_stop = matches!(
                 outcome,
@@ -283,6 +296,78 @@ fn reject_terminal_attempt(status: AttemptStatus) -> Result<()> {
         AttemptStatus::NeedsUser => bail!("Attempt needs user input before it can advance"),
         _ => Ok(()),
     }
+}
+
+/// Decide whether the Attempt loop may plan another write round.
+///
+/// Two backstops, both attempt-wide and env-tunable:
+/// - Hard ceiling: total completed write rounds must be below
+///   `FACTORY_MAX_TOTAL_WRITE_ROUNDS` (default 10).
+/// - No-progress streak: consecutive trailing review rounds where ALL
+///   completed reviewers reported `Progress: no` must be below
+///   `FACTORY_MAX_NO_PROGRESS_ROUNDS` (default 2). A reviewer that
+///   reports `yes`, `partial`, `first-pass`, or is missing the field
+///   does NOT contribute to the no-progress streak — the rule is
+///   lenient on purpose.
+fn can_advance_loop(project_root: &Path, attempt: &Attempt) -> Result<bool> {
+    let total_rounds = attempt
+        .tasks
+        .iter()
+        .filter(|task| task.kind == TaskKind::Write)
+        .count();
+    if total_rounds >= max_total_write_rounds() {
+        return Ok(false);
+    }
+    let streak = consecutive_no_progress_rounds(project_root, attempt)?;
+    Ok(streak < max_no_progress_rounds())
+}
+
+/// Walk completed review rounds from the latest backwards. A round is
+/// "no-progress" only when every completed review in it reported
+/// `Progress: no`. Returns the consecutive trailing count.
+fn consecutive_no_progress_rounds(project_root: &Path, attempt: &Attempt) -> Result<usize> {
+    let mut by_round: std::collections::BTreeMap<usize, Vec<&Task>> =
+        std::collections::BTreeMap::new();
+    for task in &attempt.tasks {
+        if task.kind != TaskKind::Review || task.status != TaskStatus::Complete {
+            continue;
+        }
+        let round = review_task_round_number(&attempt.id, &task.id).unwrap_or(1);
+        by_round.entry(round).or_default().push(task);
+    }
+
+    let mut streak = 0_usize;
+    for (_round, tasks) in by_round.iter().rev() {
+        let mut all_no = !tasks.is_empty();
+        for task in tasks {
+            let Some(area) = task.artifact_area.as_ref() else {
+                all_no = false;
+                break;
+            };
+            let dir = work_task_executor::resolve_managed_artifact_area_path(
+                project_root,
+                &area.path,
+            )?;
+            let content = fs::read_to_string(dir.join("review.md")).unwrap_or_default();
+            if review::extract_progress(&content) != review::Progress::No {
+                all_no = false;
+                break;
+            }
+        }
+        if all_no {
+            streak += 1;
+        } else {
+            break;
+        }
+    }
+    Ok(streak)
+}
+
+fn review_task_round_number(attempt_id: &str, task_id: &str) -> Option<usize> {
+    let prefix = format!("{attempt_id}-review-");
+    let suffix = task_id.strip_prefix(&prefix)?;
+    let (round, _role) = suffix.split_once('-')?;
+    round.parse::<usize>().ok()
 }
 
 fn has_completed_write(tasks: &[Task]) -> bool {
@@ -522,7 +607,9 @@ fn write_budget_exhausted_handoff(
     fs::write(
         &path,
         format!(
-            "# Attempt needs user input\n\nThe Attempt loop exhausted the same-invocation write-round budget after completing {MAX_WRITE_ROUNDS_PER_INVOCATION} write rounds.\n\nFailed review artifacts still need attention:\n\n{artifacts}\n"
+            "# Attempt needs user input\n\nThe Attempt loop stopped advancing: reviewers reported `Progress: no` for {} consecutive rounds, or the total write-round ceiling of {} was reached.\n\nFailed review artifacts still need attention:\n\n{artifacts}\n",
+            max_no_progress_rounds(),
+            max_total_write_rounds()
         ),
     )?;
     Ok(relative_path)

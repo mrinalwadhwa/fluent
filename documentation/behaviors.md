@@ -712,31 +712,43 @@ Merge Candidate.
 Test: tests/binary.rs (work_merge_candidate_failed_check_leaves_target_unchanged)
 
 WHEN any completed review artifact has a failing verdict and the
-same-invocation write-round budget permits another follow-up write
-Task,
-THE SYSTEM SHALL mark the Attempt review state as `failed` and create a
-planned write round with deterministic id
-`<attempt-id>-followup-<n>`, the candidate workspace as writable access,
-write Task instructions copied from explicit Work Item instructions or
-derived from the Work Item planning context, and the failed review
-artifacts as Task inputs.
+Attempt loop's no-progress detector and total-rounds ceiling both
+permit another cycle,
+THE SYSTEM SHALL mark the Attempt review state as `failed` and create
+a planned write round with deterministic id
+`<attempt-id>-write-<n>` (n = count of existing write Tasks + 1), the
+candidate workspace as writable access, write Task instructions
+copied from explicit Work Item instructions or derived from the Work
+Item planning context, and the failed review artifacts as Task
+inputs.
 Test: tests/binary.rs (work_attempt_run_plans_followup_for_failed_reviews)
 Test: tests/binary.rs (work_create_planning_context_feeds_followup_for_failed_reviews)
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop plans follow-up write)
 
-WHEN `factory work attempt run` advances write rounds during one
-command invocation,
-THE SYSTEM SHALL count already-planned write rounds and
-write rounds planned during the invocation against the same
-two-follow-up budget.
-Test: tests/binary.rs (work_attempt_run_counts_already_planned_followup_against_budget)
-Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop counts preplanned follow-up against budget)
+WHEN every reviewer in the next planned review round receives the same
+role's `review.md` from the prior completed round as an input
+artifact,
+THE SYSTEM SHALL render that prior review in the reviewer's prompt
+framed as "a previous review of this candidate" and instruct the
+reviewer to report a `Progress:` field (`yes`, `no`, `partial`, or
+`first-pass`) alongside its `Verdict:`.
+Test: tests/binary.rs (work_task_run_completes_review_task_with_fail_verdict_artifact)
 
-IF a failed review round would require a third write round in
-the same `factory work attempt run` command invocation,
+WHEN the Attempt loop sees that every completed review in each of the
+last `FACTORY_MAX_NO_PROGRESS_ROUNDS` consecutive review rounds
+reported `Progress: no`,
 THE SYSTEM SHALL mark the Attempt as `needs-user`, write a durable
-handoff that names the failed review artifacts and budget exhaustion,
-and SHALL NOT create the over-budget write round.
+handoff naming the failed review artifacts and the consecutive
+no-progress streak, and SHALL NOT plan another write round.
+
+WHEN the Attempt's total completed write Tasks reach
+`FACTORY_MAX_TOTAL_WRITE_ROUNDS`,
+THE SYSTEM SHALL mark the Attempt as `needs-user`, write the same
+handoff form, and SHALL NOT plan another write round, even if no
+consecutive no-progress streak has accumulated.
+Test: tests/binary.rs (work_attempt_run_counts_already_planned_followup_against_budget)
+Test: tests/binary.rs (work_attempt_run_plans_followup_for_failed_reviews)
+Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop counts preplanned follow-up against budget)
 Test: tests/binary.rs (work_attempt_run_plans_followup_for_failed_reviews)
 Test: tests/binary.rs (work_attempt_run_counts_already_planned_followup_against_budget)
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop counts preplanned follow-up against budget)

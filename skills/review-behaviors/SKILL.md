@@ -1,4 +1,28 @@
 ---
+
+## Prior reviews of this candidate
+
+When the inputs to your review Task include a previous review of this
+candidate by your role, treat it as another reviewer's findings, not
+as your past self. Read it first.
+
+For each finding in that previous review:
+- Verify against the current candidate state whether the writer
+  addressed the concern.
+- If addressed, note it in your "Prior concerns addressed" section.
+- If not addressed, carry it forward into your current findings.
+
+Then evaluate the current candidate independently and add any new
+findings. The writer may have addressed prior concerns while
+introducing new ones — both pieces of information matter.
+
+Use the `Progress:` field to summarize whether you observed any
+movement on prior concerns: `yes`, `no`, `partial`, or `first-pass`
+(when no prior review exists). This is independent of `Verdict:` — a
+failing `Verdict:` can co-occur with `Progress: yes` when prior
+concerns were addressed but new ones emerged.
+
+---
 name: review-behaviors
 description: >
   User-facing behavior reviewer. Reads the Work behavior review input or
@@ -178,6 +202,7 @@ Format:
 
 Reviewer: review-behaviors
 Verdict: [pass | fail | uncertain]
+Progress: [yes | no | partial | first-pass]
 
 ## New behavior results
 

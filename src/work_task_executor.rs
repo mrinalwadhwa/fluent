@@ -1229,7 +1229,7 @@ fn review_input_artifacts_prompt(input_artifacts: &[PathBuf]) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "Review input artifacts:\n{artifacts}\n\nRead these input artifacts first. Verify whether the follow-up addressed the concrete findings before evaluating the candidate.\n\n"
+        "A previous review of this candidate (from a prior review round) is included as input:\n{artifacts}\n\nTreat that previous review as another reviewer's findings, not as your past self. Read it first. For each finding it raised, verify against the current candidate whether the writer addressed the concern. Then evaluate the candidate independently and add any new findings. Use the `Progress:` field in your output to summarize whether you observed any movement on prior concerns (`yes`, `no`, `partial`, or `first-pass` when no prior review is included). `Progress:` is independent of `Verdict:`.\n\n"
     )
 }
 

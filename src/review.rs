@@ -560,6 +560,51 @@ pub fn extract_verdict(content: &str) -> Verdict {
     Verdict::Uncertain
 }
 
+/// Reviewer's self-reported judgment about whether the writer made
+/// progress on prior-round concerns. Emitted as a `Progress:` line in
+/// review.md. Round 1 has no prior review to compare against, so
+/// reviewers report `Progress: first-pass`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Progress {
+    /// Writer addressed at least one prior-round concern from this
+    /// reviewer (regardless of whether new concerns surfaced).
+    Yes,
+    /// Writer did not address this reviewer's prior-round concerns.
+    No,
+    /// Writer partially addressed prior-round concerns.
+    Partial,
+    /// First review round for this reviewer; no prior review exists.
+    FirstPass,
+    /// Reviewer did not emit a `Progress:` line.
+    Missing,
+}
+
+impl Progress {
+    pub fn parse(s: &str) -> Self {
+        match s.to_lowercase().trim() {
+            "yes" => Self::Yes,
+            "no" => Self::No,
+            "partial" => Self::Partial,
+            "first-pass" | "first pass" | "firstpass" => Self::FirstPass,
+            _ => Self::Missing,
+        }
+    }
+}
+
+/// Extract the `Progress:` line from review file content. Returns
+/// `Progress::Missing` if no such line exists.
+pub fn extract_progress(content: &str) -> Progress {
+    for line in content.lines() {
+        let lower = line.to_lowercase();
+        if lower.starts_with("progress:") {
+            let value = lower.strip_prefix("progress:").unwrap_or("").trim();
+            return Progress::parse(value);
+        }
+    }
+    Progress::Missing
+}
+
 fn verdict_str(v: &Verdict) -> &'static str {
     match v {
         Verdict::Pass => "pass",
@@ -609,6 +654,56 @@ mod tests {
         assert_eq!(
             extract_verdict("No verdict here.\nJust some text."),
             Verdict::Uncertain
+        );
+    }
+
+    #[test]
+    fn test_extract_progress_yes() {
+        assert_eq!(
+            extract_progress("Verdict: fail\nProgress: yes\n\nNew concerns surfaced."),
+            Progress::Yes
+        );
+    }
+
+    #[test]
+    fn test_extract_progress_no() {
+        assert_eq!(
+            extract_progress("Verdict: fail\nProgress: no\n\nSame concerns persist."),
+            Progress::No
+        );
+    }
+
+    #[test]
+    fn test_extract_progress_partial() {
+        assert_eq!(
+            extract_progress("Verdict: fail\nProgress: partial\n"),
+            Progress::Partial
+        );
+    }
+
+    #[test]
+    fn test_extract_progress_first_pass() {
+        assert_eq!(
+            extract_progress("Verdict: pass\nProgress: first-pass\n"),
+            Progress::FirstPass
+        );
+        assert_eq!(
+            extract_progress("Verdict: pass\nProgress: First Pass\n"),
+            Progress::FirstPass
+        );
+    }
+
+    #[test]
+    fn test_extract_progress_case_insensitive() {
+        assert_eq!(extract_progress("Progress: YES\n"), Progress::Yes);
+        assert_eq!(extract_progress("progress: No\n"), Progress::No);
+    }
+
+    #[test]
+    fn test_extract_progress_missing() {
+        assert_eq!(
+            extract_progress("Verdict: pass\n\nNo progress line."),
+            Progress::Missing
         );
     }
 

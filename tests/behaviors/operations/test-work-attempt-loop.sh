@@ -117,7 +117,9 @@ assert_fails() {
 }
 
 run_attempt_loop() {
-  PATH="${TEST_DIR}/bin:$PATH" "$FACTORY_BIN" work attempt run work-1 attempt-1 --no-sandbox
+  PATH="${TEST_DIR}/bin:$PATH" \
+    FACTORY_MAX_TOTAL_WRITE_ROUNDS="${FACTORY_MAX_TOTAL_WRITE_ROUNDS:-3}" \
+    "$FACTORY_BIN" work attempt run work-1 attempt-1 --no-sandbox
 }
 
 run_write_task() {
@@ -259,7 +261,7 @@ test_attempt_loop_plans_followup() {
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review" and (.id | startswith("attempt-1-review-2-")))] | length')" = "5" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-tests") | .review_context.candidate_commit')" = "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-write-2") | .output.commit')" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-tests") | .review_context.candidate_workspace_path')" = "../work-6-work-1-attempt-1" ] || RESULT=1
-  assert_contains "$(cat .factory/work/artifacts/work-1/attempt-1/needs-user.md)" "write-round budget" || RESULT=1
+  assert_contains "$(cat .factory/work/artifacts/work-1/attempt-1/needs-user.md)" "write-round ceiling" || RESULT=1
   return $RESULT
 }
 
@@ -304,7 +306,7 @@ test_attempt_loop_counts_preplanned_followup_against_budget() {
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review" and (.id | startswith("attempt-1-review-2-")))] | length')" = "5" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-documentation") | .role')" = "documentation" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-tests") | .role')" = "tests" ] || RESULT=1
-  assert_contains "$(cat .factory/work/artifacts/work-1/attempt-1/needs-user.md)" "write-round budget" || RESULT=1
+  assert_contains "$(cat .factory/work/artifacts/work-1/attempt-1/needs-user.md)" "write-round ceiling" || RESULT=1
   return $RESULT
 }
 
