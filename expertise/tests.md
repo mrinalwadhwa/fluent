@@ -243,3 +243,42 @@ avoid the code.
 - Private internals. If you need to test a private function
   directly, it probably belongs in its own module with a public
   interface.
+
+## How to run tests
+
+### Always save test output to a durable file
+
+Redirect every test run's stdout and stderr to a file before
+inspecting. Don't pipe straight to the terminal: when one case
+fails inside a long chain, the failing case's full output may
+scroll past or be truncated by a filter, and reproducing it
+requires a slow rerun.
+
+Pattern:
+
+```bash
+cargo test --lib > /tmp/cargo-lib.out 2>&1
+bash tests/behaviors/operations/test-X.sh > /tmp/test-X.out 2>&1
+```
+
+Then grep, less, or open the saved file. Subsequent debugging,
+post-mortem analysis, and references in summaries cite the saved
+file path. The file is your record of "what the run showed,"
+without needing the run again.
+
+When sharing a result in a code review or task handoff, reference
+the saved path so the reader can reopen the same evidence without
+rerunning.
+
+### Pick a runner that gives per-test isolation and parallel execution
+
+For Rust, prefer `cargo nextest run` over `cargo test`. Nextest
+spawns each test in its own process (better isolation for tests
+that touch global env or filesystem state) and parallelizes
+aggressively across cores. Identify slow outliers from nextest's
+SLOW markers — they're the wall-clock floor and worth tightening.
+
+`cargo nextest run` is a drop-in replacement for `cargo test` in
+most cases. Filter by name with `cargo nextest run NAME`. Pass
+`--no-fail-fast` to keep going after the first failure when
+auditing.

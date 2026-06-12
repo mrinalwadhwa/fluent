@@ -433,53 +433,36 @@ THE SYSTEM SHALL queue excess tasks and launch each as in-flight slots
 free up, keeping at most `cap` reviewer threads in flight at any time.
 Test: src/work_attempt_loop.rs (cap_enforcement_limits_in_flight_reviewers)
 
-WHEN Factory executes merge-time Work reviewers for a Merge Candidate,
-THE SYSTEM SHALL create each reviewer's worktree at
-`../review-<work-item-id-bytelen>-<work-item-id>-<attempt-id>-<reviewer>`
-relative to the project root, run reviewer roles in parallel, and give
-each reviewer only its own writable merge review artifact directory.
-Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge reviewers run in parallel)
+WHEN `factory work merge <work-item-id> <merge-candidate-id>` finishes
+the fast-forward,
+THE SYSTEM SHALL append an entry to the post-merge review queue at
+`.factory/work/post-merge-review-queue.json` recording the target
+branch, merged commit, timestamp, source Work Item, and source Merge
+Candidate, then spawn a detached `factory work post-merge-review run`
+child that sleeps the debounce window before reviewing. The merge
+command SHALL return immediately after spawning the child; no LLM
+reviewers run inside `factory work merge`.
 
-WHEN parallel merge-time Work reviewers finish,
-THE SYSTEM SHALL aggregate reviewer verdicts in the configured reviewer
-order, write one combined merge review state, and land only when all
-required reviewer verdicts pass.
-Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge lands after update, checks, and reviewers)
+WHEN `factory work post-merge-review run` runs,
+THE SYSTEM SHALL sleep the debounce window, then for each target
+branch with a queued entry at least `debounce_seconds` old, run a
+review-only Attempt against the target branch's current HEAD using
+the full reviewer set, and clear processed queue entries.
 
-IF a parallel merge-time Work reviewer fails, returns a failing verdict,
-does not write `review.md`, or dirties its reviewer worktree,
-THEN THE SYSTEM SHALL fail the Merge Candidate without changing the
-target branch.
-Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge failed reviewer leaves target unchanged)
-Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge missing reviewer artifact leaves target unchanged)
-Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge dirty reviewer leaves target unchanged)
+WHEN multiple merges arrive for the same target branch within the
+debounce window,
+THE SYSTEM SHALL coalesce them — only the latest entry triggers a
+review; earlier detached children wake up, see a newer entry, and
+exit. The single review covers the cumulative range.
 
-WHEN Factory uses merge reviewer worktrees,
-THE SYSTEM SHALL remove those reviewer worktrees after successful merge
-or failed review handling while preserving durable review artifacts
-under `.factory/work/artifacts/`.
-Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge reviewers run in parallel)
-
-WHEN Factory launches a merge-time reviewer,
-THE SYSTEM SHALL set `CARGO_TARGET_DIR` in the reviewer's environment to
-a path inside that reviewer's artifact directory under
-`.factory/work/artifacts/<work-item-id>/<attempt-id>/<candidate-id>/merge/reviews/<reviewer>/`,
-so Cargo writes build outputs there rather than into the reviewer's
-worktree or the candidate workspace.
-Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge lands after update, checks, and reviewers)
-
-WHEN Factory launches a merge-time reviewer for a Work Item,
-THE SYSTEM SHALL grant the reviewer process read access to the whole
-`.factory/work/artifacts/<work-item-id>/<attempt-id>/` subtree through
-the sandbox profile, so referenced merge-check and prior-review
-artifact paths are readable.
-Test: src/work_merge_executor.rs (merge_review_readable_sandbox_roots_includes_attempt_artifact_subtree)
-
-WHEN Factory generates a merge-time reviewer prompt,
-THE SYSTEM SHALL NOT instruct the reviewer to copy the candidate
-workspace to `/tmp`, export `CARGO_TARGET_DIR`, or otherwise manage
-build cache redirection.
-Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge lands after update, checks, and reviewers)
+WHEN the post-merge review finds any reviewer artifact with a failing
+or uncertain verdict,
+THE SYSTEM SHALL create a post-merge-review-fix Work Item with the
+failed review artifacts as planning context, run its first Attempt,
+and on a successful Merge Candidate auto-invoke `factory work merge`.
+The auto-merge spawns its own detached post-merge review with
+`FACTORY_POST_MERGE_REVIEW_FIX_DEPTH` incremented; recursion stops at
+`FACTORY_MAX_POST_MERGE_REVIEW_FIX_DEPTH` (default 5).
 
 WHEN `factory cleanup` runs and finds a sibling directory matching
 `../review-<bytelen>-<work-item-id>-<attempt-id>-<reviewer>` whose

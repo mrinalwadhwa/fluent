@@ -213,7 +213,7 @@ EOF
   fi
 }
 
-test_work_merge_lands_after_update_checks_and_reviewers() {
+test_work_merge_lands_after_update_and_checks() {
   setup_test_project
   trap cleanup_test_project RETURN
   write_mock_claude
@@ -233,7 +233,10 @@ EOF
   chmod +x .factory/hooks/check-pre-merge
 
   RESULT=0
-  run_merge pass > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
+  # Use a long debounce so the detached post-merge child does not race
+  # the test cleanup.
+  FACTORY_POST_MERGE_DEBOUNCE_SECONDS=3600 \
+    run_merge pass > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
   LANDED_COMMIT="$(json_value '.merge_candidates[0].merge_state.merged_commit')"
 
   [ "$(git rev-parse main)" = "$LANDED_COMMIT" ] || RESULT=1
@@ -243,53 +246,10 @@ EOF
   [ "$(cat target.txt)" = "target update" ] || RESULT=1
   [ "$(cat "$TEST_DIR/check-pwd")" = "$CANDIDATE_PWD" ] || RESULT=1
   [ "$(json_value '.merge_candidates[0].merge_state.status')" = "merged" ] || RESULT=1
-  [ "$(json_value '.merge_candidates[0].review_state')" = "passed" ] || RESULT=1
   [ "$(json_value '.merge_candidates[0].merge_state.check_artifacts | length')" = "1" ] || RESULT=1
-  [ "$(json_value '.merge_candidates[0].merge_state.review_artifacts | length')" = "6" ] || RESULT=1
-  assert_merge_review_artifacts_in_reviewer_order || RESULT=1
-  [ "$(wc -l < "$TEST_DIR/merge-review-log" | tr -d ' ')" = "5" ] || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "work-1" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "attempt-1" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "attempt-1-merge-candidate" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Target branch: main" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "review-6-work-1-attempt-1-behaviors" || RESULT=1
-  SIBLING_DIR="$(dirname "$TEST_PROJECT_PWD")"
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Review diff: git -C '${SIBLING_DIR}/review-6-work-1-attempt-1-behaviors' diff '$TARGET_BEFORE..$LANDED_COMMIT'" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" ".factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/behaviors/review.md" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "$TEST_PROJECT_PWD/.factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/behaviors/review.md" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "candidate workspace as read-only" || RESULT=1
-  if grep -Fq ".factory/runs/" "$TEST_DIR/merge-review-args-log"; then
-    printf '    FAIL: merge reviewer prompt contains legacy run review path\n'
-    RESULT=1
-  fi
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Attempt history:" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Attempt attempt-1 review_state: passed" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Task attempt-1-write-1: kind=write" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Rebase/update state:" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Rebased candidate workspace onto target branch main" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "$TARGET_BEFORE" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "source_workspace" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "candidate_commit" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Merge check status:" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Merge checks ran before reviewers" || RESULT=1
-  if grep -Fq "Check artifacts:" "$TEST_DIR/merge-review-args-log"; then
-    printf '    FAIL: merge reviewer prompt contains check artifact path list\n'
-    RESULT=1
-  fi
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Factory sets CARGO_TARGET_DIR=" || RESULT=1
-  if grep -Eq 'CARGO_TARGET_DIR="[^"]*"\s*cargo' "$TEST_DIR/merge-review-args-log" 2>/dev/null || \
-     grep -Eq 'export CARGO_TARGET_DIR=' "$TEST_DIR/merge-review-args-log" 2>/dev/null; then
-    printf '    FAIL: merge reviewer prompt contains manual CARGO_TARGET_DIR instruction\n'
-    RESULT=1
-  fi
-  if [ -f "$TEST_DIR/merge-review-env-log" ]; then
-    assert_contains "$(cat "$TEST_DIR/merge-review-env-log")" "CARGO_TARGET_DIR=" || RESULT=1
-    assert_contains "$(cat "$TEST_DIR/merge-review-env-log")" "/merge/reviews/" || RESULT=1
-    assert_contains "$(cat "$TEST_DIR/merge-review-env-log")" "/target" || RESULT=1
-  else
-    printf '    FAIL: merge-review-env-log not written\n'
-    RESULT=1
-  fi
+  # Merge-time reviewers are gone in slice 3 — no review_artifacts on the
+  # candidate, the post-merge review fires asynchronously instead.
+  [ "$(json_value '.merge_candidates[0].merge_state.review_artifacts | length')" = "0" ] || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stdout")" "Merged Merge Candidate attempt-1-merge-candidate" || RESULT=1
   "$FACTORY_BIN" work merge-candidate work-1 attempt-1-merge-candidate \
     > "$TEST_DIR/landed-candidate" 2> "$TEST_DIR/stderr" || RESULT=1
@@ -299,26 +259,8 @@ EOF
     printf '    FAIL: managed candidate workspace remains registered after merge\n'
     RESULT=1
   fi
-  assert_no_merge_reviewer_worktrees || RESULT=1
-  return $RESULT
-}
-
-test_work_merge_reviewers_run_in_parallel() {
-  setup_test_project
-  trap cleanup_test_project RETURN
-  write_mock_claude
-  create_passed_merge_candidate
-  export MERGE_REVIEW_TIMING_LOG="${TEST_DIR}/merge-review-timing-log"
-
-  RESULT=0
-  run_merge pass > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
-  STARTS_BEFORE_FIRST_END="$(awk '
-    /^end / { print starts; exit }
-    /^start / { starts++ }
-  ' "$MERGE_REVIEW_TIMING_LOG")"
-  [ "${STARTS_BEFORE_FIRST_END:-0}" -gt 1 ] || RESULT=1
-  assert_no_merge_reviewer_worktrees || RESULT=1
-  unset MERGE_REVIEW_TIMING_LOG
+  # Verify a post-merge review queue entry was appended.
+  [ -f .factory/work/post-merge-review-queue.json ] || RESULT=1
   return $RESULT
 }
 
@@ -492,106 +434,6 @@ EOF
   return $RESULT
 }
 
-test_work_merge_failed_reviewer_leaves_target_unchanged() {
-  setup_test_project
-  trap cleanup_test_project RETURN
-  write_mock_claude
-  create_passed_merge_candidate
-  MAIN_BEFORE="$(git rev-parse main)"
-
-  RESULT=0
-  assert_fails run_merge fail-merge-review || RESULT=1
-  [ "$(git rev-parse main)" = "$MAIN_BEFORE" ] || RESULT=1
-  [ "$(json_value '.merge_candidates[0].merge_state.status')" = "needs-user" ] || RESULT=1
-  [ "$(json_value '.merge_candidates[0].review_state')" = "failed" ] || RESULT=1
-  assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" "Merge-time reviewers did not pass" || RESULT=1
-  [ "$(json_value '.merge_candidates[0].merge_state.review_artifacts | length')" = "6" ] || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/stderr")" "Merge-time reviewers did not pass" || RESULT=1
-  assert_no_merge_reviewer_worktrees || RESULT=1
-  return $RESULT
-}
-
-test_work_merge_missing_reviewer_artifact_leaves_target_unchanged() {
-  setup_test_project
-  trap cleanup_test_project RETURN
-  write_mock_claude
-  create_passed_merge_candidate
-  MAIN_BEFORE="$(git rev-parse main)"
-
-  RESULT=0
-  assert_fails run_merge missing-merge-review || RESULT=1
-  [ "$(git rev-parse main)" = "$MAIN_BEFORE" ] || RESULT=1
-  [ "$(json_value '.merge_candidates[0].merge_state.status')" = "needs-user" ] || RESULT=1
-  [ "$(json_value '.merge_candidates[0].review_state')" = "failed" ] || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/stderr")" "Merge-time reviewers did not pass" || RESULT=1
-  grep -q "completed without writing" \
-    ".factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/behaviors/review.md" || RESULT=1
-  assert_no_merge_reviewer_worktrees || RESULT=1
-  return $RESULT
-}
-
-test_work_merge_aggregates_reviewer_errors_in_order() {
-  setup_test_project
-  trap cleanup_test_project RETURN
-  write_mock_claude
-  create_passed_merge_candidate
-  MAIN_BEFORE="$(git rev-parse main)"
-
-  RESULT=0
-  assert_fails run_merge dirty-merge-review-out-of-order || RESULT=1
-  [ "$(git rev-parse main)" = "$MAIN_BEFORE" ] || RESULT=1
-  [ "$(json_value '.merge_candidates[0].merge_state.status')" = "failed" ] || RESULT=1
-  [ "$(json_value '.merge_candidates[0].review_state')" = "failed" ] || RESULT=1
-  assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" "Merge-time reviewer documentation dirtied candidate workspace" || RESULT=1
-  assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" "dirty-documentation.txt" || RESULT=1
-  assert_merge_review_artifacts_in_reviewer_order || RESULT=1
-  assert_no_merge_reviewer_worktrees || RESULT=1
-  return $RESULT
-}
-
-test_work_merge_dirty_reviewer_leaves_target_unchanged() {
-  setup_test_project
-  trap cleanup_test_project RETURN
-  write_mock_claude
-  create_passed_merge_candidate
-  MAIN_BEFORE="$(git rev-parse main)"
-  CANDIDATE_WORKSPACE="${TEST_DIR}/work-6-work-1-attempt-1"
-
-  RESULT=0
-  assert_fails run_merge dirty-merge-review || RESULT=1
-  [ "$(git rev-parse main)" = "$MAIN_BEFORE" ] || RESULT=1
-  [ "$(json_value '.merge_candidates[0].merge_state.status')" = "failed" ] || RESULT=1
-  [ "$(json_value '.merge_candidates[0].review_state')" = "failed" ] || RESULT=1
-  assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" "Merge-time reviewer behaviors dirtied candidate workspace" || RESULT=1
-  assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" "review-6-work-1-attempt-1-behaviors" || RESULT=1
-  [ "$(json_value '.merge_candidates[0].merge_state.review_artifacts | length')" = "6" ] || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/stderr")" "Merge-time reviewer behaviors dirtied candidate workspace" || RESULT=1
-  test ! -f "$CANDIDATE_WORKSPACE/dirty-merge-review.txt" || RESULT=1
-  assert_no_merge_reviewer_worktrees || RESULT=1
-  return $RESULT
-}
-
-test_work_merge_dirty_factory_state_reviewer_leaves_target_unchanged() {
-  setup_test_project
-  trap cleanup_test_project RETURN
-  write_mock_claude
-  create_passed_merge_candidate
-  MAIN_BEFORE="$(git rev-parse main)"
-  CANDIDATE_WORKSPACE="${TEST_DIR}/work-6-work-1-attempt-1"
-
-  RESULT=0
-  assert_fails run_merge dirty-merge-review-factory || RESULT=1
-  [ "$(git rev-parse main)" = "$MAIN_BEFORE" ] || RESULT=1
-  [ "$(json_value '.merge_candidates[0].merge_state.status')" = "failed" ] || RESULT=1
-  [ "$(json_value '.merge_candidates[0].review_state')" = "failed" ] || RESULT=1
-  assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" "Merge-time reviewer behaviors dirtied candidate workspace" || RESULT=1
-  assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" ".factory/review-scratch/dirty.txt" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/stderr")" "Dirty ignored or Factory files" || RESULT=1
-  test ! -f "$CANDIDATE_WORKSPACE/.factory/review-scratch/dirty.txt" || RESULT=1
-  assert_no_merge_reviewer_worktrees || RESULT=1
-  return $RESULT
-}
-
 test_work_merge_rebase_failure_leaves_target_unchanged() {
   setup_test_project
   trap cleanup_test_project RETURN
@@ -638,10 +480,8 @@ test_work_merge_candidate_inspection_read_only() {
 
 printf 'test-work-merge-candidate\n\n'
 
-run_test "work merge lands after update, checks, and reviewers" \
-  test_work_merge_lands_after_update_checks_and_reviewers
-run_test "work merge reviewers run in parallel" \
-  test_work_merge_reviewers_run_in_parallel
+run_test "work merge lands after update and checks" \
+  test_work_merge_lands_after_update_and_checks
 run_test "work merge rejects missing Work Item" \
   test_work_merge_rejects_missing_work_item
 run_test "work merge rejects missing Merge Candidate" \
@@ -658,16 +498,6 @@ run_test "work merge rejects target workspace mismatch" \
   test_work_merge_rejects_target_workspace_mismatch
 run_test "work merge failed check leaves target unchanged" \
   test_work_merge_failed_check_leaves_target_unchanged
-run_test "work merge failed reviewer leaves target unchanged" \
-  test_work_merge_failed_reviewer_leaves_target_unchanged
-run_test "work merge missing reviewer artifact leaves target unchanged" \
-  test_work_merge_missing_reviewer_artifact_leaves_target_unchanged
-run_test "work merge aggregates reviewer errors in order" \
-  test_work_merge_aggregates_reviewer_errors_in_order
-run_test "work merge dirty reviewer leaves target unchanged" \
-  test_work_merge_dirty_reviewer_leaves_target_unchanged
-run_test "work merge dirty Factory state reviewer leaves target unchanged" \
-  test_work_merge_dirty_factory_state_reviewer_leaves_target_unchanged
 run_test "work merge rebase failure leaves target unchanged" \
   test_work_merge_rebase_failure_leaves_target_unchanged
 run_test "work merge-candidate inspection is read-only" \

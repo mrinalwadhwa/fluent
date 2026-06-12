@@ -357,6 +357,27 @@ pub enum WorkCommands {
         #[command(subcommand)]
         command: WorkTaskCommands,
     },
+
+    /// Drain the pending post-merge review queue (debounced)
+    PostMergeReview {
+        #[command(subcommand)]
+        command: WorkPostMergeReviewCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum WorkPostMergeReviewCommands {
+    /// Sleep the debounce window, then review each target branch with
+    /// pending merges. Findings auto-create a forward-fix Work Item.
+    Run {
+        /// Override debounce in seconds (default
+        /// FACTORY_POST_MERGE_DEBOUNCE_SECONDS env var or 60)
+        #[arg(long)]
+        debounce_seconds: Option<u64>,
+        /// Restrict to a single target branch
+        #[arg(long)]
+        target: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

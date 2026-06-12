@@ -1,0 +1,527 @@
+//! Post-merge review: deterministic merges queue a review-only Attempt
+//! against the target branch's current HEAD. Reviews fan out in
+//! parallel (using the existing review skill set). Findings auto-create
+//! a post-merge-review-fix Work Item that runs through the write→review loop and
+//! auto-merges on pass.
+//!
+//! The merge command spawns a detached child that sleeps a debounce
+//! window before running. Multiple merges within the window coalesce —
+//! the latest child sees the latest entry and reviews the cumulative
+//! range; earlier children find newer entries and exit.
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::coder::CoderKind;
+use crate::content::ContentResolver;
+use crate::review;
+use crate::work_attempt_loop::{self, WorkAttemptRunConfig, WorkAttemptRunOutcome};
+use crate::work_merge_executor::{self, WorkMergeConfig};
+use crate::work_model::{
+    ArtifactRef, PlanningContext, TaskKind, TaskStatus, WorkItem, WorkModelStore,
+};
+
+const DEFAULT_DEBOUNCE_SECONDS: u64 = 60;
+const DEFAULT_MAX_POST_MERGE_REVIEW_FIX_DEPTH: u64 = 5;
+const POST_MERGE_REVIEW_FIX_DEPTH_ENV: &str = "FACTORY_POST_MERGE_REVIEW_FIX_DEPTH";
+
+pub fn debounce_seconds() -> u64 {
+    std::env::var("FACTORY_POST_MERGE_DEBOUNCE_SECONDS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_DEBOUNCE_SECONDS)
+}
+
+pub fn max_post_merge_review_fix_depth() -> u64 {
+    std::env::var("FACTORY_MAX_POST_MERGE_REVIEW_FIX_DEPTH")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_MAX_POST_MERGE_REVIEW_FIX_DEPTH)
+}
+
+pub fn current_depth() -> u64 {
+    std::env::var(POST_MERGE_REVIEW_FIX_DEPTH_ENV)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueueEntry {
+    pub target_branch: String,
+    pub merged_commit: String,
+    pub merged_at_unix: u64,
+    pub source_work_item_id: String,
+    pub source_merge_candidate_id: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Queue {
+    #[serde(default)]
+    pub entries: Vec<QueueEntry>,
+}
+
+pub fn queue_path(project_root: &Path) -> PathBuf {
+    project_root.join(".factory/work/post-merge-review-queue.json")
+}
+
+pub fn append_entry(project_root: &Path, entry: QueueEntry) -> Result<()> {
+    let path = queue_path(project_root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).context("create post-merge-review queue directory")?;
+    }
+    let mut queue = load_queue(project_root)?;
+    queue.entries.push(entry);
+    save_queue(project_root, &queue)
+}
+
+pub fn load_queue(project_root: &Path) -> Result<Queue> {
+    let path = queue_path(project_root);
+    match fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str(&content).context("parse post-merge-review queue"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Queue::default()),
+        Err(error) => Err(error).context("read post-merge-review queue"),
+    }
+}
+
+pub fn save_queue(project_root: &Path, queue: &Queue) -> Result<()> {
+    let path = queue_path(project_root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).context("create post-merge-review queue directory")?;
+    }
+    let json =
+        serde_json::to_string_pretty(queue).context("serialize post-merge-review queue")?;
+    fs::write(&path, json).context("write post-merge-review queue")
+}
+
+pub fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Spawn a detached Factory subprocess that will run the post-merge
+/// review after the debounce window. Standard streams are redirected
+/// to a log file so the parent merge command can return immediately.
+pub fn spawn_detached_runner(project_root: &Path, debounce_secs: u64) -> Result<()> {
+    if current_depth() >= max_post_merge_review_fix_depth() {
+        eprintln!(
+            "  Skipping post-merge review spawn: post-merge-review-fix depth {} >= cap {}",
+            current_depth(),
+            max_post_merge_review_fix_depth()
+        );
+        return Ok(());
+    }
+    let log_dir = project_root.join(".factory/work");
+    fs::create_dir_all(&log_dir).context("create work dir for post-merge log")?;
+    let log_path = log_dir.join("post-merge-review.log");
+    let log_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("open log {}", log_path.display()))?;
+    let log_clone = log_file
+        .try_clone()
+        .context("clone log handle for stderr")?;
+    let factory_bin = std::env::current_exe().context("locate factory binary")?;
+    let mut cmd = Command::new(&factory_bin);
+    cmd.current_dir(project_root)
+        .args([
+            "work",
+            "post-merge-review",
+            "run",
+            "--debounce-seconds",
+            &debounce_secs.to_string(),
+        ])
+        .env(POST_MERGE_REVIEW_FIX_DEPTH_ENV, current_depth().to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_clone));
+    cmd.spawn()
+        .with_context(|| format!("spawn detached {factory_bin:?} for post-merge review"))?;
+    Ok(())
+}
+
+/// Run pending post-merge reviews. Called by CLI / detached child.
+///
+/// For each unique target branch, finds the latest queued entry. If
+/// the entry is at least `debounce_secs` old, processes it (clears all
+/// entries for that branch through this entry); otherwise leaves the
+/// queue alone — the child responsible for the later entry will handle
+/// it.
+pub fn run(
+    project_root: &Path,
+    debounce_secs: u64,
+    target_filter: Option<&str>,
+) -> Result<RunOutcome> {
+    // Wait the debounce so that follow-up merges within the window
+    // can coalesce into the same review pass.
+    if debounce_secs > 0 {
+        std::thread::sleep(std::time::Duration::from_secs(debounce_secs));
+    }
+
+    let mut queue = load_queue(project_root)?;
+    let now = now_unix();
+    let mut outcome = RunOutcome::default();
+
+    // Find candidate branches: latest entry per branch that's at least
+    // debounce_secs old.
+    let mut latest_by_branch: std::collections::BTreeMap<String, QueueEntry> =
+        std::collections::BTreeMap::new();
+    for entry in &queue.entries {
+        if let Some(filter) = target_filter
+            && filter != entry.target_branch
+        {
+            continue;
+        }
+        let pending = latest_by_branch.get(&entry.target_branch);
+        if pending
+            .map(|p| p.merged_at_unix < entry.merged_at_unix)
+            .unwrap_or(true)
+        {
+            latest_by_branch.insert(entry.target_branch.clone(), entry.clone());
+        }
+    }
+
+    let mut branches_to_process: Vec<QueueEntry> = Vec::new();
+    for (_branch, entry) in latest_by_branch {
+        if now.saturating_sub(entry.merged_at_unix) >= debounce_secs {
+            branches_to_process.push(entry);
+        }
+    }
+
+    if branches_to_process.is_empty() {
+        return Ok(outcome);
+    }
+
+    for entry in &branches_to_process {
+        eprintln!(
+            "  Running post-merge review for {} at {}",
+            entry.target_branch, entry.merged_commit
+        );
+        match review_one(project_root, entry) {
+            Ok(per) => outcome.reviewed.push(per),
+            Err(error) => {
+                eprintln!(
+                    "  Post-merge review for {} failed: {error}",
+                    entry.target_branch
+                );
+                outcome.errors.push(format!(
+                    "branch {}: {error}",
+                    entry.target_branch
+                ));
+            }
+        }
+    }
+
+    queue.entries.retain(|entry| {
+        !branches_to_process.iter().any(|p| {
+            p.target_branch == entry.target_branch
+                && entry.merged_at_unix <= p.merged_at_unix
+        })
+    });
+    save_queue(project_root, &queue)?;
+
+    Ok(outcome)
+}
+
+#[derive(Debug, Default)]
+pub struct RunOutcome {
+    pub reviewed: Vec<PerBranchOutcome>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct PerBranchOutcome {
+    pub target_branch: String,
+    pub merged_commit: String,
+    pub findings: Vec<ArtifactRef>,
+    pub post_merge_review_fix_work_item: Option<String>,
+}
+
+fn review_one(project_root: &Path, entry: &QueueEntry) -> Result<PerBranchOutcome> {
+    let store = WorkModelStore::new(project_root);
+    let short = &entry.merged_commit[..8.min(entry.merged_commit.len())];
+    let work_item_id = format!(
+        "post-merge-{}-{}",
+        entry.target_branch.replace('/', "-"),
+        short
+    );
+
+    if store.read_work_item(&work_item_id).is_ok() {
+        return Ok(PerBranchOutcome {
+            target_branch: entry.target_branch.clone(),
+            merged_commit: entry.merged_commit.clone(),
+            findings: Vec::new(),
+            post_merge_review_fix_work_item: None,
+        });
+    }
+
+    let mut item = WorkItem {
+        id: work_item_id.clone(),
+        title: format!(
+            "Post-merge review of {} at {}",
+            entry.target_branch, short
+        ),
+        planning_context: None,
+        instructions: None,
+        abandonment: None,
+        attempts: Vec::new(),
+        merge_candidates: Vec::new(),
+    };
+    let attempt_id = "attempt-1";
+    item.add_review_only_attempt(
+        attempt_id,
+        review::REVIEWERS,
+        &entry.target_branch,
+        &entry.merged_commit,
+    )
+    .map_err(|e| anyhow::anyhow!("create review-only Attempt: {e}"))?;
+    store
+        .create_work_item(&item)
+        .map_err(|e| anyhow::anyhow!("write post-merge review Work Item: {e}"))?;
+
+    let resolver = ContentResolver::new(Some(project_root));
+    let coder_kind = CoderKind::resolve(None)?;
+    let _ = work_attempt_loop::run_attempt(WorkAttemptRunConfig {
+        project_root,
+        store: &store,
+        work_item_id: &work_item_id,
+        attempt_id,
+        resolver: &resolver,
+        extra_args: &[],
+        coder_kind,
+        no_sandbox: true,
+    });
+
+    let item = store
+        .read_work_item(&work_item_id)
+        .map_err(|e| anyhow::anyhow!("read post-merge review Work Item: {e}"))?;
+    let attempt = item
+        .attempts
+        .iter()
+        .find(|a| a.id == attempt_id)
+        .ok_or_else(|| anyhow::anyhow!("Attempt {attempt_id} not found"))?;
+
+    let mut findings = Vec::new();
+    for task in &attempt.tasks {
+        if task.kind != TaskKind::Review || task.status != TaskStatus::Complete {
+            continue;
+        }
+        let Some(area) = task.artifact_area.as_ref() else {
+            continue;
+        };
+        let review_path = project_root.join(&area.path).join("review.md");
+        let content = fs::read_to_string(&review_path).unwrap_or_default();
+        match review::extract_verdict(&content) {
+            review::Verdict::Fail | review::Verdict::Uncertain => {
+                findings.push(ArtifactRef {
+                    producer_id: task.id.clone(),
+                    path: format!("{}/review.md", area.path),
+                });
+            }
+            review::Verdict::Pass => {}
+        }
+    }
+
+    let post_merge_review_fix_work_item = if findings.is_empty() {
+        None
+    } else {
+        match auto_run_post_merge_review_fix(project_root, &store, &entry.target_branch, &findings) {
+            Ok(id) => Some(id),
+            Err(error) => {
+                eprintln!("  Forward-fix auto-run failed: {error}");
+                None
+            }
+        }
+    };
+
+    Ok(PerBranchOutcome {
+        target_branch: entry.target_branch.clone(),
+        merged_commit: entry.merged_commit.clone(),
+        findings,
+        post_merge_review_fix_work_item,
+    })
+}
+
+/// Create a post-merge-review-fix Work Item from review findings, run its first
+/// Attempt, and (on Merge Candidate ready) auto-merge it. Recursion is
+/// bounded by `FACTORY_MAX_POST_MERGE_REVIEW_FIX_DEPTH`: the spawned post-merge
+/// review for the auto-merge runs with depth+1 in its environment.
+fn auto_run_post_merge_review_fix(
+    project_root: &Path,
+    store: &WorkModelStore,
+    parent_branch: &str,
+    findings: &[ArtifactRef],
+) -> Result<String> {
+    let id = create_post_merge_review_fix_work_item(store, parent_branch, findings)?;
+    let resolver = ContentResolver::new(Some(project_root));
+    let coder_kind = CoderKind::resolve(None)?;
+    let run_result = work_attempt_loop::run_attempt(WorkAttemptRunConfig {
+        project_root,
+        store,
+        work_item_id: &id,
+        attempt_id: "attempt-1",
+        resolver: &resolver,
+        extra_args: &[],
+        coder_kind,
+        no_sandbox: true,
+    })?;
+    for outcome in &run_result.outcomes {
+        if let WorkAttemptRunOutcome::MergeCandidateReady { candidate_id } = outcome {
+            // Bump the post-merge-review-fix depth so a spawned post-merge-review
+            // child sees the new depth and can stop recursing eventually.
+            let next_depth = current_depth() + 1;
+            unsafe {
+                std::env::set_var(POST_MERGE_REVIEW_FIX_DEPTH_ENV, next_depth.to_string());
+            }
+            let merge_config = WorkMergeConfig {
+                project_root,
+                store,
+                work_item_id: &id,
+                merge_candidate_id: candidate_id,
+                resolver: &resolver,
+                extra_args: &[],
+                coder_kind,
+                no_sandbox: true,
+            };
+            if let Err(error) = work_merge_executor::merge_candidate(merge_config) {
+                eprintln!("  Forward-fix auto-merge failed: {error}");
+            }
+            break;
+        }
+    }
+    Ok(id)
+}
+
+/// Forward-fix Work Item creation helper. Builds a Work Item whose
+/// planning context describes the failed findings from the post-merge
+/// review. The caller invokes the normal attempt loop on it.
+pub fn create_post_merge_review_fix_work_item(
+    store: &WorkModelStore,
+    parent_branch: &str,
+    findings: &[ArtifactRef],
+) -> Result<String> {
+    let id = format!(
+        "post-merge-review-fix-{}-{}",
+        parent_branch.replace('/', "-"),
+        now_unix()
+    );
+    let brief = format_findings_as_brief(findings);
+    let planning_context = PlanningContext {
+        brief: Some(brief),
+        behaviors: None,
+        approach: None,
+        plan: None,
+        combined: None,
+    };
+    let mut item = WorkItem {
+        id: id.clone(),
+        title: format!("Post-merge post-merge-review fix for {parent_branch}"),
+        planning_context: Some(planning_context),
+        instructions: None,
+        abandonment: None,
+        attempts: Vec::new(),
+        merge_candidates: Vec::new(),
+    };
+    item.add_initial_attempt("attempt-1")
+        .map_err(|e| anyhow::anyhow!("post-merge-review-fix add_initial_attempt: {e}"))?;
+    store
+        .create_work_item(&item)
+        .map_err(|e| anyhow::anyhow!("write post-merge-review-fix Work Item: {e}"))?;
+    Ok(id)
+}
+
+fn format_findings_as_brief(findings: &[ArtifactRef]) -> String {
+    let mut text = String::from(
+        "Post-merge review surfaced findings against the merged HEAD. Address each finding by following the write→review loop.\n\nFindings:\n",
+    );
+    for artifact in findings {
+        text.push_str(&format!("- {}\n", artifact.path));
+    }
+    text
+}
+
+/// Append the current entry to the queue and spawn the detached
+/// post-merge review runner. Called by the merge executor right after
+/// a successful fast-forward.
+pub fn queue_and_spawn(
+    project_root: &Path,
+    entry: QueueEntry,
+    debounce_secs: u64,
+) -> Result<()> {
+    append_entry(project_root, entry)?;
+    spawn_detached_runner(project_root, debounce_secs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn append_and_load_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let entry = QueueEntry {
+            target_branch: "main".into(),
+            merged_commit: "abc".into(),
+            merged_at_unix: 42,
+            source_work_item_id: "work-1".into(),
+            source_merge_candidate_id: "attempt-1-merge-candidate".into(),
+        };
+        append_entry(tmp.path(), entry.clone()).unwrap();
+        let queue = load_queue(tmp.path()).unwrap();
+        assert_eq!(queue.entries.len(), 1);
+        assert_eq!(queue.entries[0], entry);
+    }
+
+    #[test]
+    fn run_skips_when_within_debounce_window() {
+        let tmp = TempDir::new().unwrap();
+        let now = now_unix();
+        append_entry(
+            tmp.path(),
+            QueueEntry {
+                target_branch: "main".into(),
+                merged_commit: "abc".into(),
+                merged_at_unix: now,
+                source_work_item_id: "work-1".into(),
+                source_merge_candidate_id: "attempt-1-merge-candidate".into(),
+            },
+        )
+        .unwrap();
+        // debounce 0 + immediate run → should process
+        let outcome = run(tmp.path(), 0, None).unwrap();
+        assert_eq!(outcome.reviewed.len(), 1);
+        let queue = load_queue(tmp.path()).unwrap();
+        assert!(queue.entries.is_empty());
+    }
+
+    #[test]
+    fn run_coalesces_per_branch() {
+        let tmp = TempDir::new().unwrap();
+        let now = now_unix();
+        for n in 0..3 {
+            append_entry(
+                tmp.path(),
+                QueueEntry {
+                    target_branch: "main".into(),
+                    merged_commit: format!("commit-{n}"),
+                    merged_at_unix: now - 5 + n,
+                    source_work_item_id: format!("work-{n}"),
+                    source_merge_candidate_id: format!("attempt-{n}-merge-candidate"),
+                },
+            )
+            .unwrap();
+        }
+        let outcome = run(tmp.path(), 0, None).unwrap();
+        assert_eq!(outcome.reviewed.len(), 1);
+        let queue = load_queue(tmp.path()).unwrap();
+        assert!(queue.entries.is_empty());
+    }
+}

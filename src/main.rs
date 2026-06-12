@@ -11,7 +11,9 @@ use std::time::Duration;
 use factory::cleanup::{
     self, CleanupOptions, WorkBranchCleanup, WorkCleanupResult, WorktreeCleanup,
 };
+use factory::cli;
 use factory::cli::{Cli, Commands, WorkAttemptCommands, WorkCommands, WorkTaskCommands};
+use factory::post_merge_review;
 use factory::coder::{CoderKind, CoderSandbox};
 use factory::content::ContentResolver;
 use factory::credential;
@@ -588,6 +590,34 @@ fn cmd_work(
                     store_lock: None,
                 })?;
                 println!("Completed Task {} at {}", result.task_id, result.output);
+            }
+        },
+        WorkCommands::PostMergeReview { command } => match command {
+            cli::WorkPostMergeReviewCommands::Run {
+                debounce_seconds,
+                target,
+            } => {
+                let secs = debounce_seconds
+                    .unwrap_or_else(post_merge_review::debounce_seconds);
+                let outcome = post_merge_review::run(
+                    project_root,
+                    secs,
+                    target.as_deref(),
+                )?;
+                println!(
+                    "Post-merge review: reviewed {} branch(es), {} errors",
+                    outcome.reviewed.len(),
+                    outcome.errors.len()
+                );
+                for per in &outcome.reviewed {
+                    println!("  {} @ {}", per.target_branch, per.merged_commit);
+                    if let Some(work_item) = &per.post_merge_review_fix_work_item {
+                        println!("    post-merge-review-fix Work Item: {work_item}");
+                    }
+                }
+                for error in &outcome.errors {
+                    eprintln!("  error: {error}");
+                }
             }
         },
     }

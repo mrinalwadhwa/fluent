@@ -8,6 +8,7 @@ pub mod fargate;
 pub mod fargate_bootstrap;
 pub mod hooks;
 pub mod merge;
+pub mod post_merge_review;
 pub mod os;
 pub mod parallel;
 pub mod plan;
