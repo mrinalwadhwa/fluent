@@ -303,8 +303,8 @@ pub enum WorkCommands {
         /// Work Item ID
         work_item_id: String,
 
-        /// Merge Candidate ID
-        merge_candidate_id: String,
+        /// Merge Candidate ID (default: most recently created Merge Candidate)
+        merge_candidate_id: Option<String>,
 
         /// Disable sandbox
         #[arg(long)]
@@ -387,8 +387,8 @@ pub enum WorkAttemptCommands {
         /// Work Item ID
         work_item_id: String,
 
-        /// Attempt ID
-        attempt_id: String,
+        /// Attempt ID (default: most recently created Attempt)
+        attempt_id: Option<String>,
 
         /// Disable sandbox
         #[arg(long)]

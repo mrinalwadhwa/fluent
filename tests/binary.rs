@@ -763,6 +763,122 @@ fn work_attempt_rejects_invalid_attempt_id_without_changes() {
 }
 
 #[test]
+fn work_attempt_auto_id_creates_attempt_1() {
+    let tmp = TempDir::new().unwrap();
+    write_work_item_json(tmp.path(), "work-1", "Auto attempt");
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "attempt", "work-1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Created Attempt attempt-1 for Work Item work-1",
+        ));
+
+    let value = work_item_value(tmp.path(), "work-1");
+    assert_eq!(value["attempts"][0]["id"], "attempt-1");
+}
+
+#[test]
+fn work_attempt_auto_id_sequential_creates_attempt_2() {
+    let tmp = TempDir::new().unwrap();
+    write_work_item_json(tmp.path(), "work-1", "Auto attempt seq");
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "attempt", "work-1"])
+        .assert()
+        .success();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "attempt", "work-1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Created Attempt attempt-2 for Work Item work-1",
+        ));
+
+    let value = work_item_value(tmp.path(), "work-1");
+    let attempts = value["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0]["id"], "attempt-1");
+    assert_eq!(attempts[1]["id"], "attempt-2");
+}
+
+#[test]
+fn work_attempt_auto_id_fills_gap() {
+    let tmp = TempDir::new().unwrap();
+    write_work_item_json(tmp.path(), "work-1", "Auto attempt gap");
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "attempt", "work-1", "attempt-3"])
+        .assert()
+        .success();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "attempt", "work-1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Created Attempt attempt-2 for Work Item work-1",
+        ));
+}
+
+#[test]
+fn work_attempt_explicit_id_still_works() {
+    let tmp = TempDir::new().unwrap();
+    write_work_item_json(tmp.path(), "work-1", "Explicit attempt");
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "attempt", "work-1", "my-custom-attempt"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Created Attempt my-custom-attempt for Work Item work-1",
+        ));
+
+    let value = work_item_value(tmp.path(), "work-1");
+    assert_eq!(value["attempts"][0]["id"], "my-custom-attempt");
+}
+
+#[test]
+fn work_attempt_run_no_attempts_reports_error() {
+    let tmp = TempDir::new().unwrap();
+    write_work_item_json(tmp.path(), "work-1", "No attempts");
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "attempt", "run", "work-1", "--no-sandbox"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("has no Attempts"));
+}
+
+#[test]
+fn work_merge_no_candidates_reports_error() {
+    let tmp = TempDir::new().unwrap();
+    write_work_item_json(tmp.path(), "work-1", "No candidates");
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "merge", "work-1", "--no-sandbox"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("has no Merge Candidates"));
+}
+
+#[test]
 fn work_task_run_completes_write_task_with_committed_output() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);

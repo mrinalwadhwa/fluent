@@ -171,6 +171,57 @@ Test: tests/binary.rs (work_list_empty_state_succeeds_without_work_items)
 Test: tests/binary.rs (work_create_is_independent_from_legacy_runs)
 Test: tests/behaviors/operations/test-work-inspection.sh (legacy runs and work inspection are independent)
 
+WHEN `factory work attempt <work-item-id>` is invoked without an
+attempt-id positional argument,
+THE SYSTEM SHALL create an Attempt with id `attempt-N` where N is the
+smallest positive integer such that no Attempt with that id exists on
+the Work Item.
+Test: src/work_model.rs (next_attempt_id_empty_returns_attempt_1)
+Test: src/work_model.rs (next_attempt_id_sequential_returns_next)
+Test: src/work_model.rs (next_attempt_id_with_gap_returns_smallest_unused)
+Test: src/work_model.rs (next_attempt_id_ignores_non_numeric_ids)
+Test: tests/binary.rs (work_attempt_auto_id_creates_attempt_1)
+Test: tests/binary.rs (work_attempt_auto_id_sequential_creates_attempt_2)
+Test: tests/binary.rs (work_attempt_auto_id_fills_gap)
+
+WHEN `factory work attempt <work-item-id> <attempt-id>` is invoked with
+an explicit attempt-id,
+THE SYSTEM SHALL create the Attempt with that exact id.
+Test: tests/binary.rs (work_attempt_adds_planned_attempt_with_initial_write_task)
+Test: tests/binary.rs (work_attempt_explicit_id_still_works)
+
+WHEN `factory work attempt run <work-item-id>` is invoked without an
+attempt-id,
+THE SYSTEM SHALL operate on the most recently created Attempt of the
+Work Item.
+Test: src/work_model.rs (latest_attempt_id_returns_last)
+
+WHEN `factory work attempt run <work-item-id> <attempt-id>` is invoked
+with an explicit attempt-id,
+THE SYSTEM SHALL operate on that exact Attempt.
+
+WHEN `factory work merge <work-item-id>` is invoked without a
+merge-candidate-id,
+THE SYSTEM SHALL operate on the most recently created Merge Candidate
+of the Work Item.
+Test: src/work_model.rs (latest_merge_candidate_id_returns_last)
+
+WHEN `factory work merge <work-item-id> <merge-candidate-id>` is
+invoked with an explicit merge-candidate-id,
+THE SYSTEM SHALL use that exact Merge Candidate.
+
+IF `factory work attempt run <work-item-id>` is invoked without an
+attempt-id and no Attempts exist on the Work Item,
+THEN THE SYSTEM SHALL exit non-zero with an error message explaining
+no Attempt exists to run.
+Test: tests/binary.rs (work_attempt_run_no_attempts_reports_error)
+
+IF `factory work merge <work-item-id>` is invoked without a
+merge-candidate-id and no Merge Candidates exist on the Work Item,
+THEN THE SYSTEM SHALL exit non-zero with an error message explaining
+no Merge Candidate exists to merge.
+Test: tests/binary.rs (work_merge_no_candidates_reports_error)
+
 WHEN `factory work attempt <work-item-id> <attempt-id>` is invoked for a
 stored Work Item,
 THE SYSTEM SHALL append a planned Attempt under that Work Item and create

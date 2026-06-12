@@ -67,9 +67,9 @@ Merge Candidate asks for user input.
 
 **Merge Candidates:** If `factory status` shows a pending Merge
 Candidate, inspect it with `factory work merge-candidate <work-item-id>
-<merge-candidate-id>`. Land it with `factory work merge <work-item-id>
-<merge-candidate-id>` after the user accepts the candidate or the run
-policy says autonomous merging is allowed.
+<merge-candidate-id>`. Land it with `factory work merge <work-item-id>`
+after the user accepts the candidate or the run policy says autonomous
+merging is allowed.
 
 Then check `.factory/runs/` only for legacy compatibility or recovery
 runs that need attention:
@@ -159,16 +159,19 @@ Once the plan is approved, use the Work model for delegated execution:
    `factory work create <work-item-id> --title <title>
    --brief-file <brief.md> --behaviors-file <behaviors.diff.md>
    --approach-file <approach.md> --plan-file <plan.md>`.
-2. Create an Attempt: `factory work attempt <work-item-id>
-   <attempt-id>`.
-3. Run the Attempt: `factory work attempt run <work-item-id>
-   <attempt-id>`.
+2. Create an Attempt: `factory work attempt <work-item-id>`.
+   (An `attempt-N` id is auto-assigned; pass an explicit id for
+   scripted or recovery flows.)
+3. Run the Attempt: `factory work attempt run <work-item-id>`.
+   (Defaults to the most recently created Attempt; pass an explicit
+   id to target a specific one.)
 4. Inspect status with `factory status` or `factory work show
    <work-item-id>`.
 5. When the Attempt creates a Merge Candidate, inspect it with
    `factory work merge-candidate <work-item-id> <merge-candidate-id>`.
-6. Land through `factory work merge <work-item-id>
-   <merge-candidate-id>`.
+6. Land through `factory work merge <work-item-id>`.
+   (Defaults to the most recently created Merge Candidate; pass an
+   explicit id to target a specific one.)
 
 `factory work attempt run` advances the next safe transition by running
 planned write and review Tasks through the existing Task executor. It
@@ -322,13 +325,13 @@ factory work create <id> --title <t> --instructions-file <path> # load prompt fi
 factory work list                    # list stored Work Items
 factory work show <id>               # show one Work Item as JSON
 factory work abandon <id> --reason <text> # mark a stale Work Item abandoned
-factory work attempt <id> <attempt>  # add an Attempt with a write Task
-factory work attempt run <id> <attempt> # advance an Attempt
+factory work attempt <id> [<attempt>] # add an Attempt (auto-assigns attempt-N)
+factory work attempt run <id> [<attempt>] # advance an Attempt (defaults to latest)
 factory work review <id> <attempt>   # plan review Tasks
 factory work review-codebase <id> <attempt> # add a review-only Attempt
 factory work task run <id> <attempt> <task> # run one Task
 factory work merge-candidate <id> <candidate> # show a Merge Candidate
-factory work merge <id> <candidate>  # execute a Merge Candidate
+factory work merge <id> [<candidate>] # execute a Merge Candidate (defaults to latest)
 factory status                       # show Work Items by default
 factory dashboard                    # open the live dashboard
 factory cleanup                      # dry-run stale Work and legacy cleanup

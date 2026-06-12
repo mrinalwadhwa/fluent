@@ -317,6 +317,25 @@ fn cmd_work(
                 runtime,
                 extra_args,
             }) => {
+                let attempt_id = match attempt_id {
+                    Some(id) => id,
+                    None => {
+                        let item = match store.read_work_item(&work_item_id) {
+                            Ok(item) => item,
+                            Err(WorkModelStorageError::ReadFile { source, .. })
+                                if source.kind() == ErrorKind::NotFound =>
+                            {
+                                bail!("Work Item {work_item_id:?} not found");
+                            }
+                            Err(error) => return Err(error.into()),
+                        };
+                        item.latest_attempt_id()
+                            .ok_or_else(|| anyhow::anyhow!(
+                                "Work Item {work_item_id:?} has no Attempts; create one first with: factory work attempt {work_item_id}"
+                            ))?
+                            .to_string()
+                    }
+                };
                 let coder_kind = CoderKind::resolve(coder.as_deref().or(global_coder))?;
                 let runtime = runtime.unwrap_or_else(|| "local".to_string());
                 match runtime.as_str() {
@@ -408,8 +427,6 @@ fn cmd_work(
             None => {
                 let work_item_id =
                     work_item_id.ok_or_else(|| anyhow::anyhow!("work item id is required"))?;
-                let attempt_id =
-                    attempt_id.ok_or_else(|| anyhow::anyhow!("attempt id is required"))?;
                 let mut item = match store.read_work_item(&work_item_id) {
                     Ok(item) => item,
                     Err(WorkModelStorageError::ReadFile { source, .. })
@@ -419,6 +436,7 @@ fn cmd_work(
                     }
                     Err(error) => return Err(error.into()),
                 };
+                let attempt_id = attempt_id.unwrap_or_else(|| item.next_attempt_id());
                 item.add_initial_attempt(attempt_id.clone())?;
                 store.write_work_item(&item)?;
                 println!("Created Attempt {attempt_id} for Work Item {work_item_id}");
@@ -508,6 +526,25 @@ fn cmd_work(
             runtime,
             extra_args,
         } => {
+            let merge_candidate_id = match merge_candidate_id {
+                Some(id) => id,
+                None => {
+                    let item = match store.read_work_item(&work_item_id) {
+                        Ok(item) => item,
+                        Err(WorkModelStorageError::ReadFile { source, .. })
+                            if source.kind() == ErrorKind::NotFound =>
+                        {
+                            bail!("Work Item {work_item_id:?} not found");
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
+                    item.latest_merge_candidate_id()
+                        .ok_or_else(|| anyhow::anyhow!(
+                            "Work Item {work_item_id:?} has no Merge Candidates"
+                        ))?
+                        .to_string()
+                }
+            };
             let coder_kind = CoderKind::resolve(coder.as_deref().or(global_coder))?;
             let runtime = runtime.unwrap_or_else(|| "local".to_string());
             match runtime.as_str() {

@@ -597,6 +597,27 @@ impl WorkItem {
         self.validate()
     }
 
+    pub fn next_attempt_id(&self) -> String {
+        let used: HashSet<usize> = self
+            .attempts
+            .iter()
+            .filter_map(|a| a.id.strip_prefix("attempt-")?.parse::<usize>().ok())
+            .collect();
+        let mut n = 1;
+        while used.contains(&n) {
+            n += 1;
+        }
+        format!("attempt-{n}")
+    }
+
+    pub fn latest_attempt_id(&self) -> Option<&str> {
+        self.attempts.last().map(|a| a.id.as_str())
+    }
+
+    pub fn latest_merge_candidate_id(&self) -> Option<&str> {
+        self.merge_candidates.last().map(|c| c.id.as_str())
+    }
+
     pub fn ensure_not_abandoned(&self) -> Result<(), WorkModelError> {
         if self.abandonment.is_some() {
             return Err(WorkModelError::WorkItemAbandoned {
@@ -4024,5 +4045,90 @@ mod tests {
             assert_eq!(item.attempts[0].status, AttemptStatus::Executing);
             assert_eq!(item.attempts[0].tasks[0].status, TaskStatus::Executing);
         }
+    }
+
+    fn empty_work_item(id: &str) -> WorkItem {
+        WorkItem {
+            id: id.to_string(),
+            title: "Test".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn next_attempt_id_empty_returns_attempt_1() {
+        let item = empty_work_item("work-1");
+        assert_eq!(item.next_attempt_id(), "attempt-1");
+    }
+
+    #[test]
+    fn next_attempt_id_sequential_returns_next() {
+        let mut item = empty_work_item("work-1");
+        item.add_initial_attempt("attempt-1").unwrap();
+        assert_eq!(item.next_attempt_id(), "attempt-2");
+
+        item.add_initial_attempt("attempt-2").unwrap();
+        assert_eq!(item.next_attempt_id(), "attempt-3");
+    }
+
+    #[test]
+    fn next_attempt_id_with_gap_returns_smallest_unused() {
+        let mut item = empty_work_item("work-1");
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.add_initial_attempt("attempt-3").unwrap();
+        assert_eq!(item.next_attempt_id(), "attempt-2");
+    }
+
+    #[test]
+    fn next_attempt_id_ignores_non_numeric_ids() {
+        let mut item = empty_work_item("work-1");
+        item.add_initial_attempt("custom-name").unwrap();
+        assert_eq!(item.next_attempt_id(), "attempt-1");
+
+        item.add_initial_attempt("attempt-1").unwrap();
+        assert_eq!(item.next_attempt_id(), "attempt-2");
+    }
+
+    #[test]
+    fn latest_attempt_id_empty_returns_none() {
+        let item = empty_work_item("work-1");
+        assert_eq!(item.latest_attempt_id(), None);
+    }
+
+    #[test]
+    fn latest_attempt_id_returns_last() {
+        let mut item = empty_work_item("work-1");
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.add_initial_attempt("attempt-2").unwrap();
+        assert_eq!(item.latest_attempt_id(), Some("attempt-2"));
+    }
+
+    #[test]
+    fn latest_merge_candidate_id_empty_returns_none() {
+        let item = empty_work_item("work-1");
+        assert_eq!(item.latest_merge_candidate_id(), None);
+    }
+
+    #[test]
+    fn latest_merge_candidate_id_returns_last() {
+        let mut item = empty_work_item("work-1");
+        item.attempts.push(Attempt {
+            id: "attempt-1".to_string(),
+            work_item_id: "work-1".to_string(),
+            kind: AttemptKind::Write,
+            status: AttemptStatus::Complete,
+            tasks: vec![completed_write_task("attempt-1-write-1", "first")],
+            review_state: Some(AttemptReviewState::Passed),
+            artifacts: Vec::new(),
+        });
+        item.create_or_get_merge_candidate("attempt-1").unwrap();
+        assert_eq!(
+            item.latest_merge_candidate_id(),
+            Some("attempt-1-merge-candidate")
+        );
     }
 }
