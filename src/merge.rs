@@ -48,7 +48,9 @@ fn run_pre_merge_hooks_for_run(source_root: &Path, run: &Run) -> Result<()> {
     }
 
     if worktree_is_dirty(&worktree_dir)? {
-        bail!("check-pre-merge failed and fix-pre-merge cannot run: worktree has uncommitted changes");
+        bail!(
+            "check-pre-merge failed and fix-pre-merge cannot run: worktree has uncommitted changes"
+        );
     }
 
     eprintln!("  check-pre-merge failed; running fix-pre-merge...");

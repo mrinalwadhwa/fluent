@@ -234,7 +234,9 @@ fn status_shows_work_items_without_runs() {
         .stdout(predicate::str::contains("Work Items"))
         .stdout(predicate::str::contains("work-1"))
         .stdout(predicate::str::contains("attempt-1 [planned]"))
-        .stdout(predicate::str::contains("write:attempt-1-write-1 [planned]"))
+        .stdout(predicate::str::contains(
+            "write:attempt-1-write-1 [planned]",
+        ))
         .stdout(predicate::str::contains("task-ready"))
         .stdout(predicate::str::contains("Build status view"))
         .stdout(predicate::str::contains("No runs found").not());
@@ -2748,11 +2750,6 @@ fn work_attempt_run_review_only_uncertain_needs_user() {
     assert_no_non_factory_changes(&main_dir);
 }
 
-
-
-
-
-
 #[test]
 fn work_merge_candidate_failed_check_leaves_target_unchanged() {
     let tmp = TempDir::new().unwrap();
@@ -3113,7 +3110,6 @@ fn work_merge_candidate_rebases_when_target_advanced() {
     assert_eq!(candidate["merge_state"]["merged_commit"], main_after_merge);
 }
 
-
 #[test]
 fn work_merge_candidate_rebase_failure_leaves_target_unchanged() {
     let tmp = TempDir::new().unwrap();
@@ -3231,15 +3227,11 @@ fn work_attempt_run_plans_followup_for_failed_reviews() {
         .stdout(predicate::str::contains(
             "Planned write Task attempt-1-write-2",
         ))
-        .stdout(predicate::str::contains(
-            "Completed Task attempt-1-write-2",
-        ))
+        .stdout(predicate::str::contains("Completed Task attempt-1-write-2"))
         .stdout(predicate::str::contains(
             "Planned write Task attempt-1-write-3",
         ))
-        .stdout(predicate::str::contains(
-            "Completed Task attempt-1-write-3",
-        ))
+        .stdout(predicate::str::contains("Completed Task attempt-1-write-3"))
         .stdout(predicate::str::contains("needs user input"))
         .stdout(predicate::str::contains("attempt-1-write-4").not());
 
@@ -3414,9 +3406,7 @@ fn work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews() {
         .stdout(predicate::str::contains(
             "Planned write Task attempt-1-write-2",
         ))
-        .stdout(predicate::str::contains(
-            "Completed Task attempt-1-write-2",
-        ))
+        .stdout(predicate::str::contains("Completed Task attempt-1-write-2"))
         .stdout(predicate::str::contains(
             "Planned 1 review Tasks for Attempt attempt-1",
         ))
@@ -3502,18 +3492,14 @@ fn work_attempt_run_counts_already_planned_followup_against_budget() {
         .env("FACTORY_MAX_TOTAL_WRITE_ROUNDS", "3")
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Completed Task attempt-1-write-2",
-        ))
+        .stdout(predicate::str::contains("Completed Task attempt-1-write-2"))
         .stdout(predicate::str::contains(
             "Planned 5 review Tasks for Attempt attempt-1",
         ))
         .stdout(predicate::str::contains(
             "Planned write Task attempt-1-write-3",
         ))
-        .stdout(predicate::str::contains(
-            "Completed Task attempt-1-write-3",
-        ))
+        .stdout(predicate::str::contains("Completed Task attempt-1-write-3"))
         .stdout(predicate::str::contains("needs user input"))
         .stdout(predicate::str::contains("attempt-1-write-4").not());
 
@@ -3640,9 +3626,7 @@ exec "$@"
         .env("AWS_ACCESS_KEY_ID", "mock-access")
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Completed Task attempt-1-write-2",
-        ));
+        .stdout(predicate::str::contains("Completed Task attempt-1-write-2"));
 
     let expected_artifact =
         fs::canonicalize(main_dir.join(
@@ -10031,7 +10015,10 @@ fn run_merge_runs_configured_check_before_merging() {
     let log_path = run_dir.join("hooks/check-pre-merge.log");
     assert!(log_path.is_file(), "hook log should be written");
     let log = fs::read_to_string(&log_path).unwrap();
-    assert!(log.contains("check-failed"), "hook log should capture stderr, got: {log}");
+    assert!(
+        log.contains("check-failed"),
+        "hook log should capture stderr, got: {log}"
+    );
     assert!(wt_path.is_dir(), "failed check should keep worktree");
 }
 

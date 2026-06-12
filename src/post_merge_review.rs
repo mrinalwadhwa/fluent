@@ -93,8 +93,7 @@ pub fn save_queue(project_root: &Path, queue: &Queue) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).context("create post-merge-review queue directory")?;
     }
-    let json =
-        serde_json::to_string_pretty(queue).context("serialize post-merge-review queue")?;
+    let json = serde_json::to_string_pretty(queue).context("serialize post-merge-review queue")?;
     fs::write(&path, json).context("write post-merge-review queue")
 }
 
@@ -211,18 +210,16 @@ pub fn run(
                     "  Post-merge review for {} failed: {error}",
                     entry.target_branch
                 );
-                outcome.errors.push(format!(
-                    "branch {}: {error}",
-                    entry.target_branch
-                ));
+                outcome
+                    .errors
+                    .push(format!("branch {}: {error}", entry.target_branch));
             }
         }
     }
 
     queue.entries.retain(|entry| {
         !branches_to_process.iter().any(|p| {
-            p.target_branch == entry.target_branch
-                && entry.merged_at_unix <= p.merged_at_unix
+            p.target_branch == entry.target_branch && entry.merged_at_unix <= p.merged_at_unix
         })
     });
     save_queue(project_root, &queue)?;
@@ -264,10 +261,7 @@ fn review_one(project_root: &Path, entry: &QueueEntry) -> Result<PerBranchOutcom
 
     let mut item = WorkItem {
         id: work_item_id.clone(),
-        title: format!(
-            "Post-merge review of {} at {}",
-            entry.target_branch, short
-        ),
+        title: format!("Post-merge review of {} at {}", entry.target_branch, short),
         planning_context: None,
         instructions: None,
         abandonment: None,
@@ -332,7 +326,8 @@ fn review_one(project_root: &Path, entry: &QueueEntry) -> Result<PerBranchOutcom
     let post_merge_review_fix_work_item = if findings.is_empty() {
         None
     } else {
-        match auto_run_post_merge_review_fix(project_root, &store, &entry.target_branch, &findings) {
+        match auto_run_post_merge_review_fix(project_root, &store, &entry.target_branch, &findings)
+        {
             Ok(id) => Some(id),
             Err(error) => {
                 eprintln!("  Forward-fix auto-run failed: {error}");
@@ -450,11 +445,7 @@ fn format_findings_as_brief(findings: &[ArtifactRef]) -> String {
 /// Append the current entry to the queue and spawn the detached
 /// post-merge review runner. Called by the merge executor right after
 /// a successful fast-forward.
-pub fn queue_and_spawn(
-    project_root: &Path,
-    entry: QueueEntry,
-    debounce_secs: u64,
-) -> Result<()> {
+pub fn queue_and_spawn(project_root: &Path, entry: QueueEntry, debounce_secs: u64) -> Result<()> {
     append_entry(project_root, entry)?;
     spawn_detached_runner(project_root, debounce_secs)
 }

@@ -93,9 +93,8 @@ pub fn run_hook(
         )
     })?;
     let log_path = context.log_dir.join(format!("{name}.log"));
-    let log_file = fs::File::create(&log_path).with_context(|| {
-        format!("Failed to create hook log file {}", log_path.display())
-    })?;
+    let log_file = fs::File::create(&log_path)
+        .with_context(|| format!("Failed to create hook log file {}", log_path.display()))?;
     let log_file_dup = log_file
         .try_clone()
         .context("Failed to clone hook log file handle")?;

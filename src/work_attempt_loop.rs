@@ -344,10 +344,8 @@ fn consecutive_no_progress_rounds(project_root: &Path, attempt: &Attempt) -> Res
                 all_no = false;
                 break;
             };
-            let dir = work_task_executor::resolve_managed_artifact_area_path(
-                project_root,
-                &area.path,
-            )?;
+            let dir =
+                work_task_executor::resolve_managed_artifact_area_path(project_root, &area.path)?;
             let content = fs::read_to_string(dir.join("review.md")).unwrap_or_default();
             if review::extract_progress(&content) != review::Progress::No {
                 all_no = false;

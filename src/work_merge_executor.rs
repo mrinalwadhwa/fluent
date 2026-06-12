@@ -163,22 +163,22 @@ fn execute_merge(
     rebase_candidate(source_workspace, &candidate.target_branch)?;
     ensure_clean_worktree(source_workspace)?;
 
-    let check_artifacts =
-        match run_merge_checks(config, candidate, source_workspace, artifact_dir) {
-            Ok(artifacts) => artifacts,
-            Err(error) => {
-                let artifacts = check_artifacts_for_failure(config.project_root, artifact_dir);
-                record_candidate_failure(
-                    config.store,
-                    config.work_item_id,
-                    &candidate.id,
-                    error.to_string(),
-                    artifacts,
-                    Vec::new(),
-                )?;
-                return Err(error);
-            }
-        };
+    let check_artifacts = match run_merge_checks(config, candidate, source_workspace, artifact_dir)
+    {
+        Ok(artifacts) => artifacts,
+        Err(error) => {
+            let artifacts = check_artifacts_for_failure(config.project_root, artifact_dir);
+            record_candidate_failure(
+                config.store,
+                config.work_item_id,
+                &candidate.id,
+                error.to_string(),
+                artifacts,
+                Vec::new(),
+            )?;
+            return Err(error);
+        }
+    };
 
     let outcome = finalize_merge(
         config,
@@ -266,13 +266,10 @@ fn finalize_merge(
 /// Extract artifact paths for failed/uncertain reviewers so the
 /// follow-up writer can read concrete findings.
 
-
-
 /// Invoke the configured coder against the candidate workspace with
 /// the failed merge-time review artifacts as input, asking the
 /// coder to address the findings and commit. Errors if no new
 /// commits result or the worktree is left dirty.
-
 
 /// Run the `check-pre-merge` hook against the rebased candidate
 /// workspace. If it fails and a `fix-pre-merge` hook exists, run that,
@@ -299,8 +296,12 @@ fn run_merge_checks(
 
     let mut artifacts = Vec::new();
 
-    let Some(check_outcome) =
-        hooks::run_hook(config.project_root, "check-pre-merge", source_workspace, &context)?
+    let Some(check_outcome) = hooks::run_hook(
+        config.project_root,
+        "check-pre-merge",
+        source_workspace,
+        &context,
+    )?
     else {
         return Ok(artifacts);
     };
@@ -319,15 +320,17 @@ fn run_merge_checks(
     }
 
     if worktree_is_dirty(source_workspace)? {
-        bail!(
-            "check-pre-merge failed and fix-pre-merge cannot run: candidate worktree is dirty"
-        );
+        bail!("check-pre-merge failed and fix-pre-merge cannot run: candidate worktree is dirty");
     }
 
     let baseline_commit = head_commit(source_workspace)?;
-    let fix_outcome =
-        hooks::run_hook(config.project_root, "fix-pre-merge", source_workspace, &context)?
-            .expect("fix-pre-merge presence checked above");
+    let fix_outcome = hooks::run_hook(
+        config.project_root,
+        "fix-pre-merge",
+        source_workspace,
+        &context,
+    )?
+    .expect("fix-pre-merge presence checked above");
     artifacts.push(hook_artifact(config.project_root, &fix_outcome));
     if !fix_outcome.passed {
         bail!(
@@ -346,9 +349,13 @@ fn run_merge_checks(
         // surface the original failure once more for the artifact.
     }
 
-    let recheck_outcome =
-        hooks::run_hook(config.project_root, "check-pre-merge", source_workspace, &context)?
-            .expect("check-pre-merge presence already confirmed");
+    let recheck_outcome = hooks::run_hook(
+        config.project_root,
+        "check-pre-merge",
+        source_workspace,
+        &context,
+    )?
+    .expect("check-pre-merge presence already confirmed");
     artifacts.push(hook_artifact(config.project_root, &recheck_outcome));
     if !recheck_outcome.passed {
         bail!(
@@ -414,20 +421,6 @@ fn check_artifacts_for_failure(project_root: &Path, artifact_dir: &Path) -> Vec<
     }
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 fn set_candidate_executing(
     store: &WorkModelStore,
     work_item_id: &str,
@@ -444,8 +437,6 @@ fn set_candidate_executing(
         };
     })
 }
-
-
 
 fn record_candidate_failure(
     store: &WorkModelStore,
@@ -716,8 +707,6 @@ fn ensure_clean_worktree(workspace_path: &Path) -> Result<()> {
     Ok(())
 }
 
-
-
 fn worktree_status(workspace_path: &Path) -> Result<String> {
     let output = git_output(
         workspace_path,
@@ -965,5 +954,4 @@ mod tests {
         );
         assert!(candidate.merge_state.failure_reason.is_none());
     }
-
 }

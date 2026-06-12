@@ -13,7 +13,6 @@ use factory::cleanup::{
 };
 use factory::cli;
 use factory::cli::{Cli, Commands, WorkAttemptCommands, WorkCommands, WorkTaskCommands};
-use factory::post_merge_review;
 use factory::coder::{CoderKind, CoderSandbox};
 use factory::content::ContentResolver;
 use factory::credential;
@@ -23,6 +22,7 @@ use factory::merge;
 use factory::os;
 use factory::parallel;
 use factory::plan;
+use factory::post_merge_review;
 use factory::review;
 use factory::run::{self, Run};
 use factory::session::{self, DefaultHooks, SandboxedHooks, SessionConfig};
@@ -539,9 +539,9 @@ fn cmd_work(
                         Err(error) => return Err(error.into()),
                     };
                     item.latest_merge_candidate_id()
-                        .ok_or_else(|| anyhow::anyhow!(
-                            "Work Item {work_item_id:?} has no Merge Candidates"
-                        ))?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("Work Item {work_item_id:?} has no Merge Candidates")
+                        })?
                         .to_string()
                 }
             };
@@ -634,13 +634,8 @@ fn cmd_work(
                 debounce_seconds,
                 target,
             } => {
-                let secs = debounce_seconds
-                    .unwrap_or_else(post_merge_review::debounce_seconds);
-                let outcome = post_merge_review::run(
-                    project_root,
-                    secs,
-                    target.as_deref(),
-                )?;
+                let secs = debounce_seconds.unwrap_or_else(post_merge_review::debounce_seconds);
+                let outcome = post_merge_review::run(project_root, secs, target.as_deref())?;
                 println!(
                     "Post-merge review: reviewed {} branch(es), {} errors",
                     outcome.reviewed.len(),

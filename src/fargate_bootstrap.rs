@@ -49,17 +49,15 @@ impl FargateState {
         }
         let content = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
-        serde_json::from_str(&content).with_context(|| {
-            format!("Failed to parse Fargate state file {}", path.display())
-        })
+        serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse Fargate state file {}", path.display()))
     }
 
     pub fn save(&self) -> Result<()> {
         let path = Self::state_path()?;
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("Failed to create {}", parent.display())
-            })?;
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
         }
         let content = serde_json::to_string_pretty(self)?;
         fs::write(&path, format!("{content}\n"))
@@ -336,9 +334,10 @@ fn hash_file(path: &Path) -> Result<String> {
 }
 
 fn aws_text_output(args: &[&str]) -> Result<String> {
-    let output = Command::new("aws").args(args).output().context(
-        "Failed to launch aws CLI (is it installed and on PATH?)",
-    )?;
+    let output = Command::new("aws")
+        .args(args)
+        .output()
+        .context("Failed to launch aws CLI (is it installed and on PATH?)")?;
     if !output.status.success() {
         bail!(
             "aws {} failed:\n{}",
@@ -385,13 +384,7 @@ fn docker_login_ecr(account_id: &str, region: &str) -> Result<()> {
         );
     }
     let mut login = Command::new("docker")
-        .args([
-            "login",
-            "--username",
-            "AWS",
-            "--password-stdin",
-            &registry,
-        ])
+        .args(["login", "--username", "AWS", "--password-stdin", &registry])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
