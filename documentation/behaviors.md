@@ -793,6 +793,12 @@ exit without modifying the target branch.
 Test: tests/binary.rs (work_merge_rebase_gives_up_transitions_to_needs_user)
 Test: tests/binary.rs (work_merge_candidate_rebase_failure_leaves_target_unchanged)
 
+IF the rebase agent exits non-zero without writing `give-up.md`,
+THEN THE SYSTEM SHALL mark the rebase Task as `failed`, transition the
+Merge Candidate to `failed`, and exit without modifying the target
+branch.
+Test: tests/binary.rs (work_merge_rebase_agent_crash_without_give_up_fails)
+
 WHEN the rebase agent completes the rebase successfully,
 THE SYSTEM SHALL set the new candidate-tip SHA on the Merge Candidate
 (`candidate_commit`), on every completed Write Task's `output.commit`,
@@ -801,7 +807,7 @@ Per-task SHA fidelity is intentionally lossy; per-task contribution
 remains visible through the Attempt's Task list and artifact directories.
 Test: tests/binary.rs (work_merge_rebase_provenance_updated_after_rebase)
 Test: src/work_merge_executor.rs (regenerate_provenance_updates_all_write_tasks_and_candidate)
-Test: src/work_merge_executor.rs (regenerate_provenance_reshape_single_tip)
+Test: src/work_merge_executor.rs (regenerate_provenance_leaves_non_write_tasks_unchanged)
 
 WHEN the rebase agent finishes resolving conflicts and before committing
 each resolution,

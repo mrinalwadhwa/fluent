@@ -52,6 +52,26 @@ cleanup_test_project() {
 write_mock_claude() {
   cat > "${TEST_DIR}/bin/claude" <<'MOCK_SCRIPT'
 #!/usr/bin/env bash
+# Detect rebase agent invocations via -p flag
+PROMPT=""
+for arg in "$@"; do
+  if [ "$PREV_WAS_P" = "1" ]; then
+    PROMPT="$arg"
+    break
+  fi
+  if [ "$arg" = "-p" ]; then
+    PREV_WAS_P=1
+  else
+    PREV_WAS_P=0
+  fi
+done
+
+if printf '%s' "$PROMPT" | grep -q "Rebase the candidate branch onto"; then
+  TARGET=$(printf '%s' "$PROMPT" | grep -o 'onto `[^`]*`' | sed 's/onto `//;s/`//')
+  git rebase "$TARGET" 2>/dev/null
+  exit $?
+fi
+
 case "$PWD" in
   */work-6-work-1-attempt-1)
     if printf '%s' "$*" | grep -q "Address the following merge-time review findings"; then
@@ -451,8 +471,8 @@ test_work_merge_rebase_failure_leaves_target_unchanged() {
   [ "$(cat merge-output.txt)" = "target version" ] || RESULT=1
   [ "$(json_value '.merge_candidates[0].merge_state.status')" = "failed" ] || RESULT=1
   [ "$(json_value '.merge_candidates[0].review_state')" = "pending" ] || RESULT=1
-  assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" "rebase" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/stderr")" "rebase" || RESULT=1
+  assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" "Rebase agent failed" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stderr")" "Rebase agent failed" || RESULT=1
   if git -C ../work-6-work-1-attempt-1 status 2>&1 | grep -qi "rebase in progress"; then
     printf '    FAIL: rebase remains in progress after merge failure\n'
     RESULT=1

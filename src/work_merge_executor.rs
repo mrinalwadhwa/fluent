@@ -1332,35 +1332,61 @@ mod tests {
     }
 
     #[test]
-    fn regenerate_provenance_reshape_single_tip() {
+    fn regenerate_provenance_leaves_non_write_tasks_unchanged() {
         let (_tmp, store, _item, candidate_id) = completed_write_item();
 
-        regenerate_provenance(
-            &store,
-            "work-1",
-            &candidate_id,
-            "attempt-1",
-            "squashed-single-sha",
-        )
-        .unwrap();
+        // Add a rebase task with its own commit to verify it is not modified
+        let mut item = store.read_work_item("work-1").unwrap();
+        let attempt = item.attempts.first_mut().unwrap();
+        let workspace = attempt.tasks[0].workspace_access.writes[0].clone();
+        let rebase_task = Task {
+            id: "attempt-1-rebase".to_string(),
+            kind: TaskKind::Rebase,
+            status: TaskStatus::Complete,
+            role: "rebase".to_string(),
+            instructions: None,
+            work_item_id: "work-1".to_string(),
+            attempt_id: Some("attempt-1".to_string()),
+            workspace_access: WorkspaceAccess {
+                reads: Vec::new(),
+                writes: vec![workspace],
+            },
+            artifact_area: None,
+            review_context: None,
+            input_artifacts: Vec::new(),
+            output: None,
+        };
+        attempt.tasks.push(rebase_task);
+        store.write_work_item(&item).unwrap();
+
+        regenerate_provenance(&store, "work-1", &candidate_id, "attempt-1", "new-tip-sha")
+            .unwrap();
 
         let item = store.read_work_item("work-1").unwrap();
         let attempt = &item.attempts[0];
 
-        let write_commits: Vec<_> = attempt
-            .tasks
-            .iter()
-            .filter(|t| t.kind == TaskKind::Write && t.status == TaskStatus::Complete)
-            .map(|t| t.output.as_ref().unwrap().commit.as_str())
-            .collect();
-        assert_eq!(write_commits, vec!["squashed-single-sha", "squashed-single-sha"]);
+        // Write tasks should be updated
+        for task in &attempt.tasks {
+            if task.kind == TaskKind::Write && task.status == TaskStatus::Complete {
+                assert_eq!(
+                    task.output.as_ref().unwrap().commit,
+                    "new-tip-sha",
+                    "write task {} should be updated",
+                    task.id
+                );
+            }
+        }
+
+        // Rebase task should remain unmodified
+        let rebase = attempt.tasks.iter().find(|t| t.kind == TaskKind::Rebase).unwrap();
+        assert!(rebase.output.is_none(), "rebase task output should remain None");
 
         let candidate = item
             .merge_candidates
             .iter()
             .find(|c| c.id == candidate_id)
             .unwrap();
-        assert_eq!(candidate.candidate_commit, "squashed-single-sha");
+        assert_eq!(candidate.candidate_commit, "new-tip-sha");
     }
 
     #[test]

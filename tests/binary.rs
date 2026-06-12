@@ -3642,7 +3642,7 @@ fn work_merge_rebase_resolves_trivial_conflict() {
 
     // Verify both contents are present (conflict resolved by keeping both)
     let merged = fs::read_to_string(main_dir.join("shared.txt")).unwrap();
-    assert!(merged.contains("target content") || merged.contains("shared content"));
+    assert!(merged.contains("target content") && merged.contains("shared content"));
 }
 
 #[test]
@@ -3701,11 +3701,9 @@ fn work_merge_rebase_gives_up_transitions_to_needs_user() {
 
     // Target unchanged
     assert_eq!(git_head(&main_dir), main_before_merge);
-    // Candidate workspace restored
-    assert_eq!(
-        git_head(&candidate_workspace),
-        git_head(&candidate_workspace)
-    );
+    // Candidate workspace restored to pre-merge state
+    let candidate_head = git_head(&candidate_workspace);
+    assert_ne!(candidate_head, main_before_merge);
 
     let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];
@@ -3721,6 +3719,78 @@ fn work_merge_rebase_gives_up_transitions_to_needs_user() {
         .collect();
     assert_eq!(rebase_tasks.len(), 1);
     assert_eq!(rebase_tasks[0]["status"], "needs-user");
+}
+
+#[test]
+fn work_merge_rebase_agent_crash_without_give_up_fails() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Agent crash"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-rebase-crash");
+    write_mock_claude(&bin_dir, &rebase_crash_mock_script());
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    commit_file(
+        &main_dir,
+        "README.md",
+        "target readme\n",
+        "Update README from target",
+    );
+    let main_before_merge = git_head(&main_dir);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "merge",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Rebase agent failed"));
+
+    // Target unchanged
+    assert_eq!(git_head(&main_dir), main_before_merge);
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let candidate = &value["merge_candidates"][0];
+    assert_eq!(candidate["merge_state"]["status"], "failed");
+
+    // Rebase task should show failed status (not needs-user)
+    let attempt = &value["attempts"][0];
+    let rebase_tasks: Vec<_> = attempt["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["kind"] == "rebase")
+        .collect();
+    assert_eq!(rebase_tasks.len(), 1);
+    assert_eq!(rebase_tasks[0]["status"], "failed");
 }
 
 #[test]
@@ -7596,6 +7666,39 @@ if echo "$PROMPT" | grep -q "Rebase the candidate branch"; then
     mkdir -p "$ARTIFACT_DIR"
     printf 'Cannot resolve conflict in README.md\n' > "$ARTIFACT_DIR/give-up.md"
   fi
+  exit 1
+fi
+
+case "$PWD" in
+  */work-6-work-1-attempt-1)
+    printf 'candidate readme\n' > README.md
+    git add README.md
+    git commit -m "Update README from candidate" >/dev/null
+    ;;
+  *)
+    printf 'Verdict: pass\n\nLoop review passed.\n' > review.md
+    ;;
+esac
+exit 0
+"##
+    .to_string()
+}
+
+fn rebase_crash_mock_script() -> String {
+    r##"#!/bin/bash
+# Detect rebase invocations by checking for the rebase prompt
+PROMPT=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-p" ]; then
+    shift
+    PROMPT="$1"
+    break
+  fi
+  shift
+done
+
+if echo "$PROMPT" | grep -q "Rebase the candidate branch"; then
+  # Simulate an agent crash: exit non-zero without writing give-up.md
   exit 1
 fi
 
