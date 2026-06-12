@@ -783,9 +783,6 @@ consecutive no-progress streak has accumulated.
 Test: tests/binary.rs (work_attempt_run_counts_already_planned_followup_against_budget)
 Test: tests/binary.rs (work_attempt_run_plans_followup_for_failed_reviews)
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop counts preplanned follow-up against budget)
-Test: tests/binary.rs (work_attempt_run_plans_followup_for_failed_reviews)
-Test: tests/binary.rs (work_attempt_run_counts_already_planned_followup_against_budget)
-Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop counts preplanned follow-up against budget)
 
 WHEN no completed review artifact has a failing verdict and any completed
 review artifact has an uncertain or missing verdict,
