@@ -6,6 +6,71 @@ observations-resolved.md with the resolution context.
 
 ---
 
+2026-06-12 — Manage observations as independent files instead of one
+monolithic `observations.md`. Each observation gets its own file
+(e.g., `.factory/observations/<id>.md`) with its own filename-anchored
+ID. Resolved observations move to `.factory/observations/resolved/`
+(or equivalent sibling folder) rather than concatenating into a
+shared `observations-resolved.md`. This reduces the chance of
+conflicts on observation files — two Work Items that both add
+observations land in different files and never compete for the same
+git anchor.
+
+Trigger: the additive conflict in `.factory/observations-resolved.md`
+that blocked the `fargate-teardown-command` merge (recorded in the
+agentic-rebase observation below) happened because two Work Items
+each appended a "Resolved" block to the same shared file at the same
+anchor line. Per-file observations would have made that conflict
+impossible.
+
+Open questions for the brief:
+- ID format (timestamp-kebab matching Factory's other conventions
+  vs. content-hashed vs. user-chosen?).
+- Migration path for the existing concatenated files (one-shot
+  split vs. accept-as-is and apply per-file going forward).
+- Index/listing UX so the open queue is still scannable as a flat
+  list (auto-generated `INDEX.md` from filenames + first lines?
+  CLI command? Both?).
+
+2026-06-12 — `factory work merge` should run rebase as an agentic
+step, not a pure `git rebase` followed by hook chain. The rebase
+itself should be handled by an agent so trivial conflicts (additive
+edits to `.factory/observations-resolved.md`, log files, append-only
+docs) get resolved inline. No reviewers needed after the rebase step —
+the rebase agent's output IS the merge candidate to fast-forward,
+gated by `check-pre-merge` / `fix-pre-merge` as today.
+
+Concrete trigger: during the parallel speed test for
+`fargate-teardown-command`, the candidate rebased onto a main that
+had just received a sibling Work Item's commits plus an
+auto-generated `post-merge-review-fix-main-*` commit. The conflict
+in `.factory/observations-resolved.md` was purely additive (both
+branches appended a "Resolved" block at the same anchor); `git
+rebase` bailed before any hook ran. Manual resolution required
+editing the file in the candidate worktree, continuing the rebase,
+then updating Merge Candidate JSON, both write Task JSONs, and the
+Attempt JSON to point at the new rebased commit SHAs — Factory's
+post-rebase provenance checks (`candidate_commit` on the Merge
+Candidate, `output.commit` on each write Task, `artifacts[*].path`
+on the Attempt) all carry the pre-rebase SHAs. Five JSON files
+touched for one trivial conflict.
+
+Two coupled improvements:
+
+1. Make the rebase step in `factory work merge` agentic. The agent
+   runs `git rebase main` inside the candidate workspace, resolves
+   conflicts inline with project context, commits the resolution,
+   and returns the new candidate-tip SHA.
+2. Have `factory work merge` regenerate post-rebase provenance from
+   git (re-derive the per-write-task SHAs and update the Merge
+   Candidate / Attempt / Task JSONs atomically) instead of treating
+   the pre-rebase SHAs as immutable. The agent rebase already
+   produces the right SHAs; provenance just needs to follow.
+
+Without (1), every sibling-Work-Item-touching-the-same-docs scenario
+needs human intervention. Without (2), even an agentic rebase has
+to surgery five JSON files before merge accepts the candidate.
+
 2026-06-12 — Critical bug in slice-3 post-merge review:
 `SourceCheckoutReviewGuard::finish()` (in
 `src/work_task_executor.rs:566`) restores `.factory/` state to a
