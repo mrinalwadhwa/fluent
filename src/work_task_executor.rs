@@ -1299,7 +1299,12 @@ fn prepare_reviewer_build_cache(
             log_dir,
             ..Default::default()
         };
-        match hooks::run_hook(candidate_workspace, hook_name, candidate_workspace, &context) {
+        match hooks::run_hook(
+            candidate_workspace,
+            hook_name,
+            candidate_workspace,
+            &context,
+        ) {
             Ok(Some(outcome)) if outcome.passed => {
                 eprintln!(
                     "  Reviewer prep     {hook_name} hook passed (log: {})",
@@ -1957,7 +1962,9 @@ mod tests {
             "prompt should tell reviewer they can read candidate build outputs"
         );
         assert!(
-            prompts.review_prompt.contains("may NOT write to the candidate"),
+            prompts
+                .review_prompt
+                .contains("may NOT write to the candidate"),
             "prompt should tell reviewer not to write to candidate"
         );
         assert!(
