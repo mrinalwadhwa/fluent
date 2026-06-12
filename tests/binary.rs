@@ -3157,7 +3157,7 @@ fn work_merge_candidate_failed_check_leaves_target_unchanged() {
         .success();
 
     let bin_dir = tmp.path().join("bin-check-fail");
-    write_mock_claude(&bin_dir, &loop_mock_script("pass"));
+    write_mock_claude(&bin_dir, &rebase_mock_script("pass"));
     factory_cmd()
         .current_dir(&main_dir)
         .args([
@@ -3231,7 +3231,7 @@ fn work_merge_candidate_warns_when_cleanup_fails_after_landing() {
         .success();
 
     let bin_dir = tmp.path().join("bin-cleanup-warning-pass");
-    write_mock_claude(&bin_dir, &loop_mock_script("pass"));
+    write_mock_claude(&bin_dir, &rebase_mock_script("pass"));
     factory_cmd()
         .current_dir(&main_dir)
         .args([
@@ -3298,7 +3298,7 @@ fn work_merge_candidate_rerun_after_cleanup_preserves_landed_state() {
         .success();
 
     let bin_dir = tmp.path().join("bin-cleanup-rerun-pass");
-    write_mock_claude(&bin_dir, &loop_mock_script("pass"));
+    write_mock_claude(&bin_dir, &rebase_mock_script("pass"));
     factory_cmd()
         .current_dir(&main_dir)
         .args([
@@ -3387,7 +3387,7 @@ fn work_merge_candidate_rejects_stale_stored_provenance_without_rewrite() {
         .success();
 
     let bin_dir = tmp.path().join("bin-stale-provenance");
-    write_mock_claude(&bin_dir, &loop_mock_script("pass"));
+    write_mock_claude(&bin_dir, &rebase_mock_script("pass"));
     factory_cmd()
         .current_dir(&main_dir)
         .args([
@@ -3452,7 +3452,7 @@ fn work_merge_candidate_rebases_when_target_advanced() {
         .success();
 
     let bin_dir = tmp.path().join("bin-rebase-pass");
-    write_mock_claude(&bin_dir, &loop_mock_script("pass"));
+    write_mock_claude(&bin_dir, &rebase_mock_script("pass"));
     factory_cmd()
         .current_dir(&main_dir)
         .args([
@@ -3499,6 +3499,18 @@ fn work_merge_candidate_rebases_when_target_advanced() {
     let candidate = &value["merge_candidates"][0];
     assert_eq!(candidate["merge_state"]["status"], "merged");
     assert_eq!(candidate["merge_state"]["merged_commit"], main_after_merge);
+
+    // Rebase task should appear in the attempt
+    let attempt = &value["attempts"][0];
+    let rebase_tasks: Vec<_> = attempt["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["kind"] == "rebase")
+        .collect();
+    assert_eq!(rebase_tasks.len(), 1);
+    assert_eq!(rebase_tasks[0]["id"], "attempt-1-rebase");
+    assert_eq!(rebase_tasks[0]["status"], "complete");
 }
 
 #[test]
@@ -3519,19 +3531,7 @@ fn work_merge_candidate_rebase_failure_leaves_target_unchanged() {
     let bin_dir = tmp.path().join("bin-rebase-conflict");
     write_mock_claude(
         &bin_dir,
-        r##"#!/bin/bash
-case "$PWD" in
-  */work-6-work-1-attempt-1)
-    printf 'candidate readme\n' > README.md
-    git add README.md
-    git commit -m "Update README from candidate" >/dev/null
-    ;;
-  *)
-    printf 'Verdict: pass\n\nLoop review passed.\n' > review.md
-    ;;
-esac
-exit 0
-"##,
+        &rebase_give_up_mock_script(),
     );
     factory_cmd()
         .current_dir(&main_dir)
@@ -3569,20 +3569,236 @@ exit 0
         .env("PATH", mock_path(&bin_dir))
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Rebase failed"));
+        .stderr(predicate::str::contains("needs-user"));
 
     assert_eq!(git_head(&main_dir), main_before_merge);
     assert_eq!(git_head(&candidate_workspace), candidate_head);
     let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];
-    assert_eq!(candidate["review_state"], "pending");
-    assert_eq!(candidate["merge_state"]["status"], "failed");
+    assert_eq!(candidate["merge_state"]["status"], "needs-user");
     assert!(
         candidate["merge_state"]["failure_reason"]
             .as_str()
             .unwrap()
-            .contains("Rebase failed")
+            .contains("Cannot resolve conflict")
     );
+}
+
+#[test]
+fn work_merge_rebase_resolves_trivial_conflict() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Trivial conflict"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-rebase-resolve");
+    write_mock_claude(&bin_dir, &rebase_conflict_resolve_mock_script());
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    // Create a conflicting change on main
+    commit_file(
+        &main_dir,
+        "shared.txt",
+        "target content\n",
+        "Add shared from target",
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "merge",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let candidate = &value["merge_candidates"][0];
+    assert_eq!(candidate["merge_state"]["status"], "merged");
+
+    // Verify both contents are present (conflict resolved by keeping both)
+    let merged = fs::read_to_string(main_dir.join("shared.txt")).unwrap();
+    assert!(merged.contains("target content") || merged.contains("shared content"));
+}
+
+#[test]
+fn work_merge_rebase_gives_up_transitions_to_needs_user() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Give up"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-rebase-giveup");
+    write_mock_claude(&bin_dir, &rebase_give_up_mock_script());
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
+    commit_file(
+        &main_dir,
+        "README.md",
+        "target readme\n",
+        "Update README from target",
+    );
+    let main_before_merge = git_head(&main_dir);
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "merge",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("needs-user"));
+
+    // Target unchanged
+    assert_eq!(git_head(&main_dir), main_before_merge);
+    // Candidate workspace restored
+    assert_eq!(
+        git_head(&candidate_workspace),
+        git_head(&candidate_workspace)
+    );
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let candidate = &value["merge_candidates"][0];
+    assert_eq!(candidate["merge_state"]["status"], "needs-user");
+
+    // Rebase task should show needs-user status
+    let attempt = &value["attempts"][0];
+    let rebase_tasks: Vec<_> = attempt["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["kind"] == "rebase")
+        .collect();
+    assert_eq!(rebase_tasks.len(), 1);
+    assert_eq!(rebase_tasks[0]["status"], "needs-user");
+}
+
+#[test]
+fn work_merge_rebase_provenance_updated_after_rebase() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Provenance update"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-rebase-prov");
+    write_mock_claude(&bin_dir, &rebase_mock_script("pass"));
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    // Advance target so rebase creates new SHAs
+    commit_file(
+        &main_dir,
+        "target-only.txt",
+        "target content\n",
+        "Advance target",
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "merge",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let candidate = &value["merge_candidates"][0];
+    let merged_commit = candidate["merge_state"]["merged_commit"].as_str().unwrap();
+
+    // candidate_commit should have been updated to the post-rebase tip
+    let candidate_commit = candidate["candidate_commit"].as_str().unwrap();
+    assert_eq!(candidate_commit, merged_commit);
+
+    // Write task output.commit should also have been updated
+    let attempt = &value["attempts"][0];
+    let write_tasks: Vec<_> = attempt["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["kind"] == "write" && t["status"] == "complete")
+        .collect();
+    assert!(!write_tasks.is_empty());
+    for task in &write_tasks {
+        assert_eq!(
+            task["output"]["commit"].as_str().unwrap(),
+            merged_commit,
+            "write task output commit should match merged commit after provenance regeneration"
+        );
+    }
 }
 
 #[test]
@@ -7322,6 +7538,123 @@ esac
 exit 0
 "##
     )
+}
+
+fn rebase_mock_script(verdict: &str) -> String {
+    format!(
+        r##"#!/bin/bash
+# Detect rebase invocations by checking for the rebase prompt
+PROMPT=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-p" ]; then
+    shift
+    PROMPT="$1"
+    break
+  fi
+  shift
+done
+
+if echo "$PROMPT" | grep -q "Rebase the candidate branch"; then
+  # Extract target branch from prompt
+  TARGET=$(echo "$PROMPT" | grep -o 'onto `[^`]*`' | sed 's/onto `//;s/`//')
+  git rebase "$TARGET" 2>/dev/null
+  exit $?
+fi
+
+case "$PWD" in
+  */work-6-work-1-attempt-1)
+    printf 'loop output\n' > loop-output.txt
+    git add loop-output.txt
+    git commit -m "Add loop output" >/dev/null
+    ;;
+  *)
+    printf 'Verdict: {verdict}\n\nLoop review.\n' > review.md
+    ;;
+esac
+exit 0
+"##
+    )
+}
+
+fn rebase_give_up_mock_script() -> String {
+    r##"#!/bin/bash
+# Detect rebase invocations by checking for the rebase prompt
+PROMPT=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-p" ]; then
+    shift
+    PROMPT="$1"
+    break
+  fi
+  shift
+done
+
+if echo "$PROMPT" | grep -q "Rebase the candidate branch"; then
+  # Extract artifact dir from prompt for give-up.md
+  ARTIFACT_DIR=$(echo "$PROMPT" | grep -o '/[^ ]*/give-up.md' | sed 's|/give-up.md$||')
+  if [ -n "$ARTIFACT_DIR" ]; then
+    mkdir -p "$ARTIFACT_DIR"
+    printf 'Cannot resolve conflict in README.md\n' > "$ARTIFACT_DIR/give-up.md"
+  fi
+  exit 1
+fi
+
+case "$PWD" in
+  */work-6-work-1-attempt-1)
+    printf 'candidate readme\n' > README.md
+    git add README.md
+    git commit -m "Update README from candidate" >/dev/null
+    ;;
+  *)
+    printf 'Verdict: pass\n\nLoop review passed.\n' > review.md
+    ;;
+esac
+exit 0
+"##
+    .to_string()
+}
+
+fn rebase_conflict_resolve_mock_script() -> String {
+    r##"#!/bin/bash
+PROMPT=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-p" ]; then
+    shift
+    PROMPT="$1"
+    break
+  fi
+  shift
+done
+
+if echo "$PROMPT" | grep -q "Rebase the candidate branch"; then
+  TARGET=$(echo "$PROMPT" | grep -o 'onto `[^`]*`' | sed 's/onto `//;s/`//')
+  git rebase "$TARGET" 2>/dev/null
+  if [ $? -ne 0 ]; then
+    # Resolve conflicts by keeping both sides
+    for f in $(git diff --name-only --diff-filter=U); do
+      # Remove conflict markers, keep all content
+      sed -i '' -e '/^<<<<<<</d' -e '/^=======/d' -e '/^>>>>>>>/d' "$f" 2>/dev/null || \
+      sed -i -e '/^<<<<<<</d' -e '/^=======/d' -e '/^>>>>>>>/d' "$f"
+      git add "$f"
+    done
+    GIT_EDITOR=true git rebase --continue 2>/dev/null
+  fi
+  exit $?
+fi
+
+case "$PWD" in
+  */work-6-work-1-attempt-1)
+    printf 'shared content\n' >> shared.txt
+    git add shared.txt
+    git commit -m "Add shared content from candidate" >/dev/null
+    ;;
+  *)
+    printf 'Verdict: pass\n\nLoop review passed.\n' > review.md
+    ;;
+esac
+exit 0
+"##
+    .to_string()
 }
 
 fn review_only_mock_script(verdict: &str) -> String {

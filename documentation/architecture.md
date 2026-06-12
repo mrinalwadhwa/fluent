@@ -214,11 +214,33 @@ Factory does not append them as additional prompt text.
 `factory work merge-candidate <work-item-id> <merge-candidate-id>` prints
 one stored Merge Candidate as pretty JSON. This command only reads the
 boundary object. `factory work merge <work-item-id> <merge-candidate-id>`
-executes a Merge Candidate that still needs to land: it rebases the
-candidate workspace against the target branch, runs configured pre-merge
-checks in the candidate workspace, runs the required reviewer set with
-merge-time context, then fast-forwards the target branch to the updated
-candidate head. Merge-time review prepares one detached reviewer
+executes a Merge Candidate that still needs to land: it invokes an agent
+to rebase the candidate workspace against the target branch, regenerates
+post-rebase provenance, runs configured pre-merge checks in the candidate
+workspace, runs the required reviewer set with merge-time context, then
+fast-forwards the target branch to the updated candidate head.
+
+The rebase step is recorded as a `TaskKind::Rebase` Task on the Attempt,
+with its own artifact directory and prompt log. The agent runs
+`git rebase <target>` inside the candidate workspace, resolving trivial
+conflicts inline (additive doc edits, observation files, append-only
+state). If the agent cannot resolve a conflict, it writes a diagnostic
+to `give-up.md` in its artifact directory and exits non-zero; the Merge
+Candidate transitions to `needs-user` with the diagnostic attached. When
+the rebase succeeds, Factory regenerates provenance: it updates every
+completed Write Task's `output.commit`, the Attempt's
+`artifacts[*].path` entries, and the Merge Candidate's
+`candidate_commit` to the new candidate-tip SHA. Per-task SHA fidelity
+is intentionally lossy; per-task contribution remains visible through the
+Attempt's Task list, the per-Task prompt logs, and the per-Task artifact
+directories. The agent may squash, reorder, reword, or drop redundant
+commits during rebase as long as all pre-rebase content changes are
+preserved. No project hooks run during the rebase step; `fix-pre-merge`
+continues to own post-rebase cleanup. Re-running `factory work merge`
+after a failed rebase creates a new rebase Task (with an incremented
+suffix) and operates on the candidate workspace in its current state.
+
+Merge-time review prepares one detached reviewer
 worktree per role at the post-rebase candidate commit and runs those
 roles in parallel. Each reviewer worktree lives at a sibling path
 `../review-<work-item-id-bytelen>-<work-item-id>-<attempt-id>-<reviewer>`

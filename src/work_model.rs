@@ -854,7 +854,10 @@ impl Attempt {
         }
         for task in &self.tasks {
             task.validate()?;
-            if self.status == AttemptStatus::Complete && task.status != TaskStatus::Complete {
+            if self.status == AttemptStatus::Complete
+                && task.status != TaskStatus::Complete
+                && task.kind != TaskKind::Rebase
+            {
                 return Err(WorkModelError::CompleteAttemptHasIncompleteTask {
                     attempt_id: self.id.clone(),
                     task_id: task.id.clone(),
@@ -1102,6 +1105,7 @@ pub enum TaskKind {
     Write,
     Review,
     Merge,
+    Rebase,
     Report,
     Learn,
     Probe,
@@ -1113,6 +1117,7 @@ impl TaskKind {
             Self::Write => "write",
             Self::Review => "review",
             Self::Merge => "merge",
+            Self::Rebase => "rebase",
             Self::Report => "report",
             Self::Learn => "learn",
             Self::Probe => "probe",
@@ -1128,6 +1133,7 @@ impl FromStr for TaskKind {
             "write" => Ok(Self::Write),
             "review" => Ok(Self::Review),
             "merge" => Ok(Self::Merge),
+            "rebase" => Ok(Self::Rebase),
             "report" => Ok(Self::Report),
             "learn" => Ok(Self::Learn),
             "probe" => Ok(Self::Probe),
@@ -3032,6 +3038,7 @@ mod tests {
         assert_eq!("write".parse::<TaskKind>().unwrap(), TaskKind::Write);
         assert_eq!("review".parse::<TaskKind>().unwrap(), TaskKind::Review);
         assert_eq!("merge".parse::<TaskKind>().unwrap(), TaskKind::Merge);
+        assert_eq!("rebase".parse::<TaskKind>().unwrap(), TaskKind::Rebase);
         assert_eq!("report".parse::<TaskKind>().unwrap(), TaskKind::Report);
         assert_eq!("learn".parse::<TaskKind>().unwrap(), TaskKind::Learn);
         assert_eq!("probe".parse::<TaskKind>().unwrap(), TaskKind::Probe);

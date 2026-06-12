@@ -765,10 +765,63 @@ THEN THE SYSTEM SHALL leave the target branch and stored Merge Candidate
 state unchanged.
 Test: tests/binary.rs (work_merge_candidate_rejects_stale_stored_provenance_without_rewrite)
 
-WHEN the target branch has advanced since a Merge Candidate was created,
-THE SYSTEM SHALL rebase the candidate workspace against the target branch
-before checks, reviewers, and fast-forward merge.
+WHEN `factory work merge <work-item-id> <merge-candidate-id>` reaches
+the rebase step,
+THE SYSTEM SHALL invoke an agent to perform `git rebase <target>` inside
+the candidate workspace and produce a rebased candidate-tip commit,
+regardless of whether conflicts would have arisen from a non-agentic
+rebase.
 Test: tests/binary.rs (work_merge_candidate_rebases_when_target_advanced)
+
+WHEN the rebase step is invoked,
+THE SYSTEM SHALL record the rebase as a Task on the Attempt with its own
+ID, kind `rebase`, artifact directory, prompt log, and status, visible
+via `factory work show <work-item-id>`.
+Test: tests/binary.rs (work_merge_candidate_rebases_when_target_advanced)
+
+WHEN the rebase agent encounters one or more conflicts,
+THE SYSTEM SHALL provide the agent with the conflicting files' content
+and the conflict markers, and SHALL allow the agent to resolve those
+conflicts in-place, mark them resolved with `git add`, and continue the
+rebase to completion.
+Test: tests/binary.rs (work_merge_rebase_resolves_trivial_conflict)
+
+IF the rebase agent reports it cannot resolve the conflicts,
+THEN THE SYSTEM SHALL transition the Merge Candidate to `needs-user`,
+attach the conflict context to the rebase Task's artifact directory, and
+exit without modifying the target branch.
+Test: tests/binary.rs (work_merge_rebase_gives_up_transitions_to_needs_user)
+Test: tests/binary.rs (work_merge_candidate_rebase_failure_leaves_target_unchanged)
+
+WHEN the rebase agent completes the rebase successfully,
+THE SYSTEM SHALL set the new candidate-tip SHA on the Merge Candidate
+(`candidate_commit`), on every completed Write Task's `output.commit`,
+and on the Attempt's `artifacts[*].path` entries for those Tasks.
+Per-task SHA fidelity is intentionally lossy; per-task contribution
+remains visible through the Attempt's Task list and artifact directories.
+Test: tests/binary.rs (work_merge_rebase_provenance_updated_after_rebase)
+Test: src/work_merge_executor.rs (regenerate_provenance_updates_all_write_tasks_and_candidate)
+Test: src/work_merge_executor.rs (regenerate_provenance_reshape_single_tip)
+
+WHEN the rebase agent finishes resolving conflicts and before committing
+each resolution,
+THE SYSTEM SHALL NOT invoke project hooks (e.g., format, lint).
+Post-rebase cleanup of the candidate state remains the responsibility of
+`fix-pre-merge`.
+
+WHEN the rebase step completes successfully,
+THE SYSTEM SHALL proceed to `check-pre-merge` and `fix-pre-merge`
+unchanged from current behavior, and SHALL NOT run any review Tasks
+between the rebase Task and the fast-forward.
+Test: tests/binary.rs (work_merge_candidate_rebases_when_target_advanced)
+
+WHEN the rebase Task or a subsequent merge step fails and the user
+resolves the underlying issue, then re-runs `factory work merge` for the
+same Merge Candidate,
+THE SYSTEM SHALL re-run the rebase step from the candidate workspace in
+its current state and SHALL NOT reject the candidate solely because
+earlier provenance pointers were updated.
+Test: src/work_merge_executor.rs (next_rebase_task_id_increments)
 
 IF the target branch moves after merge checks and reviewers run but
 before the fast-forward merge,
@@ -776,13 +829,6 @@ THEN THE SYSTEM SHALL reject the merge, preserve the moved target branch,
 and record merge status `failed` with a failure reason on the stored
 Merge Candidate.
 Test: tests/binary.rs (work_merge_candidate_rejects_target_moved_during_review)
-
-IF rebasing the candidate workspace against the target branch fails while
-`factory work merge <work-item-id> <merge-candidate-id>` executes,
-THEN THE SYSTEM SHALL abort the rebase, leave the target branch
-unchanged, and record merge status `failed` with a failure reason on the
-stored Merge Candidate.
-Test: tests/binary.rs (work_merge_candidate_rebase_failure_leaves_target_unchanged)
 
 WHEN `factory work merge <work-item-id> <merge-candidate-id>` lands a
 Merge Candidate,

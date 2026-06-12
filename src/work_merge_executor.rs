@@ -4,15 +4,17 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use crate::coder::CoderKind;
+use crate::coder::{CoderKind, CoderSandbox};
 use crate::content::ContentResolver;
 use crate::hooks::{self, HookContext, HookOutcome};
 use crate::work_model::{
-    ArtifactRef, MergeCandidateMergeState, MergeCandidateMergeStatus, MergeCandidateReviewState,
-    WORK_ARTIFACTS_DIR, WorkItem, WorkModelError, WorkModelStorageError, WorkModelStore,
-    resolve_expected_candidate_workspace_path,
+    ArtifactRef, MergeCandidate, MergeCandidateMergeState, MergeCandidateMergeStatus,
+    MergeCandidateReviewState, Task, TaskKind, TaskStatus, WORK_ARTIFACTS_DIR, WorkItem,
+    WorkModelError, WorkModelStorageError, WorkModelStore, WorkspaceAccess,
+    resolve_expected_candidate_workspace_path, work_artifact_path,
 };
 use crate::worktree;
+use crate::{credential, os};
 
 pub struct WorkMergeConfig<'a> {
     pub project_root: &'a Path,
@@ -28,6 +30,11 @@ pub struct WorkMergeConfig<'a> {
 pub struct WorkMergeOutcome {
     pub merge_candidate_id: String,
     pub merged_commit: String,
+}
+
+enum RebaseOutcome {
+    Success { new_tip: String },
+    NeedsUser { diagnostic: String },
 }
 
 pub fn merge_candidate(config: WorkMergeConfig<'_>) -> Result<WorkMergeOutcome> {
@@ -133,7 +140,7 @@ fn recover_landed_candidate_result(
 
 fn execute_merge(
     config: &WorkMergeConfig<'_>,
-    _item: &WorkItem,
+    item: &WorkItem,
     candidate: &crate::work_model::MergeCandidate,
     source_workspace: &Path,
     target_workspace: &Path,
@@ -149,18 +156,40 @@ fn execute_merge(
         &["rev-parse", &candidate.target_branch],
         "resolve target branch",
     )?;
-    let source_head = head_commit(source_workspace)?;
-    if source_head != candidate.candidate_commit {
-        bail!(
-            "Merge Candidate {:?} expected source commit {} but workspace is at {}",
-            candidate.id,
-            candidate.candidate_commit,
-            source_head
-        );
-    }
 
     ensure_clean_worktree(source_workspace)?;
-    rebase_candidate(source_workspace, &candidate.target_branch)?;
+    let rebase_outcome = rebase_candidate(
+        config,
+        item,
+        candidate,
+        source_workspace,
+        &candidate.target_branch,
+        artifact_dir,
+    )?;
+    match rebase_outcome {
+        RebaseOutcome::NeedsUser { diagnostic } => {
+            record_candidate_needs_user(
+                config.store,
+                config.work_item_id,
+                &candidate.id,
+                diagnostic,
+            )?;
+            bail!(
+                "Rebase agent could not resolve conflicts for Merge Candidate {:?}; \
+                 status set to needs-user",
+                candidate.id
+            );
+        }
+        RebaseOutcome::Success { new_tip } => {
+            regenerate_provenance(
+                config.store,
+                config.work_item_id,
+                &candidate.id,
+                &candidate.attempt_id,
+                &new_tip,
+            )?;
+        }
+    }
     ensure_clean_worktree(source_workspace)?;
 
     let check_artifacts = match run_merge_checks(config, candidate, source_workspace, artifact_dir)
@@ -614,24 +643,269 @@ fn resolve_managed_candidate_workspace_path(
     )?)
 }
 
-fn rebase_candidate(source_workspace: &Path, target_branch: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args(["-C", &source_workspace.to_string_lossy()])
-        .args(["rebase", target_branch])
-        .output()
-        .context("Failed to run git rebase")?;
-    if output.status.success() {
-        return Ok(());
+fn rebase_candidate(
+    config: &WorkMergeConfig<'_>,
+    item: &WorkItem,
+    candidate: &MergeCandidate,
+    source_workspace: &Path,
+    target_branch: &str,
+    artifact_dir: &Path,
+) -> Result<RebaseOutcome> {
+    let rebase_task_id = next_rebase_task_id(item, &candidate.attempt_id);
+    let rebase_artifact_dir = artifact_dir.join(&rebase_task_id);
+    fs::create_dir_all(&rebase_artifact_dir)?;
+
+    let rebase_task = Task {
+        id: rebase_task_id.clone(),
+        kind: TaskKind::Rebase,
+        status: TaskStatus::Executing,
+        role: "rebase".to_string(),
+        instructions: None,
+        work_item_id: config.work_item_id.to_string(),
+        attempt_id: Some(candidate.attempt_id.clone()),
+        workspace_access: WorkspaceAccess {
+            reads: Vec::new(),
+            writes: vec![candidate.source_workspace.clone()],
+        },
+        artifact_area: Some(crate::work_model::TaskArtifactArea {
+            path: work_artifact_path(
+                config.work_item_id,
+                &candidate.attempt_id,
+                &rebase_task_id,
+            ),
+        }),
+        review_context: None,
+        input_artifacts: Vec::new(),
+        output: None,
+    };
+    add_rebase_task_to_attempt(config.store, config.work_item_id, &candidate.attempt_id, rebase_task)?;
+
+    let workspace_resolver = ContentResolver::new(Some(source_workspace));
+    let system_prompt = workspace_resolver
+        .resolve_content("prompts/work-rebase.md")
+        .unwrap_or_default();
+
+    let prompt = format!(
+        "Rebase the candidate branch onto `{target_branch}`.\n\n\
+         If you cannot resolve a conflict, write your diagnostic to:\n\
+         {artifact_dir}/give-up.md\n\n\
+         Then run `git rebase --abort` and exit with a non-zero exit code.",
+        artifact_dir = rebase_artifact_dir.display(),
+    );
+
+    let transcript_path = rebase_artifact_dir.join("transcript.jsonl");
+
+    if !config.no_sandbox {
+        os::check_prerequisites_for(config.coder_kind)?;
+        credential::inject_credentials()?;
+        credential::setup_git_signing();
     }
-    Command::new("git")
-        .args(["-C", &source_workspace.to_string_lossy()])
-        .args(["rebase", "--abort"])
-        .output()
-        .ok();
-    bail!(
-        "Rebase failed while updating Merge Candidate against {target_branch}:\n{}",
-        command_output(&output)
-    )
+
+    let (sandbox, _sandbox_profile) = if config.no_sandbox {
+        (CoderSandbox::None, None)
+    } else {
+        let common_git_dir = worktree::git_common_dir(source_workspace)?;
+        build_coder_sandbox(
+            config.coder_kind,
+            config.resolver,
+            source_workspace,
+            &[common_git_dir],
+        )?
+    };
+
+    eprintln!("  Factory           work rebase");
+    eprintln!("  Work Item         {}", config.work_item_id);
+    eprintln!("  Attempt           {}", candidate.attempt_id);
+    eprintln!("  Target            {target_branch}");
+    eprintln!("  Worktree          {}", source_workspace.display());
+
+    let coder = config.coder_kind.boxed(sandbox);
+    let exit_code = coder.run(
+        &prompt,
+        &system_prompt,
+        source_workspace,
+        config.extra_args,
+        &[],
+        Some(&transcript_path),
+    )?;
+
+    let give_up_path = rebase_artifact_dir.join("give-up.md");
+
+    if exit_code == 0 {
+        let new_tip = head_commit(source_workspace)?;
+        update_rebase_task_status(
+            config.store,
+            config.work_item_id,
+            &candidate.attempt_id,
+            &rebase_task_id,
+            TaskStatus::Complete,
+        )?;
+        Ok(RebaseOutcome::Success { new_tip })
+    } else if give_up_path.exists() {
+        Command::new("git")
+            .args(["-C", &source_workspace.to_string_lossy()])
+            .args(["rebase", "--abort"])
+            .output()
+            .ok();
+        let diagnostic = fs::read_to_string(&give_up_path)
+            .unwrap_or_else(|_| "Rebase agent gave up (no diagnostic)".to_string());
+        update_rebase_task_status(
+            config.store,
+            config.work_item_id,
+            &candidate.attempt_id,
+            &rebase_task_id,
+            TaskStatus::NeedsUser,
+        )?;
+        Ok(RebaseOutcome::NeedsUser { diagnostic })
+    } else {
+        Command::new("git")
+            .args(["-C", &source_workspace.to_string_lossy()])
+            .args(["rebase", "--abort"])
+            .output()
+            .ok();
+        update_rebase_task_status(
+            config.store,
+            config.work_item_id,
+            &candidate.attempt_id,
+            &rebase_task_id,
+            TaskStatus::Failed,
+        )?;
+        bail!(
+            "Rebase agent failed (exit code {exit_code}) while rebasing \
+             Merge Candidate {:?} against {target_branch}",
+            candidate.id
+        )
+    }
+}
+
+fn next_rebase_task_id(item: &WorkItem, attempt_id: &str) -> String {
+    let attempt = item.attempts.iter().find(|a| a.id == attempt_id);
+    let existing_count = attempt
+        .map(|a| a.tasks.iter().filter(|t| t.kind == TaskKind::Rebase).count())
+        .unwrap_or(0);
+    if existing_count == 0 {
+        format!("{attempt_id}-rebase")
+    } else {
+        format!("{attempt_id}-rebase-{}", existing_count + 1)
+    }
+}
+
+fn add_rebase_task_to_attempt(
+    store: &WorkModelStore,
+    work_item_id: &str,
+    attempt_id: &str,
+    task: Task,
+) -> Result<()> {
+    let mut item = read_work_item_or_not_found(store, work_item_id)?;
+    let attempt = item
+        .attempts
+        .iter_mut()
+        .find(|a| a.id == attempt_id)
+        .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", attempt_id))?;
+    attempt.tasks.push(task);
+    store.write_work_item(&item)?;
+    Ok(())
+}
+
+fn update_rebase_task_status(
+    store: &WorkModelStore,
+    work_item_id: &str,
+    attempt_id: &str,
+    task_id: &str,
+    status: TaskStatus,
+) -> Result<()> {
+    let mut item = read_work_item_or_not_found(store, work_item_id)?;
+    let attempt = item
+        .attempts
+        .iter_mut()
+        .find(|a| a.id == attempt_id)
+        .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", attempt_id))?;
+    if let Some(task) = attempt.tasks.iter_mut().find(|t| t.id == task_id) {
+        task.status = status;
+    }
+    store.write_work_item(&item)?;
+    Ok(())
+}
+
+fn record_candidate_needs_user(
+    store: &WorkModelStore,
+    work_item_id: &str,
+    candidate_id: &str,
+    diagnostic: String,
+) -> Result<()> {
+    update_candidate(store, work_item_id, candidate_id, |candidate| {
+        if candidate.merge_state.status == MergeCandidateMergeStatus::Merged
+            && candidate.merge_state.merged_commit.is_some()
+        {
+            return;
+        }
+        candidate.merge_state = MergeCandidateMergeState {
+            status: MergeCandidateMergeStatus::NeedsUser,
+            merged_commit: None,
+            failure_reason: Some(diagnostic),
+            check_artifacts: Vec::new(),
+            review_artifacts: Vec::new(),
+        };
+    })
+}
+
+fn regenerate_provenance(
+    store: &WorkModelStore,
+    work_item_id: &str,
+    candidate_id: &str,
+    attempt_id: &str,
+    new_tip: &str,
+) -> Result<()> {
+    let mut item = read_work_item_or_not_found(store, work_item_id)?;
+
+    let attempt = item
+        .attempts
+        .iter_mut()
+        .find(|a| a.id == attempt_id)
+        .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", attempt_id))?;
+
+    for task in &mut attempt.tasks {
+        if task.kind == TaskKind::Write && task.status == TaskStatus::Complete {
+            if let Some(ref mut output) = task.output {
+                output.commit = new_tip.to_string();
+            }
+        }
+    }
+
+    for artifact in &mut attempt.artifacts {
+        artifact.path = new_tip.to_string();
+    }
+
+    let candidate = item
+        .merge_candidates
+        .iter_mut()
+        .find(|c| c.id == candidate_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Merge Candidate {:?} not found in Work Item {:?}",
+                candidate_id,
+                work_item_id
+            )
+        })?;
+    candidate.candidate_commit = new_tip.to_string();
+
+    store.write_work_item(&item)?;
+    Ok(())
+}
+
+fn build_coder_sandbox(
+    coder_kind: CoderKind,
+    resolver: &ContentResolver,
+    working_dir: &Path,
+    additional_writable_roots: &[PathBuf],
+) -> Result<(CoderSandbox, Option<os::SandboxProfile>)> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut roots = vec![working_dir.to_path_buf()];
+    roots.extend(additional_writable_roots.iter().cloned());
+    let profile =
+        os::render_profile_for_access_for_coder(resolver, &home, &roots, &[], coder_kind)?;
+    let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
+    Ok((sandbox, Some(profile)))
 }
 
 fn cleanup_managed_workspace(project_root: &Path, source_workspace: &Path) -> Result<()> {
@@ -953,5 +1227,249 @@ mod tests {
             Some(merged_commit.as_str())
         );
         assert!(candidate.merge_state.failure_reason.is_none());
+    }
+
+    fn completed_write_item() -> (tempfile::TempDir, WorkModelStore, WorkItem, String) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Provenance test".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+
+        let attempt = item.attempts.first_mut().unwrap();
+        attempt.status = AttemptStatus::Complete;
+        attempt.review_state = Some(AttemptReviewState::Passed);
+
+        let task = attempt.tasks.first_mut().unwrap();
+        let workspace = task.workspace_access.writes.first().unwrap().clone();
+        task.status = TaskStatus::Complete;
+        task.output = Some(TaskOutput {
+            workspace_id: workspace.id.clone(),
+            workspace_path: workspace.path.clone(),
+            source_branch: "main".to_string(),
+            commit: "old-sha-1".to_string(),
+        });
+
+        let second_write = Task {
+            id: "attempt-1-write-2".to_string(),
+            kind: TaskKind::Write,
+            status: TaskStatus::Complete,
+            role: "author".to_string(),
+            instructions: None,
+            work_item_id: "work-1".to_string(),
+            attempt_id: Some("attempt-1".to_string()),
+            workspace_access: WorkspaceAccess {
+                reads: Vec::new(),
+                writes: vec![workspace.clone()],
+            },
+            artifact_area: None,
+            review_context: None,
+            input_artifacts: Vec::new(),
+            output: Some(TaskOutput {
+                workspace_id: workspace.id,
+                workspace_path: workspace.path,
+                source_branch: "main".to_string(),
+                commit: "old-sha-2".to_string(),
+            }),
+        };
+        attempt.tasks.push(second_write);
+        attempt.artifacts.push(ArtifactRef {
+            producer_id: "attempt-1-write-1".to_string(),
+            path: "old-sha-1".to_string(),
+        });
+        attempt.artifacts.push(ArtifactRef {
+            producer_id: "attempt-1-write-2".to_string(),
+            path: "old-sha-2".to_string(),
+        });
+
+        let candidate_id = item.create_or_get_merge_candidate("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+        (tmp, store, item, candidate_id)
+    }
+
+    #[test]
+    fn regenerate_provenance_updates_all_write_tasks_and_candidate() {
+        let (_tmp, store, _item, candidate_id) = completed_write_item();
+
+        regenerate_provenance(&store, "work-1", &candidate_id, "attempt-1", "new-tip-sha")
+            .unwrap();
+
+        let item = store.read_work_item("work-1").unwrap();
+        let attempt = &item.attempts[0];
+
+        for task in &attempt.tasks {
+            if task.kind == TaskKind::Write && task.status == TaskStatus::Complete {
+                assert_eq!(
+                    task.output.as_ref().unwrap().commit,
+                    "new-tip-sha",
+                    "write task {} commit should be updated",
+                    task.id
+                );
+            }
+        }
+
+        for artifact in &attempt.artifacts {
+            assert_eq!(
+                artifact.path, "new-tip-sha",
+                "attempt artifact {} path should be updated",
+                artifact.producer_id
+            );
+        }
+
+        let candidate = item
+            .merge_candidates
+            .iter()
+            .find(|c| c.id == candidate_id)
+            .unwrap();
+        assert_eq!(candidate.candidate_commit, "new-tip-sha");
+    }
+
+    #[test]
+    fn regenerate_provenance_reshape_single_tip() {
+        let (_tmp, store, _item, candidate_id) = completed_write_item();
+
+        regenerate_provenance(
+            &store,
+            "work-1",
+            &candidate_id,
+            "attempt-1",
+            "squashed-single-sha",
+        )
+        .unwrap();
+
+        let item = store.read_work_item("work-1").unwrap();
+        let attempt = &item.attempts[0];
+
+        let write_commits: Vec<_> = attempt
+            .tasks
+            .iter()
+            .filter(|t| t.kind == TaskKind::Write && t.status == TaskStatus::Complete)
+            .map(|t| t.output.as_ref().unwrap().commit.as_str())
+            .collect();
+        assert_eq!(write_commits, vec!["squashed-single-sha", "squashed-single-sha"]);
+
+        let candidate = item
+            .merge_candidates
+            .iter()
+            .find(|c| c.id == candidate_id)
+            .unwrap();
+        assert_eq!(candidate.candidate_commit, "squashed-single-sha");
+    }
+
+    #[test]
+    fn next_rebase_task_id_increments() {
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "ID generation".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+
+        assert_eq!(next_rebase_task_id(&item, "attempt-1"), "attempt-1-rebase");
+
+        let rebase_task = |id: &str, status: TaskStatus| Task {
+            id: id.to_string(),
+            kind: TaskKind::Rebase,
+            status,
+            role: "rebase".to_string(),
+            instructions: None,
+            work_item_id: "work-1".to_string(),
+            attempt_id: Some("attempt-1".to_string()),
+            workspace_access: WorkspaceAccess {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            },
+            artifact_area: None,
+            review_context: None,
+            input_artifacts: Vec::new(),
+            output: None,
+        };
+
+        item.attempts[0]
+            .tasks
+            .push(rebase_task("attempt-1-rebase", TaskStatus::Complete));
+        assert_eq!(
+            next_rebase_task_id(&item, "attempt-1"),
+            "attempt-1-rebase-2"
+        );
+
+        item.attempts[0]
+            .tasks
+            .push(rebase_task("attempt-1-rebase-2", TaskStatus::Failed));
+        assert_eq!(
+            next_rebase_task_id(&item, "attempt-1"),
+            "attempt-1-rebase-3"
+        );
+    }
+
+    #[test]
+    fn record_candidate_needs_user_sets_status_and_diagnostic() {
+        let (_tmp, store, _item, candidate_id) = completed_write_item();
+
+        record_candidate_needs_user(
+            &store,
+            "work-1",
+            &candidate_id,
+            "Cannot resolve semantic conflict in lib.rs".to_string(),
+        )
+        .unwrap();
+
+        let item = store.read_work_item("work-1").unwrap();
+        let candidate = item
+            .merge_candidates
+            .iter()
+            .find(|c| c.id == candidate_id)
+            .unwrap();
+        assert_eq!(
+            candidate.merge_state.status,
+            MergeCandidateMergeStatus::NeedsUser
+        );
+        assert_eq!(
+            candidate.merge_state.failure_reason.as_deref(),
+            Some("Cannot resolve semantic conflict in lib.rs")
+        );
+    }
+
+    #[test]
+    fn record_needs_user_preserves_landed_candidate() {
+        let (_tmp, store, work_item_id, candidate_id, _merged) = landed_candidate_store();
+
+        record_candidate_needs_user(
+            &store,
+            &work_item_id,
+            &candidate_id,
+            "should not overwrite".to_string(),
+        )
+        .unwrap();
+
+        let item = store.read_work_item(&work_item_id).unwrap();
+        let candidate = item
+            .merge_candidates
+            .iter()
+            .find(|c| c.id == candidate_id)
+            .unwrap();
+        assert_eq!(
+            candidate.merge_state.status,
+            MergeCandidateMergeStatus::Merged
+        );
+    }
+
+    #[test]
+    fn task_kind_rebase_serializes_round_trip() {
+        let json = serde_json::to_string(&TaskKind::Rebase).unwrap();
+        assert_eq!(json, r#""rebase""#);
+        let kind: TaskKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(kind, TaskKind::Rebase);
     }
 }

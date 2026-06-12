@@ -71,6 +71,7 @@ pub fn bundled_content(relative: &str) -> Option<String> {
     match relative {
         "prompts/author.md" => Some(include_str!("../prompts/author.md").to_string()),
         "prompts/work-author.md" => Some(include_str!("../prompts/work-author.md").to_string()),
+        "prompts/work-rebase.md" => Some(include_str!("../prompts/work-rebase.md").to_string()),
         "prompts/review-architecture.md" => {
             Some(include_str!("../prompts/review-architecture.md").to_string())
         }
@@ -212,6 +213,7 @@ Review run {{RUN_ID}}.
     fn test_bundled_content_prompts() {
         assert!(bundled_content("prompts/author.md").is_some());
         assert!(bundled_content("prompts/work-author.md").is_some());
+        assert!(bundled_content("prompts/work-rebase.md").is_some());
         assert!(bundled_content("prompts/review-architecture.md").is_some());
         assert!(bundled_content("prompts/review-behaviors.md").is_some());
         assert!(bundled_content("prompts/review-documentation.md").is_some());
