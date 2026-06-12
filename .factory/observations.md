@@ -6,6 +6,139 @@ observations-resolved.md with the resolution context.
 
 ---
 
+2026-06-12 — Critical bug in slice-3 post-merge review:
+`SourceCheckoutReviewGuard::finish()` (in
+`src/work_task_executor.rs:566`) restores `.factory/` state to a
+snapshot taken at review start. For background post-merge reviews,
+this WIPES any Work Item state the user creates during the review
+window.
+
+Reproduction: after merging `optional-attempt-merge-candidate-ids`,
+the post-merge review fired its detached child. The child slept 60s,
+then ran a review-only Attempt against the merged commit. The
+SourceCheckoutReviewGuard's begin captured the project state. During
+the review, I ran `factory work create reviewer-warm-build-cache`
+which wrote `.factory/work/items/reviewer-warm-build-cache.json`.
+When the post-merge review finished, the guard's
+`restore_non_factory_worktree_changes` + protected-factory-file
+restoration reverted .factory state, deleting the new Work Item file.
+`factory work attempt run` on the now-missing Work Item kept running
+its detached coder against a phantom Work Item.
+
+Root cause: the guard was designed for the interactive
+`factory work review-codebase` case — the user is at the keyboard,
+expects their source untouched. It's misapplied to the background
+post-merge review, where the user is concurrently doing legitimate
+work and Factory itself writes new state (the synthetic Work Item,
+auto-created post-merge-review-fix Work Items).
+
+Fixes to consider:
+
+1. Differentiate by AttemptKind / origin: post-merge reviews use a
+   non-restoring guard variant that only checks "did source HEAD
+   move during the review" (stale → mark accordingly) without
+   restoring file state. Interactive review-only Attempts keep
+   today's restorative guard.
+2. Run post-merge reviews in a separate worktree (clone main HEAD,
+   review there, never touch the user's primary checkout). Cleaner
+   isolation but uses disk + adds setup cost.
+3. Narrow the protected-file snapshot to source files only, never
+   `.factory/`. Factory state is mutable by Factory itself; the
+   guard shouldn't snapshot+restore it.
+
+(2) is probably the cleanest long-term answer. (3) is the smallest
+patch. (1) is the most flexible. Any of these blocks future
+post-merge-review-fix auto-creation from working safely.
+
+Related: the post-merge review also failed to auto-create the
+post-merge-review-fix Work Item even though the documentation
+reviewer reported `Verdict: fail` (legitimate finding: duplicate
+`Test:` lines around behaviors.md:783-788). The `review_one`
+function in `src/post_merge_review.rs:295` filters tasks by
+`status == TaskStatus::Complete`. When the source guard wipes state
+mid-review, the orchestrating Attempt status flips to `failed`,
+peer reviewers get stuck in `planned`, and only the first-completed
+reviewer's task ends as `failed` rather than `complete`. None pass
+the filter, no findings collected, no forward-fix created.
+
+2026-06-12 — Each Attempt-time reviewer cold-compiles project build
+artifacts in its own sandbox, costing 2–10 min per reviewer for Rust
+projects (10m for the behaviors reviewer on `optional-attempt-merge-candidate-ids`
+because it built `target/release` from scratch). The writer task
+already produces a usable build cache in the candidate workspace
+(599 MB of `target/debug` in our test), but two design choices prevent
+reviewers from benefiting from it:
+
+1. The reviewer prompt's `reviewer_writable_outputs_guidance` text
+   tells reviewers to redirect Cargo commands away from the
+   candidate's `target/` to a per-reviewer artifact directory. The
+   prompt conflates write isolation (correct: reviewers must not
+   modify the candidate) with read isolation (overreach: existing
+   build outputs are safe to consume).
+2. Even if reviewers DID write to the candidate's `target/`, parallel
+   Cargo invocations would serialize on `target/debug/.cargo-lock`,
+   defeating the reviewer parallelism we get from per-reviewer
+   sandboxes. So sharing target/ as a writable resource is not
+   tenable; each reviewer needs its own writable build cache.
+
+The fix has two layers:
+
+**Prompt guidance refinement** — tell reviewers they may READ the
+candidate's existing build outputs freely (binaries, compiled
+artifacts, installed dependencies), but must NOT write to the
+candidate. New builds redirect to the reviewer's artifact directory.
+For the immediate Rust case: behaviors and similar reviewers should
+invoke `<candidate>/target/debug/<binary>` directly instead of
+running `cargo build` against an empty `CARGO_TARGET_DIR`.
+
+**Built-in auto-prep for popular toolchains** — Factory detects the
+project type from marker files in the candidate workspace and copies
+the canonical build directories into each reviewer's artifact area
+before launching the reviewer. Reviewers point their toolchain at the
+copy and warm-start incremental builds. Initial registry:
+
+| Toolchain | Marker          | Dirs copied                                |
+| --------- | --------------- | ------------------------------------------ |
+| Rust      | `Cargo.toml`    | `target`                                   |
+| Node      | `package.json`  | `node_modules`, `dist`, `.next`, `build`   |
+| Maven     | `pom.xml`       | `target`                                   |
+| Gradle    | `build.gradle`  | `build`, `.gradle`                         |
+
+Go is intentionally omitted (build cache is content-addressed and
+location-independent). Python is intentionally omitted (venvs hardcode
+absolute paths and don't survive a copy reliably).
+
+Copy implementation should try reflink (`cp -c` on macOS, `cp
+--reflink` on Linux filesystems that support it) first, then hardlink
+(`cp -l`), then a deep copy as last resort. With reflinks the copy is
+effectively zero-cost and zero-extra-disk until something gets
+modified.
+
+A `.factory/hooks/prepare-pre-review` hook overrides the
+auto-detection when present. The hook gets `FACTORY_REVIEWER_ARTIFACT_DIR`
+in its env and CWD = candidate workspace; the project does whatever
+it needs. No marker matched and no hook present → no prep, same as
+today.
+
+Implementation notes for the Work Item:
+
+- Cargo fingerprints reference source paths, not target paths, so a
+  copied `target/` warm-starts incremental builds correctly when the
+  reviewer points `CARGO_TARGET_DIR` at the copy.
+- The toolchain registry is a `&'static [Toolchain]` constant — adding
+  a new entry is a one-row change with no new abstractions.
+- The reviewer prompt's `reviewer_writable_outputs_guidance` becomes
+  "the writer's outputs are pre-populated at
+  `$FACTORY_REVIEWER_ARTIFACT_DIR/<dirname>/`; use them for
+  incremental builds."
+
+Estimated wall-clock impact on the
+`optional-attempt-merge-candidate-ids` Work Item if this had been
+live: behaviors reviewer ~10 min → ~2–3 min; architecture/tests
+~2–3 min → ~30s; total attempt time ~17m 32s → ~9–10m.
+
+This becomes its own Work Item after `optional-attempt-merge-candidate-ids` lands.
+
 2026-06-11 — Attempt IDs, Merge Candidate IDs, and write/review Task
 IDs being external input may be more friction than benefit. Today
 every CLI surface that creates or operates on these entities takes
