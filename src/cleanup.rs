@@ -1108,35 +1108,38 @@ mod tests {
         assert_eq!(parse_reviewer_worktree_name("review-999-x-a-tests"), None);
     }
 
-    #[test]
-    fn stranded_reviewer_worktree_detected_for_non_executing_work_item() {
-        let tmp = TempDir::new().unwrap();
-        let project = tmp.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        Command::new("git")
-            .args(["-C", &project.to_string_lossy(), "init", "-b", "main"])
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args([
+    /// Initialize a deterministic git repo for tests. Disables GPG
+    /// signing locally so commits don't hang waiting for an SSH/FIDO
+    /// key when the caller's global git config has `commit.gpgsign =
+    /// true`.
+    fn init_test_repo(project: &Path) {
+        fs::create_dir_all(project).unwrap();
+        for args in [
+            vec!["-C", &project.to_string_lossy(), "init", "-b", "main"],
+            vec![
+                "-C",
+                &project.to_string_lossy(),
+                "config",
+                "commit.gpgsign",
+                "false",
+            ],
+            vec![
                 "-C",
                 &project.to_string_lossy(),
                 "config",
                 "user.email",
                 "test@test",
-            ])
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args([
+            ],
+            vec![
                 "-C",
                 &project.to_string_lossy(),
                 "config",
                 "user.name",
                 "test",
-            ])
-            .output()
-            .unwrap();
+            ],
+        ] {
+            Command::new("git").args(args).output().unwrap();
+        }
         fs::write(project.join("README.md"), "test\n").unwrap();
         Command::new("git")
             .args(["-C", &project.to_string_lossy(), "add", "README.md"])
@@ -1146,6 +1149,13 @@ mod tests {
             .args(["-C", &project.to_string_lossy(), "commit", "-m", "init"])
             .output()
             .unwrap();
+    }
+
+    #[test]
+    fn stranded_reviewer_worktree_detected_for_non_executing_work_item() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        init_test_repo(&project);
 
         let store = WorkModelStore::new(&project);
         let mut item = WorkItem {
@@ -1209,40 +1219,7 @@ mod tests {
     fn stranded_reviewer_worktree_preserved_for_executing_merge_candidate() {
         let tmp = TempDir::new().unwrap();
         let project = tmp.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        Command::new("git")
-            .args(["-C", &project.to_string_lossy(), "init", "-b", "main"])
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args([
-                "-C",
-                &project.to_string_lossy(),
-                "config",
-                "user.email",
-                "test@test",
-            ])
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args([
-                "-C",
-                &project.to_string_lossy(),
-                "config",
-                "user.name",
-                "test",
-            ])
-            .output()
-            .unwrap();
-        fs::write(project.join("README.md"), "test\n").unwrap();
-        Command::new("git")
-            .args(["-C", &project.to_string_lossy(), "add", "README.md"])
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["-C", &project.to_string_lossy(), "commit", "-m", "init"])
-            .output()
-            .unwrap();
+        init_test_repo(&project);
 
         let store = WorkModelStore::new(&project);
         let mut item = WorkItem {
@@ -1298,40 +1275,7 @@ mod tests {
     fn stranded_reviewer_worktree_removed_on_apply() {
         let tmp = TempDir::new().unwrap();
         let project = tmp.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        Command::new("git")
-            .args(["-C", &project.to_string_lossy(), "init", "-b", "main"])
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args([
-                "-C",
-                &project.to_string_lossy(),
-                "config",
-                "user.email",
-                "test@test",
-            ])
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args([
-                "-C",
-                &project.to_string_lossy(),
-                "config",
-                "user.name",
-                "test",
-            ])
-            .output()
-            .unwrap();
-        fs::write(project.join("README.md"), "test\n").unwrap();
-        Command::new("git")
-            .args(["-C", &project.to_string_lossy(), "add", "README.md"])
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["-C", &project.to_string_lossy(), "commit", "-m", "init"])
-            .output()
-            .unwrap();
+        init_test_repo(&project);
 
         let store = WorkModelStore::new(&project);
         let mut item = WorkItem {
