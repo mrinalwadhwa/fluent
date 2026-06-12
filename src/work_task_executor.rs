@@ -618,7 +618,7 @@ impl PostMergeSourceGuard {
         } else {
             bail!(
                 "Source HEAD moved during post-merge review from {} to {}: {}; \
-                 review is stale — the queue entry remains for re-attempt",
+                 review is stale",
                 self.head,
                 current_head,
                 self.path.display()

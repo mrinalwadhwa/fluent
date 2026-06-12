@@ -9,7 +9,7 @@
 //! the latest child sees the latest entry and reviews the cumulative
 //! range; earlier children find newer entries and exit.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -198,13 +198,17 @@ pub fn run(
         return Ok(outcome);
     }
 
+    let mut succeeded_branches: Vec<&QueueEntry> = Vec::new();
     for entry in &branches_to_process {
         eprintln!(
             "  Running post-merge review for {} at {}",
             entry.target_branch, entry.merged_commit
         );
         match review_one(project_root, entry) {
-            Ok(per) => outcome.reviewed.push(per),
+            Ok(per) => {
+                succeeded_branches.push(entry);
+                outcome.reviewed.push(per);
+            }
             Err(error) => {
                 eprintln!(
                     "  Post-merge review for {} failed: {error}",
@@ -218,7 +222,7 @@ pub fn run(
     }
 
     queue.entries.retain(|entry| {
-        !branches_to_process.iter().any(|p| {
+        !succeeded_branches.iter().any(|p| {
             p.target_branch == entry.target_branch && entry.merged_at_unix <= p.merged_at_unix
         })
     });
@@ -327,6 +331,21 @@ fn review_one(project_root: &Path, entry: &QueueEntry) -> Result<PerBranchOutcom
             }
             review::Verdict::Pass => {}
         }
+    }
+
+    let review_tasks: Vec<_> = attempt
+        .tasks
+        .iter()
+        .filter(|t| t.kind == TaskKind::Review)
+        .collect();
+    if !review_tasks.is_empty()
+        && review_tasks.iter().all(|t| t.status == TaskStatus::Failed)
+        && findings.is_empty()
+    {
+        bail!(
+            "all review tasks failed without findings for {}; review is stale",
+            entry.target_branch
+        );
     }
 
     let post_merge_review_fix_work_item = if findings.is_empty() {

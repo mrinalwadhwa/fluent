@@ -127,6 +127,7 @@ state outside the Task artifact area, the guard restores protected
 checkout state before failing the Task. This restorative guard applies
 only to interactive `ReviewOnly` Attempts (e.g. `factory work
 review-codebase`).
+
 Post-merge review Attempts use `AttemptKind::PostMergeReview` and a
 non-restoring `PostMergeSourceGuard`. This guard verifies that the
 source HEAD still matches the merged commit on completion but does not
