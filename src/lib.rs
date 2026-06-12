@@ -12,6 +12,7 @@ pub mod os;
 pub mod parallel;
 pub mod plan;
 pub mod post_merge_review;
+pub mod prep;
 pub mod report;
 pub mod review;
 pub mod review_diff_command;

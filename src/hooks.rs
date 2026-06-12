@@ -42,6 +42,7 @@ pub struct HookContext {
     pub merge_candidate_id: Option<String>,
     pub candidate_commit: Option<String>,
     pub artifact_dir: Option<PathBuf>,
+    pub reviewer_artifact_dir: Option<PathBuf>,
     /// Where to write `<hook-name>.log`. Created if missing.
     pub log_dir: PathBuf,
 }
@@ -119,6 +120,12 @@ pub fn run_hook(
     }
     if let Some(dir) = &context.artifact_dir {
         cmd.env("FACTORY_ARTIFACT_DIR", dir.to_string_lossy().to_string());
+    }
+    if let Some(dir) = &context.reviewer_artifact_dir {
+        cmd.env(
+            "FACTORY_REVIEWER_ARTIFACT_DIR",
+            dir.to_string_lossy().to_string(),
+        );
     }
     cmd.stdout(Stdio::from(log_file));
     cmd.stderr(Stdio::from(log_file_dup));
@@ -253,6 +260,31 @@ mod tests {
         let log = fs::read_to_string(&outcome.log_path).unwrap();
         assert!(
             log.contains("work=work-1 attempt=attempt-1 task=attempt-1-write-1 candidate=cand-1 commit=abc123"),
+            "log was: {log}"
+        );
+    }
+
+    #[test]
+    fn passes_reviewer_artifact_dir_via_env() {
+        let tmp = TempDir::new().unwrap();
+        write_hook(
+            tmp.path(),
+            "prepare-pre-review",
+            "#!/bin/sh\nprintf 'reviewer_dir=%s\\n' \"$FACTORY_REVIEWER_ARTIFACT_DIR\"\nexit 0\n",
+        );
+        let log_dir = tmp.path().join("logs");
+        let context = HookContext {
+            reviewer_artifact_dir: Some(PathBuf::from("/tmp/reviewer-artifacts")),
+            log_dir,
+            ..Default::default()
+        };
+        let outcome = run_hook(tmp.path(), "prepare-pre-review", tmp.path(), &context)
+            .unwrap()
+            .unwrap();
+        assert!(outcome.passed);
+        let log = fs::read_to_string(&outcome.log_path).unwrap();
+        assert!(
+            log.contains("reviewer_dir=/tmp/reviewer-artifacts"),
             "log was: {log}"
         );
     }

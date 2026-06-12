@@ -323,14 +323,48 @@ Test: tests/binary.rs (work_task_run_completes_review_task_with_fail_verdict_art
 WHEN Factory launches a Work-model `review` Task,
 THE SYSTEM SHALL name the Work review artifact path, the exact
 filesystem `review.md` path the reviewer must write, and the reviewer
-artifact directory; SHALL tell the reviewer to put build caches, scratch
-files, suggested patches, and temporary outputs under the reviewer
-artifact directory when the candidate workspace is read-only; SHALL
-include Cargo guidance to set `CARGO_TARGET_DIR` under the reviewer
-artifact directory for tests against a read-only workspace; and SHALL
-NOT instruct the reviewer to write legacy
+artifact directory; SHALL tell the reviewer that the candidate's
+existing build outputs are readable; SHALL tell the reviewer that the
+reviewer artifact directory has been pre-populated with the writer's
+build outputs for warm-start incremental builds; SHALL include Cargo
+guidance to set `CARGO_TARGET_DIR` under the reviewer artifact
+directory; and SHALL NOT instruct the reviewer to write legacy
 `.factory/runs/<run-id>/reviews/...` artifacts.
 Test: src/work_task_executor.rs (work_review_prompt_names_work_artifacts_and_writable_outputs)
+
+WHEN Factory plans to launch an Attempt-time review Task and the
+candidate workspace contains a recognized toolchain marker file
+(`Cargo.toml`, `package.json`, `pom.xml`, or `build.gradle`),
+THE SYSTEM SHALL copy that toolchain's canonical build directories from
+the candidate workspace into the reviewer's artifact directory before
+launching the reviewer.
+Test: src/prep.rs (copies_existing_dirs_and_skips_missing)
+Test: src/prep.rs (copies_multiple_node_dirs)
+
+WHEN Factory performs the warm-cache copy,
+THE SYSTEM SHALL try a reflink copy first (`cp -c` on macOS,
+`cp --reflink=auto` on Linux), fall back to a hardlink copy (`cp -l`)
+if reflinks are unsupported, and fall back to a deep copy as a last
+resort.
+Test: src/prep.rs (copies_existing_dirs_and_skips_missing)
+
+WHEN Factory copies a build directory that does not exist in the
+candidate workspace,
+THE SYSTEM SHALL skip that directory without error.
+Test: src/prep.rs (no_error_when_all_dirs_missing)
+Test: src/prep.rs (copies_existing_dirs_and_skips_missing)
+
+WHEN `.factory/hooks/prepare-pre-review` exists and is executable in
+the candidate workspace,
+THE SYSTEM SHALL run that hook instead of the built-in auto-prep, with
+`FACTORY_REVIEWER_ARTIFACT_DIR` set in the env and CWD = candidate
+workspace.
+Test: src/hooks.rs (passes_context_via_env)
+
+WHEN the candidate workspace contains neither a recognized toolchain
+marker nor a `prepare-pre-review` hook,
+THE SYSTEM SHALL launch the reviewer without any pre-population.
+Test: src/prep.rs (returns_none_when_no_marker)
 
 WHEN Factory launches a Work-model `review` Task for a candidate
 workspace,

@@ -8,7 +8,9 @@ use std::process::Command;
 use crate::coder::{CoderKind, CoderSandbox};
 use crate::content::ContentResolver;
 use crate::credential;
+use crate::hooks;
 use crate::os;
+use crate::prep;
 use crate::review_diff_command::render_review_diff_command;
 use crate::work_model::{
     ArtifactRef, AttemptKind, AttemptStatus, TaskKind, TaskOutput, TaskStatus, WorkItem,
@@ -336,6 +338,18 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         }
     };
     let readable_workspace_paths = readable_workspaces.paths();
+
+    if !attempt_kind.is_review_only_like() {
+        if let Some(candidate_path) = readable_workspace_paths.first() {
+            prepare_reviewer_build_cache(
+                candidate_path,
+                &artifact_dir,
+                config.work_item_id,
+                config.attempt_id,
+                config.task_id,
+            );
+        }
+    }
 
     let run_result = run_review_coder(
         &item,
@@ -1257,9 +1271,69 @@ fn work_review_artifact_path(task: &crate::work_model::Task) -> Result<String> {
 
 fn reviewer_writable_outputs_guidance(artifact_dir: &Path) -> String {
     format!(
-        "Writable review outputs:\n- Put build caches, scratch files, suggested patches, and temporary outputs under the reviewer artifact directory, not in the read-only workspace.\n- For Cargo commands against a read-only workspace, set CARGO_TARGET_DIR to a directory under the reviewer artifact directory, for example: CARGO_TARGET_DIR=\"{}/target\" cargo test.",
+        "Build cache and writable outputs:\n\
+         - You may READ the candidate workspace's existing build outputs (binaries, compiled artifacts, installed dependencies) freely. The writer produced them as part of completing the write task.\n\
+         - You may NOT write to the candidate workspace, including its build outputs. Concurrent reviewers cannot safely share a build cache.\n\
+         - Factory has pre-populated your reviewer artifact directory at {} with copies of the writer's build outputs for warm-start incremental builds. When you need to build new outputs the writer didn't produce, redirect them there.\n\
+         - For Cargo: CARGO_TARGET_DIR=\"{}/target\" cargo build (or cargo test). If the writer already built the binary you need, invoke it directly from the candidate workspace instead of recompiling.",
+        artifact_dir.display(),
         artifact_dir.display()
     )
+}
+
+fn prepare_reviewer_build_cache(
+    candidate_workspace: &Path,
+    artifact_dir: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    task_id: &str,
+) {
+    let hook_name = "prepare-pre-review";
+    if hooks::find_hook(candidate_workspace, hook_name).is_some() {
+        let log_dir = artifact_dir.join("hooks");
+        let context = hooks::HookContext {
+            work_item_id: Some(work_item_id.to_string()),
+            attempt_id: Some(attempt_id.to_string()),
+            task_id: Some(task_id.to_string()),
+            reviewer_artifact_dir: Some(artifact_dir.to_path_buf()),
+            log_dir,
+            ..Default::default()
+        };
+        match hooks::run_hook(candidate_workspace, hook_name, candidate_workspace, &context) {
+            Ok(Some(outcome)) if outcome.passed => {
+                eprintln!(
+                    "  Reviewer prep     {hook_name} hook passed (log: {})",
+                    outcome.log_path.display()
+                );
+            }
+            Ok(Some(outcome)) => {
+                eprintln!(
+                    "  Reviewer prep     {hook_name} hook failed (exit {}, log: {})",
+                    outcome.exit_code,
+                    outcome.log_path.display()
+                );
+            }
+            Ok(None) => {}
+            Err(err) => {
+                eprintln!("  Reviewer prep     {hook_name} hook error: {err:#}");
+            }
+        }
+    } else if let Some(toolchain) = prep::detect_toolchain(candidate_workspace) {
+        match prep::populate_reviewer_cache(candidate_workspace, artifact_dir, toolchain) {
+            Ok(()) => {
+                eprintln!(
+                    "  Reviewer prep     pre-populated {} build cache from candidate",
+                    toolchain.name,
+                );
+            }
+            Err(err) => {
+                eprintln!(
+                    "  Reviewer prep     failed to copy {} build cache: {err:#}",
+                    toolchain.name,
+                );
+            }
+        }
+    }
 }
 
 fn review_input_artifacts_prompt(input_artifacts: &[PathBuf]) -> String {
@@ -1877,12 +1951,25 @@ mod tests {
                 .contains("Your reviewer artifact directory is:")
         );
         assert!(prompts.review_prompt.contains("CARGO_TARGET_DIR"));
-        assert!(prompts.review_prompt.contains("cargo test"));
+        assert!(prompts.review_prompt.contains("cargo build"));
+        assert!(
+            prompts.review_prompt.contains("may READ the candidate"),
+            "prompt should tell reviewer they can read candidate build outputs"
+        );
+        assert!(
+            prompts.review_prompt.contains("may NOT write to the candidate"),
+            "prompt should tell reviewer not to write to candidate"
+        );
+        assert!(
+            prompts.review_prompt.contains("pre-populated"),
+            "prompt should mention pre-populated warm cache"
+        );
         assert!(!prompts.review_prompt.contains(".factory/runs/"));
         assert!(prompts.system_prompt.contains(
             "The Work review artifact path is .factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
         ));
         assert!(prompts.system_prompt.contains("CARGO_TARGET_DIR"));
+        assert!(prompts.system_prompt.contains("pre-populated"));
         assert!(!prompts.system_prompt.contains(".factory/runs/"));
     }
 

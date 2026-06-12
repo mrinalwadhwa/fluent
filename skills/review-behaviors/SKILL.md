@@ -76,6 +76,23 @@ something, stop. Report it as a documentation finding instead.
 
 ---
 
+## Build outputs and warm cache
+
+Factory pre-populates your artifact area with copies of the writer's
+build outputs for warm-start incremental builds. Point your toolchain
+at this directory for incremental builds; reading binaries the writer
+built directly from the candidate workspace is also fine.
+
+If the project ships a binary the writer already built (e.g.,
+`target/debug/<bin>`), invoke it directly from the candidate workspace.
+Don't recompile — the binary is already there and ready to use.
+
+When you need to build something the writer didn't produce, redirect
+build outputs to your reviewer artifact directory (e.g.,
+`CARGO_TARGET_DIR="$ARTIFACT_DIR/target" cargo build`).
+
+---
+
 ## How to run this skill
 
 ### Phase 1 — Read the inputs and establish baseline
