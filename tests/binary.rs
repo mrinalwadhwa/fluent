@@ -113,6 +113,369 @@ fn fargate_teardown_help_shows_keep_flags() {
 }
 
 #[test]
+fn fargate_teardown_deletes_stack_ecr_s3_and_removes_state() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+
+    let state_dir = tmp.path().join(".config/factory");
+    fs::create_dir_all(&state_dir).unwrap();
+    let state_path = state_dir.join("fargate.state.json");
+    fs::write(
+        &state_path,
+        r#"{
+  "stack_deployed": true,
+  "region": "us-west-2",
+  "repo_uri": "123.dkr.ecr.us-west-2.amazonaws.com/factory/run",
+  "s3_bucket": "factory-workspace-123"
+}"#,
+    )
+    .unwrap();
+
+    let aws_log = tmp.path().join("aws.log");
+    write_mock_executable(
+        &bin_dir,
+        "aws",
+        r##"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${AWS_LOG:?}"
+
+case "$1 $2" in
+  "cloudformation describe-stacks")
+    printf 'CREATE_COMPLETE\n'
+    ;;
+  "ecr describe-repositories")
+    printf 'factory/run\n'
+    ;;
+  "ecr delete-repository")
+    ;;
+  "s3 rm")
+    ;;
+  "s3 rb")
+    ;;
+  "cloudformation delete-stack")
+    ;;
+  "cloudformation wait")
+    ;;
+  *)
+    printf 'unexpected aws command: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+"##,
+    );
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .env("HOME", tmp.path())
+        .env("PATH", mock_path(&bin_dir))
+        .env("AWS_LOG", &aws_log)
+        .args(["fargate", "teardown"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "fargate teardown failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Removed:"),
+        "expected removal summary, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("CloudFormation stack"),
+        "expected stack in summary, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("ECR repository"),
+        "expected ECR in summary, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("S3 bucket"),
+        "expected S3 in summary, got: {stdout}"
+    );
+
+    let log = fs::read_to_string(&aws_log).unwrap();
+    assert!(
+        log.contains("ecr delete-repository"),
+        "should call ecr delete-repository: {log}"
+    );
+    assert!(
+        log.contains("s3 rm"),
+        "should call s3 rm: {log}"
+    );
+    assert!(
+        log.contains("s3 rb"),
+        "should call s3 rb: {log}"
+    );
+    assert!(
+        log.contains("cloudformation delete-stack"),
+        "should call cloudformation delete-stack: {log}"
+    );
+    assert!(
+        log.contains("cloudformation wait stack-delete-complete"),
+        "should wait for stack deletion: {log}"
+    );
+
+    assert!(
+        !state_path.exists(),
+        "state file should be removed after successful teardown"
+    );
+}
+
+#[test]
+fn fargate_teardown_keep_ecr_skips_ecr_delete() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+
+    let state_dir = tmp.path().join(".config/factory");
+    fs::create_dir_all(&state_dir).unwrap();
+    let state_path = state_dir.join("fargate.state.json");
+    fs::write(
+        &state_path,
+        r#"{
+  "stack_deployed": true,
+  "region": "us-west-2",
+  "repo_uri": "123.dkr.ecr.us-west-2.amazonaws.com/factory/run",
+  "s3_bucket": "factory-workspace-123"
+}"#,
+    )
+    .unwrap();
+
+    let aws_log = tmp.path().join("aws.log");
+    write_mock_executable(
+        &bin_dir,
+        "aws",
+        r##"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${AWS_LOG:?}"
+
+case "$1 $2" in
+  "cloudformation describe-stacks")
+    printf 'CREATE_COMPLETE\n'
+    ;;
+  "s3 rm")
+    ;;
+  "s3 rb")
+    ;;
+  "cloudformation delete-stack")
+    ;;
+  "cloudformation wait")
+    ;;
+  *)
+    printf 'unexpected aws command: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+"##,
+    );
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .env("HOME", tmp.path())
+        .env("PATH", mock_path(&bin_dir))
+        .env("AWS_LOG", &aws_log)
+        .args(["fargate", "teardown", "--keep-ecr"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "fargate teardown --keep-ecr failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let log = fs::read_to_string(&aws_log).unwrap();
+    assert!(
+        !log.contains("ecr"),
+        "--keep-ecr should skip all ECR commands: {log}"
+    );
+    assert!(
+        log.contains("s3 rm"),
+        "--keep-ecr should still delete S3: {log}"
+    );
+    assert!(
+        log.contains("cloudformation delete-stack"),
+        "--keep-ecr should still delete stack: {log}"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("ECR"),
+        "--keep-ecr should not mention ECR in summary: {stdout}"
+    );
+
+    assert!(
+        !state_path.exists(),
+        "state file should be removed after successful teardown"
+    );
+}
+
+#[test]
+fn fargate_teardown_keep_s3_skips_s3_delete() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+
+    let state_dir = tmp.path().join(".config/factory");
+    fs::create_dir_all(&state_dir).unwrap();
+    let state_path = state_dir.join("fargate.state.json");
+    fs::write(
+        &state_path,
+        r#"{
+  "stack_deployed": true,
+  "region": "us-west-2",
+  "repo_uri": "123.dkr.ecr.us-west-2.amazonaws.com/factory/run",
+  "s3_bucket": "factory-workspace-123"
+}"#,
+    )
+    .unwrap();
+
+    let aws_log = tmp.path().join("aws.log");
+    write_mock_executable(
+        &bin_dir,
+        "aws",
+        r##"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${AWS_LOG:?}"
+
+case "$1 $2" in
+  "cloudformation describe-stacks")
+    printf 'CREATE_COMPLETE\n'
+    ;;
+  "ecr describe-repositories")
+    printf 'factory/run\n'
+    ;;
+  "ecr delete-repository")
+    ;;
+  "cloudformation delete-stack")
+    ;;
+  "cloudformation wait")
+    ;;
+  *)
+    printf 'unexpected aws command: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+"##,
+    );
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .env("HOME", tmp.path())
+        .env("PATH", mock_path(&bin_dir))
+        .env("AWS_LOG", &aws_log)
+        .args(["fargate", "teardown", "--keep-s3"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "fargate teardown --keep-s3 failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let log = fs::read_to_string(&aws_log).unwrap();
+    assert!(
+        !log.contains("s3 rm"),
+        "--keep-s3 should skip S3 rm: {log}"
+    );
+    assert!(
+        !log.contains("s3 rb"),
+        "--keep-s3 should skip S3 rb: {log}"
+    );
+    assert!(
+        log.contains("ecr delete-repository"),
+        "--keep-s3 should still delete ECR: {log}"
+    );
+    assert!(
+        log.contains("cloudformation delete-stack"),
+        "--keep-s3 should still delete stack: {log}"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("S3"),
+        "--keep-s3 should not mention S3 in summary: {stdout}"
+    );
+
+    assert!(
+        !state_path.exists(),
+        "state file should be removed after successful teardown"
+    );
+}
+
+#[test]
+fn fargate_teardown_error_preserves_state_file() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+
+    let state_dir = tmp.path().join(".config/factory");
+    fs::create_dir_all(&state_dir).unwrap();
+    let state_path = state_dir.join("fargate.state.json");
+    fs::write(
+        &state_path,
+        r#"{
+  "stack_deployed": true,
+  "region": "us-west-2",
+  "repo_uri": "123.dkr.ecr.us-west-2.amazonaws.com/factory/run",
+  "s3_bucket": "factory-workspace-123"
+}"#,
+    )
+    .unwrap();
+
+    let aws_log = tmp.path().join("aws.log");
+    write_mock_executable(
+        &bin_dir,
+        "aws",
+        r##"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${AWS_LOG:?}"
+
+case "$1 $2" in
+  "cloudformation describe-stacks")
+    printf 'CREATE_COMPLETE\n'
+    ;;
+  "ecr describe-repositories")
+    printf 'factory/run\n'
+    ;;
+  "ecr delete-repository")
+    printf 'RepositoryNotEmptyException: cannot delete\n' >&2
+    exit 1
+    ;;
+  *)
+    printf 'unexpected aws command: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+"##,
+    );
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .env("HOME", tmp.path())
+        .env("PATH", mock_path(&bin_dir))
+        .env("AWS_LOG", &aws_log)
+        .args(["fargate", "teardown"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "fargate teardown should exit non-zero on error"
+    );
+
+    assert!(
+        state_path.exists(),
+        "state file should be preserved when teardown fails"
+    );
+}
+
+#[test]
 fn dry_run_with_codex_uses_codex_profile_layer() {
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");

@@ -1146,33 +1146,31 @@ WHEN `factory fargate teardown` is invoked,
 THE SYSTEM SHALL delete the CloudFormation stack used by the Fargate
 runtime, wait for stack deletion to reach a terminal state, and
 report the deletion outcome.
-Test: tests/binary.rs (fargate_teardown_nothing_to_teardown)
-Test: src/fargate_bootstrap.rs (teardown_outcome_display_all_removed)
+Test: tests/binary.rs (fargate_teardown_deletes_stack_ecr_s3_and_removes_state)
 
 WHEN `factory fargate teardown` is invoked without `--keep-ecr`,
 THE SYSTEM SHALL delete the ECR repository created by the bootstrap.
-Test: src/fargate_bootstrap.rs (teardown_outcome_display_all_removed)
+Test: tests/binary.rs (fargate_teardown_deletes_stack_ecr_s3_and_removes_state)
 
 WHEN `factory fargate teardown` is invoked without `--keep-s3`,
 THE SYSTEM SHALL empty and delete the S3 bucket created by the
 bootstrap.
-Test: src/fargate_bootstrap.rs (teardown_outcome_display_all_removed)
+Test: tests/binary.rs (fargate_teardown_deletes_stack_ecr_s3_and_removes_state)
 
 WHEN `factory fargate teardown` is invoked with `--keep-ecr`,
 THE SYSTEM SHALL leave the ECR repository intact while still deleting
 the CloudFormation stack and the state file.
-Test: tests/binary.rs (fargate_teardown_help_shows_keep_flags)
-Test: src/fargate_bootstrap.rs (teardown_outcome_display_partial_keep_ecr)
+Test: tests/binary.rs (fargate_teardown_keep_ecr_skips_ecr_delete)
 
 WHEN `factory fargate teardown` is invoked with `--keep-s3`,
 THE SYSTEM SHALL leave the S3 bucket intact while still deleting the
 CloudFormation stack and the state file.
-Test: tests/binary.rs (fargate_teardown_help_shows_keep_flags)
-Test: src/fargate_bootstrap.rs (teardown_outcome_display_partial_keep_s3)
+Test: tests/binary.rs (fargate_teardown_keep_s3_skips_s3_delete)
 
 WHEN `factory fargate teardown` completes its destructive steps,
 THE SYSTEM SHALL delete `~/.config/factory/fargate.state.json` so the
 next `--runtime fargate` invocation triggers a fresh `ensure_setup`.
+Test: tests/binary.rs (fargate_teardown_deletes_stack_ecr_s3_and_removes_state)
 
 IF `factory fargate teardown` is invoked when no state file exists
 and no CloudFormation stack is present,
@@ -1183,10 +1181,12 @@ Test: tests/binary.rs (fargate_teardown_nothing_to_teardown)
 IF a destructive step fails (CloudFormation, ECR, or S3),
 THEN THE SYSTEM SHALL print the error, exit non-zero, and leave the
 state file in place so a retry resumes from the failed step.
+Test: tests/binary.rs (fargate_teardown_error_preserves_state_file)
 
 WHEN `factory fargate teardown` completes successfully,
 THE SYSTEM SHALL print a one-line summary listing what was removed
 and what was kept.
+Test: tests/binary.rs (fargate_teardown_deletes_stack_ecr_s3_and_removes_state)
 Test: src/fargate_bootstrap.rs (teardown_outcome_display_all_removed)
 Test: src/fargate_bootstrap.rs (teardown_outcome_display_partial_keep_ecr)
 Test: src/fargate_bootstrap.rs (teardown_outcome_display_partial_keep_s3)
