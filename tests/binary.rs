@@ -203,14 +203,8 @@ esac
         log.contains("ecr delete-repository"),
         "should call ecr delete-repository: {log}"
     );
-    assert!(
-        log.contains("s3 rm"),
-        "should call s3 rm: {log}"
-    );
-    assert!(
-        log.contains("s3 rb"),
-        "should call s3 rb: {log}"
-    );
+    assert!(log.contains("s3 rm"), "should call s3 rm: {log}");
+    assert!(log.contains("s3 rb"), "should call s3 rb: {log}");
     assert!(
         log.contains("cloudformation delete-stack"),
         "should call cloudformation delete-stack: {log}"
@@ -380,14 +374,8 @@ esac
     );
 
     let log = fs::read_to_string(&aws_log).unwrap();
-    assert!(
-        !log.contains("s3 rm"),
-        "--keep-s3 should skip S3 rm: {log}"
-    );
-    assert!(
-        !log.contains("s3 rb"),
-        "--keep-s3 should skip S3 rb: {log}"
-    );
+    assert!(!log.contains("s3 rm"), "--keep-s3 should skip S3 rm: {log}");
+    assert!(!log.contains("s3 rb"), "--keep-s3 should skip S3 rb: {log}");
     assert!(
         log.contains("ecr delete-repository"),
         "--keep-s3 should still delete ECR: {log}"

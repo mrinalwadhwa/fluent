@@ -603,13 +603,7 @@ fn empty_and_delete_s3_bucket(region: &str, bucket: &str) -> Result<bool> {
 
     eprintln!("  Deleting S3 bucket {bucket}...");
     let delete_result = Command::new("aws")
-        .args([
-            "s3",
-            "rb",
-            &format!("s3://{bucket}"),
-            "--region",
-            region,
-        ])
+        .args(["s3", "rb", &format!("s3://{bucket}"), "--region", region])
         .output()
         .context("Failed to launch aws s3 rb")?;
     if !delete_result.status.success() {
