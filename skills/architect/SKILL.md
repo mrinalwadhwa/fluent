@@ -26,7 +26,7 @@ during review (use review-architecture).
 ### Phase 1 — Load context
 
 Read the architectural expertise:
-- `expertise/architecture.md` — principles, viewpoints, anti-patterns
+- `references/architecture.md` — principles, viewpoints, anti-patterns
 
 Read the system context:
 - `documentation/architecture.md` — how the system is built today
@@ -68,7 +68,7 @@ first.
 ### Phase 4 — Evaluate options
 
 For each viable option, assess against the relevant principles from
-`expertise/architecture.md`. Not all principles apply to every
+`references/architecture.md`. Not all principles apply to every
 decision — use the ones that discriminate between the options.
 
 For each option:
@@ -158,7 +158,7 @@ stable.
   into one discussion. Each decision gets its own frame-evaluate-choose
   cycle.
 - **Ground in expertise.** Evaluate against the principles in
-  `expertise/architecture.md`, not general instinct. Name the specific
+  `references/architecture.md`, not general instinct. Name the specific
   principle that applies.
 - **Name what you give up.** Every choice has a trade-off. A
   recommendation without trade-offs is incomplete.
