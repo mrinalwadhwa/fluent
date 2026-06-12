@@ -176,15 +176,6 @@ The Factory's own Work model can drive eval runs as Work Items whose
 Tasks are reviewer invocations against the corpus. This is its own
 track, not blocking the slice-1 unification.
 
-2026-06-11 — Add a Rust `factory fargate teardown` command that
-replaces `infrastructure/teardown.sh`, the same way JIT bootstrap
-replaced `infrastructure/setup.sh`. Two different workflows for
-parallel concerns (setup vs teardown) is unnecessary surface; both
-should live behind the binary. The teardown command should: remove
-the CloudFormation stack, optionally clean ECR images and the S3
-bucket, and clear `~/.config/factory/fargate.state.json` so the
-next `--runtime fargate` invocation bootstraps fresh.
-
 2026-06-11 — Factory needs a reviewer (or comparable mechanism) that
 maintains a vocabulary map — nouns and verbs used to describe the
 domain — across code, docs, behaviors, and skills, with the goal of

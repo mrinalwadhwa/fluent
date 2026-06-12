@@ -192,8 +192,28 @@ pub enum Commands {
         run_id: Option<String>,
     },
 
+    /// Manage Fargate infrastructure
+    Fargate {
+        #[command(subcommand)]
+        command: FargateCommands,
+    },
+
     /// Print Factory version and build commit
     Version,
+}
+
+#[derive(Subcommand)]
+pub enum FargateCommands {
+    /// Tear down Fargate infrastructure
+    Teardown {
+        /// Keep the ECR repository intact
+        #[arg(long)]
+        keep_ecr: bool,
+
+        /// Keep the S3 bucket intact
+        #[arg(long)]
+        keep_s3: bool,
+    },
 }
 
 #[derive(Subcommand)]

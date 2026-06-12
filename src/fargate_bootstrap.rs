@@ -418,6 +418,238 @@ fn read_stack_output(region: &str, key: &str) -> Result<String> {
     ])
 }
 
+/// Outcome of a teardown operation.
+#[derive(Debug)]
+pub struct TeardownOutcome {
+    pub stack_deleted: bool,
+    pub ecr_deleted: bool,
+    pub s3_deleted: bool,
+    pub state_file_removed: bool,
+}
+
+impl std::fmt::Display for TeardownOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut removed = Vec::new();
+        if self.stack_deleted {
+            removed.push("CloudFormation stack");
+        }
+        if self.ecr_deleted {
+            removed.push("ECR repository");
+        }
+        if self.s3_deleted {
+            removed.push("S3 bucket");
+        }
+        if self.state_file_removed {
+            removed.push("state file");
+        }
+        if removed.is_empty() {
+            write!(f, "Nothing to tear down")
+        } else {
+            write!(f, "Removed: {}", removed.join(", "))
+        }
+    }
+}
+
+/// Tear down Fargate infrastructure. Idempotent: re-running after a
+/// successful teardown reports nothing to tear down.
+pub fn teardown(keep_ecr: bool, keep_s3: bool) -> Result<TeardownOutcome> {
+    let state_path = FargateState::state_path()?;
+    let has_state_file = state_path.exists();
+
+    if !has_state_file {
+        return Ok(TeardownOutcome {
+            stack_deleted: false,
+            ecr_deleted: false,
+            s3_deleted: false,
+            state_file_removed: false,
+        });
+    }
+
+    let state = FargateState::load()?;
+    let region = state.region.as_deref().unwrap_or("us-west-1");
+
+    let stack_exists = if state.stack_deployed {
+        check_stack_exists(region)?
+    } else {
+        false
+    };
+
+    let mut ecr_deleted = false;
+    let mut s3_deleted = false;
+
+    if !keep_ecr {
+        ecr_deleted = delete_ecr_repository(region)?;
+    }
+
+    if !keep_s3 {
+        if let Some(bucket) = state.s3_bucket.as_deref() {
+            s3_deleted = empty_and_delete_s3_bucket(region, bucket)?;
+        } else if stack_exists {
+            if let Ok(bucket_name) = read_stack_output(region, "WorkspaceBucketName") {
+                if !bucket_name.is_empty() && bucket_name != "None" {
+                    s3_deleted = empty_and_delete_s3_bucket(region, &bucket_name)?;
+                }
+            }
+        }
+    }
+
+    let stack_deleted = if stack_exists {
+        delete_cloudformation_stack(region)?;
+        true
+    } else {
+        false
+    };
+
+    fs::remove_file(&state_path)
+        .with_context(|| format!("Failed to remove {}", state_path.display()))?;
+
+    Ok(TeardownOutcome {
+        stack_deleted,
+        ecr_deleted,
+        s3_deleted,
+        state_file_removed: true,
+    })
+}
+
+fn check_stack_exists(region: &str) -> Result<bool> {
+    let output = Command::new("aws")
+        .args([
+            "cloudformation",
+            "describe-stacks",
+            "--region",
+            region,
+            "--stack-name",
+            STACK_NAME,
+            "--query",
+            "Stacks[0].StackStatus",
+            "--output",
+            "text",
+        ])
+        .output()
+        .context("Failed to launch aws CLI")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("does not exist") || stderr.contains("ValidationError") {
+            return Ok(false);
+        }
+        bail!(
+            "aws cloudformation describe-stacks failed:\n{}",
+            stderr.trim()
+        );
+    }
+    let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(!status.is_empty() && status != "None")
+}
+
+fn delete_ecr_repository(region: &str) -> Result<bool> {
+    eprintln!("  Deleting ECR repository...");
+    let output = Command::new("aws")
+        .args([
+            "ecr",
+            "describe-repositories",
+            "--region",
+            region,
+            "--repository-names",
+            "factory/run",
+            "--query",
+            "repositories[0].repositoryName",
+            "--output",
+            "text",
+        ])
+        .output()
+        .context("Failed to launch aws CLI")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("RepositoryNotFoundException") {
+            eprintln!("  ECR repository not found, skipping.");
+            return Ok(false);
+        }
+        bail!("aws ecr describe-repositories failed:\n{}", stderr.trim());
+    }
+    run_aws(&[
+        "ecr",
+        "delete-repository",
+        "--region",
+        region,
+        "--repository-name",
+        "factory/run",
+        "--force",
+    ])?;
+    eprintln!("  ECR repository deleted.");
+    Ok(true)
+}
+
+fn empty_and_delete_s3_bucket(region: &str, bucket: &str) -> Result<bool> {
+    eprintln!("  Emptying S3 bucket {bucket}...");
+    let empty_result = Command::new("aws")
+        .args([
+            "s3",
+            "rm",
+            &format!("s3://{bucket}"),
+            "--recursive",
+            "--region",
+            region,
+        ])
+        .output()
+        .context("Failed to launch aws s3 rm")?;
+    if !empty_result.status.success() {
+        let stderr = String::from_utf8_lossy(&empty_result.stderr);
+        if stderr.contains("NoSuchBucket") {
+            eprintln!("  S3 bucket not found, skipping.");
+            return Ok(false);
+        }
+        bail!("aws s3 rm failed:\n{}", stderr.trim());
+    }
+
+    eprintln!("  Deleting S3 bucket {bucket}...");
+    let delete_result = Command::new("aws")
+        .args([
+            "s3",
+            "rb",
+            &format!("s3://{bucket}"),
+            "--region",
+            region,
+        ])
+        .output()
+        .context("Failed to launch aws s3 rb")?;
+    if !delete_result.status.success() {
+        let stderr = String::from_utf8_lossy(&delete_result.stderr);
+        if stderr.contains("NoSuchBucket") {
+            eprintln!("  S3 bucket already deleted.");
+            return Ok(true);
+        }
+        bail!("aws s3 rb failed:\n{}", stderr.trim());
+    }
+    eprintln!("  S3 bucket deleted.");
+    Ok(true)
+}
+
+fn delete_cloudformation_stack(region: &str) -> Result<()> {
+    eprintln!("  Deleting CloudFormation stack '{STACK_NAME}'...");
+    run_aws(&[
+        "cloudformation",
+        "delete-stack",
+        "--region",
+        region,
+        "--stack-name",
+        STACK_NAME,
+    ])?;
+
+    eprintln!("  Waiting for stack deletion...");
+    run_aws(&[
+        "cloudformation",
+        "wait",
+        "stack-delete-complete",
+        "--region",
+        region,
+        "--stack-name",
+        STACK_NAME,
+    ])?;
+
+    eprintln!("  CloudFormation stack deleted.");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,5 +693,59 @@ mod tests {
         fs::write(&path, "goodbye").unwrap();
         let h2 = hash_file(&path).unwrap();
         assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn teardown_outcome_display_nothing() {
+        let outcome = TeardownOutcome {
+            stack_deleted: false,
+            ecr_deleted: false,
+            s3_deleted: false,
+            state_file_removed: false,
+        };
+        assert_eq!(outcome.to_string(), "Nothing to tear down");
+    }
+
+    #[test]
+    fn teardown_outcome_display_all_removed() {
+        let outcome = TeardownOutcome {
+            stack_deleted: true,
+            ecr_deleted: true,
+            s3_deleted: true,
+            state_file_removed: true,
+        };
+        let display = outcome.to_string();
+        assert!(display.contains("CloudFormation stack"));
+        assert!(display.contains("ECR repository"));
+        assert!(display.contains("S3 bucket"));
+        assert!(display.contains("state file"));
+    }
+
+    #[test]
+    fn teardown_outcome_display_partial_keep_ecr() {
+        let outcome = TeardownOutcome {
+            stack_deleted: true,
+            ecr_deleted: false,
+            s3_deleted: true,
+            state_file_removed: true,
+        };
+        let display = outcome.to_string();
+        assert!(display.contains("CloudFormation stack"));
+        assert!(!display.contains("ECR repository"));
+        assert!(display.contains("S3 bucket"));
+    }
+
+    #[test]
+    fn teardown_outcome_display_partial_keep_s3() {
+        let outcome = TeardownOutcome {
+            stack_deleted: true,
+            ecr_deleted: true,
+            s3_deleted: false,
+            state_file_removed: true,
+        };
+        let display = outcome.to_string();
+        assert!(display.contains("CloudFormation stack"));
+        assert!(display.contains("ECR repository"));
+        assert!(!display.contains("S3 bucket"));
     }
 }

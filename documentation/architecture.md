@@ -23,7 +23,7 @@ from intent capture through execution and review across multiple sessions.
 │  factory work / status / dashboard / cleanup    │
 │  factory run / review / summary / watch         │
 │  factory resume / land / pull / shell           │
-│  factory init / version                         │
+│  factory fargate teardown / init / version      │
 │  Deterministic, operational                     │
 └─────────────────────────────────────────────────┘
 ```
@@ -1120,6 +1120,21 @@ they change. The Factory source tree must be locatable: either
 the project root looking for a directory that contains both
 `Cargo.toml` and `infrastructure/run/Dockerfile`.
 
+#### Teardown
+
+`factory fargate teardown` removes the Fargate infrastructure
+deployed by `ensure_setup`. It reads
+`~/.config/factory/fargate.state.json` to learn the region, ECR
+repository, and S3 bucket, then deletes the ECR repository (unless
+`--keep-ecr`), empties and deletes the S3 bucket (unless
+`--keep-s3`), deletes the CloudFormation stack and waits for
+deletion to complete, and removes the state file so the next
+`--runtime fargate` invocation re-bootstraps from scratch. Each
+destructive step checks for existence before deleting: a missing
+stack, absent ECR repository, or absent S3 bucket is treated as
+success. When no state file exists and no stack is present, the
+command exits zero with a message saying nothing needed teardown.
+
 #### BYO project Dockerfile
 
 Each Factory-managed project that needs project-specific toolchains
@@ -1250,7 +1265,6 @@ factory/main/
     run/
       Dockerfile
       entrypoint.sh
-    teardown.sh
   tests/
     behaviors/
       operations/            ← behavioral tests for the Rust binary

@@ -12,12 +12,15 @@ use factory::cleanup::{
     self, CleanupOptions, WorkBranchCleanup, WorkCleanupResult, WorktreeCleanup,
 };
 use factory::cli;
-use factory::cli::{Cli, Commands, WorkAttemptCommands, WorkCommands, WorkTaskCommands};
+use factory::cli::{
+    Cli, Commands, FargateCommands, WorkAttemptCommands, WorkCommands, WorkTaskCommands,
+};
 use factory::coder::{CoderKind, CoderSandbox};
 use factory::content::ContentResolver;
 use factory::credential;
 use factory::dashboard;
 use factory::fargate;
+use factory::fargate_bootstrap;
 use factory::merge;
 use factory::os;
 use factory::parallel;
@@ -209,6 +212,12 @@ fn main() -> Result<()> {
         Some(Commands::Merge { run_id }) => {
             cmd_merge(&cwd, run_id.as_deref())?;
         }
+        Some(Commands::Fargate { command }) => match command {
+            FargateCommands::Teardown { keep_ecr, keep_s3 } => {
+                let outcome = fargate_bootstrap::teardown(keep_ecr, keep_s3)?;
+                println!("{outcome}");
+            }
+        },
         Some(Commands::Version) => {
             println!("{}", version::version_string());
         }

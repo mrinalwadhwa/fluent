@@ -73,6 +73,46 @@ fn expected_build_commit() -> Option<String> {
 }
 
 #[test]
+fn fargate_teardown_nothing_to_teardown() {
+    let tmp = TempDir::new().unwrap();
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .env("HOME", tmp.path().to_string_lossy().to_string())
+        .env_remove("AWS_DEFAULT_REGION")
+        .args(["fargate", "teardown"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "fargate teardown should exit zero when nothing to tear down: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Nothing to tear down"),
+        "expected nothing-to-teardown message, got: {stdout}"
+    );
+}
+
+#[test]
+fn fargate_teardown_help_shows_keep_flags() {
+    let tmp = TempDir::new().unwrap();
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["fargate", "teardown", "--help"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--keep-ecr"), "help should show --keep-ecr");
+    assert!(stdout.contains("--keep-s3"), "help should show --keep-s3");
+}
+
+#[test]
 fn dry_run_with_codex_uses_codex_profile_layer() {
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
