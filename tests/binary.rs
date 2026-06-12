@@ -10568,7 +10568,9 @@ fn post_merge_review_guard_fails_when_head_moves() {
         .env("PATH", mock_path(&bin_dir))
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Source HEAD moved during post-merge review"));
+        .stderr(predicate::str::contains(
+            "Source HEAD moved during post-merge review",
+        ));
 
     let value = read_work_show_json(&main_dir, "work-1");
     let attempt = &value["attempts"][0];

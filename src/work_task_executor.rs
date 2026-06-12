@@ -716,9 +716,7 @@ fn resolve_review_readable_workspace_path(
     attempt_id: &str,
     attempt_kind: &AttemptKind,
 ) -> Result<PathBuf> {
-    if attempt_kind.is_source_checkout_review()
-        && workspace.id == "source"
-        && workspace.path == "."
+    if attempt_kind.is_source_checkout_review() && workspace.id == "source" && workspace.path == "."
     {
         return Ok(project_root.to_path_buf());
     }
@@ -2015,11 +2013,7 @@ mod tests {
         let guard = PostMergeSourceGuard::begin(dir.clone(), &head).unwrap();
 
         fs::create_dir_all(dir.join(".factory/work/items")).unwrap();
-        fs::write(
-            dir.join(".factory/work/items/new-work-item.json"),
-            "{}",
-        )
-        .unwrap();
+        fs::write(dir.join(".factory/work/items/new-work-item.json"), "{}").unwrap();
 
         assert!(guard.finish().is_ok());
     }

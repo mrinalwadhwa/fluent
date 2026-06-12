@@ -10,8 +10,8 @@ use crate::coder::CoderKind;
 use crate::content::ContentResolver;
 use crate::review::{self, Verdict};
 use crate::work_model::{
-    ArtifactRef, Attempt, AttemptReviewState, AttemptStatus, Task, TaskKind,
-    TaskStatus, WorkItem, WorkModelStorageError, WorkModelStore, work_artifact_path,
+    ArtifactRef, Attempt, AttemptReviewState, AttemptStatus, Task, TaskKind, TaskStatus, WorkItem,
+    WorkModelStorageError, WorkModelStore, work_artifact_path,
 };
 use crate::work_task_executor::{self, WorkTaskRunConfig};
 
