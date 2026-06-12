@@ -124,7 +124,17 @@ unchanged and that only the Task artifact area changed under `.factory/`.
 If a reviewer changes source HEAD, the guard resets HEAD before failing
 the Task. If a reviewer changes source files or protected `.factory/`
 state outside the Task artifact area, the guard restores protected
-checkout state before failing the Task.
+checkout state before failing the Task. This restorative guard applies
+only to interactive `ReviewOnly` Attempts (e.g. `factory work
+review-codebase`).
+Post-merge review Attempts use `AttemptKind::PostMergeReview` and a
+non-restoring `PostMergeSourceGuard`. This guard verifies that the
+source HEAD still matches the merged commit on completion but does not
+snapshot or restore worktree changes or `.factory/` file contents.
+This allows Factory and the user to write new state concurrently while
+a background post-merge review is in flight. If the source HEAD moves
+during the review (e.g. another merge lands), the guard fails the
+review Tasks with a clear error and does not attempt restoration.
 `factory work attempt run <work-item-id> <attempt-id>` is the first
 Attempt-level orchestration path. It advances one Attempt by running the
 next planned write Task serially through the Task executor, or by running

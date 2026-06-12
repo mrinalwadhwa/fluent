@@ -10,7 +10,7 @@ use crate::coder::CoderKind;
 use crate::content::ContentResolver;
 use crate::review::{self, Verdict};
 use crate::work_model::{
-    ArtifactRef, Attempt, AttemptKind, AttemptReviewState, AttemptStatus, Task, TaskKind,
+    ArtifactRef, Attempt, AttemptReviewState, AttemptStatus, Task, TaskKind,
     TaskStatus, WorkItem, WorkModelStorageError, WorkModelStore, work_artifact_path,
 };
 use crate::work_task_executor::{self, WorkTaskRunConfig};
@@ -83,7 +83,7 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
 
         reject_terminal_attempt(attempt.status.clone())?;
 
-        if attempt.kind != AttemptKind::ReviewOnly
+        if !attempt.kind.is_review_only_like()
             && attempt.status == AttemptStatus::Complete
             && attempt.review_state == Some(AttemptReviewState::Passed)
         {
@@ -99,7 +99,7 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             .iter()
             .find(|task| task.status == TaskStatus::Planned)
         {
-            if task.kind == TaskKind::Review && attempt.kind != AttemptKind::ReviewOnly {
+            if task.kind == TaskKind::Review && !attempt.kind.is_review_only_like() {
                 let planned_review_ids: Vec<String> = attempt
                     .tasks
                     .iter()
@@ -152,7 +152,7 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             );
         }
 
-        if attempt.kind != AttemptKind::ReviewOnly
+        if !attempt.kind.is_review_only_like()
             && has_completed_write(attempt.tasks.as_slice())
             && !has_review_after_latest_write(attempt.tasks.as_slice())
         {
@@ -475,7 +475,7 @@ fn interpret_reviews(
 
     if !failed.is_empty() {
         item.attempts[attempt_index].review_state = Some(AttemptReviewState::Failed);
-        if item.attempts[attempt_index].kind == AttemptKind::ReviewOnly {
+        if item.attempts[attempt_index].kind.is_review_only_like() {
             item.attempts[attempt_index].status = AttemptStatus::Failed;
             store.write_work_item(&item)?;
             return Ok(WorkAttemptRunOutcome::ReviewOnlyFailed);
@@ -512,7 +512,7 @@ fn interpret_reviews(
 
     item.attempts[attempt_index].review_state = Some(AttemptReviewState::Passed);
     item.attempts[attempt_index].status = AttemptStatus::Complete;
-    if item.attempts[attempt_index].kind == AttemptKind::ReviewOnly {
+    if item.attempts[attempt_index].kind.is_review_only_like() {
         store.write_work_item(&item)?;
         return Ok(WorkAttemptRunOutcome::ReviewOnlyComplete);
     }
@@ -531,7 +531,7 @@ fn latest_review_artifacts(
     project_root: &Path,
     attempt: &crate::work_model::Attempt,
 ) -> Result<Vec<ReviewArtifact>> {
-    let start = if attempt.kind == AttemptKind::ReviewOnly {
+    let start = if attempt.kind.is_review_only_like() {
         0
     } else {
         let Some(last_write_index) = attempt
@@ -629,6 +629,7 @@ fn read_work_item_or_not_found(store: &WorkModelStore, id: &str) -> Result<WorkI
 mod tests {
     use super::*;
     use crate::content::ContentResolver;
+    use crate::work_model::AttemptKind;
     use crate::work_model::WorkItemAbandonment;
     use crate::work_model::{Attempt, TaskArtifactArea, WorkspaceAccess};
 

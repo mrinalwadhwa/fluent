@@ -10416,3 +10416,261 @@ fn run_merge_fails_when_worktree_file_missing() {
         .failure()
         .stderr(predicate::str::contains("worktree"));
 }
+
+fn patch_attempt_kind_to_post_merge_review(
+    project_root: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+) {
+    let attempt_path = project_root
+        .join(".factory/work/attempts")
+        .join(work_item_id)
+        .join(format!("{attempt_id}.json"));
+    let content = fs::read_to_string(&attempt_path).unwrap();
+    let patched = content.replace("\"review-only\"", "\"post-merge-review\"");
+    assert_ne!(
+        content, patched,
+        "expected to patch review-only to post-merge-review in {attempt_path:?}"
+    );
+    fs::write(&attempt_path, patched).unwrap();
+}
+
+#[test]
+fn post_merge_review_guard_allows_source_changes() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Post-merge review"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .assert()
+        .success();
+    patch_attempt_kind_to_post_merge_review(&main_dir, "work-1", "attempt-review");
+
+    let main_head = git_head(&main_dir);
+    let bin_dir = tmp.path().join("bin-pmr-dirty");
+    write_mock_claude(&bin_dir, &review_only_dirty_source_mock_script());
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-review",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let attempt = &value["attempts"][0];
+    assert_eq!(attempt["kind"], "post-merge-review");
+    assert_eq!(attempt["status"], "complete");
+    assert_eq!(attempt["review_state"], "passed");
+    assert_eq!(git_head(&main_dir), main_head);
+}
+
+#[test]
+fn post_merge_review_guard_allows_factory_state_changes() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    fs::create_dir_all(main_dir.join(".factory/expertise")).unwrap();
+    fs::write(
+        main_dir.join(".factory/expertise/decisions.md"),
+        "initial\n",
+    )
+    .unwrap();
+    StdCommand::new("git")
+        .args(["add", ".factory"])
+        .current_dir(&main_dir)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "add factory state"])
+        .current_dir(&main_dir)
+        .output()
+        .unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Post-merge review"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .assert()
+        .success();
+    patch_attempt_kind_to_post_merge_review(&main_dir, "work-1", "attempt-review");
+
+    let main_head = git_head(&main_dir);
+    let bin_dir = tmp.path().join("bin-pmr-factory-dirty");
+    write_mock_claude(&bin_dir, &review_only_dirty_factory_mock_script());
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-review",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let attempt = &value["attempts"][0];
+    assert_eq!(attempt["kind"], "post-merge-review");
+    assert_eq!(attempt["status"], "complete");
+    assert_eq!(attempt["review_state"], "passed");
+    assert_eq!(git_head(&main_dir), main_head);
+}
+
+#[test]
+fn post_merge_review_guard_fails_when_head_moves() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Post-merge review"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .assert()
+        .success();
+    patch_attempt_kind_to_post_merge_review(&main_dir, "work-1", "attempt-review");
+
+    let bin_dir = tmp.path().join("bin-pmr-head");
+    write_mock_claude(&bin_dir, &review_only_changed_head_mock_script());
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-review",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Source HEAD moved during post-merge review"));
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let attempt = &value["attempts"][0];
+    assert!(
+        attempt["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task["kind"] == "review" && task["status"] == "failed")
+    );
+}
+
+#[test]
+fn post_merge_review_guard_passes_clean_review() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Post-merge review"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .assert()
+        .success();
+    patch_attempt_kind_to_post_merge_review(&main_dir, "work-1", "attempt-review");
+
+    let main_head = git_head(&main_dir);
+    let bin_dir = tmp.path().join("bin-pmr-pass");
+    write_mock_claude(&bin_dir, &review_only_mock_script("pass"));
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-review",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Review-only Attempt attempt-review passed",
+        ));
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let attempt = &value["attempts"][0];
+    assert_eq!(attempt["kind"], "post-merge-review");
+    assert_eq!(attempt["status"], "complete");
+    assert_eq!(attempt["review_state"], "passed");
+    assert_eq!(git_head(&main_dir), main_head);
+}
+
+#[test]
+fn post_merge_review_preflight_allows_non_factory_worktree_changes() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Post-merge review"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .assert()
+        .success();
+    patch_attempt_kind_to_post_merge_review(&main_dir, "work-1", "attempt-review");
+
+    fs::write(main_dir.join("user-edit.txt"), "concurrent user work\n").unwrap();
+
+    let main_head = git_head(&main_dir);
+    let bin_dir = tmp.path().join("bin-pmr-concurrent");
+    write_mock_claude(&bin_dir, &review_only_mock_script("pass"));
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "attempt",
+            "run",
+            "work-1",
+            "attempt-review",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Review-only Attempt attempt-review passed",
+        ));
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let attempt = &value["attempts"][0];
+    assert_eq!(attempt["status"], "complete");
+    assert_eq!(git_head(&main_dir), main_head);
+    assert!(
+        main_dir.join("user-edit.txt").exists(),
+        "user's concurrent edit should be preserved"
+    );
+}

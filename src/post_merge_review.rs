@@ -269,13 +269,13 @@ fn review_one(project_root: &Path, entry: &QueueEntry) -> Result<PerBranchOutcom
         merge_candidates: Vec::new(),
     };
     let attempt_id = "attempt-1";
-    item.add_review_only_attempt(
+    item.add_post_merge_review_attempt(
         attempt_id,
         review::REVIEWERS,
         &entry.target_branch,
         &entry.merged_commit,
     )
-    .map_err(|e| anyhow::anyhow!("create review-only Attempt: {e}"))?;
+    .map_err(|e| anyhow::anyhow!("create post-merge review Attempt: {e}"))?;
     store
         .create_work_item(&item)
         .map_err(|e| anyhow::anyhow!("write post-merge review Work Item: {e}"))?;
@@ -304,14 +304,20 @@ fn review_one(project_root: &Path, entry: &QueueEntry) -> Result<PerBranchOutcom
 
     let mut findings = Vec::new();
     for task in &attempt.tasks {
-        if task.kind != TaskKind::Review || task.status != TaskStatus::Complete {
+        if task.kind != TaskKind::Review {
+            continue;
+        }
+        if task.status != TaskStatus::Complete && task.status != TaskStatus::Failed {
             continue;
         }
         let Some(area) = task.artifact_area.as_ref() else {
             continue;
         };
         let review_path = project_root.join(&area.path).join("review.md");
-        let content = fs::read_to_string(&review_path).unwrap_or_default();
+        let content = match fs::read_to_string(&review_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
         match review::extract_verdict(&content) {
             review::Verdict::Fail | review::Verdict::Uncertain => {
                 findings.push(ArtifactRef {
@@ -330,7 +336,11 @@ fn review_one(project_root: &Path, entry: &QueueEntry) -> Result<PerBranchOutcom
         {
             Ok(id) => Some(id),
             Err(error) => {
-                eprintln!("  Forward-fix auto-run failed: {error}");
+                eprintln!(
+                    "  Forward-fix auto-run failed for {}: {error}; \
+                     synthetic Work Item {work_item_id:?} left intact for inspection",
+                    entry.target_branch
+                );
                 None
             }
         }

@@ -515,6 +515,65 @@ The auto-merge spawns its own detached post-merge review with
 `FACTORY_POST_MERGE_REVIEW_FIX_DEPTH` incremented; recursion stops at
 `FACTORY_MAX_POST_MERGE_REVIEW_FIX_DEPTH` (default 5).
 
+WHEN the post-merge review runner spawns a review-only Attempt
+against the source checkout for a synthetic `post-merge-<branch>-<short>`
+Work Item,
+THE SYSTEM SHALL apply a non-restoring guard that checks
+source-HEAD-still-matches-the-merged-commit on completion but does
+NOT snapshot or restore non-Factory worktree changes or protected
+`.factory/` file contents.
+Test: tests/binary.rs (post_merge_review_guard_allows_source_changes)
+Test: tests/binary.rs (post_merge_review_guard_allows_factory_state_changes)
+Test: tests/binary.rs (post_merge_review_preflight_allows_non_factory_worktree_changes)
+Test: src/work_task_executor.rs (post_merge_source_guard_finish_succeeds_with_worktree_edits)
+Test: src/work_task_executor.rs (post_merge_source_guard_finish_succeeds_with_factory_mutations)
+
+WHEN the source HEAD moves during a post-merge review (e.g., the
+user lands another merge concurrently),
+THE SYSTEM SHALL mark the review tasks failed with a clear error
+explaining the source HEAD changed, leave the merged-commit's queue
+entry in place so the next post-merge runner can re-attempt, and
+SHALL NOT attempt to restore the head.
+Test: tests/binary.rs (post_merge_review_guard_fails_when_head_moves)
+Test: src/work_task_executor.rs (post_merge_source_guard_finish_fails_when_head_moves)
+
+WHEN `factory work review-codebase` is invoked interactively by the
+user against the current source checkout,
+THE SYSTEM SHALL apply the existing restorative guard semantics:
+snapshot non-Factory worktree state and protected `.factory/`
+contents at begin, restore both on finish if reviewers modified
+them, and surface clear errors when restoration was needed.
+Test: tests/binary.rs (work_attempt_run_review_only_rejects_source_changes)
+Test: tests/binary.rs (work_attempt_run_review_only_rejects_factory_state_changes)
+Test: tests/binary.rs (work_attempt_run_review_only_restores_mixed_source_and_factory_changes)
+
+WHEN a reviewer task running under either guard variant modifies a
+file inside its allowed reviewer artifact directory,
+THE SYSTEM SHALL leave that change in place (artifact directories
+are the reviewer's writable surface, unchanged from today).
+Test: tests/binary.rs (post_merge_review_guard_passes_clean_review)
+Test: tests/binary.rs (work_attempt_run_review_only_passes_without_merge_candidate)
+
+IF the post-merge review's review-only Attempt completes with at
+least one reviewer task whose review.md has `Verdict: fail` or
+`Verdict: uncertain`,
+THEN THE SYSTEM SHALL collect those review artifacts and proceed to
+auto-create a `post-merge-review-fix-<branch>-<timestamp>` Work
+Item, regardless of whether peer reviewer tasks are in
+`failed`/`needs-user`/`complete` status.
+
+WHEN the post-merge review reads completed review artifacts to
+decide whether to create a forward-fix Work Item,
+THE SYSTEM SHALL include reviewers whose Task status is `failed`
+in addition to `complete`, treating any reviewer that wrote a
+review.md with a non-pass verdict as a finding source.
+
+IF the post-merge review cannot create a forward-fix Work Item
+(e.g., because storage write fails),
+THEN THE SYSTEM SHALL log the failure to the post-merge review log
+and leave the synthetic Work Item state intact so an operator can
+inspect the findings manually.
+
 WHEN `factory cleanup` runs and finds a sibling directory matching
 `../review-<bytelen>-<work-item-id>-<attempt-id>-<reviewer>` whose
 Work Item has no merge candidate currently executing,

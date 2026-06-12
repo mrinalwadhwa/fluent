@@ -345,7 +345,7 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         &review_path,
         &readable_workspace_paths,
         &input_artifacts,
-        attempt_kind == AttemptKind::ReviewOnly,
+        attempt_kind.is_review_only_like(),
         config.resolver,
         config.extra_args,
         config.coder_kind,
@@ -447,6 +447,10 @@ impl ReviewReadableWorkspaces {
             if *attempt_kind == AttemptKind::ReviewOnly && workspace_path == project_root {
                 ensure_head_matches_review_context(&workspace_path, expected_source_head)?;
                 ensure_no_non_factory_worktree_changes(&workspace_path)?;
+            } else if *attempt_kind == AttemptKind::PostMergeReview
+                && workspace_path == project_root
+            {
+                ensure_head_matches_review_context(&workspace_path, expected_source_head)?;
             } else {
                 ensure_registered_worktree(project_root, &workspace_path)?;
                 ensure_clean_worktree(&workspace_path)?;
@@ -481,6 +485,13 @@ impl ReviewReadableWorkspaces {
                         expected_source_head,
                         artifact_dir,
                     )?)
+                } else if *attempt_kind == AttemptKind::PostMergeReview
+                    && workspace_path == project_root
+                {
+                    ReviewReadableWorkspace::PostMergeSource(PostMergeSourceGuard::begin(
+                        workspace_path,
+                        expected_source_head,
+                    )?)
                 } else {
                     ensure_registered_worktree(project_root, &workspace_path)?;
                     ensure_clean_worktree(&workspace_path)?;
@@ -512,6 +523,7 @@ impl ReviewReadableWorkspaces {
 enum ReviewReadableWorkspace {
     Candidate(CandidateReviewWorkspace),
     Source(SourceCheckoutReviewGuard),
+    PostMergeSource(PostMergeSourceGuard),
 }
 
 impl ReviewReadableWorkspace {
@@ -519,6 +531,7 @@ impl ReviewReadableWorkspace {
         match self {
             Self::Candidate(workspace) => workspace.path.clone(),
             Self::Source(guard) => guard.path.clone(),
+            Self::PostMergeSource(guard) => guard.path.clone(),
         }
     }
 
@@ -526,6 +539,7 @@ impl ReviewReadableWorkspace {
         match self {
             Self::Candidate(workspace) => workspace.finish(),
             Self::Source(guard) => guard.finish(),
+            Self::PostMergeSource(guard) => guard.finish(),
         }
     }
 }
@@ -580,6 +594,36 @@ impl SourceCheckoutReviewGuard {
             return Err(error);
         }
         Ok(())
+    }
+}
+
+struct PostMergeSourceGuard {
+    path: PathBuf,
+    head: String,
+}
+
+impl PostMergeSourceGuard {
+    fn begin(path: PathBuf, expected_head: &str) -> Result<Self> {
+        ensure_head_matches_review_context(&path, expected_head)?;
+        Ok(Self {
+            head: head_commit(&path)?,
+            path,
+        })
+    }
+
+    fn finish(&self) -> Result<()> {
+        let current_head = head_commit(&self.path)?;
+        if current_head == self.head {
+            Ok(())
+        } else {
+            bail!(
+                "Source HEAD moved during post-merge review from {} to {}: {}; \
+                 review is stale — the queue entry remains for re-attempt",
+                self.head,
+                current_head,
+                self.path.display()
+            )
+        }
     }
 }
 
@@ -672,7 +716,9 @@ fn resolve_review_readable_workspace_path(
     attempt_id: &str,
     attempt_kind: &AttemptKind,
 ) -> Result<PathBuf> {
-    if *attempt_kind == AttemptKind::ReviewOnly && workspace.id == "source" && workspace.path == "."
+    if attempt_kind.is_source_checkout_review()
+        && workspace.id == "source"
+        && workspace.path == "."
     {
         return Ok(project_root.to_path_buf());
     }
@@ -1915,5 +1961,104 @@ mod tests {
             .map(|arg| format!("<{arg}>\n"))
             .collect::<String>();
         assert_eq!(fs::read_to_string(log_path).unwrap(), expected_log);
+    }
+
+    fn setup_test_repo(tmp: &tempfile::TempDir) -> PathBuf {
+        let dir = tmp.path().join("repo");
+        fs::create_dir_all(&dir).unwrap();
+        for (args, _) in [
+            (vec!["init", "-b", "main"], "init"),
+            (vec!["config", "commit.gpgsign", "false"], "config"),
+            (vec!["config", "user.email", "test@test"], "config"),
+            (vec!["config", "user.name", "test"], "config"),
+        ] {
+            Command::new("git")
+                .args(&args)
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+        }
+        fs::write(dir.join("README.md"), "test").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        dir
+    }
+
+    #[test]
+    fn post_merge_source_guard_finish_succeeds_with_worktree_edits() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = setup_test_repo(&tmp);
+        let head = head_commit(&dir).unwrap();
+
+        let guard = PostMergeSourceGuard::begin(dir.clone(), &head).unwrap();
+
+        fs::write(dir.join("new-file.txt"), "user edit\n").unwrap();
+        fs::write(dir.join("README.md"), "modified\n").unwrap();
+
+        assert!(guard.finish().is_ok());
+    }
+
+    #[test]
+    fn post_merge_source_guard_finish_succeeds_with_factory_mutations() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = setup_test_repo(&tmp);
+        let head = head_commit(&dir).unwrap();
+
+        let guard = PostMergeSourceGuard::begin(dir.clone(), &head).unwrap();
+
+        fs::create_dir_all(dir.join(".factory/work/items")).unwrap();
+        fs::write(
+            dir.join(".factory/work/items/new-work-item.json"),
+            "{}",
+        )
+        .unwrap();
+
+        assert!(guard.finish().is_ok());
+    }
+
+    #[test]
+    fn post_merge_source_guard_finish_fails_when_head_moves() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = setup_test_repo(&tmp);
+        let head = head_commit(&dir).unwrap();
+
+        let guard = PostMergeSourceGuard::begin(dir.clone(), &head).unwrap();
+
+        fs::write(dir.join("new-commit.txt"), "extra commit\n").unwrap();
+        Command::new("git")
+            .args(["add", "new-commit.txt"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "move head"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+
+        let result = guard.finish();
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Source HEAD moved during post-merge review"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn post_merge_source_guard_begin_rejects_mismatched_head() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = setup_test_repo(&tmp);
+
+        let result = PostMergeSourceGuard::begin(dir, "0000000000000000000000000000000000000000");
+        assert!(result.is_err());
     }
 }

@@ -286,6 +286,72 @@ impl WorkItem {
         Ok(task_ids)
     }
 
+    pub fn add_post_merge_review_attempt(
+        &mut self,
+        attempt_id: impl Into<String>,
+        roles: &[&str],
+        source_ref: impl Into<String>,
+        source_commit: impl Into<String>,
+    ) -> Result<Vec<String>, WorkModelError> {
+        self.ensure_not_abandoned()?;
+        let attempt_id = attempt_id.into();
+        validate_id("work item", &self.id)?;
+        validate_id("attempt", &attempt_id)?;
+        if self.attempts.iter().any(|attempt| attempt.id == attempt_id) {
+            return Err(WorkModelError::AttemptAlreadyExists { id: attempt_id });
+        }
+
+        let source = WorkspaceRef {
+            id: "source".to_string(),
+            path: ".".to_string(),
+        };
+        let source_ref = source_ref.into();
+        let source_commit = source_commit.into();
+        let review_task_instructions = self.write_task_instructions();
+        let mut task_ids = Vec::new();
+        let mut tasks = Vec::new();
+        for role in roles {
+            validate_id("review role", role)?;
+            let task_id = format!("{attempt_id}-review-{role}");
+            validate_id("task", &task_id)?;
+            tasks.push(Task {
+                id: task_id.clone(),
+                kind: TaskKind::Review,
+                status: TaskStatus::Planned,
+                role: (*role).to_string(),
+                instructions: review_task_instructions.clone(),
+                work_item_id: self.id.clone(),
+                attempt_id: Some(attempt_id.clone()),
+                workspace_access: WorkspaceAccess::read_only(vec![source.clone()]),
+                artifact_area: Some(TaskArtifactArea {
+                    path: work_artifact_path(&self.id, &attempt_id, &task_id),
+                }),
+                review_context: Some(ReviewContext {
+                    candidate_workspace_id: source.id.clone(),
+                    candidate_workspace_path: source.path.clone(),
+                    source_branch: source_ref.clone(),
+                    candidate_commit: source_commit.clone(),
+                }),
+                input_artifacts: Vec::new(),
+                output: None,
+            });
+            task_ids.push(task_id);
+        }
+
+        self.attempts.push(Attempt {
+            id: attempt_id,
+            work_item_id: self.id.clone(),
+            kind: AttemptKind::PostMergeReview,
+            status: AttemptStatus::Reviewing,
+            tasks,
+            review_state: Some(AttemptReviewState::NotReviewed),
+            artifacts: Vec::new(),
+        });
+
+        self.validate()?;
+        Ok(task_ids)
+    }
+
     pub fn add_review_tasks(
         &mut self,
         attempt_id: &str,
@@ -783,7 +849,7 @@ impl Attempt {
                 });
             }
         }
-        if self.kind == AttemptKind::ReviewOnly {
+        if self.kind.is_review_only_like() {
             self.validate_review_only_shape(work_item_id)?;
         }
         for task in &self.tasks {
@@ -858,6 +924,17 @@ pub enum AttemptKind {
     #[default]
     Write,
     ReviewOnly,
+    PostMergeReview,
+}
+
+impl AttemptKind {
+    pub fn is_review_only_like(&self) -> bool {
+        matches!(self, Self::ReviewOnly | Self::PostMergeReview)
+    }
+
+    pub fn is_source_checkout_review(&self) -> bool {
+        matches!(self, Self::ReviewOnly | Self::PostMergeReview)
+    }
 }
 
 fn attempt_kind_is_write(kind: &AttemptKind) -> bool {
@@ -4130,5 +4207,65 @@ mod tests {
             item.latest_merge_candidate_id(),
             Some("attempt-1-merge-candidate")
         );
+    }
+
+    #[test]
+    fn post_merge_review_attempt_round_trips_through_storage() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem {
+            id: "work-pmr".to_string(),
+            title: "Post-merge review".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        let task_ids = item
+            .add_post_merge_review_attempt("attempt-1", &["skills", "tests"], "main", "abc123")
+            .unwrap();
+        assert_eq!(task_ids.len(), 2);
+        assert_eq!(item.attempts[0].kind, AttemptKind::PostMergeReview);
+
+        store.create_work_item(&item).unwrap();
+        let loaded = store.read_work_item("work-pmr").unwrap();
+        assert_eq!(loaded.attempts[0].kind, AttemptKind::PostMergeReview);
+        assert_eq!(loaded.attempts[0].tasks.len(), 2);
+    }
+
+    #[test]
+    fn attempt_kind_is_review_only_like() {
+        assert!(!AttemptKind::Write.is_review_only_like());
+        assert!(AttemptKind::ReviewOnly.is_review_only_like());
+        assert!(AttemptKind::PostMergeReview.is_review_only_like());
+    }
+
+    #[test]
+    fn attempt_kind_is_source_checkout_review() {
+        assert!(!AttemptKind::Write.is_source_checkout_review());
+        assert!(AttemptKind::ReviewOnly.is_source_checkout_review());
+        assert!(AttemptKind::PostMergeReview.is_source_checkout_review());
+    }
+
+    #[test]
+    fn post_merge_review_attempt_validates_same_as_review_only() {
+        let mut item = WorkItem {
+            id: "work-pmr".to_string(),
+            title: "PMR".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_post_merge_review_attempt("attempt-1", &["skills"], "main", "abc123")
+            .unwrap();
+
+        let attempt = &mut item.attempts[0];
+        let task = &mut attempt.tasks[0];
+        task.kind = TaskKind::Write;
+        let err = item.validate();
+        assert!(err.is_err(), "PostMergeReview should reject write tasks");
     }
 }
