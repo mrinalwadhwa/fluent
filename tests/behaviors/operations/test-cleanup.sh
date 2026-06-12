@@ -259,11 +259,11 @@ attempt = json.loads(path.read_text())
 attempt["status"] = "complete"
 path.write_text(json.dumps(attempt, indent=2) + "\n")
 
-path = Path(".factory/work/tasks/work-1/attempt-1/attempt-1-write.json")
+path = Path(".factory/work/tasks/work-1/attempt-1/attempt-1-write-1.json")
 task = json.loads(path.read_text())
 task["status"] = "complete"
 task["artifact_area"] = {
-    "path": ".factory/work/artifacts/work-1/attempt-1/attempt-1-write"
+    "path": ".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1"
 }
 task["output"] = {
     "workspace_id": "candidate",
@@ -278,7 +278,7 @@ attempt = json.loads(path.read_text())
 attempt["status"] = "executing"
 path.write_text(json.dumps(attempt, indent=2) + "\n")
 
-path = Path(".factory/work/tasks/work-active/attempt-1/attempt-1-write.json")
+path = Path(".factory/work/tasks/work-active/attempt-1/attempt-1-write-1.json")
 task = json.loads(path.read_text())
 task["status"] = "executing"
 task["artifact_area"] = {
@@ -287,7 +287,7 @@ task["artifact_area"] = {
 path.write_text(json.dumps(task, indent=2) + "\n")
 PY
 
-  ARTIFACT_DIR=".factory/work/artifacts/work-1/attempt-1/attempt-1-write"
+  ARTIFACT_DIR=".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1"
   mkdir -p "$ARTIFACT_DIR"
   printf 'artifact' > "$ARTIFACT_DIR/result.md"
   ACTIVE_ARTIFACT_DIR=".factory/work/artifacts/work-active/attempt-1/attempt-1-active"
@@ -295,10 +295,10 @@ PY
   printf 'active artifact' > "$ACTIVE_ARTIFACT_DIR/result.md"
 
   WORKTREE_DIR="$(cd .. && pwd)/work-6-work-1-attempt-1"
-  BRANCH_NAME="work/work-1/attempt-1/attempt-1-write"
+  BRANCH_NAME="work/work-1/attempt-1/attempt-1-write-1"
   git worktree add -q -b "$BRANCH_NAME" "$WORKTREE_DIR" HEAD
   ACTIVE_WORKTREE_DIR="$(cd .. && pwd)/work-11-work-active-attempt-1"
-  ACTIVE_BRANCH_NAME="work/work-active/attempt-1/attempt-1-write"
+  ACTIVE_BRANCH_NAME="work/work-active/attempt-1/attempt-1-write-1"
   git worktree add -q -b "$ACTIVE_BRANCH_NAME" "$ACTIVE_WORKTREE_DIR" HEAD
 
   OUTPUT="$("$FACTORY_BIN" cleanup 2>&1)"
@@ -463,11 +463,11 @@ attempt["artifacts"] = [
 ]
 path.write_text(json.dumps(attempt, indent=2) + "\n")
 
-path = Path(".factory/work/tasks/work-1/attempt-1/attempt-1-write.json")
+path = Path(".factory/work/tasks/work-1/attempt-1/attempt-1-write-1.json")
 task = json.loads(path.read_text())
 task["status"] = "complete"
 task["artifact_area"] = {
-    "path": ".factory/work/artifacts/work-1/attempt-1/attempt-1-write"
+    "path": ".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1"
 }
 task["output"] = {
     "workspace_id": "candidate",
@@ -478,7 +478,7 @@ task["output"] = {
 path.write_text(json.dumps(task, indent=2) + "\n")
 PY
 
-  ARTIFACT_DIR=".factory/work/artifacts/work-1/attempt-1/attempt-1-write"
+  ARTIFACT_DIR=".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1"
   MANAGED_REVIEW_ARTIFACT=".factory/work/artifacts/work-1/attempt-1/attempt-1-review/review.md"
   mkdir -p "$ARTIFACT_DIR" "$(dirname "$MANAGED_REVIEW_ARTIFACT")"
   printf 'artifact' > "$ARTIFACT_DIR/result.md"
@@ -529,7 +529,7 @@ attempt = json.loads(attempt_path.read_text())
 attempt["status"] = "needs-user"
 attempt_path.write_text(json.dumps(attempt, indent=2) + "\n")
 
-task_path = Path(".factory/work/tasks/work-stale/attempt-1/attempt-1-write.json")
+task_path = Path(".factory/work/tasks/work-stale/attempt-1/attempt-1-write-1.json")
 task = json.loads(task_path.read_text())
 task["status"] = "needs-user"
 task_path.write_text(json.dumps(task, indent=2) + "\n")
@@ -538,7 +538,7 @@ PY
   "$FACTORY_BIN" work abandon work-stale --reason "replacement landed" >/dev/null
 
   WORKTREE_DIR="$(cd .. && pwd)/work-10-work-stale-attempt-1"
-  BRANCH_NAME="work/work-stale/attempt-1/attempt-1-write"
+  BRANCH_NAME="work/work-stale/attempt-1/attempt-1-write-1"
   git worktree add -q -b "$BRANCH_NAME" "$WORKTREE_DIR" HEAD
 
   OUTPUT="$("$FACTORY_BIN" cleanup 2>&1)"
@@ -613,7 +613,7 @@ attempt["status"] = "complete"
 attempt["review_state"] = "passed"
 attempt_path.write_text(json.dumps(attempt, indent=2) + "\n")
 
-task_path = Path(".factory/work/tasks/work-active/attempt-1/attempt-1-write.json")
+task_path = Path(".factory/work/tasks/work-active/attempt-1/attempt-1-write-1.json")
 task = json.loads(task_path.read_text())
 task["status"] = "complete"
 task["output"] = {

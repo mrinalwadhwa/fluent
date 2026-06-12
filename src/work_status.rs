@@ -305,7 +305,7 @@ mod tests {
         let row = summarize_work_item(&item);
 
         assert_eq!(row.attempt, "attempt-1 [planned]");
-        assert_eq!(row.task, "write:attempt-1-write [planned]");
+        assert_eq!(row.task, "write:attempt-1-write-1 [planned]");
         assert_eq!(row.review, "-");
         assert_eq!(row.action, "task-ready");
     }
@@ -368,7 +368,7 @@ mod tests {
 
         let row = summarize_work_item(&item);
 
-        assert_eq!(row.task, "write:attempt-1-write [needs-user]");
+        assert_eq!(row.task, "write:attempt-1-write-1 [needs-user]");
         assert_eq!(row.action, "needs-user");
     }
 
@@ -391,7 +391,7 @@ mod tests {
 
         let row = summarize_work_item(&item);
 
-        assert_eq!(row.task, "write:attempt-1-write [needs-user]");
+        assert_eq!(row.task, "write:attempt-1-write-1 [needs-user]");
         assert_eq!(row.action, "abandoned");
     }
 
@@ -402,7 +402,7 @@ mod tests {
                 id: "work-1".to_string(),
                 title: "Build status view".to_string(),
                 attempt: "attempt-1 [planned]".to_string(),
-                task: "write:attempt-1-write [planned]".to_string(),
+                task: "write:attempt-1-write-1 [planned]".to_string(),
                 review: "-".to_string(),
                 merge_candidate: "-".to_string(),
                 merge: "-".to_string(),
@@ -427,7 +427,7 @@ mod tests {
                 id: "work-1".to_string(),
                 title: "Build status view".to_string(),
                 attempt: "attempt-1 [planned]".to_string(),
-                task: "write:attempt-1-write [planned]".to_string(),
+                task: "write:attempt-1-write-1 [planned]".to_string(),
                 review: "-".to_string(),
                 merge_candidate: "-".to_string(),
                 merge: "-".to_string(),

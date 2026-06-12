@@ -360,8 +360,8 @@ fn cmd_work(
                                 "Attempt {attempt_id} reviews passed; Merge Candidate {candidate_id} is ready"
                             );
                         }
-                        WorkAttemptRunOutcome::PlannedFollowup { task_id } => {
-                            println!("Planned follow-up write Task {task_id}");
+                        WorkAttemptRunOutcome::PlannedWriteRound { task_id } => {
+                            println!("Planned write Task {task_id}");
                         }
                         WorkAttemptRunOutcome::NeedsUser { handoff_path } => {
                             println!("Attempt {attempt_id} needs user input: {handoff_path}");

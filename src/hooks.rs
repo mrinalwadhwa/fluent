@@ -242,7 +242,7 @@ mod tests {
         let context = HookContext {
             work_item_id: Some("work-1".into()),
             attempt_id: Some("attempt-1".into()),
-            task_id: Some("attempt-1-write".into()),
+            task_id: Some("attempt-1-write-1".into()),
             merge_candidate_id: Some("cand-1".into()),
             candidate_commit: Some("abc123".into()),
             log_dir,
@@ -253,7 +253,7 @@ mod tests {
             .unwrap();
         let log = fs::read_to_string(&outcome.log_path).unwrap();
         assert!(
-            log.contains("work=work-1 attempt=attempt-1 task=attempt-1-write candidate=cand-1 commit=abc123"),
+            log.contains("work=work-1 attempt=attempt-1 task=attempt-1-write-1 candidate=cand-1 commit=abc123"),
             "log was: {log}"
         );
     }

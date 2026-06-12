@@ -1791,7 +1791,7 @@ mod tests {
             store: &store,
             work_item_id: "work-1",
             attempt_id: "attempt-1",
-            task_id: "attempt-1-write",
+            task_id: "attempt-1-write-1",
             resolver: &resolver,
             extra_args: &[],
             coder_kind: CoderKind::Codex,

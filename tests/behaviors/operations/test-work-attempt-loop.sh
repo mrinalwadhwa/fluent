@@ -122,13 +122,13 @@ run_attempt_loop() {
 
 run_write_task() {
   PATH="${TEST_DIR}/bin:$PATH" "$FACTORY_BIN" work task run \
-    work-1 attempt-1 attempt-1-write --no-sandbox
+    work-1 attempt-1 attempt-1-write-1 --no-sandbox
 }
 
 write_planned_followup_task() {
   local workspace_id workspace_path task_count
-  workspace_id="$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-write") | .output.workspace_id')"
-  workspace_path="$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-write") | .output.workspace_path')"
+  workspace_id="$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-write-1") | .output.workspace_id')"
+  workspace_path="$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-write-1") | .output.workspace_path')"
   task_count="$(json_value '.attempts[0].tasks | length')"
   mkdir -p .factory/work/tasks/work-1/attempt-1
   jq -n \
@@ -137,7 +137,7 @@ write_planned_followup_task() {
     --arg workspace_path "$workspace_path" \
     '{
       order: $order,
-      id: "attempt-1-followup-1",
+      id: "attempt-1-write-2",
       kind: "write",
       role: "author",
       work_item_id: "work-1",
@@ -147,7 +147,7 @@ write_planned_followup_task() {
         writes: [{id: $workspace_id, path: $workspace_path}]
       },
       input_artifacts: []
-    }' > .factory/work/tasks/work-1/attempt-1/attempt-1-followup-1.json
+    }' > .factory/work/tasks/work-1/attempt-1/attempt-1-write-2.json
   jq '.status = "planned" | .review_state = "failed"' \
     .factory/work/attempts/work-1/attempt-1.json > "$TEST_DIR/attempt.json"
   mv "$TEST_DIR/attempt.json" .factory/work/attempts/work-1/attempt-1.json
@@ -248,18 +248,18 @@ test_attempt_loop_plans_followup() {
   RESULT=0
   run_attempt_loop > "$TEST_DIR/stdout"
 
-  grep -q 'Planned follow-up write Task attempt-1-followup-1' "$TEST_DIR/stdout" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/stdout")" "Completed Task attempt-1-followup-1" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/stdout")" "Planned follow-up write Task attempt-1-followup-2" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/stdout")" "Completed Task attempt-1-followup-2" || RESULT=1
+  grep -q 'Planned write Task attempt-1-write-2' "$TEST_DIR/stdout" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stdout")" "Completed Task attempt-1-write-2" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stdout")" "Planned write Task attempt-1-write-3" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stdout")" "Completed Task attempt-1-write-3" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stdout")" "needs user input" || RESULT=1
   [ "$(json_value '.attempts[0].status')" = "needs-user" ] || RESULT=1
   [ "$(json_value '.attempts[0].review_state')" = "failed" ] || RESULT=1
-  [ "$(json_value '[.attempts[0].tasks[] | select(.id == "attempt-1-followup-3")] | length')" = "0" ] || RESULT=1
+  [ "$(json_value '[.attempts[0].tasks[] | select(.id == "attempt-1-write-4")] | length')" = "0" ] || RESULT=1
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review" and (.id | startswith("attempt-1-review-2-")))] | length')" = "5" ] || RESULT=1
-  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-tests") | .review_context.candidate_commit')" = "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-followup-1") | .output.commit')" ] || RESULT=1
+  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-tests") | .review_context.candidate_commit')" = "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-write-2") | .output.commit')" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-tests") | .review_context.candidate_workspace_path')" = "../work-6-work-1-attempt-1" ] || RESULT=1
-  assert_contains "$(cat .factory/work/artifacts/work-1/attempt-1/needs-user.md)" "follow-up write budget" || RESULT=1
+  assert_contains "$(cat .factory/work/artifacts/work-1/attempt-1/needs-user.md)" "write-round budget" || RESULT=1
   return $RESULT
 }
 
@@ -270,15 +270,15 @@ test_attempt_loop_plans_followup_with_mixed_failed_and_missing_reviews() {
 
   RESULT=0
   run_attempt_loop > "$TEST_DIR/stdout" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/stdout")" "Planned follow-up write Task attempt-1-followup-1" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/stdout")" "Completed Task attempt-1-followup-1" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stdout")" "Planned write Task attempt-1-write-2" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stdout")" "Completed Task attempt-1-write-2" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stdout")" "Planned 1 review Tasks for Attempt attempt-1" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stdout")" "attempt-1-review-2-documentation" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stdout")" "Merge Candidate attempt-1-merge-candidate is ready" || RESULT=1
   [ "$(json_value '.attempts[0].status')" = "complete" ] || RESULT=1
   [ "$(json_value '.attempts[0].review_state')" = "passed" ] || RESULT=1
-  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-followup-1") | .input_artifacts | length')" = "1" ] || RESULT=1
-  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-followup-1") | .input_artifacts[0].path')" = ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-documentation/review.md" ] || RESULT=1
+  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-write-2") | .input_artifacts | length')" = "1" ] || RESULT=1
+  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-write-2") | .input_artifacts[0].path')" = ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-documentation/review.md" ] || RESULT=1
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review" and (.id | startswith("attempt-1-review-2-")))] | length')" = "1" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-documentation") | .role')" = "documentation" ] || RESULT=1
   return $RESULT
@@ -294,17 +294,17 @@ test_attempt_loop_counts_preplanned_followup_against_budget() {
   write_planned_followup_task
 
   run_attempt_loop > "$TEST_DIR/followup-stdout" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Completed Task attempt-1-followup-1" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Completed Task attempt-1-write-2" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Planned 5 review Tasks for Attempt attempt-1" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Planned follow-up write Task attempt-1-followup-2" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Completed Task attempt-1-followup-2" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Planned write Task attempt-1-write-3" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Completed Task attempt-1-write-3" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/followup-stdout")" "needs user input" || RESULT=1
   [ "$(json_value '.attempts[0].status')" = "needs-user" ] || RESULT=1
-  [ "$(json_value '[.attempts[0].tasks[] | select(.id == "attempt-1-followup-3")] | length')" = "0" ] || RESULT=1
+  [ "$(json_value '[.attempts[0].tasks[] | select(.id == "attempt-1-write-4")] | length')" = "0" ] || RESULT=1
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review" and (.id | startswith("attempt-1-review-2-")))] | length')" = "5" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-documentation") | .role')" = "documentation" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-tests") | .role')" = "tests" ] || RESULT=1
-  assert_contains "$(cat .factory/work/artifacts/work-1/attempt-1/needs-user.md)" "follow-up write budget" || RESULT=1
+  assert_contains "$(cat .factory/work/artifacts/work-1/attempt-1/needs-user.md)" "write-round budget" || RESULT=1
   return $RESULT
 }
 

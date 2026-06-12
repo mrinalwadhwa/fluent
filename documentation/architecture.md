@@ -302,7 +302,7 @@ the core model.
 
 ```json
 {
-  "id": "attempt-1-write",
+  "id": "attempt-1-write-1",
   "kind": "write",
   "role": "author",
   "instructions": "Preserve coder flags as args.\nKeep prompt content in Work state.",

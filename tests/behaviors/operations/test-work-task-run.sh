@@ -136,7 +136,7 @@ assert_contains() {
 
 assert_not_complete() {
   local status output_commit
-  local task_path=".factory/work/tasks/work-1/attempt-1/attempt-1-write.json"
+  local task_path=".factory/work/tasks/work-1/attempt-1/attempt-1-write-1.json"
   if [ -f "$task_path" ]; then
     status="$(jq -r '.status // "missing"' "$task_path")"
     output_commit="$(jq -r '.output.commit // "missing"' "$task_path")"
@@ -167,7 +167,7 @@ run_task() {
     CODER_ARGS_LOG="${TEST_DIR}/coder-args.log" \
     CODER_PROMPT_LOG="${TEST_DIR}/coder-prompt.log" \
     "$FACTORY_BIN" work task run --no-sandbox --coder codex \
-      work-1 attempt-1 attempt-1-write
+      work-1 attempt-1 attempt-1-write-1
 }
 
 run_review_task() {
@@ -213,7 +213,7 @@ test_run_passes_task_context_to_coder_prompt() {
   PROMPT="$(cat "$TEST_DIR/coder-prompt.log")"
   assert_contains "$PROMPT" "Work Item: work-1 - Prompt contract" || RESULT=1
   assert_contains "$PROMPT" "Attempt: attempt-1" || RESULT=1
-  assert_contains "$PROMPT" "Task: attempt-1-write" || RESULT=1
+  assert_contains "$PROMPT" "Task: attempt-1-write-1" || RESULT=1
   assert_contains "$PROMPT" "Role: author" || RESULT=1
   assert_contains "$PROMPT" "Completion contract:" || RESULT=1
   assert_contains "$PROMPT" "Commit all Task output" || RESULT=1
@@ -242,7 +242,7 @@ test_run_passes_task_context_to_coder_prompt() {
   assert_contains "$PROMPT" "update the applicable behavior contract, docs, tests, and verification notes" || RESULT=1
   assert_contains "$PROMPT" "record why the other related artifacts do not apply" || RESULT=1
   assert_contains "$PROMPT" "Current Task model:" || RESULT=1
-  assert_contains "$PROMPT" '"id": "attempt-1-write"' || RESULT=1
+  assert_contains "$PROMPT" '"id": "attempt-1-write-1"' || RESULT=1
   assert_contains "$PROMPT" '"kind": "write"' || RESULT=1
 
   cleanup_test_project
@@ -280,7 +280,7 @@ test_clean_committed_task_completes() {
   [ "$(show_json_value '.attempts[0].tasks[0].output.workspace_path')" = "$(workspace_path)" ] || RESULT=1
   [ "$COMMIT" != "null" ] && git -C "$(workspace_path)" cat-file -e "${COMMIT}^{commit}" || RESULT=1
   [ -z "$(git -C "$(workspace_path)" status --porcelain)" ] || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/stdout")" "Completed Task attempt-1-write" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stdout")" "Completed Task attempt-1-write-1" || RESULT=1
 
   cleanup_test_project
   return $RESULT
@@ -590,16 +590,16 @@ test_invalid_task_requests_do_not_complete_or_mutate() {
   write_mock_codex
 
   RESULT=0
-  TASK_PATH=".factory/work/tasks/work-1/attempt-1/attempt-1-write.json"
+  TASK_PATH=".factory/work/tasks/work-1/attempt-1/attempt-1-write-1.json"
   BEFORE="$(cat "$TASK_PATH")"
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
-    missing-work attempt-1 attempt-1-write || RESULT=1
+    missing-work attempt-1 attempt-1-write-1 || RESULT=1
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
-    work-1 missing-attempt attempt-1-write || RESULT=1
+    work-1 missing-attempt attempt-1-write-1 || RESULT=1
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
     work-1 attempt-1 missing-task || RESULT=1
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
-    work-1 attempt-2 attempt-1-write || RESULT=1
+    work-1 attempt-2 attempt-1-write-1 || RESULT=1
   if [ "$(cat "$TASK_PATH")" != "$BEFORE" ]; then
     printf '    FAIL: missing id requests changed Work Item state\n'
     RESULT=1
@@ -608,21 +608,21 @@ test_invalid_task_requests_do_not_complete_or_mutate() {
   jq '.kind = "review"' "$TASK_PATH" > "$TEST_DIR/task.json"
   mv "$TEST_DIR/task.json" "$TASK_PATH"
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
-    work-1 attempt-1 attempt-1-write || RESULT=1
+    work-1 attempt-1 attempt-1-write-1 || RESULT=1
   assert_not_complete || RESULT=1
 
   printf '%s' "$BEFORE" > "$TASK_PATH"
   jq '.work_item_id = "other-work"' "$TASK_PATH" > "$TEST_DIR/task.json"
   mv "$TEST_DIR/task.json" "$TASK_PATH"
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
-    work-1 attempt-1 attempt-1-write || RESULT=1
+    work-1 attempt-1 attempt-1-write-1 || RESULT=1
   assert_not_complete || RESULT=1
 
   printf '%s' "$BEFORE" > "$TASK_PATH"
   jq '.status = "failed"' "$TASK_PATH" > "$TEST_DIR/task.json"
   mv "$TEST_DIR/task.json" "$TASK_PATH"
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
-    work-1 attempt-1 attempt-1-write || RESULT=1
+    work-1 attempt-1 attempt-1-write-1 || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "expected planned" || RESULT=1
   assert_not_complete || RESULT=1
 
@@ -630,7 +630,7 @@ test_invalid_task_requests_do_not_complete_or_mutate() {
   jq '.workspace_access.writes = []' "$TASK_PATH" > "$TEST_DIR/task.json"
   mv "$TEST_DIR/task.json" "$TASK_PATH"
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
-    work-1 attempt-1 attempt-1-write || RESULT=1
+    work-1 attempt-1 attempt-1-write-1 || RESULT=1
   assert_not_complete || RESULT=1
 
   printf '%s' "$BEFORE" > "$TASK_PATH"
@@ -638,14 +638,14 @@ test_invalid_task_requests_do_not_complete_or_mutate() {
     "$TASK_PATH" > "$TEST_DIR/task.json"
   mv "$TEST_DIR/task.json" "$TASK_PATH"
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
-    work-1 attempt-1 attempt-1-write || RESULT=1
+    work-1 attempt-1 attempt-1-write-1 || RESULT=1
 
   assert_not_complete || RESULT=1
 
   printf '%s' "$BEFORE" > "$TASK_PATH"
   mkdir -p "$(workspace_path)"
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
-    work-1 attempt-1 attempt-1-write || RESULT=1
+    work-1 attempt-1 attempt-1-write-1 || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "not a registered git worktree" || RESULT=1
   rm -rf "$(workspace_path)"
   assert_not_complete || RESULT=1
@@ -655,7 +655,7 @@ test_invalid_task_requests_do_not_complete_or_mutate() {
     "$TASK_PATH" > "$TEST_DIR/task.json"
   mv "$TEST_DIR/task.json" "$TASK_PATH"
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
-    work-1 attempt-1 attempt-1-write || RESULT=1
+    work-1 attempt-1 attempt-1-write-1 || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "Task writable workspace path must" || RESULT=1
   if [ -e "../outside-workspace" ]; then
     printf '    FAIL: invalid workspace path created an external workspace\n'
@@ -668,7 +668,7 @@ test_invalid_task_requests_do_not_complete_or_mutate() {
     "$TASK_PATH" > "$TEST_DIR/task.json"
   mv "$TEST_DIR/task.json" "$TASK_PATH"
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
-    work-1 attempt-1 attempt-1-write || RESULT=1
+    work-1 attempt-1 attempt-1-write-1 || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "Task writable workspace path must" || RESULT=1
   if [ -e "${TEST_DIR}/outside-absolute" ]; then
     printf '    FAIL: invalid absolute workspace path created a workspace\n'

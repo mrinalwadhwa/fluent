@@ -133,7 +133,7 @@ attempt_record_path() {
 }
 
 task_record_path() {
-  printf '.factory/work/tasks/work-1/attempt-1/attempt-1-write.json'
+  printf '.factory/work/tasks/work-1/attempt-1/attempt-1-write-1.json'
 }
 
 merge_candidate_record_path() {
@@ -264,7 +264,7 @@ EOF
   fi
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Attempt history:" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Attempt attempt-1 review_state: passed" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Task attempt-1-write: kind=write" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Task attempt-1-write-1: kind=write" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Rebase/update state:" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "Rebased candidate workspace onto target branch main" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/merge-review-args-log")" "$TARGET_BEFORE" || RESULT=1

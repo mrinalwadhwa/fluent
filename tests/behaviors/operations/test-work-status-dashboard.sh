@@ -334,7 +334,7 @@ test_dashboard_lists_work_items() {
   assert_contains "$OUTPUT" "Work Items (1)" || RESULT=1
   assert_contains "$OUTPUT" "work-visible - Visible Work" || RESULT=1
   assert_contains "$OUTPUT" "Attempt: attempt-visible [planned]" || RESULT=1
-  assert_contains "$OUTPUT" "Task: write:attempt-visible-write [planned]" || RESULT=1
+  assert_contains "$OUTPUT" "Task: write:attempt-visible-write-1 [planned]" || RESULT=1
   assert_contains "$OUTPUT" "Review: -" || RESULT=1
   assert_contains "$OUTPUT" "Merge Candidate: -" || RESULT=1
   assert_contains "$OUTPUT" "Merge: -" || RESULT=1

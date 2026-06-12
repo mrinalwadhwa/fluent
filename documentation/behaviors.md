@@ -393,21 +393,21 @@ set and run planned review Tasks through the existing Task executor.
 Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop passes review round)
 
-WHEN a normal Work Attempt completes a follow-up write Task created from
+WHEN a normal Work Attempt completes a write round created from
 failed review artifacts,
 THE SYSTEM SHALL plan the next review round only for the failed reviewer
-roles that fed that follow-up write Task.
+roles that fed that write round.
 Test: tests/binary.rs (work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews)
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop plans follow-up with mixed missing review)
 
-WHEN a normal Work Attempt completes a follow-up write Task created from
+WHEN a normal Work Attempt completes a write round created from
 failed review artifacts and Factory plans a targeted follow-up review
 round,
 THE SYSTEM SHALL attach the relevant prior failed review artifact for
 each planned review Task role as that review Task's input artifact.
 Test: tests/binary.rs (work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews)
 
-IF a normal Work Attempt completes a follow-up write Task and the failed
+IF a normal Work Attempt completes a write round and the failed
 reviewer roles cannot be derived from the follow-up Task input artifacts,
 THEN THE SYSTEM SHALL plan the next review round using the full Work
 reviewer set.
@@ -526,14 +526,14 @@ Test: tests/behaviors/operations/test-work-review-codebase.sh (review-only pass 
 
 WHEN any review-only reviewer artifact has verdict `fail`,
 THE SYSTEM SHALL mark the Attempt failed with review state `failed` and
-SHALL NOT create a follow-up write Task or Merge Candidate.
+SHALL NOT create a write round or Merge Candidate.
 Test: tests/binary.rs (work_attempt_run_review_only_fails_without_followup)
 Test: tests/behaviors/operations/test-work-review-codebase.sh (review-only fail stops without follow-up)
 
 WHEN any review-only reviewer artifact has verdict `uncertain` and none
 has verdict `fail`,
 THE SYSTEM SHALL mark the Attempt `needs-user`, write a Work handoff
-artifact, and SHALL NOT create a follow-up write Task or Merge
+artifact, and SHALL NOT create a write round or Merge
 Candidate.
 Test: tests/binary.rs (work_attempt_run_review_only_uncertain_needs_user)
 Test: tests/behaviors/operations/test-work-review-codebase.sh (review-only uncertain needs user)
@@ -678,7 +678,7 @@ Test: src/work_merge_executor.rs (failed_review_paths_picks_only_fail_and_uncert
 Test: src/work_merge_executor.rs (write_merge_needs_user_handoff_lists_failed_review_paths)
 
 WHEN merge-time reviewers return any fail or uncertain verdict and the
-same-invocation follow-up write budget permits another cycle,
+same-invocation write-round budget permits another cycle,
 THE SYSTEM SHALL invoke the configured Coder against the candidate
 workspace with the failed merge-time review artifact paths as input
 artifacts, ask the coder to address the findings and commit, verify
@@ -712,10 +712,10 @@ Merge Candidate.
 Test: tests/binary.rs (work_merge_candidate_failed_check_leaves_target_unchanged)
 
 WHEN any completed review artifact has a failing verdict and the
-same-invocation follow-up write budget permits another follow-up write
+same-invocation write-round budget permits another follow-up write
 Task,
 THE SYSTEM SHALL mark the Attempt review state as `failed` and create a
-planned follow-up write Task with deterministic id
+planned write round with deterministic id
 `<attempt-id>-followup-<n>`, the candidate workspace as writable access,
 write Task instructions copied from explicit Work Item instructions or
 derived from the Work Item planning context, and the failed review
@@ -724,19 +724,19 @@ Test: tests/binary.rs (work_attempt_run_plans_followup_for_failed_reviews)
 Test: tests/binary.rs (work_create_planning_context_feeds_followup_for_failed_reviews)
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop plans follow-up write)
 
-WHEN `factory work attempt run` advances follow-up write Tasks during one
+WHEN `factory work attempt run` advances write rounds during one
 command invocation,
-THE SYSTEM SHALL count already-planned follow-up write Tasks and
-follow-up write Tasks planned during the invocation against the same
+THE SYSTEM SHALL count already-planned write rounds and
+write rounds planned during the invocation against the same
 two-follow-up budget.
 Test: tests/binary.rs (work_attempt_run_counts_already_planned_followup_against_budget)
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop counts preplanned follow-up against budget)
 
-IF a failed review round would require a third follow-up write Task in
+IF a failed review round would require a third write round in
 the same `factory work attempt run` command invocation,
 THE SYSTEM SHALL mark the Attempt as `needs-user`, write a durable
 handoff that names the failed review artifacts and budget exhaustion,
-and SHALL NOT create the over-budget follow-up write Task.
+and SHALL NOT create the over-budget write round.
 Test: tests/binary.rs (work_attempt_run_plans_followup_for_failed_reviews)
 Test: tests/binary.rs (work_attempt_run_counts_already_planned_followup_against_budget)
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop counts preplanned follow-up against budget)

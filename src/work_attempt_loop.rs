@@ -15,7 +15,7 @@ use crate::work_model::{
 };
 use crate::work_task_executor::{self, WorkTaskRunConfig};
 
-const MAX_FOLLOWUP_WRITES_PER_INVOCATION: usize = 2;
+const MAX_WRITE_ROUNDS_PER_INVOCATION: usize = 3;
 const DEFAULT_MAX_PARALLEL_REVIEWERS: usize = 5;
 
 fn max_parallel_reviewers() -> usize {
@@ -42,7 +42,7 @@ pub enum WorkAttemptRunOutcome {
     RanTask { task_id: String, output: String },
     PlannedReviews { task_ids: Vec<String> },
     MergeCandidateReady { candidate_id: String },
-    PlannedFollowup { task_id: String },
+    PlannedWriteRound { task_id: String },
     NeedsUser { handoff_path: String },
     ReviewOnlyComplete,
     ReviewOnlyFailed,
@@ -54,7 +54,6 @@ pub struct WorkAttemptRunResult {
 
 pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunResult> {
     let mut outcomes = Vec::new();
-    let mut followup_writes_advanced = 0;
 
     loop {
         let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
@@ -94,8 +93,6 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                 continue;
             }
 
-            let is_followup_write =
-                task.kind == TaskKind::Write && is_followup_write_task(config.attempt_id, &task.id);
             let result = work_task_executor::run_task(WorkTaskRunConfig {
                 project_root: config.project_root,
                 store: config.store,
@@ -112,9 +109,6 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                 task_id: result.task_id,
                 output: result.output,
             });
-            if is_followup_write {
-                followup_writes_advanced += 1;
-            }
             continue;
         }
 
@@ -160,12 +154,17 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             .is_some()
             && !has_open_review_round(attempt.tasks.as_slice())
         {
+            let attempt_write_count = attempt
+                .tasks
+                .iter()
+                .filter(|task| task.kind == TaskKind::Write)
+                .count();
             let outcome = interpret_reviews(
                 config.project_root,
                 config.store,
                 item,
                 config.attempt_id,
-                followup_writes_advanced < MAX_FOLLOWUP_WRITES_PER_INVOCATION,
+                attempt_write_count < MAX_WRITE_ROUNDS_PER_INVOCATION,
             )?;
             let should_stop = matches!(
                 outcome,
@@ -292,11 +291,6 @@ fn has_completed_write(tasks: &[Task]) -> bool {
         .any(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
 }
 
-fn is_followup_write_task(attempt_id: &str, task_id: &str) -> bool {
-    let followup_prefix = format!("{attempt_id}-followup-");
-    task_id.starts_with(&followup_prefix)
-}
-
 fn has_open_review_round(tasks: &[Task]) -> bool {
     for task in tasks.iter().rev() {
         match task.kind {
@@ -415,9 +409,9 @@ fn interpret_reviews(
             return Ok(WorkAttemptRunOutcome::NeedsUser { handoff_path });
         }
         item.attempts[attempt_index].status = AttemptStatus::Planned;
-        let task_id = item.add_followup_write_task(attempt_id, failed)?;
+        let task_id = item.add_next_write_round(attempt_id, failed)?;
         store.write_work_item(&item)?;
-        return Ok(WorkAttemptRunOutcome::PlannedFollowup { task_id });
+        return Ok(WorkAttemptRunOutcome::PlannedWriteRound { task_id });
     }
 
     if !uncertain.is_empty() {
@@ -528,7 +522,7 @@ fn write_budget_exhausted_handoff(
     fs::write(
         &path,
         format!(
-            "# Attempt needs user input\n\nThe Attempt loop exhausted the same-invocation follow-up write budget after advancing {MAX_FOLLOWUP_WRITES_PER_INVOCATION} follow-up write Tasks.\n\nFailed review artifacts still need attention:\n\n{artifacts}\n"
+            "# Attempt needs user input\n\nThe Attempt loop exhausted the same-invocation write-round budget after completing {MAX_WRITE_ROUNDS_PER_INVOCATION} write rounds.\n\nFailed review artifacts still need attention:\n\n{artifacts}\n"
         ),
     )?;
     Ok(relative_path)
@@ -598,7 +592,7 @@ mod tests {
     fn completed_review_round_is_not_open() {
         let tasks = vec![
             Task {
-                id: "attempt-1-write".to_string(),
+                id: "attempt-1-write-1".to_string(),
                 kind: TaskKind::Write,
                 status: TaskStatus::Complete,
                 role: "author".to_string(),
@@ -640,7 +634,7 @@ mod tests {
     fn latest_review_artifacts_rejects_unmanaged_artifact_area() {
         let tasks = vec![
             Task {
-                id: "attempt-1-write".to_string(),
+                id: "attempt-1-write-1".to_string(),
                 kind: TaskKind::Write,
                 status: TaskStatus::Complete,
                 role: "author".to_string(),
@@ -698,7 +692,7 @@ mod tests {
 
     #[test]
     fn initial_write_uses_full_review_roles() {
-        let attempt = attempt_with_tasks(vec![write_task("attempt-1-write", Vec::new())]);
+        let attempt = attempt_with_tasks(vec![write_task("attempt-1-write-1", Vec::new())]);
 
         assert_eq!(next_review_roles(&attempt), review::REVIEWERS);
     }
@@ -706,10 +700,10 @@ mod tests {
     #[test]
     fn followup_write_uses_failed_input_review_role() {
         let attempt = attempt_with_tasks(vec![
-            write_task("attempt-1-write", Vec::new()),
+            write_task("attempt-1-write-1", Vec::new()),
             review_task("attempt-1-review-tests", "tests"),
             write_task(
-                "attempt-1-followup-1",
+                "attempt-1-write-2",
                 vec![ArtifactRef {
                     producer_id: "attempt-1-review-tests".to_string(),
                     path:
@@ -725,11 +719,11 @@ mod tests {
     #[test]
     fn followup_write_uses_failed_roles_in_default_order() {
         let attempt = attempt_with_tasks(vec![
-            write_task("attempt-1-write", Vec::new()),
+            write_task("attempt-1-write-1", Vec::new()),
             review_task("attempt-1-review-tests", "tests"),
             review_task("attempt-1-review-documentation", "documentation"),
             write_task(
-                "attempt-1-followup-1",
+                "attempt-1-write-2",
                 vec![
                     ArtifactRef {
                         producer_id: "attempt-1-review-tests".to_string(),
@@ -751,10 +745,10 @@ mod tests {
     #[test]
     fn unmappable_followup_inputs_fall_back_to_full_review_roles() {
         let attempt = attempt_with_tasks(vec![
-            write_task("attempt-1-write", Vec::new()),
+            write_task("attempt-1-write-1", Vec::new()),
             review_task("attempt-1-review-tests", "tests"),
             write_task(
-                "attempt-1-followup-1",
+                "attempt-1-write-2",
                 vec![ArtifactRef {
                     producer_id: "missing-review-task".to_string(),
                     path: ".factory/work/artifacts/work-1/attempt-1/missing-review-task/review.md"

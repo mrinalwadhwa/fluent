@@ -186,7 +186,7 @@ impl WorkItem {
             return Err(WorkModelError::AttemptAlreadyExists { id: attempt_id });
         }
 
-        let task_id = format!("{attempt_id}-write");
+        let task_id = format!("{attempt_id}-write-1");
         let workspace_path = initial_candidate_workspace_path(&self.id, &attempt_id);
         self.attempts.push(Attempt {
             id: attempt_id.clone(),
@@ -406,7 +406,7 @@ impl WorkItem {
         Ok(task_ids)
     }
 
-    pub fn add_followup_write_task(
+    pub fn add_next_write_round(
         &mut self,
         attempt_id: &str,
         input_artifacts: Vec<ArtifactRef>,
@@ -436,13 +436,13 @@ impl WorkItem {
             });
         };
 
-        let next = attempt
+        let next_round = attempt
             .tasks
             .iter()
-            .filter(|task| task.kind == TaskKind::Write && task.id.contains("-followup-"))
+            .filter(|task| task.kind == TaskKind::Write)
             .count()
             + 1;
-        let task_id = format!("{attempt_id}-followup-{next}");
+        let task_id = format!("{attempt_id}-write-{next_round}");
         validate_id("task", &task_id)?;
         if attempt.tasks.iter().any(|task| task.id == task_id) {
             return Err(WorkModelError::TaskAlreadyExists { id: task_id });
@@ -2463,9 +2463,14 @@ fn list_json_paths(dir: &Path) -> Result<Vec<PathBuf>, WorkModelStorageError> {
 }
 
 fn task_order_key(attempt_id: &str, task: &Task) -> (usize, usize, String) {
-    let initial_write_id = format!("{attempt_id}-write");
-    if task.kind == TaskKind::Write && task.id == initial_write_id {
-        return (0, 0, task.id.clone());
+    let write_prefix = format!("{attempt_id}-write-");
+    if task.kind == TaskKind::Write
+        && let Some(round) = task
+            .id
+            .strip_prefix(&write_prefix)
+            .and_then(|round| round.parse::<usize>().ok())
+    {
+        return (round.saturating_sub(1) * 2, 0, task.id.clone());
     }
 
     let review_prefix = format!("{attempt_id}-review-");
@@ -2484,16 +2489,6 @@ fn task_order_key(attempt_id: &str, task: &Task) -> (usize, usize, String) {
             );
         }
         return (1, review_role_order(suffix), suffix.to_string());
-    }
-
-    let followup_prefix = format!("{attempt_id}-followup-");
-    if task.kind == TaskKind::Write
-        && let Some(round) = task
-            .id
-            .strip_prefix(&followup_prefix)
-            .and_then(|round| round.parse::<usize>().ok())
-    {
-        return (round * 2, 0, task.id.clone());
     }
 
     (usize::MAX, 0, task.id.clone())
@@ -2911,7 +2906,7 @@ mod tests {
         });
 
         let error = work_item
-            .add_followup_write_task("attempt-1", Vec::new())
+            .add_next_write_round("attempt-1", Vec::new())
             .unwrap_err();
 
         assert!(matches!(error, WorkModelError::WorkItemAbandoned { .. }));
@@ -3182,8 +3177,8 @@ mod tests {
                 kind: AttemptKind::Write,
                 status: AttemptStatus::Planned,
                 tasks: vec![
-                    completed_write_task("attempt-1-write", "original"),
-                    completed_write_task("attempt-1-followup-1", "followup"),
+                    completed_write_task("attempt-1-write-1", "original"),
+                    completed_write_task("attempt-1-write-2", "followup"),
                 ],
                 review_state: Some(AttemptReviewState::Failed),
                 artifacts: Vec::new(),
@@ -3259,7 +3254,7 @@ mod tests {
             .unwrap();
         work_item.attempts[0].tasks[1].status = TaskStatus::Complete;
         work_item
-            .add_followup_write_task(
+            .add_next_write_round(
                 "attempt-1",
                 vec![ArtifactRef {
                     producer_id: "attempt-1-review-tests".to_string(),
@@ -3326,7 +3321,7 @@ mod tests {
         fs::write(&attempt_path, to_json_pretty(&attempt_record).unwrap()).unwrap();
 
         let followup_path = store
-            .work_task_path("work-1", "attempt-1", "attempt-1-followup-1")
+            .work_task_path("work-1", "attempt-1", "attempt-1-write-2")
             .unwrap();
         let mut followup_record: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&followup_path).unwrap()).unwrap();
@@ -3405,7 +3400,7 @@ mod tests {
                 kind: AttemptKind::Write,
                 status: AttemptStatus::Planned,
                 tasks: vec![
-                    completed_write_task("attempt-1-write", "initial"),
+                    completed_write_task("attempt-1-write-1", "initial"),
                     Task {
                         id: "attempt-1-review-documentation".to_string(),
                         kind: TaskKind::Review,
@@ -3451,7 +3446,7 @@ mod tests {
                         input_artifacts: Vec::new(),
                         output: None,
                     },
-                    completed_write_task("attempt-1-followup-1", "followup"),
+                    completed_write_task("attempt-1-write-2", "followup"),
                 ],
                 review_state: Some(AttemptReviewState::NotReviewed),
                 artifacts: Vec::new(),
@@ -3513,8 +3508,8 @@ mod tests {
                 kind: AttemptKind::Write,
                 status: AttemptStatus::Complete,
                 tasks: vec![
-                    completed_write_task("attempt-1-write", "original"),
-                    completed_write_task("attempt-1-followup-1", "followup"),
+                    completed_write_task("attempt-1-write-1", "original"),
+                    completed_write_task("attempt-1-write-2", "followup"),
                 ],
                 review_state: Some(AttemptReviewState::Passed),
                 artifacts: Vec::new(),
@@ -3557,7 +3552,7 @@ mod tests {
                 work_item_id: "work-1".to_string(),
                 kind: AttemptKind::Write,
                 status: AttemptStatus::Complete,
-                tasks: vec![completed_write_task("attempt-1-write", "original")],
+                tasks: vec![completed_write_task("attempt-1-write-1", "original")],
                 review_state: Some(AttemptReviewState::Passed),
                 artifacts: Vec::new(),
             }],
@@ -3589,7 +3584,7 @@ mod tests {
                 work_item_id: "work-1".to_string(),
                 kind: AttemptKind::Write,
                 status: AttemptStatus::Complete,
-                tasks: vec![completed_write_task("attempt-1-write", "original")],
+                tasks: vec![completed_write_task("attempt-1-write-1", "original")],
                 review_state: Some(AttemptReviewState::Passed),
                 artifacts: Vec::new(),
             }],
@@ -3623,7 +3618,7 @@ mod tests {
                 work_item_id: "work-1".to_string(),
                 kind: AttemptKind::Write,
                 status: AttemptStatus::Reviewing,
-                tasks: vec![completed_write_task("attempt-1-write", "original")],
+                tasks: vec![completed_write_task("attempt-1-write-1", "original")],
                 review_state: Some(AttemptReviewState::Uncertain),
                 artifacts: Vec::new(),
             }],
@@ -3669,7 +3664,7 @@ mod tests {
                 work_item_id: "work-1".to_string(),
                 kind: AttemptKind::Write,
                 status: AttemptStatus::Complete,
-                tasks: vec![completed_write_task("attempt-1-write", "original")],
+                tasks: vec![completed_write_task("attempt-1-write-1", "original")],
                 review_state: Some(AttemptReviewState::Passed),
                 artifacts: Vec::new(),
             }],
@@ -3715,7 +3710,7 @@ mod tests {
                 work_item_id: "work-1".to_string(),
                 kind: AttemptKind::Write,
                 status: AttemptStatus::Reviewing,
-                tasks: vec![completed_write_task("attempt-1-write", "original")],
+                tasks: vec![completed_write_task("attempt-1-write-1", "original")],
                 review_state: Some(AttemptReviewState::Failed),
                 artifacts: Vec::new(),
             }],
@@ -3761,7 +3756,7 @@ mod tests {
                 work_item_id: "work-1".to_string(),
                 kind: AttemptKind::Write,
                 status: AttemptStatus::Complete,
-                tasks: vec![completed_write_task("attempt-1-write", "original")],
+                tasks: vec![completed_write_task("attempt-1-write-1", "original")],
                 review_state: Some(AttemptReviewState::Passed),
                 artifacts: Vec::new(),
             }],
@@ -3876,7 +3871,7 @@ mod tests {
                 kind: AttemptKind::Write,
                 status: AttemptStatus::Reviewing,
                 tasks: vec![
-                    completed_write_task("attempt-1-write", "initial"),
+                    completed_write_task("attempt-1-write-1", "initial"),
                     Task {
                         id: "attempt-1-review-tests".to_string(),
                         kind: TaskKind::Review,
@@ -3899,7 +3894,7 @@ mod tests {
                         input_artifacts: Vec::new(),
                         output: None,
                     },
-                    completed_write_task("attempt-1-followup-1", "followup"),
+                    completed_write_task("attempt-1-write-2", "followup"),
                 ],
                 review_state: Some(AttemptReviewState::NotReviewed),
                 artifacts: Vec::new(),
@@ -3920,9 +3915,9 @@ mod tests {
         assert_eq!(
             task_ids,
             vec![
-                "attempt-1-write",
+                "attempt-1-write-1",
                 "attempt-1-review-tests",
-                "attempt-1-followup-1",
+                "attempt-1-write-2",
                 "attempt-1-review-2-tests"
             ]
         );
@@ -3970,7 +3965,7 @@ mod tests {
                 status: AttemptStatus::Complete,
                 tasks: vec![Task {
                     work_item_id: id.to_string(),
-                    ..completed_write_task("attempt-1-write", "initial")
+                    ..completed_write_task("attempt-1-write-1", "initial")
                 }],
                 review_state: Some(AttemptReviewState::NotReviewed),
                 artifacts: Vec::new(),

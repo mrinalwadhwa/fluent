@@ -234,7 +234,7 @@ fn status_shows_work_items_without_runs() {
         .stdout(predicate::str::contains("Work Items"))
         .stdout(predicate::str::contains("work-1"))
         .stdout(predicate::str::contains("attempt-1 [planned]"))
-        .stdout(predicate::str::contains("write:attempt-1-write [planned]"))
+        .stdout(predicate::str::contains("write:attempt-1-write-1 [planned]"))
         .stdout(predicate::str::contains("task-ready"))
         .stdout(predicate::str::contains("Build status view"))
         .stdout(predicate::str::contains("No runs found").not());
@@ -606,7 +606,7 @@ fn work_attempt_adds_planned_attempt_with_initial_write_task() {
     assert_eq!(attempt["id"], "attempt-1");
     assert_eq!(attempt["work_item_id"], "work-1");
     assert_eq!(attempt["status"], "planned");
-    assert_eq!(attempt["tasks"][0]["id"], "attempt-1-write");
+    assert_eq!(attempt["tasks"][0]["id"], "attempt-1-write-1");
     assert_eq!(attempt["tasks"][0]["kind"], "write");
     assert_eq!(attempt["tasks"][0]["role"], "author");
     assert_eq!(attempt["tasks"][0]["work_item_id"], "work-1");
@@ -694,7 +694,7 @@ fn work_attempt_appends_to_existing_attempts() {
     assert_eq!(attempts[0]["id"], "attempt-1");
     assert_eq!(attempts[1]["id"], "attempt-2");
     assert_eq!(attempts[1]["tasks"].as_array().unwrap().len(), 1);
-    assert_eq!(attempts[1]["tasks"][0]["id"], "attempt-2-write");
+    assert_eq!(attempts[1]["tasks"][0]["id"], "attempt-2-write-1");
     assert_eq!(attempts[1]["tasks"][0]["attempt_id"], "attempt-2");
     assert_eq!(
         attempts[1]["tasks"][0]["workspace_access"]["writes"][0]["path"],
@@ -796,7 +796,7 @@ exit 0
             "run",
             "work-1",
             "attempt-1",
-            "attempt-1-write",
+            "attempt-1-write-1",
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&bin_dir))
@@ -809,7 +809,7 @@ exit 0
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("Completed Task attempt-1-write"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Completed Task attempt-1-write-1"));
 
     let workspace = main_dir.join("../work-6-work-1-attempt-1");
     assert!(workspace.join("task-output.txt").is_file());
@@ -832,7 +832,7 @@ exit 0
     );
     assert_eq!(task["output"]["source_branch"], "main");
     assert_eq!(task["output"]["commit"], head);
-    assert_eq!(attempt["artifacts"][0]["producer_id"], "attempt-1-write");
+    assert_eq!(attempt["artifacts"][0]["producer_id"], "attempt-1-write-1");
     assert_eq!(attempt["artifacts"][0]["path"], head);
 }
 
@@ -884,7 +884,7 @@ exit 0
             "run",
             "work-1",
             "attempt-1",
-            "attempt-1-write",
+            "attempt-1-write-1",
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&bin_dir))
@@ -897,7 +897,7 @@ exit 0
     let system_prompt = fs::read_to_string(system_log).unwrap();
     assert!(prompt.contains("Work Item: work-1 - Prompt contract"));
     assert!(prompt.contains("Attempt: attempt-1"));
-    assert!(prompt.contains("Task: attempt-1-write"));
+    assert!(prompt.contains("Task: attempt-1-write-1"));
     assert!(prompt.contains("Role: author"));
     assert!(prompt.contains("Completion contract:"));
     assert!(prompt.contains("Commit all Task output"));
@@ -921,7 +921,7 @@ exit 0
     assert!(prompt.contains("record why the other related artifacts do not apply"));
     assert!(!prompt.contains("Task instructions:"));
     assert!(prompt.contains("Current Task model:"));
-    assert!(prompt.contains(r#""id": "attempt-1-write""#));
+    assert!(prompt.contains(r#""id": "attempt-1-write-1""#));
     assert!(prompt.contains(r#""kind": "write""#));
     assert!(prompt.contains(r#""workspace_access""#));
 }
@@ -1148,7 +1148,7 @@ exit 0
             "run",
             "work-1",
             "attempt-1",
-            "attempt-1-write",
+            "attempt-1-write-1",
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&bin_dir))
@@ -1213,7 +1213,7 @@ exit 0
             "run",
             "work-1",
             "attempt-1",
-            "attempt-1-write",
+            "attempt-1-write-1",
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&bin_dir))
@@ -1279,7 +1279,7 @@ exit 0
             "run",
             "work-1",
             "attempt-1",
-            "attempt-1-write",
+            "attempt-1-write-1",
             "--no-sandbox",
             "--coder",
             "codex",
@@ -2040,7 +2040,7 @@ fn work_attempt_run_drives_write_reviews_and_passes() {
         .env("PATH", mock_path(&bin_dir))
         .assert()
         .success()
-        .stdout(predicate::str::contains("Completed Task attempt-1-write"))
+        .stdout(predicate::str::contains("Completed Task attempt-1-write-1"))
         .stdout(predicate::str::contains(
             "Planned 5 review Tasks for Attempt attempt-1",
         ))
@@ -3712,19 +3712,19 @@ fn work_attempt_run_plans_followup_for_failed_reviews() {
             "Planned 5 review Tasks for Attempt attempt-1",
         ))
         .stdout(predicate::str::contains(
-            "Planned follow-up write Task attempt-1-followup-1",
+            "Planned write Task attempt-1-write-2",
         ))
         .stdout(predicate::str::contains(
-            "Completed Task attempt-1-followup-1",
+            "Completed Task attempt-1-write-2",
         ))
         .stdout(predicate::str::contains(
-            "Planned follow-up write Task attempt-1-followup-2",
+            "Planned write Task attempt-1-write-3",
         ))
         .stdout(predicate::str::contains(
-            "Completed Task attempt-1-followup-2",
+            "Completed Task attempt-1-write-3",
         ))
         .stdout(predicate::str::contains("needs user input"))
-        .stdout(predicate::str::contains("attempt-1-followup-3").not());
+        .stdout(predicate::str::contains("attempt-1-write-4").not());
 
     let value = read_work_show_json(&main_dir, "work-1");
     let attempt = &value["attempts"][0];
@@ -3734,7 +3734,7 @@ fn work_attempt_run_plans_followup_for_failed_reviews() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|task| task["id"] == "attempt-1-followup-1")
+        .find(|task| task["id"] == "attempt-1-write-2")
         .unwrap();
     assert_eq!(followup["kind"], "write");
     assert_eq!(followup["workspace_access"]["writes"][0]["id"], "candidate");
@@ -3756,7 +3756,7 @@ fn work_attempt_run_plans_followup_for_failed_reviews() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|task| task["id"] == "attempt-1-followup-2")
+        .find(|task| task["id"] == "attempt-1-write-3")
         .unwrap();
     assert_eq!(second_followup["status"], "complete");
     assert!(
@@ -3764,7 +3764,7 @@ fn work_attempt_run_plans_followup_for_failed_reviews() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|task| task["id"] == "attempt-1-followup-3")
+            .any(|task| task["id"] == "attempt-1-write-4")
     );
     let second_round_reviews: Vec<_> = attempt["tasks"]
         .as_array()
@@ -3794,7 +3794,7 @@ fn work_attempt_run_plans_followup_for_failed_reviews() {
     let handoff =
         fs::read_to_string(main_dir.join(".factory/work/artifacts/work-1/attempt-1/needs-user.md"))
             .unwrap();
-    assert!(handoff.contains("follow-up write budget"));
+    assert!(handoff.contains("write-round budget"));
     assert!(handoff.contains("attempt-1-review-3-tests/review.md"));
 }
 
@@ -3809,7 +3809,7 @@ fn work_create_planning_context_feeds_followup_for_failed_reviews() {
     fs::write(&brief_path, "Build retry planning context.\n").unwrap();
     fs::write(&behaviors_path, "WHEN reviews fail, retry with context.\n").unwrap();
     fs::write(&approach_path, "Reuse Work state for retry prompts.\n").unwrap();
-    fs::write(&plan_path, "1. Plan the follow-up write Task.\n").unwrap();
+    fs::write(&plan_path, "1. Plan the write round.\n").unwrap();
 
     let bin_dir = tmp.path().join("bin-planning-followup");
     write_mock_claude(&bin_dir, &stateful_loop_mock_script("fail"));
@@ -3852,7 +3852,7 @@ fn work_create_planning_context_feeds_followup_for_failed_reviews() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Planned follow-up write Task attempt-1-followup-1",
+            "Planned write Task attempt-1-write-2",
         ))
         .stdout(predicate::str::contains("needs user input"));
 
@@ -3862,13 +3862,13 @@ fn work_create_planning_context_feeds_followup_for_failed_reviews() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|task| task["id"] == "attempt-1-followup-1")
+        .find(|task| task["id"] == "attempt-1-write-2")
         .unwrap();
     let instructions = followup["instructions"].as_str().unwrap();
     assert!(instructions.contains("# Brief\n\nBuild retry planning context."));
     assert!(instructions.contains("# Behaviors\n\nWHEN reviews fail, retry with context."));
     assert!(instructions.contains("# Approach\n\nReuse Work state for retry prompts."));
-    assert!(instructions.contains("# Plan\n\n1. Plan the follow-up write Task."));
+    assert!(instructions.contains("# Plan\n\n1. Plan the write round."));
     assert_eq!(followup["input_artifacts"].as_array().unwrap().len(), 5);
 }
 
@@ -3895,10 +3895,10 @@ fn work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Planned follow-up write Task attempt-1-followup-1",
+            "Planned write Task attempt-1-write-2",
         ))
         .stdout(predicate::str::contains(
-            "Completed Task attempt-1-followup-1",
+            "Completed Task attempt-1-write-2",
         ))
         .stdout(predicate::str::contains(
             "Planned 1 review Tasks for Attempt attempt-1",
@@ -3922,7 +3922,7 @@ fn work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|task| task["id"] == "attempt-1-followup-1")
+        .find(|task| task["id"] == "attempt-1-write-2")
         .unwrap();
     let input_artifacts = followup["input_artifacts"].as_array().unwrap();
     assert_eq!(input_artifacts.len(), 1);
@@ -3985,19 +3985,19 @@ fn work_attempt_run_counts_already_planned_followup_against_budget() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Completed Task attempt-1-followup-1",
+            "Completed Task attempt-1-write-2",
         ))
         .stdout(predicate::str::contains(
             "Planned 5 review Tasks for Attempt attempt-1",
         ))
         .stdout(predicate::str::contains(
-            "Planned follow-up write Task attempt-1-followup-2",
+            "Planned write Task attempt-1-write-3",
         ))
         .stdout(predicate::str::contains(
-            "Completed Task attempt-1-followup-2",
+            "Completed Task attempt-1-write-3",
         ))
         .stdout(predicate::str::contains("needs user input"))
-        .stdout(predicate::str::contains("attempt-1-followup-3").not());
+        .stdout(predicate::str::contains("attempt-1-write-4").not());
 
     let value = read_work_show_json(&main_dir, "work-1");
     let attempt = &value["attempts"][0];
@@ -4008,7 +4008,7 @@ fn work_attempt_run_counts_already_planned_followup_against_budget() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|task| task["id"] == "attempt-1-followup-3")
+            .any(|task| task["id"] == "attempt-1-write-4")
     );
     let second_round_reviews: Vec<_> = attempt["tasks"]
         .as_array()
@@ -4035,7 +4035,7 @@ fn work_attempt_run_counts_already_planned_followup_against_budget() {
     let handoff =
         fs::read_to_string(main_dir.join(".factory/work/artifacts/work-1/attempt-1/needs-user.md"))
             .unwrap();
-    assert!(handoff.contains("follow-up write budget"));
+    assert!(handoff.contains("write-round budget"));
     assert!(handoff.contains("attempt-1-review-2-tests/review.md"));
 }
 
@@ -4123,7 +4123,7 @@ exec "$@"
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Completed Task attempt-1-followup-1",
+            "Completed Task attempt-1-write-2",
         ));
 
     let expected_artifact =
@@ -4988,7 +4988,7 @@ exit 0
             "run",
             "work-1",
             "attempt-1",
-            "attempt-1-write",
+            "attempt-1-write-1",
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&bin_dir))
@@ -5033,7 +5033,7 @@ exit 0
             "run",
             "work-1",
             "attempt-1",
-            "attempt-1-write",
+            "attempt-1-write-1",
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&bin_dir))
@@ -5083,7 +5083,7 @@ exit 7
             "run",
             "work-1",
             "attempt-1",
-            "attempt-1-write",
+            "attempt-1-write-1",
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&bin_dir))
@@ -5125,7 +5125,7 @@ fn work_task_run_rejects_success_without_commits() {
             "run",
             "work-1",
             "attempt-1",
-            "attempt-1-write",
+            "attempt-1-write-1",
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&bin_dir))
@@ -5200,7 +5200,7 @@ fn work_task_run_rejects_reused_workspace_without_new_commit() {
             "run",
             "work-1",
             "attempt-1",
-            "attempt-1-write",
+            "attempt-1-write-1",
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&bin_dir))
@@ -5245,7 +5245,7 @@ fn work_task_run_rejects_existing_directory_that_is_not_worktree() {
             "run",
             "work-1",
             "attempt-1",
-            "attempt-1-write",
+            "attempt-1-write-1",
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&bin_dir))
@@ -5281,7 +5281,7 @@ fn work_task_run_rejects_existing_task_branch_without_workspace() {
             "-C",
             &main_dir.to_string_lossy(),
             "branch",
-            "work/work-1/attempt-1/attempt-1-write",
+            "work/work-1/attempt-1/attempt-1-write-1",
             "HEAD",
         ])
         .output()
@@ -5295,7 +5295,7 @@ fn work_task_run_rejects_existing_task_branch_without_workspace() {
             "run",
             "work-1",
             "attempt-1",
-            "attempt-1-write",
+            "attempt-1-write-1",
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&bin_dir))
@@ -5325,7 +5325,7 @@ fn work_task_run_rejects_task_that_is_not_planned() {
         .assert()
         .success();
 
-    let task_path = work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-write");
+    let task_path = work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-write-1");
     let mut value = read_json_value(&task_path);
     value["status"] = serde_json::Value::String("failed".to_string());
     write_json_value(&task_path, &value);
@@ -5339,7 +5339,7 @@ fn work_task_run_rejects_task_that_is_not_planned() {
             "run",
             "work-1",
             "attempt-1",
-            "attempt-1-write",
+            "attempt-1-write-1",
             "--no-sandbox",
         ])
         .assert()
@@ -5366,7 +5366,7 @@ fn work_task_run_rejects_non_write_task() {
         .assert()
         .success();
 
-    let task_path = work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-write");
+    let task_path = work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-write-1");
     let mut value = read_json_value(&task_path);
     value["kind"] = serde_json::Value::String("probe".to_string());
     write_json_value(&task_path, &value);
@@ -5380,7 +5380,7 @@ fn work_task_run_rejects_non_write_task() {
             "run",
             "work-1",
             "attempt-1",
-            "attempt-1-write",
+            "attempt-1-write-1",
             "--no-sandbox",
         ])
         .assert()
@@ -5407,7 +5407,7 @@ fn work_task_run_requires_one_writable_workspace() {
         .assert()
         .success();
 
-    let task_path = work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-write");
+    let task_path = work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-write-1");
     let mut value = read_json_value(&task_path);
     value["workspace_access"]["writes"] = serde_json::Value::Array(Vec::new());
     write_json_value(&task_path, &value);
@@ -5421,7 +5421,7 @@ fn work_task_run_requires_one_writable_workspace() {
             "run",
             "work-1",
             "attempt-1",
-            "attempt-1-write",
+            "attempt-1-write-1",
             "--no-sandbox",
         ])
         .assert()
@@ -5449,7 +5449,7 @@ fn work_task_run_requires_one_writable_workspace() {
             "run",
             "work-1",
             "attempt-1",
-            "attempt-1-write",
+            "attempt-1-write-1",
             "--no-sandbox",
         ])
         .assert()
@@ -5475,7 +5475,7 @@ fn work_task_run_rejects_unmanaged_writable_workspace_path() {
         .assert()
         .success();
 
-    let task_path = work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-write");
+    let task_path = work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-write-1");
     let outside_absolute = tmp.path().join("outside-absolute");
     let outside_absolute = outside_absolute.to_string_lossy().to_string();
     for path in [
@@ -5498,7 +5498,7 @@ fn work_task_run_rejects_unmanaged_writable_workspace_path() {
                 "run",
                 "work-1",
                 "attempt-1",
-                "attempt-1-write",
+                "attempt-1-write-1",
                 "--no-sandbox",
             ])
             .assert()
@@ -5547,7 +5547,7 @@ fn work_task_run_missing_ids_leave_work_item_unchanged() {
             "run",
             "missing-work",
             "attempt-1",
-            "attempt-1-write",
+            "attempt-1-write-1",
             "--no-sandbox",
         ],
         [
@@ -5556,7 +5556,7 @@ fn work_task_run_missing_ids_leave_work_item_unchanged() {
             "run",
             "work-1",
             "missing-attempt",
-            "attempt-1-write",
+            "attempt-1-write-1",
             "--no-sandbox",
         ],
         [
@@ -5574,7 +5574,7 @@ fn work_task_run_missing_ids_leave_work_item_unchanged() {
             "run",
             "work-1",
             "attempt-2",
-            "attempt-1-write",
+            "attempt-1-write-1",
             "--no-sandbox",
         ],
     ] {
@@ -5895,13 +5895,13 @@ fn write_planned_followup_task(main_dir: &Path, input_artifacts: Vec<serde_json:
         .as_array()
         .unwrap()
         .iter()
-        .find(|task| task["id"] == "attempt-1-write")
+        .find(|task| task["id"] == "attempt-1-write-1")
         .unwrap();
     let output = &initial_write["output"];
     let task_count = attempt["tasks"].as_array().unwrap().len();
     let task = serde_json::json!({
         "order": task_count,
-        "id": "attempt-1-followup-1",
+        "id": "attempt-1-write-2",
         "kind": "write",
         "role": "author",
         "work_item_id": "work-1",
@@ -5917,7 +5917,7 @@ fn write_planned_followup_task(main_dir: &Path, input_artifacts: Vec<serde_json:
         },
         "input_artifacts": input_artifacts
     });
-    let task_path = work_task_record_path(main_dir, "work-1", "attempt-1", "attempt-1-followup-1");
+    let task_path = work_task_record_path(main_dir, "work-1", "attempt-1", "attempt-1-write-2");
     write_json_value(&task_path, &task);
 
     let attempt_path = main_dir
@@ -6177,14 +6177,14 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
 
     let item_path = main_dir.join(".factory/work/items/work-1.json");
     let attempt_path = main_dir.join(".factory/work/attempts/work-1/attempt-1.json");
-    let task_path = main_dir.join(".factory/work/tasks/work-1/attempt-1/attempt-1-write.json");
+    let task_path = main_dir.join(".factory/work/tasks/work-1/attempt-1/attempt-1-write-1.json");
     let mut attempt = read_json_path(&attempt_path);
     attempt["status"] = serde_json::Value::String("complete".to_string());
     write_json_path(&attempt_path, &attempt);
     let mut task = read_json_path(&task_path);
     task["status"] = serde_json::Value::String("complete".to_string());
     task["artifact_area"] = serde_json::json!({
-        "path": ".factory/work/artifacts/work-1/attempt-1/attempt-1-write"
+        "path": ".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1"
     });
     task["output"] = serde_json::json!({
         "workspace_id": "candidate",
@@ -6194,13 +6194,13 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
     });
     write_json_path(&task_path, &task);
 
-    let artifact_dir = main_dir.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-write");
+    let artifact_dir = main_dir.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1");
     let artifact_parent = main_dir.join(".factory/work/artifacts/work-1/attempt-1");
     fs::create_dir_all(&artifact_dir).unwrap();
     fs::write(artifact_dir.join("result.md"), "artifact").unwrap();
 
     let worktree_dir = main_dir.join("../work-6-work-1-attempt-1");
-    let branch_name = "work/work-1/attempt-1/attempt-1-write";
+    let branch_name = "work/work-1/attempt-1/attempt-1-write-1";
     StdCommand::new("git")
         .args([
             "worktree",
@@ -6217,7 +6217,7 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
     let active_item_path = main_dir.join(".factory/work/items/work-active.json");
     let active_attempt_path = main_dir.join(".factory/work/attempts/work-active/attempt-1.json");
     let active_task_path =
-        main_dir.join(".factory/work/tasks/work-active/attempt-1/attempt-1-write.json");
+        main_dir.join(".factory/work/tasks/work-active/attempt-1/attempt-1-write-1.json");
     let mut active_attempt = read_json_path(&active_attempt_path);
     active_attempt["status"] = serde_json::Value::String("executing".to_string());
     write_json_path(&active_attempt_path, &active_attempt);
@@ -6234,7 +6234,7 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
     fs::write(active_artifact_dir.join("result.md"), "active artifact").unwrap();
 
     let active_worktree_dir = main_dir.join("../work-11-work-active-attempt-1");
-    let active_branch_name = "work/work-active/attempt-1/attempt-1-write";
+    let active_branch_name = "work/work-active/attempt-1/attempt-1-write-1";
     StdCommand::new("git")
         .args([
             "worktree",
@@ -6414,7 +6414,7 @@ fn cleanup_work_items_apply_skips_unregistered_managed_worktree() {
 
     let attempt_path = main_dir.join(".factory/work/attempts/work-unregistered/attempt-1.json");
     let task_path =
-        main_dir.join(".factory/work/tasks/work-unregistered/attempt-1/attempt-1-write.json");
+        main_dir.join(".factory/work/tasks/work-unregistered/attempt-1/attempt-1-write-1.json");
     let mut attempt = read_json_path(&attempt_path);
     attempt["status"] = serde_json::Value::String("complete".to_string());
     write_json_path(&attempt_path, &attempt);
@@ -6482,7 +6482,7 @@ fn cleanup_work_items_selects_failed_terminal_and_skips_pending_merge_candidate(
     let failed_item_path = main_dir.join(".factory/work/items/work-failed.json");
     let failed_attempt_path = main_dir.join(".factory/work/attempts/work-failed/attempt-1.json");
     let failed_task_path =
-        main_dir.join(".factory/work/tasks/work-failed/attempt-1/attempt-1-write.json");
+        main_dir.join(".factory/work/tasks/work-failed/attempt-1/attempt-1-write-1.json");
     let mut failed_attempt = read_json_path(&failed_attempt_path);
     failed_attempt["status"] = serde_json::Value::String("failed".to_string());
     write_json_path(&failed_attempt_path, &failed_attempt);
@@ -6496,7 +6496,7 @@ fn cleanup_work_items_selects_failed_terminal_and_skips_pending_merge_candidate(
     let pending_attempt_path =
         main_dir.join(".factory/work/attempts/work-pending-merge/attempt-1.json");
     let pending_task_path =
-        main_dir.join(".factory/work/tasks/work-pending-merge/attempt-1/attempt-1-write.json");
+        main_dir.join(".factory/work/tasks/work-pending-merge/attempt-1/attempt-1-write-1.json");
     let mut pending_attempt = read_json_path(&pending_attempt_path);
     pending_attempt["status"] = serde_json::Value::String("complete".to_string());
     pending_attempt["review_state"] = serde_json::Value::String("passed".to_string());
@@ -6587,19 +6587,19 @@ fn cleanup_work_items_skips_failed_attempt_with_active_task() {
     let item_path = main_dir.join(".factory/work/items/work-active-task.json");
     let attempt_path = main_dir.join(".factory/work/attempts/work-active-task/attempt-1.json");
     let task_path =
-        main_dir.join(".factory/work/tasks/work-active-task/attempt-1/attempt-1-write.json");
+        main_dir.join(".factory/work/tasks/work-active-task/attempt-1/attempt-1-write-1.json");
     let mut attempt = read_json_path(&attempt_path);
     attempt["status"] = serde_json::Value::String("failed".to_string());
     write_json_path(&attempt_path, &attempt);
     let mut task = read_json_path(&task_path);
     task["status"] = serde_json::Value::String("executing".to_string());
     task["artifact_area"] = serde_json::json!({
-        "path": ".factory/work/artifacts/work-active-task/attempt-1/attempt-1-write"
+        "path": ".factory/work/artifacts/work-active-task/attempt-1/attempt-1-write-1"
     });
     write_json_path(&task_path, &task);
 
     let artifact_dir =
-        main_dir.join(".factory/work/artifacts/work-active-task/attempt-1/attempt-1-write");
+        main_dir.join(".factory/work/artifacts/work-active-task/attempt-1/attempt-1-write-1");
     fs::create_dir_all(&artifact_dir).unwrap();
     fs::write(artifact_dir.join("result.md"), "active task artifact").unwrap();
 
@@ -6651,7 +6651,7 @@ fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() 
     let item_path = main_dir.join(".factory/work/items/work-merge-cleanup.json");
     let workspace_path = "../work-18-work-merge-cleanup-attempt-1";
     let worktree_dir = main_dir.join(workspace_path);
-    let branch_name = "work/work-merge-cleanup/attempt-1/attempt-1-write";
+    let branch_name = "work/work-merge-cleanup/attempt-1/attempt-1-write-1";
     StdCommand::new("git")
         .args([
             "worktree",
@@ -6668,7 +6668,7 @@ fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() 
     let candidate_head = git_head(&worktree_dir);
     let attempt_path = main_dir.join(".factory/work/attempts/work-merge-cleanup/attempt-1.json");
     let task_path =
-        main_dir.join(".factory/work/tasks/work-merge-cleanup/attempt-1/attempt-1-write.json");
+        main_dir.join(".factory/work/tasks/work-merge-cleanup/attempt-1/attempt-1-write-1.json");
     let mut attempt = read_json_path(&attempt_path);
     attempt["status"] = serde_json::Value::String("complete".to_string());
     attempt["review_state"] = serde_json::Value::String("passed".to_string());
@@ -7310,7 +7310,7 @@ exit 0
             "run",
             "work-1",
             "attempt-1",
-            "attempt-1-write",
+            "attempt-1-write-1",
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&bin_dir))
@@ -7356,7 +7356,7 @@ exit 0
             "run",
             "work-1",
             "attempt-1",
-            "attempt-1-write",
+            "attempt-1-write-1",
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&bin_dir))

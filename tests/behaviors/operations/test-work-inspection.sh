@@ -183,7 +183,7 @@ test_work_attempt_adds_initial_write_task() {
   assert_contains "$SHOW_OUTPUT" '"id": "attempt-1"' || RESULT=1
   assert_contains "$SHOW_OUTPUT" '"work_item_id": "work-1"' || RESULT=1
   assert_contains "$SHOW_OUTPUT" '"status": "planned"' || RESULT=1
-  assert_contains "$SHOW_OUTPUT" '"id": "attempt-1-write"' || RESULT=1
+  assert_contains "$SHOW_OUTPUT" '"id": "attempt-1-write-1"' || RESULT=1
   assert_contains "$SHOW_OUTPUT" '"kind": "write"' || RESULT=1
   assert_contains "$SHOW_OUTPUT" '"role": "author"' || RESULT=1
   assert_contains "$SHOW_OUTPUT" '"id": "candidate"' || RESULT=1
@@ -311,7 +311,7 @@ attempt = json.loads(attempt_path.read_text())
 attempt["status"] = "executing"
 attempt_path.write_text(json.dumps(attempt, indent=2) + "\n")
 
-task_path = Path(".factory/work/tasks/work-active/attempt-1/attempt-1-write.json")
+task_path = Path(".factory/work/tasks/work-active/attempt-1/attempt-1-write-1.json")
 task = json.loads(task_path.read_text())
 task["status"] = "executing"
 task_path.write_text(json.dumps(task, indent=2) + "\n")
@@ -364,7 +364,7 @@ attempt = json.loads(attempt_path.read_text())
 attempt["status"] = "failed"
 attempt_path.write_text(json.dumps(attempt, indent=2) + "\n")
 
-task_path = Path(".factory/work/tasks/work-active/attempt-1/attempt-1-write.json")
+task_path = Path(".factory/work/tasks/work-active/attempt-1/attempt-1-write-1.json")
 task = json.loads(task_path.read_text())
 task["status"] = "executing"
 task_path.write_text(json.dumps(task, indent=2) + "\n")
@@ -394,7 +394,7 @@ attempt["status"] = "complete"
 attempt["review_state"] = "passed"
 attempt_path.write_text(json.dumps(attempt, indent=2) + "\n")
 
-task_path = Path(".factory/work/tasks/work-active/attempt-1/attempt-1-write.json")
+task_path = Path(".factory/work/tasks/work-active/attempt-1/attempt-1-write-1.json")
 task = json.loads(task_path.read_text())
 task["status"] = "complete"
 task["output"] = {

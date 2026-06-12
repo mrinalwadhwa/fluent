@@ -707,7 +707,7 @@ fn work_item_add_initial_attempt_creates_scheduler_facing_write_task() {
     assert_eq!(attempt.tasks.len(), 1);
 
     let task = &attempt.tasks[0];
-    assert_eq!(task.id, "attempt-1-write");
+    assert_eq!(task.id, "attempt-1-write-1");
     assert_eq!(task.kind, TaskKind::Write);
     assert_eq!(task.role, "author");
     assert_eq!(task.work_item_id, "work-1");
@@ -737,7 +737,7 @@ fn work_item_add_initial_attempt_appends_to_existing_attempts() {
     let attempt = &work_item.attempts[1];
     assert_eq!(attempt.id, "attempt-2");
     assert_eq!(attempt.tasks.len(), 1);
-    assert_eq!(attempt.tasks[0].id, "attempt-2-write");
+    assert_eq!(attempt.tasks[0].id, "attempt-2-write-1");
     assert_eq!(attempt.tasks[0].attempt_id.as_deref(), Some("attempt-2"));
     assert_eq!(
         attempt.tasks[0].workspace_access.writes,

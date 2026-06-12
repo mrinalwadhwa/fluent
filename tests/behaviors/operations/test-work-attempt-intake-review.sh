@@ -104,9 +104,9 @@ test_attempt_appends_to_existing_attempts() {
   [ "$(show_json_value '.attempts[0].id')" = "attempt-1" ] || RESULT=1
   [ "$(show_json_value '.attempts[1].id')" = "attempt-2" ] || RESULT=1
   [ "$(show_json_value '.attempts[1].tasks | length')" = "1" ] || RESULT=1
-  [ "$(task_json_value attempt-2 attempt-2-write '.id')" = "attempt-2-write" ] || RESULT=1
-  [ "$(task_json_value attempt-2 attempt-2-write '.attempt_id')" = "attempt-2" ] || RESULT=1
-  [ "$(task_json_value attempt-2 attempt-2-write '.workspace_access.writes[0].path')" = "../work-6-work-1-attempt-2" ] || RESULT=1
+  [ "$(task_json_value attempt-2 attempt-2-write-1 '.id')" = "attempt-2-write-1" ] || RESULT=1
+  [ "$(task_json_value attempt-2 attempt-2-write-1 '.attempt_id')" = "attempt-2" ] || RESULT=1
+  [ "$(task_json_value attempt-2 attempt-2-write-1 '.workspace_access.writes[0].path')" = "../work-6-work-1-attempt-2" ] || RESULT=1
 
   cleanup_test_project
   return $RESULT
@@ -119,7 +119,7 @@ test_attempt_adds_one_initial_write_task() {
   RESULT=0
   "$FACTORY_BIN" work attempt work-1 attempt-1 > /dev/null
   [ "$(show_json_value '.attempts[0].tasks | length')" = "1" ] || RESULT=1
-  [ "$(task_json_value attempt-1 attempt-1-write '.kind')" = "write" ] || RESULT=1
+  [ "$(task_json_value attempt-1 attempt-1-write-1 '.kind')" = "write" ] || RESULT=1
 
   cleanup_test_project
   return $RESULT
@@ -131,10 +131,10 @@ test_initial_write_task_has_ids_and_one_writable_workspace() {
 
   RESULT=0
   "$FACTORY_BIN" work attempt work-1 attempt-1 > /dev/null
-  [ "$(task_json_value attempt-1 attempt-1-write '.work_item_id')" = "work-1" ] || RESULT=1
-  [ "$(task_json_value attempt-1 attempt-1-write '.attempt_id')" = "attempt-1" ] || RESULT=1
-  [ "$(task_json_value attempt-1 attempt-1-write '.workspace_access.reads | length')" = "0" ] || RESULT=1
-  [ "$(task_json_value attempt-1 attempt-1-write '.workspace_access.writes | length')" = "1" ] || RESULT=1
+  [ "$(task_json_value attempt-1 attempt-1-write-1 '.work_item_id')" = "work-1" ] || RESULT=1
+  [ "$(task_json_value attempt-1 attempt-1-write-1 '.attempt_id')" = "attempt-1" ] || RESULT=1
+  [ "$(task_json_value attempt-1 attempt-1-write-1 '.workspace_access.reads | length')" = "0" ] || RESULT=1
+  [ "$(task_json_value attempt-1 attempt-1-write-1 '.workspace_access.writes | length')" = "1" ] || RESULT=1
 
   cleanup_test_project
   return $RESULT
@@ -202,7 +202,7 @@ test_show_prints_attempt_and_task_as_pretty_json() {
       "status": "planned",
       "tasks": [
         {
-          "id": "attempt-1-write",
+          "id": "attempt-1-write-1",
           "kind": "write",
           "role": "author",
           "work_item_id": "work-1",

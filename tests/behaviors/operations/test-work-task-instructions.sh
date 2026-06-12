@@ -128,7 +128,7 @@ run_work_task_with_extra_args() {
     CODER_PROMPT_LOG="${TEST_DIR}/coder-prompt.log" \
     TASK_OUTPUT_COUNT_FILE="${TEST_DIR}/task-output-count" \
     "$FACTORY_BIN" work task run --no-sandbox --coder codex \
-      work-1 attempt-1 attempt-1-write -- \
+      work-1 attempt-1 attempt-1-write-1 -- \
       --model test-model EXTRA_ARG_PROMPT_SENTINEL
 }
 
@@ -160,7 +160,7 @@ test_attempt_copies_instructions_to_initial_write_task() {
 
   RESULT=0
   [ "$("$FACTORY_BIN" work show work-1 | jq -r '.attempts[0].tasks[0].instructions')" = "$(cat "$TEST_DIR/instructions.md")" ] || RESULT=1
-  [ "$("$FACTORY_BIN" work show work-1 | jq -r '.attempts[0].tasks[0].id')" = "attempt-1-write" ] || RESULT=1
+  [ "$("$FACTORY_BIN" work show work-1 | jq -r '.attempts[0].tasks[0].id')" = "attempt-1-write-1" ] || RESULT=1
 
   cleanup_test_project
   return $RESULT
@@ -222,7 +222,7 @@ test_minimal_work_item_keeps_minimal_prompt() {
     CODER_PROMPT_LOG="${TEST_DIR}/coder-prompt.log" \
     TASK_OUTPUT_COUNT_FILE="${TEST_DIR}/task-output-count" \
     "$FACTORY_BIN" work task run --no-sandbox --coder codex \
-      work-1 attempt-1 attempt-1-write > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
+      work-1 attempt-1 attempt-1-write-1 > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
 
   PROMPT="$(cat "$TEST_DIR/coder-prompt.log")"
   assert_contains "$PROMPT" "Work Item: work-1 - Minimal prompt" || RESULT=1

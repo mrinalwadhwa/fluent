@@ -6,6 +6,43 @@ observations-resolved.md with the resolution context.
 
 ---
 
+2026-06-11 — Attempt IDs, Merge Candidate IDs, and write/review Task
+IDs being external input may be more friction than benefit. Today
+every CLI surface that creates or operates on these entities takes
+the ID as an argument: `factory work attempt <work-id> <attempt-id>`,
+`factory work merge <work-id> <merge-candidate-id>`, etc. Task IDs
+within an Attempt are already auto-generated (`attempt-N-write-K`,
+`attempt-N-review-K-role`) and the user never types them — so the
+right pattern is already in the codebase, just not extended one level
+up to Attempts and Merge Candidates. Most users type sequential
+defaults (`attempt-1`, `attempt-2`) which is exactly what auto-gen
+would produce. Sketch of the change: make Attempt/Candidate IDs
+optional, default to next-free-integer suffix when omitted, keep them
+positional when explicitly supplied (scriptability + recovery still
+work). Work Item IDs should stay user-provided because they often
+mirror external ticket/doc IDs and lose traceability under auto-gen.
+Small, self-contained change — ~20 LOC of CLI default-handling and
+~10 test updates per surface.
+
+2026-06-11 — Factory needs a reviewer evaluation framework. The
+write→review loop's correctness depends on many prompt-shaping and
+contract decisions we currently make on intuition: prior-review
+framing ("a previous review of this candidate" vs "your previous
+review"), Progress quaternary vs binary, lenient vs strict no-progress
+quorum, the Pass > Uncertain > Fail ordering, where to place the prior
+review in the prompt, reviewer set narrowing across rounds, etc. None
+of these are verifiable today. Sketch of an eval framework: (1) per-
+reviewer synthetic corpus of (candidate workspace, prior review,
+ground-truth verdict, ground-truth progress signal) for regression
+testing; (2) A/B reviewer comparisons that hold corpus fixed and vary
+one prompt knob at a time; (3) recursive evaluation via post-merge
+reviewers catching things attempt-time reviewers missed (built-in
+false-negative signal); (4) self-consistency probes — run the same
+reviewer on the same candidate K times, measure verdict stability.
+The Factory's own Work model can drive eval runs as Work Items whose
+Tasks are reviewer invocations against the corpus. This is its own
+track, not blocking the slice-1 unification.
+
 2026-06-11 — Add a Rust `factory fargate teardown` command that
 replaces `infrastructure/teardown.sh`, the same way JIT bootstrap
 replaced `infrastructure/setup.sh`. Two different workflows for
