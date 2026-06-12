@@ -359,7 +359,7 @@ the candidate workspace,
 THE SYSTEM SHALL run that hook instead of the built-in auto-prep, with
 `FACTORY_REVIEWER_ARTIFACT_DIR` set in the env and CWD = candidate
 workspace.
-Test: src/hooks.rs (passes_context_via_env)
+Test: src/hooks.rs (passes_reviewer_artifact_dir_via_env)
 
 WHEN the candidate workspace contains neither a recognized toolchain
 marker nor a `prepare-pre-review` hook,

@@ -46,7 +46,7 @@ and use it.
 
 ## Build outputs and warm cache
 
-Factory pre-populates your artifact area with copies of the writer's
+Factory pre-populates your artifact directory with copies of the writer's
 build outputs for warm-start incremental builds. Point your toolchain
 at this directory for incremental builds; reading binaries the writer
 built directly from the candidate workspace is also fine.

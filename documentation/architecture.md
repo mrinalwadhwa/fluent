@@ -136,15 +136,17 @@ This allows Factory and the user to write new state concurrently while
 a background post-merge review is in flight. If the source HEAD moves
 during the review (e.g. another merge lands), the guard fails the
 review Tasks with a clear error and does not attempt restoration.
+
 Before launching each review Task, Factory pre-populates the reviewer's
 artifact directory with the candidate's build outputs so reviewers start
 with a warm build cache. Factory detects the project toolchain from
 marker files (`Cargo.toml`, `package.json`, `pom.xml`, `build.gradle`)
 and copies the canonical build directories using reflink, hardlink, or
 deep copy in that order. A `.factory/hooks/prepare-pre-review` hook
-overrides the built-in detection when present. Review-only Attempts skip
-this step because they review the source checkout, not a candidate with
-writer-produced build outputs.
+overrides the built-in detection when present. Review-only and
+post-merge review Attempts skip this step because they review the source
+checkout, not a candidate with writer-produced build outputs.
+
 `factory work attempt run <work-item-id> <attempt-id>` is the first
 Attempt-level orchestration path. It advances one Attempt by running the
 next planned write Task serially through the Task executor, or by running
