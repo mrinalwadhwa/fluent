@@ -75,3 +75,5 @@ live: behaviors reviewer ~10 min → ~2–3 min; architecture/tests
 ~2–3 min → ~30s; total attempt time ~17m 32s → ~9–10m.
 
 This becomes its own Work Item after `optional-attempt-merge-candidate-ids` lands.
+
+→ Resolved: Resolved by Work Item reviewer-warm-build-cache at a0f5e6e. Auto-prep copies writer's target/ (and Node/Maven/Gradle equivalents) to reviewer artifact dirs before launch; reviewer prompt updated to read existing build outputs from the candidate.

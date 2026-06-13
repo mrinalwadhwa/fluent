@@ -52,3 +52,5 @@ mid-review, the orchestrating Attempt status flips to `failed`,
 peer reviewers get stuck in `planned`, and only the first-completed
 reviewer's task ends as `failed` rather than `complete`. None pass
 the filter, no findings collected, no forward-fix created.
+
+→ Resolved: Resolved by Work Item post-merge-review-guard-fix at 36809a4. PostMergeSourceGuard now differs from SourceCheckoutReviewGuard and does not restore .factory/ state.

@@ -13,3 +13,5 @@ path. Both issues only surface once `MAX_MERGE_FOLLOWUP_WRITES_PER_INVOCATION`
 is non-zero — worth a project-level reviewer that flags new mock claude
 scripts that don't distinguish writer/reviewer roles or don't make
 progress on each invocation.
+
+→ Resolved: Issue (1) candidate_has_failure now matches both Failed and NeedsUser (src/work_merge_executor.rs:584). Issue (2) merge follow-up writer surface removed entirely by slice 3 — MAX_MERGE_FOLLOWUP no longer exists in src/.

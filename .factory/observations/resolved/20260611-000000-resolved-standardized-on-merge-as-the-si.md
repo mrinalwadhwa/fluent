@@ -16,3 +16,5 @@ file `tests/behaviors/operations/test-land.sh` is renamed to
 `test-run-merge.sh` to match the `fn run_merge_*` convention in
 `tests/binary.rs`; internal function names and display strings updated
 to match.
+
+→ Resolved: Already marked Resolved in body. Standardization landed in bc26693 ("Standardize on merge as the single verb...") with the rename test suite at ce44a3c.

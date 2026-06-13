@@ -15,3 +15,5 @@ work). Work Item IDs should stay user-provided because they often
 mirror external ticket/doc IDs and lose traceability under auto-gen.
 Small, self-contained change — ~20 LOC of CLI default-handling and
 ~10 test updates per surface.
+
+→ Resolved: Resolved by Work Item optional-attempt-merge-candidate-ids at 26e37de + 0377e9c. CLI now accepts auto-gen Attempt/Merge Candidate IDs.
