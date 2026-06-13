@@ -33,11 +33,11 @@ Resources:
             "rules": [
               {
                 "rulePriority": 1,
-                "description": "Keep last 5 images",
+                "description": "Keep last 10 images",
                 "selection": {
                   "tagStatus": "any",
                   "countType": "imageCountMoreThan",
-                  "countNumber": 5
+                  "countNumber": 10
                 },
                 "action": { "type": "expire" }
               }
@@ -174,7 +174,7 @@ Resources:
         SizeInGiB: 30
       ContainerDefinitions:
         - Name: run
-          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${Repo}:latest'
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${Repo}:factory-base-placeholder'
           Essential: true
           WorkingDirectory: /workspace
           LinuxParameters:

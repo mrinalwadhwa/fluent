@@ -464,6 +464,337 @@ esac
 }
 
 #[test]
+fn fargate_ensure_setup_creates_dockerfile_stub_when_missing() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    let project_dir = tmp.path().join("my-project");
+    let factory_src = tmp.path().join("factory-src");
+    fs::create_dir_all(project_dir.join(".factory")).unwrap();
+    fs::create_dir_all(factory_src.join("infrastructure/run")).unwrap();
+    fs::write(
+        factory_src.join("Cargo.toml"),
+        "[package]\nname = \"factory\"\n",
+    )
+    .unwrap();
+    fs::write(
+        factory_src.join("infrastructure/run/Dockerfile"),
+        "FROM node:latest\n",
+    )
+    .unwrap();
+    fs::write(
+        factory_src.join("infrastructure/run/entrypoint.sh"),
+        "#!/bin/sh\n",
+    )
+    .unwrap();
+
+    let state_dir = tmp.path().join(".config/factory");
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        state_dir.join("fargate.state.json"),
+        r#"{
+  "stack_deployed": true,
+  "region": "us-west-2",
+  "cluster_arn": "arn:aws:ecs:us-west-2:123:cluster/factory",
+  "task_def_arn": "arn:aws:ecs:us-west-2:123:task-definition/factory-run:1",
+  "repo_uri": "123456789012.dkr.ecr.us-west-2.amazonaws.com/factory/run",
+  "s3_bucket": "factory-workspace-123",
+  "subnets": "subnet-a,subnet-b",
+  "security_group_id": "sg-abc"
+}"#,
+    )
+    .unwrap();
+
+    let aws_log = tmp.path().join("aws.log");
+    write_mock_executable(
+        &bin_dir,
+        "aws",
+        r##"#!/bin/bash
+printf '%s\n' "$*" >> "${AWS_LOG:?}"
+case "$1 $2" in
+  "sts get-caller-identity")
+    printf '123456789012\n'
+    ;;
+  "ecr describe-images")
+    printf 'None\n'
+    ;;
+  "ecs describe-task-definition")
+    if echo "$*" | grep -q 'containerDefinitions\[0\].image'; then
+      printf 'placeholder\n'
+    else
+      printf '{"family":"factory-run","containerDefinitions":[{"name":"run","image":"placeholder","essential":true}],"requiresCompatibilities":["FARGATE"],"networkMode":"awsvpc","cpu":"1024","memory":"2048"}\n'
+    fi
+    ;;
+  "ecs register-task-definition")
+    printf 'arn:aws:ecs:us-west-2:123:task-definition/factory-run:2\n'
+    ;;
+  *)
+    ;;
+esac
+"##,
+    );
+
+    write_mock_executable(
+        &bin_dir,
+        "docker",
+        r##"#!/bin/bash
+printf '%s\n' "$*" >> "${AWS_LOG:?}.docker"
+exit 0
+"##,
+    );
+
+    let output = factory_cmd()
+        .current_dir(&project_dir)
+        .env("HOME", tmp.path())
+        .env("PATH", mock_path(&bin_dir))
+        .env("AWS_LOG", &aws_log)
+        .env("FACTORY_SOURCE_ROOT", &factory_src)
+        .args(["fargate", "ensure-setup"])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "ensure-setup should succeed: stdout={} stderr={stderr}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let dockerfile = project_dir.join(".factory/Dockerfile");
+    assert!(dockerfile.exists(), "Dockerfile stub should be created");
+    let content = fs::read_to_string(&dockerfile).unwrap();
+    assert!(
+        content.contains("ARG FACTORY_BASE_URI"),
+        "stub should contain ARG: {content}"
+    );
+    assert!(
+        content.contains("FROM ${FACTORY_BASE_URI}"),
+        "stub should contain FROM: {content}"
+    );
+    assert!(
+        stderr.contains("Created .factory/Dockerfile stub"),
+        "should report stub creation: {stderr}"
+    );
+}
+
+#[test]
+fn fargate_ensure_setup_skips_base_build_when_ecr_tag_exists() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    let project_dir = tmp.path().join("my-project");
+    let factory_src = tmp.path().join("factory-src");
+    fs::create_dir_all(project_dir.join(".factory")).unwrap();
+    fs::create_dir_all(factory_src.join("infrastructure/run")).unwrap();
+    fs::write(
+        factory_src.join("Cargo.toml"),
+        "[package]\nname = \"factory\"\n",
+    )
+    .unwrap();
+    fs::write(
+        factory_src.join("infrastructure/run/Dockerfile"),
+        "FROM node:latest\n",
+    )
+    .unwrap();
+    fs::write(
+        factory_src.join("infrastructure/run/entrypoint.sh"),
+        "#!/bin/sh\n",
+    )
+    .unwrap();
+
+    let state_dir = tmp.path().join(".config/factory");
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        state_dir.join("fargate.state.json"),
+        r#"{
+  "stack_deployed": true,
+  "region": "us-west-2",
+  "cluster_arn": "arn:aws:ecs:us-west-2:123:cluster/factory",
+  "task_def_arn": "arn:aws:ecs:us-west-2:123:task-definition/factory-run:1",
+  "repo_uri": "123456789012.dkr.ecr.us-west-2.amazonaws.com/factory/run",
+  "s3_bucket": "factory-workspace-123",
+  "subnets": "subnet-a,subnet-b",
+  "security_group_id": "sg-abc"
+}"#,
+    )
+    .unwrap();
+
+    let aws_log = tmp.path().join("aws.log");
+    write_mock_executable(
+        &bin_dir,
+        "aws",
+        r##"#!/bin/bash
+printf '%s\n' "$*" >> "${AWS_LOG:?}"
+case "$1 $2" in
+  "sts get-caller-identity")
+    printf '123456789012\n'
+    ;;
+  "ecr describe-images")
+    printf 'sha256:abc123\n'
+    ;;
+  "ecs describe-task-definition")
+    if echo "$*" | grep -q 'containerDefinitions\[0\].image'; then
+      printf 'placeholder\n'
+    else
+      printf '{"family":"factory-run","containerDefinitions":[{"name":"run","image":"placeholder","essential":true}],"requiresCompatibilities":["FARGATE"],"networkMode":"awsvpc","cpu":"1024","memory":"2048"}\n'
+    fi
+    ;;
+  "ecs register-task-definition")
+    printf 'arn:aws:ecs:us-west-2:123:task-definition/factory-run:2\n'
+    ;;
+  *)
+    ;;
+esac
+"##,
+    );
+
+    write_mock_executable(
+        &bin_dir,
+        "docker",
+        r##"#!/bin/bash
+printf 'docker: %s\n' "$*" >> "${AWS_LOG:?}.docker"
+exit 0
+"##,
+    );
+
+    let output = factory_cmd()
+        .current_dir(&project_dir)
+        .env("HOME", tmp.path())
+        .env("PATH", mock_path(&bin_dir))
+        .env("AWS_LOG", &aws_log)
+        .env("FACTORY_SOURCE_ROOT", &factory_src)
+        .args(["fargate", "ensure-setup"])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "ensure-setup should succeed: stdout={} stderr={stderr}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        stderr.contains("already in ECR, skipping build"),
+        "should skip base build when ECR has the tag: {stderr}"
+    );
+
+    let docker_log_path = format!("{}.docker", aws_log.display());
+    let docker_log = fs::read_to_string(&docker_log_path).unwrap_or_default();
+    assert!(
+        !docker_log.contains("build"),
+        "should not invoke docker build when base image exists in ECR: {docker_log}"
+    );
+}
+
+#[test]
+fn fargate_ensure_setup_skips_project_build_when_ecr_tag_exists() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    let project_dir = tmp.path().join("my-project");
+    let factory_src = tmp.path().join("factory-src");
+    fs::create_dir_all(project_dir.join(".factory")).unwrap();
+    fs::create_dir_all(factory_src.join("infrastructure/run")).unwrap();
+    fs::write(
+        factory_src.join("Cargo.toml"),
+        "[package]\nname = \"factory\"\n",
+    )
+    .unwrap();
+    fs::write(
+        factory_src.join("infrastructure/run/Dockerfile"),
+        "FROM node:latest\n",
+    )
+    .unwrap();
+    fs::write(
+        factory_src.join("infrastructure/run/entrypoint.sh"),
+        "#!/bin/sh\n",
+    )
+    .unwrap();
+    fs::write(
+        project_dir.join(".factory/Dockerfile"),
+        "ARG FACTORY_BASE_URI\nFROM ${FACTORY_BASE_URI}\nRUN echo hello\n",
+    )
+    .unwrap();
+
+    let state_dir = tmp.path().join(".config/factory");
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        state_dir.join("fargate.state.json"),
+        r#"{
+  "stack_deployed": true,
+  "region": "us-west-2",
+  "cluster_arn": "arn:aws:ecs:us-west-2:123:cluster/factory",
+  "task_def_arn": "arn:aws:ecs:us-west-2:123:task-definition/factory-run:1",
+  "repo_uri": "123456789012.dkr.ecr.us-west-2.amazonaws.com/factory/run",
+  "s3_bucket": "factory-workspace-123",
+  "subnets": "subnet-a,subnet-b",
+  "security_group_id": "sg-abc"
+}"#,
+    )
+    .unwrap();
+
+    let aws_log = tmp.path().join("aws.log");
+    write_mock_executable(
+        &bin_dir,
+        "aws",
+        r##"#!/bin/bash
+printf '%s\n' "$*" >> "${AWS_LOG:?}"
+case "$1 $2" in
+  "sts get-caller-identity")
+    printf '123456789012\n'
+    ;;
+  "ecr describe-images")
+    printf 'sha256:abc123\n'
+    ;;
+  "ecs describe-task-definition")
+    if echo "$*" | grep -q 'containerDefinitions\[0\].image'; then
+      printf '123456789012.dkr.ecr.us-west-2.amazonaws.com/factory/run:project-existing\n'
+    else
+      printf '{"family":"factory-run","containerDefinitions":[{"name":"run","image":"123456789012.dkr.ecr.us-west-2.amazonaws.com/factory/run:project-existing","essential":true}],"requiresCompatibilities":["FARGATE"],"networkMode":"awsvpc","cpu":"1024","memory":"2048"}\n'
+    fi
+    ;;
+  "ecs register-task-definition")
+    printf 'arn:aws:ecs:us-west-2:123:task-definition/factory-run:2\n'
+    ;;
+  *)
+    ;;
+esac
+"##,
+    );
+
+    write_mock_executable(
+        &bin_dir,
+        "docker",
+        r##"#!/bin/bash
+printf 'docker: %s\n' "$*" >> "${AWS_LOG:?}.docker"
+exit 0
+"##,
+    );
+
+    let output = factory_cmd()
+        .current_dir(&project_dir)
+        .env("HOME", tmp.path())
+        .env("PATH", mock_path(&bin_dir))
+        .env("AWS_LOG", &aws_log)
+        .env("FACTORY_SOURCE_ROOT", &factory_src)
+        .args(["fargate", "ensure-setup"])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "ensure-setup should succeed: stdout={} stderr={stderr}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let docker_log_path = format!("{}.docker", aws_log.display());
+    let docker_log = fs::read_to_string(&docker_log_path).unwrap_or_default();
+    let build_count = docker_log.matches("build").count();
+    assert!(
+        build_count == 0,
+        "should not invoke docker build when both images exist in ECR: {docker_log}"
+    );
+}
+
+#[test]
 fn dry_run_with_codex_uses_codex_profile_layer() {
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");

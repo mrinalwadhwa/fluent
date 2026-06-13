@@ -13,6 +13,7 @@ tempfile = "3"
 ratatui = "0.29"
 crossterm = "0.28"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+sha2 = "0.10"
 unicode-width = "0.2"
 
 [dev-dependencies]

@@ -8,6 +8,7 @@
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -15,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const STACK_NAME: &str = "factory";
-const BASE_IMAGE_LOCAL_TAG: &str = "factory-runtime:latest";
+const FACTORY_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Durable state file recording what's been deployed. One file per
 /// user, cross-project.
@@ -96,28 +97,63 @@ pub fn ensure_setup(config: &BootstrapConfig) -> Result<FargateState> {
         );
     }
 
+    let repo_uri = state
+        .repo_uri
+        .as_deref()
+        .context("Repo URI missing from Fargate state — stack must be deployed first")?
+        .to_string();
+    let region = config.region.as_str();
+
+    let base_tag = base_image_tag();
     let base_hash = compute_base_image_hash(&config.factory_source_root)?;
     let base_changed = state.base_image_hash.as_deref() != Some(&base_hash);
     if base_changed || config.force_rebuild {
-        build_and_push_base_image(config, &state, &base_hash)?;
-        state.base_image_hash = Some(base_hash);
-        state.base_image_pushed_at = Some(chrono::Utc::now().to_rfc3339());
-        state.save()?;
+        let ecr_has_base = ecr_image_tag_exists(region, &repo_uri, &base_tag)?;
+        if ecr_has_base && !config.force_rebuild {
+            eprintln!("  Base image {repo_uri}:{base_tag} already in ECR, skipping build.");
+            state.base_image_hash = Some(base_hash);
+            state.save()?;
+        } else {
+            build_and_push_base_image(config, &state, &base_hash)?;
+            state.base_image_hash = Some(base_hash);
+            state.base_image_pushed_at = Some(chrono::Utc::now().to_rfc3339());
+            state.save()?;
+        }
+    }
+
+    let base_image_uri = format!("{repo_uri}:{base_tag}");
+    let stub_created = ensure_project_dockerfile_stub(&config.project_root)?;
+    if stub_created {
+        eprintln!(
+            "  Created .factory/Dockerfile stub. Customize it with project-specific toolchains."
+        );
     }
 
     let project_dockerfile = config.project_root.join(".factory/Dockerfile");
     if project_dockerfile.exists() {
         let project_name = project_basename(&config.project_root)?;
+        let dockerfile_sha = sha256_file(&project_dockerfile)?;
+        let project_tag = project_image_tag(&dockerfile_sha);
         let project_hash = hash_file(&project_dockerfile)?;
         let previous_hash = state.project_image_hashes.get(&project_name).cloned();
         let project_changed = previous_hash.as_deref() != Some(&project_hash);
         if base_changed || project_changed || config.force_rebuild {
-            build_and_push_project_image(config, &state, &project_name)?;
+            let ecr_has_project = ecr_image_tag_exists(region, &repo_uri, &project_tag)?;
+            if ecr_has_project && !config.force_rebuild {
+                eprintln!(
+                    "  Project image {repo_uri}:{project_tag} already in ECR, skipping build."
+                );
+            } else {
+                build_and_push_project_image(config, &state, &project_tag, &base_image_uri)?;
+            }
             state
                 .project_image_hashes
                 .insert(project_name, project_hash);
             state.save()?;
         }
+
+        let project_image_uri = format!("{repo_uri}:{project_tag}");
+        register_task_definition_revision(&state, &project_image_uri)?;
     }
 
     Ok(state)
@@ -238,10 +274,12 @@ fn build_and_push_base_image(
     ])?;
     docker_login_ecr(&account_id, region)?;
 
+    let tag = base_image_tag();
     let dockerfile = config
         .factory_source_root
         .join("infrastructure/run/Dockerfile");
     let context_dir = &config.factory_source_root;
+    let remote_tag = format!("{repo_uri}:{tag}");
     eprintln!("  Building base image (hash {base_hash})...");
     run_docker(&[
         "build",
@@ -251,21 +289,20 @@ fn build_and_push_base_image(
         "-f",
         &dockerfile.to_string_lossy(),
         "-t",
-        &format!("{repo_uri}:latest"),
-        "-t",
-        BASE_IMAGE_LOCAL_TAG,
+        &remote_tag,
         &context_dir.to_string_lossy(),
     ])?;
 
-    eprintln!("  Pushing base image to {repo_uri}:latest...");
-    run_docker(&["push", &format!("{repo_uri}:latest")])?;
+    eprintln!("  Pushing base image to {remote_tag}...");
+    run_docker(&["push", &remote_tag])?;
     Ok(())
 }
 
 fn build_and_push_project_image(
     config: &BootstrapConfig,
     state: &FargateState,
-    project_name: &str,
+    image_tag: &str,
+    base_image_uri: &str,
 ) -> Result<()> {
     let repo_uri = state
         .repo_uri
@@ -282,13 +319,9 @@ fn build_and_push_project_image(
     ])?;
     docker_login_ecr(&account_id, region)?;
 
-    // Re-tag the just-pushed base image so the project Dockerfile's
-    // literal `FROM factory-runtime:latest` resolves locally.
-    run_docker(&["tag", &format!("{repo_uri}:latest"), BASE_IMAGE_LOCAL_TAG])?;
-
     let dockerfile = config.project_root.join(".factory/Dockerfile");
-    let project_tag = format!("{repo_uri}:project-{project_name}");
-    eprintln!("  Building project image for '{project_name}'...");
+    let remote_tag = format!("{repo_uri}:{image_tag}");
+    eprintln!("  Building project image ({image_tag})...");
     run_docker(&[
         "build",
         "--platform",
@@ -296,13 +329,15 @@ fn build_and_push_project_image(
         "--load",
         "-f",
         &dockerfile.to_string_lossy(),
+        "--build-arg",
+        &format!("FACTORY_BASE_URI={base_image_uri}"),
         "-t",
-        &project_tag,
+        &remote_tag,
         &config.project_root.to_string_lossy(),
     ])?;
 
-    eprintln!("  Pushing project image to {project_tag}...");
-    run_docker(&["push", &project_tag])?;
+    eprintln!("  Pushing project image to {remote_tag}...");
+    run_docker(&["push", &remote_tag])?;
     Ok(())
 }
 
@@ -331,6 +366,199 @@ fn hash_file(path: &Path) -> Result<String> {
         .with_context(|| format!("Failed to read {}", path.display()))?
         .hash(&mut hasher);
     Ok(format!("{:x}", hasher.finish()))
+}
+
+pub fn base_image_tag() -> String {
+    format!("factory-base-{FACTORY_VERSION}")
+}
+
+pub fn project_image_tag(dockerfile_sha256: &str) -> String {
+    let prefix = &dockerfile_sha256[..12.min(dockerfile_sha256.len())];
+    format!("project-{prefix}")
+}
+
+pub fn sha256_file(path: &Path) -> Result<String> {
+    let content = fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&content);
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+pub fn project_image_tag_for_dockerfile(project_root: &Path) -> Result<String> {
+    let dockerfile = project_root.join(".factory/Dockerfile");
+    if !dockerfile.exists() {
+        bail!("No .factory/Dockerfile found at {}", dockerfile.display());
+    }
+    let sha = sha256_file(&dockerfile)?;
+    Ok(project_image_tag(&sha))
+}
+
+fn ecr_image_tag_exists(region: &str, repo_uri: &str, tag: &str) -> Result<bool> {
+    let repo_name = repo_name_from_uri(repo_uri)?;
+    let output = Command::new("aws")
+        .args([
+            "ecr",
+            "describe-images",
+            "--region",
+            region,
+            "--repository-name",
+            &repo_name,
+            "--image-ids",
+            &format!("imageTag={tag}"),
+            "--query",
+            "imageDetails[0].imageDigest",
+            "--output",
+            "text",
+        ])
+        .output()
+        .context("Failed to launch aws CLI")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("ImageNotFoundException") || stderr.contains("does not exist") {
+            return Ok(false);
+        }
+        bail!(
+            "aws ecr describe-images --image-ids imageTag={tag} failed:\n{}",
+            stderr.trim()
+        );
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(!text.is_empty() && text != "None")
+}
+
+fn repo_name_from_uri(repo_uri: &str) -> Result<String> {
+    repo_uri
+        .split('/')
+        .skip(1)
+        .collect::<Vec<_>>()
+        .join("/")
+        .parse::<String>()
+        .map(|s| {
+            if s.is_empty() {
+                repo_uri.to_string()
+            } else {
+                s
+            }
+        })
+        .context("Failed to extract repository name from URI")
+}
+
+fn ensure_project_dockerfile_stub(project_root: &Path) -> Result<bool> {
+    let dockerfile = project_root.join(".factory/Dockerfile");
+    if dockerfile.exists() {
+        return Ok(false);
+    }
+    let parent = dockerfile
+        .parent()
+        .context("Cannot determine parent of .factory/Dockerfile")?;
+    fs::create_dir_all(parent).with_context(|| format!("Failed to create {}", parent.display()))?;
+    let stub = format!(
+        "# Project-specific Factory runtime image.\n\
+         # Extend the Factory base with any toolchains your merge checks\n\
+         # need (rustc, go, mvn, etc.).\n\
+         ARG FACTORY_BASE_URI\n\
+         FROM ${{FACTORY_BASE_URI}}\n",
+    );
+    fs::write(&dockerfile, &stub)
+        .with_context(|| format!("Failed to write {}", dockerfile.display()))?;
+    Ok(true)
+}
+
+fn register_task_definition_revision(
+    state: &FargateState,
+    project_image_uri: &str,
+) -> Result<String> {
+    let region = state
+        .region
+        .as_deref()
+        .context("Region missing from Fargate state")?;
+    let task_def_arn = state
+        .task_def_arn
+        .as_deref()
+        .context("Task definition ARN missing from Fargate state")?;
+    let family = task_def_family(task_def_arn);
+
+    let current_json = aws_text_output(&[
+        "ecs",
+        "describe-task-definition",
+        "--region",
+        region,
+        "--task-definition",
+        &family,
+        "--query",
+        "taskDefinition.containerDefinitions[0].image",
+        "--output",
+        "text",
+    ])?;
+
+    if current_json.trim() == project_image_uri {
+        eprintln!("  Task definition already references {project_image_uri}, skipping revision.");
+        return Ok(task_def_arn.to_string());
+    }
+
+    eprintln!("  Registering task definition revision for {project_image_uri}...");
+    let full_def = aws_text_output(&[
+        "ecs",
+        "describe-task-definition",
+        "--region",
+        region,
+        "--task-definition",
+        &family,
+        "--query",
+        "taskDefinition",
+        "--output",
+        "json",
+    ])?;
+
+    let mut def: serde_json::Value =
+        serde_json::from_str(&full_def).context("Failed to parse task definition JSON")?;
+    if let Some(containers) = def
+        .get_mut("containerDefinitions")
+        .and_then(|v| v.as_array_mut())
+    {
+        for container in containers.iter_mut() {
+            container["image"] = serde_json::Value::String(project_image_uri.to_string());
+        }
+    }
+
+    for key in &[
+        "taskDefinitionArn",
+        "revision",
+        "status",
+        "requiresAttributes",
+        "compatibilities",
+        "registeredAt",
+        "registeredBy",
+    ] {
+        def.as_object_mut().map(|m| m.remove(*key));
+    }
+
+    let def_str = serde_json::to_string(&def)?;
+    let new_arn = aws_text_output(&[
+        "ecs",
+        "register-task-definition",
+        "--region",
+        region,
+        "--cli-input-json",
+        &def_str,
+        "--query",
+        "taskDefinition.taskDefinitionArn",
+        "--output",
+        "text",
+    ])?;
+
+    eprintln!("  New task definition revision: {new_arn}");
+    Ok(new_arn)
+}
+
+fn task_def_family(task_def_arn: &str) -> String {
+    if let Some(family_rev) = task_def_arn.rsplit('/').next() {
+        if let Some(family) = family_rev.rsplit_once(':') {
+            return family.0.to_string();
+        }
+        return family_rev.to_string();
+    }
+    task_def_arn.to_string()
 }
 
 fn aws_text_output(args: &[&str]) -> Result<String> {
@@ -478,6 +706,9 @@ pub fn teardown(keep_ecr: bool, keep_s3: bool) -> Result<TeardownOutcome> {
     let mut s3_deleted = false;
 
     if !keep_ecr {
+        eprintln!(
+            "  ECR repository contains base image tags (factory-base-*) and project image tags (project-*)."
+        );
         ecr_deleted = delete_ecr_repository(region)?;
     }
 
@@ -741,5 +972,91 @@ mod tests {
         assert!(display.contains("CloudFormation stack"));
         assert!(display.contains("ECR repository"));
         assert!(!display.contains("S3 bucket"));
+    }
+
+    #[test]
+    fn base_image_tag_includes_version() {
+        let tag = base_image_tag();
+        assert!(tag.starts_with("factory-base-"));
+        assert!(tag.contains(FACTORY_VERSION));
+    }
+
+    #[test]
+    fn project_image_tag_from_hash_deterministic_12_hex() {
+        let tag = project_image_tag("a3f2b8c9d4e1ff00112233445566778899aabbcc");
+        assert_eq!(tag, "project-a3f2b8c9d4e1");
+    }
+
+    #[test]
+    fn project_image_tag_from_hash_short_input() {
+        let tag = project_image_tag("abcd");
+        assert_eq!(tag, "project-abcd");
+    }
+
+    #[test]
+    fn sha256_file_is_stable() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.txt");
+        fs::write(&path, "hello world").unwrap();
+        let h1 = sha256_file(&path).unwrap();
+        let h2 = sha256_file(&path).unwrap();
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 64);
+    }
+
+    #[test]
+    fn sha256_file_changes_with_content() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.txt");
+        fs::write(&path, "hello").unwrap();
+        let h1 = sha256_file(&path).unwrap();
+        fs::write(&path, "goodbye").unwrap();
+        let h2 = sha256_file(&path).unwrap();
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn ensure_project_dockerfile_stub_creates_when_missing() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("my-project");
+        fs::create_dir_all(&project).unwrap();
+        let result = ensure_project_dockerfile_stub(&project).unwrap();
+        assert!(result);
+        let content = fs::read_to_string(project.join(".factory/Dockerfile")).unwrap();
+        assert!(content.contains("ARG FACTORY_BASE_URI"));
+        assert!(content.contains("FROM ${FACTORY_BASE_URI}"));
+        assert!(content.contains("# Project-specific Factory runtime image."));
+    }
+
+    #[test]
+    fn ensure_project_dockerfile_stub_skips_when_exists() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("my-project");
+        fs::create_dir_all(project.join(".factory")).unwrap();
+        fs::write(project.join(".factory/Dockerfile"), "FROM custom:image\n").unwrap();
+        let result = ensure_project_dockerfile_stub(&project).unwrap();
+        assert!(!result);
+        let content = fs::read_to_string(project.join(".factory/Dockerfile")).unwrap();
+        assert_eq!(content, "FROM custom:image\n");
+    }
+
+    #[test]
+    fn repo_name_from_uri_extracts_name() {
+        let name =
+            repo_name_from_uri("123456789012.dkr.ecr.us-west-2.amazonaws.com/factory/run").unwrap();
+        assert_eq!(name, "factory/run");
+    }
+
+    #[test]
+    fn task_def_family_extracts_from_arn() {
+        assert_eq!(
+            task_def_family("arn:aws:ecs:us-west-2:123:task-definition/factory-run:5"),
+            "factory-run"
+        );
+    }
+
+    #[test]
+    fn task_def_family_handles_plain_name() {
+        assert_eq!(task_def_family("factory-run"), "factory-run");
     }
 }

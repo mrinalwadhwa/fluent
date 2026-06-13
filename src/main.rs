@@ -215,6 +215,19 @@ fn main() -> Result<()> {
             cmd_merge(&cwd, run_id.as_deref())?;
         }
         Some(Commands::Fargate { command }) => match command {
+            FargateCommands::EnsureSetup { force_rebuild } => {
+                let region = std::env::var("FACTORY_REGION")
+                    .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
+                    .unwrap_or_else(|_| "us-west-1".to_string());
+                let factory_source_root = fargate::resolve_factory_source_root_from(&cwd)?;
+                fargate_bootstrap::ensure_setup(&fargate_bootstrap::BootstrapConfig {
+                    project_root: cwd.clone(),
+                    factory_source_root,
+                    region,
+                    force_rebuild,
+                })?;
+                eprintln!("  Fargate setup complete.");
+            }
             FargateCommands::Teardown { keep_ecr, keep_s3 } => {
                 let outcome = fargate_bootstrap::teardown(keep_ecr, keep_s3)?;
                 println!("{outcome}");

@@ -2212,3 +2212,72 @@ WHILE running inside the sandbox,
 THE SYSTEM SHALL inject credentials via environment variables, never by
 opening filesystem access to credential stores.
 Test: tests/behaviors/operations/test-sandbox.sh (profile denies Keychain Mach services, profile denies credential filesystem access, credentials injected via env vars)
+
+## Per-project Fargate images
+
+WHEN `factory fargate ensure-setup` runs and `.factory/Dockerfile`
+does not exist in the project root,
+THE SYSTEM SHALL create it as a stub containing `ARG FACTORY_BASE_URI`
+and `FROM ${FACTORY_BASE_URI}` (plus a brief comment on how to extend
+it), and SHALL leave the file uncommitted for the user to inspect and
+version-control.
+Test: src/fargate_bootstrap.rs (ensure_project_dockerfile_stub_creates_when_missing, ensure_project_dockerfile_stub_skips_when_exists)
+Test: tests/binary.rs (fargate_ensure_setup_creates_dockerfile_stub_when_missing)
+
+WHEN `factory fargate ensure-setup` runs,
+THE SYSTEM SHALL build the Factory base image and push it to the
+project's ECR repo tagged with the current Factory version (e.g.,
+`factory-base-0.1.0`), unless an image with that tag already exists
+in the repo, in which case the build is skipped.
+Test: src/fargate_bootstrap.rs (base_image_tag_includes_version)
+Test: tests/binary.rs (fargate_ensure_setup_skips_base_build_when_ecr_tag_exists)
+
+WHEN `factory fargate ensure-setup` runs,
+THE SYSTEM SHALL compute the SHA-256 of the project's
+`.factory/Dockerfile`, check the project's ECR repo for the project
+image tagged with that hash (e.g., `project-a3f2b8c9d4e1`), build and
+push the project image if missing, and skip the build if present.
+Test: src/fargate_bootstrap.rs (project_image_tag_from_hash_deterministic_12_hex, sha256_file_is_stable, sha256_file_changes_with_content)
+Test: tests/binary.rs (fargate_ensure_setup_skips_project_build_when_ecr_tag_exists)
+
+WHEN `factory work merge --runtime fargate` runs,
+THE SYSTEM SHALL launch the ECS task using the project image whose
+tag matches the SHA-256 of `.factory/Dockerfile` at launch time.
+
+WHEN `factory work merge --runtime fargate` runs and the project
+image for the current `.factory/Dockerfile` content hash does not
+exist in ECR,
+THE SYSTEM SHALL build and push the project image (same procedure
+as bootstrap) before launching the ECS task.
+
+WHEN a local Attempt or local post-merge review runs (no `--runtime
+fargate`),
+THE SYSTEM SHALL NOT consult `.factory/Dockerfile` and SHALL NOT
+build or launch any container; the user's local environment is used
+as today.
+
+WHEN `factory fargate teardown` runs,
+THE SYSTEM SHALL delete both the Factory base image tags and the
+project image tags from the project's ECR repo, in addition to the
+existing teardown behaviors.
+Test: tests/binary.rs (fargate_teardown_deletes_stack_ecr_s3_and_removes_state)
+
+WHEN this repo's `.factory/Dockerfile` is used to build the project
+image,
+THE SYSTEM SHALL produce an image that contains `rustc`, `cargo`,
+`rustfmt`, and `clippy` such that `cargo fmt --check`, `cargo test`,
+and `cargo clippy` execute successfully under the merge-check hook.
+
+IF the project's `.factory/Dockerfile` cannot be built (syntax
+error, unreachable base image, network failure during `docker
+build`),
+THEN `factory fargate ensure-setup` and `factory work merge
+--runtime fargate` SHALL exit non-zero with a clear error that
+names the failing build step and leaves the project's ECR repo
+unchanged.
+
+WHEN the project's `.factory/Dockerfile` references a `FROM
+<ecr-uri>/factory-base:<version>` tag that does not exist in ECR,
+THE SYSTEM SHALL surface the missing-tag error from `docker build`
+to the user without retry, so the user can either bump Factory to
+match the referenced base or update the `FROM` line.

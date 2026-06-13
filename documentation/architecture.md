@@ -1141,9 +1141,7 @@ default VPC and subnets, deploys the CloudFormation stack named
 `factory`, reads stack outputs (cluster ARN, task-definition ARN,
 ECR repository URI, S3 bucket, security group), authenticates
 Docker with ECR, builds the Factory base image from the embedded
-`infrastructure/run/Dockerfile` (tagged both as
-`<repo>:latest` and as `factory-runtime:latest` for the local
-build context), pushes it, and writes everything to
+`infrastructure/run/Dockerfile`, pushes it, and writes everything to
 `~/.config/factory/fargate.state.json`. The state file records
 the deployed region, stack output values, a hash of the base image
 inputs, and per-project hashes of `.factory/Dockerfile`. On later
@@ -1153,36 +1151,67 @@ they change. The Factory source tree must be locatable: either
 the project root looking for a directory that contains both
 `Cargo.toml` and `infrastructure/run/Dockerfile`.
 
+#### Per-project images
+
+Factory publishes a thin base image (`factory` binary +
+`claude-code` + minimum runtime) and each project extends it with
+whatever toolchains its merge checks require through
+`.factory/Dockerfile`.
+
+**Tag scheme.** Both base and project images live in the same ECR
+repository. The base image is tagged
+`factory-base-<factory-version>` (e.g. `factory-base-0.1.0`)
+using `env!("CARGO_PKG_VERSION")`. The project image is tagged
+`project-<sha256-first-12-hex>` where the hash is the SHA-256 of
+`.factory/Dockerfile` (e.g. `project-a3f2b8c9d4e1`).
+
+**Auto-stub.** When `factory fargate ensure-setup` runs and
+`.factory/Dockerfile` does not exist, Factory creates a stub
+containing `ARG FACTORY_BASE_URI` and
+`FROM ${FACTORY_BASE_URI}` with a comment explaining how to
+extend it. The stub is left uncommitted for the user to inspect
+and version-control.
+
+**Build-arg portability.** Project Dockerfiles use
+`ARG FACTORY_BASE_URI` instead of a literal ECR URI. Factory
+passes `--build-arg FACTORY_BASE_URI=<resolved-uri>` when
+invoking `docker build`. This keeps the file content (and
+therefore its SHA-256 tag) stable across developers who push
+to different ECR registries.
+
+**ECR skip-if-exists.** Before building either image, Factory
+calls `aws ecr describe-images --image-ids imageTag=<tag>`. If
+the tag exists, the build and push are skipped. The local state
+file hash check remains as a short-circuit when state is intact;
+the ECR check covers the state-wiped case.
+
+**Task definition revision.** After a successful project image
+push, Factory registers a new ECS task definition revision that
+updates the container image URI to the new project tag. The
+`run-task` call uses the task definition family name (without
+revision number) so AWS auto-resolves to the latest active
+revision.
+
+This repo ships `.factory/Dockerfile` that extends the Factory
+base with the Rust toolchain via rustup so `cargo fmt --check`,
+`cargo test`, and `cargo clippy` execute successfully under the
+merge-check hook on Fargate.
+
 #### Teardown
 
 `factory fargate teardown` removes the Fargate infrastructure
 deployed by `ensure_setup`. It reads
 `~/.config/factory/fargate.state.json` to learn the region, ECR
 repository, and S3 bucket, then deletes the ECR repository (unless
-`--keep-ecr`), empties and deletes the S3 bucket (unless
-`--keep-s3`), deletes the CloudFormation stack and waits for
+`--keep-ecr`) including all base image tags (`factory-base-*`) and
+project image tags (`project-*`), empties and deletes the S3 bucket
+(unless `--keep-s3`), deletes the CloudFormation stack and waits for
 deletion to complete, and removes the state file so the next
 `--runtime fargate` invocation re-bootstraps from scratch. Each
 destructive step checks for existence before deleting: a missing
 stack, absent ECR repository, or absent S3 bucket is treated as
 success. When no state file exists and no stack is present, the
 command exits zero with a message saying nothing needed teardown.
-
-#### BYO project Dockerfile
-
-Each Factory-managed project that needs project-specific toolchains
-in its Fargate container provides `.factory/Dockerfile`. Factory's
-bootstrap builds that Dockerfile after the base image is in place,
-tags it as `<repo>:project-<project-name>`, and pushes. The
-project Dockerfile uses a literal `FROM factory-runtime:latest` —
-Factory tags the just-pushed base image locally before invoking
-`docker build` so the FROM resolves. The base image and project
-image lifecycles are coupled: when the base image hash changes,
-all project images that FROM it are rebuilt on their next launch.
-Projects with no `.factory/Dockerfile` use the base image
-directly and have access only to what the base ships
-(`factory` binary, `aws-cli`, `git`, `bash`, `jq`, `tmux`,
-`curl`, `claude-code`).
 
 ## Credential management
 
@@ -1251,6 +1280,7 @@ factory/main/
     terminal-ui.md
     tests.md
   .factory/
+    Dockerfile               ← per-project Fargate image (Rust toolchain)
     observations/             ← per-file observation queue (tracked)
       <id>.md                ← open observations
       resolved/

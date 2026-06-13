@@ -15,11 +15,12 @@ __pycache__/
 # Dependencies
 node_modules/
 
-# Factory — working state, except observations, expertise, and hooks
+# Factory — working state, except observations, expertise, hooks, and Dockerfile
 .factory/*
 !.factory/observations/
 !.factory/expertise/
 !.factory/hooks/
+!.factory/Dockerfile
 
 
 # Added by cargo

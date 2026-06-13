@@ -29,11 +29,14 @@ fn load_config() -> Result<FargateConfig> {
             && state.subnets.is_some()
             && state.security_group_id.is_some()
         {
+            let run_task = state
+                .task_def_arn
+                .as_deref()
+                .map(task_def_family)
+                .unwrap_or_else(|| "factory-run".to_string());
             return Ok(FargateConfig {
                 cluster: state.cluster_arn.unwrap(),
-                run_task: state
-                    .task_def_arn
-                    .unwrap_or_else(|| "factory-run".to_string()),
+                run_task,
                 s3_bucket: state.s3_bucket.unwrap(),
                 subnets: state.subnets.unwrap(),
                 security_group: state.security_group_id.unwrap(),
@@ -72,6 +75,10 @@ fn load_config() -> Result<FargateConfig> {
 ///      contains both `Cargo.toml` and `infrastructure/run/Dockerfile`
 ///   3. Use the project root itself if it looks like the Factory
 ///      source tree.
+pub fn resolve_factory_source_root_from(project_root: &Path) -> Result<std::path::PathBuf> {
+    resolve_factory_source_root(project_root)
+}
+
 fn resolve_factory_source_root(project_root: &Path) -> Result<std::path::PathBuf> {
     if let Ok(env_path) = std::env::var("FACTORY_SOURCE_ROOT") {
         let path = std::path::PathBuf::from(&env_path);
@@ -118,6 +125,16 @@ fn bootstrap_and_load_config(project_root: &Path) -> Result<FargateConfig> {
         force_rebuild,
     })?;
     load_config()
+}
+
+fn task_def_family(arn: &str) -> String {
+    if let Some(family_rev) = arn.rsplit('/').next() {
+        if let Some((family, _rev)) = family_rev.rsplit_once(':') {
+            return family.to_string();
+        }
+        return family_rev.to_string();
+    }
+    arn.to_string()
 }
 
 fn env_required(name: &str) -> Result<String> {

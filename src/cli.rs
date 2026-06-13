@@ -240,6 +240,13 @@ pub enum ObservationsCommands {
 
 #[derive(Subcommand)]
 pub enum FargateCommands {
+    /// Deploy infrastructure and build images
+    EnsureSetup {
+        /// Force rebuild of all images
+        #[arg(long)]
+        force_rebuild: bool,
+    },
+
     /// Tear down Fargate infrastructure
     Teardown {
         /// Keep the ECR repository intact
