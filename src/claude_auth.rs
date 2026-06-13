@@ -79,7 +79,10 @@ fn check_token_expiry(creds: Option<&ClaudeAiOauth>, now_ms: i64) -> Result<(), 
 /// entry exists or the session has no refresh token, treating these as
 /// API-key-only paths that skip the check.
 pub fn ensure_not_expired() -> Result<(), AuthError> {
-    check_token_expiry(read_keychain().as_ref(), chrono::Utc::now().timestamp_millis())
+    check_token_expiry(
+        read_keychain().as_ref(),
+        chrono::Utc::now().timestamp_millis(),
+    )
 }
 
 /// Walk a transcript JSONL file and return `AuthError::Rejected` if
@@ -140,10 +143,7 @@ mod tests {
             request_id: Some("req-123".into()),
         };
         let msg = err.user_message();
-        assert!(
-            msg.contains("rejected"),
-            "should mention rejected: {msg}"
-        );
+        assert!(msg.contains("rejected"), "should mention rejected: {msg}");
         assert!(msg.contains("401"), "should mention 401: {msg}");
         assert!(
             msg.contains("claude /login"),
@@ -373,7 +373,8 @@ mod tests {
         writeln!(f, "trailing garbage").unwrap();
         drop(f);
 
-        let err = classify_transcript_401(&path).expect("should detect 401 despite malformed lines");
+        let err =
+            classify_transcript_401(&path).expect("should detect 401 despite malformed lines");
         match err {
             AuthError::Rejected { request_id } => {
                 assert_eq!(request_id.as_deref(), Some("req-ok"));
