@@ -19,3 +19,5 @@ careful design pass:
 - Merge launches must include the candidate sibling worktree in
   the upload because the merge executor cd's into it; otherwise
   the container reports `fatal: cannot change to /worktrees/work-<...>: No such file or directory`.
+
+→ Resolved: All listed fixes are in place and stable: bsdtar metadata flags, upload excludes, /worktrees parent ownership, IAM policy for work/* prefixes, file-based transfers, git worktree repair on extraction, candidate-sibling upload in merge launches. The 'fold back into a more careful design pass' framing is too speculative without concrete goals; future Fargate concerns should be captured as their own observations rather than batched into a refactor.
