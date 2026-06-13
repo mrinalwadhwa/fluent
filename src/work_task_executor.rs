@@ -1480,14 +1480,7 @@ fn run_behavior_tests_coder(
     eprintln!("  Artifact area     {}", artifact_dir.display());
 
     let coder = coder_kind.boxed(sandbox);
-    let exit_code = coder.run(
-        &prompt,
-        &system_prompt,
-        artifact_dir,
-        extra_args,
-        &[],
-        None,
-    )?;
+    let exit_code = coder.run(&prompt, &system_prompt, artifact_dir, extra_args, &[], None)?;
     if exit_code == 0 {
         Ok(())
     } else {
@@ -1584,9 +1577,7 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
         let bt_results_hint = if let Some(dep_id) = task.depends_on.as_deref() {
             let bt_artifact_path = format!(
                 ".factory/work/artifacts/{}/{}/{}/behavior-tests-results.json",
-                input.item.id,
-                input.attempt_id,
-                dep_id
+                input.item.id, input.attempt_id, dep_id
             );
             format!(
                 "\nBehavior test results are available at: {bt_artifact_path}\n\
@@ -1598,7 +1589,11 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
         } else {
             String::new()
         };
-        format!("{}\n{}", work_behavior_review_input(input.item), bt_results_hint)
+        format!(
+            "{}\n{}",
+            work_behavior_review_input(input.item),
+            bt_results_hint
+        )
     } else {
         String::new()
     };

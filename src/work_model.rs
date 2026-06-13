@@ -3308,10 +3308,7 @@ mod tests {
             Some("attempt-1-behavior-tests")
         );
 
-        let doc_review = tasks
-            .iter()
-            .find(|t| t.role == "documentation")
-            .unwrap();
+        let doc_review = tasks.iter().find(|t| t.role == "documentation").unwrap();
         assert!(doc_review.depends_on.is_none());
 
         let tests_review = tasks.iter().find(|t| t.role == "tests").unwrap();
