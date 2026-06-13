@@ -34,3 +34,5 @@ during the same long-lived session and hit the same expired token.
 
 Probably needs to be addressed as part of any long-session
 automation work.
+
+→ Resolved: Detection-half resolved by Work Item claude-auth-detection. claude_auth::ensure_not_expired() reads the keychain before every Claude coder invocation; bails with a needs-user message when the access token is within 5 minutes of expiry. classify_transcript_401() in the retrying loop catches in-flight 401s and surfaces the same clean error. Automated refresh deferred — a separate Work Item will tackle it once the correct request format for the Claude.ai subscription OAuth endpoint is known (claude.ai/v1/oauth/token returned 400 Invalid request format for a standard OAuth refresh body during exploration on 2026-06-13).

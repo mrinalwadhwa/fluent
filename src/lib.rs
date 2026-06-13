@@ -1,6 +1,7 @@
 pub mod auto_merge;
 pub mod behavior_tests;
 pub mod cleanup;
+pub mod claude_auth;
 pub mod cli;
 pub mod coder;
 pub mod content;

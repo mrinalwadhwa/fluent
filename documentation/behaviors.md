@@ -2815,3 +2815,70 @@ WHEN `MergeCandidateMergeState` is serialized with
 `auto_merge_skipped == None`,
 THE SYSTEM SHALL omit the field from the JSON output.
 Test: src/work_model.rs (merge_state_skips_serializing_auto_merge_skipped_when_none)
+
+## Claude auth token expiry detection
+
+WHEN any Claude coder variant (`SandboxedClaudeCode`,
+`BareClaudeCode`) is about to launch the `claude` process,
+THE SYSTEM SHALL call `claude_auth::ensure_not_expired()` first,
+and SHALL surface the returned error to the caller (translated to
+`needs-user`) if the call returns an error.
+Test: src/coder.rs (SandboxedClaudeCode::run calls ensure_not_expired before launch)
+Test: src/coder.rs (BareClaudeCode::run calls ensure_not_expired before launch)
+
+WHEN `claude_auth::ensure_not_expired()` is invoked,
+THE SYSTEM SHALL read the keychain entry under service
+`Claude Code-credentials`, parse the `claudeAiOauth` object, and
+return `Ok(())` if the access token's `expiresAt` is more than 5
+minutes in the future.
+Test: src/claude_auth.rs (tests::auth_error_expired_user_message_names_login_action)
+
+WHEN `claude_auth::ensure_not_expired()` finds the access token
+within 5 minutes of `expiresAt` (or already expired),
+THE SYSTEM SHALL return `AuthError::Expired { expires_at }` with
+the parsed expiry, so callers can produce a user-facing message
+naming the recovery action (`claude /login`).
+Test: src/claude_auth.rs (tests::auth_error_expired_user_message_names_login_action)
+
+WHEN `claude_auth::ensure_not_expired()` cannot read the keychain
+entry (missing entry, malformed JSON, decode error),
+THE SYSTEM SHALL return `Ok(())` rather than an error, on the
+assumption that the user is on an API-key path that doesn't use
+the keychain. The coder runs as today; any genuine auth failure
+surfaces through the recovery layer.
+Test: src/claude_auth.rs (tests::classify_transcript_401_returns_none_for_missing_file)
+
+WHEN the keychain entry's `claudeAiOauth.refreshToken` field is
+absent or null,
+THE SYSTEM SHALL return `Ok(())` (treating the session as API-key
+only) and skip the expiry check.
+Test: src/claude_auth.rs (KeychainEnvelope deserializes with optional refreshToken)
+
+WHEN `src/coder.rs::run_with_transcript_retrying` observes the
+coder process exit non-zero AND the transcript's most recent
+`result` event has `api_error_status == 401`,
+THE SYSTEM SHALL return `AuthError::Rejected { request_id }`
+(populated from the transcript's `result.request_id` when
+present) so the caller surfaces `needs-user`.
+Test: src/claude_auth.rs (tests::classify_transcript_401_returns_rejected_on_result_401)
+Test: src/claude_auth.rs (tests::classify_transcript_401_extracts_request_id_when_present)
+Test: src/claude_auth.rs (tests::classify_transcript_401_returns_rejected_with_none_request_id_when_missing)
+
+WHEN the recovery layer's 401 detection fires alongside the
+existing rate-limit detection on the same attempt,
+THE SYSTEM SHALL prefer the 401 surface (the auth issue is the
+proximate cause; the rate-limit envelope may be incidental).
+Test: src/coder.rs (401 check placed before rate-limit detection in run_with_transcript_retrying)
+
+WHEN the user-facing error message is constructed for either
+`AuthError::Expired` or `AuthError::Rejected`,
+THE SYSTEM SHALL name the recovery action explicitly: "Claude
+auth token expired (or rejected). Run 'claude /login' to
+re-authenticate, then retry the Task."
+Test: src/claude_auth.rs (tests::auth_error_expired_user_message_names_login_action)
+Test: src/claude_auth.rs (tests::auth_error_rejected_user_message_names_login_action)
+
+WHEN any Codex coder variant (`CodexCode`) is about to launch,
+THE SYSTEM SHALL NOT call `claude_auth::ensure_not_expired()`.
+Codex auth lifecycle is out of scope for this Work Item.
+Test: src/coder.rs (CodexCode::run does not call ensure_not_expired)
