@@ -1496,7 +1496,14 @@ fn run_behavior_tests_coder(
     eprintln!("  Artifact area     {}", artifact_dir.display());
 
     let coder = coder_kind.boxed(sandbox);
-    let exit_code = coder.run(&prompt, &system_prompt, artifact_dir, extra_args, &[], None)?;
+    let exit_code = coder.run(
+        &prompt,
+        &system_prompt,
+        artifact_dir,
+        extra_args,
+        &[("FACTORY_TASK_KIND".to_string(), "behavior-tests".to_string())],
+        None,
+    )?;
     if exit_code == 0 {
         Ok(())
     } else {

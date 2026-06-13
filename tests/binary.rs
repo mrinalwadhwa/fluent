@@ -2102,7 +2102,7 @@ fn work_review_plans_review_tasks_for_completed_attempt() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Planned 5 review Tasks for Attempt attempt-1",
+            "Planned 6 review Tasks for Attempt attempt-1",
         ))
         .stdout(predicate::str::contains("attempt-1-review-tests"));
 
@@ -2110,7 +2110,7 @@ fn work_review_plans_review_tasks_for_completed_attempt() {
     let attempt = &value["attempts"][0];
     assert_eq!(attempt["status"], "reviewing");
     assert_eq!(attempt["review_state"], "not-reviewed");
-    assert_eq!(attempt["tasks"].as_array().unwrap().len(), 6);
+    assert_eq!(attempt["tasks"].as_array().unwrap().len(), 7);
 
     let review_task = attempt["tasks"]
         .as_array()
@@ -2589,6 +2589,21 @@ exit 0
             "run",
             "work-1",
             "attempt-1",
+            "attempt-1-behavior-tests",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
             "attempt-1-review-behaviors",
             "--no-sandbox",
         ])
@@ -2637,6 +2652,21 @@ printf 'Verdict: pass\n\nBehavior review passed.\n' > review.md
 exit 0
 "##,
     );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-behavior-tests",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -2755,6 +2785,21 @@ fn work_task_run_completes_attempt_after_all_review_tasks_complete() {
         "#!/bin/bash\nprintf 'Verdict: pass\\n' > review.md\nexit 0\n",
     );
 
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-behavior-tests",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
     for role in [
         "documentation",
         "behaviors",
@@ -2834,7 +2879,7 @@ fn work_attempt_run_drives_write_reviews_and_passes() {
         .success()
         .stdout(predicate::str::contains("Completed Task attempt-1-write-1"))
         .stdout(predicate::str::contains(
-            "Planned 5 review Tasks for Attempt attempt-1",
+            "Planned 6 review Tasks for Attempt attempt-1",
         ))
         .stdout(predicate::str::contains(
             "Attempt attempt-1 reviews passed; Merge Candidate attempt-1-merge-candidate is ready",
@@ -2844,7 +2889,7 @@ fn work_attempt_run_drives_write_reviews_and_passes() {
     let attempt = &value["attempts"][0];
     assert_eq!(attempt["status"], "complete");
     assert_eq!(attempt["review_state"], "passed");
-    assert_eq!(attempt["tasks"].as_array().unwrap().len(), 6);
+    assert_eq!(attempt["tasks"].as_array().unwrap().len(), 7);
     assert_eq!(value["merge_candidates"].as_array().unwrap().len(), 1);
     let candidate = &value["merge_candidates"][0];
     assert_eq!(candidate["id"], "attempt-1-merge-candidate");
@@ -4176,7 +4221,7 @@ fn work_attempt_run_plans_followup_for_failed_reviews() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Planned 5 review Tasks for Attempt attempt-1",
+            "Planned 6 review Tasks for Attempt attempt-1",
         ))
         .stdout(predicate::str::contains(
             "Planned write Task attempt-1-write-2",
@@ -4448,7 +4493,7 @@ fn work_attempt_run_counts_already_planned_followup_against_budget() {
         .success()
         .stdout(predicate::str::contains("Completed Task attempt-1-write-2"))
         .stdout(predicate::str::contains(
-            "Planned 5 review Tasks for Attempt attempt-1",
+            "Planned 6 review Tasks for Attempt attempt-1",
         ))
         .stdout(predicate::str::contains(
             "Planned write Task attempt-1-write-3",
@@ -4632,6 +4677,20 @@ fn work_attempt_run_rejects_unmanaged_completed_review_artifact_area_path() {
         &bin_dir,
         "#!/bin/bash\nprintf 'Verdict: pass\\n' > review.md\nexit 0\n",
     );
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-behavior-tests",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
     for role in [
         "documentation",
         "behaviors",
@@ -7520,11 +7579,54 @@ fn commit_file(repo: &Path, path: &str, content: &str, message: &str) {
     git::run(repo, &["commit", "-m", message], "commit").unwrap();
 }
 
+const BEHAVIOR_TESTS_MOCK_PRELUDE: &str = r##"#!/bin/bash
+
+if [ "${FACTORY_TASK_KIND:-}" = "behavior-tests" ]; then
+    args_blob=""
+    for arg in "$@"; do
+        args_blob="$args_blob $arg"
+    done
+    results_path=$(printf '%s' "$args_blob" \
+        | grep -oE '/[^ ]*/behavior-tests-results\.json' \
+        | head -n 1)
+
+    if [ -z "$results_path" ]; then
+        echo "mock-prelude: could not extract behavior-tests-results.json path from prompt" >&2
+        exit 1
+    fi
+
+    ran_at=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '1970-01-01T00:00:00Z')
+    candidate_commit=$(git rev-parse HEAD 2>/dev/null || echo '0000000000000000000000000000000000000000')
+
+    mkdir -p "$(dirname "$results_path")" 2>/dev/null
+    cat > "$results_path" <<JSON
+{
+  "ran_at": "$ran_at",
+  "candidate_commit": "$candidate_commit",
+  "commands_run": [],
+  "summary": {
+    "behaviors_total": 0,
+    "tested_passing": 0,
+    "tested_failing": 0,
+    "untestable": 0,
+    "missing_test_ref": 0
+  },
+  "behaviors": []
+}
+JSON
+    exit 0
+fi
+
+"##;
+
 fn write_mock_claude(bin_dir: &Path, script: &str) {
     fs::create_dir_all(bin_dir).unwrap();
 
+    let script_body = script.strip_prefix("#!/bin/bash\n").unwrap_or(script);
+    let combined = format!("{}{}", BEHAVIOR_TESTS_MOCK_PRELUDE, script_body);
+
     let claude_path = bin_dir.join("claude");
-    fs::write(&claude_path, script).unwrap();
+    fs::write(&claude_path, &combined).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

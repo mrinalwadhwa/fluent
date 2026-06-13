@@ -150,6 +150,11 @@ The `behavior-tests-results.json` schema is defined in
 `RunBehaviorTests:` command fails, the JSON includes a `command_failure`
 field and an empty `behaviors` array.
 
+Factory sets `FACTORY_TASK_KIND=behavior-tests` in the Coder process env
+when invoking the agent for a BehaviorTests Task. Test mock scripts use
+this env var to detect BehaviorTests invocations and write a minimal-valid
+`behavior-tests-results.json` fixture without requiring per-test setup.
+
 Before launching each review Task, Factory pre-populates the reviewer's
 artifact directory with the candidate's build outputs so reviewers start
 with a warm build cache. Factory detects the project toolchain from

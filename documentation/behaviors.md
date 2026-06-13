@@ -2390,3 +2390,45 @@ THE SYSTEM SHALL contain `Test:` references in
 DeleteLegacyRunModel section, covering both absence-of-legacy
 assertions and CLI-error assertions.
 Test: tests/binary.rs::no_legacy_run_strings_in_documentation (verifies behaviors.md does not reintroduce legacy strings)
+
+## Mock coder BehaviorTests fixture
+
+WHEN Factory invokes the Coder for a `behavior-tests` Task,
+THE SYSTEM SHALL set the environment variable
+`FACTORY_TASK_KIND=behavior-tests` in the Coder process's env,
+in addition to all other env vars Factory normally propagates.
+Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
+
+WHEN Factory invokes the Coder for any other Task kind (write,
+review),
+THE SYSTEM SHALL NOT set `FACTORY_TASK_KIND=behavior-tests`.
+Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
+
+WHEN `tests/binary.rs::write_mock_claude` writes a mock script,
+THE SYSTEM SHALL prepend a prelude that detects
+`FACTORY_TASK_KIND=behavior-tests`, extracts the
+`behavior-tests-results.json` artifact path from the agent
+prompt, writes a minimal-valid JSON fixture, and exits 0. If
+`FACTORY_TASK_KIND` is not `behavior-tests`, the prelude falls
+through to the test-supplied script body unchanged.
+Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
+
+WHEN a test exercises an Attempt loop end-to-end with mock
+coders,
+THE SYSTEM SHALL produce a BehaviorTests Task that completes
+with a valid `behavior-tests-results.json` artifact, allowing
+the downstream behaviors-completeness reviewer Task to read it
+without erroring.
+Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
+
+WHEN a test wants the BehaviorTests Task to fail (for negative-
+path coverage),
+THE SYSTEM SHALL allow an alternate helper or explicit env-var
+override; the default-injected prelude SHALL NOT prevent this
+customization.
+Untestable: Structural allowance; negative-path helpers are a follow-up
+
+WHEN the mock prelude executes,
+THE SYSTEM SHALL tolerate missing `git` or `date` by writing a
+fallback fixture with placeholder values rather than failing.
+Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
