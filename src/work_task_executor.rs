@@ -1191,8 +1191,7 @@ fn run_task_coder(
         .as_ref()
         .map(|a| project_root.join(&a.path).join("transcript.jsonl"));
     if let Some(parent) = transcript_path.as_ref().and_then(|p| p.parent()) {
-        fs::create_dir_all(parent)
-            .context("Failed to create writer transcript artifact dir")?;
+        fs::create_dir_all(parent).context("Failed to create writer transcript artifact dir")?;
     }
 
     let workspace_resolver = ContentResolver::new(Some(workspace_path));

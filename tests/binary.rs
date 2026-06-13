@@ -1712,9 +1712,8 @@ exit 0
         .assert()
         .success();
 
-    let transcript = main_dir.join(
-        ".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1/transcript.jsonl",
-    );
+    let transcript = main_dir
+        .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1/transcript.jsonl");
     assert!(
         transcript.is_file(),
         "transcript.jsonl should exist at {}",
@@ -1772,9 +1771,8 @@ exit 1
         .output()
         .unwrap();
 
-    let transcript = main_dir.join(
-        ".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1/transcript.jsonl",
-    );
+    let transcript = main_dir
+        .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1/transcript.jsonl");
     assert!(
         transcript.is_file(),
         "transcript.jsonl should persist even on failure at {}",

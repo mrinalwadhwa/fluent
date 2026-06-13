@@ -3413,8 +3413,9 @@ mod tests {
                 "attempt-1",
                 vec![ArtifactRef {
                     producer_id: "attempt-1-review-tests".to_string(),
-                    path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
-                        .to_string(),
+                    path:
+                        ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
+                            .to_string(),
                 }],
             )
             .unwrap();
