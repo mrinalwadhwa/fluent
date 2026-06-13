@@ -11674,9 +11674,7 @@ fn observations_add_from_stdin() {
     let id = stdout.trim();
     assert!(!id.is_empty());
 
-    let file = tmp
-        .path()
-        .join(format!(".factory/observations/{id}.md"));
+    let file = tmp.path().join(format!(".factory/observations/{id}.md"));
     assert!(file.exists(), "observation file should exist");
     let content = fs::read_to_string(&file).unwrap();
     assert!(content.contains("Observation from stdin"));
@@ -11693,10 +11691,7 @@ fn observations_add_empty_stdin_errors() {
         .output()
         .unwrap();
 
-    assert!(
-        !output.status.success(),
-        "add with empty stdin should fail"
-    );
+    assert!(!output.status.success(), "add with empty stdin should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("No content provided on stdin"),
@@ -11709,11 +11704,20 @@ fn observations_resolve_inline() {
     let tmp = TempDir::new().unwrap();
     let obs_dir = tmp.path().join(".factory/observations");
     fs::create_dir_all(&obs_dir).unwrap();
-    fs::write(obs_dir.join("20260612-000000-test-obs.md"), "Test obs body\n").unwrap();
+    fs::write(
+        obs_dir.join("20260612-000000-test-obs.md"),
+        "Test obs body\n",
+    )
+    .unwrap();
 
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .args(["observations", "resolve", "20260612-000000-test-obs", "Fixed it"])
+        .args([
+            "observations",
+            "resolve",
+            "20260612-000000-test-obs",
+            "Fixed it",
+        ])
         .output()
         .unwrap();
 
@@ -11745,10 +11749,7 @@ fn observations_resolve_unknown_id_errors() {
         .output()
         .unwrap();
 
-    assert!(
-        !output.status.success(),
-        "resolve unknown id should fail"
-    );
+    assert!(!output.status.success(), "resolve unknown id should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("No open observation matching"),
@@ -11783,9 +11784,11 @@ fn observations_resolve_prefix_unique_match() {
     assert_eq!(stdout.trim(), "20260612-143000-unique-entry");
 
     assert!(!obs_dir.join("20260612-143000-unique-entry.md").exists());
-    assert!(obs_dir
-        .join("resolved/20260612-143000-unique-entry.md")
-        .exists());
+    assert!(
+        obs_dir
+            .join("resolved/20260612-143000-unique-entry.md")
+            .exists()
+    );
 }
 
 #[test]
@@ -11802,10 +11805,7 @@ fn observations_resolve_prefix_ambiguous_errors() {
         .output()
         .unwrap();
 
-    assert!(
-        !output.status.success(),
-        "ambiguous prefix should fail"
-    );
+    assert!(!output.status.success(), "ambiguous prefix should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("Ambiguous prefix"),
@@ -11949,7 +11949,11 @@ fn observations_migrate_splits_monolithic_files() {
             }
         })
         .collect();
-    assert_eq!(open_files.len(), 2, "should have two open observation files");
+    assert_eq!(
+        open_files.len(),
+        2,
+        "should have two open observation files"
+    );
 
     // Resolved observations split correctly
     let resolved_files: Vec<String> = fs::read_dir(obs_dir.join("resolved"))

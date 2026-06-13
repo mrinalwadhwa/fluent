@@ -23,6 +23,7 @@ use factory::dashboard;
 use factory::fargate;
 use factory::fargate_bootstrap;
 use factory::merge;
+use factory::observations;
 use factory::os;
 use factory::parallel;
 use factory::plan;
@@ -37,7 +38,6 @@ use factory::work_merge_executor::{self, WorkMergeConfig};
 use factory::work_model::{
     PlanningContext, WorkItem, WorkModelStorageError, WorkModelStore, to_json_pretty,
 };
-use factory::observations;
 use factory::work_status;
 use factory::work_task_executor::{self, WorkTaskRunConfig};
 use factory::worktree;
