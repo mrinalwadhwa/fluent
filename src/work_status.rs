@@ -483,6 +483,7 @@ mod tests {
             failure_reason: None,
             check_artifacts: Vec::new(),
             review_artifacts: Vec::new(),
+            auto_merge_skipped: None,
         };
 
         let row = summarize_work_item(&item);

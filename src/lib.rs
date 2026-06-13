@@ -1,3 +1,4 @@
+pub mod auto_merge;
 pub mod behavior_tests;
 pub mod cleanup;
 pub mod cli;

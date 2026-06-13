@@ -1486,6 +1486,33 @@ artifacts, checking dirty worktrees, rebasing the run branch onto the
 source branch, fast-forward merging, deleting the run branch, removing
 the worktree, and setting status to `merged`.
 
+### Auto-merge watcher
+
+`auto_merge.rs` is a long-lived polling process that watches Work
+Items for merge-ready Merge Candidates and fires
+`work_merge_executor::merge_candidate` automatically. Two modes:
+single Work Item (`factory work auto-merge <id>`) or all Work Items
+(`factory work auto-merge --all`). The watcher polls every 30
+seconds (configurable via `--poll-seconds`).
+
+A candidate is merge-ready when the latest Attempt has
+`review_state == passed`, the candidate has
+`review_state == passed` and `merge_state.status == pending`, and
+`merge_state.auto_merge_skipped` is not `true`.
+
+The `auto_merge_skipped` field on `MergeCandidateMergeState` is an
+`Option<bool>` that persists skip state across watcher restarts.
+When a merge fails for non-authentication reasons, the watcher sets
+this field to `true` so the candidate is not retried. Authentication
+failures (401, token expiry) leave the field unset so the watcher
+retries after re-authentication.
+
+The watcher is merge-only: it does not invoke attempt progression,
+task execution, or any other phase. Signal handling uses `ctrlc`
+with the `termination` feature to catch SIGINT, SIGTERM, and
+SIGHUP. In-progress merges run to completion before the watcher
+exits.
+
 ### Git wrapper
 
 `git.rs` is the single entry point for all git subprocess invocations

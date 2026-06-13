@@ -421,6 +421,20 @@ pub enum WorkCommands {
         command: WorkTaskCommands,
     },
 
+    /// Watch for merge-ready candidates and merge them automatically
+    AutoMerge {
+        /// Work Item ID (watches a single Work Item)
+        work_item_id: Option<String>,
+
+        /// Watch all Work Items in the project
+        #[arg(long)]
+        all: bool,
+
+        /// Poll interval in seconds (default 30)
+        #[arg(long, hide = true)]
+        poll_seconds: Option<u64>,
+    },
+
     /// Drain the pending post-merge review queue (debounced)
     PostMergeReview {
         #[command(subcommand)]

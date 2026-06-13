@@ -462,6 +462,7 @@ fn set_candidate_executing(
             failure_reason: None,
             check_artifacts: Vec::new(),
             review_artifacts: Vec::new(),
+            auto_merge_skipped: None,
         };
         crate::work_model::mark_merge_candidate_started(candidate);
     })
@@ -492,6 +493,7 @@ fn record_candidate_failure(
             failure_reason: Some(reason),
             check_artifacts,
             review_artifacts,
+            auto_merge_skipped: None,
         };
         crate::work_model::set_merge_candidate_terminal(
             candidate,
@@ -516,6 +518,7 @@ fn record_candidate_merged(
             failure_reason: None,
             check_artifacts,
             review_artifacts,
+            auto_merge_skipped: None,
         };
         crate::work_model::set_merge_candidate_terminal(
             candidate,
@@ -863,6 +866,7 @@ fn record_candidate_needs_user(
             failure_reason: Some(diagnostic),
             check_artifacts: Vec::new(),
             review_artifacts: Vec::new(),
+            auto_merge_skipped: None,
         };
         crate::work_model::set_merge_candidate_terminal(
             candidate,

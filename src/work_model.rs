@@ -1441,6 +1441,8 @@ pub struct MergeCandidateMergeState {
     pub check_artifacts: Vec<ArtifactRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub review_artifacts: Vec<ArtifactRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_merge_skipped: Option<bool>,
 }
 
 impl Default for MergeCandidateMergeState {
@@ -1451,6 +1453,7 @@ impl Default for MergeCandidateMergeState {
             failure_reason: None,
             check_artifacts: Vec::new(),
             review_artifacts: Vec::new(),
+            auto_merge_skipped: None,
         }
     }
 }
@@ -3689,6 +3692,7 @@ mod tests {
                     path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/tests/review.md"
                         .to_string(),
                 }],
+                auto_merge_skipped: None,
             },
             created_at: None,
             started_at: None,
@@ -4161,6 +4165,7 @@ mod tests {
                 failure_reason: Some("Attempt review failed".to_string()),
                 check_artifacts: Vec::new(),
                 review_artifacts: Vec::new(),
+                auto_merge_skipped: None,
             },
             created_at: None,
             started_at: None,
@@ -4212,6 +4217,7 @@ mod tests {
                 failure_reason: Some("candidate_commit mismatch".to_string()),
                 check_artifacts: Vec::new(),
                 review_artifacts: Vec::new(),
+                auto_merge_skipped: None,
             },
             created_at: None,
             started_at: None,
@@ -4929,5 +4935,63 @@ mod tests {
         assert!(candidate.created_at.is_some());
         assert_eq!(candidate.started_at, None);
         assert_eq!(candidate.completed_at, None);
+    }
+
+    #[test]
+    fn merge_state_round_trips_with_auto_merge_skipped() {
+        let state = MergeCandidateMergeState {
+            status: MergeCandidateMergeStatus::Pending,
+            merged_commit: None,
+            failure_reason: None,
+            check_artifacts: Vec::new(),
+            review_artifacts: Vec::new(),
+            auto_merge_skipped: Some(true),
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let parsed: MergeCandidateMergeState = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.auto_merge_skipped, Some(true));
+    }
+
+    #[test]
+    fn merge_state_skips_serializing_auto_merge_skipped_when_none() {
+        let state = MergeCandidateMergeState::default();
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(!json.contains("auto_merge_skipped"));
+    }
+
+    #[test]
+    fn legacy_merge_state_json_deserializes_with_none_skipped() {
+        let json = r#"{"status":"pending"}"#;
+        let state: MergeCandidateMergeState = serde_json::from_str(json).unwrap();
+        assert_eq!(state.auto_merge_skipped, None);
+        assert_eq!(state.status, MergeCandidateMergeStatus::Pending);
+    }
+
+    #[test]
+    fn mark_merge_candidate_auto_merge_skipped_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = WorkModelStore::new(dir.path());
+        let mut work_item = work_item_with_completed_write("work-skip");
+        work_item.attempts[0].review_state = Some(AttemptReviewState::Passed);
+        work_item
+            .create_or_get_merge_candidate("attempt-1")
+            .unwrap();
+        store.create_work_item(&work_item).unwrap();
+
+        // Set auto_merge_skipped
+        let mut item = store.read_work_item("work-skip").unwrap();
+        item.merge_candidates[0]
+            .merge_state
+            .auto_merge_skipped = Some(true);
+        store.write_work_item(&item).unwrap();
+
+        // Re-read and verify
+        let reloaded = store.read_work_item("work-skip").unwrap();
+        assert_eq!(
+            reloaded.merge_candidates[0]
+                .merge_state
+                .auto_merge_skipped,
+            Some(true)
+        );
     }
 }

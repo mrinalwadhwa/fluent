@@ -12398,3 +12398,158 @@ fn log_command_failed_command_appends_to_failed_sentinel() {
         ".failed sentinel should contain a log path"
     );
 }
+
+// --- auto-merge CLI tests ---
+
+#[test]
+fn auto_merge_with_both_flags_set_errors() {
+    let tmp = TempDir::new().unwrap();
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "auto-merge", "some-work-item", "--all"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("mutually exclusive"),
+        "expected mutually exclusive error, got: {stderr}"
+    );
+}
+
+#[test]
+fn auto_merge_with_neither_flag_set_errors() {
+    let tmp = TempDir::new().unwrap();
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "auto-merge"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Work Item ID") || stderr.contains("--all"),
+        "expected usage guidance, got: {stderr}"
+    );
+}
+
+#[test]
+fn auto_merge_single_mode_rejects_unknown_work_item_id() {
+    let tmp = TempDir::new().unwrap();
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "auto-merge", "nonexistent-work-item"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not found"),
+        "expected not-found error, got: {stderr}"
+    );
+}
+
+#[test]
+fn auto_merge_skips_candidate_already_marked_skipped() {
+    let tmp = TempDir::new().unwrap();
+    git::run(tmp.path(), &["init", "-b", "main"], "init repo").unwrap();
+    git::run(
+        tmp.path(),
+        &["commit", "--allow-empty", "-m", "init"],
+        "initial commit",
+    )
+    .unwrap();
+    // Create a work item with a ready merge candidate marked as skipped
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "create", "wi-skip", "--title", "Test skip"])
+        .output()
+        .unwrap();
+
+    // Write a merge candidate JSON directly with auto_merge_skipped set
+    let mc_dir = tmp
+        .path()
+        .join(".factory/work/merge-candidates/wi-skip");
+    fs::create_dir_all(&mc_dir).unwrap();
+    let candidate_json = serde_json::json!({
+        "id": "attempt-1-merge-candidate",
+        "attempt_id": "attempt-1",
+        "source_workspace": { "id": "candidate", "path": "." },
+        "target_workspace": { "id": "target", "path": "." },
+        "source_branch": "main",
+        "target_branch": "main",
+        "candidate_commit": "abc123",
+        "review_state": "passed",
+        "merge_state": {
+            "status": "pending",
+            "auto_merge_skipped": true
+        }
+    });
+    fs::write(
+        mc_dir.join("attempt-1-merge-candidate.json"),
+        serde_json::to_string_pretty(&candidate_json).unwrap(),
+    )
+    .unwrap();
+
+    // Run auto-merge with a very short poll and it should exit on signal
+    // (use --poll-seconds 1 so the test is fast)
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("factory"))
+        .current_dir(tmp.path())
+        .args(["work", "auto-merge", "wi-skip", "--poll-seconds", "1"])
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Give it a couple of seconds to run a tick
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    // Send SIGINT to stop the watcher
+    send_signal(child.id(), "INT");
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("[auto-merge] merged"),
+        "should not have merged a skipped candidate: {stderr}"
+    );
+}
+
+#[test]
+fn auto_merge_exits_clean_on_sigterm() {
+    let tmp = TempDir::new().unwrap();
+    git::run(tmp.path(), &["init", "-b", "main"], "init repo").unwrap();
+    git::run(
+        tmp.path(),
+        &["commit", "--allow-empty", "-m", "init"],
+        "initial commit",
+    )
+    .unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "create", "wi-sig", "--title", "Test signal"])
+        .output()
+        .unwrap();
+
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("factory"))
+        .current_dir(tmp.path())
+        .args(["work", "auto-merge", "wi-sig", "--poll-seconds", "1"])
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    send_signal(child.id(), "TERM");
+    let status = child.wait().unwrap();
+    assert!(
+        status.success(),
+        "auto-merge should exit cleanly on SIGTERM"
+    );
+}
+
+fn send_signal(pid: u32, signal: &str) {
+    std::process::Command::new("kill")
+        .args([&format!("-{signal}"), &pid.to_string()])
+        .status()
+        .expect("send signal");
+}

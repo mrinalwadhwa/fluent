@@ -658,6 +658,28 @@ fn cmd_work(
                 println!("Completed Task {} at {}", result.task_id, result.output);
             }
         },
+        WorkCommands::AutoMerge {
+            work_item_id,
+            all,
+            poll_seconds,
+        } => {
+            let mode = match (work_item_id, all) {
+                (Some(id), false) => factory::auto_merge::AutoMergeMode::Single(id),
+                (None, true) => factory::auto_merge::AutoMergeMode::All,
+                (Some(_), true) => {
+                    bail!(
+                        "Cannot specify both a Work Item ID and --all; the two modes are mutually exclusive"
+                    );
+                }
+                (None, false) => {
+                    bail!(
+                        "Specify either a Work Item ID or --all"
+                    );
+                }
+            };
+            let poll = poll_seconds.unwrap_or(30);
+            factory::auto_merge::run(project_root, mode, poll)?;
+        }
         WorkCommands::PostMergeReview { command } => match command {
             cli::WorkPostMergeReviewCommands::Run {
                 debounce_seconds,
