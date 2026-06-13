@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"thread-002"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"type":"agent_message","text":"Processing..."}}
+{"type":"error","code":"rate_limit","reset_at":"2099-01-01T00:00:00Z","message":"Rate limit exceeded. Resets at 2099-01-01T00:00:00Z."}

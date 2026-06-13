@@ -328,7 +328,9 @@ jitter — matching previous behavior on unstructured transcripts.
 
 Per-run jitter uses the process PID and nanosecond timestamp to
 produce independent values across concurrent Factory runs, preventing
-thundering-herd retries.
+thundering-herd retries. The jitter function accepts the maximum as a
+parameter internally (`rate_limit_jitter_with_max`) for testability;
+the public `rate_limit_jitter()` reads the env var at call time.
 
 The wrapper retries the same coder invocation up to two more times
 before propagating the exit code. A `RateLimitState` tracker fires

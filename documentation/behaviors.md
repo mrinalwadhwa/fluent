@@ -1127,12 +1127,14 @@ jitter (uniform in `[0, JITTER_MAX_SECONDS]`, default 30) before
 retrying.
 Test: src/coder.rs (jitter_tests::jitter_respects_max)
 Test: src/coder.rs (jitter_tests::jitter_returns_zero_when_max_is_zero)
+Test: src/coder.rs (jitter_tests::jitter_respects_custom_max)
 
 WHEN multiple concurrent Factory runs encounter rate limits with
 the same `retry_at`,
 THE SYSTEM SHALL apply each run's independent jitter so the runs
 fan out instead of retrying at the same instant.
 Test: src/coder.rs (jitter_tests::jitter_respects_max)
+Test: src/coder.rs (jitter_tests::jitter_respects_custom_max)
 
 IF a rate-limit response does not include a retry-after hint, or the
 hint is unparseable,
@@ -1151,20 +1153,22 @@ non-rate-limited request),
 THE SYSTEM SHALL fire a notification once via the existing macOS
 `osascript` surface (or platform equivalent on non-macOS) stating
 that the run paused and naming the expected resume time.
-Test: src/coder.rs (rate_limit_state_tests::state_transitions_correctly)
+Test: src/coder.rs (rate_limit_state_tests::normal_to_rate_limited_fires_enter_notification)
+Test: src/coder.rs (rate_limit_state_tests::full_cycle_fires_enter_once_and_leave_once)
 
 WHEN a run transitions out of rate-limit state (the first successful
 non-rate-limited request after a paused wait),
 THE SYSTEM SHALL fire a notification once stating that the run
 resumed.
-Test: src/coder.rs (rate_limit_state_tests::state_transitions_correctly)
+Test: src/coder.rs (rate_limit_state_tests::full_cycle_fires_enter_once_and_leave_once)
 
 WHEN the session loop retries within an ongoing rate-limit pause
 (multiple retries against the same `retry_at` because the provider
 returned another 429),
 THE SYSTEM SHALL NOT fire additional enter-state notifications;
 notifications fire on state transitions, not on each retry tick.
-Test: src/coder.rs (rate_limit_state_tests::rate_limited_to_rate_limited_preserves_entered_at)
+Test: src/coder.rs (rate_limit_state_tests::rate_limited_to_rate_limited_does_not_refire_notification)
+Test: src/coder.rs (rate_limit_state_tests::full_cycle_fires_enter_once_and_leave_once)
 
 WHEN the Coder abstraction is queried for rate-limit parsing,
 THE SYSTEM SHALL provide a parser for the Anthropic provider and a
@@ -1172,6 +1176,8 @@ parser for the Codex provider, both returning
 `Option<RateLimitInfo>` from a provider-specific response shape.
 Test: src/coder.rs (rate_limit_parsing_tests::fixture_claude_code_retry_after)
 Test: src/coder.rs (rate_limit_parsing_tests::fixture_codex_retry_after)
+Test: src/coder.rs (rate_limit_parsing_tests::codex_parses_reset_at_iso8601)
+Test: src/coder.rs (rate_limit_parsing_tests::fixture_codex_reset_at)
 
 WHEN no transcript file is configured for a Coder invocation,
 THE SYSTEM SHALL propagate the original exit code without rate-

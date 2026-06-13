@@ -372,13 +372,9 @@ pub struct RateLimitInfo {
 /// Track whether the retry loop is in a rate-limited state, so
 /// notifications fire on state transitions rather than on every retry.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 enum RateLimitState {
     Normal,
-    RateLimited {
-        entered_at: SystemTime,
-        retry_at: SystemTime,
-    },
+    RateLimited { retry_at: SystemTime },
 }
 
 fn rate_limit_retry_after() -> Duration {
@@ -398,7 +394,10 @@ fn jitter_max_secs() -> u64 {
 
 /// Per-process randomized jitter to stagger concurrent Factory runs.
 pub fn rate_limit_jitter() -> Duration {
-    let max = jitter_max_secs();
+    rate_limit_jitter_with_max(jitter_max_secs())
+}
+
+fn rate_limit_jitter_with_max(max: u64) -> Duration {
     if max == 0 {
         return Duration::ZERO;
     }
@@ -515,6 +514,28 @@ fn format_retry_time(t: SystemTime) -> String {
     dt.format("%H:%M:%S").to_string()
 }
 
+/// Advance the rate-limit state machine. Fires notifications on
+/// Normal→RateLimited only; RateLimited→RateLimited updates the
+/// retry_at without re-notifying.
+fn transition_rate_limit_state(
+    current: &RateLimitState,
+    reason: &str,
+    retry_at: SystemTime,
+    notify: &dyn Fn(&str, &str),
+) -> RateLimitState {
+    match current {
+        RateLimitState::Normal => {
+            let retry_time = format_retry_time(retry_at);
+            notify(
+                "Factory",
+                &format!("Factory paused: {reason}. Will retry at {retry_time}."),
+            );
+            RateLimitState::RateLimited { retry_at }
+        }
+        RateLimitState::RateLimited { .. } => RateLimitState::RateLimited { retry_at },
+    }
+}
+
 /// Scan a transcript for a Claude session-limit marker. Returns true if the
 /// session was rate-limited (i.e. the non-zero exit is a transient capacity
 /// failure, not a real Task failure).
@@ -587,28 +608,13 @@ where
             (rate_limit_retry_after() + jitter, "Rate limited".to_string())
         };
 
-        // State transition notifications
-        match &rl_state {
-            RateLimitState::Normal => {
-                let retry_at = SystemTime::now() + wait;
-                let retry_time = format_retry_time(retry_at);
-                crate::notify::notify(
-                    "Factory",
-                    &format!("Factory paused: {reason}. Will retry at {retry_time}."),
-                );
-                rl_state = RateLimitState::RateLimited {
-                    entered_at: SystemTime::now(),
-                    retry_at,
-                };
-            }
-            RateLimitState::RateLimited { .. } => {
-                let retry_at = SystemTime::now() + wait;
-                rl_state = RateLimitState::RateLimited {
-                    entered_at: SystemTime::now(),
-                    retry_at,
-                };
-            }
-        }
+        let retry_at = SystemTime::now() + wait;
+        rl_state = transition_rate_limit_state(
+            &rl_state,
+            &reason,
+            retry_at,
+            &crate::notify::notify,
+        );
 
         eprintln!(
             "  Rate-limit detected on attempt {} ({reason}); sleeping {}s before retry.",
@@ -898,11 +904,33 @@ mod rate_limit_parsing_tests {
     }
 
     #[test]
+    fn codex_parses_reset_at_iso8601() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        let mut f = File::create(&path).unwrap();
+        writeln!(f, r#"{{"type":"error","code":"rate_limit","reset_at":"2099-01-01T00:00:00Z","message":"Resets Jan 1"}}"#).unwrap();
+        drop(f);
+
+        let info = parse_rate_limit_from_transcript(&path).expect("should parse");
+        assert_eq!(info.reason, "Resets Jan 1");
+        assert!(info.retry_at > SystemTime::now());
+    }
+
+    #[test]
     fn fixture_codex_retry_after() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/rate-limit-transcripts/codex/rate-limit-with-retry-after.jsonl");
         let info = parse_rate_limit_from_transcript(&path).expect("should parse fixture");
         assert_eq!(info.reason, "Rate limit exceeded. Retry after 120 seconds.");
+    }
+
+    #[test]
+    fn fixture_codex_reset_at() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/rate-limit-transcripts/codex/rate-limit-with-reset-at.jsonl");
+        let info = parse_rate_limit_from_transcript(&path).expect("should parse fixture");
+        assert!(info.reason.contains("Resets at"));
+        assert!(info.retry_at > SystemTime::now());
     }
 
     #[test]
@@ -919,23 +947,25 @@ mod jitter_tests {
 
     #[test]
     fn jitter_respects_max() {
-        let max = jitter_max_secs();
+        let max = DEFAULT_JITTER_MAX_SECS;
         for _ in 0..100 {
-            let j = rate_limit_jitter();
+            let j = rate_limit_jitter_with_max(max);
             assert!(j.as_secs() <= max);
         }
     }
 
     #[test]
     fn jitter_returns_zero_when_max_is_zero() {
-        // SAFETY: test-only, no concurrent env access expected.
-        unsafe {
-            std::env::set_var("FACTORY_RATE_LIMIT_JITTER_MAX_SECONDS", "0");
-        }
-        let j = rate_limit_jitter();
+        let j = rate_limit_jitter_with_max(0);
         assert_eq!(j, Duration::ZERO);
-        unsafe {
-            std::env::remove_var("FACTORY_RATE_LIMIT_JITTER_MAX_SECONDS");
+    }
+
+    #[test]
+    fn jitter_respects_custom_max() {
+        let max = 10;
+        for _ in 0..100 {
+            let j = rate_limit_jitter_with_max(max);
+            assert!(j.as_secs() <= max);
         }
     }
 }
@@ -943,39 +973,83 @@ mod jitter_tests {
 #[cfg(test)]
 mod rate_limit_state_tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     #[test]
-    fn state_transitions_correctly() {
-        let mut state = RateLimitState::Normal;
-        assert!(matches!(state, RateLimitState::Normal));
-
-        let now = SystemTime::now();
-        state = RateLimitState::RateLimited {
-            entered_at: now,
-            retry_at: now + Duration::from_secs(300),
+    fn normal_to_rate_limited_fires_enter_notification() {
+        let calls: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let calls_clone = Arc::clone(&calls);
+        let notify = move |title: &str, body: &str| {
+            calls_clone
+                .lock()
+                .unwrap()
+                .push((title.to_string(), body.to_string()));
         };
-        assert!(matches!(state, RateLimitState::RateLimited { .. }));
 
-        state = RateLimitState::Normal;
-        assert!(matches!(state, RateLimitState::Normal));
+        let state = RateLimitState::Normal;
+        let retry_at = SystemTime::now() + Duration::from_secs(300);
+        let new_state = transition_rate_limit_state(&state, "Rate limited", retry_at, &notify);
+
+        assert!(matches!(new_state, RateLimitState::RateLimited { .. }));
+        let notifications = calls.lock().unwrap();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].0, "Factory");
+        assert!(notifications[0].1.contains("Factory paused: Rate limited"));
     }
 
     #[test]
-    fn rate_limited_to_rate_limited_preserves_entered_at() {
-        let entered = SystemTime::now();
-        let state = RateLimitState::RateLimited {
-            entered_at: entered,
-            retry_at: entered + Duration::from_secs(300),
+    fn rate_limited_to_rate_limited_does_not_refire_notification() {
+        let calls: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let calls_clone = Arc::clone(&calls);
+        let notify = move |title: &str, body: &str| {
+            calls_clone
+                .lock()
+                .unwrap()
+                .push((title.to_string(), body.to_string()));
         };
-        assert!(matches!(state, RateLimitState::RateLimited { .. }));
 
-        let new_retry = SystemTime::now() + Duration::from_secs(600);
-        let state = RateLimitState::RateLimited {
-            entered_at: entered,
-            retry_at: new_retry,
-        };
-        if let RateLimitState::RateLimited { retry_at, .. } = state {
-            assert_eq!(retry_at, new_retry);
+        let retry_at = SystemTime::now() + Duration::from_secs(300);
+        let state = RateLimitState::RateLimited { retry_at };
+        let new_retry_at = SystemTime::now() + Duration::from_secs(600);
+        let new_state =
+            transition_rate_limit_state(&state, "Rate limited again", new_retry_at, &notify);
+
+        assert!(matches!(new_state, RateLimitState::RateLimited { .. }));
+        if let RateLimitState::RateLimited { retry_at } = new_state {
+            assert_eq!(retry_at, new_retry_at);
         }
+        let notifications = calls.lock().unwrap();
+        assert_eq!(notifications.len(), 0);
+    }
+
+    #[test]
+    fn full_cycle_fires_enter_once_and_leave_once() {
+        let calls: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let calls_clone = Arc::clone(&calls);
+        let notify = move |title: &str, body: &str| {
+            calls_clone
+                .lock()
+                .unwrap()
+                .push((title.to_string(), body.to_string()));
+        };
+
+        // Normal → RateLimited (enter notification)
+        let state = RateLimitState::Normal;
+        let retry_at = SystemTime::now() + Duration::from_secs(300);
+        let state = transition_rate_limit_state(&state, "Rate limited", retry_at, &notify);
+        assert_eq!(calls.lock().unwrap().len(), 1);
+
+        // RateLimited → RateLimited (no notification)
+        let new_retry = SystemTime::now() + Duration::from_secs(600);
+        let state = transition_rate_limit_state(&state, "Still limited", new_retry, &notify);
+        assert_eq!(calls.lock().unwrap().len(), 1);
+
+        // RateLimited → RateLimited again (no notification)
+        let newer_retry = SystemTime::now() + Duration::from_secs(900);
+        let _state = transition_rate_limit_state(&state, "Still limited", newer_retry, &notify);
+        assert_eq!(calls.lock().unwrap().len(), 1);
+
+        // The leave notification is checked separately in run_with_transcript_retrying
+        // via the `if matches!(rl_state, RateLimited)` guard on exit-0.
     }
 }
