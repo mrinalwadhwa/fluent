@@ -446,6 +446,9 @@ the core model.
       }
     ]
   },
+  "artifact_area": {
+    "path": ".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1"
+  },
   "status": "complete",
   "output": {
     "workspace_id": "candidate",
