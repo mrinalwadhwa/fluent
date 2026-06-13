@@ -75,16 +75,10 @@ pub fn run(
                     }
                     MergeOutcome::Failed { reason } => {
                         mark_auto_merge_skipped(&store, &wi.id, &candidate.id);
-                        eprintln!(
-                            "[auto-merge] skipping {} (merge failed: {})",
-                            wi.id, reason
-                        );
+                        eprintln!("[auto-merge] skipping {} (merge failed: {})", wi.id, reason);
                     }
                     MergeOutcome::AuthExpired => {
-                        eprintln!(
-                            "[auto-merge] authentication expired, pausing {}",
-                            wi.id
-                        );
+                        eprintln!("[auto-merge] authentication expired, pausing {}", wi.id);
                     }
                 }
             }
@@ -188,9 +182,7 @@ fn mark_auto_merge_skipped(store: &WorkModelStore, work_item_id: &str, candidate
         Ok(())
     })();
     if let Err(err) = result {
-        eprintln!(
-            "[auto-merge] warning: failed to mark {work_item_id} as skipped: {err}"
-        );
+        eprintln!("[auto-merge] warning: failed to mark {work_item_id} as skipped: {err}");
     }
 }
 
@@ -424,19 +416,28 @@ mod tests {
     #[test]
     fn classify_merge_outcome_recognizes_401_as_auth_expired() {
         let err = anyhow::anyhow!("request failed with status 401 Unauthorized");
-        assert!(matches!(classify_merge_outcome(Err(err)), MergeOutcome::AuthExpired));
+        assert!(matches!(
+            classify_merge_outcome(Err(err)),
+            MergeOutcome::AuthExpired
+        ));
     }
 
     #[test]
     fn classify_merge_outcome_recognizes_invalid_authentication_phrase() {
         let err = anyhow::anyhow!("Invalid authentication credentials provided");
-        assert!(matches!(classify_merge_outcome(Err(err)), MergeOutcome::AuthExpired));
+        assert!(matches!(
+            classify_merge_outcome(Err(err)),
+            MergeOutcome::AuthExpired
+        ));
     }
 
     #[test]
     fn classify_merge_outcome_recognizes_authentication_failed() {
         let err = anyhow::anyhow!("authentication_failed: token expired");
-        assert!(matches!(classify_merge_outcome(Err(err)), MergeOutcome::AuthExpired));
+        assert!(matches!(
+            classify_merge_outcome(Err(err)),
+            MergeOutcome::AuthExpired
+        ));
     }
 
     #[test]
@@ -446,11 +447,14 @@ mod tests {
             MergeOutcome::Failed { reason } => {
                 assert!(reason.contains("rebase conflict"));
             }
-            other => panic!("expected Failed, got {:?}", match other {
-                MergeOutcome::Succeeded { .. } => "Succeeded",
-                MergeOutcome::AuthExpired => "AuthExpired",
-                MergeOutcome::Failed { .. } => "Failed",
-            }),
+            other => panic!(
+                "expected Failed, got {:?}",
+                match other {
+                    MergeOutcome::Succeeded { .. } => "Succeeded",
+                    MergeOutcome::AuthExpired => "AuthExpired",
+                    MergeOutcome::Failed { .. } => "Failed",
+                }
+            ),
         }
     }
 

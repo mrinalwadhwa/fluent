@@ -12466,9 +12466,7 @@ fn auto_merge_skips_candidate_already_marked_skipped() {
         .unwrap();
 
     // Write a completed attempt with review_state passed
-    let attempt_dir = tmp
-        .path()
-        .join(".factory/work/attempts/wi-skip");
+    let attempt_dir = tmp.path().join(".factory/work/attempts/wi-skip");
     fs::create_dir_all(&attempt_dir).unwrap();
     let attempt_json = serde_json::json!({
         "id": "attempt-1",
@@ -12483,9 +12481,7 @@ fn auto_merge_skips_candidate_already_marked_skipped() {
     .unwrap();
 
     // Write a merge candidate with auto_merge_skipped set
-    let mc_dir = tmp
-        .path()
-        .join(".factory/work/merge-candidates/wi-skip");
+    let mc_dir = tmp.path().join(".factory/work/merge-candidates/wi-skip");
     fs::create_dir_all(&mc_dir).unwrap();
     let candidate_json = serde_json::json!({
         "id": "attempt-1-merge-candidate",

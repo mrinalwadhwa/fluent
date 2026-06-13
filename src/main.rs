@@ -674,9 +674,7 @@ fn cmd_work(
                     );
                 }
                 (None, false) => {
-                    bail!(
-                        "Specify either a Work Item ID or --all"
-                    );
+                    bail!("Specify either a Work Item ID or --all");
                 }
             };
             let coder_kind = CoderKind::resolve(coder.as_deref().or(global_coder))?;

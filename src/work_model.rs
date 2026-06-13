@@ -4980,17 +4980,13 @@ mod tests {
 
         // Set auto_merge_skipped
         let mut item = store.read_work_item("work-skip").unwrap();
-        item.merge_candidates[0]
-            .merge_state
-            .auto_merge_skipped = Some(true);
+        item.merge_candidates[0].merge_state.auto_merge_skipped = Some(true);
         store.write_work_item(&item).unwrap();
 
         // Re-read and verify
         let reloaded = store.read_work_item("work-skip").unwrap();
         assert_eq!(
-            reloaded.merge_candidates[0]
-                .merge_state
-                .auto_merge_skipped,
+            reloaded.merge_candidates[0].merge_state.auto_merge_skipped,
             Some(true)
         );
     }
