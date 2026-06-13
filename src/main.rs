@@ -365,7 +365,12 @@ fn cmd_work(
                 let runtime = runtime.unwrap_or_else(|| "local".to_string());
                 match runtime.as_str() {
                     "fargate" => {
-                        fargate::launch_work_attempt(project_root, &work_item_id, &attempt_id, coder_kind)?;
+                        fargate::launch_work_attempt(
+                            project_root,
+                            &work_item_id,
+                            &attempt_id,
+                            coder_kind,
+                        )?;
                         println!(
                             "Launched Attempt {attempt_id} for Work Item {work_item_id} on Fargate"
                         );
@@ -571,7 +576,12 @@ fn cmd_work(
             let runtime = runtime.unwrap_or_else(|| "local".to_string());
             match runtime.as_str() {
                 "fargate" => {
-                    fargate::launch_work_merge(project_root, &work_item_id, &merge_candidate_id, coder_kind)?;
+                    fargate::launch_work_merge(
+                        project_root,
+                        &work_item_id,
+                        &merge_candidate_id,
+                        coder_kind,
+                    )?;
                     println!(
                         "Launched merge of {merge_candidate_id} for Work Item {work_item_id} on Fargate"
                     );

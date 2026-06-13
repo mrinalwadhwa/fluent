@@ -601,12 +601,8 @@ pub fn coder_task_overrides(coder: CoderKind) -> Result<Vec<(String, String)>> {
                     auth_path.display()
                 )
             })?;
-            let parsed: serde_json::Value = serde_json::from_str(&auth_json).map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to parse {}: {e}",
-                    auth_path.display()
-                )
-            })?;
+            let parsed: serde_json::Value = serde_json::from_str(&auth_json)
+                .map_err(|e| anyhow::anyhow!("Failed to parse {}: {e}", auth_path.display()))?;
             let auth_mode = parsed
                 .get("auth_mode")
                 .and_then(|v| v.as_str())
@@ -690,10 +686,7 @@ pub fn launch_work_attempt(
     for (k, v) in &coder_env {
         env_overrides.push(serde_json::json!({"name": k, "value": v}));
     }
-    let task_arn = run_ecs_task(
-        &config,
-        serde_json::Value::Array(env_overrides),
-    )?;
+    let task_arn = run_ecs_task(&config, serde_json::Value::Array(env_overrides))?;
     eprintln!("  Task: {task_arn}");
 
     let runtime_dir = work_attempt_runtime_dir(project_root, work_item_id, attempt_id);
@@ -751,10 +744,7 @@ pub fn launch_work_merge(
     for (k, v) in &coder_env {
         env_overrides.push(serde_json::json!({"name": k, "value": v}));
     }
-    let task_arn = run_ecs_task(
-        &config,
-        serde_json::Value::Array(env_overrides),
-    )?;
+    let task_arn = run_ecs_task(&config, serde_json::Value::Array(env_overrides))?;
     eprintln!("  Task: {task_arn}");
 
     let runtime_dir = work_merge_runtime_dir(project_root, work_item_id, merge_candidate_id);
@@ -981,11 +971,15 @@ mod tests {
         let result = coder_task_overrides(CoderKind::Claude).unwrap();
         unsafe { std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN") };
         assert!(
-            result.iter().any(|(k, v)| k == "FACTORY_CODER" && v == "claude"),
+            result
+                .iter()
+                .any(|(k, v)| k == "FACTORY_CODER" && v == "claude"),
             "must include FACTORY_CODER=claude"
         );
         assert!(
-            result.iter().any(|(k, v)| k == "CLAUDE_CODE_OAUTH_TOKEN" && v == "test-token-123"),
+            result
+                .iter()
+                .any(|(k, v)| k == "CLAUDE_CODE_OAUTH_TOKEN" && v == "test-token-123"),
             "must include CLAUDE_CODE_OAUTH_TOKEN"
         );
     }
@@ -1002,11 +996,15 @@ mod tests {
         unsafe { std::env::set_var("HOME", tmp.path().to_str().unwrap()) };
         let result = coder_task_overrides(CoderKind::Codex).unwrap();
         assert!(
-            result.iter().any(|(k, v)| k == "FACTORY_CODER" && v == "codex"),
+            result
+                .iter()
+                .any(|(k, v)| k == "FACTORY_CODER" && v == "codex"),
             "must include FACTORY_CODER=codex"
         );
         assert!(
-            result.iter().any(|(k, v)| k == "CODEX_AUTH_JSON" && v == auth_json),
+            result
+                .iter()
+                .any(|(k, v)| k == "CODEX_AUTH_JSON" && v == auth_json),
             "must include CODEX_AUTH_JSON with auth.json content"
         );
     }

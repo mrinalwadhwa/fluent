@@ -9913,9 +9913,7 @@ fn run_fargate_with_codex_fails_when_host_auth_missing() {
         .env("HOME", tmp.path().to_str().unwrap())
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "Cannot read Codex auth",
-        ));
+        .stderr(predicate::str::contains("Cannot read Codex auth"));
 }
 
 #[test]
