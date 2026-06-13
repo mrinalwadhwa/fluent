@@ -16,9 +16,7 @@ fn notify_macos(title: &str, body: &str) {
     Command::new("osascript")
         .args([
             "-e",
-            &format!(
-                "display notification \"{escaped_body}\" with title \"{escaped_title}\""
-            ),
+            &format!("display notification \"{escaped_body}\" with title \"{escaped_title}\""),
         ])
         .output()
         .ok();

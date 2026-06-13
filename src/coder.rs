@@ -599,22 +599,18 @@ where
 
         let (wait, reason) = if let Some(ref info) = parsed {
             let now = SystemTime::now();
-            let base_wait = info
-                .retry_at
-                .duration_since(now)
-                .unwrap_or(Duration::ZERO);
+            let base_wait = info.retry_at.duration_since(now).unwrap_or(Duration::ZERO);
             (base_wait + jitter, info.reason.clone())
         } else {
-            (rate_limit_retry_after() + jitter, "Rate limited".to_string())
+            (
+                rate_limit_retry_after() + jitter,
+                "Rate limited".to_string(),
+            )
         };
 
         let retry_at = SystemTime::now() + wait;
-        rl_state = transition_rate_limit_state(
-            &rl_state,
-            &reason,
-            retry_at,
-            &crate::notify::notify,
-        );
+        rl_state =
+            transition_rate_limit_state(&rl_state, &reason, retry_at, &crate::notify::notify);
 
         eprintln!(
             "  Rate-limit detected on attempt {} ({reason}); sleeping {}s before retry.",
@@ -732,7 +728,11 @@ mod rate_limit_parsing_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transcript.jsonl");
         let mut f = File::create(&path).unwrap();
-        writeln!(f, r#"{{"type":"system","subtype":"init","session_id":"s1","model":"claude-opus-4-6"}}"#).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"system","subtype":"init","session_id":"s1","model":"claude-opus-4-6"}}"#
+        )
+        .unwrap();
         writeln!(f, r#"{{"type":"rate_limit_event","retry_after":300,"message":"Rate limited for 5 minutes"}}"#).unwrap();
         drop(f);
 
@@ -748,7 +748,11 @@ mod rate_limit_parsing_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transcript.jsonl");
         let mut f = File::create(&path).unwrap();
-        writeln!(f, r#"{{"type":"rate_limit_event","retry_after_ms":60000,"message":"Wait 60s"}}"#).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"rate_limit_event","retry_after_ms":60000,"message":"Wait 60s"}}"#
+        )
+        .unwrap();
         drop(f);
 
         let info = parse_rate_limit_from_transcript(&path).expect("should parse");
@@ -798,8 +802,16 @@ mod rate_limit_parsing_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transcript.jsonl");
         let mut f = File::create(&path).unwrap();
-        writeln!(f, r#"{{"type":"rate_limit_event","retry_after":60,"message":"First"}}"#).unwrap();
-        writeln!(f, r#"{{"type":"rate_limit_event","retry_after":300,"message":"Second"}}"#).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"rate_limit_event","retry_after":60,"message":"First"}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"rate_limit_event","retry_after":300,"message":"Second"}}"#
+        )
+        .unwrap();
         drop(f);
 
         let info = parse_rate_limit_from_transcript(&path).expect("should parse");
@@ -829,7 +841,11 @@ mod rate_limit_parsing_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transcript.jsonl");
         let mut f = File::create(&path).unwrap();
-        writeln!(f, r#"{{"type":"error","code":"internal","message":"Something broke"}}"#).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"error","code":"internal","message":"Something broke"}}"#
+        )
+        .unwrap();
         drop(f);
 
         assert!(parse_rate_limit_from_transcript(&path).is_none());
@@ -864,8 +880,9 @@ mod rate_limit_parsing_tests {
 
     #[test]
     fn fixture_claude_code_retry_after() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/rate-limit-transcripts/claude-code/rate-limit-with-retry-after.jsonl");
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "tests/fixtures/rate-limit-transcripts/claude-code/rate-limit-with-retry-after.jsonl",
+        );
         let info = parse_rate_limit_from_transcript(&path).expect("should parse fixture");
         assert_eq!(
             info.reason,
@@ -875,8 +892,9 @@ mod rate_limit_parsing_tests {
 
     #[test]
     fn fixture_claude_code_reset_at() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/rate-limit-transcripts/claude-code/rate-limit-with-reset-at.jsonl");
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "tests/fixtures/rate-limit-transcripts/claude-code/rate-limit-with-reset-at.jsonl",
+        );
         let info = parse_rate_limit_from_transcript(&path).expect("should parse fixture");
         assert!(info.reason.contains("session limit"));
     }
