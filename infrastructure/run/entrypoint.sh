@@ -1,14 +1,10 @@
 #!/usr/bin/env bash
-# entrypoint.sh — Single-container Fargate entrypoint for Factory
-# Work Item Attempts and Merges. The container layout uses a single
-# worktrees root that contains the project root plus any sibling
-# candidate / review worktrees Factory creates:
+# entrypoint.sh — Single-container Fargate entrypoint for Factory.
+# Supports three dispatch modes:
 #
-#   /worktrees/${FACTORY_PROJECT_NAME}/   project root
-#   /worktrees/work-<...>/                candidate worktrees
-#   /worktrees/review-<...>/              review worktrees
-#
-# Two modes, selected by env vars:
+#   Legacy run mode (FACTORY_RUN_ID):
+#     Pull workspace from S3, write runtime metadata, run
+#     `factory run --runtime local`, upload result to S3.
 #
 #   Work Attempt mode (FACTORY_WORK_ITEM_ID + FACTORY_WORK_ATTEMPT_ID):
 #     Pull tar into /worktrees, run `factory work attempt run`, upload
@@ -19,27 +15,30 @@
 #   `factory work merge` instead.
 #
 # Environment variables (passed as task overrides):
-#   FACTORY_WORK_ITEM_ID              Work Item ID
-#   FACTORY_WORK_ATTEMPT_ID           Attempt ID  (Attempt mode)
-#   FACTORY_WORK_MERGE_CANDIDATE_ID   Merge Candidate ID (Merge mode)
-#   FACTORY_PROJECT_NAME              basename of the project root
-#                                     (e.g. "main")
 #   FACTORY_S3_BUCKET                 S3 bucket for workspace transfer
 #   FACTORY_REGION                    AWS region
 #   FACTORY_CODER                     coder to use: "claude" (default)
 #                                     or "codex"
 #   CLAUDE_CODE_OAUTH_TOKEN           Claude auth token (claude coder)
 #   CODEX_AUTH_JSON                   Codex auth.json content (codex coder)
+#
+# Legacy run mode only:
+#   FACTORY_RUN_ID                    Run identifier
+#   FACTORY_TASK_ARN                  ECS task ARN (optional)
+#   WORKSPACE                         Workspace path (default: /workspace)
+#
+# Work model mode only:
+#   FACTORY_WORK_ITEM_ID              Work Item ID
+#   FACTORY_WORK_ATTEMPT_ID           Attempt ID  (Attempt mode)
+#   FACTORY_WORK_MERGE_CANDIDATE_ID   Merge Candidate ID (Merge mode)
+#   FACTORY_PROJECT_NAME              basename of the project root
+#                                     (e.g. "main")
 
 set -euo pipefail
-
-WORKTREES_ROOT="${FACTORY_WORKTREES_ROOT:-/worktrees}"
 
 die() { printf 'factory-run: %s\n' "$1" >&2; exit 1; }
 
 [ -n "${FACTORY_S3_BUCKET:-}" ] || die "FACTORY_S3_BUCKET not set"
-[ -n "${FACTORY_WORK_ITEM_ID:-}" ] || die "FACTORY_WORK_ITEM_ID not set"
-[ -n "${FACTORY_PROJECT_NAME:-}" ] || die "FACTORY_PROJECT_NAME not set"
 
 CODER="${FACTORY_CODER:-claude}"
 
@@ -70,6 +69,95 @@ case "$CODER" in
     die "Unsupported FACTORY_CODER: '$CODER'. Expected 'claude' or 'codex'."
     ;;
 esac
+
+# --------------------------------------------------------------------------
+# Legacy run mode (FACTORY_RUN_ID)
+# --------------------------------------------------------------------------
+if [ -n "${FACTORY_RUN_ID:-}" ]; then
+  WORKSPACE="${WORKSPACE:-/workspace}"
+
+  TASK_HANDLE=""
+  if [ -n "${FACTORY_TASK_ARN:-}" ]; then
+    TASK_HANDLE="$FACTORY_TASK_ARN"
+  elif [ -n "${ECS_CONTAINER_METADATA_URI_V4:-}" ] &&
+    command -v curl >/dev/null 2>&1 &&
+    command -v jq >/dev/null 2>&1; then
+    task_json="$(curl -fsS "${ECS_CONTAINER_METADATA_URI_V4}/task" 2>/dev/null)" || true
+    if [ -n "${task_json:-}" ]; then
+      TASK_HANDLE="$(printf '%s' "$task_json" | jq -r '.TaskARN // empty')"
+    fi
+  fi
+
+  printf 'factory-run: pulling workspace from S3...\n'
+  WAIT=0
+  while true; do
+    if aws s3 cp \
+      --region "${FACTORY_REGION:-us-west-1}" \
+      "s3://${FACTORY_S3_BUCKET}/runs/${FACTORY_RUN_ID}/workspace-in.tar" \
+      - 2>/dev/null | tar xf - -C "$WORKSPACE"; then
+      printf 'factory-run: workspace received\n'
+      break
+    fi
+    sleep 5
+    WAIT=$((WAIT + 1))
+    if [ "$WAIT" -gt 60 ]; then
+      die "Timed out waiting for workspace in S3 (5 minutes)"
+    fi
+  done
+
+  RUN_DIR="${WORKSPACE}/.factory/runs/${FACTORY_RUN_ID}"
+  [ -d "$RUN_DIR" ] || die "Run directory not found: $RUN_DIR"
+
+  printf '%s' "$FACTORY_RUN_ID" > "${WORKSPACE}/.factory/active-run"
+  printf 'fargate' > "${RUN_DIR}/runtime"
+  if [ -n "$TASK_HANDLE" ]; then
+    printf '%s' "$TASK_HANDLE" > "${RUN_DIR}/handle"
+  else
+    printf 'factory-run: warning: task handle unavailable from ECS metadata\n' >&2
+  fi
+
+  cd "$WORKSPACE"
+
+  if [ -n "${FACTORY_BIN:-}" ]; then
+    [ -x "$FACTORY_BIN" ] || die "FACTORY_BIN is not executable: $FACTORY_BIN"
+  elif [ -x "/usr/local/bin/factory" ]; then
+    FACTORY_BIN="/usr/local/bin/factory"
+  elif [ -x "${WORKSPACE}/target/release/factory" ]; then
+    FACTORY_BIN="${WORKSPACE}/target/release/factory"
+  elif command -v factory >/dev/null 2>&1; then
+    FACTORY_BIN="$(command -v factory)"
+  else
+    die "no factory binary available"
+  fi
+
+  "$FACTORY_BIN" run \
+    --runtime local \
+    --no-sandbox \
+    --in-place \
+    --preserve-run-metadata \
+    --coder "$CODER" \
+    --run-id "$FACTORY_RUN_ID"
+
+  printf 'factory-run: uploading workspace to S3...\n'
+  tar cf - -C "$WORKSPACE" . | \
+    aws s3 cp \
+      --region "${FACTORY_REGION:-us-west-1}" \
+      - "s3://${FACTORY_S3_BUCKET}/runs/${FACTORY_RUN_ID}/workspace.tar"
+
+  printf 'factory-run: uploaded to s3://%s/runs/%s/workspace.tar\n' \
+    "$FACTORY_S3_BUCKET" "$FACTORY_RUN_ID"
+  printf 'factory-run: done\n'
+  exit 0
+fi
+
+# --------------------------------------------------------------------------
+# Work model mode (FACTORY_WORK_ITEM_ID + Attempt / Merge)
+# --------------------------------------------------------------------------
+
+WORKTREES_ROOT="${FACTORY_WORKTREES_ROOT:-/worktrees}"
+
+[ -n "${FACTORY_WORK_ITEM_ID:-}" ] || die "FACTORY_WORK_ITEM_ID not set"
+[ -n "${FACTORY_PROJECT_NAME:-}" ] || die "FACTORY_PROJECT_NAME not set"
 
 MODE=""
 if [ -n "${FACTORY_WORK_MERGE_CANDIDATE_ID:-}" ]; then
