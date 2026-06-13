@@ -12697,9 +12697,8 @@ fn git_wrapper_parallel_config_writes_both_succeed() {
     let p1 = tmp.path().to_path_buf();
     let p2 = tmp.path().to_path_buf();
 
-    let h1 = std::thread::spawn(move || {
-        git::run(&p1, &["config", "user.name", "alice"], "set alice")
-    });
+    let h1 =
+        std::thread::spawn(move || git::run(&p1, &["config", "user.name", "alice"], "set alice"));
     let h2 = std::thread::spawn(move || {
         git::run(&p2, &["config", "user.email", "bob@test.com"], "set bob")
     });

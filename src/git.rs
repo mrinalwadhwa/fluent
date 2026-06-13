@@ -48,9 +48,7 @@ fn backoff_duration(attempt: usize) -> Duration {
 fn run_with_lock_retry(cmd_builder: impl Fn() -> Command) -> Result<Output> {
     let mut last_output: Option<Output> = None;
     for attempt in 1..=LOCK_RETRY_MAX_ATTEMPTS {
-        let output = cmd_builder()
-            .output()
-            .context("Failed to invoke git")?;
+        let output = cmd_builder().output().context("Failed to invoke git")?;
 
         if output.status.success() {
             return Ok(output);
@@ -268,9 +266,7 @@ mod tests {
         assert!(!is_lock_error(
             "fatal: destination path '/tmp/repo' already exists and is not an empty directory."
         ));
-        assert!(!is_lock_error(
-            "error: '/some/path/data.txt': File exists"
-        ));
+        assert!(!is_lock_error("error: '/some/path/data.txt': File exists"));
     }
 
     #[test]
