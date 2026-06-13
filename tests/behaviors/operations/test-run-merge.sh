@@ -24,9 +24,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 BINARY="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
 
-PASS=0
-FAIL=0
-ERRORS=""
+source "${PROJECT_DIR}/tests/lib/run_test.sh"
+LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 # -------------------------------------------------------------------------
 # Helpers
@@ -145,19 +144,6 @@ cleanup_test_project() {
     done || true
   fi
   rm -rf "$TEST_DIR"
-}
-
-run_test() {
-  TEST_NAME="$1"
-  printf '  %s ... ' "$TEST_NAME"
-  if ( eval "$2" ) 2>&1; then
-    printf 'PASS\n'
-    PASS=$((PASS + 1))
-  else
-    printf '\n'
-    FAIL=$((FAIL + 1))
-    ERRORS="${ERRORS}\n  - ${TEST_NAME}"
-  fi
 }
 
 # -------------------------------------------------------------------------
@@ -993,9 +979,4 @@ run_test "this repo defines a pre-merge format check" test_factory_config_define
 run_test "shell: merge rejects non-complete run (exit code)" test_shell_merge_rejects_non_complete_status
 run_test "shell: merge full workflow" test_shell_merge_full_workflow
 
-printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
-
-if [ "$FAIL" -gt 0 ]; then
-  printf '\n  Failures:%b\n' "$ERRORS"
-  exit 1
-fi
+summarize_and_exit

@@ -11,9 +11,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
 
-PASS=0
-FAIL=0
-ERRORS=""
+source "${PROJECT_DIR}/tests/lib/run_test.sh"
+LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 if [ ! -x "$FACTORY_BIN" ]; then
   (cd "$PROJECT_DIR" && cargo build --quiet)
@@ -218,18 +217,6 @@ capture_dashboard() {
   rm -f "$output_file"
 }
 
-run_test() {
-  local test_name="$1"
-  printf '  %s ... ' "$test_name"
-  if ( eval "$2" ) 2>&1; then
-    printf 'PASS\n'
-    PASS=$((PASS + 1))
-  else
-    printf '\n'
-    FAIL=$((FAIL + 1))
-    ERRORS="${ERRORS}\n  - ${test_name}"
-  fi
-}
 
 test_review_phase_writes_passed_state() {
   setup_project
@@ -569,9 +556,4 @@ run_test "summary uses recorded review state" \
 run_test "dashboard uses recorded review state" \
   test_dashboard_uses_recorded_review_state
 
-printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
-
-if [ "$FAIL" -gt 0 ]; then
-  printf '\n  Failures:%b\n' "$ERRORS"
-  exit 1
-fi
+summarize_and_exit

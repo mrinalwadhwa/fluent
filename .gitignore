@@ -23,6 +23,9 @@ node_modules/
 !.factory/Dockerfile
 
 
+# Test output (per-case logs, never committed)
+tests/output/
+
 # Added by cargo
 
 /target

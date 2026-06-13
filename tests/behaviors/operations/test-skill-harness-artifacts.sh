@@ -6,22 +6,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 
-PASS=0
-FAIL=0
-ERRORS=""
-
-run_test() {
-  TEST_NAME="$1"
-  printf '  %s ... ' "$TEST_NAME"
-  if ( eval "$2" ) 2>&1; then
-    printf 'PASS\n'
-    PASS=$((PASS + 1))
-  else
-    printf '\n'
-    FAIL=$((FAIL + 1))
-    ERRORS="${ERRORS}\n  - ${TEST_NAME}"
-  fi
-}
+source "${PROJECT_DIR}/tests/lib/run_test.sh"
+LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 write_fake_claude() {
   FAKE_BIN="$(mktemp -d -t factory-test-skill-bin-XXXXXX)"
@@ -198,9 +184,4 @@ run_test "skill harness omits brief without artifact" test_skill_harness_omits_b
 run_test "skill harness omits verdict without judge" test_skill_harness_omits_verdict_without_judge
 run_test "skill harness names planning artifacts" test_skill_harness_names_planning_artifacts
 
-printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
-
-if [ "$FAIL" -ne 0 ]; then
-  printf '\nFailed tests:%b\n' "$ERRORS"
-  exit 1
-fi
+summarize_and_exit

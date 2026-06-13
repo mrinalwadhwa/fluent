@@ -14,9 +14,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
 
-PASS=0
-FAIL=0
-ERRORS=""
+source "${PROJECT_DIR}/tests/lib/run_test.sh"
+LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 setup_plain_project() {
   TEST_DIR="$(mktemp -d -t factory-test-live-state-XXXXXX)"
@@ -48,19 +47,6 @@ cleanup_test_project() {
     done || true
   fi
   rm -rf "${TEST_DIR:-}"
-}
-
-run_test() {
-  TEST_NAME="$1"
-  printf '  %s ... ' "$TEST_NAME"
-  if ( eval "$2" ) 2>&1; then
-    printf 'PASS\n'
-    PASS=$((PASS + 1))
-  else
-    printf '\n'
-    FAIL=$((FAIL + 1))
-    ERRORS="${ERRORS}\n  - ${TEST_NAME}"
-  fi
 }
 
 assert_contains() {
@@ -367,9 +353,4 @@ run_test "land uses live status and reviews" test_land_uses_live_status_and_revi
 run_test "invalid worktree falls back to source" \
   test_invalid_worktree_falls_back_to_source
 
-printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
-
-if [ "$FAIL" -gt 0 ]; then
-  printf '\n  Failures:%b\n' "$ERRORS"
-  exit 1
-fi
+summarize_and_exit

@@ -1,12 +1,16 @@
-use assert_cmd::Command;
+#[path = "lib/log.rs"]
+mod log;
+
 use factory::git;
+use log::LoggedCommand;
 use predicates::prelude::*;
+use serial_test::serial;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
-fn factory_cmd() -> Command {
-    Command::cargo_bin("factory").unwrap()
+fn factory_cmd() -> LoggedCommand {
+    LoggedCommand::cargo_bin("factory")
 }
 
 fn work_item_value(project_root: &Path, id: &str) -> serde_json::Value {
@@ -12301,4 +12305,96 @@ fn collect_git_command_violations(dir: &Path, src_root: &Path, violations: &mut 
             }
         }
     }
+}
+
+#[test]
+#[serial(env_skip_log)]
+fn log_command_writes_log_file_on_success() {
+    let log_dir = log::test_log_dir_path();
+    let _ = fs::create_dir_all(&log_dir);
+
+    let test_name = log::test_current_test_name();
+    let log_path = log_dir.join(format!("{test_name}.log"));
+
+    let output = LoggedCommand::cargo_bin("factory")
+        .arg("version")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(
+        log_path.exists(),
+        "log file should be created at {}",
+        log_path.display()
+    );
+
+    let content = fs::read_to_string(&log_path).unwrap();
+    assert!(content.contains("=== "), "log should contain header");
+    assert!(
+        content.contains("command: factory version"),
+        "log should contain command line"
+    );
+    assert!(content.contains("exit: 0"), "log should contain exit code");
+    assert!(
+        content.contains("---stdout---"),
+        "log should contain stdout marker"
+    );
+    assert!(
+        content.contains("---stderr---"),
+        "log should contain stderr marker"
+    );
+}
+
+#[test]
+#[serial(env_skip_log)]
+fn log_command_skips_on_factory_tests_skip_log() {
+    let log_dir = log::test_log_dir_path();
+    let test_name = log::test_current_test_name();
+    let log_path = log_dir.join(format!("{test_name}.log"));
+
+    let _ = fs::remove_file(&log_path);
+
+    // SAFETY: this test runs a single LoggedCommand synchronously and
+    // restores the variable immediately; no other thread reads
+    // FACTORY_TESTS_SKIP_LOG in this window.
+    unsafe { std::env::set_var("FACTORY_TESTS_SKIP_LOG", "1") };
+    let output = LoggedCommand::cargo_bin("factory")
+        .arg("version")
+        .output()
+        .unwrap();
+    unsafe { std::env::remove_var("FACTORY_TESTS_SKIP_LOG") };
+
+    assert!(output.status.success());
+    assert!(
+        !log_path.exists(),
+        "log file should NOT be created when skip is set"
+    );
+}
+
+#[test]
+fn log_command_failed_command_appends_to_failed_sentinel() {
+    let log_dir = log::test_log_dir_path();
+    let _ = fs::create_dir_all(&log_dir);
+
+    let failed_path = log_dir.join(".failed");
+    let _ = fs::remove_file(&failed_path);
+
+    let tmp = TempDir::new().unwrap();
+    let output = LoggedCommand::cargo_bin("factory")
+        .current_dir(tmp.path())
+        .args(["merge", "nonexistent-run-id-for-test"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        failed_path.exists(),
+        ".failed sentinel should exist after a failed command"
+    );
+
+    let content = fs::read_to_string(&failed_path).unwrap();
+    assert!(
+        !content.trim().is_empty(),
+        ".failed sentinel should contain a log path"
+    );
 }

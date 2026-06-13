@@ -2533,3 +2533,55 @@ THE SYSTEM SHALL skip emitting timestamp keys whose value is None,
 so on-disk JSON stays compact and existing JSON files remain stable
 when re-saved unchanged.
 Test: src/work_model.rs (task_default_serializes_without_timestamps)
+
+## Per-test log output
+
+WHEN a Rust binary test in `tests/binary.rs` runs through the
+`LoggedCommand` harness wrapper,
+THE SYSTEM SHALL write the test's full captured stdout and stderr to
+`tests/output/<test-name>.log`, truncating any prior content from a
+previous run.
+Test: tests/binary.rs (log_command_writes_log_file_on_success)
+
+WHEN a shell behavior test function in `tests/behaviors/` invokes the
+shared `run_test` helper,
+THE SYSTEM SHALL write the function's full captured stdout and stderr to
+`tests/output/<test-file-name>/<case-name>.log`, truncating any prior
+content from a previous run.
+Test: tests/behaviors/lib/test-log-harness.sh
+
+WHEN any test writes its captured output to the durable log file,
+THE SYSTEM SHALL also pass the output through to the user's terminal
+unchanged so interactive runs see exactly what they would see without
+logging.
+Test: tests/behaviors/lib/test-log-harness.sh
+
+WHEN the test harness writes per-test log files,
+THE SYSTEM SHALL create `tests/output/` and any required subdirectories
+on demand and SHALL NOT fail the test on a log-write error; instead it
+surfaces a one-line warning and continues.
+Test: tests/lib/log.rs (write_log error handling)
+
+WHEN `FACTORY_TESTS_SKIP_LOG=1` is set in the test process environment,
+THE SYSTEM SHALL bypass per-test log-writing entirely — no file created,
+no warning printed.
+Test: tests/binary.rs (log_command_skips_on_factory_tests_skip_log)
+Test: tests/behaviors/lib/test-log-harness.sh
+
+WHEN any case fails during the test run,
+THE SYSTEM SHALL print a "Failing case logs:" section at the end of the
+run listing each failed case's absolute log path and the last 20 lines
+of that log inline.
+Test: tests/behaviors/lib/test-log-harness.sh
+Test: tests/binary.rs (log_command_failed_command_appends_to_failed_sentinel)
+
+WHEN the test harness lists per-test log paths in the failed-test
+summary,
+THE SYSTEM SHALL print absolute paths so clipboard-copy-paste into
+another shell works without `cd` context.
+Test: tests/behaviors/lib/test-log-harness.sh
+
+WHEN `tests/output/` is present in the repository,
+THE SYSTEM SHALL gitignore it so per-run logs never appear in
+`git status`, never get committed, and never appear in diffs.
+Test: .gitignore (tests/output/ entry)

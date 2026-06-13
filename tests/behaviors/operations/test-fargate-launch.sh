@@ -7,22 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
 
-PASS=0
-FAIL=0
-ERRORS=""
-
-run_test() {
-  TEST_NAME="$1"
-  printf '  %s ... ' "$TEST_NAME"
-  if ( eval "$2" ) 2>&1; then
-    printf 'PASS\n'
-    PASS=$((PASS + 1))
-  else
-    printf '\n'
-    FAIL=$((FAIL + 1))
-    ERRORS="${ERRORS}\n  - ${TEST_NAME}"
-  fi
-}
+source "${PROJECT_DIR}/tests/lib/run_test.sh"
+LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 assert_file_contains() {
   local file="$1"
@@ -199,9 +185,4 @@ printf 'test-fargate-launch\n\n'
 run_test "fargate launch uploads workspace and records ECS handle" test_fargate_launch_uploads_and_records_handle
 run_test "fargate launch stops when archive fails" test_fargate_launch_stops_when_archive_fails
 
-printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
-
-if [ "$FAIL" -gt 0 ]; then
-  printf '\n  Failures:%b\n' "$ERRORS"
-  exit 1
-fi
+summarize_and_exit

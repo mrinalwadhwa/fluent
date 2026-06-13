@@ -16,22 +16,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
 
-PASS=0
-FAIL=0
-ERRORS=""
-
-run_test() {
-  TEST_NAME="$1"
-  printf '  %s ... ' "$TEST_NAME"
-  if ( eval "$2" ) 2>&1; then
-    printf 'PASS\n'
-    PASS=$((PASS + 1))
-  else
-    printf '\n'
-    FAIL=$((FAIL + 1))
-    ERRORS="${ERRORS}\n  - ${TEST_NAME}"
-  fi
-}
+source "${PROJECT_DIR}/tests/lib/run_test.sh"
+LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 capture_dashboard() {
   PROJECT_PATH="$1"
@@ -244,17 +230,14 @@ grid = [[" " for _ in range(cols)] for _ in range(rows)]
 row = 0
 col = 0
 
-
 def clear_screen():
     for y in range(rows):
         for x in range(cols):
             grid[y][x] = " "
 
-
 def clear_line():
     for x in range(col, cols):
         grid[row][x] = " "
-
 
 def put_char(ch):
     global row, col
@@ -263,7 +246,6 @@ def put_char(ch):
         row = min(row + 1, rows - 1)
     grid[row][col] = ch
     col += 1
-
 
 def apply_csi(params, final):
     global row, col
@@ -288,9 +270,7 @@ def apply_csi(params, final):
     elif final == "D":
         col = max(0, col - max(first, 1))
 
-
 ansi_re = re.compile(r"\x1b\[([0-9;?]*)([@-~])")
-
 
 def feed(data):
     global row, col
@@ -316,10 +296,8 @@ def feed(data):
             put_char(ch)
         i += 1
 
-
 def screen_text():
     return "\n".join("".join(line).rstrip() for line in grid)
-
 
 def wait_for(predicate, description):
     deadline = time.time() + 8
@@ -336,7 +314,6 @@ def wait_for(predicate, description):
     print(f"    FAIL: timed out waiting for {description}", file=sys.stderr)
     print(screen_text(), file=sys.stderr)
     return False
-
 
 master, slave = pty.openpty()
 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
@@ -399,9 +376,4 @@ run_test "archived reviews do not drive current verdict" test_archived_reviews_d
 run_test "archived transcripts do not create current tabs" test_archived_transcripts_do_not_create_current_tabs
 run_test "stale reviewer tabs disappear when top-level transcripts are archived" test_stale_reviewer_tabs_disappear_when_top_level_transcripts_are_archived
 
-printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
-
-if [ "$FAIL" -gt 0 ]; then
-  printf '\n  Failures:%b\n' "$ERRORS"
-  exit 1
-fi
+summarize_and_exit

@@ -15,9 +15,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
 
-PASS=0
-FAIL=0
-ERRORS=""
+source "${PROJECT_DIR}/tests/lib/run_test.sh"
+LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 setup_test_project() {
   TEST_DIR="$(mktemp -d -t factory-test-codex-XXXXXX)"
@@ -163,19 +162,6 @@ assert_before() {
   if [ "$pos_first" -ge "$pos_second" ]; then
     printf '    FAIL: "%s" (pos %s) must appear before "%s" (pos %s)\n' "$first" "$pos_first" "$second" "$pos_second"
     return 1
-  fi
-}
-
-run_test() {
-  TEST_NAME="$1"
-  printf '  %s ... ' "$TEST_NAME"
-  if ( eval "$2" ) 2>&1; then
-    printf 'PASS\n'
-    PASS=$((PASS + 1))
-  else
-    printf '\n'
-    FAIL=$((FAIL + 1))
-    ERRORS="${ERRORS}\n  - ${TEST_NAME}"
   fi
 }
 
@@ -443,9 +429,4 @@ run_test "parallel codex does not run claude refresh hook" test_parallel_codex_d
 run_test "fargate codex fails when host auth missing" test_fargate_codex_fails_when_host_auth_missing
 run_test "fargate codex fails when host auth mode is apikey" test_fargate_codex_fails_when_host_auth_mode_is_apikey
 
-printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
-
-if [ "$FAIL" -gt 0 ]; then
-  printf '\n  Failures:%b\n' "$ERRORS"
-  exit 1
-fi
+summarize_and_exit

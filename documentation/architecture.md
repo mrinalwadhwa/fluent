@@ -1400,7 +1400,23 @@ factory/main/
       operations/            ← behavioral tests for the Rust binary
       skills/                ← scenario cards for test-skill
       README.md              ← behavior-to-test mapping
+    lib/
+      log.rs                 ← LoggedCommand wrapper for Rust tests
+      run_test.sh            ← shared run_test helper for shell tests
+    output/                  ← per-case logs (git-ignored, created on run)
 ```
+
+### Per-test log output
+
+Both the Rust binary suite (`tests/binary.rs` via `LoggedCommand`)
+and the shell behavior suite (`tests/behaviors/` via
+`tests/lib/run_test.sh`) write per-case stdout and stderr to
+`tests/output/` on every run. Rust tests produce
+`tests/output/<test-name>.log`; shell tests produce
+`tests/output/<test-file>/<case>.log`. Failed cases append their
+absolute log path to `tests/output/.failed` and print a tail
+summary at the end of the run. Set `FACTORY_TESTS_SKIP_LOG=1` to
+bypass log writing.
 
 ## Active module responsibilities
 

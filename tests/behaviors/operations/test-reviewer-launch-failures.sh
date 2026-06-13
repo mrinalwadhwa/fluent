@@ -11,9 +11,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
 
-PASS=0
-FAIL=0
-ERRORS=""
+source "${PROJECT_DIR}/tests/lib/run_test.sh"
+LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 if [ ! -x "$FACTORY_BIN" ]; then
   (cd "$PROJECT_DIR" && cargo build --quiet)
@@ -246,19 +245,6 @@ test_passing_review_artifacts_keep_review_passing() {
   return $RESULT
 }
 
-run_test() {
-  TEST_NAME="$1"
-  printf '  %s ... ' "$TEST_NAME"
-  if ( eval "$2" ) 2>&1; then
-    printf 'PASS\n'
-    PASS=$((PASS + 1))
-  else
-    printf '\n'
-    FAIL=$((FAIL + 1))
-    ERRORS="${ERRORS}\n  - ${TEST_NAME}"
-  fi
-}
-
 printf 'test-reviewer-launch-failures\n\n'
 
 run_test "reviewer launch failure blocks review" test_reviewer_launch_failure_blocks_review
@@ -266,9 +252,4 @@ run_test "reviewer non-zero exit blocks review" test_reviewer_nonzero_exit_block
 run_test "missing review artifact blocks review" test_missing_review_artifact_blocks_review
 run_test "passing review artifacts keep review passing" test_passing_review_artifacts_keep_review_passing
 
-printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
-
-if [ "$FAIL" -gt 0 ]; then
-  printf '\n  Failures:%b\n' "$ERRORS"
-  exit 1
-fi
+summarize_and_exit

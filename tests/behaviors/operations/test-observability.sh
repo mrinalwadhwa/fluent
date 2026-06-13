@@ -20,9 +20,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
 
-PASS=0
-FAIL=0
-ERRORS=""
+source "${PROJECT_DIR}/tests/lib/run_test.sh"
+LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 # -------------------------------------------------------------------------
 # Helpers
@@ -167,19 +166,6 @@ assert_file_not_matches() {
   if grep -qE "$2" "$1"; then
     printf '    FAIL: file %s should not match "%s"\n' "$1" "$2"
     return 1
-  fi
-}
-
-run_test() {
-  TEST_NAME="$1"
-  printf '  %s ... ' "$TEST_NAME"
-  if ( eval "$2" ) 2>&1; then
-    printf 'PASS\n'
-    PASS=$((PASS + 1))
-  else
-    printf '\n'
-    FAIL=$((FAIL + 1))
-    ERRORS="${ERRORS}\n  - ${TEST_NAME}"
   fi
 }
 
@@ -354,9 +340,4 @@ run_test "transcript not sourced from history" test_transcript_not_from_history
 run_test "no global ~/.claude state in session dirs" test_no_global_claude_state_in_sessions
 run_test "multi-session writes sequential log lines" test_multi_session_writes_multiple_log_lines
 
-printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
-
-if [ "$FAIL" -gt 0 ]; then
-  printf '\n  Failures:%b\n' "$ERRORS"
-  exit 1
-fi
+summarize_and_exit

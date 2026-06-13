@@ -25,9 +25,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
 
-PASS=0
-FAIL=0
-ERRORS=""
+source "${PROJECT_DIR}/tests/lib/run_test.sh"
+LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 # -------------------------------------------------------------------------
 # Helpers
@@ -92,19 +91,6 @@ assert_output_not_contains() {
   if printf '%s' "$1" | grep -q "$2"; then
     printf '    FAIL: output should not contain "%s"\n' "$2"
     return 1
-  fi
-}
-
-run_test() {
-  TEST_NAME="$1"
-  printf '  %s ... ' "$TEST_NAME"
-  if ( eval "$2" ) 2>&1; then
-    printf 'PASS\n'
-    PASS=$((PASS + 1))
-  else
-    printf '\n'
-    FAIL=$((FAIL + 1))
-    ERRORS="${ERRORS}\n  - ${TEST_NAME}"
   fi
 }
 
@@ -498,9 +484,4 @@ run_test "sandboxed run can commit and blocks sibling write" test_sandboxed_run_
 run_test "credentials injected via env vars" test_credentials_injected_via_env_vars
 run_test "profile denies credential filesystem access" test_profile_denies_credential_filesystem_access
 
-printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
-
-if [ "$FAIL" -gt 0 ]; then
-  printf '\n  Failures:%b\n' "$ERRORS"
-  exit 1
-fi
+summarize_and_exit

@@ -23,9 +23,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
 
-PASS=0
-FAIL=0
-ERRORS=""
+source "${PROJECT_DIR}/tests/lib/run_test.sh"
+LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 setup_test_project() {
   TEST_DIR="$(mktemp -d -t factory-test-summary-XXXXXX)"
@@ -95,19 +94,6 @@ assert_not_contains() {
     printf '    FAIL: output should not contain "%s"\n' "$2"
     printf '    Output:\n%s\n' "$1"
     return 1
-  fi
-}
-
-run_test() {
-  TEST_NAME="$1"
-  printf '  %s ... ' "$TEST_NAME"
-  if ( eval "$2" ) 2>&1; then
-    printf 'PASS\n'
-    PASS=$((PASS + 1))
-  else
-    printf '\n'
-    FAIL=$((FAIL + 1))
-    ERRORS="${ERRORS}\n  - ${TEST_NAME}"
   fi
 }
 
@@ -241,9 +227,4 @@ run_test "summary includes handoff context" test_summary_includes_handoff_contex
 run_test "summary reports report presence without dumping" test_summary_reports_report_presence_without_dumping
 run_test "summary fails when no run resolves" test_summary_fails_when_no_run_resolves
 
-printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
-
-if [ "$FAIL" -gt 0 ]; then
-  printf '\n  Failures:%b\n' "$ERRORS"
-  exit 1
-fi
+summarize_and_exit

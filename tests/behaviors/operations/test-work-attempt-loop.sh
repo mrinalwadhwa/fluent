@@ -7,22 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
 
-PASS=0
-FAIL=0
-ERRORS=""
-
-run_test() {
-  TEST_NAME="$1"
-  printf '  %s ... ' "$TEST_NAME"
-  if ( eval "$2" ) 2>&1; then
-    printf 'PASS\n'
-    PASS=$((PASS + 1))
-  else
-    printf '\n'
-    FAIL=$((FAIL + 1))
-    ERRORS="${ERRORS}\n  - ${TEST_NAME}"
-  fi
-}
+source "${PROJECT_DIR}/tests/lib/run_test.sh"
+LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 setup_test_project() {
   TEST_DIR="$(mktemp -d -t factory-work-attempt-loop-XXXXXX)"
@@ -387,8 +373,4 @@ run_test "attempt loop marks missing verdict needs-user" test_attempt_loop_marks
 run_test "attempt loop stops after Task executor failure" test_attempt_loop_stops_after_task_executor_failure
 run_test "attempt loop invalid or terminal request leaves state unchanged" test_attempt_loop_invalid_or_terminal_request_leaves_state_unchanged
 
-printf '\nResults: %d passed, %d failed\n' "$PASS" "$FAIL"
-if [ "$FAIL" -ne 0 ]; then
-  printf 'Failed tests:%b\n' "$ERRORS"
-  exit 1
-fi
+summarize_and_exit

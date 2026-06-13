@@ -7,22 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
 
-PASS=0
-FAIL=0
-ERRORS=""
-
-run_test() {
-  TEST_NAME="$1"
-  printf '  %s ... ' "$TEST_NAME"
-  if ( eval "$2" ) 2>&1; then
-    printf 'PASS\n'
-    PASS=$((PASS + 1))
-  else
-    printf '\n'
-    FAIL=$((FAIL + 1))
-    ERRORS="${ERRORS}\n  - ${TEST_NAME}"
-  fi
-}
+source "${PROJECT_DIR}/tests/lib/run_test.sh"
+LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 setup_test_project() {
   TEST_DIR="$(mktemp -d -t factory-work-sibling-workspaces-XXXXXX)"
@@ -256,8 +242,4 @@ run_test "task run rejects unmanaged workspace paths" test_task_run_rejects_unma
 run_test "attempt run keeps state and artifacts in source checkout" test_attempt_run_keeps_state_and_artifacts_in_source_checkout
 run_test "documentation describes sibling workspace layout" test_documentation_describes_sibling_workspace_layout
 
-printf '\n  %s passed, %s failed\n' "$PASS" "$FAIL"
-if [ "$FAIL" -ne 0 ]; then
-  printf 'Failed tests:%b\n' "$ERRORS"
-  exit 1
-fi
+summarize_and_exit

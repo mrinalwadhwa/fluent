@@ -18,9 +18,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
 
-PASS=0
-FAIL=0
-ERRORS=""
+source "${PROJECT_DIR}/tests/lib/run_test.sh"
+LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 if [ ! -x "$FACTORY_BIN" ]; then
   (cd "$PROJECT_DIR" && cargo build --quiet)
@@ -198,19 +197,6 @@ test_clean_complete_skips_reviews() {
   return $RESULT
 }
 
-run_test() {
-  TEST_NAME="$1"
-  printf '  %s ... ' "$TEST_NAME"
-  if ( eval "$2" ) 2>&1; then
-    printf 'PASS\n'
-    PASS=$((PASS + 1))
-  else
-    printf '\n'
-    FAIL=$((FAIL + 1))
-    ERRORS="${ERRORS}\n  - ${TEST_NAME}"
-  fi
-}
-
 printf 'test-dirty-complete-reviews\n\n'
 
 run_test "tracked dirty complete runs reviews" test_tracked_dirty_complete_runs_reviews
@@ -218,9 +204,4 @@ run_test "staged dirty complete runs reviews" test_staged_dirty_complete_runs_re
 run_test "untracked dirty complete runs reviews" test_untracked_dirty_complete_runs_reviews
 run_test "clean complete skips reviews" test_clean_complete_skips_reviews
 
-printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
-
-if [ "$FAIL" -gt 0 ]; then
-  printf '\n  Failures:%b\n' "$ERRORS"
-  exit 1
-fi
+summarize_and_exit

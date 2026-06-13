@@ -282,3 +282,14 @@ SLOW markers — they're the wall-clock floor and worth tightening.
 most cases. Filter by name with `cargo nextest run NAME`. Pass
 `--no-fail-fast` to keep going after the first failure when
 auditing.
+
+### Where to find failure logs
+
+Every test run writes per-case stdout and stderr to `tests/output/`.
+Rust binary tests produce `tests/output/<test-name>.log`. Shell
+behavior tests produce `tests/output/<test-file-name>/<case>.log`.
+After a failure, open the log directly instead of rerunning. The
+`tests/output/` directory is git-ignored — it exists only on disk.
+
+Set `FACTORY_TESTS_SKIP_LOG=1` to disable per-case log writing
+(useful for CI workers that manage their own artifact capture).

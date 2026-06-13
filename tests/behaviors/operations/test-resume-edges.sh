@@ -19,9 +19,8 @@ if [ ! -x "$FACTORY" ]; then
   (cd "$PROJECT_DIR" && cargo build --quiet)
 fi
 
-PASS=0
-FAIL=0
-ERRORS=""
+source "${PROJECT_DIR}/tests/lib/run_test.sh"
+LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 # -------------------------------------------------------------------------
 # Helpers
@@ -42,19 +41,6 @@ setup_test_project() {
 cleanup_test_project() {
   cd /
   rm -rf "$TEST_DIR"
-}
-
-run_test() {
-  TEST_NAME="$1"
-  printf '  %s ... ' "$TEST_NAME"
-  if ( eval "$2" ) 2>&1; then
-    printf 'PASS\n'
-    PASS=$((PASS + 1))
-  else
-    printf '\n'
-    FAIL=$((FAIL + 1))
-    ERRORS="${ERRORS}\n  - ${TEST_NAME}"
-  fi
 }
 
 # -------------------------------------------------------------------------
@@ -133,9 +119,4 @@ run_test "resume with no runs" test_resume_with_no_runs
 run_test "resume skips planned runs" test_resume_skips_planned
 run_test "resume prefers needs-user over failed" test_resume_prefers_needs_user_over_failed
 
-printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
-
-if [ "$FAIL" -gt 0 ]; then
-  printf '\n  Failures:%b\n' "$ERRORS"
-  exit 1
-fi
+summarize_and_exit

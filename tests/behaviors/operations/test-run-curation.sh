@@ -11,22 +11,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
 
-PASS=0
-FAIL=0
-ERRORS=""
+source "${PROJECT_DIR}/tests/lib/run_test.sh"
+LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
-run_test() {
-  TEST_NAME="$1"
-  printf '  %s ... ' "$TEST_NAME"
-  if ( eval "$2" ) 2>&1; then
-    printf 'PASS\n'
-    PASS=$((PASS + 1))
-  else
-    printf '\n'
-    FAIL=$((FAIL + 1))
-    ERRORS="${ERRORS}\n  - ${TEST_NAME}"
-  fi
-}
 
 assert_contains() {
   FILE="$1"
@@ -141,9 +128,4 @@ run_test "resolved observations are curated" test_resolved_observations_are_cura
 run_test "smoke runs are marked non-actionable" test_smoke_runs_are_marked_non_actionable
 run_test "cleanup policy direction is captured" test_cleanup_policy_direction_is_captured
 
-printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
-
-if [ "$FAIL" -ne 0 ]; then
-  printf '\nFailed tests:%b\n' "$ERRORS"
-  exit 1
-fi
+summarize_and_exit
