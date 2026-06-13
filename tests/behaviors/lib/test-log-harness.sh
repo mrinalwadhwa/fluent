@@ -148,10 +148,42 @@ if [ "$RESULT" -eq 0 ]; then
 fi
 
 # -------------------------------------------------------------------------
+# Test 4: stale .failed sentinel is cleared on first run_test call
+# -------------------------------------------------------------------------
+
+printf '  stale .failed sentinel is cleared on new run ... '
+
+STALE_DIR="$(mktemp -d -t factory-test-stale-XXXXXX)"
+
+(
+  source "${PROJECT_DIR}/tests/lib/run_test.sh"
+  LOG_DIR="${STALE_DIR}/test-stale"
+  mkdir -p "$LOG_DIR"
+  printf '/old/stale/path.log\n' > "${LOG_DIR}/.failed"
+
+  run_test "fresh passing case" test_passing_case > /dev/null 2>&1
+)
+
+RESULT=0
+stale_failed="${STALE_DIR}/test-stale/.failed"
+if [ -f "$stale_failed" ]; then
+  if grep -q "stale" "$stale_failed" 2>/dev/null; then
+    printf '    FAIL: .failed still contains stale content\n'
+    SELF_FAIL=$((SELF_FAIL + 1))
+    RESULT=1
+  fi
+fi
+
+if [ "$RESULT" -eq 0 ]; then
+  printf 'PASS\n'
+  SELF_PASS=$((SELF_PASS + 1))
+fi
+
+# -------------------------------------------------------------------------
 # Cleanup and summary
 # -------------------------------------------------------------------------
 
-rm -rf "$TEST_LOG_DIR" "$SKIP_DIR"
+rm -rf "$TEST_LOG_DIR" "$SKIP_DIR" "$STALE_DIR"
 
 printf '\n  %d passed, %d failed\n' "$SELF_PASS" "$SELF_FAIL"
 

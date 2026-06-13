@@ -12,6 +12,20 @@
 PASS=0
 FAIL=0
 ERRORS=""
+_SENTINEL_CLEARED=0
+
+_record_result() {
+  local case_label="$1"
+  local exit_code="$2"
+  if [ "$exit_code" -eq 0 ]; then
+    printf 'PASS\n'
+    PASS=$((PASS + 1))
+  else
+    printf '\n'
+    FAIL=$((FAIL + 1))
+    ERRORS="${ERRORS}\n  - ${case_label}"
+  fi
+}
 
 run_test() {
   local case_label="$1"
@@ -20,42 +34,33 @@ run_test() {
   printf '  %s ... ' "$case_label"
 
   if [ "${FACTORY_TESTS_SKIP_LOG:-0}" = "1" ] || [ -z "${LOG_DIR:-}" ]; then
-    if ( eval "$case_fn" ) 2>&1; then
-      printf 'PASS\n'
-      PASS=$((PASS + 1))
-    else
-      printf '\n'
-      FAIL=$((FAIL + 1))
-      ERRORS="${ERRORS}\n  - ${case_label}"
-    fi
+    local rc=0
+    ( eval "$case_fn" ) 2>&1 || rc=$?
+    _record_result "$case_label" "$rc"
     return
   fi
 
   local case_name="${case_fn#test_}"
   local log_file="${LOG_DIR}/${case_name}.log"
-  mkdir -p "$LOG_DIR" 2>/dev/null || {
-    if ( eval "$case_fn" ) 2>&1; then
-      printf 'PASS\n'
-      PASS=$((PASS + 1))
-    else
-      printf '\n'
-      FAIL=$((FAIL + 1))
-      ERRORS="${ERRORS}\n  - ${case_label}"
-    fi
+
+  if ! mkdir -p "$LOG_DIR" 2>/dev/null; then
+    local rc=0
+    ( eval "$case_fn" ) 2>&1 || rc=$?
+    _record_result "$case_label" "$rc"
     return
-  }
+  fi
+
+  if [ "$_SENTINEL_CLEARED" = "0" ]; then
+    rm -f "${LOG_DIR}/.failed" 2>/dev/null || true
+    _SENTINEL_CLEARED=1
+  fi
 
   local tmpfile
   tmpfile="$(mktemp 2>/dev/null)" || tmpfile=""
   if [ -z "$tmpfile" ]; then
-    if ( eval "$case_fn" ) 2>&1; then
-      printf 'PASS\n'
-      PASS=$((PASS + 1))
-    else
-      printf '\n'
-      FAIL=$((FAIL + 1))
-      ERRORS="${ERRORS}\n  - ${case_label}"
-    fi
+    local rc=0
+    ( eval "$case_fn" ) 2>&1 || rc=$?
+    _record_result "$case_label" "$rc"
     return
   fi
 
@@ -73,14 +78,9 @@ run_test() {
 
   rm -f "$tmpfile"
 
-  if [ "$exit_code" -eq 0 ]; then
-    printf 'PASS\n'
-    PASS=$((PASS + 1))
-  else
-    printf '\n'
-    FAIL=$((FAIL + 1))
-    ERRORS="${ERRORS}\n  - ${case_label}"
+  _record_result "$case_label" "$exit_code"
 
+  if [ "$exit_code" -ne 0 ]; then
     local abs_log
     abs_log="$(cd "$(dirname "$log_file")" 2>/dev/null && pwd)/$(basename "$log_file")"
     printf '%s\n' "$abs_log" >> "${LOG_DIR}/.failed" 2>/dev/null
