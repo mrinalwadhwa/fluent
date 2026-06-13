@@ -12308,6 +12308,20 @@ fn collect_git_command_violations(dir: &Path, src_root: &Path, violations: &mut 
 }
 
 #[test]
+fn no_osascript_in_notify() {
+    let notify_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/notify.rs");
+    let contents = fs::read_to_string(&notify_path).expect("src/notify.rs should exist");
+    for (line_number, line) in contents.lines().enumerate() {
+        assert!(
+            !line.contains("osascript"),
+            "src/notify.rs:{}: osascript reference found — the macOS notification path should be removed: {}",
+            line_number + 1,
+            line.trim()
+        );
+    }
+}
+
+#[test]
 #[serial(env_skip_log)]
 fn log_command_writes_log_file_on_success() {
     let log_dir = log::test_log_dir_path();

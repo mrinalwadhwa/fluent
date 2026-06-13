@@ -3046,6 +3046,7 @@ Test: src/notify.rs (notify_format_contract)
 WHEN this system is built,
 THE SYSTEM SHALL contain no invocations of `osascript` inside
 `src/notify.rs` (the macOS-specific delivery path is removed).
+Test: tests/binary.rs (no_osascript_in_notify)
 
 WHEN the rate-limit retry loop in `src/coder.rs` transitions between
 paused and resumed states,
@@ -3059,3 +3060,6 @@ replaces `notify()`'s implementation,
 THE SYSTEM SHALL be able to re-light all existing call sites without
 modifying them, because the `notify(title, body)` signature is
 preserved.
+Untestable: design-intent constraint verified by code review; the
+guarantee is structural (public signature preservation), not
+observable at runtime.
