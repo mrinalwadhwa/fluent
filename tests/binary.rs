@@ -9878,6 +9878,7 @@ fn run_fargate_fails_without_config() {
         .current_dir(&main_dir)
         .args(["run", "--runtime", "fargate", "--run-id", run_id])
         .env("HOME", tmp.path().to_str().unwrap())
+        .env("CLAUDE_CODE_OAUTH_TOKEN", "test-token")
         .env_remove("FACTORY_CLUSTER")
         .env_remove("FACTORY_S3_BUCKET")
         .env_remove("FACTORY_SUBNETS")
@@ -9888,7 +9889,7 @@ fn run_fargate_fails_without_config() {
 }
 
 #[test]
-fn run_fargate_with_codex_fails_before_config() {
+fn run_fargate_with_codex_fails_when_host_auth_missing() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
 
@@ -9913,7 +9914,45 @@ fn run_fargate_with_codex_fails_before_config() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "Fargate runtime currently supports only the claude coder",
+            "Cannot read Codex auth",
+        ));
+}
+
+#[test]
+fn run_fargate_with_codex_fails_when_host_auth_mode_is_apikey() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let run_id = "20260605-fargate-codex-apikey";
+    let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("status"), "planned").unwrap();
+    fs::write(run_dir.join("brief.md"), "Brief\n").unwrap();
+
+    let codex_dir = tmp.path().join(".codex");
+    fs::create_dir_all(&codex_dir).unwrap();
+    fs::write(
+        codex_dir.join("auth.json"),
+        r#"{"auth_mode":"apikey","api_key":"sk-test"}"#,
+    )
+    .unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "run",
+            "--runtime",
+            "fargate",
+            "--coder",
+            "codex",
+            "--run-id",
+            run_id,
+        ])
+        .env("HOME", tmp.path().to_str().unwrap())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Fargate Codex requires ChatGPT subscription auth",
         ));
 }
 

@@ -26,18 +26,50 @@
 #                                     (e.g. "main")
 #   FACTORY_S3_BUCKET                 S3 bucket for workspace transfer
 #   FACTORY_REGION                    AWS region
-#   CLAUDE_CODE_OAUTH_TOKEN           Claude auth token
+#   FACTORY_CODER                     coder to use: "claude" (default)
+#                                     or "codex"
+#   CLAUDE_CODE_OAUTH_TOKEN           Claude auth token (claude coder)
+#   CODEX_AUTH_JSON                   Codex auth.json content (codex coder)
 
 set -euo pipefail
 
-WORKTREES_ROOT="/worktrees"
+WORKTREES_ROOT="${FACTORY_WORKTREES_ROOT:-/worktrees}"
 
 die() { printf 'factory-run: %s\n' "$1" >&2; exit 1; }
 
 [ -n "${FACTORY_S3_BUCKET:-}" ] || die "FACTORY_S3_BUCKET not set"
-[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || die "No Claude auth token"
 [ -n "${FACTORY_WORK_ITEM_ID:-}" ] || die "FACTORY_WORK_ITEM_ID not set"
 [ -n "${FACTORY_PROJECT_NAME:-}" ] || die "FACTORY_PROJECT_NAME not set"
+
+CODER="${FACTORY_CODER:-claude}"
+
+case "$CODER" in
+  claude)
+    [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || die "FACTORY_CODER=claude but CLAUDE_CODE_OAUTH_TOKEN is not set"
+    ;;
+  codex)
+    [ -n "${CODEX_AUTH_JSON:-}" ] || die "FACTORY_CODER=codex but CODEX_AUTH_JSON is not set"
+    command -v codex >/dev/null 2>&1 || die "codex binary not found on PATH"
+
+    auth_mode=$(printf '%s' "$CODEX_AUTH_JSON" | jq -r '.auth_mode // empty')
+    [ "$auth_mode" = "chatgpt" ] || die "Fargate Codex requires auth_mode=chatgpt (subscription billing), got: '$auth_mode'"
+
+    config_toml="${HOME}/.codex/config.toml"
+    if [ -f "$config_toml" ] && grep -qE '^[[:space:]]*preferred_auth_method[[:space:]]*=[[:space:]]*"apikey"' "$config_toml"; then
+      die "Fargate Codex refuses preferred_auth_method=apikey in ${config_toml} (would force per-token billing)"
+    fi
+
+    unset OPENAI_API_KEY
+
+    mkdir -p "${HOME}/.codex"
+    chmod 0700 "${HOME}/.codex"
+    printf '%s' "$CODEX_AUTH_JSON" > "${HOME}/.codex/auth.json"
+    chmod 0600 "${HOME}/.codex/auth.json"
+    ;;
+  *)
+    die "Unsupported FACTORY_CODER: '$CODER'. Expected 'claude' or 'codex'."
+    ;;
+esac
 
 MODE=""
 if [ -n "${FACTORY_WORK_MERGE_CANDIDATE_ID:-}" ]; then
@@ -123,22 +155,22 @@ fi
 
 case "$MODE" in
   work-attempt)
-    printf 'factory-run: running factory work attempt run %s %s\n' \
-      "$FACTORY_WORK_ITEM_ID" "$FACTORY_WORK_ATTEMPT_ID"
+    printf 'factory-run: running factory work attempt run %s %s (coder=%s)\n' \
+      "$FACTORY_WORK_ITEM_ID" "$FACTORY_WORK_ATTEMPT_ID" "$CODER"
 
     "$FACTORY_BIN" work attempt run \
       --no-sandbox \
-      --coder claude \
+      --coder "$CODER" \
       "$FACTORY_WORK_ITEM_ID" \
       "$FACTORY_WORK_ATTEMPT_ID"
     ;;
   work-merge)
-    printf 'factory-run: running factory work merge %s %s\n' \
-      "$FACTORY_WORK_ITEM_ID" "$FACTORY_WORK_MERGE_CANDIDATE_ID"
+    printf 'factory-run: running factory work merge %s %s (coder=%s)\n' \
+      "$FACTORY_WORK_ITEM_ID" "$FACTORY_WORK_MERGE_CANDIDATE_ID" "$CODER"
 
     "$FACTORY_BIN" work merge \
       --no-sandbox \
-      --coder claude \
+      --coder "$CODER" \
       "$FACTORY_WORK_ITEM_ID" \
       "$FACTORY_WORK_MERGE_CANDIDATE_ID"
     ;;

@@ -1398,9 +1398,18 @@ record `runtime=fargate`, and record the ECS task handle in the source
 run directory.
 Test: tests/binary.rs (run_fargate_launch_uploads_workspace_and_records_task_handle), tests/behaviors/operations/test-fargate-launch.sh
 
-WHEN legacy `factory run --runtime fargate --coder codex` is invoked,
-THE SYSTEM SHALL fail with a clear unsupported-coder error.
-Test: tests/binary.rs (run_fargate_with_codex_fails_before_config)
+WHEN legacy `factory run --runtime fargate --coder codex` is invoked
+and the host `~/.codex/auth.json` is missing,
+THE SYSTEM SHALL fail with a clear error before launching the ECS task.
+Test: tests/binary.rs (run_fargate_with_codex_fails_when_host_auth_missing)
+Test: tests/behaviors/operations/test-codex-runtime.sh (fargate codex fails when host auth missing)
+
+WHEN legacy `factory run --runtime fargate --coder codex` is invoked
+and the host `~/.codex/auth.json` has `auth_mode != "chatgpt"`,
+THE SYSTEM SHALL refuse to launch with a clear error stating that
+Fargate Codex requires ChatGPT subscription auth.
+Test: tests/binary.rs (run_fargate_with_codex_fails_when_host_auth_mode_is_apikey)
+Test: tests/behaviors/operations/test-codex-runtime.sh (fargate codex fails when host auth mode is apikey)
 
 WHEN the Fargate task starts,
 THE SYSTEM SHALL pull the workspace from S3 and run the Rust session loop
@@ -1411,6 +1420,86 @@ Test: tests/binary.rs (run_in_place_can_preserve_run_metadata), tests/behaviors/
 WHEN the Fargate task reaches a terminal status,
 THE SYSTEM SHALL upload the workspace to S3.
 Test: tests/behaviors/operations/test-fargate-entrypoint.sh
+
+## Fargate Codex support
+
+WHEN `factory work attempt run <work-id> --runtime fargate --coder
+codex` is invoked,
+THE SYSTEM SHALL launch an ECS task using the Factory base image,
+pass `FACTORY_CODER=codex` plus the Codex auth env var as task
+overrides, and run the Attempt to completion producing the same
+artifact shape that the local Codex path produces today.
+Test: src/fargate.rs (codex_overrides_include_auth_json_and_factory_coder)
+
+WHEN `factory work merge <work-id> --runtime fargate --coder codex`
+is invoked,
+THE SYSTEM SHALL launch an ECS task that runs the agentic rebase
+step using Codex, then proceeds through merge checks, reviews, and
+fast-forward unchanged from the Claude path.
+Test: src/fargate.rs (codex_overrides_include_auth_json_and_factory_coder)
+
+WHEN the Fargate entrypoint runs with `FACTORY_CODER=codex`,
+THE SYSTEM SHALL require the `CODEX_AUTH_JSON` env var, write its
+contents to `${HOME}/.codex/auth.json` with mode 0600 before
+invoking the factory binary, and exit non-zero with a clear error
+when the env var is missing.
+Test: tests/behaviors/operations/test-fargate-entrypoint-codex.sh (codex writes auth.json and unsets OPENAI_API_KEY, codex missing CODEX_AUTH_JSON fails)
+
+WHEN the Fargate entrypoint runs with `FACTORY_CODER=claude` or
+`FACTORY_CODER` unset,
+THE SYSTEM SHALL require the `CLAUDE_CODE_OAUTH_TOKEN` env var
+(today's behavior, unchanged) and SHALL NOT require any Codex
+credentials.
+Test: tests/behaviors/operations/test-fargate-entrypoint-codex.sh (claude path unchanged, default coder is claude)
+
+WHEN the Factory base image is built,
+THE SYSTEM SHALL install both `@anthropic-ai/claude-code` and
+`@openai/codex` via npm such that `claude` and `codex` are both on
+the `PATH` of the runtime container user.
+Test: infrastructure/run/Dockerfile (visual inspection)
+
+WHEN ECS task launch occurs from a Fargate runtime path,
+THE SYSTEM SHALL set `FACTORY_CODER` as a task override and pass the
+appropriate auth env var (`CLAUDE_CODE_OAUTH_TOKEN` for Claude,
+`CODEX_AUTH_JSON` for Codex) without logging, persisting, or echoing
+the value into user-facing output.
+Test: src/fargate.rs (claude_overrides_include_oauth_token_and_factory_coder, codex_overrides_include_auth_json_and_factory_coder)
+
+WHEN the host machine launches a Fargate Codex run,
+THE SYSTEM SHALL read the Codex auth from `~/.codex/auth.json` on
+the host and pass its contents as the `CODEX_AUTH_JSON` task
+override, returning a clear error when the host auth file is
+missing or unreadable.
+Test: src/fargate.rs (codex_overrides_err_when_host_auth_file_missing)
+
+WHEN the host launches a Fargate Codex run and the host
+`~/.codex/auth.json` has `auth_mode != "chatgpt"`,
+THE SYSTEM SHALL refuse to launch with a clear error stating that
+Fargate Codex requires ChatGPT subscription auth, and SHALL NOT
+issue the ECS RunTask call.
+Test: src/fargate.rs (codex_overrides_err_when_host_auth_mode_is_apikey)
+
+WHEN the Fargate entrypoint runs with `FACTORY_CODER=codex`,
+THE SYSTEM SHALL `unset OPENAI_API_KEY` in the entrypoint's
+exported environment before invoking the factory binary, so any
+accidental env-var leak cannot flip the run from ChatGPT subscription
+billing to per-token API billing.
+Test: tests/behaviors/operations/test-fargate-entrypoint-codex.sh (codex OPENAI_API_KEY unset in binary env)
+
+IF the project's `.factory/Dockerfile` (or any base image layer)
+ships a `~/.codex/config.toml` containing
+`preferred_auth_method = "apikey"`,
+THEN the Fargate Codex entrypoint SHALL detect that setting and
+exit non-zero with an error explaining that Fargate Codex enforces
+ChatGPT subscription billing.
+Test: tests/behaviors/operations/test-fargate-entrypoint-codex.sh (codex config.toml apikey preference rejected)
+
+IF the Factory base image is built without the Codex npm package,
+THEN the Fargate Codex entrypoint check SHALL exit non-zero with
+"codex binary not found on PATH" before any work is attempted.
+Test: tests/behaviors/operations/test-fargate-entrypoint-codex.sh (codex missing CODEX_AUTH_JSON fails — env var check fires first; binary check fires after)
+
+---
 
 ## Status reporting
 

@@ -892,13 +892,33 @@ caller-provided `SSL_CERT_FILE`. In bare mode, Codex also runs with
 `--dangerously-bypass-approvals-and-sandbox`, but without
 `sandbox-exec`.
 
-Fargate currently supports only Claude because its container entrypoint
-and credential path remain Claude-specific. The Fargate run image builds
-the Rust Factory binary during the Docker image build and copies it to
-`/usr/local/bin/factory`; the task entrypoint uses that binary to enter
-the shared Rust session loop. The Fargate wrapper owns durable runtime
-metadata, so the in-place local loop does not rewrite `runtime` or
-`handle` while it runs inside the task.
+Fargate supports both Claude and Codex. The base image
+(`infrastructure/run/Dockerfile`) installs both `@anthropic-ai/claude-code`
+and `@openai/codex` via npm so `claude` and `codex` are both on the
+`PATH`. The entrypoint dispatches on `FACTORY_CODER` (default `claude`),
+validates the coder-specific auth env var, and passes `--coder $CODER` to
+the factory binary.
+
+Coder-specific auth for Fargate:
+
+| Coder | Auth env var | Source on host | In-container setup |
+|-------|-------------|----------------|-------------------|
+| Claude | `CLAUDE_CODE_OAUTH_TOKEN` | macOS Keychain / env | Passed as-is |
+| Codex | `CODEX_AUTH_JSON` | `~/.codex/auth.json` | Written to `${HOME}/.codex/auth.json` (mode 0600) |
+
+The host-side launcher (`fargate.rs::coder_task_overrides`) reads the
+appropriate auth source, validates it, and passes it as an ECS task
+override. For Codex, the host-side check and the entrypoint both
+validate `auth_mode == "chatgpt"` to preserve ChatGPT subscription
+billing. The entrypoint also unsets `OPENAI_API_KEY` and rejects any
+`~/.codex/config.toml` containing `preferred_auth_method = "apikey"`.
+
+The Fargate run image builds the Rust Factory binary during the Docker
+image build and copies it to `/usr/local/bin/factory`; the task
+entrypoint uses that binary to enter the shared Rust session loop.
+The Fargate wrapper owns durable runtime metadata, so the in-place
+local loop does not rewrite `runtime` or `handle` while it runs
+inside the task.
 
 Sandboxed local Claude runs refresh Claude OAuth credentials outside the
 sandbox at session boundaries. Sandboxed local Codex runs do not use that
@@ -1062,8 +1082,8 @@ Local machine                    Fargate task
                                     --runtime local
                                     --no-sandbox --in-place
                                     --preserve-run-metadata
-                                    --coder claude
-                                 7. Rust session loop launches Claude
+                                    --coder $CODER
+                                 7. Rust session loop launches coder
                                  8. ...hours pass...
                                  9. upload workspace → S3
 factory status --runs ───► (local run artifacts)
@@ -1198,7 +1218,7 @@ the project root looking for a directory that contains both
 #### Per-project images
 
 Factory publishes a thin base image (`factory` binary +
-`claude-code` + minimum runtime) and each project extends it with
+`claude-code` + `codex` + minimum runtime) and each project extends it with
 whatever toolchains its merge checks require through
 `.factory/Dockerfile`.
 

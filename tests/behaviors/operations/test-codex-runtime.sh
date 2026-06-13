@@ -372,31 +372,56 @@ PLAN
   return $RESULT
 }
 
-test_fargate_codex_fails_before_launch() {
+test_fargate_codex_fails_when_host_auth_missing() {
   setup_test_project
   create_planned_run "test-codex-fargate"
   write_mock_codex
 
   set +e
-  OUTPUT="$(PATH="${MOCK_BIN}:${PATH}" "$FACTORY_BIN" run --runtime fargate \
+  OUTPUT="$(HOME="${TEST_DIR}/empty-home" PATH="${MOCK_BIN}:${PATH}" "$FACTORY_BIN" run --runtime fargate \
     --coder codex --run-id "test-codex-fargate" 2>&1)"
   STATUS=$?
   set -e
 
   RESULT=0
   if [ "$STATUS" -eq 0 ]; then
-    printf '    FAIL: fargate Codex command succeeded\n'
+    printf '    FAIL: fargate Codex command succeeded without auth\n'
     RESULT=1
   fi
 
-  assert_contains "$OUTPUT" "Fargate" || RESULT=1
-  assert_contains "$OUTPUT" "supports only the claude coder" || RESULT=1
+  assert_contains "$OUTPUT" "Cannot read Codex auth" || RESULT=1
 
   LAUNCHED_FILES="$(find "${TEST_DIR}/project" -name .codex-launched -print)"
   if [ -n "$LAUNCHED_FILES" ]; then
     printf '    FAIL: mock codex was launched for fargate runtime\n'
     RESULT=1
   fi
+
+  cleanup_test_project
+  return $RESULT
+}
+
+test_fargate_codex_fails_when_host_auth_mode_is_apikey() {
+  setup_test_project
+  create_planned_run "test-codex-fargate-apikey"
+  write_mock_codex
+
+  mkdir -p "${TEST_DIR}/.codex"
+  printf '{"auth_mode":"apikey","api_key":"sk-test"}' > "${TEST_DIR}/.codex/auth.json"
+
+  set +e
+  OUTPUT="$(HOME="${TEST_DIR}" PATH="${MOCK_BIN}:${PATH}" "$FACTORY_BIN" run --runtime fargate \
+    --coder codex --run-id "test-codex-fargate-apikey" 2>&1)"
+  STATUS=$?
+  set -e
+
+  RESULT=0
+  if [ "$STATUS" -eq 0 ]; then
+    printf '    FAIL: fargate Codex command succeeded with apikey auth\n'
+    RESULT=1
+  fi
+
+  assert_contains "$OUTPUT" "Fargate Codex requires ChatGPT subscription auth" || RESULT=1
 
   cleanup_test_project
   return $RESULT
@@ -415,7 +440,8 @@ run_test "sandboxed codex prefers factory ca bundle" test_sandboxed_codex_prefer
 run_test "no-sandbox codex bypasses approvals and sandbox" test_no_sandbox_codex_bypasses_approvals_and_sandbox
 run_test "codex does not run claude refresh hook" test_codex_does_not_run_claude_refresh_hook
 run_test "parallel codex does not run claude refresh hook" test_parallel_codex_does_not_run_claude_refresh_hook
-run_test "fargate codex fails before launch" test_fargate_codex_fails_before_launch
+run_test "fargate codex fails when host auth missing" test_fargate_codex_fails_when_host_auth_missing
+run_test "fargate codex fails when host auth mode is apikey" test_fargate_codex_fails_when_host_auth_mode_is_apikey
 
 printf '\n  %d passed, %d failed\n' "$PASS" "$FAIL"
 

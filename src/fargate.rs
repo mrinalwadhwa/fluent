@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::coder::CoderKind;
 use crate::credential;
 use crate::git;
 use crate::run;
@@ -578,6 +579,51 @@ fn repair_sibling_worktrees(project_root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Build the coder-specific environment overrides for an ECS task.
+/// Always includes `FACTORY_CODER`. For Claude, reads the OAuth token
+/// from the environment. For Codex, reads `~/.codex/auth.json` from
+/// the host and validates `auth_mode == "chatgpt"` before returning.
+pub fn coder_task_overrides(coder: CoderKind) -> Result<Vec<(String, String)>> {
+    let mut env = vec![("FACTORY_CODER".to_string(), coder.as_str().to_string())];
+    match coder {
+        CoderKind::Claude => {
+            let oauth = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
+                .map_err(|_| anyhow::anyhow!("No Claude auth token available"))?;
+            env.push(("CLAUDE_CODE_OAUTH_TOKEN".to_string(), oauth));
+        }
+        CoderKind::Codex => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let auth_path = PathBuf::from(&home).join(".codex/auth.json");
+            let auth_json = fs::read_to_string(&auth_path).map_err(|e| {
+                anyhow::anyhow!(
+                    "Cannot read Codex auth from {}: {e}. \
+                     Log in with `codex` locally first.",
+                    auth_path.display()
+                )
+            })?;
+            let parsed: serde_json::Value = serde_json::from_str(&auth_json).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to parse {}: {e}",
+                    auth_path.display()
+                )
+            })?;
+            let auth_mode = parsed
+                .get("auth_mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if auth_mode != "chatgpt" {
+                anyhow::bail!(
+                    "Fargate Codex requires ChatGPT subscription auth \
+                     (host auth_mode = \"{auth_mode}\"). \
+                     Switch to subscription auth or use --coder claude."
+                );
+            }
+            env.push(("CODEX_AUTH_JSON".to_string(), auth_json));
+        }
+    }
+    Ok(env)
+}
+
 fn run_ecs_task(config: &FargateConfig, environment: serde_json::Value) -> Result<String> {
     let overrides = serde_json::json!({
         "containerOverrides": [{
@@ -620,12 +666,13 @@ pub fn launch_work_attempt(
     project_root: &Path,
     work_item_id: &str,
     attempt_id: &str,
+    coder: CoderKind,
 ) -> Result<()> {
+    let coder_env = coder_task_overrides(coder)?;
+
     let config = bootstrap_and_load_config(project_root)?;
     credential::inject_credentials()?;
 
-    let oauth = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
-        .map_err(|_| anyhow::anyhow!("No Claude auth token available"))?;
     let (_parent, project_name) = project_root_components(project_root)?;
 
     let upload_key = format!("work/{work_item_id}/{attempt_id}/workspace-in.tar");
@@ -633,16 +680,19 @@ pub fn launch_work_attempt(
     upload_project_workspace(&config, project_root, &upload_key)?;
 
     eprintln!("  Starting Fargate task...");
+    let mut env_overrides: Vec<serde_json::Value> = vec![
+        serde_json::json!({"name": "FACTORY_WORK_ITEM_ID", "value": work_item_id}),
+        serde_json::json!({"name": "FACTORY_WORK_ATTEMPT_ID", "value": attempt_id}),
+        serde_json::json!({"name": "FACTORY_PROJECT_NAME", "value": project_name}),
+        serde_json::json!({"name": "FACTORY_S3_BUCKET", "value": config.s3_bucket}),
+        serde_json::json!({"name": "FACTORY_REGION", "value": config.region}),
+    ];
+    for (k, v) in &coder_env {
+        env_overrides.push(serde_json::json!({"name": k, "value": v}));
+    }
     let task_arn = run_ecs_task(
         &config,
-        serde_json::json!([
-            {"name": "FACTORY_WORK_ITEM_ID", "value": work_item_id},
-            {"name": "FACTORY_WORK_ATTEMPT_ID", "value": attempt_id},
-            {"name": "FACTORY_PROJECT_NAME", "value": project_name},
-            {"name": "FACTORY_S3_BUCKET", "value": config.s3_bucket},
-            {"name": "FACTORY_REGION", "value": config.region},
-            {"name": "CLAUDE_CODE_OAUTH_TOKEN", "value": oauth},
-        ]),
+        serde_json::Value::Array(env_overrides),
     )?;
     eprintln!("  Task: {task_arn}");
 
@@ -675,12 +725,13 @@ pub fn launch_work_merge(
     project_root: &Path,
     work_item_id: &str,
     merge_candidate_id: &str,
+    coder: CoderKind,
 ) -> Result<()> {
+    let coder_env = coder_task_overrides(coder)?;
+
     let config = bootstrap_and_load_config(project_root)?;
     credential::inject_credentials()?;
 
-    let oauth = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
-        .map_err(|_| anyhow::anyhow!("No Claude auth token available"))?;
     let (_parent, project_name) = project_root_components(project_root)?;
 
     let sibling_worktrees =
@@ -690,16 +741,19 @@ pub fn launch_work_merge(
     upload_worktrees(&config, project_root, &upload_key, &sibling_worktrees)?;
 
     eprintln!("  Starting Fargate task...");
+    let mut env_overrides: Vec<serde_json::Value> = vec![
+        serde_json::json!({"name": "FACTORY_WORK_ITEM_ID", "value": work_item_id}),
+        serde_json::json!({"name": "FACTORY_WORK_MERGE_CANDIDATE_ID", "value": merge_candidate_id}),
+        serde_json::json!({"name": "FACTORY_PROJECT_NAME", "value": project_name}),
+        serde_json::json!({"name": "FACTORY_S3_BUCKET", "value": config.s3_bucket}),
+        serde_json::json!({"name": "FACTORY_REGION", "value": config.region}),
+    ];
+    for (k, v) in &coder_env {
+        env_overrides.push(serde_json::json!({"name": k, "value": v}));
+    }
     let task_arn = run_ecs_task(
         &config,
-        serde_json::json!([
-            {"name": "FACTORY_WORK_ITEM_ID", "value": work_item_id},
-            {"name": "FACTORY_WORK_MERGE_CANDIDATE_ID", "value": merge_candidate_id},
-            {"name": "FACTORY_PROJECT_NAME", "value": project_name},
-            {"name": "FACTORY_S3_BUCKET", "value": config.s3_bucket},
-            {"name": "FACTORY_REGION", "value": config.region},
-            {"name": "CLAUDE_CODE_OAUTH_TOKEN", "value": oauth},
-        ]),
+        serde_json::Value::Array(env_overrides),
     )?;
     eprintln!("  Task: {task_arn}");
 
@@ -732,7 +786,9 @@ pub fn pull_work_merge(
 }
 
 /// Upload worktree to S3, start Fargate task, record runtime metadata.
-pub fn launch(source_root: &Path, run_id: Option<&str>) -> Result<()> {
+pub fn launch(source_root: &Path, run_id: Option<&str>, coder: CoderKind) -> Result<()> {
+    let coder_env = coder_task_overrides(coder)?;
+
     let config = load_config()?;
     credential::inject_credentials()?;
 
@@ -740,9 +796,6 @@ pub fn launch(source_root: &Path, run_id: Option<&str>) -> Result<()> {
     let wt_result = worktree::setup_run_worktree(source_root, &run.id, &run.dir)?;
 
     eprintln!("  Factory           fargate run (run: {})", run.id);
-
-    let oauth = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
-        .map_err(|_| anyhow::anyhow!("No Claude auth token available"))?;
 
     // Upload worktree to S3
     eprintln!("  Uploading worktree to S3...");
@@ -781,15 +834,18 @@ pub fn launch(source_root: &Path, run_id: Option<&str>) -> Result<()> {
 
     // Start ECS task
     eprintln!("  Starting Fargate task...");
+    let mut env_list: Vec<serde_json::Value> = vec![
+        serde_json::json!({"name": "FACTORY_RUN_ID", "value": run.id}),
+        serde_json::json!({"name": "FACTORY_S3_BUCKET", "value": config.s3_bucket}),
+        serde_json::json!({"name": "FACTORY_REGION", "value": config.region}),
+    ];
+    for (k, v) in &coder_env {
+        env_list.push(serde_json::json!({"name": k, "value": v}));
+    }
     let overrides = serde_json::json!({
         "containerOverrides": [{
             "name": "run",
-            "environment": [
-                {"name": "FACTORY_RUN_ID", "value": run.id},
-                {"name": "FACTORY_S3_BUCKET", "value": config.s3_bucket},
-                {"name": "FACTORY_REGION", "value": config.region},
-                {"name": "CLAUDE_CODE_OAUTH_TOKEN", "value": oauth}
-            ]
+            "environment": env_list,
         }]
     });
 
@@ -911,4 +967,83 @@ pub fn shell(search_root: &Path, run_id: Option<&str>) -> Result<()> {
         .status()?;
 
     std::process::exit(status.code().unwrap_or(1));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn claude_overrides_include_oauth_token_and_factory_coder() {
+        unsafe { std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", "test-token-123") };
+        let result = coder_task_overrides(CoderKind::Claude).unwrap();
+        unsafe { std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN") };
+        assert!(
+            result.iter().any(|(k, v)| k == "FACTORY_CODER" && v == "claude"),
+            "must include FACTORY_CODER=claude"
+        );
+        assert!(
+            result.iter().any(|(k, v)| k == "CLAUDE_CODE_OAUTH_TOKEN" && v == "test-token-123"),
+            "must include CLAUDE_CODE_OAUTH_TOKEN"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn codex_overrides_include_auth_json_and_factory_coder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let codex_dir = tmp.path().join(".codex");
+        fs::create_dir_all(&codex_dir).unwrap();
+        let auth_json = r#"{"auth_mode":"chatgpt","refresh_token":"tok"}"#;
+        fs::write(codex_dir.join("auth.json"), auth_json).unwrap();
+
+        unsafe { std::env::set_var("HOME", tmp.path().to_str().unwrap()) };
+        let result = coder_task_overrides(CoderKind::Codex).unwrap();
+        assert!(
+            result.iter().any(|(k, v)| k == "FACTORY_CODER" && v == "codex"),
+            "must include FACTORY_CODER=codex"
+        );
+        assert!(
+            result.iter().any(|(k, v)| k == "CODEX_AUTH_JSON" && v == auth_json),
+            "must include CODEX_AUTH_JSON with auth.json content"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn codex_overrides_err_when_host_auth_file_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("HOME", tmp.path().to_str().unwrap()) };
+        let result = coder_task_overrides(CoderKind::Codex);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Cannot read Codex auth"),
+            "error should mention missing auth: {err}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn codex_overrides_err_when_host_auth_mode_is_apikey() {
+        let tmp = tempfile::tempdir().unwrap();
+        let codex_dir = tmp.path().join(".codex");
+        fs::create_dir_all(&codex_dir).unwrap();
+        fs::write(
+            codex_dir.join("auth.json"),
+            r#"{"auth_mode":"apikey","api_key":"sk-test"}"#,
+        )
+        .unwrap();
+
+        unsafe { std::env::set_var("HOME", tmp.path().to_str().unwrap()) };
+        let result = coder_task_overrides(CoderKind::Codex);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Fargate Codex requires ChatGPT subscription auth"),
+            "error should mention subscription auth: {err}"
+        );
+    }
 }

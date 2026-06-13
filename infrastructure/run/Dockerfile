@@ -13,7 +13,7 @@ FROM cgr.dev/chainguard/node:latest-dev
 
 USER root
 RUN apk add --no-cache git bash aws-cli jq tmux curl
-RUN npm install -g @anthropic-ai/claude-code
+RUN npm install -g @anthropic-ai/claude-code @openai/codex
 
 COPY --from=builder /src/target/release/factory /usr/local/bin/factory
 COPY infrastructure/run/entrypoint.sh /entrypoint.sh
