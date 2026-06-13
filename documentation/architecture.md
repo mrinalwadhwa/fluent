@@ -1583,6 +1583,22 @@ Three public functions cover the call-site patterns in the codebase:
 directory, and captured stderr so failures are debuggable without
 re-running.
 
+All three public functions retry git lock errors transparently.
+When a git invocation exits non-zero with stderr matching a known
+lock-error pattern (`could not lock`, `lock failed`,
+`: File exists` against a `.lock`/`index`/`HEAD` path, or
+`Resource temporarily unavailable` against a `.lock` path), the
+wrapper sleeps with exponential backoff and retries the command.
+Backoff starts at 20ms and doubles each attempt, capping at 320ms
+after the 5th retry, with ±25% random jitter per sleep.
+Up to 8 attempts total (~1.5s max wall clock) before bailing.
+Successful retries are invisible to callers; budget exhaustion
+emits one stderr line and then returns the same error the wrapper
+produces for any other non-zero exit.
+
+Constants: `LOCK_RETRY_MAX_ATTEMPTS = 8`,
+`LOCK_RETRY_BASE_MS = 20`, `LOCK_RETRY_CAP_MS = 320`.
+
 A regression-guard test (`no_direct_git_command_in_src` in
 `tests/binary.rs`) scans `src/` for `Command::new("git")` outside
 `src/git.rs` and fails if any are found.

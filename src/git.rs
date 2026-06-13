@@ -1,6 +1,11 @@
 use anyhow::{Context, Result, bail};
 use std::path::Path;
 use std::process::{Command, Output};
+use std::time::{Duration, SystemTime};
+
+const LOCK_RETRY_MAX_ATTEMPTS: usize = 8;
+const LOCK_RETRY_BASE_MS: u64 = 20;
+const LOCK_RETRY_CAP_MS: u64 = 320;
 
 fn build_command(cwd: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new("git");
@@ -14,11 +19,66 @@ fn build_command(cwd: &Path, args: &[&str]) -> Command {
     cmd
 }
 
+fn is_lock_error(stderr: &str) -> bool {
+    let s = stderr.to_lowercase();
+    s.contains("could not lock")
+        || s.contains("lock failed")
+        || (s.contains(": file exists")
+            && (s.contains(".lock") || s.contains("/index") || s.contains("/head")))
+        || (s.contains("resource temporarily unavailable") && s.contains(".lock"))
+}
+
+fn lock_jitter_factor() -> f64 {
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as u64;
+    let mixed = nanos ^ (std::process::id() as u64);
+    let bucket = (mixed % 100) as f64;
+    (bucket - 50.0) / 200.0
+}
+
+fn backoff_duration(attempt: usize) -> Duration {
+    let exp = LOCK_RETRY_BASE_MS << (attempt - 1).min(4);
+    let base = exp.min(LOCK_RETRY_CAP_MS);
+    let jitter = (base as f64) * lock_jitter_factor();
+    Duration::from_millis((base as f64 + jitter) as u64)
+}
+
+fn run_with_lock_retry(cmd_builder: impl Fn() -> Command) -> Result<Output> {
+    let mut last_output: Option<Output> = None;
+    for attempt in 1..=LOCK_RETRY_MAX_ATTEMPTS {
+        let output = cmd_builder()
+            .output()
+            .context("Failed to invoke git")?;
+
+        if output.status.success() {
+            return Ok(output);
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !is_lock_error(&stderr) {
+            return Ok(output);
+        }
+
+        if attempt == LOCK_RETRY_MAX_ATTEMPTS {
+            eprintln!(
+                "git lock retry budget exhausted after {LOCK_RETRY_MAX_ATTEMPTS} attempts: {}",
+                stderr.lines().next().unwrap_or("(empty)")
+            );
+            last_output = Some(output);
+            break;
+        }
+
+        std::thread::sleep(backoff_duration(attempt));
+    }
+
+    Ok(last_output.expect("loop exits via return or last_output set"))
+}
+
 /// Run `git <args>` in `cwd` and check the exit status.
 pub fn run(cwd: &Path, args: &[&str], action: &str) -> Result<()> {
-    let output = build_command(cwd, args)
-        .output()
-        .with_context(|| format!("Failed to {action}"))?;
+    let output = run_with_lock_retry(|| build_command(cwd, args))?;
     if output.status.success() {
         return Ok(());
     }
@@ -33,9 +93,7 @@ pub fn run(cwd: &Path, args: &[&str], action: &str) -> Result<()> {
 
 /// Run `git <args>` in `cwd`, return trimmed stdout on success.
 pub fn run_stdout(cwd: &Path, args: &[&str], action: &str) -> Result<String> {
-    let output = build_command(cwd, args)
-        .output()
-        .with_context(|| format!("Failed to {action}"))?;
+    let output = run_with_lock_retry(|| build_command(cwd, args))?;
     if !output.status.success() {
         bail!(
             "git {} failed (exit {}) while {action}\n  cwd: {}\n{}",
@@ -50,9 +108,7 @@ pub fn run_stdout(cwd: &Path, args: &[&str], action: &str) -> Result<String> {
 
 /// Run `git <args>` in `cwd`, return the raw `Output`.
 pub fn run_raw(cwd: &Path, args: &[&str]) -> Result<Output> {
-    build_command(cwd, args)
-        .output()
-        .context("Failed to run git")
+    run_with_lock_retry(|| build_command(cwd, args))
 }
 
 fn exit_code_display(output: &Output) -> String {
@@ -156,5 +212,129 @@ mod tests {
             err.contains(&tmp.path().display().to_string()),
             "Error should contain cwd: {err}"
         );
+    }
+
+    // Lock-error detection tests
+
+    #[test]
+    fn is_lock_error_recognizes_could_not_lock_config() {
+        assert!(is_lock_error(
+            "error: could not lock config file /path/.git/config: File exists"
+        ));
+    }
+
+    #[test]
+    fn is_lock_error_recognizes_index_lock_file_exists() {
+        assert!(is_lock_error(
+            "fatal: Unable to create '/path/.git/index.lock': File exists."
+        ));
+    }
+
+    #[test]
+    fn is_lock_error_recognizes_head_lock_resource_temporarily_unavailable() {
+        assert!(is_lock_error(
+            "error: Unable to create '/path/.git/HEAD.lock': Resource temporarily unavailable"
+        ));
+    }
+
+    #[test]
+    fn is_lock_error_recognizes_refs_lock_file_exists() {
+        assert!(is_lock_error(
+            "error: Unable to create '/path/.git/refs/heads/main.lock': File exists"
+        ));
+    }
+
+    #[test]
+    fn is_lock_error_recognizes_lock_failed() {
+        assert!(is_lock_error("error: lock failed on refs/heads/main"));
+    }
+
+    #[test]
+    fn is_lock_error_does_not_match_authentication_failure() {
+        assert!(!is_lock_error(
+            "fatal: Authentication failed for 'https://github.com/repo.git/'"
+        ));
+    }
+
+    #[test]
+    fn is_lock_error_does_not_match_network_error() {
+        assert!(!is_lock_error(
+            "fatal: unable to access 'https://github.com/repo.git/': Could not resolve host"
+        ));
+    }
+
+    #[test]
+    fn is_lock_error_does_not_match_unrelated_file_exists_error() {
+        assert!(!is_lock_error(
+            "fatal: destination path '/tmp/repo' already exists and is not an empty directory."
+        ));
+        assert!(!is_lock_error(
+            "error: '/some/path/data.txt': File exists"
+        ));
+    }
+
+    #[test]
+    fn is_lock_error_case_insensitive() {
+        assert!(is_lock_error("ERROR: COULD NOT LOCK config file"));
+        assert!(is_lock_error("Fatal: LOCK FAILED on refs/heads/main"));
+    }
+
+    // Backoff duration tests
+
+    #[test]
+    fn backoff_duration_doubles_for_first_5_attempts() {
+        let expected_bases: [u64; 5] = [20, 40, 80, 160, 320];
+        for (i, &expected_base) in expected_bases.iter().enumerate() {
+            let attempt = i + 1;
+            let dur = backoff_duration(attempt);
+            let ms = dur.as_millis() as u64;
+            let lower = (expected_base as f64 * 0.75) as u64;
+            let upper = (expected_base as f64 * 1.25) as u64;
+            assert!(
+                ms >= lower && ms <= upper,
+                "attempt {attempt}: expected {lower}..={upper}ms, got {ms}ms"
+            );
+        }
+    }
+
+    #[test]
+    fn backoff_duration_caps_at_320ms_after_5th_attempt() {
+        for attempt in 6..=8 {
+            let dur = backoff_duration(attempt);
+            let ms = dur.as_millis() as u64;
+            let lower = (320_f64 * 0.75) as u64;
+            let upper = (320_f64 * 1.25) as u64;
+            assert!(
+                ms >= lower && ms <= upper,
+                "attempt {attempt}: expected {lower}..={upper}ms (capped), got {ms}ms"
+            );
+        }
+    }
+
+    #[test]
+    fn backoff_duration_applies_jitter_within_25_percent() {
+        for attempt in 1..=8 {
+            let dur = backoff_duration(attempt);
+            let ms = dur.as_millis() as u64;
+            let exp = LOCK_RETRY_BASE_MS << (attempt - 1).min(4);
+            let base = exp.min(LOCK_RETRY_CAP_MS);
+            let lower = (base as f64 * 0.75) as u64;
+            let upper = (base as f64 * 1.25) as u64;
+            assert!(
+                ms >= lower && ms <= upper,
+                "attempt {attempt}: {ms}ms outside [{lower}, {upper}]"
+            );
+        }
+    }
+
+    #[test]
+    fn lock_jitter_factor_within_range() {
+        for _ in 0..20 {
+            let f = lock_jitter_factor();
+            assert!(
+                f >= -0.25 && f <= 0.25,
+                "jitter factor {f} outside [-0.25, 0.25]"
+            );
+        }
     }
 }

@@ -21,3 +21,13 @@ elsewhere.
 Out of scope for the immediate need but worth a small Work Item.
 Adjacent: any other shell-out to git from Factory could race on
 the same lock; the wrapper should retry uniformly.
+
+---
+
+Resolved by Work Item git-lock-retry. src/git.rs detects git lock
+errors (could not lock, lock failed, : File exists + lock path,
+Resource temporarily unavailable + .lock) and retries with
+exponential backoff (20ms doubling to 320ms cap, ±25% jitter,
+8 attempts, ~1.5s total budget). Success on retry is transparent
+to callers; budget exhaustion emits one stderr line then bails
+normally.

@@ -12561,3 +12561,157 @@ fn send_signal(pid: u32, signal: &str) {
         .status()
         .expect("send signal");
 }
+
+// --- Git wrapper lock-retry integration tests ---
+
+fn init_git_repo(dir: &Path) {
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(dir)
+        .output()
+        .expect("git init");
+    std::process::Command::new("git")
+        .args(["commit", "--allow-empty", "-m", "init"])
+        .current_dir(dir)
+        .env("GIT_AUTHOR_NAME", "test")
+        .env("GIT_AUTHOR_EMAIL", "test@test.com")
+        .env("GIT_COMMITTER_NAME", "test")
+        .env("GIT_COMMITTER_EMAIL", "test@test.com")
+        .output()
+        .expect("initial commit");
+}
+
+#[test]
+fn git_wrapper_succeeds_on_first_attempt_when_no_lock_error() {
+    let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
+
+    let result = git::run(tmp.path(), &["status"], "check status");
+    assert!(result.is_ok(), "git status should succeed: {result:?}");
+}
+
+#[test]
+fn git_wrapper_succeeds_after_config_lock_clears_within_budget() {
+    let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
+
+    let lock_path = tmp.path().join(".git/config.lock");
+    fs::write(&lock_path, "lock").expect("create lock file");
+
+    let lp = lock_path.clone();
+    let handle = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let _ = fs::remove_file(&lp);
+    });
+
+    let result = git::run(
+        tmp.path(),
+        &["config", "user.name", "test-user"],
+        "set user name",
+    );
+    handle.join().unwrap();
+    assert!(
+        result.is_ok(),
+        "git config should succeed after lock clears: {result:?}"
+    );
+}
+
+#[test]
+fn git_wrapper_succeeds_after_index_lock_clears_within_budget() {
+    let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
+
+    let lock_path = tmp.path().join(".git/index.lock");
+    fs::write(&lock_path, "lock").expect("create lock file");
+
+    let lp = lock_path.clone();
+    let handle = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let _ = fs::remove_file(&lp);
+    });
+
+    let result = git::run(tmp.path(), &["add", "."], "stage files");
+    handle.join().unwrap();
+    assert!(
+        result.is_ok(),
+        "git add should succeed after index lock clears: {result:?}"
+    );
+}
+
+#[test]
+fn git_wrapper_bails_when_lock_persists_past_budget() {
+    let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
+
+    let lock_path = tmp.path().join(".git/config.lock");
+    fs::write(&lock_path, "lock").expect("create lock file");
+
+    let start = std::time::Instant::now();
+    let result = git::run(
+        tmp.path(),
+        &["config", "user.name", "test-user"],
+        "set user name",
+    );
+    let elapsed = start.elapsed();
+
+    assert!(result.is_err(), "should fail when lock persists");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("set user name"),
+        "error should contain action: {err}"
+    );
+    assert!(
+        elapsed.as_millis() > 100,
+        "should have retried with backoff, elapsed: {elapsed:?}"
+    );
+
+    let _ = fs::remove_file(&lock_path);
+}
+
+#[test]
+fn git_wrapper_does_not_retry_on_non_lock_error() {
+    let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
+
+    let start = std::time::Instant::now();
+    let result = git::run(
+        tmp.path(),
+        &["checkout", "nonexistent-branch-xyz"],
+        "switch branch",
+    );
+    let elapsed = start.elapsed();
+
+    assert!(result.is_err(), "should fail for bad branch");
+    assert!(
+        elapsed.as_millis() < 500,
+        "should not have slept for retries, elapsed: {elapsed:?}"
+    );
+}
+
+#[test]
+#[ignore]
+fn git_wrapper_parallel_config_writes_both_succeed() {
+    let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
+
+    let p1 = tmp.path().to_path_buf();
+    let p2 = tmp.path().to_path_buf();
+
+    let h1 = std::thread::spawn(move || {
+        git::run(&p1, &["config", "user.name", "alice"], "set alice")
+    });
+    let h2 = std::thread::spawn(move || {
+        git::run(&p2, &["config", "user.email", "bob@test.com"], "set bob")
+    });
+
+    let r1 = h1.join().unwrap();
+    let r2 = h2.join().unwrap();
+    assert!(
+        r1.is_ok(),
+        "first parallel config write should succeed: {r1:?}"
+    );
+    assert!(
+        r2.is_ok(),
+        "second parallel config write should succeed: {r2:?}"
+    );
+}

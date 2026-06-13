@@ -2965,3 +2965,71 @@ target so subsequent `status`, `off`, and `on` invocations
 correctly observe the running process via `pgrep -f` against the
 wrapper path.
 Test: src/keep_awake.rs (plist_contains_valid_xml_structure)
+
+---
+
+## Git lock-error retry
+
+WHEN `git::run`, `git::run_stdout`, or `git::run_raw` invokes git
+and the invocation exits non-zero with stderr matching a known git
+lock-error pattern,
+THE SYSTEM SHALL sleep with exponential backoff (starting at 20ms,
+doubling each attempt, capping at 320ms after the 5th retry) plus
+±25% random jitter, and re-invoke the same command up to a total
+of 8 attempts before giving up.
+Test: tests/binary.rs (git_wrapper_succeeds_after_config_lock_clears_within_budget)
+Test: tests/binary.rs (git_wrapper_succeeds_after_index_lock_clears_within_budget)
+Test: tests/binary.rs (git_wrapper_bails_when_lock_persists_past_budget)
+
+WHEN the wrapper detects a lock error,
+THE SYSTEM SHALL recognize the following stderr patterns as
+lock-class errors: `could not lock`, `lock failed`, `: File exists`
+(with the path indicating a `.lock` suffix or known lock file),
+and `Resource temporarily unavailable` against a `.lock` path.
+Test: src/git.rs (is_lock_error_recognizes_could_not_lock_config)
+Test: src/git.rs (is_lock_error_recognizes_index_lock_file_exists)
+Test: src/git.rs (is_lock_error_recognizes_head_lock_resource_temporarily_unavailable)
+Test: src/git.rs (is_lock_error_recognizes_refs_lock_file_exists)
+Test: src/git.rs (is_lock_error_recognizes_lock_failed)
+
+WHEN a retried git invocation succeeds within the 8-attempt budget,
+THE SYSTEM SHALL return `Ok(())` / `Ok(stdout)` / `Ok(Output)` to
+the caller as if the invocation had succeeded on the first try,
+with no log output and no indication that retries occurred.
+Test: tests/binary.rs (git_wrapper_succeeds_after_config_lock_clears_within_budget)
+Test: tests/binary.rs (git_wrapper_succeeds_after_index_lock_clears_within_budget)
+
+WHEN the 8-attempt retry budget is exhausted,
+THE SYSTEM SHALL emit one stderr line naming the failed command,
+the number of attempts made, and the underlying lock-error
+stderr, then return the same error type the wrapper produces for
+any other non-zero exit.
+Test: tests/binary.rs (git_wrapper_bails_when_lock_persists_past_budget)
+
+WHEN the git invocation exits non-zero with stderr that does NOT
+match a lock-error pattern,
+THE SYSTEM SHALL return the error immediately without retrying.
+Test: tests/binary.rs (git_wrapper_does_not_retry_on_non_lock_error)
+Test: src/git.rs (is_lock_error_does_not_match_authentication_failure)
+Test: src/git.rs (is_lock_error_does_not_match_network_error)
+Test: src/git.rs (is_lock_error_does_not_match_unrelated_file_exists_error)
+
+WHEN the git invocation exits zero on the first attempt,
+THE SYSTEM SHALL return success without any sleep or retry
+overhead.
+Test: tests/binary.rs (git_wrapper_succeeds_on_first_attempt_when_no_lock_error)
+
+WHEN the wrapper's backoff sleep would push wall-clock past the
+total budget (~1.5s),
+THE SYSTEM SHALL apply the final sleep anyway and then make the
+last attempt before giving up — the budget is approximate, not
+strict.
+Test: tests/binary.rs (git_wrapper_bails_when_lock_persists_past_budget)
+Test: src/git.rs (backoff_duration_caps_at_320ms_after_5th_attempt)
+
+WHEN multiple concurrent Factory processes each retry the same
+git lock,
+THE SYSTEM SHALL apply per-process jitter so the retries do not
+collide on identical sleep intervals (thundering-herd avoidance).
+Test: src/git.rs (lock_jitter_factor_within_range)
+Test: src/git.rs (backoff_duration_applies_jitter_within_25_percent)
