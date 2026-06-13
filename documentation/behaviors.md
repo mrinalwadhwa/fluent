@@ -550,8 +550,8 @@ THE SYSTEM SHALL still persist whatever transcript content the Coder
 wrote, so post-mortem analysis is possible.
 Test: tests/binary.rs (write_task_transcript_persists_after_failed_attempt)
 
-WHEN any reviewer Task (architecture, behaviors-completeness,
-documentation, skills, tests-completeness) is executed,
+WHEN any reviewer Task (architecture, behaviors, documentation, skills,
+tests) is executed,
 THE SYSTEM SHALL NOT receive read access to the writer transcript file
 in its sandbox readable roots, and the reviewer prompt SHALL NOT
 mention the writer transcript file.
