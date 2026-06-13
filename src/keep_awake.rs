@@ -82,10 +82,7 @@ fn get_uid() -> Result<String> {
 // --- Process discovery ---
 
 fn find_wrapper_pid() -> Option<u32> {
-    let output = Command::new("pgrep")
-        .args(["-f", SENTINEL])
-        .output()
-        .ok()?;
+    let output = Command::new("pgrep").args(["-f", SENTINEL]).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -170,7 +167,10 @@ fn bootstrap_launch_agent(plist: &Path) -> Result<()> {
         .args(["bootstrap", &format!("gui/{uid}"), &plist.to_string_lossy()])
         .status()?;
     if !status.success() {
-        bail!("launchctl bootstrap failed (exit {})", status.code().unwrap_or(-1));
+        bail!(
+            "launchctl bootstrap failed (exit {})",
+            status.code().unwrap_or(-1)
+        );
     }
     Ok(())
 }
@@ -194,7 +194,10 @@ fn kickstart_launch_agent() -> Result<()> {
         .args(["kickstart", &format!("gui/{uid}/{LABEL}")])
         .status()?;
     if !status.success() {
-        bail!("launchctl kickstart failed (exit {})", status.code().unwrap_or(-1));
+        bail!(
+            "launchctl kickstart failed (exit {})",
+            status.code().unwrap_or(-1)
+        );
     }
     Ok(())
 }
