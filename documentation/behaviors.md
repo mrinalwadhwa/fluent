@@ -2759,13 +2759,14 @@ otherwise satisfy the ready conditions.
 Test: src/auto_merge.rs (find_ready_candidate_returns_none_when_auto_merge_skipped)
 Test: tests/binary.rs (auto_merge_skips_candidate_already_marked_skipped)
 
-WHEN a future tick observes a Merge Candidate whose latest
-Attempt's `review_state == needs-user` or whose
-`merge_state.status == needs-user`,
+WHEN a future tick observes a Merge Candidate whose
+`merge_state.status == needs-user` or whose
+`review_state != passed`,
 THE SYSTEM SHALL skip the candidate without setting
 `auto_merge_skipped` and SHALL pick it up automatically on a
 later tick if it transitions back to a ready state.
-Test: src/auto_merge.rs (find_ready_candidate_returns_none_for_needs_user_candidate)
+Test: src/auto_merge.rs (find_ready_candidate_returns_none_when_merge_status_needs_user)
+Test: src/auto_merge.rs (find_ready_candidate_returns_none_when_candidate_review_not_passed)
 
 WHEN `factory work auto-merge` receives SIGINT or SIGTERM while
 no merge is in progress,
@@ -2796,6 +2797,14 @@ WHEN `factory work auto-merge` is invoked with neither a Work Item
 ID nor `--all`,
 THE SYSTEM SHALL exit non-zero with a clear error.
 Test: tests/binary.rs (auto_merge_with_neither_flag_set_errors)
+
+WHEN `factory work auto-merge` runs and a Merge Candidate
+satisfies the ready conditions on multiple consecutive ticks,
+THE SYSTEM SHALL fire merge only once and then either mark the
+candidate skipped (on failure) or wait for the candidate to
+transition to `merged` (on success); subsequent ticks observe
+the new state and do not re-fire.
+Untestable: Emergent from merge success transitioning status to `merged` and merge failure setting `auto_merge_skipped`, both of which prevent re-fire on the next tick
 
 WHEN `MergeCandidateMergeState` is deserialized from JSON that
 does not contain `auto_merge_skipped`,

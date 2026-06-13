@@ -661,6 +661,8 @@ fn cmd_work(
         WorkCommands::AutoMerge {
             work_item_id,
             all,
+            no_sandbox,
+            coder,
             poll_seconds,
         } => {
             let mode = match (work_item_id, all) {
@@ -677,8 +679,15 @@ fn cmd_work(
                     );
                 }
             };
+            let coder_kind = CoderKind::resolve(coder.as_deref().or(global_coder))?;
             let poll = poll_seconds.unwrap_or(30);
-            factory::auto_merge::run(project_root, mode, poll)?;
+            factory::auto_merge::run(
+                project_root,
+                mode,
+                poll,
+                coder_kind,
+                no_sandbox || global_no_sandbox,
+            )?;
         }
         WorkCommands::PostMergeReview { command } => match command {
             cli::WorkPostMergeReviewCommands::Run {

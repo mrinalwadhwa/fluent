@@ -29,6 +29,8 @@ pub fn run(
     project_root: &Path,
     mode: AutoMergeMode,
     poll_seconds: u64,
+    coder_kind: CoderKind,
+    no_sandbox: bool,
 ) -> Result<()> {
     install_signal_handler();
     let store = WorkModelStore::new(project_root);
@@ -64,6 +66,8 @@ pub fn run(
                     &resolver,
                     &wi.id,
                     &candidate.id,
+                    coder_kind,
+                    no_sandbox,
                 );
                 match outcome {
                     MergeOutcome::Succeeded { commit } => {
@@ -127,6 +131,8 @@ fn attempt_merge(
     resolver: &ContentResolver,
     work_item_id: &str,
     merge_candidate_id: &str,
+    coder_kind: CoderKind,
+    no_sandbox: bool,
 ) -> MergeOutcome {
     let result = work_merge_executor::merge_candidate(WorkMergeConfig {
         project_root,
@@ -135,8 +141,8 @@ fn attempt_merge(
         merge_candidate_id,
         resolver,
         extra_args: &[],
-        coder_kind: CoderKind::Claude,
-        no_sandbox: false,
+        coder_kind,
+        no_sandbox,
     });
 
     classify_merge_outcome(result)
@@ -341,12 +347,24 @@ mod tests {
     }
 
     #[test]
-    fn find_ready_candidate_returns_none_for_needs_user_candidate() {
+    fn find_ready_candidate_returns_none_when_candidate_review_not_passed() {
         let wi = make_work_item_with_candidate(
             AttemptReviewState::Passed,
             AttemptStatus::Complete,
             MergeCandidateReviewState::Pending,
             MergeCandidateMergeStatus::Pending,
+            None,
+        );
+        assert!(find_ready_candidate(&wi).is_none());
+    }
+
+    #[test]
+    fn find_ready_candidate_returns_none_when_merge_status_needs_user() {
+        let wi = make_work_item_with_candidate(
+            AttemptReviewState::Passed,
+            AttemptStatus::Complete,
+            MergeCandidateReviewState::Passed,
+            MergeCandidateMergeStatus::NeedsUser,
             None,
         );
         assert!(find_ready_candidate(&wi).is_none());

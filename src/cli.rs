@@ -430,6 +430,14 @@ pub enum WorkCommands {
         #[arg(long)]
         all: bool,
 
+        /// Disable sandbox
+        #[arg(long)]
+        no_sandbox: bool,
+
+        /// Coding agent to launch: claude or codex
+        #[arg(long)]
+        coder: Option<String>,
+
         /// Poll interval in seconds (default 30)
         #[arg(long, hide = true)]
         poll_seconds: Option<u64>,

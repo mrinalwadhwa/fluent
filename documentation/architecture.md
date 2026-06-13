@@ -1496,9 +1496,9 @@ single Work Item (`factory work auto-merge <id>`) or all Work Items
 seconds (configurable via `--poll-seconds`).
 
 A candidate is merge-ready when the latest Attempt has
-`review_state == passed`, the candidate has
-`review_state == passed` and `merge_state.status == pending`, and
-`merge_state.auto_merge_skipped` is not `true`.
+`status == complete` and `review_state == passed`, the candidate
+has `review_state == passed` and `merge_state.status == pending`,
+and `merge_state.auto_merge_skipped` is not `true`.
 
 The `auto_merge_skipped` field on `MergeCandidateMergeState` is an
 `Option<bool>` that persists skip state across watcher restarts.
@@ -1508,10 +1508,11 @@ failures (401, token expiry) leave the field unset so the watcher
 retries after re-authentication.
 
 The watcher is merge-only: it does not invoke attempt progression,
-task execution, or any other phase. Signal handling uses `ctrlc`
-with the `termination` feature to catch SIGINT, SIGTERM, and
-SIGHUP. In-progress merges run to completion before the watcher
-exits.
+task execution, or any other phase. It respects `--coder` and
+`--no-sandbox` flags, resolving them through `CoderKind::resolve`
+like other agent-invoking commands. Signal handling uses `ctrlc`
+with the `termination` feature to catch SIGINT and SIGTERM.
+In-progress merges run to completion before the watcher exits.
 
 ### Git wrapper
 

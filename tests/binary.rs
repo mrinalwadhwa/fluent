@@ -12459,14 +12459,30 @@ fn auto_merge_skips_candidate_already_marked_skipped() {
         "initial commit",
     )
     .unwrap();
-    // Create a work item with a ready merge candidate marked as skipped
     factory_cmd()
         .current_dir(tmp.path())
         .args(["work", "create", "wi-skip", "--title", "Test skip"])
         .output()
         .unwrap();
 
-    // Write a merge candidate JSON directly with auto_merge_skipped set
+    // Write a completed attempt with review_state passed
+    let attempt_dir = tmp
+        .path()
+        .join(".factory/work/attempts/wi-skip");
+    fs::create_dir_all(&attempt_dir).unwrap();
+    let attempt_json = serde_json::json!({
+        "id": "attempt-1",
+        "work_item_id": "wi-skip",
+        "status": "complete",
+        "review_state": "passed"
+    });
+    fs::write(
+        attempt_dir.join("attempt-1.json"),
+        serde_json::to_string_pretty(&attempt_json).unwrap(),
+    )
+    .unwrap();
+
+    // Write a merge candidate with auto_merge_skipped set
     let mc_dir = tmp
         .path()
         .join(".factory/work/merge-candidates/wi-skip");
@@ -12491,8 +12507,6 @@ fn auto_merge_skips_candidate_already_marked_skipped() {
     )
     .unwrap();
 
-    // Run auto-merge with a very short poll and it should exit on signal
-    // (use --poll-seconds 1 so the test is fast)
     let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("factory"))
         .current_dir(tmp.path())
         .args(["work", "auto-merge", "wi-skip", "--poll-seconds", "1"])
@@ -12500,10 +12514,8 @@ fn auto_merge_skips_candidate_already_marked_skipped() {
         .spawn()
         .unwrap();
 
-    // Give it a couple of seconds to run a tick
     std::thread::sleep(std::time::Duration::from_secs(2));
 
-    // Send SIGINT to stop the watcher
     send_signal(child.id(), "INT");
     let output = child.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
