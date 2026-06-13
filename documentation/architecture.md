@@ -462,6 +462,14 @@ workspaces. `workspace_access.writes` may be empty or contain one
 workspace. A `review` task must keep `writes` empty; reviewers write
 findings and notes under a required `artifact_area`.
 
+Write Tasks carry an `artifact_area` under
+`.factory/work/artifacts/<work-item-id>/<attempt-id>/<task-id>/`,
+matching the review and behavior-tests convention. The writer's Coder
+persists `transcript.jsonl` into this directory during execution. The
+writer's sandbox grants write access to both the candidate workspace
+and the artifact directory. Reviewer sandboxes intentionally exclude
+writer artifact directories to preserve independent verification.
+
 Write Tasks may include optional `instructions` copied from explicit Work
 Item instructions or derived from Work Item planning context. JSON omits
 `instructions` when the Task has no rich execution context.

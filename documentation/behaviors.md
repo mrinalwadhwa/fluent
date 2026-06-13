@@ -513,6 +513,56 @@ Test: tests/binary.rs (work_task_run_rejects_success_without_commits)
 Test: tests/binary.rs (work_task_run_rejects_reused_workspace_without_new_commit)
 Test: tests/behaviors/operations/test-work-task-run.sh (success without new commit fails with guidance)
 
+WHEN Factory creates a `write` Task (initial author Task or follow-up
+after failed review),
+THE SYSTEM SHALL set `Task.artifact_area` to
+`Some(TaskArtifactArea { path:
+".factory/work/artifacts/<work-item-id>/<attempt-id>/<task-id>" })`
+following the same convention as review and behavior-tests Tasks.
+Test: src/work_model.rs (initial_write_task_has_artifact_area_path)
+Test: src/work_model.rs (followup_write_task_has_artifact_area_path)
+
+WHEN a `write` Task is executed,
+THE SYSTEM SHALL pass the path `<artifact_area>/transcript.jsonl` to
+the Coder's transcript argument so the agent's session is persisted
+to that file during execution.
+Test: tests/binary.rs (write_task_transcript_persists_after_successful_attempt)
+
+WHEN the writer's sandbox is constructed for a `write` Task,
+THE SYSTEM SHALL grant write access to both the candidate workspace
+(existing behavior) AND the Task's artifact directory.
+Test: tests/binary.rs (write_task_sandbox_grants_artifact_dir_write_access)
+
+WHEN a `write` Task completes,
+THE SYSTEM SHALL leave the transcript file in place under the artifact
+directory; the file SHALL NOT be deleted when the Task transitions to
+`complete`, `failed`, or `needs-user`.
+Test: tests/binary.rs (write_task_transcript_persists_after_successful_attempt)
+
+WHEN `factory work show <work-item-id>` returns Task JSON for a
+completed `write` Task,
+THE SYSTEM SHALL include the `artifact_area.path` field populated with
+the expected artifact directory path.
+Test: tests/binary.rs (write_task_transcript_persists_after_successful_attempt)
+
+WHEN a `write` Task fails before producing a commit,
+THE SYSTEM SHALL still persist whatever transcript content the Coder
+wrote, so post-mortem analysis is possible.
+Test: tests/binary.rs (write_task_transcript_persists_after_failed_attempt)
+
+WHEN any reviewer Task (architecture, behaviors-completeness,
+documentation, skills, tests-completeness) is executed,
+THE SYSTEM SHALL NOT receive read access to the writer transcript file
+in its sandbox readable roots, and the reviewer prompt SHALL NOT
+mention the writer transcript file.
+Test: tests/binary.rs (reviewer_sandbox_does_not_include_writer_artifact_dir)
+
+WHEN a `rebase` Task is created,
+THE SYSTEM SHALL continue to use the rebase Task's existing artifact
+directory (no change to the rebase Task surface).
+Untestable: structural constraint; rebase Tasks are a separate kind
+with their own creation path not affected by this change.
+
 WHEN `factory work review <work-item-id> <attempt-id>` is invoked for an
 Attempt with completed write output,
 THE SYSTEM SHALL append planned `review` Tasks that read the candidate

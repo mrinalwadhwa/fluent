@@ -124,6 +124,7 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         &item,
         config.attempt_id,
         config.task_id,
+        config.project_root,
         &workspace_path,
         &input_artifacts,
         config.resolver,
@@ -1148,6 +1149,7 @@ fn run_task_coder(
     item: &WorkItem,
     attempt_id: &str,
     task_id: &str,
+    project_root: &Path,
     workspace_path: &Path,
     input_artifacts: &[PathBuf],
     resolver: &ContentResolver,
@@ -1184,6 +1186,15 @@ fn run_task_coder(
         task_json
     );
 
+    let transcript_path = task
+        .artifact_area
+        .as_ref()
+        .map(|a| project_root.join(&a.path).join("transcript.jsonl"));
+    if let Some(parent) = transcript_path.as_ref().and_then(|p| p.parent()) {
+        fs::create_dir_all(parent)
+            .context("Failed to create writer transcript artifact dir")?;
+    }
+
     let workspace_resolver = ContentResolver::new(Some(workspace_path));
     let system_prompt = workspace_resolver
         .resolve_content("prompts/work-author.md")
@@ -1193,11 +1204,17 @@ fn run_task_coder(
     } else {
         let common_git_dir = worktree::git_common_dir(workspace_path)?;
         let readable_roots = input_artifact_readable_roots(input_artifacts);
+        let mut additional_writable = vec![common_git_dir];
+        if let Some(ref tp) = transcript_path {
+            if let Some(artifact_dir) = tp.parent() {
+                additional_writable.push(artifact_dir.to_path_buf());
+            }
+        }
         build_coder_sandbox_with_writable_and_read_only_roots(
             coder_kind,
             resolver,
             workspace_path,
-            &[common_git_dir],
+            &additional_writable,
             &readable_roots,
         )?
     };
@@ -1215,7 +1232,7 @@ fn run_task_coder(
         workspace_path,
         extra_args,
         &[],
-        None,
+        transcript_path.as_deref(),
     )?;
     if exit_code == 0 {
         Ok(())

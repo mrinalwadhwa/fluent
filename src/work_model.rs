@@ -192,6 +192,7 @@ impl WorkItem {
 
         let task_id = format!("{attempt_id}-write-1");
         let workspace_path = initial_candidate_workspace_path(&self.id, &attempt_id);
+        let artifact_path = work_artifact_path(&self.id, &attempt_id, &task_id);
         self.attempts.push(Attempt {
             id: attempt_id.clone(),
             work_item_id: self.id.clone(),
@@ -212,7 +213,9 @@ impl WorkItem {
                         path: workspace_path,
                     }],
                 },
-                artifact_area: None,
+                artifact_area: Some(TaskArtifactArea {
+                    path: artifact_path,
+                }),
                 review_context: None,
                 input_artifacts: Vec::new(),
                 depends_on: None,
@@ -612,7 +615,9 @@ impl WorkItem {
                     path: write_output.workspace_path,
                 }],
             },
-            artifact_area: None,
+            artifact_area: Some(TaskArtifactArea {
+                path: work_artifact_path(&self.id, attempt_id, &task_id),
+            }),
             review_context: None,
             input_artifacts,
             depends_on: None,
@@ -3373,6 +3378,57 @@ mod tests {
         let review_task = task(TaskKind::Review, Vec::new());
         assert!(review_task.validate().is_ok());
         assert!(review_task.artifact_area.is_some());
+    }
+
+    #[test]
+    fn initial_write_task_has_artifact_area_path() {
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Write with artifacts".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        work_item.add_initial_attempt("attempt-1").unwrap();
+
+        let write_task = &work_item.attempts[0].tasks[0];
+        assert_eq!(write_task.kind, TaskKind::Write);
+        assert_eq!(
+            write_task.artifact_area.as_ref().unwrap().path,
+            ".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1"
+        );
+    }
+
+    #[test]
+    fn followup_write_task_has_artifact_area_path() {
+        let mut work_item = work_item_with_completed_write("work-1");
+        work_item
+            .add_next_review_tasks("attempt-1", &["tests"])
+            .unwrap();
+        work_item.attempts[0].tasks[1].status = TaskStatus::Complete;
+        let task_id = work_item
+            .add_next_write_round(
+                "attempt-1",
+                vec![ArtifactRef {
+                    producer_id: "attempt-1-review-tests".to_string(),
+                    path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
+                        .to_string(),
+                }],
+            )
+            .unwrap();
+
+        let followup_task = work_item.attempts[0]
+            .tasks
+            .iter()
+            .find(|t| t.id == task_id)
+            .unwrap();
+        assert_eq!(followup_task.kind, TaskKind::Write);
+        assert_eq!(
+            followup_task.artifact_area.as_ref().unwrap().path,
+            ".factory/work/artifacts/work-1/attempt-1/attempt-1-write-2"
+        );
     }
 
     #[test]

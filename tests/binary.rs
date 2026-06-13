@@ -1672,6 +1672,258 @@ exit 0
 }
 
 #[test]
+fn write_task_transcript_persists_after_successful_attempt() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+printf '{"type":"transcript","line":"hello"}\n'
+printf 'task output\n' > task-output.txt
+git add task-output.txt
+git commit -m "Add task output" >/dev/null
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Transcript test"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let transcript = main_dir.join(
+        ".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1/transcript.jsonl",
+    );
+    assert!(
+        transcript.is_file(),
+        "transcript.jsonl should exist at {}",
+        transcript.display()
+    );
+    let content = fs::read_to_string(&transcript).unwrap();
+    assert!(
+        content.contains("transcript"),
+        "transcript should contain mock coder output"
+    );
+
+    let value = work_item_value(&main_dir, "work-1");
+    let task = &value["attempts"][0]["tasks"][0];
+    assert_eq!(
+        task["artifact_area"]["path"],
+        ".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1"
+    );
+}
+
+#[test]
+fn write_task_transcript_persists_after_failed_attempt() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+printf '{"type":"partial","data":"before-failure"}\n'
+exit 1
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Fail transcript"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .output()
+        .unwrap();
+
+    let transcript = main_dir.join(
+        ".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1/transcript.jsonl",
+    );
+    assert!(
+        transcript.is_file(),
+        "transcript.jsonl should persist even on failure at {}",
+        transcript.display()
+    );
+    let content = fs::read_to_string(&transcript).unwrap();
+    assert!(
+        content.contains("before-failure"),
+        "partial transcript should contain content written before failure"
+    );
+}
+
+#[test]
+fn write_task_sandbox_grants_artifact_dir_write_access() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-write-sandbox");
+    let sandbox_profile_log = tmp.path().join("write-sandbox.sb");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+printf '{"type":"transcript"}\n'
+printf 'task output\n' > task-output.txt
+git add task-output.txt
+git commit -m "Add task output" >/dev/null
+exit 0
+"##,
+    );
+    write_mock_executable(
+        &bin_dir,
+        "sandbox-exec",
+        r##"#!/bin/bash
+if [ "$1" = "-f" ]; then
+  cp "$2" "$SANDBOX_PROFILE_LOG"
+  shift 2
+fi
+exec "$@"
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Sandbox test"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "attempt", "work-1", "attempt-1"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write-1",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("SANDBOX_PROFILE_LOG", &sandbox_profile_log)
+        .env("CLAUDE_CODE_OAUTH_TOKEN", "mock-token")
+        .assert()
+        .success();
+
+    let artifact_dir = fs::canonicalize(
+        main_dir.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1"),
+    )
+    .unwrap();
+    let sandbox_profile = fs::read_to_string(&sandbox_profile_log).unwrap();
+    assert!(
+        sandbox_profile.contains(&format!(
+            "(allow file-write* (subpath \"{}\"))",
+            artifact_dir.display()
+        )),
+        "sandbox should grant write access to artifact dir: {sandbox_profile}"
+    );
+}
+
+#[test]
+fn reviewer_sandbox_does_not_include_writer_artifact_dir() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let writer_artifact_dir =
+        main_dir.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1");
+    fs::create_dir_all(&writer_artifact_dir).unwrap();
+    fs::write(
+        writer_artifact_dir.join("transcript.jsonl"),
+        r#"{"type":"transcript","line":"writer content"}"#,
+    )
+    .unwrap();
+
+    let bin_dir = tmp.path().join("bin-review-check");
+    let sandbox_profile_log = tmp.path().join("reviewer-sandbox.sb");
+    write_mock_claude(
+        &bin_dir,
+        "#!/bin/bash\nprintf 'Verdict: pass\\n' > review.md\nexit 0\n",
+    );
+    write_mock_executable(
+        &bin_dir,
+        "sandbox-exec",
+        "#!/bin/bash\ncp \"$2\" \"${SANDBOX_PROFILE_LOG:?}\"\nshift 2\nexec \"$@\"\n",
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-review-tests",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("SANDBOX_PROFILE_LOG", &sandbox_profile_log)
+        .env("CLAUDE_CODE_OAUTH_TOKEN", "mock-token")
+        .env("BRAVE_SEARCH_API_KEY", "mock-key")
+        .env("AWS_ACCESS_KEY_ID", "mock-access")
+        .assert()
+        .success();
+
+    let writer_artifact_canonical = fs::canonicalize(&writer_artifact_dir).unwrap();
+    let sandbox_profile = fs::read_to_string(&sandbox_profile_log).unwrap();
+    assert!(
+        !sandbox_profile.contains(&format!(
+            "(allow file-read*  (subpath \"{}\"))",
+            writer_artifact_canonical.display()
+        )),
+        "reviewer sandbox should NOT include writer artifact dir for reading: {sandbox_profile}"
+    );
+    assert!(
+        !sandbox_profile.contains(&format!(
+            "(allow file-write* (subpath \"{}\"))",
+            writer_artifact_canonical.display()
+        )),
+        "reviewer sandbox should NOT include writer artifact dir for writing: {sandbox_profile}"
+    );
+}
+
+#[test]
 fn work_task_run_passes_task_context_to_coder_prompt() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
