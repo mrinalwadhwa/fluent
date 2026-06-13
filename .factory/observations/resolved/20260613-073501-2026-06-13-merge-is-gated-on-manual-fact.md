@@ -29,3 +29,5 @@ Auto-merge-when-reviews-pass would close the gap. Considerations:
 
 This is the single biggest speed lever once the rest of the pipeline
 is fast.
+
+→ Resolved: Resolved by Work Item work-auto-merge at c281dfc. factory work auto-merge --all polls every 30 seconds for ready Merge Candidates and invokes merge automatically. Skips on failure (via auto_merge_skipped field). Pauses on 401 without marking skipped.

@@ -12,3 +12,5 @@ separate from Factory's flag placement. Earlier failed smoke
 gap: the worktree run status was `failed`, while the source run
 directory still showed `planned` because failed worktree artifacts were
 not copied back.
+
+→ Resolved: Obsolete. Codex approval-flag fix was verified at the time; the nested-sandbox Operation-not-permitted issue is a developer-workflow concern (Codex inside an outer sandbox), not a Factory runtime concern. The status-propagation gap (worktree run vs source run directory) was a legacy run-model construct; the Work model uses split JSON storage and has no source-vs-worktree distinction.

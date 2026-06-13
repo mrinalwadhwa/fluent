@@ -9,3 +9,5 @@ but the queue agent can be intelligent — resolving simple conflicts,
 running targeted reviews on the merged code, and rejecting merges
 that break tests. Direct commits to main would be forbidden while
 the queue is active.
+
+→ Resolved: Substantially realized across multiple landed Work Items. The original 'parallel run merge failed because child runs were executing' surface is gone (slice 3 removed parent/child runs). The merge-queue concept is distributed across: Work model (independent Work Items with split state), agentic rebase (resolves trivial conflicts intelligently, demonstrated in production resolving documentation/behaviors.md conflict between concurrent merges), factory work auto-merge --all (polls and merges ready candidates), and post-merge review queue (targeted reviews on merged commits). 'Direct commits forbidden' isn't enforced but is a CLAUDE.md guideline.
