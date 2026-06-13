@@ -7,3 +7,5 @@ environment, and tests for launch, session loop, upload/download, and
 review artifacts. Until then, `factory run --runtime fargate --coder
 codex` should fail clearly instead of starting a run that breaks
 halfway through.
+
+→ Resolved: Resolved by Work Item fargate-codex-support at 438d834. Fargate base image now ships both claude-code and codex; entrypoint dispatches on FACTORY_CODER; host-side task launch passes the appropriate auth env var per coder.
