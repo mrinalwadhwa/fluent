@@ -25,12 +25,14 @@ impl AuthError {
 }
 
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(Debug, Clone))]
 struct KeychainEnvelope {
     #[serde(rename = "claudeAiOauth")]
     claude_ai_oauth: Option<ClaudeAiOauth>,
 }
 
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(Debug, Clone))]
 struct ClaudeAiOauth {
     #[serde(rename = "refreshToken")]
     refresh_token: Option<String>,
@@ -54,12 +56,8 @@ fn read_keychain() -> Option<ClaudeAiOauth> {
     envelope.claude_ai_oauth
 }
 
-/// Check that the Claude OAuth token has not expired (or is not about
-/// to expire within 5 minutes). Returns `Ok(())` when no keychain
-/// entry exists or the session has no refresh token, treating these as
-/// API-key-only paths that skip the check.
-pub fn ensure_not_expired() -> Result<(), AuthError> {
-    let Some(creds) = read_keychain() else {
+fn check_token_expiry(creds: Option<&ClaudeAiOauth>, now_ms: i64) -> Result<(), AuthError> {
+    let Some(creds) = creds else {
         return Ok(());
     };
 
@@ -67,7 +65,6 @@ pub fn ensure_not_expired() -> Result<(), AuthError> {
         return Ok(());
     }
 
-    let now_ms = chrono::Utc::now().timestamp_millis();
     if creds.expires_at - now_ms > EXPIRY_MARGIN_MS {
         return Ok(());
     }
@@ -75,6 +72,14 @@ pub fn ensure_not_expired() -> Result<(), AuthError> {
     Err(AuthError::Expired {
         expires_at: creds.expires_at,
     })
+}
+
+/// Check that the Claude auth token has not expired (or is not about
+/// to expire within 5 minutes). Returns `Ok(())` when no keychain
+/// entry exists or the session has no refresh token, treating these as
+/// API-key-only paths that skip the check.
+pub fn ensure_not_expired() -> Result<(), AuthError> {
+    check_token_expiry(read_keychain().as_ref(), chrono::Utc::now().timestamp_millis())
 }
 
 /// Walk a transcript JSONL file and return `AuthError::Rejected` if
@@ -110,6 +115,8 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    // -- user_message tests --
+
     #[test]
     fn auth_error_expired_user_message_names_login_action() {
         let err = AuthError::Expired {
@@ -144,7 +151,110 @@ mod tests {
         );
     }
 
-    // -- classify_transcript_401 tests ---
+    // -- KeychainEnvelope deserialization tests --
+
+    #[test]
+    fn keychain_envelope_deserializes_with_refresh_token() {
+        let json = r#"{"claudeAiOauth":{"accessToken":"at","refreshToken":"rt","expiresAt":1700000000000}}"#;
+        let envelope: KeychainEnvelope = serde_json::from_str(json).unwrap();
+        let creds = envelope.claude_ai_oauth.unwrap();
+        assert_eq!(creds.refresh_token.as_deref(), Some("rt"));
+        assert_eq!(creds.expires_at, 1_700_000_000_000);
+    }
+
+    #[test]
+    fn keychain_envelope_deserializes_without_refresh_token() {
+        let json = r#"{"claudeAiOauth":{"accessToken":"at","expiresAt":1700000000000}}"#;
+        let envelope: KeychainEnvelope = serde_json::from_str(json).unwrap();
+        let creds = envelope.claude_ai_oauth.unwrap();
+        assert!(creds.refresh_token.is_none());
+        assert_eq!(creds.expires_at, 1_700_000_000_000);
+    }
+
+    #[test]
+    fn keychain_envelope_deserializes_without_claude_ai_oauth() {
+        let json = r#"{"otherField":"value"}"#;
+        let envelope: KeychainEnvelope = serde_json::from_str(json).unwrap();
+        assert!(envelope.claude_ai_oauth.is_none());
+    }
+
+    // -- check_token_expiry tests --
+
+    #[test]
+    fn check_token_expiry_returns_ok_when_no_creds() {
+        assert!(check_token_expiry(None, 1_700_000_000_000).is_ok());
+    }
+
+    #[test]
+    fn check_token_expiry_returns_ok_when_no_refresh_token() {
+        let creds = ClaudeAiOauth {
+            refresh_token: None,
+            expires_at: 1_700_000_000_000,
+        };
+        assert!(check_token_expiry(Some(&creds), 1_700_000_000_000).is_ok());
+    }
+
+    #[test]
+    fn check_token_expiry_returns_ok_when_more_than_5min_remaining() {
+        let now_ms = 1_700_000_000_000i64;
+        let creds = ClaudeAiOauth {
+            refresh_token: Some("rt".into()),
+            expires_at: now_ms + EXPIRY_MARGIN_MS + 60_000,
+        };
+        assert!(check_token_expiry(Some(&creds), now_ms).is_ok());
+    }
+
+    #[test]
+    fn check_token_expiry_returns_expired_within_margin() {
+        let now_ms = 1_700_000_000_000i64;
+        let creds = ClaudeAiOauth {
+            refresh_token: Some("rt".into()),
+            expires_at: now_ms + EXPIRY_MARGIN_MS - 1_000,
+        };
+        let err = check_token_expiry(Some(&creds), now_ms).unwrap_err();
+        assert!(matches!(err, AuthError::Expired { .. }));
+    }
+
+    #[test]
+    fn check_token_expiry_returns_expired_when_already_expired() {
+        let now_ms = 1_700_000_000_000i64;
+        let creds = ClaudeAiOauth {
+            refresh_token: Some("rt".into()),
+            expires_at: now_ms - 60_000,
+        };
+        let err = check_token_expiry(Some(&creds), now_ms).unwrap_err();
+        match err {
+            AuthError::Expired { expires_at } => {
+                assert_eq!(expires_at, now_ms - 60_000);
+            }
+            _ => panic!("expected Expired variant"),
+        }
+    }
+
+    #[test]
+    fn check_token_expiry_boundary_at_exactly_5min() {
+        let now_ms = 1_700_000_000_000i64;
+
+        let creds_at_margin = ClaudeAiOauth {
+            refresh_token: Some("rt".into()),
+            expires_at: now_ms + EXPIRY_MARGIN_MS,
+        };
+        assert!(
+            check_token_expiry(Some(&creds_at_margin), now_ms).is_err(),
+            "exactly at margin (remaining == EXPIRY_MARGIN_MS) should be expired"
+        );
+
+        let creds_past_margin = ClaudeAiOauth {
+            refresh_token: Some("rt".into()),
+            expires_at: now_ms + EXPIRY_MARGIN_MS + 1,
+        };
+        assert!(
+            check_token_expiry(Some(&creds_past_margin), now_ms).is_ok(),
+            "1ms past margin should be ok"
+        );
+    }
+
+    // -- classify_transcript_401 tests --
 
     #[test]
     fn classify_transcript_401_returns_none_when_no_result_event() {
@@ -245,5 +355,30 @@ mod tests {
         drop(f);
 
         assert!(classify_transcript_401(&path).is_none());
+    }
+
+    #[test]
+    fn classify_transcript_401_skips_malformed_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        let mut f = File::create(&path).unwrap();
+        writeln!(f, "not valid json at all").unwrap();
+        writeln!(f, r#"{{"type":"system","subtype":"init"}}"#).unwrap();
+        writeln!(f, "{{broken json").unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"result","api_error_status":401,"request_id":"req-ok"}}"#
+        )
+        .unwrap();
+        writeln!(f, "trailing garbage").unwrap();
+        drop(f);
+
+        let err = classify_transcript_401(&path).expect("should detect 401 despite malformed lines");
+        match err {
+            AuthError::Rejected { request_id } => {
+                assert_eq!(request_id.as_deref(), Some("req-ok"));
+            }
+            _ => panic!("expected Rejected variant"),
+        }
     }
 }

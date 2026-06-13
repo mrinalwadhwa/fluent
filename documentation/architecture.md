@@ -370,7 +370,7 @@ behavior without further plumbing.
 | `FACTORY_RATE_LIMIT_RETRY_AFTER_SECS` | 1800 | Fallback wait when no structured timing is available |
 | `FACTORY_RATE_LIMIT_JITTER_MAX_SECONDS` | 30 | Maximum per-run jitter added to the retry wait |
 
-`claude_auth.rs` detects Claude OAuth token expiry before and during
+`claude_auth.rs` detects Claude auth token expiry before and during
 coder invocations, surfacing `needs-user` instead of letting the coder
 fail mid-Task with a cold 401. Two layers:
 
