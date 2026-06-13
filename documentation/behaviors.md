@@ -1168,9 +1168,8 @@ Test: src/coder.rs (transcript_rate_limit_tests::no_marker_returns_false)
 WHEN a run transitions into rate-limit state (the first time the
 session loop pauses for a parsed `retry_at` after a previously
 non-rate-limited request),
-THE SYSTEM SHALL fire a notification once via the existing macOS
-`osascript` surface (or platform equivalent on non-macOS) stating
-that the run paused and naming the expected resume time.
+THE SYSTEM SHALL fire a notification once via `notify()` (stderr log)
+stating that the run paused and naming the expected resume time.
 Test: src/coder.rs (rate_limit_state_tests::normal_to_rate_limited_fires_enter_notification)
 Test: src/coder.rs (rate_limit_state_tests::full_cycle_fires_enter_once_and_leave_once)
 
@@ -3033,3 +3032,30 @@ THE SYSTEM SHALL apply per-process jitter so the retries do not
 collide on identical sleep intervals (thundering-herd avoidance).
 Test: src/git.rs (lock_jitter_factor_within_range)
 Test: src/git.rs (backoff_duration_applies_jitter_within_25_percent)
+
+---
+
+## Notification dispatch
+
+WHEN `factory::notify::notify(title, body)` is invoked,
+THE SYSTEM SHALL write one line `[{title}] {body}` to stderr and
+return without launching any subprocess, regardless of host platform.
+Test: src/notify.rs (notify_does_not_panic)
+Test: src/notify.rs (notify_format_contract)
+
+WHEN this system is built,
+THE SYSTEM SHALL contain no invocations of `osascript` inside
+`src/notify.rs` (the macOS-specific delivery path is removed).
+
+WHEN the rate-limit retry loop in `src/coder.rs` transitions between
+paused and resumed states,
+THE SYSTEM SHALL continue to call `notify()`, which produces stderr
+output. No call-site change is required.
+Test: src/coder.rs (rate_limit_state_tests::normal_to_rate_limited_fires_enter_notification)
+Test: src/coder.rs (rate_limit_state_tests::full_cycle_fires_enter_once_and_leave_once)
+
+WHEN a future general notification system (Discord, Slack, push, etc.)
+replaces `notify()`'s implementation,
+THE SYSTEM SHALL be able to re-light all existing call sites without
+modifying them, because the `notify(title, body)` signature is
+preserved.

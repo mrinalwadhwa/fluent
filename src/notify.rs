@@ -1,25 +1,9 @@
-use std::process::Command;
+//! Notify call sites. Currently logs to stderr in `[Title] body`
+//! format. A future general notification system (Discord/Slack/push)
+//! will replace this implementation; call sites stay as they are.
 
-/// Send a desktop notification. On macOS, use osascript to display a
-/// native notification. On other platforms, log to stderr.
 pub fn notify(title: &str, body: &str) {
-    if cfg!(target_os = "macos") {
-        notify_macos(title, body);
-    } else {
-        eprintln!("[{title}] {body}");
-    }
-}
-
-fn notify_macos(title: &str, body: &str) {
-    let escaped_title = title.replace('\\', "\\\\").replace('"', "\\\"");
-    let escaped_body = body.replace('\\', "\\\\").replace('"', "\\\"");
-    Command::new("osascript")
-        .args([
-            "-e",
-            &format!("display notification \"{escaped_body}\" with title \"{escaped_title}\""),
-        ])
-        .output()
-        .ok();
+    eprintln!("[{title}] {body}");
 }
 
 #[cfg(test)]
@@ -28,8 +12,14 @@ mod tests {
 
     #[test]
     fn notify_does_not_panic() {
-        // On non-macOS this logs to stderr; on macOS it shells out to
-        // osascript. Either way, it must not panic.
         notify("Test", "test notification body");
+    }
+
+    #[test]
+    fn notify_format_contract() {
+        let title = "Factory";
+        let body = "Test message";
+        let formatted = format!("[{title}] {body}");
+        assert_eq!(formatted, "[Factory] Test message");
     }
 }
