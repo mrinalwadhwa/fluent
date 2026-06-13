@@ -668,17 +668,18 @@ fn rebase_candidate(
             writes: vec![candidate.source_workspace.clone()],
         },
         artifact_area: Some(crate::work_model::TaskArtifactArea {
-            path: work_artifact_path(
-                config.work_item_id,
-                &candidate.attempt_id,
-                &rebase_task_id,
-            ),
+            path: work_artifact_path(config.work_item_id, &candidate.attempt_id, &rebase_task_id),
         }),
         review_context: None,
         input_artifacts: Vec::new(),
         output: None,
     };
-    add_rebase_task_to_attempt(config.store, config.work_item_id, &candidate.attempt_id, rebase_task)?;
+    add_rebase_task_to_attempt(
+        config.store,
+        config.work_item_id,
+        &candidate.attempt_id,
+        rebase_task,
+    )?;
 
     let workspace_resolver = ContentResolver::new(Some(source_workspace));
     let system_prompt = workspace_resolver
@@ -781,7 +782,12 @@ fn rebase_candidate(
 fn next_rebase_task_id(item: &WorkItem, attempt_id: &str) -> String {
     let attempt = item.attempts.iter().find(|a| a.id == attempt_id);
     let existing_count = attempt
-        .map(|a| a.tasks.iter().filter(|t| t.kind == TaskKind::Rebase).count())
+        .map(|a| {
+            a.tasks
+                .iter()
+                .filter(|t| t.kind == TaskKind::Rebase)
+                .count()
+        })
         .unwrap_or(0);
     if existing_count == 0 {
         format!("{attempt_id}-rebase")
@@ -1298,8 +1304,7 @@ mod tests {
     fn regenerate_provenance_updates_all_write_tasks_and_candidate() {
         let (_tmp, store, _item, candidate_id) = completed_write_item();
 
-        regenerate_provenance(&store, "work-1", &candidate_id, "attempt-1", "new-tip-sha")
-            .unwrap();
+        regenerate_provenance(&store, "work-1", &candidate_id, "attempt-1", "new-tip-sha").unwrap();
 
         let item = store.read_work_item("work-1").unwrap();
         let attempt = &item.attempts[0];
@@ -1359,8 +1364,7 @@ mod tests {
         attempt.tasks.push(rebase_task);
         store.write_work_item(&item).unwrap();
 
-        regenerate_provenance(&store, "work-1", &candidate_id, "attempt-1", "new-tip-sha")
-            .unwrap();
+        regenerate_provenance(&store, "work-1", &candidate_id, "attempt-1", "new-tip-sha").unwrap();
 
         let item = store.read_work_item("work-1").unwrap();
         let attempt = &item.attempts[0];
@@ -1378,8 +1382,15 @@ mod tests {
         }
 
         // Rebase task should remain unmodified
-        let rebase = attempt.tasks.iter().find(|t| t.kind == TaskKind::Rebase).unwrap();
-        assert!(rebase.output.is_none(), "rebase task output should remain None");
+        let rebase = attempt
+            .tasks
+            .iter()
+            .find(|t| t.kind == TaskKind::Rebase)
+            .unwrap();
+        assert!(
+            rebase.output.is_none(),
+            "rebase task output should remain None"
+        );
 
         let candidate = item
             .merge_candidates

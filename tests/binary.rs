@@ -3529,10 +3529,7 @@ fn work_merge_candidate_rebase_failure_leaves_target_unchanged() {
         .success();
 
     let bin_dir = tmp.path().join("bin-rebase-conflict");
-    write_mock_claude(
-        &bin_dir,
-        &rebase_give_up_mock_script(),
-    );
+    write_mock_claude(&bin_dir, &rebase_give_up_mock_script());
     factory_cmd()
         .current_dir(&main_dir)
         .args([
