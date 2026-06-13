@@ -3063,3 +3063,55 @@ preserved.
 Untestable: design-intent constraint verified by code review; the
 guarantee is structural (public signature preservation), not
 observable at runtime.
+
+---
+
+## Easy-to-answer skill rule
+
+WHEN `skills/capture-brief/SKILL.md` is read after this Work Item
+lands,
+THE SYSTEM SHALL contain in its "Rules" section a short rule
+naming the two acceptable question patterns (labeled multi-option
+where the user types a single label, and yes/no with an implicit
+default) and naming the bad pattern (unlabeled "X or Y" requiring
+the user to re-describe an option).
+Test: tests/behaviors/operations/test-easy-to-answer-skill-rule.sh (rule present in capture-brief)
+
+WHEN `skills/define-behaviors/SKILL.md` is read after this Work
+Item lands,
+THE SYSTEM SHALL contain the same rule, with the same wording, in
+its "Rules" section (or equivalent).
+Test: tests/behaviors/operations/test-easy-to-answer-skill-rule.sh (rule present in define-behaviors)
+
+WHEN `skills/design-approach/SKILL.md` is read after this Work
+Item lands,
+THE SYSTEM SHALL contain the same rule, with the same wording, in
+its "Rules" section (or equivalent).
+Test: tests/behaviors/operations/test-easy-to-answer-skill-rule.sh (rule present in design-approach)
+
+WHEN `skills/plan-execution/SKILL.md` is read after this Work
+Item lands,
+THE SYSTEM SHALL contain the same rule, with the same wording, in
+its "Rules" section (or equivalent).
+Test: tests/behaviors/operations/test-easy-to-answer-skill-rule.sh (rule present in plan-execution)
+
+WHEN the rule is added to any skill,
+THE SYSTEM SHALL NOT add a new section above or below the
+existing "Rules" section; the rule lives within that section as
+one bullet (or short paragraph) consistent with the section's
+existing formatting.
+Untestable: Structural constraint verified by visual inspection
+
+WHEN any new bullet is added to a skill's "Rules" section as part
+of this Work Item,
+THE SYSTEM SHALL leave all other bullets in the section
+unchanged.
+Untestable: Structural constraint verified by visual inspection
+
+WHEN this Work Item lands,
+THE SYSTEM SHALL contain `Test:` references in
+`documentation/behaviors.md` for each new EARS statement here,
+covering the rule's presence in each of the four skills and
+the consistency of wording across them. Tests are shell-based
+grep checks (or equivalent) that the rule string is present.
+Test: tests/behaviors/operations/test-easy-to-answer-skill-rule.sh (wording consistency across all four skills)

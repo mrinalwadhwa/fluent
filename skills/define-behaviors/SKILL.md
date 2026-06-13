@@ -197,6 +197,12 @@ THE SYSTEM SHALL [observable behavior]
   approval. This applies through the entire conversation — including
   review output, triggering mechanics, and final assembly. Don't
   start with small pieces and then dump the rest at the end.
+- **Make questions easy to answer.** Either label the options
+  ((a), (b), (c)...) so the user types a single label, or ask
+  yes/no when one option is the obvious default. Avoid
+  unlabeled "Do you want X or Y?" forms — the user shouldn't
+  have to re-type or paraphrase an option's description as the
+  answer.
 - **One area at a time.** Don't overwhelm with the full picture until
   the pieces are agreed. Each area gets its own discussion turn.
 - **Observable, not internal.** Every behavior describes something a

@@ -310,6 +310,12 @@ groups run steps one at a time. Child run IDs are
 - **Interview, don't present.** Walk through steps with the user, one
   at a time or in small groups. Don't produce a finished plan and ask
   for approval.
+- **Make questions easy to answer.** Either label the options
+  ((a), (b), (c)...) so the user types a single label, or ask
+  yes/no when one option is the obvious default. Avoid
+  unlabeled "Do you want X or Y?" forms — the user shouldn't
+  have to re-type or paraphrase an option's description as the
+  answer.
 - **States, not activities.** Each step describes a state the system
   reaches — observable, testable. Push activity phrasing ("work on X")
   into state phrasing ("X works").

@@ -329,6 +329,12 @@ more "Unknowns." Both are valid briefs.
   add terminology they didn't use.
 - **Do not elaborate.** The brief captures intent, not design.
 - **One question at a time.** Do not stack questions.
+- **Make questions easy to answer.** Either label the options
+  ((a), (b), (c)...) so the user types a single label, or ask
+  yes/no when one option is the obvious default. Avoid
+  unlabeled "Do you want X or Y?" forms — the user shouldn't
+  have to re-type or paraphrase an option's description as the
+  answer.
 - **Short is correct.** A brief that's too long has crossed into the
   define-behaviors territory. Push detail to the next stage.
 - **Record unknowns explicitly.** "I don't know how auth should work" is

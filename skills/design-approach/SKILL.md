@@ -220,6 +220,12 @@ boundaries — enough to guide execution. Not a detailed design.]
   full conversation — decisions, solution outline, and risks each get
   their own discussion. Don't walk through decisions carefully and
   then dump the rest as one block.
+- **Make questions easy to answer.** Either label the options
+  ((a), (b), (c)...) so the user types a single label, or ask
+  yes/no when one option is the obvious default. Avoid
+  unlabeled "Do you want X or Y?" forms — the user shouldn't
+  have to re-type or paraphrase an option's description as the
+  answer.
 - **Direction, not commitment.** approach.md is a hypothesis. The
   executing agent can adapt it. The real architecture lands in
   architecture.md after implementation.
