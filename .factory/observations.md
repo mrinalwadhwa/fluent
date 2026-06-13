@@ -6,6 +6,15 @@ observations-resolved.md with the resolution context.
 
 ---
 
+2026-06-12 — The dashboard TUI needs a bigger overhaul; it is not
+usable in its current state. Rate-limit UX improvements that target
+the dashboard (countdown render, retry-now keybind) should land into
+whatever the dashboard overhaul produces, not into today's
+implementation. Capture the specific dashboard issues that motivate
+the overhaul (run-tab selection, polling cadence, overflow rendering,
+keybind set, content-density tradeoffs, etc.) before defining the
+overhaul's brief.
+
 2026-06-12 — Manage observations as independent files instead of one
 monolithic `observations.md`. Each observation gets its own file
 (e.g., `.factory/observations/<id>.md`) with its own filename-anchored
