@@ -3,6 +3,7 @@ pub mod behavior_tests;
 pub mod claude_auth;
 pub mod cleanup;
 pub mod cli;
+pub mod keep_awake;
 pub mod coder;
 pub mod content;
 pub mod credential;

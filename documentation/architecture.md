@@ -24,6 +24,7 @@ from intent capture through execution and review across multiple sessions.
 │  factory run / review / summary / watch         │
 │  factory resume / land / pull / shell           │
 │  factory fargate teardown / init / version      │
+│  factory keep-awake on / off / status           │
 │  Deterministic, operational                     │
 └─────────────────────────────────────────────────┘
 ```
@@ -1364,6 +1365,7 @@ factory/main/
     credential.rs            ← Keychain credential injection
     fargate_bootstrap.rs     ← JIT Fargate setup (CFN, base + project image builds)
     hooks.rs                 ← Project hook execution (.factory/hooks/<name>)
+    keep_awake.rs            ← macOS idle-sleep prevention toggle
     merge.rs                  ← Merging policy and pre-merge hook orchestration
     run.rs                   ← Run state, resolution, status
     session.rs               ← Session loop orchestration
@@ -1541,6 +1543,26 @@ task execution, or any other phase. It respects `--coder` and
 like other agent-invoking commands. Signal handling uses `ctrlc`
 with the `termination` feature to catch SIGINT and SIGTERM.
 In-progress merges run to completion before the watcher exits.
+
+### Keep-awake toggle
+
+`keep_awake.rs` prevents macOS idle sleep via a user-controlled
+`caffeinate -i` toggle. Four subcommands: `on`, `off`, `status`,
+`uninstall`. macOS-only; exits non-zero on other platforms.
+
+Process management uses a wrapper shell script at
+`~/.config/factory/keep-awake-caffeinate` that starts `caffeinate -i`
+in the background and handles signal forwarding via `trap`. The
+wrapper script path serves as the `pgrep -f` sentinel for process
+discovery — no pidfile needed.
+
+A LaunchAgent plist at
+`~/Library/LaunchAgents/com.factory.keep-awake.plist` persists the
+toggle state across reboots. `KeepAlive` and `RunAtLoad` are both
+`true` when on, both `false` when off. `on` bootstraps the
+LaunchAgent via `launchctl bootstrap gui/$UID`; `off` unloads it
+via `launchctl bootout` and rewrites the plist with both flags
+disabled. `uninstall` removes the plist and wrapper script entirely.
 
 ### Git wrapper
 

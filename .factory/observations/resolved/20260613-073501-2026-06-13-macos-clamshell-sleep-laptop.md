@@ -23,3 +23,5 @@ Considerations:
   back up" reliably on lid-open without dropping detached work.
 - Fargate runtime sidesteps this entirely — ECS tasks run in the
   cloud, no local power management to fight.
+
+→ Resolved: Resolved by Work Item keep-awake-toggle. Single 'factory keep-awake on/off/status/uninstall' toggle. Installs LaunchAgent on first 'on' so state persists across reboots. KeepAlive/RunAtLoad=true when on, false when off. Caffeinate process managed via wrapper script at ~/.config/factory/keep-awake-caffeinate; pgrep -f discovers it without a pidfile.

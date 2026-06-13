@@ -2885,3 +2885,82 @@ WHEN any Codex coder variant (`CodexCode`) is about to launch,
 THE SYSTEM SHALL NOT call `claude_auth::ensure_not_expired()`.
 Codex auth lifecycle is out of scope for this Work Item.
 Untestable: Structural absence verified by code inspection — `CodexCode::run` does not reference `claude_auth`
+
+## Keep-awake toggle
+
+WHEN `factory keep-awake on` is invoked on macOS,
+THE SYSTEM SHALL ensure a single `caffeinate -i` process managed by
+a Factory wrapper script is running, and print
+`keep-awake on (caffeinate PID <pid>)` to stdout.
+Test: tests/behaviors/operations/test-keep-awake.sh (on first invocation installs LaunchAgent and wrapper script)
+
+WHEN `factory keep-awake on` is invoked and a Factory-managed
+caffeinate process is already running,
+THE SYSTEM SHALL print `keep-awake already on (caffeinate PID
+<pid>)` to stdout and exit zero without spawning a duplicate.
+Test: tests/behaviors/operations/test-keep-awake.sh (on when already running prints already-on with PID)
+
+WHEN `factory keep-awake on` is invoked for the first time (no
+LaunchAgent plist installed),
+THE SYSTEM SHALL write the wrapper script to
+`~/.config/factory/keep-awake-caffeinate`, write
+`~/Library/LaunchAgents/com.factory.keep-awake.plist`, invoke
+`launchctl bootstrap gui/$UID <plist>`, and print one additional
+line confirming the LaunchAgent installation.
+Test: tests/behaviors/operations/test-keep-awake.sh (on first invocation installs LaunchAgent and wrapper script)
+
+WHEN `factory keep-awake on` succeeds,
+THE SYSTEM SHALL enable the LaunchAgent's RunAtLoad and KeepAlive
+policies so the user's intended-on state persists across reboots.
+Test: src/keep_awake.rs (plist_round_trips_keepalive_true)
+
+WHEN `factory keep-awake off` is invoked while a Factory-managed
+caffeinate process is running,
+THE SYSTEM SHALL invoke `launchctl bootout` to unload the
+LaunchAgent, rewrite the plist with KeepAlive and RunAtLoad
+disabled, wait for the process to exit, and print
+`keep-awake off` to stdout.
+Test: tests/behaviors/operations/test-keep-awake.sh (off when running calls bootout and updates plist)
+
+WHEN `factory keep-awake off` is invoked and no caffeinate process
+is running,
+THE SYSTEM SHALL print `keep-awake already off` to stdout, and
+exit zero.
+Test: tests/behaviors/operations/test-keep-awake.sh (off when not running prints already-off)
+
+WHEN `factory keep-awake status` is invoked,
+THE SYSTEM SHALL print `on (caffeinate PID <pid>)` if a
+Factory-managed caffeinate wrapper process is discoverable via
+`pgrep -f <sentinel>`, or `off` otherwise, to stdout.
+Test: tests/behaviors/operations/test-keep-awake.sh (status reports off when no caffeinate process is running)
+Test: tests/behaviors/operations/test-keep-awake.sh (status reports on with caffeinate PID when process is running)
+
+WHEN the macOS user logs in or the laptop boots,
+THE SYSTEM SHALL respect the last toggle state: if `off` was the
+most recent state, the LaunchAgent's disabled RunAtLoad and
+KeepAlive policies keep caffeinate from running; if `on` was the
+most recent state, launchctl starts caffeinate via the LaunchAgent.
+Untestable: Requires macOS login/reboot cycle
+
+WHEN `factory keep-awake uninstall` is invoked,
+THE SYSTEM SHALL send `SIGTERM` to the running caffeinate process
+if any, invoke `launchctl bootout` against the LaunchAgent,
+delete the plist file and wrapper script, and print a one-line
+confirmation.
+Test: tests/behaviors/operations/test-keep-awake.sh (uninstall removes plist and wrapper script)
+Test: tests/behaviors/operations/test-keep-awake.sh (uninstall when already uninstalled prints already-uninstalled)
+
+WHEN any `factory keep-awake` subcommand is invoked on a non-macOS
+platform,
+THE SYSTEM SHALL exit non-zero with a clear error stating the
+subcommand is macOS-only, and SHALL NOT touch the LaunchAgent or
+any other state.
+Test: src/keep_awake.rs (ensure_macos_errors_on_non_macos)
+
+WHEN the LaunchAgent spawns caffeinate at boot or login,
+THE SYSTEM SHALL use the Factory wrapper script at
+`~/.config/factory/keep-awake-caffeinate` as the ProgramArguments
+target so subsequent `status`, `off`, and `on` invocations
+correctly observe the running process via `pgrep -f` against the
+wrapper path.
+Test: src/keep_awake.rs (plist_contains_valid_xml_structure)

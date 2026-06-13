@@ -13,8 +13,8 @@ use factory::cleanup::{
 };
 use factory::cli;
 use factory::cli::{
-    Cli, Commands, FargateCommands, ObservationsCommands, WorkAttemptCommands, WorkCommands,
-    WorkTaskCommands,
+    Cli, Commands, FargateCommands, KeepAwakeCommands, ObservationsCommands, WorkAttemptCommands,
+    WorkCommands, WorkTaskCommands,
 };
 use factory::coder::{CoderKind, CoderSandbox};
 use factory::content::ContentResolver;
@@ -24,6 +24,7 @@ use factory::fargate;
 use factory::fargate_bootstrap;
 use factory::git;
 use factory::merge;
+use factory::keep_awake;
 use factory::observations;
 use factory::os;
 use factory::parallel;
@@ -236,6 +237,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Observations { command }) => {
             cmd_observations(&cwd, command)?;
+        }
+        Some(Commands::KeepAwake { command }) => {
+            cmd_keep_awake(command)?;
         }
         None => {
             let coder_kind = CoderKind::resolve(cli.coder.as_deref())?;
@@ -773,6 +777,16 @@ fn cmd_observations(project_root: &Path, command: ObservationsCommands) -> Resul
         ObservationsCommands::Show { id } => observations::show(project_root, &id),
         ObservationsCommands::Migrate => observations::migrate(project_root),
     }
+}
+
+fn cmd_keep_awake(command: KeepAwakeCommands) -> Result<()> {
+    let sub = match command {
+        KeepAwakeCommands::On => keep_awake::Subcommand::On,
+        KeepAwakeCommands::Off => keep_awake::Subcommand::Off,
+        KeepAwakeCommands::Status => keep_awake::Subcommand::Status,
+        KeepAwakeCommands::Uninstall => keep_awake::Subcommand::Uninstall,
+    };
+    keep_awake::run(sub)
 }
 
 fn cmd_interactive(

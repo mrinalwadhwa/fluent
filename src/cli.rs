@@ -206,6 +206,27 @@ pub enum Commands {
         #[command(subcommand)]
         command: ObservationsCommands,
     },
+
+    /// Prevent macOS idle sleep (caffeinate toggle)
+    KeepAwake {
+        #[command(subcommand)]
+        command: KeepAwakeCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum KeepAwakeCommands {
+    /// Enable keep-awake (start caffeinate, install LaunchAgent)
+    On,
+
+    /// Disable keep-awake (stop caffeinate, disable LaunchAgent)
+    Off,
+
+    /// Print current keep-awake state
+    Status,
+
+    /// Remove the LaunchAgent and stop caffeinate
+    Uninstall,
 }
 
 #[derive(Subcommand)]
