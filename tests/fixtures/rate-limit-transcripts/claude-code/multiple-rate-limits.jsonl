@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","session_id":"sess-005","model":"claude-opus-4-6"}
+{"type":"rate_limit_event","retry_after":60,"message":"First rate limit hit"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Resumed..."}]}}
+{"type":"rate_limit_event","retry_after":300,"message":"Second rate limit hit — retry after 300 seconds"}

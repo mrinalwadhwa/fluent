@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"thread-001"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"type":"agent_message","text":"Working..."}}
+{"type":"error","code":"rate_limit","retry_after":120,"message":"Rate limit exceeded. Retry after 120 seconds."}

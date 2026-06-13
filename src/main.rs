@@ -1528,12 +1528,5 @@ fn kill_existing_claude() -> Result<()> {
 }
 
 fn notify_status_change(body: &str) {
-    let escaped = body.replace('\\', "\\\\").replace('"', "\\\"");
-    Command::new("osascript")
-        .args([
-            "-e",
-            &format!("display notification \"{escaped}\" with title \"Factory\""),
-        ])
-        .output()
-        .ok();
+    factory::notify::notify("Factory", body);
 }

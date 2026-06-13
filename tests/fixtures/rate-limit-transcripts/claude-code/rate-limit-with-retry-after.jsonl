@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"sess-001","model":"claude-opus-4-6"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Working on the task..."}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"echo hello","description":"test"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"hello"}]}}
+{"type":"rate_limit_event","retry_after":300,"message":"You've hit your rate limit. Retry after 300 seconds."}

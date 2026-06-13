@@ -304,12 +304,17 @@ pub fn run_session_loop(
                 hooks.sleep(Duration::from_secs(2));
             }
             RunStatus::RateLimited => {
-                eprintln!("  Rate limited — waiting 5 minutes...");
+                let jitter = crate::coder::rate_limit_jitter();
+                let wait = Duration::from_secs(300) + jitter;
+                eprintln!(
+                    "  Rate limited — waiting {}s before retry.",
+                    wait.as_secs()
+                );
                 prompt = format!(
                     "Continue from the handoff at .factory/runs/{}/handoff.md",
                     run.id
                 );
-                hooks.sleep(Duration::from_secs(300));
+                hooks.sleep(wait);
             }
             _ => {
                 eprintln!("  Unexpected status \"{}\" — stopping.", status.as_str());

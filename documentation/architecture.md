@@ -309,11 +309,42 @@ panics or non-verdict errors are never retried — they fail the
 merge immediately.
 
 Coder runs whose transcript contains a session-limit or rate-limit
-marker are not treated as Task failures. The Coder wrapper sleeps
-`FACTORY_RATE_LIMIT_RETRY_AFTER_SECS` (default 1800 seconds) and
-retries the same coder invocation up to two more times before
-propagating the exit code. Author and reviewer Tasks inherit this
+marker are not treated as Task failures. The Coder wrapper parses
+structured rate-limit events from the transcript to determine when to
+retry:
+
+- Claude Code emits `{"type":"rate_limit_event","retry_after":N,...}`
+  with a `retry_after` (seconds), `retry_after_ms` (milliseconds),
+  or `reset_at` (ISO-8601 timestamp) field.
+- Codex emits `{"type":"error","code":"rate_limit","retry_after":N,...}`
+  with a `retry_after` (seconds) or `reset_at` field.
+
+When a structured event carries parseable timing, the wrapper
+computes a wait: `retry_at + jitter` where jitter is drawn uniformly
+from `[0, FACTORY_RATE_LIMIT_JITTER_MAX_SECONDS]` (default 30).
+When no structured timing is available, the wrapper falls back to
+`FACTORY_RATE_LIMIT_RETRY_AFTER_SECS` (default 1800 seconds) plus
+jitter — matching previous behavior on unstructured transcripts.
+
+Per-run jitter uses the process PID and nanosecond timestamp to
+produce independent values across concurrent Factory runs, preventing
+thundering-herd retries.
+
+The wrapper retries the same coder invocation up to two more times
+before propagating the exit code. A `RateLimitState` tracker fires
+macOS notifications (`osascript`) on state transitions: once on
+entering rate-limit state (naming the reason and expected resume
+time) and once on leaving (after the first successful invocation
+following a pause). Repeated retries within the same pause do not
+fire additional enter-state notifications.
+
+Author and reviewer Tasks inherit this
 behavior without further plumbing.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `FACTORY_RATE_LIMIT_RETRY_AFTER_SECS` | 1800 | Fallback wait when no structured timing is available |
+| `FACTORY_RATE_LIMIT_JITTER_MAX_SECONDS` | 30 | Maximum per-run jitter added to the retry wait |
 `factory cleanup` owns the terminal Work model cleanup lifecycle. It
 defaults to a dry run and only mutates state with `--apply`. A Work Item
 is eligible when every Attempt is terminal, every Task in those Attempts

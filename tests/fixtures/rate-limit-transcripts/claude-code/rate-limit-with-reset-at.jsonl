@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","session_id":"sess-002","model":"claude-opus-4-6"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Working on the task..."}]}}
+{"type":"rate_limit_event","reset_at":"2026-06-12T19:10:00Z","message":"You've hit your session limit · resets 7:10pm"}

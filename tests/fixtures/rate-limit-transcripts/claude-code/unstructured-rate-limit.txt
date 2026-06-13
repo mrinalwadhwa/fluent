@@ -1,0 +1,3 @@
+Some normal output line
+You've hit your session limit · resets 7:10pm (America/Los_Angeles)
+Error: Coder exited with code 1

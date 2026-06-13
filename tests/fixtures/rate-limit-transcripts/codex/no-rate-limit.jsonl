@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"thread-002"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"type":"agent_message","text":"Working..."}}
+{"type":"item.completed","item":{"type":"agent_message","text":"Done."}}
+{"type":"turn.completed"}

@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, SystemTime};
 
 const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-4-6";
 
@@ -353,15 +354,165 @@ fn run_with_transcript(mut cmd: Command, transcript_file: Option<&Path>) -> Resu
     }
 }
 
+// ---------------------------------------------------------------------------
+// Rate-limit parsing, jitter, and state tracking
+// ---------------------------------------------------------------------------
+
 const DEFAULT_RATE_LIMIT_RETRY_AFTER_SECS: u64 = 1800;
 const RATE_LIMIT_MAX_RETRIES: u32 = 2;
+const DEFAULT_JITTER_MAX_SECS: u64 = 30;
 
-fn rate_limit_retry_after() -> std::time::Duration {
+/// Parsed rate-limit info from a coder transcript.
+#[derive(Debug, Clone)]
+pub struct RateLimitInfo {
+    pub retry_at: SystemTime,
+    pub reason: String,
+}
+
+/// Track whether the retry loop is in a rate-limited state, so
+/// notifications fire on state transitions rather than on every retry.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+enum RateLimitState {
+    Normal,
+    RateLimited {
+        entered_at: SystemTime,
+        retry_at: SystemTime,
+    },
+}
+
+fn rate_limit_retry_after() -> Duration {
     let secs = std::env::var("FACTORY_RATE_LIMIT_RETRY_AFTER_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_RATE_LIMIT_RETRY_AFTER_SECS);
-    std::time::Duration::from_secs(secs)
+    Duration::from_secs(secs)
+}
+
+fn jitter_max_secs() -> u64 {
+    std::env::var("FACTORY_RATE_LIMIT_JITTER_MAX_SECONDS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_JITTER_MAX_SECS)
+}
+
+/// Per-process randomized jitter to stagger concurrent Factory runs.
+pub fn rate_limit_jitter() -> Duration {
+    let max = jitter_max_secs();
+    if max == 0 {
+        return Duration::ZERO;
+    }
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as u64;
+    let jitter_secs = (nanos ^ (std::process::id() as u64)) % (max + 1);
+    Duration::from_secs(jitter_secs)
+}
+
+/// Parse structured rate-limit info from a transcript JSONL file.
+///
+/// Walks all lines and returns the last (most recent) rate-limit event
+/// that contains parseable timing information. Returns `None` when no
+/// such event is found.
+///
+/// Handles two provider event shapes:
+/// - Claude Code: `{"type":"rate_limit_event","retry_after":N,...}` or
+///   `{"type":"rate_limit_event","reset_at":"ISO-8601",...}`
+/// - Codex: `{"type":"error","code":"rate_limit","retry_after":N,...}`
+pub fn parse_rate_limit_from_transcript(transcript_path: &Path) -> Option<RateLimitInfo> {
+    let file = File::open(transcript_path).ok()?;
+    let reader = BufReader::new(file);
+    let mut last: Option<RateLimitInfo> = None;
+
+    for line in reader.lines().map_while(Result::ok) {
+        let val: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let event_type = val["type"].as_str().unwrap_or("");
+
+        let info = match event_type {
+            "rate_limit_event" => parse_claude_rate_limit_event(&val),
+            "error" => parse_codex_error_event(&val),
+            _ => None,
+        };
+
+        if info.is_some() {
+            last = info;
+        }
+    }
+
+    last
+}
+
+/// Parse a Claude Code `rate_limit_event` into `RateLimitInfo`.
+///
+/// Accepted fields (checked in order):
+/// - `retry_after`: seconds until retry (integer)
+/// - `retry_after_ms`: milliseconds until retry (integer)
+/// - `reset_at`: ISO-8601 timestamp when the limit resets
+fn parse_claude_rate_limit_event(val: &serde_json::Value) -> Option<RateLimitInfo> {
+    let reason = val["message"]
+        .as_str()
+        .unwrap_or("Rate limited")
+        .to_string();
+
+    let retry_at = if let Some(secs) = val["retry_after"].as_u64() {
+        SystemTime::now() + Duration::from_secs(secs)
+    } else if let Some(ms) = val["retry_after_ms"].as_u64() {
+        SystemTime::now() + Duration::from_millis(ms)
+    } else if let Some(reset_str) = val["reset_at"].as_str() {
+        parse_iso8601_to_system_time(reset_str)?
+    } else {
+        return None;
+    };
+
+    Some(RateLimitInfo { retry_at, reason })
+}
+
+/// Parse a Codex `error` event with `code: "rate_limit"` into `RateLimitInfo`.
+fn parse_codex_error_event(val: &serde_json::Value) -> Option<RateLimitInfo> {
+    if val["code"].as_str() != Some("rate_limit") {
+        return None;
+    }
+
+    let reason = val["message"]
+        .as_str()
+        .unwrap_or("Rate limited")
+        .to_string();
+
+    let retry_at = if let Some(secs) = val["retry_after"].as_u64() {
+        SystemTime::now() + Duration::from_secs(secs)
+    } else if let Some(reset_str) = val["reset_at"].as_str() {
+        parse_iso8601_to_system_time(reset_str)?
+    } else {
+        return None;
+    };
+
+    Some(RateLimitInfo { retry_at, reason })
+}
+
+/// Parse an ISO-8601 UTC timestamp into `SystemTime`.
+fn parse_iso8601_to_system_time(s: &str) -> Option<SystemTime> {
+    let dt = chrono::DateTime::parse_from_rfc3339(s).ok()?;
+    let epoch_secs = dt.timestamp();
+    if epoch_secs < 0 {
+        return None;
+    }
+    let nanos = dt.timestamp_subsec_nanos();
+    Some(
+        SystemTime::UNIX_EPOCH
+            + Duration::from_secs(epoch_secs as u64)
+            + Duration::from_nanos(nanos as u64),
+    )
+}
+
+/// Format a `SystemTime` as a human-readable local time string.
+fn format_retry_time(t: SystemTime) -> String {
+    let dt: chrono::DateTime<chrono::Local> = t.into();
+    dt.format("%H:%M:%S").to_string()
 }
 
 /// Scan a transcript for a Claude session-limit marker. Returns true if the
@@ -382,26 +533,39 @@ pub fn transcript_indicates_rate_limit(transcript_path: &Path) -> bool {
 }
 
 /// Run a Coder command with rate-limit-aware retry. After a non-zero exit
-/// whose transcript contains a session-limit marker, sleep for the
-/// configured retry-after window and try again (up to a small bounded
-/// number of attempts). If no transcript is available the function behaves
-/// the same as `run_with_transcript`.
+/// whose transcript contains a rate-limit marker, parse the retry-after
+/// timing from the transcript, apply per-run jitter, and sleep before
+/// retrying. Falls back to the configured fixed wait when no structured
+/// timing is available. Fires notifications on rate-limit state transitions.
 fn run_with_transcript_retrying<F>(build_cmd: F, transcript_file: Option<&Path>) -> Result<i32>
 where
     F: Fn() -> Command,
 {
     let mut attempt: u32 = 0;
+    let mut rl_state = RateLimitState::Normal;
+
     loop {
         let exit = run_with_transcript(build_cmd(), transcript_file)?;
         if exit == 0 {
+            if matches!(rl_state, RateLimitState::RateLimited { .. }) {
+                crate::notify::notify("Factory", "Factory resumed after rate-limit pause.");
+                eprintln!("  Rate-limit cleared — resuming.");
+            }
             return Ok(exit);
         }
+
         let Some(path) = transcript_file else {
             return Ok(exit);
         };
-        if !transcript_indicates_rate_limit(path) {
+
+        // Try structured parsing first, then fall back to text detection.
+        let parsed = parse_rate_limit_from_transcript(path);
+        let is_rate_limited = parsed.is_some() || transcript_indicates_rate_limit(path);
+
+        if !is_rate_limited {
             return Ok(exit);
         }
+
         if attempt >= RATE_LIMIT_MAX_RETRIES {
             eprintln!(
                 "  Rate-limit detected on attempt {}; retry budget exhausted, propagating exit code {exit}.",
@@ -409,9 +573,45 @@ where
             );
             return Ok(exit);
         }
-        let wait = rate_limit_retry_after();
+
+        let jitter = rate_limit_jitter();
+
+        let (wait, reason) = if let Some(ref info) = parsed {
+            let now = SystemTime::now();
+            let base_wait = info
+                .retry_at
+                .duration_since(now)
+                .unwrap_or(Duration::ZERO);
+            (base_wait + jitter, info.reason.clone())
+        } else {
+            (rate_limit_retry_after() + jitter, "Rate limited".to_string())
+        };
+
+        // State transition notifications
+        match &rl_state {
+            RateLimitState::Normal => {
+                let retry_at = SystemTime::now() + wait;
+                let retry_time = format_retry_time(retry_at);
+                crate::notify::notify(
+                    "Factory",
+                    &format!("Factory paused: {reason}. Will retry at {retry_time}."),
+                );
+                rl_state = RateLimitState::RateLimited {
+                    entered_at: SystemTime::now(),
+                    retry_at,
+                };
+            }
+            RateLimitState::RateLimited { .. } => {
+                let retry_at = SystemTime::now() + wait;
+                rl_state = RateLimitState::RateLimited {
+                    entered_at: SystemTime::now(),
+                    retry_at,
+                };
+            }
+        }
+
         eprintln!(
-            "  Rate-limit detected on attempt {}; sleeping {}s before retry.",
+            "  Rate-limit detected on attempt {} ({reason}); sleeping {}s before retry.",
             attempt + 1,
             wait.as_secs()
         );
@@ -513,5 +713,269 @@ mod transcript_rate_limit_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nonexistent.txt");
         assert!(!transcript_indicates_rate_limit(&path));
+    }
+}
+
+#[cfg(test)]
+mod rate_limit_parsing_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn claude_code_parses_retry_after_seconds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        let mut f = File::create(&path).unwrap();
+        writeln!(f, r#"{{"type":"system","subtype":"init","session_id":"s1","model":"claude-opus-4-6"}}"#).unwrap();
+        writeln!(f, r#"{{"type":"rate_limit_event","retry_after":300,"message":"Rate limited for 5 minutes"}}"#).unwrap();
+        drop(f);
+
+        let info = parse_rate_limit_from_transcript(&path).expect("should parse");
+        assert_eq!(info.reason, "Rate limited for 5 minutes");
+        let until_retry = info.retry_at.duration_since(SystemTime::now()).unwrap();
+        assert!(until_retry.as_secs() <= 300);
+        assert!(until_retry.as_secs() >= 298);
+    }
+
+    #[test]
+    fn claude_code_parses_retry_after_ms() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        let mut f = File::create(&path).unwrap();
+        writeln!(f, r#"{{"type":"rate_limit_event","retry_after_ms":60000,"message":"Wait 60s"}}"#).unwrap();
+        drop(f);
+
+        let info = parse_rate_limit_from_transcript(&path).expect("should parse");
+        assert_eq!(info.reason, "Wait 60s");
+        let until_retry = info.retry_at.duration_since(SystemTime::now()).unwrap();
+        assert!(until_retry.as_secs() <= 60);
+        assert!(until_retry.as_secs() >= 58);
+    }
+
+    #[test]
+    fn claude_code_parses_reset_at_iso8601() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        let mut f = File::create(&path).unwrap();
+        writeln!(f, r#"{{"type":"rate_limit_event","reset_at":"2099-01-01T00:00:00Z","message":"Resets Jan 1"}}"#).unwrap();
+        drop(f);
+
+        let info = parse_rate_limit_from_transcript(&path).expect("should parse");
+        assert_eq!(info.reason, "Resets Jan 1");
+        assert!(info.retry_at > SystemTime::now());
+    }
+
+    #[test]
+    fn claude_code_returns_none_for_no_timing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        let mut f = File::create(&path).unwrap();
+        writeln!(f, r#"{{"type":"rate_limit_event"}}"#).unwrap();
+        drop(f);
+
+        assert!(parse_rate_limit_from_transcript(&path).is_none());
+    }
+
+    #[test]
+    fn claude_code_returns_none_for_unstructured_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.txt");
+        let mut f = File::create(&path).unwrap();
+        writeln!(f, "You've hit your session limit · resets 7:10pm").unwrap();
+        drop(f);
+
+        assert!(parse_rate_limit_from_transcript(&path).is_none());
+    }
+
+    #[test]
+    fn claude_code_returns_latest_event_when_multiple_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        let mut f = File::create(&path).unwrap();
+        writeln!(f, r#"{{"type":"rate_limit_event","retry_after":60,"message":"First"}}"#).unwrap();
+        writeln!(f, r#"{{"type":"rate_limit_event","retry_after":300,"message":"Second"}}"#).unwrap();
+        drop(f);
+
+        let info = parse_rate_limit_from_transcript(&path).expect("should parse");
+        assert_eq!(info.reason, "Second");
+        let until_retry = info.retry_at.duration_since(SystemTime::now()).unwrap();
+        assert!(until_retry.as_secs() >= 298);
+    }
+
+    #[test]
+    fn codex_parses_rate_limit_error_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        let mut f = File::create(&path).unwrap();
+        writeln!(f, r#"{{"type":"thread.started","thread_id":"t1"}}"#).unwrap();
+        writeln!(f, r#"{{"type":"error","code":"rate_limit","retry_after":120,"message":"Rate limit exceeded"}}"#).unwrap();
+        drop(f);
+
+        let info = parse_rate_limit_from_transcript(&path).expect("should parse");
+        assert_eq!(info.reason, "Rate limit exceeded");
+        let until_retry = info.retry_at.duration_since(SystemTime::now()).unwrap();
+        assert!(until_retry.as_secs() <= 120);
+        assert!(until_retry.as_secs() >= 118);
+    }
+
+    #[test]
+    fn codex_returns_none_for_non_rate_limit_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        let mut f = File::create(&path).unwrap();
+        writeln!(f, r#"{{"type":"error","code":"internal","message":"Something broke"}}"#).unwrap();
+        drop(f);
+
+        assert!(parse_rate_limit_from_transcript(&path).is_none());
+    }
+
+    #[test]
+    fn codex_returns_none_for_no_rate_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        let mut f = File::create(&path).unwrap();
+        writeln!(f, r#"{{"type":"thread.started","thread_id":"t1"}}"#).unwrap();
+        writeln!(f, r#"{{"type":"turn.completed"}}"#).unwrap();
+        drop(f);
+
+        assert!(parse_rate_limit_from_transcript(&path).is_none());
+    }
+
+    #[test]
+    fn returns_none_for_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.jsonl");
+        assert!(parse_rate_limit_from_transcript(&path).is_none());
+    }
+
+    #[test]
+    fn returns_none_for_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.jsonl");
+        File::create(&path).unwrap();
+        assert!(parse_rate_limit_from_transcript(&path).is_none());
+    }
+
+    #[test]
+    fn fixture_claude_code_retry_after() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/rate-limit-transcripts/claude-code/rate-limit-with-retry-after.jsonl");
+        let info = parse_rate_limit_from_transcript(&path).expect("should parse fixture");
+        assert_eq!(
+            info.reason,
+            "You've hit your rate limit. Retry after 300 seconds."
+        );
+    }
+
+    #[test]
+    fn fixture_claude_code_reset_at() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/rate-limit-transcripts/claude-code/rate-limit-with-reset-at.jsonl");
+        let info = parse_rate_limit_from_transcript(&path).expect("should parse fixture");
+        assert!(info.reason.contains("session limit"));
+    }
+
+    #[test]
+    fn fixture_claude_code_no_timing() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/rate-limit-transcripts/claude-code/rate-limit-no-timing.jsonl");
+        assert!(parse_rate_limit_from_transcript(&path).is_none());
+    }
+
+    #[test]
+    fn fixture_claude_code_no_rate_limit() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/rate-limit-transcripts/claude-code/no-rate-limit.jsonl");
+        assert!(parse_rate_limit_from_transcript(&path).is_none());
+    }
+
+    #[test]
+    fn fixture_claude_code_multiple_events() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/rate-limit-transcripts/claude-code/multiple-rate-limits.jsonl");
+        let info = parse_rate_limit_from_transcript(&path).expect("should parse fixture");
+        assert!(info.reason.contains("Second"));
+    }
+
+    #[test]
+    fn fixture_codex_retry_after() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/rate-limit-transcripts/codex/rate-limit-with-retry-after.jsonl");
+        let info = parse_rate_limit_from_transcript(&path).expect("should parse fixture");
+        assert_eq!(info.reason, "Rate limit exceeded. Retry after 120 seconds.");
+    }
+
+    #[test]
+    fn fixture_codex_no_rate_limit() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/rate-limit-transcripts/codex/no-rate-limit.jsonl");
+        assert!(parse_rate_limit_from_transcript(&path).is_none());
+    }
+}
+
+#[cfg(test)]
+mod jitter_tests {
+    use super::*;
+
+    #[test]
+    fn jitter_respects_max() {
+        let max = jitter_max_secs();
+        for _ in 0..100 {
+            let j = rate_limit_jitter();
+            assert!(j.as_secs() <= max);
+        }
+    }
+
+    #[test]
+    fn jitter_returns_zero_when_max_is_zero() {
+        // SAFETY: test-only, no concurrent env access expected.
+        unsafe {
+            std::env::set_var("FACTORY_RATE_LIMIT_JITTER_MAX_SECONDS", "0");
+        }
+        let j = rate_limit_jitter();
+        assert_eq!(j, Duration::ZERO);
+        unsafe {
+            std::env::remove_var("FACTORY_RATE_LIMIT_JITTER_MAX_SECONDS");
+        }
+    }
+}
+
+#[cfg(test)]
+mod rate_limit_state_tests {
+    use super::*;
+
+    #[test]
+    fn state_transitions_correctly() {
+        let mut state = RateLimitState::Normal;
+        assert!(matches!(state, RateLimitState::Normal));
+
+        let now = SystemTime::now();
+        state = RateLimitState::RateLimited {
+            entered_at: now,
+            retry_at: now + Duration::from_secs(300),
+        };
+        assert!(matches!(state, RateLimitState::RateLimited { .. }));
+
+        state = RateLimitState::Normal;
+        assert!(matches!(state, RateLimitState::Normal));
+    }
+
+    #[test]
+    fn rate_limited_to_rate_limited_preserves_entered_at() {
+        let entered = SystemTime::now();
+        let state = RateLimitState::RateLimited {
+            entered_at: entered,
+            retry_at: entered + Duration::from_secs(300),
+        };
+        assert!(matches!(state, RateLimitState::RateLimited { .. }));
+
+        let new_retry = SystemTime::now() + Duration::from_secs(600);
+        let state = RateLimitState::RateLimited {
+            entered_at: entered,
+            retry_at: new_retry,
+        };
+        if let RateLimitState::RateLimited { retry_at, .. } = state {
+            assert_eq!(retry_at, new_retry);
+        }
     }
 }
