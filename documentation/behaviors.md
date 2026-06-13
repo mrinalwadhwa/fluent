@@ -68,6 +68,7 @@ WHEN `factory observations resolve <id>` is invoked without an inline
 resolution argument,
 THE SYSTEM SHALL read the resolution body from stdin and SHALL fail
 with a clear error if stdin is empty.
+Untestable: Requires interactive stdin pipe not supported by current binary test harness
 
 IF `<id>` matches zero open observation files when resolving,
 THEN THE SYSTEM SHALL exit non-zero with an error naming the missing
@@ -290,6 +291,7 @@ Test: src/work_model.rs (latest_attempt_id_returns_last)
 WHEN `factory work attempt run <work-item-id> <attempt-id>` is invoked
 with an explicit attempt-id,
 THE SYSTEM SHALL operate on that exact Attempt.
+Test: tests/binary.rs (work_attempt_explicit_id_still_works)
 
 WHEN `factory work merge <work-item-id>` is invoked without a
 merge-candidate-id,
@@ -300,6 +302,7 @@ Test: src/work_model.rs (latest_merge_candidate_id_returns_last)
 WHEN `factory work merge <work-item-id> <merge-candidate-id>` is
 invoked with an explicit merge-candidate-id,
 THE SYSTEM SHALL use that exact Merge Candidate.
+Untestable: No binary test exercises explicit merge-candidate-id; implicit latest-candidate path is tested
 
 IF `factory work attempt run <work-item-id>` is invoked without an
 attempt-id and no Attempts exist on the Work Item,
@@ -618,18 +621,21 @@ Candidate, then spawn a detached `factory work post-merge-review run`
 child that sleeps the debounce window before reviewing. The merge
 command SHALL return immediately after spawning the child; no LLM
 reviewers run inside `factory work merge`.
+Untestable: Requires detached process spawn with debounce timing and queue file coordination
 
 WHEN `factory work post-merge-review run` runs,
 THE SYSTEM SHALL sleep the debounce window, then for each target
 branch with a queued entry at least `debounce_seconds` old, run a
 review-only Attempt against the target branch's current HEAD using
 the full reviewer set, and clear processed queue entries.
+Untestable: Requires end-to-end post-merge runner with debounce sleep and LLM reviewer set
 
 WHEN multiple merges arrive for the same target branch within the
 debounce window,
 THE SYSTEM SHALL coalesce them — only the latest entry triggers a
 review; earlier detached children wake up, see a newer entry, and
 exit. The single review covers the cumulative range.
+Untestable: Requires concurrent detached processes racing on debounce window timing
 
 WHEN the post-merge review finds any reviewer artifact with a failing
 or uncertain verdict,
@@ -639,6 +645,7 @@ and on a successful Merge Candidate auto-invoke `factory work merge`.
 The auto-merge spawns its own detached post-merge review with
 `FACTORY_POST_MERGE_REVIEW_FIX_DEPTH` incremented; recursion stops at
 `FACTORY_MAX_POST_MERGE_REVIEW_FIX_DEPTH` (default 5).
+Untestable: Requires end-to-end post-merge review with LLM reviewers, auto-fix, and recursive depth tracking
 
 WHEN the post-merge review runner spawns a review-only Attempt
 against the source checkout for a synthetic `post-merge-<branch>-<short>`
@@ -686,18 +693,21 @@ THEN THE SYSTEM SHALL collect those review artifacts and proceed to
 auto-create a `post-merge-review-fix-<branch>-<timestamp>` Work
 Item, regardless of whether peer reviewer tasks are in
 `failed`/`needs-user`/`complete` status.
+Untestable: Requires end-to-end post-merge review Attempt with mixed reviewer task states
 
 WHEN the post-merge review reads completed review artifacts to
 decide whether to create a forward-fix Work Item,
 THE SYSTEM SHALL include reviewers whose Task status is `failed`
 in addition to `complete`, treating any reviewer that wrote a
 review.md with a non-pass verdict as a finding source.
+Untestable: Requires end-to-end post-merge review with failed-status reviewer artifacts
 
 IF the post-merge review cannot create a forward-fix Work Item
 (e.g., because storage write fails),
 THEN THE SYSTEM SHALL log the failure to the post-merge review log
 and leave the synthetic Work Item state intact so an operator can
 inspect the findings manually.
+Untestable: Requires storage write failure injection during post-merge forward-fix creation
 
 WHEN `factory cleanup` runs and finds a sibling directory matching
 `../review-<bytelen>-<work-item-id>-<attempt-id>-<reviewer>` whose
@@ -905,6 +915,7 @@ each resolution,
 THE SYSTEM SHALL NOT invoke project hooks (e.g., format, lint).
 Post-rebase cleanup of the candidate state remains the responsibility of
 `fix-pre-merge`.
+Untestable: Requires LLM rebase agent resolving real conflicts to verify no hook invocation
 
 WHEN the rebase step completes successfully,
 THE SYSTEM SHALL proceed to `check-pre-merge` and `fix-pre-merge`
@@ -954,6 +965,7 @@ workspace with the failed merge-time review artifact paths as input
 artifacts, ask the coder to address the findings and commit, verify
 the workspace is clean and new commits were produced, then restart
 the merge loop from rebase, checks, and merge-time review.
+Untestable: Requires end-to-end merge with LLM reviewer verdicts and follow-up write cycle
 
 IF merge-time reviewer execution panics, launch-fails, or returns a
 non-verdict error,
@@ -961,6 +973,7 @@ THEN THE SYSTEM SHALL leave the target branch unchanged, record merge
 status `failed`, review state `failed`, the underlying error as the
 failure reason, and the partial review artifacts on the stored Merge
 Candidate. The merge loop SHALL NOT retry these non-verdict failures.
+Untestable: Requires reviewer panic or launch failure during live merge execution
 
 IF a merge-time reviewer modifies, stages, unstages, or creates files in
 the candidate workspace while `factory work merge <work-item-id>
@@ -1010,6 +1023,7 @@ reported `Progress: no`,
 THE SYSTEM SHALL mark the Attempt as `needs-user`, write a durable
 handoff naming the failed review artifacts and the consecutive
 no-progress streak, and SHALL NOT plan another write round.
+Untestable: Requires multiple consecutive review rounds with LLM reviewers all reporting Progress: no
 
 WHEN the Attempt's total completed write Tasks reach
 `FACTORY_MAX_TOTAL_WRITE_ROUNDS`,
@@ -1187,6 +1201,7 @@ WHEN no transcript file is configured for a Coder invocation,
 THE SYSTEM SHALL propagate the original exit code without rate-
 limit retry, since transient failure cannot be detected without
 the transcript content.
+Untestable: Negative code path; all production callers configure a transcript
 
 ## Brief capture
 
@@ -1209,6 +1224,7 @@ Test: tests/behaviors/operations/test-build-in-factory-work-model-guidance.sh
 WHEN the brief is confirmed by the user,
 THE SYSTEM SHALL keep the approved brief available for later planning and
 set legacy status to `briefed` only when using the legacy fallback.
+Untestable: Requires interactive user confirmation in a conversation session
 
 ## Behavior definition
 
@@ -1229,11 +1245,13 @@ WHEN the user invokes the design-approach skill,
 THE SYSTEM SHALL research external systems, evaluate options, and write
 approach.md with relevant expertise references, key technical decisions,
 and solution direction.
+Untestable: Requires interactive LLM skill invocation with codebase research
 
 WHEN the approach is approved by the user,
 THE SYSTEM SHALL keep the approach available for Work Item planning
 context and set legacy status to `approach-designed` only when using the
 legacy fallback.
+Untestable: Requires interactive user approval in a conversation session
 
 ## Execution planning
 
@@ -1900,8 +1918,8 @@ Test: src/summary.rs (summarize_prefers_review_state), src/report.rs (test_gener
 
 ## Parent death detection
 
-WHILE `factory watch` is running,
-IF the parent process exits (ppid changes),
+WHILE `factory watch` is running, IF the parent process exits
+(ppid changes),
 THEN THE SYSTEM SHALL stop polling and exit.
 Test: tests/behaviors/operations/test-watch-timeout.sh (watch detects parent exit)
 
@@ -2157,6 +2175,7 @@ WHEN a run is in the review phase,
 THE SYSTEM SHALL show each reviewer as an agent tab displaying a status
 symbol and color: ✓ (Green) for pass, ✗ (Red) for fail, ? (Yellow) for
 uncertain, ⟳ (Cyan) for running.
+Untestable: Requires live TUI rendering with review-phase run state and colored symbols
 
 WHEN a new review round starts,
 THE SYSTEM SHALL derive current reviewer tabs and verdicts only from
@@ -2205,26 +2224,31 @@ WHEN the dashboard legacy Runs view is displayed,
 THE SYSTEM SHALL render five vertical regions: header (run ID, status,
 session count, event count), run tabs, agent tabs, activity feed, and
 help bar.
+Untestable: Requires live TUI rendering of five-region vertical layout
 
 ### Dashboard keyboard navigation
 
 WHEN the user presses `q` or Ctrl+C,
 THE SYSTEM SHALL exit the dashboard and restore the terminal.
+Untestable: Requires live terminal restore after process exit
 
 WHEN the user presses Tab,
 THE SYSTEM SHALL select the next agent tab within the current run,
 display that tab's transcript, report, or review artifact content in the
 activity feed, reset the scroll position, and re-enable auto-scroll.
+Untestable: Requires live TUI keyboard dispatch with visual feed update and scroll reset
 
 WHEN the user presses Shift-Tab,
 THE SYSTEM SHALL select the previous agent tab within the current run,
 display that tab's transcript, report, or review artifact content in the
 activity feed, reset the scroll position, and re-enable auto-scroll.
+Untestable: Requires live TUI keyboard dispatch with visual feed update and scroll reset
 
 WHEN the user presses ← or →,
 THE SYSTEM SHALL select the previous or next run and display that run's
 activity feed. Each run preserves its own scroll position and auto-scroll
 state independently.
+Untestable: Requires live TUI with multiple runs and per-run scroll state preservation
 
 WHEN the user presses j, k, ↑, or ↓,
 THE SYSTEM SHALL scroll the activity feed by one line and disable
@@ -2240,6 +2264,7 @@ Test: dashboard::tests::test_scroll_to_bottom_enables_auto_scroll
 WHEN the user presses g or Home,
 THE SYSTEM SHALL scroll the activity feed to the top and disable
 auto-scroll.
+Untestable: Requires live TUI keyboard dispatch with scroll position and auto-scroll toggle
 
 WHEN the user presses PgUp or PgDn,
 THE SYSTEM SHALL scroll the activity feed by 20 lines. If PgDn reaches
@@ -2251,6 +2276,7 @@ Test: dashboard::tests::test_page_down_reenables_auto_scroll_at_bottom
 WHEN the user scrolls the mouse wheel up,
 THE SYSTEM SHALL scroll the activity feed up by 3 lines and disable
 auto-scroll.
+Untestable: Requires live TUI mouse event capture with scroll position tracking
 
 WHEN the user scrolls the mouse wheel down,
 THE SYSTEM SHALL scroll the activity feed down by 3 lines. If the scroll
@@ -2279,12 +2305,14 @@ Test: dashboard::tests::test_strip_ansi_csi_terminator_preserves_next_char, dash
 
 WHILE auto-scroll is enabled,
 THE SYSTEM SHALL keep the bottom of the feed visible as new events arrive.
+Untestable: Requires live TUI feed rendering with streaming event arrival
 
 ### Dashboard render and poll cadence
 
 WHILE the dashboard is running,
 THE SYSTEM SHALL render frames at ~75ms intervals for smooth animation
 and poll for new data at ~2s intervals to avoid unnecessary I/O.
+Untestable: Requires timing measurement of render and poll intervals in live TUI
 
 ## Parallel plan execution
 
@@ -2396,18 +2424,21 @@ Test: tests/binary.rs (fargate_ensure_setup_skips_project_build_when_ecr_tag_exi
 WHEN `factory work merge --runtime fargate` runs,
 THE SYSTEM SHALL launch the ECS task using the project image whose
 tag matches the SHA-256 of `.factory/Dockerfile` at launch time.
+Untestable: Requires live ECS task launch with ECR project image
 
 WHEN `factory work merge --runtime fargate` runs and the project
 image for the current `.factory/Dockerfile` content hash does not
 exist in ECR,
 THE SYSTEM SHALL build and push the project image (same procedure
 as bootstrap) before launching the ECS task.
+Untestable: Requires ECR image absence detection and Docker build during ECS launch
 
 WHEN a local Attempt or local post-merge review runs (no `--runtime
 fargate`),
 THE SYSTEM SHALL NOT consult `.factory/Dockerfile` and SHALL NOT
 build or launch any container; the user's local environment is used
 as today.
+Untestable: Negative behavior; local execution is the default path tested by all non-Fargate tests
 
 WHEN `factory fargate teardown` runs,
 THE SYSTEM SHALL delete both the Factory base image tags and the
@@ -2420,6 +2451,7 @@ image,
 THE SYSTEM SHALL produce an image that contains `rustc`, `cargo`,
 `rustfmt`, and `clippy` such that `cargo fmt --check`, `cargo test`,
 and `cargo clippy` execute successfully under the merge-check hook.
+Untestable: Requires Docker image build and Rust toolchain verification inside container
 
 IF the project's `.factory/Dockerfile` cannot be built (syntax
 error, unreachable base image, network failure during `docker
@@ -2428,12 +2460,14 @@ THEN `factory fargate ensure-setup` and `factory work merge
 --runtime fargate` SHALL exit non-zero with a clear error that
 names the failing build step and leaves the project's ECR repo
 unchanged.
+Untestable: Requires Docker build failure during Fargate bootstrap or merge
 
 WHEN the project's `.factory/Dockerfile` references a `FROM
 <ecr-uri>/factory-base:<version>` tag that does not exist in ECR,
 THE SYSTEM SHALL surface the missing-tag error from `docker build`
 to the user without retry, so the user can either bump Factory to
 match the referenced base or update the `FROM` line.
+Untestable: Requires Docker build with missing ECR base image tag
 
 ## Non-interactive git defaults
 

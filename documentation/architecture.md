@@ -390,7 +390,7 @@ managed sibling path and are registered git worktrees.
 |---|---|
 | Work Item | Planned Factory work. Planning operates on work items. |
 | Attempt | One execution history branch under a work item. Attempts are visible state and history, but they are usually not their own queue. |
-| Task | Schedulable unit of work. Task kinds stay generic: `write`, `review`, `merge`, `report`, `learn`, and `probe`. Roles carry prompt and domain behavior. |
+| Task | Schedulable unit of work. Task kinds stay generic: `write`, `review`, `merge`, `report`, `learn`, `probe`, and `behavior-tests`. Roles carry prompt and domain behavior. |
 | Workspace | Factory-managed filesystem/git context. A task may read many workspaces and write at most one. |
 | Merge Candidate | Candidate result prepared for merge. Its review state is separate from attempt review state. |
 
@@ -426,8 +426,8 @@ the core model.
 }
 ```
 
-The `kind` field accepts only `write`, `review`, `merge`, `report`,
-`learn`, or `probe`. `workspace_access.reads` may list any number of
+The `kind` field accepts `write`, `review`, `merge`, `report`,
+`learn`, `probe`, or `behavior-tests`. `workspace_access.reads` may list any number of
 workspaces. `workspace_access.writes` may be empty or contain one
 workspace. A `review` task must keep `writes` empty; reviewers write
 findings and notes under a required `artifact_area`.
@@ -1347,6 +1347,7 @@ factory/main/
     dashboard.rs             ← Live TUI for run activity
     summary.rs               ← Text run summary from durable artifacts
     transcript.rs            ← Parse stream-json transcripts incrementally
+    behavior_tests.rs        ← BehaviorTests results schema
     work_model.rs            ← Core Work Item / Attempt / Task model
     work_status.rs           ← Summarize Work Items for status and dashboard
     work_merge_executor.rs   ← Execute Work Merge Candidates
@@ -1379,6 +1380,7 @@ factory/main/
     work/                    ← Work model durable state (not tracked)
   prompts/                   ← agent system prompts
     author.md
+    behavior-tests.md        ← BehaviorTests agent prompt
     review-architecture.md
     review-behaviors.md
     review-documentation.md
