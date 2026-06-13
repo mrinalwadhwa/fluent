@@ -11619,3 +11619,371 @@ fn post_merge_review_preflight_allows_non_factory_worktree_changes() {
         "user's concurrent edit should be preserved"
     );
 }
+
+// --- Observations management ---
+
+#[test]
+fn observations_add_with_inline_content() {
+    let tmp = TempDir::new().unwrap();
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["observations", "add", "Test observation content"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "add should succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let id = stdout.trim();
+    assert!(!id.is_empty(), "should print the generated ID");
+    assert!(
+        id.contains("-test-observation-content"),
+        "ID should contain slugified title: {id}"
+    );
+
+    let obs_dir = tmp.path().join(".factory/observations");
+    let file = obs_dir.join(format!("{id}.md"));
+    assert!(file.exists(), "observation file should exist");
+    let content = fs::read_to_string(&file).unwrap();
+    assert!(content.contains("Test observation content"));
+}
+
+#[test]
+fn observations_add_from_stdin() {
+    let tmp = TempDir::new().unwrap();
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["observations", "add"])
+        .write_stdin("Observation from stdin")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "add from stdin should succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let id = stdout.trim();
+    assert!(!id.is_empty());
+
+    let file = tmp
+        .path()
+        .join(format!(".factory/observations/{id}.md"));
+    assert!(file.exists(), "observation file should exist");
+    let content = fs::read_to_string(&file).unwrap();
+    assert!(content.contains("Observation from stdin"));
+}
+
+#[test]
+fn observations_add_empty_stdin_errors() {
+    let tmp = TempDir::new().unwrap();
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["observations", "add"])
+        .write_stdin("")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "add with empty stdin should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("No content provided on stdin"),
+        "should show error message: {stderr}"
+    );
+}
+
+#[test]
+fn observations_resolve_inline() {
+    let tmp = TempDir::new().unwrap();
+    let obs_dir = tmp.path().join(".factory/observations");
+    fs::create_dir_all(&obs_dir).unwrap();
+    fs::write(obs_dir.join("20260612-000000-test-obs.md"), "Test obs body\n").unwrap();
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["observations", "resolve", "20260612-000000-test-obs", "Fixed it"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "resolve should succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        !obs_dir.join("20260612-000000-test-obs.md").exists(),
+        "open file should be removed"
+    );
+
+    let resolved = obs_dir.join("resolved/20260612-000000-test-obs.md");
+    assert!(resolved.exists(), "resolved file should exist");
+    let content = fs::read_to_string(&resolved).unwrap();
+    assert!(content.contains("Test obs body"));
+    assert!(content.contains("Resolved: Fixed it"));
+}
+
+#[test]
+fn observations_resolve_unknown_id_errors() {
+    let tmp = TempDir::new().unwrap();
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["observations", "resolve", "nonexistent-id", "whatever"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "resolve unknown id should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("No open observation matching"),
+        "should name the missing id: {stderr}"
+    );
+}
+
+#[test]
+fn observations_resolve_prefix_unique_match() {
+    let tmp = TempDir::new().unwrap();
+    let obs_dir = tmp.path().join(".factory/observations");
+    fs::create_dir_all(&obs_dir).unwrap();
+    fs::write(
+        obs_dir.join("20260612-143000-unique-entry.md"),
+        "Unique observation\n",
+    )
+    .unwrap();
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["observations", "resolve", "20260612-143", "Done"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "prefix resolve should succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.trim(), "20260612-143000-unique-entry");
+
+    assert!(!obs_dir.join("20260612-143000-unique-entry.md").exists());
+    assert!(obs_dir
+        .join("resolved/20260612-143000-unique-entry.md")
+        .exists());
+}
+
+#[test]
+fn observations_resolve_prefix_ambiguous_errors() {
+    let tmp = TempDir::new().unwrap();
+    let obs_dir = tmp.path().join(".factory/observations");
+    fs::create_dir_all(&obs_dir).unwrap();
+    fs::write(obs_dir.join("20260612-000000-alpha.md"), "a\n").unwrap();
+    fs::write(obs_dir.join("20260612-000000-bravo.md"), "b\n").unwrap();
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["observations", "resolve", "20260612", "Done"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "ambiguous prefix should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Ambiguous prefix"),
+        "should mention ambiguous prefix: {stderr}"
+    );
+    assert!(
+        stderr.contains("20260612-000000-alpha"),
+        "should list matching ids: {stderr}"
+    );
+}
+
+#[test]
+fn observations_list_orders_chronologically() {
+    let tmp = TempDir::new().unwrap();
+    let obs_dir = tmp.path().join(".factory/observations");
+    fs::create_dir_all(&obs_dir).unwrap();
+    fs::write(obs_dir.join("20260612-120000-second.md"), "Second entry\n").unwrap();
+    fs::write(obs_dir.join("20260611-100000-first.md"), "First entry\n").unwrap();
+    fs::write(obs_dir.join("20260613-080000-third.md"), "Third entry\n").unwrap();
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["observations", "list"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "list should succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 3);
+    assert!(lines[0].starts_with("20260611-100000-first"));
+    assert!(lines[1].starts_with("20260612-120000-second"));
+    assert!(lines[2].starts_with("20260613-080000-third"));
+    assert!(lines[0].contains("First entry"));
+}
+
+#[test]
+fn observations_show_open_and_resolved() {
+    let tmp = TempDir::new().unwrap();
+    let obs_dir = tmp.path().join(".factory/observations");
+    let resolved_dir = obs_dir.join("resolved");
+    fs::create_dir_all(&resolved_dir).unwrap();
+    fs::write(obs_dir.join("20260612-open.md"), "Open observation body\n").unwrap();
+    fs::write(
+        resolved_dir.join("20260611-resolved.md"),
+        "Resolved observation body\n",
+    )
+    .unwrap();
+
+    // Show open observation
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["observations", "show", "20260612-open"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Open observation body"));
+
+    // Show resolved observation (falls back to resolved dir)
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["observations", "show", "20260611-resolved"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Resolved observation body"));
+
+    // Show unknown observation
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["observations", "show", "nonexistent"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+}
+
+#[test]
+fn observations_migrate_splits_monolithic_files() {
+    let tmp = TempDir::new().unwrap();
+    let factory = tmp.path().join(".factory");
+    fs::create_dir_all(&factory).unwrap();
+
+    fs::write(
+        factory.join("observations.md"),
+        "# Observations\n\nOpen queue.\n\n---\n\n\
+         2026-06-12 \u{2014} First open observation\nDetails here.\n\n\
+         2026-06-12 \u{2014} Second open observation\nMore details.\n",
+    )
+    .unwrap();
+
+    fs::write(
+        factory.join("observations-resolved.md"),
+        "# Resolved Observations\n\nResolved queue.\n\n---\n\n\
+         2026-06-11 \u{2014} Old resolved observation\n\u{2192} Resolved: fixed.\n",
+    )
+    .unwrap();
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["observations", "migrate"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "migrate should succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Monolithic files removed
+    assert!(
+        !factory.join("observations.md").exists(),
+        "observations.md should be removed"
+    );
+    assert!(
+        !factory.join("observations-resolved.md").exists(),
+        "observations-resolved.md should be removed"
+    );
+
+    // Per-file layout exists
+    let obs_dir = factory.join("observations");
+    assert!(obs_dir.is_dir());
+    assert!(obs_dir.join("resolved").is_dir());
+
+    // Open observations split correctly
+    let open_files: Vec<String> = fs::read_dir(&obs_dir)
+        .unwrap()
+        .filter_map(|e| {
+            let e = e.ok()?;
+            if e.file_type().ok()?.is_file() {
+                Some(e.file_name().to_string_lossy().to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(open_files.len(), 2, "should have two open observation files");
+
+    // Resolved observations split correctly
+    let resolved_files: Vec<String> = fs::read_dir(obs_dir.join("resolved"))
+        .unwrap()
+        .filter_map(|e| {
+            let e = e.ok()?;
+            Some(e.file_name().to_string_lossy().to_string())
+        })
+        .collect();
+    assert_eq!(
+        resolved_files.len(),
+        1,
+        "should have one resolved observation file"
+    );
+
+    // Content preserved verbatim
+    let resolved_file = obs_dir.join("resolved").join(&resolved_files[0]);
+    let content = fs::read_to_string(&resolved_file).unwrap();
+    assert!(
+        content.contains("Old resolved observation"),
+        "resolved content should be preserved"
+    );
+    assert!(
+        content.contains("\u{2192} Resolved: fixed."),
+        "resolution context should be preserved"
+    );
+
+    // Idempotent: second run is a no-op
+    let output2 = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["observations", "migrate"])
+        .output()
+        .unwrap();
+    assert!(output2.status.success());
+    let stdout2 = String::from_utf8_lossy(&output2.stdout);
+    assert!(stdout2.contains("Nothing to migrate"));
+}

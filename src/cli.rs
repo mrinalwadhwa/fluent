@@ -200,6 +200,42 @@ pub enum Commands {
 
     /// Print Factory version and build commit
     Version,
+
+    /// Manage per-file observations
+    Observations {
+        #[command(subcommand)]
+        command: ObservationsCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ObservationsCommands {
+    /// Record a new observation
+    Add {
+        /// Observation content (reads from stdin when absent)
+        content: Option<String>,
+    },
+
+    /// Resolve an open observation
+    Resolve {
+        /// Observation ID or unique prefix
+        id: String,
+
+        /// Resolution context (reads from stdin when absent)
+        resolution: Option<String>,
+    },
+
+    /// List open observations
+    List,
+
+    /// Print the body of one observation
+    Show {
+        /// Observation ID or unique prefix
+        id: String,
+    },
+
+    /// Migrate monolithic observation files to per-file layout
+    Migrate,
 }
 
 #[derive(Subcommand)]

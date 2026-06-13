@@ -27,6 +27,93 @@ stdout and exit successfully without requiring a Factory project.
 Test: tests/binary.rs (version_prints_package_version_and_commit)
 Test: tests/behaviors/operations/test-version.sh
 
+## Observations management
+
+WHEN `factory observations add "<content>"` is invoked,
+THE SYSTEM SHALL write a new observation file at
+`.factory/observations/<id>.md` where `<id>` follows the format
+`YYYYMMDD-HHMMSS-<short-title>` derived from the current timestamp
+and a sanitized kebab form of the content's first line, and SHALL
+print the generated `<id>` on stdout.
+Test: tests/binary.rs (observations_add_with_inline_content)
+Test: src/observations.rs (generate_id_includes_timestamp_and_slug)
+
+WHEN `factory observations add` is invoked without an inline content
+argument,
+THE SYSTEM SHALL read the observation body from stdin and SHALL fail
+with a clear error if stdin is empty.
+Test: tests/binary.rs (observations_add_from_stdin)
+Test: tests/binary.rs (observations_add_empty_stdin_errors)
+
+WHEN two `factory observations add` invocations would generate the
+same `<id>` (same second, same first-line title),
+THE SYSTEM SHALL suffix the second with a counter
+(`YYYYMMDD-HHMMSS-<short-title>-2`) so the resulting filenames are
+unique.
+Test: src/observations.rs (resolve_collision_sequential_suffixes)
+Test: src/observations.rs (migrate_collision_suffixes)
+
+WHEN `factory observations resolve <id> "<resolution>"` is invoked
+and `<id>` matches exactly one file under `.factory/observations/`,
+THE SYSTEM SHALL append the resolution context to the file
+(preserving the existing observation content) and move the file to
+`.factory/observations/resolved/<id>.md`.
+Test: tests/binary.rs (observations_resolve_inline)
+
+WHEN `factory observations resolve <id>` is invoked without an inline
+resolution argument,
+THE SYSTEM SHALL read the resolution body from stdin and SHALL fail
+with a clear error if stdin is empty.
+
+IF `<id>` matches zero open observation files when resolving,
+THEN THE SYSTEM SHALL exit non-zero with an error naming the missing
+id.
+Test: tests/binary.rs (observations_resolve_unknown_id_errors)
+
+IF `<id>` is supplied as a unique prefix of exactly one open
+observation id,
+THEN THE SYSTEM SHALL expand it to the full id for `resolve` and
+`show`.
+Test: tests/binary.rs (observations_resolve_prefix_unique_match)
+Test: src/observations.rs (expand_prefix_unique_match)
+
+IF `<id>` is supplied as a prefix that matches multiple ids,
+THEN THE SYSTEM SHALL exit non-zero, list the matches, and ask the
+user to disambiguate.
+Test: tests/binary.rs (observations_resolve_prefix_ambiguous_errors)
+Test: src/observations.rs (expand_prefix_ambiguous)
+
+WHEN `factory observations list` is invoked,
+THE SYSTEM SHALL print one line per open observation under
+`.factory/observations/`, ordered by id ascending (chronological), in
+the format `<id>  <first line of body>`.
+Test: tests/binary.rs (observations_list_orders_chronologically)
+
+WHEN `factory observations show <id>` is invoked,
+THE SYSTEM SHALL print the body of the observation at
+`.factory/observations/<id>.md` if present, otherwise at
+`.factory/observations/resolved/<id>.md`, on stdout.
+Test: tests/binary.rs (observations_show_open_and_resolved)
+
+WHEN `factory observations migrate` is invoked with monolithic
+observation files present,
+THE SYSTEM SHALL split `.factory/observations.md` and
+`.factory/observations-resolved.md` into one file per observation
+under `.factory/observations/<id>.md` and
+`.factory/observations/resolved/<id>.md` respectively, preserving
+each observation's content verbatim, and remove the monolithic files.
+Test: tests/binary.rs (observations_migrate_splits_monolithic_files)
+Test: src/observations.rs (migrate_splits_and_removes_monolithic)
+Test: src/observations.rs (migrate_idempotent)
+
+WHEN `factory observations migrate` is invoked with no monolithic
+observation files present,
+THE SYSTEM SHALL exit successfully without creating or modifying files.
+Test: tests/binary.rs (observations_migrate_splits_monolithic_files)
+Test: src/observations.rs (migrate_idempotent)
+
+---
+
 ## Work Item intake and inspection
 
 WHEN two threads create, read, and write distinct Work Items

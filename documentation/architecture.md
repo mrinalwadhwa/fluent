@@ -421,10 +421,21 @@ or an explicit statement that no behavior increment was provided. Legacy
 `.factory/runs/<run-id>/behaviors.diff.md` remains a legacy run input,
 not the Work-model behavior review contract.
 
-Project-local `.factory/observations.md` and `.factory/expertise/*` are
-durable Factory memory that belongs in normal repository history. Legacy
-runtime compatibility state remains under `.factory/runs` and related
-run artifacts. Keeping these concepts separate lets learning and
+Project-local `.factory/observations/` and `.factory/expertise/*` are
+durable Factory memory that belongs in normal repository history.
+Observations are stored as one file per entry under
+`.factory/observations/<id>.md` (open) and
+`.factory/observations/resolved/<id>.md` (resolved). The `factory
+observations` CLI surface manages the lifecycle: `add` records a new
+observation, `resolve` appends resolution context and moves the file,
+`list` prints the open queue, and `show` prints a single entry. The
+per-file layout prevents merge conflicts when parallel Work Items add
+or resolve observations concurrently. A one-shot `migrate` command
+converted the prior monolithic `observations.md` and
+`observations-resolved.md` into the per-file layout.
+
+Legacy runtime compatibility state remains under `.factory/runs` and
+related run artifacts. Keeping these concepts separate lets learning and
 planning land through the same reviewed workflow as code without
 treating transient session state as project knowledge.
 
@@ -1240,7 +1251,10 @@ factory/main/
     terminal-ui.md
     tests.md
   .factory/
-    observations.md          ← feedback log (tracked)
+    observations/             ← per-file observation queue (tracked)
+      <id>.md                ← open observations
+      resolved/
+        <id>.md              ← resolved observations
     expertise/               ← project-level learnings (tracked)
     hooks/                   ← project hook scripts (tracked)
       check-pre-merge

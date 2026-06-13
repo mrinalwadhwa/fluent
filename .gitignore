@@ -17,8 +17,7 @@ node_modules/
 
 # Factory — working state, except observations, expertise, and hooks
 .factory/*
-!.factory/observations.md
-!.factory/observations-resolved.md
+!.factory/observations/
 !.factory/expertise/
 !.factory/hooks/
 

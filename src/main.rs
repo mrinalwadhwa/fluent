@@ -13,7 +13,8 @@ use factory::cleanup::{
 };
 use factory::cli;
 use factory::cli::{
-    Cli, Commands, FargateCommands, WorkAttemptCommands, WorkCommands, WorkTaskCommands,
+    Cli, Commands, FargateCommands, ObservationsCommands, WorkAttemptCommands, WorkCommands,
+    WorkTaskCommands,
 };
 use factory::coder::{CoderKind, CoderSandbox};
 use factory::content::ContentResolver;
@@ -36,6 +37,7 @@ use factory::work_merge_executor::{self, WorkMergeConfig};
 use factory::work_model::{
     PlanningContext, WorkItem, WorkModelStorageError, WorkModelStore, to_json_pretty,
 };
+use factory::observations;
 use factory::work_status;
 use factory::work_task_executor::{self, WorkTaskRunConfig};
 use factory::worktree;
@@ -220,6 +222,9 @@ fn main() -> Result<()> {
         },
         Some(Commands::Version) => {
             println!("{}", version::version_string());
+        }
+        Some(Commands::Observations { command }) => {
+            cmd_observations(&cwd, command)?;
         }
         None => {
             let coder_kind = CoderKind::resolve(cli.coder.as_deref())?;
@@ -724,6 +729,18 @@ fn current_ref(project_root: &Path) -> Result<String> {
         head_commit(project_root)
     } else {
         Ok(branch)
+    }
+}
+
+fn cmd_observations(project_root: &Path, command: ObservationsCommands) -> Result<()> {
+    match command {
+        ObservationsCommands::Add { content } => observations::add(project_root, content),
+        ObservationsCommands::Resolve { id, resolution } => {
+            observations::resolve(project_root, &id, resolution)
+        }
+        ObservationsCommands::List => observations::list(project_root),
+        ObservationsCommands::Show { id } => observations::show(project_root, &id),
+        ObservationsCommands::Migrate => observations::migrate(project_root),
     }
 }
 

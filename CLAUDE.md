@@ -32,7 +32,11 @@ Keep `main` available as a stable integration branch for runs to rebase
 from and merge into. If conversation-state edits could overlap with
 active runs or parent merging, make them on a lightweight discussion
 branch or worktree and land them separately instead of dirtying `main`.
-Use `.factory/observations.md` to record future work and lessons.
+Use `factory observations add` to record future work and lessons.
+Open observations live as one file per entry under
+`.factory/observations/`; resolved ones move to
+`.factory/observations/resolved/`. Inspect with `factory
+observations list` and `factory observations show <id>`.
 
 ## Commit messages
 
