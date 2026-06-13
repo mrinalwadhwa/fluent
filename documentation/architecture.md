@@ -1415,6 +1415,32 @@ artifacts, checking dirty worktrees, rebasing the run branch onto the
 source branch, fast-forward merging, deleting the run branch, removing
 the worktree, and setting status to `merged`.
 
+### Git wrapper
+
+`git.rs` is the single entry point for all git subprocess invocations
+in Factory. Every git command passes through `build_command`, which
+sets non-interactive defaults so headless agents never block on an
+editor, passphrase, or credential prompt:
+
+- Environment: `GIT_EDITOR=true`, `GIT_SEQUENCE_EDITOR=true`,
+  `GIT_TERMINAL_PROMPT=0`
+- Config overrides: `-c commit.gpgsign=false`, `-c core.editor=true`
+
+Three public functions cover the call-site patterns in the codebase:
+`run` (check exit status), `run_stdout` (return trimmed stdout), and
+`run_raw` (return raw `Output` for caller inspection). On failure,
+`run` and `run_stdout` surface the subcommand, exit code, working
+directory, and captured stderr so failures are debuggable without
+re-running.
+
+A regression-guard test (`no_direct_git_command_in_src` in
+`tests/binary.rs`) scans `src/` for `Command::new("git")` outside
+`src/git.rs` and fails if any are found.
+
+External coder processes (Claude, Codex) run git outside this wrapper.
+`worktree::disable_commit_signing` sets persistent repo-level
+`commit.gpgsign=false` in candidate worktrees for those processes.
+
 ### Cleanup
 
 `cleanup.rs` owns cleanup of terminal legacy run artifacts and terminal

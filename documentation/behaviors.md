@@ -2341,3 +2341,41 @@ WHEN the project's `.factory/Dockerfile` references a `FROM
 THE SYSTEM SHALL surface the missing-tag error from `docker build`
 to the user without retry, so the user can either bump Factory to
 match the referenced base or update the `FROM` line.
+
+## Non-interactive git defaults
+
+WHEN Factory invokes git through the wrapper module,
+THE SYSTEM SHALL set the environment variables `GIT_EDITOR=true`,
+`GIT_SEQUENCE_EDITOR=true`, and `GIT_TERMINAL_PROMPT=0` on the git
+subprocess.
+Test: src/git.rs (build_command_sets_non_interactive_env)
+
+WHEN Factory invokes git through the wrapper module,
+THE SYSTEM SHALL pass `-c commit.gpgsign=false` and
+`-c core.editor=true` to every git subcommand.
+Test: src/git.rs (build_command_passes_gpgsign_false, build_command_passes_core_editor_true)
+
+WHEN any Factory code path issues a commit in a candidate worktree
+(writer Task, agentic rebase, fix-pre-merge auto-commit, or any
+future commit-producing path),
+THE SYSTEM SHALL produce an unsigned commit regardless of the
+project's global or repo-level git config.
+Test: src/git.rs (build_command_passes_gpgsign_false)
+
+WHEN the git wrapper is invoked,
+THE SYSTEM SHALL capture stdout and stderr and surface non-zero exit
+codes with the full command line plus captured output, so a failure
+is debuggable without re-running.
+Test: src/git.rs (run_returns_error_with_full_context)
+
+IF a git operation genuinely requires user interaction (merge
+conflict not resolved by the caller, credential prompt, signing
+secret unlock, etc.),
+THEN THE SYSTEM SHALL exit non-zero with diagnostic context and
+SHALL NOT silently block the agent.
+Test: src/git.rs (run_returns_error_with_full_context)
+
+WHEN this Work Item lands,
+THE SYSTEM SHALL contain zero direct `Command::new("git")` call sites
+in `src/` outside the wrapper module.
+Test: tests/binary.rs (no_direct_git_command_in_src)

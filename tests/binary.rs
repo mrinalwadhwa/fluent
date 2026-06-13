@@ -1,8 +1,8 @@
 use assert_cmd::Command;
+use factory::git;
 use predicates::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command as StdCommand;
 use tempfile::TempDir;
 
 fn factory_cmd() -> Command {
@@ -62,13 +62,9 @@ fn version_prints_package_version_and_commit() {
 }
 
 fn expected_build_commit() -> Option<String> {
-    StdCommand::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
+    let cwd = std::env::current_dir().ok()?;
+    git::run_stdout(&cwd, &["rev-parse", "--short", "HEAD"], "read build commit")
         .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|stdout| stdout.trim().to_string())
         .filter(|commit| !commit.is_empty())
 }
 
@@ -1653,12 +1649,7 @@ exit 0
 
     let workspace = main_dir.join("../work-6-work-1-attempt-1");
     assert!(workspace.join("task-output.txt").is_file());
-    let head = StdCommand::new("git")
-        .args(["-C", &workspace.to_string_lossy()])
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .unwrap();
-    let head = String::from_utf8(head.stdout).unwrap().trim().to_string();
+    let head = git::run_stdout(&workspace, &["rev-parse", "HEAD"], "read workspace HEAD").unwrap();
 
     let value = work_item_value(&main_dir, "work-1");
     let attempt = &value["attempts"][0];
@@ -2434,16 +2425,8 @@ fn work_task_run_completes_review_task_with_fail_verdict_artifact() {
         "# Review tests\n\nCheck tests.\n",
     )
     .unwrap();
-    StdCommand::new("git")
-        .args(["add", "skills/review-tests/SKILL.md"])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
-    StdCommand::new("git")
-        .args(["commit", "-m", "Add review tests skill"])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
+    git::run(&main_dir, &["add", "skills/review-tests/SKILL.md"], "stage skill").unwrap();
+    git::run(&main_dir, &["commit", "-m", "Add review tests skill"], "commit skill").unwrap();
     create_completed_work_attempt(&tmp, &main_dir);
     factory_cmd()
         .current_dir(&main_dir)
@@ -3124,16 +3107,8 @@ fn work_attempt_run_review_only_requires_recorded_source_commit() {
         .success();
 
     fs::write(main_dir.join("README.md"), "source advanced\n").unwrap();
-    StdCommand::new("git")
-        .args(["add", "README.md"])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
-    StdCommand::new("git")
-        .args(["commit", "-m", "advance source"])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
+    git::run(&main_dir, &["add", "README.md"], "stage README").unwrap();
+    git::run(&main_dir, &["commit", "-m", "advance source"], "commit advance").unwrap();
 
     let bin_dir = tmp.path().join("bin-review-only-stale");
     write_mock_claude(&bin_dir, &review_only_mock_script("pass"));
@@ -3173,16 +3148,8 @@ fn work_attempt_run_review_only_rejects_factory_state_changes() {
         "# Decisions\n\n",
     )
     .unwrap();
-    StdCommand::new("git")
-        .args(["add", ".factory/expertise/decisions.md"])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
-    StdCommand::new("git")
-        .args(["commit", "-m", "record decisions"])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
+    git::run(&main_dir, &["add", ".factory/expertise/decisions.md"], "stage decisions").unwrap();
+    git::run(&main_dir, &["commit", "-m", "record decisions"], "commit decisions").unwrap();
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -3297,16 +3264,8 @@ fn work_attempt_run_review_only_restores_mixed_source_and_factory_changes() {
         "# Decisions\n\n",
     )
     .unwrap();
-    StdCommand::new("git")
-        .args(["add", ".factory/expertise/decisions.md"])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
-    StdCommand::new("git")
-        .args(["commit", "-m", "record decisions"])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
+    git::run(&main_dir, &["add", ".factory/expertise/decisions.md"], "stage decisions").unwrap();
+    git::run(&main_dir, &["commit", "-m", "record decisions"], "commit decisions").unwrap();
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -3579,16 +3538,7 @@ fn work_merge_candidate_warns_when_cleanup_fails_after_landing() {
 
     let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
     let candidate_head = git_head(&candidate_workspace);
-    let lock_output = StdCommand::new("git")
-        .args(["worktree", "lock", &candidate_workspace.to_string_lossy()])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
-    assert!(
-        lock_output.status.success(),
-        "git worktree lock failed: {}",
-        String::from_utf8_lossy(&lock_output.stderr)
-    );
+    git::run(&main_dir, &["worktree", "lock", &candidate_workspace.to_string_lossy()], "lock worktree").unwrap();
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -5665,39 +5615,10 @@ fn work_task_run_rejects_reused_workspace_without_new_commit() {
         .success();
 
     let workspace = main_dir.join("../work-6-work-1-attempt-1");
-    StdCommand::new("git")
-        .args([
-            "-C",
-            &main_dir.to_string_lossy(),
-            "worktree",
-            "add",
-            "-b",
-            "precreated-task-workspace",
-            &workspace.to_string_lossy(),
-            "HEAD",
-        ])
-        .output()
-        .unwrap();
+    git::run(&main_dir, &["worktree", "add", "-b", "precreated-task-workspace", &workspace.to_string_lossy(), "HEAD"], "create worktree").unwrap();
     fs::write(workspace.join("stale-output.txt"), "stale").unwrap();
-    StdCommand::new("git")
-        .args([
-            "-C",
-            &workspace.to_string_lossy(),
-            "add",
-            "stale-output.txt",
-        ])
-        .output()
-        .unwrap();
-    StdCommand::new("git")
-        .args([
-            "-C",
-            &workspace.to_string_lossy(),
-            "commit",
-            "-m",
-            "Add stale output",
-        ])
-        .output()
-        .unwrap();
+    git::run(&workspace, &["add", "stale-output.txt"], "stage stale output").unwrap();
+    git::run(&workspace, &["commit", "-m", "Add stale output"], "commit stale output").unwrap();
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -5783,16 +5704,7 @@ fn work_task_run_rejects_existing_task_branch_without_workspace() {
         .assert()
         .success();
 
-    StdCommand::new("git")
-        .args([
-            "-C",
-            &main_dir.to_string_lossy(),
-            "branch",
-            "work/work-1/attempt-1/attempt-1-write-1",
-            "HEAD",
-        ])
-        .output()
-        .unwrap();
+    git::run(&main_dir, &["branch", "work/work-1/attempt-1/attempt-1-write-1", "HEAD"], "create task branch").unwrap();
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -6545,17 +6457,7 @@ fn cleanup_apply_removes_registered_worktree() {
     fs::write(run_dir.join("status"), "complete").unwrap();
 
     let worktree_dir = tmp.path().join(run_id);
-    StdCommand::new("git")
-        .args([
-            "worktree",
-            "add",
-            worktree_dir.to_str().unwrap(),
-            "-b",
-            run_id,
-        ])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
+    git::run(&main_dir, &["worktree", "add", worktree_dir.to_str().unwrap(), "-b", run_id], "create worktree").unwrap();
     fs::write(run_dir.join("worktree"), worktree_dir.to_str().unwrap()).unwrap();
 
     factory_cmd()
@@ -6579,17 +6481,7 @@ fn cleanup_dry_run_keeps_registered_worktree() {
     fs::write(run_dir.join("status"), "complete").unwrap();
 
     let worktree_dir = tmp.path().join(run_id);
-    StdCommand::new("git")
-        .args([
-            "worktree",
-            "add",
-            worktree_dir.to_str().unwrap(),
-            "-b",
-            run_id,
-        ])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
+    git::run(&main_dir, &["worktree", "add", worktree_dir.to_str().unwrap(), "-b", run_id], "create worktree").unwrap();
     fs::write(run_dir.join("worktree"), worktree_dir.to_str().unwrap()).unwrap();
 
     factory_cmd()
@@ -6602,16 +6494,7 @@ fn cleanup_dry_run_keeps_registered_worktree() {
     assert!(worktree_dir.is_dir());
     assert!(!run_dir.join("cleaned.md").exists());
 
-    StdCommand::new("git")
-        .args([
-            "worktree",
-            "remove",
-            "--force",
-            worktree_dir.to_str().unwrap(),
-        ])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
+    git::run(&main_dir, &["worktree", "remove", "--force", worktree_dir.to_str().unwrap()], "remove worktree").unwrap();
 }
 
 #[test]
@@ -6624,17 +6507,7 @@ fn cleanup_from_run_worktree_uses_source_registry() {
     fs::write(source_run_dir.join("status"), "complete").unwrap();
 
     let worktree_dir = tmp.path().join(run_id);
-    StdCommand::new("git")
-        .args([
-            "worktree",
-            "add",
-            worktree_dir.to_str().unwrap(),
-            "-b",
-            run_id,
-        ])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
+    git::run(&main_dir, &["worktree", "add", worktree_dir.to_str().unwrap(), "-b", run_id], "create worktree").unwrap();
     fs::write(
         source_run_dir.join("worktree"),
         worktree_dir.to_str().unwrap(),
@@ -6708,18 +6581,7 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
 
     let worktree_dir = main_dir.join("../work-6-work-1-attempt-1");
     let branch_name = "work/work-1/attempt-1/attempt-1-write-1";
-    StdCommand::new("git")
-        .args([
-            "worktree",
-            "add",
-            worktree_dir.to_str().unwrap(),
-            "-b",
-            branch_name,
-            "HEAD",
-        ])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
+    git::run(&main_dir, &["worktree", "add", worktree_dir.to_str().unwrap(), "-b", branch_name, "HEAD"], "create worktree").unwrap();
 
     let active_item_path = main_dir.join(".factory/work/items/work-active.json");
     let active_attempt_path = main_dir.join(".factory/work/attempts/work-active/attempt-1.json");
@@ -6742,18 +6604,7 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
 
     let active_worktree_dir = main_dir.join("../work-11-work-active-attempt-1");
     let active_branch_name = "work/work-active/attempt-1/attempt-1-write-1";
-    StdCommand::new("git")
-        .args([
-            "worktree",
-            "add",
-            active_worktree_dir.to_str().unwrap(),
-            "-b",
-            active_branch_name,
-            "HEAD",
-        ])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
+    git::run(&main_dir, &["worktree", "add", active_worktree_dir.to_str().unwrap(), "-b", active_branch_name, "HEAD"], "create active worktree").unwrap();
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -6795,40 +6646,13 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
     assert!(active_worktree_dir.is_dir());
     assert!(active_artifact_dir.is_dir());
 
-    let branch_check = StdCommand::new("git")
-        .args([
-            "show-ref",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{branch_name}"),
-        ])
-        .current_dir(&main_dir)
-        .status()
-        .unwrap();
-    assert!(!branch_check.success());
+    let branch_check = git::run_raw(&main_dir, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch_name}")]).unwrap();
+    assert!(!branch_check.status.success());
 
-    let active_branch_check = StdCommand::new("git")
-        .args([
-            "show-ref",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{active_branch_name}"),
-        ])
-        .current_dir(&main_dir)
-        .status()
-        .unwrap();
-    assert!(active_branch_check.success());
+    let active_branch_check = git::run_raw(&main_dir, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{active_branch_name}")]).unwrap();
+    assert!(active_branch_check.status.success());
 
-    StdCommand::new("git")
-        .args([
-            "worktree",
-            "remove",
-            "--force",
-            active_worktree_dir.to_str().unwrap(),
-        ])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
+    git::run(&main_dir, &["worktree", "remove", "--force", active_worktree_dir.to_str().unwrap()], "remove active worktree").unwrap();
 }
 
 #[test]
@@ -7159,18 +6983,19 @@ fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() 
     let workspace_path = "../work-18-work-merge-cleanup-attempt-1";
     let worktree_dir = main_dir.join(workspace_path);
     let branch_name = "work/work-merge-cleanup/attempt-1/attempt-1-write-1";
-    StdCommand::new("git")
-        .args([
+    git::run(
+        &main_dir,
+        &[
             "worktree",
             "add",
             worktree_dir.to_str().unwrap(),
             "-b",
             branch_name,
             "HEAD",
-        ])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
+        ],
+        "create worktree",
+    )
+    .unwrap();
 
     let candidate_head = git_head(&worktree_dir);
     let attempt_path = main_dir.join(".factory/work/attempts/work-merge-cleanup/attempt-1.json");
@@ -7287,17 +7112,17 @@ fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() 
     assert!(!candidate_artifact_dir.exists());
     assert!(!attempt_artifact_dir.exists());
 
-    let branch_check = StdCommand::new("git")
-        .args([
+    let branch_check = git::run_raw(
+        &main_dir,
+        &[
             "show-ref",
             "--verify",
             "--quiet",
             &format!("refs/heads/{branch_name}"),
-        ])
-        .current_dir(&main_dir)
-        .status()
-        .unwrap();
-    assert!(!branch_check.success());
+        ],
+    )
+    .unwrap();
+    assert!(!branch_check.status.success());
 }
 
 // -------------------------------------------------------------------------
@@ -7742,33 +7567,30 @@ fn setup_git_project(tmp: &TempDir) -> std::path::PathBuf {
     let main_dir = tmp.path().join("main");
     fs::create_dir_all(&main_dir).unwrap();
 
-    std::process::Command::new("git")
-        .args(["init", "-b", "main"])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
-    for args in [
-        vec!["config", "commit.gpgsign", "false"],
-        vec!["config", "user.email", "test@test"],
-        vec!["config", "user.name", "test"],
-    ] {
-        std::process::Command::new("git")
-            .args(&args)
-            .current_dir(&main_dir)
-            .output()
-            .unwrap();
-    }
+    git::run(&main_dir, &["init", "-b", "main"], "init repo").unwrap();
+    // Persistent config needed because external coder processes (spawned
+    // by factory work task run) make commits outside our wrapper.
+    git::run(
+        &main_dir,
+        &["config", "commit.gpgsign", "false"],
+        "disable signing",
+    )
+    .unwrap();
+    git::run(
+        &main_dir,
+        &["config", "user.email", "test@test"],
+        "set user.email",
+    )
+    .unwrap();
+    git::run(
+        &main_dir,
+        &["config", "user.name", "test"],
+        "set user.name",
+    )
+    .unwrap();
     fs::write(main_dir.join("README.md"), "test").unwrap();
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["commit", "-m", "init"])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
+    git::run(&main_dir, &["add", "."], "stage files").unwrap();
+    git::run(&main_dir, &["commit", "-m", "init"], "initial commit").unwrap();
 
     main_dir
 }
@@ -8165,24 +7987,19 @@ fn merge_candidates_are_empty(value: &serde_json::Value) -> bool {
 }
 
 fn assert_no_non_factory_changes(path: &Path) {
-    let output = StdCommand::new("git")
-        .args([
+    let status = git::run_stdout(
+        path,
+        &[
             "status",
             "--porcelain",
             "--untracked-files=all",
             "--",
             ".",
             ":(exclude).factory",
-        ])
-        .current_dir(path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git status failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let status = String::from_utf8_lossy(&output.stdout);
+        ],
+        "check for non-factory changes",
+    )
+    .unwrap();
     assert!(
         status.is_empty(),
         "source files should not change:\n{status}"
@@ -8256,32 +8073,13 @@ exit 0
 }
 
 fn git_head(repo: &Path) -> String {
-    let output = StdCommand::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(repo)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git rev-parse failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap().trim().to_string()
+    git::run_stdout(repo, &["rev-parse", "HEAD"], "get HEAD").unwrap()
 }
 
 fn git_common_dir(repo: &Path) -> PathBuf {
-    let output = StdCommand::new("git")
-        .args(["rev-parse", "--git-common-dir"])
-        .current_dir(repo)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git rev-parse --git-common-dir failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let path = String::from_utf8(output.stdout).unwrap();
-    let path = PathBuf::from(path.trim());
+    let path_str =
+        git::run_stdout(repo, &["rev-parse", "--git-common-dir"], "get git common dir").unwrap();
+    let path = PathBuf::from(&path_str);
     if path.is_absolute() {
         path
     } else {
@@ -8291,26 +8089,8 @@ fn git_common_dir(repo: &Path) -> PathBuf {
 
 fn commit_file(repo: &Path, path: &str, content: &str, message: &str) {
     fs::write(repo.join(path), content).unwrap();
-    let output = StdCommand::new("git")
-        .args(["add", path])
-        .current_dir(repo)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git add failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let output = StdCommand::new("git")
-        .args(["commit", "-m", message])
-        .current_dir(repo)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git commit failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    git::run(repo, &["add", path], "stage file").unwrap();
+    git::run(repo, &["commit", "-m", message], "commit").unwrap();
 }
 
 fn write_mock_claude(bin_dir: &Path, script: &str) {
@@ -8409,11 +8189,12 @@ impl Drop for WorktreeGuard {
         if let Ok(wt) = fs::read_to_string(&wt_file) {
             let wt = wt.trim();
             if Path::new(wt).is_dir() {
-                std::process::Command::new("git")
-                    .args(["-C", &self.main_dir.to_string_lossy()])
-                    .args(["worktree", "remove", "--force", wt])
-                    .output()
-                    .ok();
+                git::run(
+                    &self.main_dir,
+                    &["worktree", "remove", "--force", wt],
+                    "remove worktree",
+                )
+                .ok();
             }
         }
     }
@@ -8854,22 +8635,15 @@ fn worktree_branches_from_current_branch() {
     let main_dir = setup_git_project(&tmp);
 
     // Create and switch to a feature branch
-    std::process::Command::new("git")
-        .args(["checkout", "-b", "feature-test"])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
+    git::run(
+        &main_dir,
+        &["checkout", "-b", "feature-test"],
+        "create feature branch",
+    )
+    .unwrap();
     fs::write(main_dir.join("feature.txt"), "feature content").unwrap();
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["commit", "-m", "add feature"])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
+    git::run(&main_dir, &["add", "."], "stage files").unwrap();
+    git::run(&main_dir, &["commit", "-m", "add feature"], "commit").unwrap();
 
     let run_id = "20260513-wt-branch";
     let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
@@ -10643,15 +10417,13 @@ exit 0
         "bypass flag should be an exec option after exec: {args}"
     );
 
-    let log = std::process::Command::new("git")
-        .args(["log", "-1", "--format=%s"])
-        .current_dir(Path::new(wt_path_str.trim()))
-        .output()
-        .unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&log.stdout).trim(),
-        "Codex sandbox commit"
-    );
+    let log = git::run_stdout(
+        Path::new(wt_path_str.trim()),
+        &["log", "-1", "--format=%s"],
+        "get last commit subject",
+    )
+    .unwrap();
+    assert_eq!(log, "Codex sandbox commit");
 
     let transcript =
         fs::read_to_string(wt_run_dir.join("sessions/session-1/transcript.jsonl")).unwrap();
@@ -10957,16 +10729,13 @@ fn run_skips_reviews_when_no_code_changed() {
         "[system]\nReviewer.\n[changes]\nReview.\n[full]\nReview all.\n",
     )
     .unwrap();
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["commit", "-m", "add test fixtures"])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
+    git::run(&main_dir, &["add", "."], "stage files").unwrap();
+    git::run(
+        &main_dir,
+        &["commit", "-m", "add test fixtures"],
+        "commit fixtures",
+    )
+    .unwrap();
 
     let run_id = "20260515-skip-review";
     let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
@@ -11020,16 +10789,13 @@ fn run_reviews_when_complete_worktree_is_dirty() {
         "[system]\nReviewer.\n[changes]\nReview.\n[full]\nReview all.\n",
     )
     .unwrap();
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["commit", "-m", "add test fixtures"])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
+    git::run(&main_dir, &["add", "."], "stage files").unwrap();
+    git::run(
+        &main_dir,
+        &["commit", "-m", "add test fixtures"],
+        "commit fixtures",
+    )
+    .unwrap();
 
     let run_id = "20260515-dirty-review";
     let run_dir = main_dir.join(format!(".factory/runs/{run_id}"));
@@ -11073,23 +10839,24 @@ exit 0
         wt_path.join("dirty.txt").exists(),
         "dirty author work should remain in the worktree after it is committed"
     );
-    let status = std::process::Command::new("git")
-        .args(["status", "--porcelain", "--untracked-files=normal"])
-        .current_dir(wt_path)
-        .output()
-        .unwrap();
+    let status = git::run_stdout(
+        wt_path,
+        &["status", "--porcelain", "--untracked-files=normal"],
+        "check worktree status",
+    )
+    .unwrap();
     assert!(
-        status.stdout.is_empty(),
-        "worktree should be clean after completion: {}",
-        String::from_utf8_lossy(&status.stdout)
+        status.is_empty(),
+        "worktree should be clean after completion: {status}"
     );
-    let log = std::process::Command::new("git")
-        .args(["log", "--oneline", "-3"])
-        .current_dir(wt_path)
-        .output()
-        .unwrap();
+    let log = git::run_stdout(
+        wt_path,
+        &["log", "--oneline", "-3"],
+        "get recent commits",
+    )
+    .unwrap();
     assert!(
-        String::from_utf8_lossy(&log.stdout).contains("Add dirty work"),
+        log.contains("Add dirty work"),
         "dirty author work should be committed before completion"
     );
 }
@@ -11189,24 +10956,24 @@ fn run_merge_completes_full_lifecycle() {
     );
 
     // Verify branch was deleted
-    let branches = std::process::Command::new("git")
-        .args(["-C", &main_dir.to_string_lossy()])
-        .args(["branch", "--list", &run_id])
-        .output()
-        .unwrap();
-    let branch_list = String::from_utf8_lossy(&branches.stdout);
+    let branch_list = git::run_stdout(
+        &main_dir,
+        &["branch", "--list", &run_id],
+        "list branches",
+    )
+    .unwrap();
     assert!(
         branch_list.trim().is_empty(),
         "branch should be deleted after landing"
     );
 
     // Verify commit is on main
-    let log = std::process::Command::new("git")
-        .args(["-C", &main_dir.to_string_lossy()])
-        .args(["log", "--oneline", "-5"])
-        .output()
-        .unwrap();
-    let log_str = String::from_utf8_lossy(&log.stdout);
+    let log_str = git::run_stdout(
+        &main_dir,
+        &["log", "--oneline", "-5"],
+        "get recent commits",
+    )
+    .unwrap();
     assert!(
         log_str.contains("Add feature"),
         "feature commit should be on main: {log_str}"
@@ -11347,16 +11114,13 @@ fn run_merge_autofixes_and_reruns_reviewers() {
     fs::write(run_dir.join("reviewers"), "tests").unwrap();
     fs::write(wt_run_dir.join("reviewers"), "tests").unwrap();
     fs::write(wt_path.join("needs-format"), "bad\n").unwrap();
-    std::process::Command::new("git")
-        .args(["-C", &wt_path.to_string_lossy()])
-        .args(["add", "needs-format"])
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["-C", &wt_path.to_string_lossy()])
-        .args(["commit", "-m", "Add unformatted file"])
-        .output()
-        .unwrap();
+    git::run(wt_path, &["add", "needs-format"], "stage file").unwrap();
+    git::run(
+        wt_path,
+        &["commit", "-m", "Add unformatted file"],
+        "commit unformatted file",
+    )
+    .unwrap();
 
     write_executable_hook(
         &main_dir,
@@ -11393,12 +11157,12 @@ exit 0
             "Rerunning reviewers after fix-pre-merge autofix",
         ));
 
-    let log = std::process::Command::new("git")
-        .args(["-C", &main_dir.to_string_lossy()])
-        .args(["log", "--oneline", "-5"])
-        .output()
-        .unwrap();
-    let log = String::from_utf8_lossy(&log.stdout);
+    let log = git::run_stdout(
+        &main_dir,
+        &["log", "--oneline", "-5"],
+        "get recent commits",
+    )
+    .unwrap();
     assert!(log.contains("Apply fix-pre-merge changes"));
     let review = fs::read_to_string(run_dir.join("reviews/review-tests.md")).unwrap();
     assert!(review.contains("Autofix review passed"));
@@ -11417,16 +11181,13 @@ fn run_merge_keeps_worktree_when_autofix_review_fails() {
     fs::write(run_dir.join("reviewers"), "tests").unwrap();
     fs::write(wt_run_dir.join("reviewers"), "tests").unwrap();
     fs::write(wt_path.join("needs-format"), "bad\n").unwrap();
-    std::process::Command::new("git")
-        .args(["-C", &wt_path.to_string_lossy()])
-        .args(["add", "needs-format"])
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["-C", &wt_path.to_string_lossy()])
-        .args(["commit", "-m", "Add unformatted file"])
-        .output()
-        .unwrap();
+    git::run(wt_path, &["add", "needs-format"], "stage file").unwrap();
+    git::run(
+        wt_path,
+        &["commit", "-m", "Add unformatted file"],
+        "commit unformatted file",
+    )
+    .unwrap();
 
     write_executable_hook(
         &main_dir,
@@ -11617,12 +11378,12 @@ fn run_merge_preserves_linear_history() {
         .success();
 
     // Verify no merge commits exist (linear history)
-    let log = std::process::Command::new("git")
-        .args(["-C", &main_dir.to_string_lossy()])
-        .args(["log", "--oneline", "--merges"])
-        .output()
-        .unwrap();
-    let merge_log = String::from_utf8_lossy(&log.stdout);
+    let merge_log = git::run_stdout(
+        &main_dir,
+        &["log", "--oneline", "--merges"],
+        "check for merge commits",
+    )
+    .unwrap();
     assert!(
         merge_log.trim().is_empty(),
         "should have no merge commits (linear history): {merge_log}"
@@ -11637,16 +11398,13 @@ fn run_merge_fails_on_rebase_conflict() {
 
     // Create a conflicting commit on main after the run branched
     fs::write(main_dir.join("feature.txt"), "conflicting content").unwrap();
-    std::process::Command::new("git")
-        .args(["-C", &main_dir.to_string_lossy()])
-        .args(["add", "feature.txt"])
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["-C", &main_dir.to_string_lossy()])
-        .args(["commit", "-m", "conflicting commit on main"])
-        .output()
-        .unwrap();
+    git::run(&main_dir, &["add", "feature.txt"], "stage conflicting file").unwrap();
+    git::run(
+        &main_dir,
+        &["commit", "-m", "conflicting commit on main"],
+        "commit conflict",
+    )
+    .unwrap();
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -11761,16 +11519,13 @@ fn post_merge_review_guard_allows_factory_state_changes() {
         "initial\n",
     )
     .unwrap();
-    StdCommand::new("git")
-        .args(["add", ".factory"])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
-    StdCommand::new("git")
-        .args(["commit", "-m", "add factory state"])
-        .current_dir(&main_dir)
-        .output()
-        .unwrap();
+    git::run(&main_dir, &["add", ".factory"], "stage factory state").unwrap();
+    git::run(
+        &main_dir,
+        &["commit", "-m", "add factory state"],
+        "commit factory state",
+    )
+    .unwrap();
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -12321,4 +12076,48 @@ fn observations_migrate_splits_monolithic_files() {
     assert!(output2.status.success());
     let stdout2 = String::from_utf8_lossy(&output2.stdout);
     assert!(stdout2.contains("Nothing to migrate"));
+}
+
+#[test]
+fn no_direct_git_command_in_src() {
+    let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut violations = Vec::new();
+    collect_git_command_violations(&src_dir, &src_dir, &mut violations);
+    assert!(
+        violations.is_empty(),
+        "Direct Command::new(\"git\") found outside src/git.rs — use the git wrapper instead:\n{}",
+        violations.join("\n")
+    );
+}
+
+fn collect_git_command_violations(dir: &Path, src_root: &Path, violations: &mut Vec<String>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if path.is_dir() {
+            collect_git_command_violations(&path, src_root, violations);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            let relative = path.strip_prefix(src_root).unwrap_or(&path);
+            if relative == Path::new("git.rs") {
+                continue;
+            }
+            let Ok(contents) = fs::read_to_string(&path) else {
+                continue;
+            };
+            for (line_number, line) in contents.lines().enumerate() {
+                if line.contains("Command::new(\"git\")") {
+                    violations.push(format!(
+                        "  {}:{}: {}",
+                        relative.display(),
+                        line_number + 1,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+    }
 }

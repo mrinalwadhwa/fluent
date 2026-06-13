@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::credential;
+use crate::git;
 use crate::run;
 use crate::worktree;
 
@@ -569,10 +570,10 @@ fn repair_sibling_worktrees(project_root: &Path) -> Result<()> {
             continue;
         }
         eprintln!("  Repairing sibling worktree linkage: {}", path.display());
-        let _ = Command::new("git")
-            .args(["-C", &project_root.to_string_lossy()])
-            .args(["worktree", "repair", &path.to_string_lossy()])
-            .status();
+        let _ = git::run_raw(
+            project_root,
+            &["worktree", "repair", &path.to_string_lossy()],
+        );
     }
     Ok(())
 }

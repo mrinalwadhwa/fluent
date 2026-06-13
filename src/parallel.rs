@@ -321,8 +321,8 @@ fn run_child(ctx: ChildContext) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git;
     use crate::plan::{Group, Step};
-    use std::process::Command;
     use tempfile::TempDir;
 
     fn setup_git_project() -> TempDir {
@@ -330,34 +330,14 @@ mod tests {
         let main_dir = tmp.path().join("main");
         fs::create_dir_all(&main_dir).unwrap();
 
-        Command::new("git")
-            .args(["init", "-b", "main"])
-            .current_dir(&main_dir)
-            .output()
-            .unwrap();
-        for (k, v) in [
-            ("commit.gpgsign", "false"),
-            ("user.email", "test@test"),
-            ("user.name", "test"),
-        ] {
-            Command::new("git")
-                .args(["config", k, v])
-                .current_dir(&main_dir)
-                .output()
-                .unwrap();
+        git::run(&main_dir, &["init", "-b", "main"], "init repo").unwrap();
+        for (k, v) in [("user.email", "test@test"), ("user.name", "test")] {
+            git::run(&main_dir, &["config", k, v], "set git config").unwrap();
         }
         fs::write(main_dir.join("README.md"), "test").unwrap();
         fs::create_dir_all(main_dir.join(".factory/runs")).unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(&main_dir)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(&main_dir)
-            .output()
-            .unwrap();
+        git::run(&main_dir, &["add", "."], "stage files").unwrap();
+        git::run(&main_dir, &["commit", "-m", "init"], "initial commit").unwrap();
 
         tmp
     }
@@ -389,14 +369,12 @@ mod tests {
         fs::write(ctx.worktree_dir.join(&filename), &ctx.id)?;
 
         // Stage and commit
-        Command::new("git")
-            .args(["add", &filename])
-            .current_dir(&ctx.worktree_dir)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", &format!("Add {}", ctx.id)])
-            .current_dir(&ctx.worktree_dir)
-            .output()?;
+        git::run(&ctx.worktree_dir, &["add", &filename], "stage file")?;
+        git::run(
+            &ctx.worktree_dir,
+            &["commit", "-m", &format!("Add {}", ctx.id)],
+            "commit file",
+        )?;
 
         // Set status to complete
         fs::write(wt_run_dir.join("status"), "complete")?;
@@ -414,11 +392,10 @@ mod tests {
         for id in ids {
             let wt = tmp.path().join(id);
             if wt.exists() {
-                Command::new("git")
-                    .args(["-C", &main_dir.to_string_lossy()])
-                    .args(["worktree", "remove", "--force", &wt.to_string_lossy()])
-                    .output()
-                    .ok();
+                let _ = git::run_raw(
+                    main_dir,
+                    &["worktree", "remove", "--force", &wt.to_string_lossy()],
+                );
             }
         }
     }
@@ -748,14 +725,12 @@ mod tests {
             // Create our file and commit
             let filename = format!("{}.txt", ctx.id);
             fs::write(ctx.worktree_dir.join(&filename), &ctx.id)?;
-            Command::new("git")
-                .args(["add", &filename])
-                .current_dir(&ctx.worktree_dir)
-                .output()?;
-            Command::new("git")
-                .args(["commit", "-m", &format!("Add {}", ctx.id)])
-                .current_dir(&ctx.worktree_dir)
-                .output()?;
+            git::run(&ctx.worktree_dir, &["add", &filename], "stage file")?;
+            git::run(
+                &ctx.worktree_dir,
+                &["commit", "-m", &format!("Add {}", ctx.id)],
+                "commit file",
+            )?;
 
             fs::write(wt_run_dir.join("status"), "complete")?;
             Ok(())
@@ -804,14 +779,12 @@ mod tests {
             } else {
                 let filename = format!("{}.txt", ctx.id);
                 fs::write(ctx.worktree_dir.join(&filename), &ctx.id)?;
-                Command::new("git")
-                    .args(["add", &filename])
-                    .current_dir(&ctx.worktree_dir)
-                    .output()?;
-                Command::new("git")
-                    .args(["commit", "-m", &format!("Add {}", ctx.id)])
-                    .current_dir(&ctx.worktree_dir)
-                    .output()?;
+                git::run(&ctx.worktree_dir, &["add", &filename], "stage file")?;
+                git::run(
+                    &ctx.worktree_dir,
+                    &["commit", "-m", &format!("Add {}", ctx.id)],
+                    "commit file",
+                )?;
                 fs::write(wt_run_dir.join("status"), "complete")?;
             }
             Ok(())
@@ -922,14 +895,12 @@ mod tests {
             }
             let filename = format!("{}.txt", ctx.id);
             fs::write(ctx.worktree_dir.join(&filename), &ctx.id)?;
-            Command::new("git")
-                .args(["add", &filename])
-                .current_dir(&ctx.worktree_dir)
-                .output()?;
-            Command::new("git")
-                .args(["commit", "-m", &format!("Add {}", ctx.id)])
-                .current_dir(&ctx.worktree_dir)
-                .output()?;
+            git::run(&ctx.worktree_dir, &["add", &filename], "stage file")?;
+            git::run(
+                &ctx.worktree_dir,
+                &["commit", "-m", &format!("Add {}", ctx.id)],
+                "commit file",
+            )?;
             fs::write(wt_run_dir.join("status"), "complete")?;
             Ok(())
         };
@@ -1041,14 +1012,12 @@ mod tests {
 
             let filename = format!("{}.txt", ctx.id);
             fs::write(ctx.worktree_dir.join(&filename), &ctx.id)?;
-            Command::new("git")
-                .args(["add", &filename])
-                .current_dir(&ctx.worktree_dir)
-                .output()?;
-            Command::new("git")
-                .args(["commit", "-m", &format!("Add {}", ctx.id)])
-                .current_dir(&ctx.worktree_dir)
-                .output()?;
+            git::run(&ctx.worktree_dir, &["add", &filename], "stage file")?;
+            git::run(
+                &ctx.worktree_dir,
+                &["commit", "-m", &format!("Add {}", ctx.id)],
+                "commit file",
+            )?;
 
             fs::write(wt_run_dir.join("status"), "complete")?;
             Ok(())

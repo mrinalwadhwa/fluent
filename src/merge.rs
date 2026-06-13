@@ -1,9 +1,9 @@
 use anyhow::{Context, Result, bail};
 use std::path::Path;
-use std::process::Command;
 
 use crate::coder::CoderKind;
 use crate::content::ContentResolver;
+use crate::git;
 use crate::hooks::{self, HookContext};
 use crate::review;
 use crate::run::{self, Run};
@@ -81,28 +81,27 @@ fn run_pre_merge_hooks_for_run(source_root: &Path, run: &Run) -> Result<()> {
 }
 
 fn worktree_is_dirty(worktree_dir: &Path) -> Result<bool> {
-    let output = Command::new("git")
-        .args(["-C", &worktree_dir.to_string_lossy()])
-        .args([
+    let output = git::run_raw(
+        worktree_dir,
+        &[
             "status",
             "--porcelain",
             "--untracked-files=normal",
             "--",
             ".",
             ":(exclude).factory",
-        ])
-        .output()
-        .context("Failed to run git status")?;
+        ],
+    )?;
     Ok(!output.stdout.is_empty())
 }
 
 fn commit_autofix(worktree_dir: &Path) -> Result<()> {
-    git(
+    git::run(
         worktree_dir,
         &["add", "--", ".", ":(exclude).factory"],
         "stage fix-pre-merge changes",
     )?;
-    git(
+    git::run(
         worktree_dir,
         &[
             "commit",
@@ -113,22 +112,6 @@ fn commit_autofix(worktree_dir: &Path) -> Result<()> {
         ],
         "commit fix-pre-merge changes",
     )
-}
-
-fn git(worktree_dir: &Path, args: &[&str], subject: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args(["-C", &worktree_dir.to_string_lossy()])
-        .args(args)
-        .output()
-        .with_context(|| format!("Failed to {subject}"))?;
-    if !output.status.success() {
-        bail!(
-            "git {} failed:\n{}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    Ok(())
 }
 
 fn rerun_reviews_after_autofix(source_root: &Path, run: &Run, worktree_dir: &Path) -> Result<()> {

@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, bail};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
+use crate::git;
 
 /// Result of setting up a worktree for a run.
 pub struct WorktreeResult {
@@ -28,42 +29,16 @@ pub fn setup_run_worktree(
     } else {
         eprintln!("  Creating worktree {} from {}...", run_id, source_branch);
         // Try creating a new branch, fall back to existing branch
-        let result = Command::new("git")
-            .args(["-C", &source_root.to_string_lossy()])
-            .args([
-                "worktree",
-                "add",
-                &worktree_dir.to_string_lossy(),
-                "-b",
-                run_id,
-            ])
-            .output()?;
+        let wt = worktree_dir.to_string_lossy();
+        let result = git::run_raw(
+            source_root,
+            &["worktree", "add", &wt, "-b", run_id],
+        )?;
 
         if !result.status.success() {
             // Branch exists from a previous run — reset it to current HEAD
-            let reset = Command::new("git")
-                .args(["-C", &source_root.to_string_lossy()])
-                .args(["branch", "-f", run_id, "HEAD"])
-                .output()?;
-
-            if !reset.status.success() {
-                bail!(
-                    "Failed to reset branch to HEAD: {}",
-                    String::from_utf8_lossy(&reset.stderr)
-                );
-            }
-
-            let result2 = Command::new("git")
-                .args(["-C", &source_root.to_string_lossy()])
-                .args(["worktree", "add", &worktree_dir.to_string_lossy(), run_id])
-                .output()?;
-
-            if !result2.status.success() {
-                bail!(
-                    "Failed to create worktree: {}",
-                    String::from_utf8_lossy(&result2.stderr)
-                );
-            }
+            git::run(source_root, &["branch", "-f", run_id, "HEAD"], "reset branch to HEAD")?;
+            git::run(source_root, &["worktree", "add", &wt, run_id], "create worktree")?;
         }
     }
 
@@ -89,49 +64,36 @@ pub fn setup_run_worktree(
     })
 }
 
-/// Disable commit signing in a worktree so agents can commit without hardware key.
+/// Disable commit signing in a worktree so external coders can commit
+/// without hardware key. Factory's own git calls get this via the
+/// wrapper's `-c commit.gpgsign=false`; this sets the persistent
+/// repo-level config for processes outside our control.
 pub fn disable_commit_signing(worktree_dir: &Path) -> Result<()> {
-    Command::new("git")
-        .args(["-C", &worktree_dir.to_string_lossy()])
-        .args(["config", "commit.gpgsign", "false"])
-        .output()?;
-    Ok(())
+    git::run(
+        worktree_dir,
+        &["config", "commit.gpgsign", "false"],
+        "disable commit signing",
+    )
 }
 
 /// Check if a directory is a git repository.
 pub fn is_git_repo(dir: &Path) -> bool {
-    Command::new("git")
-        .args(["-C", &dir.to_string_lossy()])
-        .args(["rev-parse", "--git-dir"])
-        .output()
+    git::run_raw(dir, &["rev-parse", "--git-dir"])
         .is_ok_and(|o| o.status.success())
 }
 
 /// Return the repository's common git directory as an absolute path.
 pub fn git_common_dir(dir: &Path) -> Result<PathBuf> {
-    let output = Command::new("git")
-        .args(["-C", &dir.to_string_lossy()])
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .output()?;
-
-    if !output.status.success() {
-        bail!(
-            "Failed to resolve common git directory: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    Ok(PathBuf::from(
-        String::from_utf8_lossy(&output.stdout).trim(),
-    ))
+    let path = git::run_stdout(
+        dir,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        "resolve common git directory",
+    )?;
+    Ok(PathBuf::from(path))
 }
 
 fn git_current_branch(dir: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .args(["-C", &dir.to_string_lossy()])
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()?;
-
+    let output = git::run_raw(dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {
@@ -184,37 +146,19 @@ pub fn merge_run(source_root: &Path, run_id: &str, run_dir: &Path) -> Result<()>
 
     // Remove the worktree first — the branch can't be rebased while
     // it's checked out in a worktree
-    let wt_remove = Command::new("git")
-        .args(["-C", &source_root.to_string_lossy()])
-        .args([
-            "worktree",
-            "remove",
-            "--force",
-            &worktree_dir.to_string_lossy(),
-        ])
-        .output()?;
-
-    if !wt_remove.status.success() {
-        bail!(
-            "Failed to remove worktree {}:\n{}",
-            worktree_dir.display(),
-            String::from_utf8_lossy(&wt_remove.stderr)
-        );
-    }
+    let wt = worktree_dir.to_string_lossy();
+    git::run(
+        source_root,
+        &["worktree", "remove", "--force", &wt],
+        "remove worktree",
+    )?;
 
     // Rebase the run branch onto the source branch
-    let rebase = Command::new("git")
-        .args(["-C", &source_root.to_string_lossy()])
-        .args(["rebase", &main_branch, run_id])
-        .output()?;
+    let rebase = git::run_raw(source_root, &["rebase", &main_branch, run_id])?;
 
     if !rebase.status.success() {
         // Abort the failed rebase so the repo is not left in a broken state
-        Command::new("git")
-            .args(["-C", &source_root.to_string_lossy()])
-            .args(["rebase", "--abort"])
-            .output()
-            .ok();
+        git::run_raw(source_root, &["rebase", "--abort"]).ok();
         bail!(
             "Rebase failed — resolve conflicts manually:\n{}",
             String::from_utf8_lossy(&rebase.stderr)
@@ -222,37 +166,13 @@ pub fn merge_run(source_root: &Path, run_id: &str, run_dir: &Path) -> Result<()>
     }
 
     // Checkout the source branch
-    let checkout = Command::new("git")
-        .args(["-C", &source_root.to_string_lossy()])
-        .args(["checkout", &main_branch])
-        .output()?;
-
-    if !checkout.status.success() {
-        bail!(
-            "Failed to checkout {}: {}",
-            main_branch,
-            String::from_utf8_lossy(&checkout.stderr)
-        );
-    }
+    git::run(source_root, &["checkout", &main_branch], "checkout source branch")?;
 
     // Fast-forward merge
-    let merge = Command::new("git")
-        .args(["-C", &source_root.to_string_lossy()])
-        .args(["merge", "--ff-only", run_id])
-        .output()?;
-
-    if !merge.status.success() {
-        bail!(
-            "Fast-forward merge failed:\n{}",
-            String::from_utf8_lossy(&merge.stderr)
-        );
-    }
+    git::run(source_root, &["merge", "--ff-only", run_id], "fast-forward merge")?;
 
     // Delete the branch
-    Command::new("git")
-        .args(["-C", &source_root.to_string_lossy()])
-        .args(["branch", "-d", run_id])
-        .output()?;
+    git::run_raw(source_root, &["branch", "-d", run_id])?;
 
     Ok(())
 }
@@ -288,18 +208,17 @@ fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
 }
 
 fn worktree_is_dirty(worktree_dir: &Path) -> Result<bool> {
-    let output = Command::new("git")
-        .args(["-C", &worktree_dir.to_string_lossy()])
-        .args([
+    let output = git::run_raw(
+        worktree_dir,
+        &[
             "status",
             "--porcelain",
             "--untracked-files=normal",
             "--",
             ".",
             ":(exclude).factory",
-        ])
-        .output()
-        .context("Failed to check worktree status before landing")?;
+        ],
+    )?;
 
     if !output.status.success() {
         bail!(
@@ -321,37 +240,12 @@ mod tests {
         let main_dir = tmp.path().join("main");
         fs::create_dir_all(&main_dir).unwrap();
 
-        Command::new("git")
-            .args(["init", "-b", "main"])
-            .current_dir(&main_dir)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "commit.gpgsign", "false"])
-            .current_dir(&main_dir)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.email", "test@test"])
-            .current_dir(&main_dir)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.name", "test"])
-            .current_dir(&main_dir)
-            .output()
-            .unwrap();
+        git::run(&main_dir, &["init", "-b", "main"], "init").unwrap();
+        git::run(&main_dir, &["config", "user.email", "test@test"], "config").unwrap();
+        git::run(&main_dir, &["config", "user.name", "test"], "config").unwrap();
         fs::write(main_dir.join("README.md"), "test").unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(&main_dir)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(&main_dir)
-            .output()
-            .unwrap();
+        git::run(&main_dir, &["add", "."], "stage").unwrap();
+        git::run(&main_dir, &["commit", "-m", "init"], "commit").unwrap();
 
         tmp
     }
@@ -394,11 +288,8 @@ mod tests {
         );
 
         // Cleanup worktree
-        Command::new("git")
-            .args(["-C", &main_dir.to_string_lossy()])
-            .args(["worktree", "remove", "--force", &wt.to_string_lossy()])
-            .output()
-            .ok();
+        let wt_s = wt.to_string_lossy();
+        git::run_raw(&main_dir, &["worktree", "remove", "--force", &wt_s]).ok();
     }
 
     #[test]
@@ -425,16 +316,8 @@ mod tests {
         assert!(Path::new(&wt_path).is_dir());
 
         // Cleanup
-        Command::new("git")
-            .args(["-C", &main_dir.to_string_lossy()])
-            .args([
-                "worktree",
-                "remove",
-                "--force",
-                &result.worktree_dir.to_string_lossy(),
-            ])
-            .output()
-            .ok();
+        let wt_s = result.worktree_dir.to_string_lossy();
+        git::run_raw(&main_dir, &["worktree", "remove", "--force", &wt_s]).ok();
     }
 
     #[test]
@@ -460,11 +343,8 @@ mod tests {
         );
 
         // Cleanup
-        Command::new("git")
-            .args(["-C", &main_dir.to_string_lossy()])
-            .args(["worktree", "remove", "--force", &wt.to_string_lossy()])
-            .output()
-            .ok();
+        let wt_s = wt.to_string_lossy();
+        git::run_raw(&main_dir, &["worktree", "remove", "--force", &wt_s]).ok();
     }
 
     #[test]
@@ -489,11 +369,8 @@ mod tests {
         );
 
         // Cleanup
-        Command::new("git")
-            .args(["-C", &main_dir.to_string_lossy()])
-            .args(["worktree", "remove", "--force", &wt.to_string_lossy()])
-            .output()
-            .ok();
+        let wt_s = wt.to_string_lossy();
+        git::run_raw(&main_dir, &["worktree", "remove", "--force", &wt_s]).ok();
     }
 
     #[test]
@@ -526,11 +403,8 @@ mod tests {
         );
 
         // Cleanup
-        Command::new("git")
-            .args(["-C", &main_dir.to_string_lossy()])
-            .args(["worktree", "remove", "--force", &wt.to_string_lossy()])
-            .output()
-            .ok();
+        let wt_s = wt.to_string_lossy();
+        git::run_raw(&main_dir, &["worktree", "remove", "--force", &wt_s]).ok();
     }
 
     #[test]
@@ -547,62 +421,24 @@ mod tests {
         // First worktree creation — creates the branch
         let result1 = setup_run_worktree(&main_dir, run_id, &run_dir).unwrap();
         let wt1 = result1.worktree_dir;
-        let old_head = String::from_utf8_lossy(
-            &Command::new("git")
-                .args(["-C", &wt1.to_string_lossy()])
-                .args(["rev-parse", "HEAD"])
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .trim()
-        .to_string();
+        let old_head = git::run_stdout(&wt1, &["rev-parse", "HEAD"], "resolve HEAD").unwrap();
 
         // Remove the worktree but keep the branch
-        Command::new("git")
-            .args(["-C", &main_dir.to_string_lossy()])
-            .args(["worktree", "remove", "--force", &wt1.to_string_lossy()])
-            .output()
-            .unwrap();
+        let wt1_s = wt1.to_string_lossy();
+        git::run(&main_dir, &["worktree", "remove", "--force", &wt1_s], "remove worktree").unwrap();
 
         // Advance HEAD on main with a new commit
         fs::write(main_dir.join("new-file.txt"), "new content").unwrap();
-        Command::new("git")
-            .args(["add", "new-file.txt"])
-            .current_dir(&main_dir)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "second commit"])
-            .current_dir(&main_dir)
-            .output()
-            .unwrap();
+        git::run(&main_dir, &["add", "new-file.txt"], "stage").unwrap();
+        git::run(&main_dir, &["commit", "-m", "second commit"], "commit").unwrap();
 
-        let new_head = String::from_utf8_lossy(
-            &Command::new("git")
-                .args(["-C", &main_dir.to_string_lossy()])
-                .args(["rev-parse", "HEAD"])
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .trim()
-        .to_string();
+        let new_head = git::run_stdout(&main_dir, &["rev-parse", "HEAD"], "resolve HEAD").unwrap();
         assert_ne!(old_head, new_head);
 
         // Re-create worktree with the same run_id — should be at new HEAD
         let result2 = setup_run_worktree(&main_dir, run_id, &run_dir).unwrap();
         let wt2 = result2.worktree_dir;
-        let wt_head = String::from_utf8_lossy(
-            &Command::new("git")
-                .args(["-C", &wt2.to_string_lossy()])
-                .args(["rev-parse", "HEAD"])
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .trim()
-        .to_string();
+        let wt_head = git::run_stdout(&wt2, &["rev-parse", "HEAD"], "resolve HEAD").unwrap();
 
         assert_eq!(
             wt_head, new_head,
@@ -610,11 +446,8 @@ mod tests {
         );
 
         // Cleanup
-        Command::new("git")
-            .args(["-C", &main_dir.to_string_lossy()])
-            .args(["worktree", "remove", "--force", &wt2.to_string_lossy()])
-            .output()
-            .ok();
+        let wt2_s = wt2.to_string_lossy();
+        git::run_raw(&main_dir, &["worktree", "remove", "--force", &wt2_s]).ok();
     }
 
     #[test]

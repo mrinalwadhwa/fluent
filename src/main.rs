@@ -21,6 +21,7 @@ use factory::content::ContentResolver;
 use factory::credential;
 use factory::dashboard;
 use factory::fargate;
+use factory::git;
 use factory::fargate_bootstrap;
 use factory::merge;
 use factory::observations;
@@ -712,32 +713,19 @@ fn read_optional_file(path: Option<String>) -> Result<Option<String>> {
 }
 
 fn head_commit(project_root: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .args(["-C", &project_root.to_string_lossy()])
-        .args(["rev-parse", "HEAD"])
-        .output()?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        bail!(
-            "Failed to resolve source checkout HEAD: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-    }
+    git::run_stdout(
+        project_root,
+        &["rev-parse", "HEAD"],
+        "resolve source checkout HEAD",
+    )
 }
 
 fn current_ref(project_root: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .args(["-C", &project_root.to_string_lossy()])
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()?;
-    if !output.status.success() {
-        bail!(
-            "Failed to resolve source checkout ref: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let branch = git::run_stdout(
+        project_root,
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+        "resolve source checkout ref",
+    )?;
     if branch == "HEAD" {
         head_commit(project_root)
     } else {

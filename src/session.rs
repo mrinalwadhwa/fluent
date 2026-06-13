@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use crate::coder::{Coder, CoderKind};
 use crate::content::ContentResolver;
+use crate::git;
 use crate::report;
 use crate::review;
 use crate::run::{ReviewScope, Run, RunMode, RunStatus};
@@ -397,13 +398,11 @@ fn has_changes(working_dir: &Path, run_dir: &Path) -> bool {
         Ok(b) => b.trim().to_string(),
         Err(_) => return true, // assume changes if we can't tell
     };
-    let committed_diff = std::process::Command::new("git")
-        .args(["diff", "--quiet", &format!("{source_branch}..HEAD")])
-        .current_dir(working_dir)
-        .status();
+    let committed_diff =
+        git::run_raw(working_dir, &["diff", "--quiet", &format!("{source_branch}..HEAD")]);
 
     match committed_diff {
-        Ok(status) if !status.success() => return true,
+        Ok(output) if !output.status.success() => return true,
         Ok(_) => {}
         Err(_) => return true, // assume changes if git fails
     }
@@ -419,17 +418,17 @@ fn has_dirty_worktree(working_dir: &Path) -> bool {
 }
 
 fn git_status_porcelain(working_dir: &Path) -> Option<String> {
-    let worktree_status = std::process::Command::new("git")
-        .args([
+    let worktree_status = git::run_raw(
+        working_dir,
+        &[
             "status",
             "--porcelain",
             "--untracked-files=normal",
             "--",
             ".",
             ":(exclude).factory",
-        ])
-        .current_dir(working_dir)
-        .output();
+        ],
+    );
 
     match worktree_status {
         Ok(output) if output.status.success() => {
@@ -630,18 +629,7 @@ printf '{{"type":"result"}}\n'
     }
 
     fn run_git(dir: &Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {:?} failed:\nstdout: {}\nstderr: {}",
-            args,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        git::run(dir, args, &format!("run test git {:?}", args)).unwrap();
     }
 
     fn setup_change_detection_repo() -> (TempDir, PathBuf, PathBuf) {
@@ -649,7 +637,6 @@ printf '{{"type":"result"}}\n'
         let repo = tmp.path().join("repo");
         fs::create_dir_all(&repo).unwrap();
         run_git(&repo, &["init", "-b", "main"]);
-        run_git(&repo, &["config", "commit.gpgsign", "false"]);
         run_git(&repo, &["config", "user.email", "test@test"]);
         run_git(&repo, &["config", "user.name", "test"]);
 

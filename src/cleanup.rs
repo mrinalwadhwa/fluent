@@ -2,9 +2,9 @@ use anyhow::{Context, Result, bail};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::git;
 use crate::review;
 use crate::run::{self, Run, RunStatus};
 use crate::work_model::{
@@ -245,11 +245,7 @@ fn cleanup_source_root(search_root: &Path) -> Result<PathBuf> {
 }
 
 fn git_worktree_root(search_root: &Path) -> Option<PathBuf> {
-    let output = Command::new("git")
-        .args(["-C", &search_root.to_string_lossy()])
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
+    let output = git::run_raw(search_root, &["rev-parse", "--show-toplevel"]).ok()?;
 
     if !output.status.success() {
         return None;
@@ -574,32 +570,14 @@ fn cleanup_work_branch(
         return Ok(WorkBranchCleanup::WouldRemove(branch_name.to_string()));
     }
 
-    let output = Command::new("git")
-        .args(["-C", &source_root.to_string_lossy()])
-        .args(["branch", "-D", branch_name])
-        .output()
-        .context("Failed to remove Work branch")?;
-    if !output.status.success() {
-        bail!(
-            "Failed to remove Work branch {branch_name:?}:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    git::run(source_root, &["branch", "-D", branch_name], "remove Work branch")?;
 
     Ok(WorkBranchCleanup::Removed(branch_name.to_string()))
 }
 
 fn git_branch_exists(source_root: &Path, branch_name: &str) -> Result<bool> {
-    let output = Command::new("git")
-        .args(["-C", &source_root.to_string_lossy()])
-        .args([
-            "show-ref",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{branch_name}"),
-        ])
-        .output()
-        .context("Failed to check Work branch")?;
+    let ref_arg = format!("refs/heads/{branch_name}");
+    let output = git::run_raw(source_root, &["show-ref", "--verify", "--quiet", &ref_arg])?;
     match output.status.code() {
         Some(0) => Ok(true),
         Some(1) => Ok(false),
@@ -761,21 +739,12 @@ fn cleanup_worktree(
 }
 
 fn remove_registered_worktree(search_root: &Path, path: &Path) -> Result<()> {
-    let output = Command::new("git")
-        .args(["-C", &search_root.to_string_lossy()])
-        .args(["worktree", "remove", "--force", &path.to_string_lossy()])
-        .output()
-        .context("Failed to remove registered worktree")?;
-
-    if !output.status.success() {
-        bail!(
-            "Failed to remove worktree {}:\n{}",
-            path.display(),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    Ok(())
+    let path_str = path.to_string_lossy();
+    git::run(
+        search_root,
+        &["worktree", "remove", "--force", &path_str],
+        "remove registered worktree",
+    )
 }
 
 fn recorded_worktree_path(run: &Run) -> Result<Option<PathBuf>> {
@@ -794,13 +763,9 @@ fn recorded_worktree_path(run: &Run) -> Result<Option<PathBuf>> {
 }
 
 fn registered_worktrees(search_root: &Path) -> Result<Vec<PathBuf>> {
-    let output = Command::new("git")
-        .args(["-C", &search_root.to_string_lossy()])
-        .args(["worktree", "list", "--porcelain"])
-        .output();
-
-    let Ok(output) = output else {
-        return Ok(Vec::new());
+    let output = match git::run_raw(search_root, &["worktree", "list", "--porcelain"]) {
+        Ok(o) => o,
+        Err(_) => return Ok(Vec::new()),
     };
     if !output.status.success() {
         return Ok(Vec::new());
@@ -1108,47 +1073,19 @@ mod tests {
         assert_eq!(parse_reviewer_worktree_name("review-999-x-a-tests"), None);
     }
 
-    /// Initialize a deterministic git repo for tests. Disables GPG
-    /// signing locally so commits don't hang waiting for an SSH/FIDO
-    /// key when the caller's global git config has `commit.gpgsign =
-    /// true`.
+    /// Initialize a deterministic git repo for tests.
     fn init_test_repo(project: &Path) {
         fs::create_dir_all(project).unwrap();
         for args in [
-            vec!["-C", &project.to_string_lossy(), "init", "-b", "main"],
-            vec![
-                "-C",
-                &project.to_string_lossy(),
-                "config",
-                "commit.gpgsign",
-                "false",
-            ],
-            vec![
-                "-C",
-                &project.to_string_lossy(),
-                "config",
-                "user.email",
-                "test@test",
-            ],
-            vec![
-                "-C",
-                &project.to_string_lossy(),
-                "config",
-                "user.name",
-                "test",
-            ],
+            &["init", "-b", "main"] as &[&str],
+            &["config", "user.email", "test@test"],
+            &["config", "user.name", "test"],
         ] {
-            Command::new("git").args(args).output().unwrap();
+            git::run(project, args, "init test repo").unwrap();
         }
         fs::write(project.join("README.md"), "test\n").unwrap();
-        Command::new("git")
-            .args(["-C", &project.to_string_lossy(), "add", "README.md"])
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["-C", &project.to_string_lossy(), "commit", "-m", "init"])
-            .output()
-            .unwrap();
+        git::run(project, &["add", "README.md"], "stage test file").unwrap();
+        git::run(project, &["commit", "-m", "init"], "initial commit").unwrap();
     }
 
     #[test]

@@ -1,11 +1,11 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 
 use crate::coder::{CoderKind, CoderSandbox};
 use crate::content::ContentResolver;
+use crate::git;
 use crate::hooks::{self, HookContext, HookOutcome};
 use crate::work_model::{
     ArtifactRef, MergeCandidate, MergeCandidateMergeState, MergeCandidateMergeStatus,
@@ -151,7 +151,7 @@ fn execute_merge(
     ensure_registered_worktree(config.project_root, source_workspace)?;
     ensure_clean_worktree(source_workspace)?;
     ensure_clean_worktree(target_workspace)?;
-    let target_head_before = git_stdout(
+    let target_head_before = git::run_stdout(
         target_workspace,
         &["rev-parse", &candidate.target_branch],
         "resolve target branch",
@@ -246,7 +246,7 @@ fn finalize_merge(
     review_artifacts: Vec<ArtifactRef>,
 ) -> Result<WorkMergeOutcome> {
     let merged_commit = head_commit(source_workspace)?;
-    let target_head_now = git_stdout(
+    let target_head_now = git::run_stdout(
         target_workspace,
         &["rev-parse", &candidate.target_branch],
         "resolve target branch before merge",
@@ -260,12 +260,12 @@ fn finalize_merge(
         );
     }
 
-    git(
+    git::run(
         target_workspace,
         &["checkout", &candidate.target_branch],
         "checkout target branch",
     )?;
-    git(
+    git::run(
         target_workspace,
         &["merge", "--ff-only", &merged_commit],
         "fast-forward target branch",
@@ -404,28 +404,27 @@ fn hook_artifact(project_root: &Path, outcome: &HookOutcome) -> ArtifactRef {
 }
 
 fn worktree_is_dirty(worktree_dir: &Path) -> Result<bool> {
-    let output = Command::new("git")
-        .args(["-C", &worktree_dir.to_string_lossy()])
-        .args([
+    let output = git::run_raw(
+        worktree_dir,
+        &[
             "status",
             "--porcelain",
             "--untracked-files=normal",
             "--",
             ".",
             ":(exclude).factory",
-        ])
-        .output()
-        .context("Failed to run git status")?;
+        ],
+    )?;
     Ok(!output.stdout.is_empty())
 }
 
 fn commit_autofix(worktree_dir: &Path) -> Result<()> {
-    git(
+    git::run(
         worktree_dir,
         &["add", "--", ".", ":(exclude).factory"],
         "stage fix-pre-merge changes",
     )?;
-    git(
+    git::run(
         worktree_dir,
         &[
             "commit",
@@ -743,11 +742,7 @@ fn rebase_candidate(
         )?;
         Ok(RebaseOutcome::Success { new_tip })
     } else if give_up_path.exists() {
-        Command::new("git")
-            .args(["-C", &source_workspace.to_string_lossy()])
-            .args(["rebase", "--abort"])
-            .output()
-            .ok();
+        git::run_raw(source_workspace, &["rebase", "--abort"]).ok();
         let diagnostic = fs::read_to_string(&give_up_path)
             .unwrap_or_else(|_| "Rebase agent gave up (no diagnostic)".to_string());
         update_rebase_task_status(
@@ -759,11 +754,7 @@ fn rebase_candidate(
         )?;
         Ok(RebaseOutcome::NeedsUser { diagnostic })
     } else {
-        Command::new("git")
-            .args(["-C", &source_workspace.to_string_lossy()])
-            .args(["rebase", "--abort"])
-            .output()
-            .ok();
+        git::run_raw(source_workspace, &["rebase", "--abort"]).ok();
         update_rebase_task_status(
             config.store,
             config.work_item_id,
@@ -915,25 +906,12 @@ fn build_coder_sandbox(
 }
 
 fn cleanup_managed_workspace(project_root: &Path, source_workspace: &Path) -> Result<()> {
-    let output = Command::new("git")
-        .args(["-C", &project_root.to_string_lossy()])
-        .args([
-            "worktree",
-            "remove",
-            "--force",
-            &source_workspace.to_string_lossy(),
-        ])
-        .output()
-        .context("Failed to remove managed workspace")?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        bail!(
-            "Failed to remove managed workspace {}:\n{}",
-            source_workspace.display(),
-            command_output(&output)
-        )
-    }
+    let wt = source_workspace.to_string_lossy();
+    git::run(
+        project_root,
+        &["worktree", "remove", "--force", &wt],
+        "remove managed workspace",
+    )
 }
 
 fn ensure_same_git_repository(project_root: &Path, workspace_path: &Path) -> Result<()> {
@@ -950,10 +928,7 @@ fn ensure_same_git_repository(project_root: &Path, workspace_path: &Path) -> Res
 
 fn ensure_registered_worktree(project_root: &Path, workspace_path: &Path) -> Result<()> {
     let expected = fs::canonicalize(workspace_path)?;
-    let output = Command::new("git")
-        .args(["-C", &project_root.to_string_lossy()])
-        .args(["worktree", "list", "--porcelain"])
-        .output()?;
+    let output = git::run_raw(project_root, &["worktree", "list", "--porcelain"])?;
     if !output.status.success() {
         bail!(
             "Failed to list git worktrees: {}",
@@ -988,7 +963,7 @@ fn ensure_clean_worktree(workspace_path: &Path) -> Result<()> {
 }
 
 fn worktree_status(workspace_path: &Path) -> Result<String> {
-    let output = git_output(
+    let output = git::run_stdout(
         workspace_path,
         &[
             "status",
@@ -1000,64 +975,11 @@ fn worktree_status(workspace_path: &Path) -> Result<String> {
         ],
         "check worktree status",
     )?;
-    if !output.status.success() {
-        bail!(
-            "Failed to check worktree status:\n{}",
-            command_output(&output)
-        );
-    }
-    if !output.stdout.is_empty() {
-        return Ok(String::from_utf8_lossy(&output.stdout).to_string());
-    }
-    Ok(String::new())
+    Ok(output)
 }
 
 fn head_commit(repo: &Path) -> Result<String> {
-    git_stdout(repo, &["rev-parse", "HEAD"], "resolve HEAD")
-}
-
-fn git(repo: &Path, args: &[&str], action: &str) -> Result<()> {
-    let output = git_output(repo, args, action)?;
-    if output.status.success() {
-        return Ok(());
-    }
-    bail!("Failed to {action}:\n{}", command_output(&output))
-}
-
-fn git_stdout(repo: &Path, args: &[&str], action: &str) -> Result<String> {
-    let output = git_output(repo, args, action)?;
-    if !output.status.success() {
-        bail!("Failed to {action}:\n{}", command_output(&output));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn git_output(repo: &Path, args: &[&str], action: &str) -> Result<Output> {
-    Command::new("git")
-        .args(["-C", &repo.to_string_lossy()])
-        .args(args)
-        .output()
-        .with_context(|| format!("Failed to {action}"))
-}
-
-fn command_output(output: &Output) -> String {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let mut combined = String::new();
-    if !stdout.trim().is_empty() {
-        combined.push_str("stdout:\n");
-        combined.push_str(stdout.trim_end());
-        combined.push('\n');
-    }
-    if !stderr.trim().is_empty() {
-        combined.push_str("stderr:\n");
-        combined.push_str(stderr.trim_end());
-        combined.push('\n');
-    }
-    if combined.is_empty() {
-        combined.push_str("(no output)\n");
-    }
-    combined
+    git::run_stdout(repo, &["rev-parse", "HEAD"], "resolve HEAD")
 }
 
 fn path_for_model(project_root: &Path, path: &Path) -> String {

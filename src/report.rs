@@ -1,8 +1,8 @@
 use anyhow::Result;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
+use crate::git;
 use crate::review;
 use crate::run::project_root_from_run_dir;
 
@@ -128,10 +128,9 @@ pub fn generate_report(run_dir: &Path, run_id: &str, session_count: u32) -> Resu
     let worktree_root = project_root_from_run_dir(run_dir)
         .to_string_lossy()
         .to_string();
-    if Path::new(&worktree_root).join(".git").exists()
-        || Command::new("git")
-            .args(["-C", &worktree_root, "rev-parse", "--git-dir"])
-            .output()
+    let wt_path = Path::new(&worktree_root);
+    if wt_path.join(".git").exists()
+        || git::run_raw(wt_path, &["rev-parse", "--git-dir"])
             .map(|o| o.status.success())
             .unwrap_or(false)
     {
@@ -139,10 +138,7 @@ pub fn generate_report(run_dir: &Path, run_id: &str, session_count: u32) -> Resu
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| "main".into());
         let range = format!("{source_branch}..HEAD");
-        if let Ok(output) = Command::new("git")
-            .args(["-C", &worktree_root, "log", "--oneline", &range])
-            .output()
-        {
+        if let Ok(output) = git::run_raw(wt_path, &["log", "--oneline", &range]) {
             let log = String::from_utf8_lossy(&output.stdout);
             if log.trim().is_empty() {
                 report.push_str("(no commits)\n");

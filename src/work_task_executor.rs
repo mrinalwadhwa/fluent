@@ -3,11 +3,11 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 
 use crate::coder::{CoderKind, CoderSandbox};
 use crate::content::ContentResolver;
 use crate::credential;
+use crate::git;
 use crate::hooks;
 use crate::os;
 use crate::prep;
@@ -846,38 +846,17 @@ fn prepare_task_worktree(
         );
     }
 
-    let output = Command::new("git")
-        .args(["-C", &project_root.to_string_lossy()])
-        .args([
-            "worktree",
-            "add",
-            "-b",
-            branch_name,
-            &workspace_path.to_string_lossy(),
-            source_ref,
-        ])
-        .output()?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        bail!(
-            "Failed to create task worktree: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-    }
+    let ws = workspace_path.to_string_lossy();
+    git::run(
+        project_root,
+        &["worktree", "add", "-b", branch_name, &ws, source_ref],
+        "create task worktree",
+    )
 }
 
 fn git_branch_exists(project_root: &Path, branch_name: &str) -> Result<bool> {
-    let output = Command::new("git")
-        .args(["-C", &project_root.to_string_lossy()])
-        .args([
-            "show-ref",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{branch_name}"),
-        ])
-        .output()?;
+    let refspec = format!("refs/heads/{branch_name}");
+    let output = git::run_raw(project_root, &["show-ref", "--verify", "--quiet", &refspec])?;
     match output.status.code() {
         Some(0) => Ok(true),
         Some(1) => Ok(false),
@@ -902,10 +881,7 @@ fn ensure_same_git_repository(project_root: &Path, workspace_path: &Path) -> Res
 
 fn ensure_registered_worktree(project_root: &Path, workspace_path: &Path) -> Result<()> {
     let expected = fs::canonicalize(workspace_path)?;
-    let output = Command::new("git")
-        .args(["-C", &project_root.to_string_lossy()])
-        .args(["worktree", "list", "--porcelain"])
-        .output()?;
+    let output = git::run_raw(project_root, &["worktree", "list", "--porcelain"])?;
     if !output.status.success() {
         bail!(
             "Failed to list git worktrees: {}",
@@ -1549,11 +1525,9 @@ fn worktree_status(workspace_path: &Path) -> Result<Vec<String>> {
 }
 
 fn git_status_output(workspace_path: &Path, args: &[&str]) -> Result<std::process::Output> {
-    Ok(Command::new("git")
-        .args(["-C", &workspace_path.to_string_lossy()])
-        .arg("status")
-        .args(args)
-        .output()?)
+    let mut full_args = vec!["status"];
+    full_args.extend_from_slice(args);
+    git::run_raw(workspace_path, &full_args)
 }
 
 fn allowed_status_prefix(workspace_path: &Path, allowed_artifact_dir: &Path) -> Result<PathBuf> {
@@ -1669,17 +1643,10 @@ fn factory_file_snapshot_diff(
 }
 
 fn restore_non_factory_worktree_changes(workspace_path: &Path) -> Result<()> {
-    let restore = Command::new("git")
-        .args(["-C", &workspace_path.to_string_lossy()])
-        .args([
-            "restore",
-            "--staged",
-            "--worktree",
-            "--",
-            ".",
-            ":(exclude).factory",
-        ])
-        .output()?;
+    let restore = git::run_raw(
+        workspace_path,
+        &["restore", "--staged", "--worktree", "--", ".", ":(exclude).factory"],
+    )?;
     if !restore.status.success() {
         bail!(
             "Failed to restore non-Factory source changes: {}",
@@ -1687,10 +1654,10 @@ fn restore_non_factory_worktree_changes(workspace_path: &Path) -> Result<()> {
         );
     }
 
-    let clean = Command::new("git")
-        .args(["-C", &workspace_path.to_string_lossy()])
-        .args(["clean", "-fd", "--", ".", ":(exclude).factory"])
-        .output()?;
+    let clean = git::run_raw(
+        workspace_path,
+        &["clean", "-fd", "--", ".", ":(exclude).factory"],
+    )?;
     if clean.status.success() {
         Ok(())
     } else {
@@ -1706,12 +1673,10 @@ fn restore_source_changes_outside_artifact_area(
 ) -> Result<()> {
     let allowed = allowed_status_prefix(&baseline.path, &baseline.allowed_artifact_dir)?;
     let excluded_pathspec = format!(":(exclude){}", allowed.display());
-    let restore = Command::new("git")
-        .args(["-C", &baseline.path.to_string_lossy()])
-        .args(["restore", "--staged", "--worktree", "--"])
-        .arg(".")
-        .arg(&excluded_pathspec)
-        .output()?;
+    let restore = git::run_raw(
+        &baseline.path,
+        &["restore", "--staged", "--worktree", "--", ".", &excluded_pathspec],
+    )?;
     if !restore.status.success() {
         bail!(
             "Failed to restore source changes outside managed artifact area: {}",
@@ -1719,12 +1684,10 @@ fn restore_source_changes_outside_artifact_area(
         );
     }
 
-    let clean = Command::new("git")
-        .args(["-C", &baseline.path.to_string_lossy()])
-        .args(["clean", "-fd", "--"])
-        .arg(".")
-        .arg(&excluded_pathspec)
-        .output()?;
+    let clean = git::run_raw(
+        &baseline.path,
+        &["clean", "-fd", "--", ".", &excluded_pathspec],
+    )?;
     if !clean.status.success() {
         bail!(
             "Failed to remove untracked source changes outside managed artifact area: {}",
@@ -1779,18 +1742,11 @@ fn ensure_source_head_unchanged(workspace_path: &Path, baseline_head: &str) -> R
 }
 
 fn reset_worktree_head(workspace_path: &Path, target: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args(["-C", &workspace_path.to_string_lossy()])
-        .args(["reset", "--hard", target])
-        .output()?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        bail!(
-            "Failed to restore readable candidate workspace HEAD: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-    }
+    git::run(
+        workspace_path,
+        &["reset", "--hard", target],
+        "restore readable candidate workspace HEAD",
+    )
 }
 
 fn path_for_model(project_root: &Path, path: &Path) -> String {
@@ -1801,60 +1757,30 @@ fn path_for_model(project_root: &Path, path: &Path) -> String {
 }
 
 fn commits_ahead(workspace_path: &Path, source_ref: &str) -> Result<u32> {
-    let output = Command::new("git")
-        .args(["-C", &workspace_path.to_string_lossy()])
-        .args(["rev-list", "--count", &format!("{source_ref}..HEAD")])
-        .output()?;
-    if !output.status.success() {
-        bail!(
-            "Failed to compare task workspace with {source_ref}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().parse()?)
+    let range = format!("{source_ref}..HEAD");
+    let stdout = git::run_stdout(
+        workspace_path,
+        &["rev-list", "--count", &range],
+        &format!("compare task workspace with {source_ref}"),
+    )?;
+    Ok(stdout.parse()?)
 }
 
 fn head_commit(workspace_path: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .args(["-C", &workspace_path.to_string_lossy()])
-        .args(["rev-parse", "HEAD"])
-        .output()?;
-    if !output.status.success() {
-        bail!(
-            "Failed to resolve task workspace HEAD: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    git::run_stdout(workspace_path, &["rev-parse", "HEAD"], "resolve task workspace HEAD")
 }
 
 fn current_branch(project_root: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .args(["-C", &project_root.to_string_lossy()])
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()?;
-    if !output.status.success() {
-        bail!(
-            "Failed to resolve source branch: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let branch = git::run_stdout(
+        project_root,
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+        "resolve source branch",
+    )?;
     if branch != "HEAD" {
         return Ok(branch);
     }
 
-    let output = Command::new("git")
-        .args(["-C", &project_root.to_string_lossy()])
-        .args(["rev-parse", "HEAD"])
-        .output()?;
-    if !output.status.success() {
-        bail!(
-            "Failed to resolve source commit: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    git::run_stdout(project_root, &["rev-parse", "HEAD"], "resolve source commit")
 }
 
 #[cfg(test)]
@@ -1863,6 +1789,7 @@ mod tests {
     use crate::content::ContentResolver;
     use crate::work_model::{TaskOutput, TaskStatus, WorkItem, WorkItemAbandonment};
     use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
 
     fn review_item() -> WorkItem {
         let mut item = WorkItem {
@@ -2058,29 +1985,12 @@ mod tests {
     fn setup_test_repo(tmp: &tempfile::TempDir) -> PathBuf {
         let dir = tmp.path().join("repo");
         fs::create_dir_all(&dir).unwrap();
-        for (args, _) in [
-            (vec!["init", "-b", "main"], "init"),
-            (vec!["config", "commit.gpgsign", "false"], "config"),
-            (vec!["config", "user.email", "test@test"], "config"),
-            (vec!["config", "user.name", "test"], "config"),
-        ] {
-            Command::new("git")
-                .args(&args)
-                .current_dir(&dir)
-                .output()
-                .unwrap();
-        }
+        git::run(&dir, &["init", "-b", "main"], "init repo").unwrap();
+        git::run(&dir, &["config", "user.email", "test@test"], "config email").unwrap();
+        git::run(&dir, &["config", "user.name", "test"], "config name").unwrap();
         fs::write(dir.join("README.md"), "test").unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(&dir)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(&dir)
-            .output()
-            .unwrap();
+        git::run(&dir, &["add", "."], "stage files").unwrap();
+        git::run(&dir, &["commit", "-m", "init"], "initial commit").unwrap();
         dir
     }
 
@@ -2121,16 +2031,8 @@ mod tests {
         let guard = PostMergeSourceGuard::begin(dir.clone(), &head).unwrap();
 
         fs::write(dir.join("new-commit.txt"), "extra commit\n").unwrap();
-        Command::new("git")
-            .args(["add", "new-commit.txt"])
-            .current_dir(&dir)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "move head"])
-            .current_dir(&dir)
-            .output()
-            .unwrap();
+        git::run(&dir, &["add", "new-commit.txt"], "stage file").unwrap();
+        git::run(&dir, &["commit", "-m", "move head"], "commit").unwrap();
 
         let result = guard.finish();
         assert!(result.is_err());

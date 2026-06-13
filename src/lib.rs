@@ -6,6 +6,7 @@ pub mod credential;
 pub mod dashboard;
 pub mod fargate;
 pub mod fargate_bootstrap;
+pub mod git;
 pub mod hooks;
 pub mod merge;
 pub mod notify;
