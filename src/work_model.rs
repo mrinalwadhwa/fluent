@@ -508,6 +508,19 @@ impl WorkItem {
             } else {
                 None
             };
+            let mut task_input_artifacts = review_input_artifacts
+                .get(*role)
+                .cloned()
+                .unwrap_or_default();
+            if let (Some(bt_id), "behaviors") = (behavior_tests_task_id.as_deref(), *role) {
+                task_input_artifacts.push(ArtifactRef {
+                    producer_id: bt_id.to_string(),
+                    path: format!(
+                        "{}/behavior-tests-results.json",
+                        work_artifact_path(&self.id, attempt_id, bt_id)
+                    ),
+                });
+            }
             attempt.tasks.push(Task {
                 id: task_id.clone(),
                 kind: TaskKind::Review,
@@ -526,10 +539,7 @@ impl WorkItem {
                     source_branch: write_output.source_branch.clone(),
                     candidate_commit: write_output.commit.clone(),
                 }),
-                input_artifacts: review_input_artifacts
-                    .get(*role)
-                    .cloned()
-                    .unwrap_or_default(),
+                input_artifacts: task_input_artifacts,
                 depends_on,
                 output: None,
                 created_at: Some(now_iso8601()),
