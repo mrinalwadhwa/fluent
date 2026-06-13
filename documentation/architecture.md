@@ -372,31 +372,32 @@ behavior without further plumbing.
 | `FACTORY_RATE_LIMIT_JITTER_MAX_SECONDS` | 30 | Maximum per-run jitter added to the retry wait |
 
 `claude_auth.rs` detects Claude auth token expiry before and during
-coder invocations, surfacing `needs-user` instead of letting the coder
-fail mid-Task with a cold 401. Two layers:
+coder invocations, failing the Task with a clear recovery message
+instead of letting the coder fail mid-Task with a cold 401. Two layers:
 
 - **Prevention.** `ensure_not_expired()` reads the macOS Keychain entry
   under service `Claude Code-credentials`, parses the `claudeAiOauth`
   object, and checks `expiresAt` against a 5-minute margin. If the
   token is expired or about to expire, it returns `AuthError::Expired`
-  and the caller bails with a `needs-user` message naming
-  `claude /login` as the recovery action. When the keychain entry is
-  missing, malformed, or has no `refreshToken` (API-key path), the
-  check returns `Ok(())` and the coder launches as before.
-  `SandboxedClaudeCode::run` and `BareClaudeCode::run` call this before
-  every launch; `CodexCode::run` does not.
+  and the caller bails with an error message naming `claude /login` as
+  the recovery action. When the keychain entry is missing, malformed,
+  or has no `refreshToken` (API-key path), the check returns `Ok(())`
+  and the coder launches as before. `SandboxedClaudeCode::run` and
+  `BareClaudeCode::run` call this before every launch;
+  `CodexCode::run` does not.
 
 - **Recovery.** `classify_transcript_401()` walks the transcript JSONL
   for `result` events with `api_error_status == 401`. When the most
   recent `result` event is a 401, it returns `AuthError::Rejected`. The
   retrying loop in `run_with_transcript_retrying` checks this before
   rate-limit detection so 401 wins when both match. The caller bails
-  with the same `needs-user` message.
+  with the same recovery message.
 
 Automatic OAuth refresh is explicitly out of scope. The module returns
-typed errors; callers translate to `needs-user`. A follow-up Work Item
-will tackle refresh once the correct request format for the Claude.ai
-subscription OAuth endpoint is known.
+typed errors; callers bail with a descriptive error that propagates as
+`TaskStatus::Failed`. A follow-up Work Item will tackle refresh once
+the correct request format for the Claude.ai subscription OAuth
+endpoint is known.
 
 `factory cleanup` owns the terminal Work model cleanup lifecycle. It
 defaults to a dry run and only mutates state with `--apply`. A Work Item

@@ -2821,8 +2821,8 @@ Test: src/work_model.rs (merge_state_skips_serializing_auto_merge_skipped_when_n
 WHEN any Claude coder variant (`SandboxedClaudeCode`,
 `BareClaudeCode`) is about to launch the `claude` process,
 THE SYSTEM SHALL call `claude_auth::ensure_not_expired()` first,
-and SHALL surface the returned error to the caller (translated to
-`needs-user`) if the call returns an error.
+and SHALL bail with the error's user-facing message (the Task fails
+with `TaskStatus::Failed`) if the call returns an error.
 Untestable: Structural integration verified by code inspection — `ensure_not_expired()` is the first call in both `SandboxedClaudeCode::run` and `BareClaudeCode::run`
 
 WHEN `claude_auth::ensure_not_expired()` is invoked,
@@ -2863,7 +2863,8 @@ coder process exit non-zero AND the transcript's most recent
 `result` event has `api_error_status == 401`,
 THE SYSTEM SHALL return `AuthError::Rejected { request_id }`
 (populated from the transcript's `result.request_id` when
-present) so the caller surfaces `needs-user`.
+present) so the caller bails with a recovery message (the Task
+fails with `TaskStatus::Failed`).
 Test: src/claude_auth.rs (tests::classify_transcript_401_returns_rejected_on_result_401)
 Test: src/claude_auth.rs (tests::classify_transcript_401_extracts_request_id_when_present)
 Test: src/claude_auth.rs (tests::classify_transcript_401_returns_rejected_with_none_request_id_when_missing)
