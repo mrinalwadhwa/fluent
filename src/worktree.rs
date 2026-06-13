@@ -30,15 +30,20 @@ pub fn setup_run_worktree(
         eprintln!("  Creating worktree {} from {}...", run_id, source_branch);
         // Try creating a new branch, fall back to existing branch
         let wt = worktree_dir.to_string_lossy();
-        let result = git::run_raw(
-            source_root,
-            &["worktree", "add", &wt, "-b", run_id],
-        )?;
+        let result = git::run_raw(source_root, &["worktree", "add", &wt, "-b", run_id])?;
 
         if !result.status.success() {
             // Branch exists from a previous run — reset it to current HEAD
-            git::run(source_root, &["branch", "-f", run_id, "HEAD"], "reset branch to HEAD")?;
-            git::run(source_root, &["worktree", "add", &wt, run_id], "create worktree")?;
+            git::run(
+                source_root,
+                &["branch", "-f", run_id, "HEAD"],
+                "reset branch to HEAD",
+            )?;
+            git::run(
+                source_root,
+                &["worktree", "add", &wt, run_id],
+                "create worktree",
+            )?;
         }
     }
 
@@ -78,8 +83,7 @@ pub fn disable_commit_signing(worktree_dir: &Path) -> Result<()> {
 
 /// Check if a directory is a git repository.
 pub fn is_git_repo(dir: &Path) -> bool {
-    git::run_raw(dir, &["rev-parse", "--git-dir"])
-        .is_ok_and(|o| o.status.success())
+    git::run_raw(dir, &["rev-parse", "--git-dir"]).is_ok_and(|o| o.status.success())
 }
 
 /// Return the repository's common git directory as an absolute path.
@@ -166,10 +170,18 @@ pub fn merge_run(source_root: &Path, run_id: &str, run_dir: &Path) -> Result<()>
     }
 
     // Checkout the source branch
-    git::run(source_root, &["checkout", &main_branch], "checkout source branch")?;
+    git::run(
+        source_root,
+        &["checkout", &main_branch],
+        "checkout source branch",
+    )?;
 
     // Fast-forward merge
-    git::run(source_root, &["merge", "--ff-only", run_id], "fast-forward merge")?;
+    git::run(
+        source_root,
+        &["merge", "--ff-only", run_id],
+        "fast-forward merge",
+    )?;
 
     // Delete the branch
     git::run_raw(source_root, &["branch", "-d", run_id])?;
@@ -425,7 +437,12 @@ mod tests {
 
         // Remove the worktree but keep the branch
         let wt1_s = wt1.to_string_lossy();
-        git::run(&main_dir, &["worktree", "remove", "--force", &wt1_s], "remove worktree").unwrap();
+        git::run(
+            &main_dir,
+            &["worktree", "remove", "--force", &wt1_s],
+            "remove worktree",
+        )
+        .unwrap();
 
         // Advance HEAD on main with a new commit
         fs::write(main_dir.join("new-file.txt"), "new content").unwrap();

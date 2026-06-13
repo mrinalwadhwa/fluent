@@ -570,7 +570,11 @@ fn cleanup_work_branch(
         return Ok(WorkBranchCleanup::WouldRemove(branch_name.to_string()));
     }
 
-    git::run(source_root, &["branch", "-D", branch_name], "remove Work branch")?;
+    git::run(
+        source_root,
+        &["branch", "-D", branch_name],
+        "remove Work branch",
+    )?;
 
     Ok(WorkBranchCleanup::Removed(branch_name.to_string()))
 }

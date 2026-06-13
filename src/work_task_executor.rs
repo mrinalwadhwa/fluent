@@ -1645,7 +1645,14 @@ fn factory_file_snapshot_diff(
 fn restore_non_factory_worktree_changes(workspace_path: &Path) -> Result<()> {
     let restore = git::run_raw(
         workspace_path,
-        &["restore", "--staged", "--worktree", "--", ".", ":(exclude).factory"],
+        &[
+            "restore",
+            "--staged",
+            "--worktree",
+            "--",
+            ".",
+            ":(exclude).factory",
+        ],
     )?;
     if !restore.status.success() {
         bail!(
@@ -1675,7 +1682,14 @@ fn restore_source_changes_outside_artifact_area(
     let excluded_pathspec = format!(":(exclude){}", allowed.display());
     let restore = git::run_raw(
         &baseline.path,
-        &["restore", "--staged", "--worktree", "--", ".", &excluded_pathspec],
+        &[
+            "restore",
+            "--staged",
+            "--worktree",
+            "--",
+            ".",
+            &excluded_pathspec,
+        ],
     )?;
     if !restore.status.success() {
         bail!(
@@ -1767,7 +1781,11 @@ fn commits_ahead(workspace_path: &Path, source_ref: &str) -> Result<u32> {
 }
 
 fn head_commit(workspace_path: &Path) -> Result<String> {
-    git::run_stdout(workspace_path, &["rev-parse", "HEAD"], "resolve task workspace HEAD")
+    git::run_stdout(
+        workspace_path,
+        &["rev-parse", "HEAD"],
+        "resolve task workspace HEAD",
+    )
 }
 
 fn current_branch(project_root: &Path) -> Result<String> {
@@ -1780,7 +1798,11 @@ fn current_branch(project_root: &Path) -> Result<String> {
         return Ok(branch);
     }
 
-    git::run_stdout(project_root, &["rev-parse", "HEAD"], "resolve source commit")
+    git::run_stdout(
+        project_root,
+        &["rev-parse", "HEAD"],
+        "resolve source commit",
+    )
 }
 
 #[cfg(test)]

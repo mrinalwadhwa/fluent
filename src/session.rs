@@ -398,8 +398,10 @@ fn has_changes(working_dir: &Path, run_dir: &Path) -> bool {
         Ok(b) => b.trim().to_string(),
         Err(_) => return true, // assume changes if we can't tell
     };
-    let committed_diff =
-        git::run_raw(working_dir, &["diff", "--quiet", &format!("{source_branch}..HEAD")]);
+    let committed_diff = git::run_raw(
+        working_dir,
+        &["diff", "--quiet", &format!("{source_branch}..HEAD")],
+    );
 
     match committed_diff {
         Ok(output) if !output.status.success() => return true,

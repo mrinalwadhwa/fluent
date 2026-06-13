@@ -92,18 +92,19 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let cmd = build_command(tmp.path(), &["status"]);
         let envs: Vec<_> = cmd.get_envs().collect();
-        assert!(envs
-            .iter()
-            .any(|(k, v)| *k == "GIT_EDITOR"
-                && *v == Some(std::ffi::OsStr::new("true"))));
-        assert!(envs
-            .iter()
-            .any(|(k, v)| *k == "GIT_SEQUENCE_EDITOR"
-                && *v == Some(std::ffi::OsStr::new("true"))));
-        assert!(envs
-            .iter()
-            .any(|(k, v)| *k == "GIT_TERMINAL_PROMPT"
-                && *v == Some(std::ffi::OsStr::new("0"))));
+        assert!(
+            envs.iter()
+                .any(|(k, v)| *k == "GIT_EDITOR" && *v == Some(std::ffi::OsStr::new("true")))
+        );
+        assert!(
+            envs.iter()
+                .any(|(k, v)| *k == "GIT_SEQUENCE_EDITOR"
+                    && *v == Some(std::ffi::OsStr::new("true")))
+        );
+        assert!(
+            envs.iter()
+                .any(|(k, v)| *k == "GIT_TERMINAL_PROMPT" && *v == Some(std::ffi::OsStr::new("0")))
+        );
     }
 
     #[test]
@@ -131,10 +132,7 @@ mod tests {
             .map(|a| a.to_string_lossy().to_string())
             .collect();
         let pos = args.iter().position(|a| a == "core.editor=true");
-        assert!(
-            pos.is_some(),
-            "Expected core.editor=true in args: {args:?}"
-        );
+        assert!(pos.is_some(), "Expected core.editor=true in args: {args:?}");
         assert_eq!(args[pos.unwrap() - 1], "-c");
     }
 

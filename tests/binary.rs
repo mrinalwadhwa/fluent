@@ -2425,8 +2425,18 @@ fn work_task_run_completes_review_task_with_fail_verdict_artifact() {
         "# Review tests\n\nCheck tests.\n",
     )
     .unwrap();
-    git::run(&main_dir, &["add", "skills/review-tests/SKILL.md"], "stage skill").unwrap();
-    git::run(&main_dir, &["commit", "-m", "Add review tests skill"], "commit skill").unwrap();
+    git::run(
+        &main_dir,
+        &["add", "skills/review-tests/SKILL.md"],
+        "stage skill",
+    )
+    .unwrap();
+    git::run(
+        &main_dir,
+        &["commit", "-m", "Add review tests skill"],
+        "commit skill",
+    )
+    .unwrap();
     create_completed_work_attempt(&tmp, &main_dir);
     factory_cmd()
         .current_dir(&main_dir)
@@ -3108,7 +3118,12 @@ fn work_attempt_run_review_only_requires_recorded_source_commit() {
 
     fs::write(main_dir.join("README.md"), "source advanced\n").unwrap();
     git::run(&main_dir, &["add", "README.md"], "stage README").unwrap();
-    git::run(&main_dir, &["commit", "-m", "advance source"], "commit advance").unwrap();
+    git::run(
+        &main_dir,
+        &["commit", "-m", "advance source"],
+        "commit advance",
+    )
+    .unwrap();
 
     let bin_dir = tmp.path().join("bin-review-only-stale");
     write_mock_claude(&bin_dir, &review_only_mock_script("pass"));
@@ -3148,8 +3163,18 @@ fn work_attempt_run_review_only_rejects_factory_state_changes() {
         "# Decisions\n\n",
     )
     .unwrap();
-    git::run(&main_dir, &["add", ".factory/expertise/decisions.md"], "stage decisions").unwrap();
-    git::run(&main_dir, &["commit", "-m", "record decisions"], "commit decisions").unwrap();
+    git::run(
+        &main_dir,
+        &["add", ".factory/expertise/decisions.md"],
+        "stage decisions",
+    )
+    .unwrap();
+    git::run(
+        &main_dir,
+        &["commit", "-m", "record decisions"],
+        "commit decisions",
+    )
+    .unwrap();
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -3264,8 +3289,18 @@ fn work_attempt_run_review_only_restores_mixed_source_and_factory_changes() {
         "# Decisions\n\n",
     )
     .unwrap();
-    git::run(&main_dir, &["add", ".factory/expertise/decisions.md"], "stage decisions").unwrap();
-    git::run(&main_dir, &["commit", "-m", "record decisions"], "commit decisions").unwrap();
+    git::run(
+        &main_dir,
+        &["add", ".factory/expertise/decisions.md"],
+        "stage decisions",
+    )
+    .unwrap();
+    git::run(
+        &main_dir,
+        &["commit", "-m", "record decisions"],
+        "commit decisions",
+    )
+    .unwrap();
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -3538,7 +3573,12 @@ fn work_merge_candidate_warns_when_cleanup_fails_after_landing() {
 
     let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
     let candidate_head = git_head(&candidate_workspace);
-    git::run(&main_dir, &["worktree", "lock", &candidate_workspace.to_string_lossy()], "lock worktree").unwrap();
+    git::run(
+        &main_dir,
+        &["worktree", "lock", &candidate_workspace.to_string_lossy()],
+        "lock worktree",
+    )
+    .unwrap();
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -5615,10 +5655,32 @@ fn work_task_run_rejects_reused_workspace_without_new_commit() {
         .success();
 
     let workspace = main_dir.join("../work-6-work-1-attempt-1");
-    git::run(&main_dir, &["worktree", "add", "-b", "precreated-task-workspace", &workspace.to_string_lossy(), "HEAD"], "create worktree").unwrap();
+    git::run(
+        &main_dir,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "precreated-task-workspace",
+            &workspace.to_string_lossy(),
+            "HEAD",
+        ],
+        "create worktree",
+    )
+    .unwrap();
     fs::write(workspace.join("stale-output.txt"), "stale").unwrap();
-    git::run(&workspace, &["add", "stale-output.txt"], "stage stale output").unwrap();
-    git::run(&workspace, &["commit", "-m", "Add stale output"], "commit stale output").unwrap();
+    git::run(
+        &workspace,
+        &["add", "stale-output.txt"],
+        "stage stale output",
+    )
+    .unwrap();
+    git::run(
+        &workspace,
+        &["commit", "-m", "Add stale output"],
+        "commit stale output",
+    )
+    .unwrap();
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -5704,7 +5766,12 @@ fn work_task_run_rejects_existing_task_branch_without_workspace() {
         .assert()
         .success();
 
-    git::run(&main_dir, &["branch", "work/work-1/attempt-1/attempt-1-write-1", "HEAD"], "create task branch").unwrap();
+    git::run(
+        &main_dir,
+        &["branch", "work/work-1/attempt-1/attempt-1-write-1", "HEAD"],
+        "create task branch",
+    )
+    .unwrap();
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -6457,7 +6524,18 @@ fn cleanup_apply_removes_registered_worktree() {
     fs::write(run_dir.join("status"), "complete").unwrap();
 
     let worktree_dir = tmp.path().join(run_id);
-    git::run(&main_dir, &["worktree", "add", worktree_dir.to_str().unwrap(), "-b", run_id], "create worktree").unwrap();
+    git::run(
+        &main_dir,
+        &[
+            "worktree",
+            "add",
+            worktree_dir.to_str().unwrap(),
+            "-b",
+            run_id,
+        ],
+        "create worktree",
+    )
+    .unwrap();
     fs::write(run_dir.join("worktree"), worktree_dir.to_str().unwrap()).unwrap();
 
     factory_cmd()
@@ -6481,7 +6559,18 @@ fn cleanup_dry_run_keeps_registered_worktree() {
     fs::write(run_dir.join("status"), "complete").unwrap();
 
     let worktree_dir = tmp.path().join(run_id);
-    git::run(&main_dir, &["worktree", "add", worktree_dir.to_str().unwrap(), "-b", run_id], "create worktree").unwrap();
+    git::run(
+        &main_dir,
+        &[
+            "worktree",
+            "add",
+            worktree_dir.to_str().unwrap(),
+            "-b",
+            run_id,
+        ],
+        "create worktree",
+    )
+    .unwrap();
     fs::write(run_dir.join("worktree"), worktree_dir.to_str().unwrap()).unwrap();
 
     factory_cmd()
@@ -6494,7 +6583,17 @@ fn cleanup_dry_run_keeps_registered_worktree() {
     assert!(worktree_dir.is_dir());
     assert!(!run_dir.join("cleaned.md").exists());
 
-    git::run(&main_dir, &["worktree", "remove", "--force", worktree_dir.to_str().unwrap()], "remove worktree").unwrap();
+    git::run(
+        &main_dir,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            worktree_dir.to_str().unwrap(),
+        ],
+        "remove worktree",
+    )
+    .unwrap();
 }
 
 #[test]
@@ -6507,7 +6606,18 @@ fn cleanup_from_run_worktree_uses_source_registry() {
     fs::write(source_run_dir.join("status"), "complete").unwrap();
 
     let worktree_dir = tmp.path().join(run_id);
-    git::run(&main_dir, &["worktree", "add", worktree_dir.to_str().unwrap(), "-b", run_id], "create worktree").unwrap();
+    git::run(
+        &main_dir,
+        &[
+            "worktree",
+            "add",
+            worktree_dir.to_str().unwrap(),
+            "-b",
+            run_id,
+        ],
+        "create worktree",
+    )
+    .unwrap();
     fs::write(
         source_run_dir.join("worktree"),
         worktree_dir.to_str().unwrap(),
@@ -6581,7 +6691,19 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
 
     let worktree_dir = main_dir.join("../work-6-work-1-attempt-1");
     let branch_name = "work/work-1/attempt-1/attempt-1-write-1";
-    git::run(&main_dir, &["worktree", "add", worktree_dir.to_str().unwrap(), "-b", branch_name, "HEAD"], "create worktree").unwrap();
+    git::run(
+        &main_dir,
+        &[
+            "worktree",
+            "add",
+            worktree_dir.to_str().unwrap(),
+            "-b",
+            branch_name,
+            "HEAD",
+        ],
+        "create worktree",
+    )
+    .unwrap();
 
     let active_item_path = main_dir.join(".factory/work/items/work-active.json");
     let active_attempt_path = main_dir.join(".factory/work/attempts/work-active/attempt-1.json");
@@ -6604,7 +6726,19 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
 
     let active_worktree_dir = main_dir.join("../work-11-work-active-attempt-1");
     let active_branch_name = "work/work-active/attempt-1/attempt-1-write-1";
-    git::run(&main_dir, &["worktree", "add", active_worktree_dir.to_str().unwrap(), "-b", active_branch_name, "HEAD"], "create active worktree").unwrap();
+    git::run(
+        &main_dir,
+        &[
+            "worktree",
+            "add",
+            active_worktree_dir.to_str().unwrap(),
+            "-b",
+            active_branch_name,
+            "HEAD",
+        ],
+        "create active worktree",
+    )
+    .unwrap();
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -6646,13 +6780,41 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
     assert!(active_worktree_dir.is_dir());
     assert!(active_artifact_dir.is_dir());
 
-    let branch_check = git::run_raw(&main_dir, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch_name}")]).unwrap();
+    let branch_check = git::run_raw(
+        &main_dir,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch_name}"),
+        ],
+    )
+    .unwrap();
     assert!(!branch_check.status.success());
 
-    let active_branch_check = git::run_raw(&main_dir, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{active_branch_name}")]).unwrap();
+    let active_branch_check = git::run_raw(
+        &main_dir,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{active_branch_name}"),
+        ],
+    )
+    .unwrap();
     assert!(active_branch_check.status.success());
 
-    git::run(&main_dir, &["worktree", "remove", "--force", active_worktree_dir.to_str().unwrap()], "remove active worktree").unwrap();
+    git::run(
+        &main_dir,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            active_worktree_dir.to_str().unwrap(),
+        ],
+        "remove active worktree",
+    )
+    .unwrap();
 }
 
 #[test]
@@ -7582,12 +7744,7 @@ fn setup_git_project(tmp: &TempDir) -> std::path::PathBuf {
         "set user.email",
     )
     .unwrap();
-    git::run(
-        &main_dir,
-        &["config", "user.name", "test"],
-        "set user.name",
-    )
-    .unwrap();
+    git::run(&main_dir, &["config", "user.name", "test"], "set user.name").unwrap();
     fs::write(main_dir.join("README.md"), "test").unwrap();
     git::run(&main_dir, &["add", "."], "stage files").unwrap();
     git::run(&main_dir, &["commit", "-m", "init"], "initial commit").unwrap();
@@ -8077,8 +8234,12 @@ fn git_head(repo: &Path) -> String {
 }
 
 fn git_common_dir(repo: &Path) -> PathBuf {
-    let path_str =
-        git::run_stdout(repo, &["rev-parse", "--git-common-dir"], "get git common dir").unwrap();
+    let path_str = git::run_stdout(
+        repo,
+        &["rev-parse", "--git-common-dir"],
+        "get git common dir",
+    )
+    .unwrap();
     let path = PathBuf::from(&path_str);
     if path.is_absolute() {
         path
@@ -10849,12 +11010,7 @@ exit 0
         status.is_empty(),
         "worktree should be clean after completion: {status}"
     );
-    let log = git::run_stdout(
-        wt_path,
-        &["log", "--oneline", "-3"],
-        "get recent commits",
-    )
-    .unwrap();
+    let log = git::run_stdout(wt_path, &["log", "--oneline", "-3"], "get recent commits").unwrap();
     assert!(
         log.contains("Add dirty work"),
         "dirty author work should be committed before completion"
@@ -10956,24 +11112,16 @@ fn run_merge_completes_full_lifecycle() {
     );
 
     // Verify branch was deleted
-    let branch_list = git::run_stdout(
-        &main_dir,
-        &["branch", "--list", &run_id],
-        "list branches",
-    )
-    .unwrap();
+    let branch_list =
+        git::run_stdout(&main_dir, &["branch", "--list", &run_id], "list branches").unwrap();
     assert!(
         branch_list.trim().is_empty(),
         "branch should be deleted after landing"
     );
 
     // Verify commit is on main
-    let log_str = git::run_stdout(
-        &main_dir,
-        &["log", "--oneline", "-5"],
-        "get recent commits",
-    )
-    .unwrap();
+    let log_str =
+        git::run_stdout(&main_dir, &["log", "--oneline", "-5"], "get recent commits").unwrap();
     assert!(
         log_str.contains("Add feature"),
         "feature commit should be on main: {log_str}"
@@ -11157,12 +11305,8 @@ exit 0
             "Rerunning reviewers after fix-pre-merge autofix",
         ));
 
-    let log = git::run_stdout(
-        &main_dir,
-        &["log", "--oneline", "-5"],
-        "get recent commits",
-    )
-    .unwrap();
+    let log =
+        git::run_stdout(&main_dir, &["log", "--oneline", "-5"], "get recent commits").unwrap();
     assert!(log.contains("Apply fix-pre-merge changes"));
     let review = fs::read_to_string(run_dir.join("reviews/review-tests.md")).unwrap();
     assert!(review.contains("Autofix review passed"));
