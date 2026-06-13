@@ -215,6 +215,7 @@ impl WorkItem {
                 artifact_area: None,
                 review_context: None,
                 input_artifacts: Vec::new(),
+                depends_on: None,
                 output: None,
                 created_at: Some(now_iso8601()),
                 started_at: None,
@@ -276,6 +277,7 @@ impl WorkItem {
                     candidate_commit: source_commit.clone(),
                 }),
                 input_artifacts: Vec::new(),
+                depends_on: None,
                 output: None,
                 created_at: Some(now_iso8601()),
                 started_at: None,
@@ -347,6 +349,7 @@ impl WorkItem {
                     candidate_commit: source_commit.clone(),
                 }),
                 input_artifacts: Vec::new(),
+                depends_on: None,
                 output: None,
                 created_at: Some(now_iso8601()),
                 started_at: None,
@@ -448,6 +451,48 @@ impl WorkItem {
             path: write_output.workspace_path.clone(),
         };
         let mut task_ids = Vec::new();
+
+        let needs_behavior_tests = roles.contains(&"behaviors");
+        let behavior_tests_task_id = if needs_behavior_tests {
+            let bt_id = match round {
+                Some(round) => format!("{attempt_id}-behavior-tests-{round}"),
+                None => format!("{attempt_id}-behavior-tests"),
+            };
+            validate_id("task", &bt_id)?;
+            if attempt.tasks.iter().any(|task| task.id == bt_id) {
+                return Err(WorkModelError::TaskAlreadyExists { id: bt_id });
+            }
+            attempt.tasks.push(Task {
+                id: bt_id.clone(),
+                kind: TaskKind::BehaviorTests,
+                status: TaskStatus::Planned,
+                role: "behavior-tests".to_string(),
+                instructions: None,
+                work_item_id: self.id.clone(),
+                attempt_id: Some(attempt_id.to_string()),
+                workspace_access: WorkspaceAccess::read_only(vec![candidate.clone()]),
+                artifact_area: Some(TaskArtifactArea {
+                    path: work_artifact_path(&self.id, attempt_id, &bt_id),
+                }),
+                review_context: Some(ReviewContext {
+                    candidate_workspace_id: write_output.workspace_id.clone(),
+                    candidate_workspace_path: write_output.workspace_path.clone(),
+                    source_branch: write_output.source_branch.clone(),
+                    candidate_commit: write_output.commit.clone(),
+                }),
+                input_artifacts: Vec::new(),
+                depends_on: None,
+                output: None,
+                created_at: Some(now_iso8601()),
+                started_at: None,
+                completed_at: None,
+            });
+            task_ids.push(bt_id.clone());
+            Some(bt_id)
+        } else {
+            None
+        };
+
         for role in roles {
             validate_id("review role", role)?;
             let task_id = match round {
@@ -458,6 +503,11 @@ impl WorkItem {
             if attempt.tasks.iter().any(|task| task.id == task_id) {
                 return Err(WorkModelError::TaskAlreadyExists { id: task_id });
             }
+            let depends_on = if *role == "behaviors" {
+                behavior_tests_task_id.clone()
+            } else {
+                None
+            };
             attempt.tasks.push(Task {
                 id: task_id.clone(),
                 kind: TaskKind::Review,
@@ -480,6 +530,7 @@ impl WorkItem {
                     .get(*role)
                     .cloned()
                     .unwrap_or_default(),
+                depends_on,
                 output: None,
                 created_at: Some(now_iso8601()),
                 started_at: None,
@@ -554,6 +605,7 @@ impl WorkItem {
             artifact_area: None,
             review_context: None,
             input_artifacts,
+            depends_on: None,
             output: None,
             created_at: Some(now_iso8601()),
             started_at: None,
@@ -889,6 +941,7 @@ impl Attempt {
             if self.status == AttemptStatus::Complete
                 && task.status != TaskStatus::Complete
                 && task.kind != TaskKind::Rebase
+                && task.kind != TaskKind::BehaviorTests
             {
                 return Err(WorkModelError::CompleteAttemptHasIncompleteTask {
                     attempt_id: self.id.clone(),
@@ -1042,6 +1095,8 @@ pub struct Task {
     pub review_context: Option<ReviewContext>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_artifacts: Vec<ArtifactRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depends_on: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<TaskOutput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1147,6 +1202,7 @@ pub enum TaskKind {
     Report,
     Learn,
     Probe,
+    BehaviorTests,
 }
 
 impl TaskKind {
@@ -1159,6 +1215,7 @@ impl TaskKind {
             Self::Report => "report",
             Self::Learn => "learn",
             Self::Probe => "probe",
+            Self::BehaviorTests => "behavior-tests",
         }
     }
 }
@@ -1175,6 +1232,7 @@ impl FromStr for TaskKind {
             "report" => Ok(Self::Report),
             "learn" => Ok(Self::Learn),
             "probe" => Ok(Self::Probe),
+            "behavior-tests" => Ok(Self::BehaviorTests),
             other => Err(ParseTaskKindError(other.to_string())),
         }
     }
@@ -2867,6 +2925,7 @@ mod tests {
             }),
             review_context,
             input_artifacts: Vec::new(),
+            depends_on: None,
             output: None,
             created_at: None,
             started_at: None,
@@ -3139,7 +3198,138 @@ mod tests {
         assert_eq!("report".parse::<TaskKind>().unwrap(), TaskKind::Report);
         assert_eq!("learn".parse::<TaskKind>().unwrap(), TaskKind::Learn);
         assert_eq!("probe".parse::<TaskKind>().unwrap(), TaskKind::Probe);
+        assert_eq!(
+            "behavior-tests".parse::<TaskKind>().unwrap(),
+            TaskKind::BehaviorTests
+        );
         assert!("triage".parse::<TaskKind>().is_err());
+    }
+
+    #[test]
+    fn task_kind_behavior_tests_round_trips() {
+        let json = serde_json::to_string(&TaskKind::BehaviorTests).unwrap();
+        assert_eq!(json, r#""behavior-tests""#);
+        let kind: TaskKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(kind, TaskKind::BehaviorTests);
+        assert_eq!(TaskKind::BehaviorTests.as_str(), "behavior-tests");
+        assert_eq!(format!("{}", TaskKind::BehaviorTests), "behavior-tests");
+    }
+
+    #[test]
+    fn task_with_depends_on_round_trips() {
+        let task = Task {
+            id: "attempt-1-review-behaviors".to_string(),
+            kind: TaskKind::Review,
+            status: TaskStatus::Planned,
+            role: "behaviors".to_string(),
+            instructions: None,
+            work_item_id: "work-1".to_string(),
+            attempt_id: Some("attempt-1".to_string()),
+            workspace_access: WorkspaceAccess {
+                reads: vec![workspace("candidate")],
+                writes: Vec::new(),
+            },
+            artifact_area: Some(TaskArtifactArea {
+                path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-behaviors"
+                    .to_string(),
+            }),
+            review_context: Some(ReviewContext {
+                candidate_workspace_id: "candidate".to_string(),
+                candidate_workspace_path: "/workspaces/candidate".to_string(),
+                source_branch: "main".to_string(),
+                candidate_commit: "abc123".to_string(),
+            }),
+            input_artifacts: Vec::new(),
+            depends_on: Some("attempt-1-behavior-tests".to_string()),
+            output: None,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+        };
+
+        let json = serde_json::to_string_pretty(&task).unwrap();
+        assert!(json.contains(r#""depends_on": "attempt-1-behavior-tests""#));
+        let parsed: Task = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.depends_on.as_deref(),
+            Some("attempt-1-behavior-tests")
+        );
+    }
+
+    #[test]
+    fn task_without_depends_on_omits_field() {
+        let task = Task {
+            id: "t-1".to_string(),
+            kind: TaskKind::Write,
+            status: TaskStatus::Planned,
+            role: "author".to_string(),
+            instructions: None,
+            work_item_id: "w-1".to_string(),
+            attempt_id: None,
+            workspace_access: WorkspaceAccess {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            },
+            artifact_area: None,
+            review_context: None,
+            input_artifacts: Vec::new(),
+            depends_on: None,
+            output: None,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+        };
+        let json = serde_json::to_string(&task).unwrap();
+        assert!(!json.contains("depends_on"));
+    }
+
+    #[test]
+    fn review_tasks_include_behavior_tests_task_when_behaviors_role_present() {
+        let mut work_item = work_item_with_completed_write("work-1");
+        work_item
+            .add_next_review_tasks("attempt-1", &["documentation", "behaviors", "tests"])
+            .unwrap();
+
+        let tasks = &work_item.attempts[0].tasks;
+        let bt_task = tasks
+            .iter()
+            .find(|t| t.kind == TaskKind::BehaviorTests)
+            .expect("should have a BehaviorTests task");
+        assert_eq!(bt_task.id, "attempt-1-behavior-tests");
+        assert_eq!(bt_task.role, "behavior-tests");
+        assert!(bt_task.depends_on.is_none());
+
+        let behaviors_review = tasks
+            .iter()
+            .find(|t| t.role == "behaviors" && t.kind == TaskKind::Review)
+            .expect("should have a behaviors review task");
+        assert_eq!(
+            behaviors_review.depends_on.as_deref(),
+            Some("attempt-1-behavior-tests")
+        );
+
+        let doc_review = tasks
+            .iter()
+            .find(|t| t.role == "documentation")
+            .unwrap();
+        assert!(doc_review.depends_on.is_none());
+
+        let tests_review = tasks.iter().find(|t| t.role == "tests").unwrap();
+        assert!(tests_review.depends_on.is_none());
+    }
+
+    #[test]
+    fn review_tasks_skip_behavior_tests_when_behaviors_role_absent() {
+        let mut work_item = work_item_with_completed_write("work-1");
+        work_item
+            .add_next_review_tasks("attempt-1", &["documentation", "tests"])
+            .unwrap();
+
+        let tasks = &work_item.attempts[0].tasks;
+        assert!(
+            !tasks.iter().any(|t| t.kind == TaskKind::BehaviorTests),
+            "no BehaviorTests task when behaviors role not requested"
+        );
     }
 
     #[test]
@@ -3629,6 +3819,7 @@ mod tests {
                             candidate_commit: "commit-initial".to_string(),
                         }),
                         input_artifacts: Vec::new(),
+                        depends_on: None,
                         output: None,
                         created_at: None,
                         started_at: None,
@@ -3654,6 +3845,7 @@ mod tests {
                             candidate_commit: "commit-initial".to_string(),
                         }),
                         input_artifacts: Vec::new(),
+                        depends_on: None,
                         output: None,
                         created_at: None,
                         started_at: None,
@@ -4140,6 +4332,7 @@ mod tests {
                             candidate_commit: "commit-initial".to_string(),
                         }),
                         input_artifacts: Vec::new(),
+                        depends_on: None,
                         output: None,
                         created_at: None,
                         started_at: None,
@@ -4195,6 +4388,7 @@ mod tests {
             artifact_area: None,
             review_context: None,
             input_artifacts: Vec::new(),
+            depends_on: None,
             output: Some(TaskOutput {
                 workspace_id: "candidate".to_string(),
                 workspace_path: format!("../work-6-work-1-attempt-1-{suffix}"),
@@ -4454,6 +4648,7 @@ mod tests {
             artifact_area: None,
             review_context: None,
             input_artifacts: Vec::new(),
+            depends_on: None,
             output: None,
             created_at: None,
             started_at: None,
@@ -4482,6 +4677,7 @@ mod tests {
             artifact_area: None,
             review_context: None,
             input_artifacts: Vec::new(),
+            depends_on: None,
             output: None,
             created_at: Some("2026-06-12T10:00:00+00:00".to_string()),
             started_at: Some("2026-06-12T10:01:00+00:00".to_string()),
@@ -4571,6 +4767,7 @@ mod tests {
             artifact_area: None,
             review_context: None,
             input_artifacts: Vec::new(),
+            depends_on: None,
             output: None,
             created_at: None,
             started_at: None,
@@ -4599,6 +4796,7 @@ mod tests {
             artifact_area: None,
             review_context: None,
             input_artifacts: Vec::new(),
+            depends_on: None,
             output: None,
             created_at: None,
             started_at: None,
@@ -4629,6 +4827,7 @@ mod tests {
             artifact_area: None,
             review_context: None,
             input_artifacts: Vec::new(),
+            depends_on: None,
             output: None,
             created_at: None,
             started_at: Some("2026-01-01T00:00:00+00:00".to_string()),

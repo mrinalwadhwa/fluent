@@ -137,6 +137,28 @@ a background post-merge review is in flight. If the source HEAD moves
 during the review (e.g. another merge lands), the guard fails the
 review Tasks with a clear error and does not attempt restoration.
 
+When the behaviors reviewer role is included in a review plan, Factory
+also creates a `TaskKind::BehaviorTests` Task alongside the review
+Tasks. This Task runs an LLM agent that reads `documentation/behaviors.md`,
+executes the `RunBehaviorTests:` commands, parses structured output, and
+writes `behavior-tests-results.json` to its artifact directory. The
+behaviors-completeness reviewer (role `behaviors`) declares a `depends_on`
+reference to the BehaviorTests Task; the Attempt scheduler blocks it until
+the dependency completes. Other reviewers have no dependency and start
+immediately in parallel with the BehaviorTests Task.
+
+The `behaviors.md` format supports three markers on EARS statements:
+- `Test:` — names a test that verifies the behavior.
+- `Untestable:` — marks a behavior as genuinely untestable with a reason.
+- `RunBehaviorTests:` — top-level header lines naming batch test commands.
+
+The `behavior-tests-results.json` schema is defined in
+`src/behavior_tests.rs` and includes per-behavior entries with `anchor`,
+`test_refs`, `status` (pass, fail, untestable, missing_test_ref),
+`duration_ms`, `failure_excerpt`, and `untestable_reason`. When a
+`RunBehaviorTests:` command fails, the JSON includes a `command_failure`
+field and an empty `behaviors` array.
+
 Before launching each review Task, Factory pre-populates the reviewer's
 artifact directory with the candidate's build outputs so reviewers start
 with a warm build cache. Factory detects the project toolchain from

@@ -1,3 +1,4 @@
+pub mod behavior_tests;
 pub mod cleanup;
 pub mod cli;
 pub mod coder;

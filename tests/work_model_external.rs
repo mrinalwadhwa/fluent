@@ -31,6 +31,7 @@ fn task(kind: TaskKind) -> Task {
         }),
         review_context: None,
         input_artifacts: Vec::new(),
+        depends_on: None,
         output: Some(TaskOutput {
             workspace_id: "candidate".to_string(),
             workspace_path: "../workspaces/candidate".to_string(),

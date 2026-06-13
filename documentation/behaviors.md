@@ -3,6 +3,10 @@
 Observable behaviors of the factory system. Each statement describes what
 the system does, not how. EARS format.
 
+RunBehaviorTests: cargo nextest run --test binary --message-format libtest-json
+RunBehaviorTests: cargo test --lib --message-format json
+RunBehaviorTests: for test in tests/behaviors/operations/*.sh; do bash "$test"; done
+
 ## Test harnesses
 
 | Harness | Runs | Usage |
@@ -2585,3 +2589,83 @@ WHEN `tests/output/` is present in the repository,
 THE SYSTEM SHALL gitignore it so per-run logs never appear in
 `git status`, never get committed, and never appear in diffs.
 Test: .gitignore (tests/output/ entry)
+
+## Behavior tests Task
+
+WHEN Factory plans review Tasks for a completed Attempt,
+THE SYSTEM SHALL include one `TaskKind::BehaviorTests` Task with
+id `<attempt-id>-behavior-tests` alongside the review Tasks when
+the behaviors reviewer role is included.
+Test: src/work_model.rs (review_tasks_include_behavior_tests_task_when_behaviors_role_present)
+
+WHEN the behaviors reviewer role is absent from the review plan,
+THE SYSTEM SHALL skip creating a BehaviorTests Task.
+Test: src/work_model.rs (review_tasks_skip_behavior_tests_when_behaviors_role_absent)
+
+WHEN a `TaskKind::BehaviorTests` Task is executed,
+THE SYSTEM SHALL launch an LLM agent that reads
+`documentation/behaviors.md` from the candidate workspace, runs each
+`RunBehaviorTests:` command, parses structured output, maps each
+`Test:` reference to its outcome, and writes
+`behavior-tests-results.json` to the Task's artifact directory.
+Untestable: Requires live LLM agent execution environment
+
+WHEN `behavior-tests-results.json` is written,
+THE SYSTEM SHALL produce per-behavior entries with `anchor`,
+`test_refs`, `status` (pass, fail, untestable, missing_test_ref),
+`duration_ms` when known, and `failure_excerpt` when status is fail.
+Test: src/behavior_tests.rs (behavior_tests_results_round_trip)
+
+WHEN the candidate's `behaviors.md` contains an EARS statement with
+an `Untestable:` marker,
+THE SYSTEM SHALL record that behavior as `status: untestable` in the
+results JSON with `untestable_reason` set to the marker's text.
+Test: src/behavior_tests.rs (behavior_tests_results_round_trip)
+
+WHEN the candidate's `behaviors.md` contains an EARS statement with
+no `Test:` reference and no `Untestable:` marker,
+THE SYSTEM SHALL record that behavior as `status: missing_test_ref`.
+Test: src/behavior_tests.rs (behavior_status_serializes_lowercase)
+
+WHEN Factory schedules the review-phase Tasks of an Attempt,
+THE SYSTEM SHALL start `behavior-tests` in parallel with the other
+reviewers, and SHALL block the behaviors-completeness reviewer until
+`behavior-tests` completes.
+Test: src/work_model.rs (review_tasks_include_behavior_tests_task_when_behaviors_role_present)
+Test: src/work_attempt_loop.rs (tasks_ready_to_run_skips_dependents_until_dependency_complete)
+Test: src/work_attempt_loop.rs (tasks_ready_to_run_returns_dependent_after_dependency_completes)
+
+WHEN the behaviors-completeness reviewer runs,
+THE SYSTEM SHALL read `behavior-tests-results.json` and the candidate's
+behavior increment, verify that every new or changed EARS statement has
+either a `Test:` reference or an `Untestable:` marker, verify that
+every `Test:` reference's entry has `status: pass`, and produce a
+review.md artifact with a verdict and findings.
+Untestable: Reviewer behavior is LLM-driven and verified by the skill definition
+
+IF the `behavior-tests` Task's LLM agent cannot resolve the
+`RunBehaviorTests:` commands,
+THEN the agent SHALL write `behavior-tests-results.json` with a
+top-level `command_failure` field and an empty `behaviors` array.
+Test: src/behavior_tests.rs (command_failure_results_round_trip)
+
+WHEN the behaviors-completeness reviewer reads a results JSON
+containing `command_failure`,
+THE SYSTEM SHALL produce a `fail` verdict naming the failed command.
+Untestable: Reviewer behavior is LLM-driven and verified by the skill definition
+
+WHEN `TaskKind::BehaviorTests` is serialized and deserialized,
+THE SYSTEM SHALL round-trip as `"behavior-tests"`.
+Test: src/work_model.rs (task_kind_behavior_tests_round_trips)
+
+WHEN a Task has a `depends_on` field referencing another Task,
+THE SYSTEM SHALL skip that Task in the ready-to-run check until the
+dependency completes.
+Test: src/work_model.rs (task_with_depends_on_round_trips)
+Test: src/work_attempt_loop.rs (tasks_ready_to_run_skips_dependents_until_dependency_complete)
+Test: src/work_attempt_loop.rs (tasks_ready_to_run_returns_dependent_after_dependency_completes)
+
+WHEN a Task has no `depends_on` field,
+THE SYSTEM SHALL consider it immediately ready to run.
+Test: src/work_attempt_loop.rs (tasks_ready_to_run_returns_independent_tasks_immediately)
+Test: src/work_model.rs (task_without_depends_on_omits_field)

@@ -47,6 +47,7 @@ pub fn run_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     match item.attempts[attempt_index].tasks[task_index].kind {
         TaskKind::Write => run_write_task(config),
         TaskKind::Review => run_review_task(config),
+        TaskKind::BehaviorTests => run_behavior_tests_task(config),
         kind => bail!(
             "Task {:?} is kind {kind}; unsupported by task run",
             config.task_id
@@ -453,6 +454,219 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     Ok(WorkTaskRunResult {
         task_id: config.task_id.to_string(),
         output: path_for_model(config.project_root, &review_path),
+    })
+}
+
+fn run_behavior_tests_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
+    let (attempt_kind, workspace_reads, candidate_commit, artifact_dir, results_path) = {
+        let _lock = config
+            .store_lock
+            .map(|m| m.lock().unwrap_or_else(|e| e.into_inner()));
+        let mut item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+        let (attempt_index, task_index) =
+            find_attempt_task_indexes(&item, config.attempt_id, config.task_id)
+                .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", config.task_id))?;
+
+        let task = &item.attempts[attempt_index].tasks[task_index];
+        let attempt_kind = item.attempts[attempt_index].kind.clone();
+        if task.status != TaskStatus::Planned {
+            bail!(
+                "Task {:?} is {}; expected planned",
+                config.task_id,
+                task.status
+            );
+        }
+        if !task.workspace_access.writes.is_empty() {
+            bail!(
+                "BehaviorTests Task {:?} cannot write a workspace",
+                config.task_id
+            );
+        }
+        if task.workspace_access.reads.is_empty() {
+            bail!(
+                "BehaviorTests Task {:?} must declare at least one readable candidate workspace",
+                config.task_id
+            );
+        }
+        let artifact_area = task
+            .artifact_area
+            .as_ref()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "BehaviorTests Task {:?} must declare an artifact area",
+                    config.task_id
+                )
+            })?
+            .path
+            .clone();
+        let review_context = task.review_context.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "BehaviorTests Task {:?} must declare review context",
+                config.task_id
+            )
+        })?;
+        let workspace_reads = task.workspace_access.reads.clone();
+        let candidate_commit = review_context.candidate_commit.clone();
+        let artifact_dir = resolve_managed_artifact_area_path(config.project_root, &artifact_area)?;
+        let results_path = artifact_dir.join("behavior-tests-results.json");
+
+        if !workspace_reads.iter().any(|workspace| {
+            workspace.id == review_context.candidate_workspace_id
+                && workspace.path == review_context.candidate_workspace_path
+        }) {
+            bail!(
+                "BehaviorTests Task {:?} review context candidate must match a readable workspace",
+                config.task_id
+            );
+        }
+        ReviewReadableWorkspaces::preflight(
+            config.project_root,
+            config.work_item_id,
+            config.attempt_id,
+            &attempt_kind,
+            &workspace_reads,
+            &candidate_commit,
+        )?;
+        fs::create_dir_all(&artifact_dir)?;
+
+        item.attempts[attempt_index].status = AttemptStatus::Reviewing;
+        item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Executing;
+        crate::work_model::mark_task_started(&mut item.attempts[attempt_index].tasks[task_index]);
+        item.attempts[attempt_index].tasks[task_index].output = None;
+        config.store.write_work_item(&item)?;
+
+        (
+            attempt_kind,
+            workspace_reads,
+            candidate_commit,
+            artifact_dir,
+            results_path,
+        )
+    };
+
+    let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+
+    let readable_workspaces = match ReviewReadableWorkspaces::resolve(
+        config.project_root,
+        config.work_item_id,
+        config.attempt_id,
+        &attempt_kind,
+        &workspace_reads,
+        &candidate_commit,
+        &artifact_dir,
+    ) {
+        Ok(workspaces) => workspaces,
+        Err(error) => {
+            lock_mark_task_failed(
+                config.store,
+                config.store_lock,
+                config.work_item_id,
+                config.attempt_id,
+                config.task_id,
+            )?;
+            return Err(error);
+        }
+    };
+    let readable_workspace_paths = readable_workspaces.paths();
+
+    if !attempt_kind.is_review_only_like() {
+        if let Some(candidate_path) = readable_workspace_paths.first() {
+            prepare_reviewer_build_cache(
+                candidate_path,
+                &artifact_dir,
+                config.work_item_id,
+                config.attempt_id,
+                config.task_id,
+            );
+        }
+    }
+
+    let run_result = run_behavior_tests_coder(
+        &item,
+        config.attempt_id,
+        config.task_id,
+        &artifact_dir,
+        &results_path,
+        &readable_workspace_paths,
+        config.resolver,
+        config.extra_args,
+        config.coder_kind,
+        config.no_sandbox,
+    );
+
+    if let Err(error) = readable_workspaces.finish() {
+        lock_mark_task_failed(
+            config.store,
+            config.store_lock,
+            config.work_item_id,
+            config.attempt_id,
+            config.task_id,
+        )?;
+        return Err(error);
+    }
+
+    if let Err(error) = run_result {
+        lock_mark_task_failed(
+            config.store,
+            config.store_lock,
+            config.work_item_id,
+            config.attempt_id,
+            config.task_id,
+        )?;
+        return Err(error);
+    }
+
+    if !results_path.is_file() {
+        lock_mark_task_failed(
+            config.store,
+            config.store_lock,
+            config.work_item_id,
+            config.attempt_id,
+            config.task_id,
+        )?;
+        bail!(
+            "BehaviorTests Task {:?} completed without writing {}",
+            config.task_id,
+            results_path.display()
+        );
+    }
+
+    {
+        let _lock = config
+            .store_lock
+            .map(|m| m.lock().unwrap_or_else(|e| e.into_inner()));
+        let mut completed_item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+        let (attempt_index, task_index) =
+            find_attempt_task_indexes(&completed_item, config.attempt_id, config.task_id)
+                .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", config.task_id))?;
+        crate::work_model::set_task_terminal(
+            &mut completed_item.attempts[attempt_index].tasks[task_index],
+            TaskStatus::Complete,
+        );
+        completed_item.attempts[attempt_index]
+            .artifacts
+            .push(ArtifactRef {
+                producer_id: config.task_id.to_string(),
+                path: path_for_model(config.project_root, &results_path),
+            });
+        let all_complete = completed_item.attempts[attempt_index]
+            .tasks
+            .iter()
+            .all(|task| task.status == TaskStatus::Complete);
+        if all_complete {
+            crate::work_model::set_attempt_terminal(
+                &mut completed_item.attempts[attempt_index],
+                AttemptStatus::Complete,
+            );
+        } else {
+            completed_item.attempts[attempt_index].status = AttemptStatus::Reviewing;
+        }
+        config.store.write_work_item(&completed_item)?;
+    }
+
+    Ok(WorkTaskRunResult {
+        task_id: config.task_id.to_string(),
+        output: path_for_model(config.project_root, &results_path),
     })
 }
 
@@ -1130,6 +1344,157 @@ fn run_review_coder(
     }
 }
 
+fn run_behavior_tests_coder(
+    item: &WorkItem,
+    attempt_id: &str,
+    task_id: &str,
+    artifact_dir: &Path,
+    results_path: &Path,
+    readable_workspaces: &[PathBuf],
+    resolver: &ContentResolver,
+    extra_args: &[String],
+    coder_kind: CoderKind,
+    no_sandbox: bool,
+) -> Result<()> {
+    if !no_sandbox {
+        os::check_prerequisites_for(coder_kind)?;
+        credential::inject_credentials()?;
+        credential::setup_git_signing();
+    }
+
+    let task = item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == attempt_id)
+        .and_then(|attempt| attempt.tasks.iter().find(|task| task.id == task_id))
+        .ok_or_else(|| anyhow::anyhow!("Task {task_id:?} not found"))?;
+    let task_json = to_json_pretty(task)?;
+    let review_context = task.review_context.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "BehaviorTests Task {:?} must declare review context",
+            task_id
+        )
+    })?;
+    let read_paths = task
+        .workspace_access
+        .reads
+        .iter()
+        .zip(readable_workspaces.iter())
+        .map(|(workspace, resolved_path)| {
+            format!("- {}: {}", workspace.id, resolved_path.display())
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let writable_outputs_guidance = reviewer_writable_outputs_guidance(artifact_dir);
+    let workspace_resolver = readable_workspaces
+        .first()
+        .map(|ws| ContentResolver::new(Some(ws)));
+    let behavior_tests_prompt = workspace_resolver
+        .as_ref()
+        .and_then(|r| r.resolve_content("prompts/behavior-tests.md"))
+        .unwrap_or_default();
+    let system_prompt = if behavior_tests_prompt.is_empty() {
+        format!(
+            "You are a Factory behavior-tests agent operating as a Work model Task.\n\
+             Read candidate workspaces only; do not edit or commit in them.\n\
+             Write the behavior-tests-results.json artifact to {}.\n\
+             {}",
+            results_path.display(),
+            writable_outputs_guidance
+        )
+    } else {
+        behavior_tests_prompt
+    };
+
+    let candidate_workspace = task
+        .workspace_access
+        .reads
+        .iter()
+        .zip(readable_workspaces.iter())
+        .find(|(workspace, _)| workspace.id == review_context.candidate_workspace_id)
+        .map(|(_, resolved_path)| resolved_path.as_path())
+        .unwrap_or_else(|| Path::new(&review_context.candidate_workspace_path));
+    let review_range = format!(
+        "{}..{}",
+        review_context.source_branch, review_context.candidate_commit
+    );
+    let review_diff_command =
+        crate::review_diff_command::render_review_diff_command(candidate_workspace, &review_range);
+
+    let prompt = format!(
+        "Execute this Factory behavior-tests Task.\n\n\
+         Work Item: {} - {}\n\
+         Attempt: {}\n\
+         Task: {}\n\n\
+         Readable candidate workspaces:\n{}\n\n\
+         Review context:\n\
+         - Candidate workspace: {} ({})\n\
+         - Source branch: {}\n\
+         - Candidate commit: {}\n\
+         - Review diff: {}\n\n\
+         {}\n\n\
+         Procedure:\n\
+         1. Read `documentation/behaviors.md` from the candidate workspace at {}.\n\
+         2. Extract every `RunBehaviorTests:` header line.\n\
+         3. Extract every `Test:` reference and every `Untestable:` marker.\n\
+         4. Run each `RunBehaviorTests:` command exactly once in the candidate workspace.\n\
+         5. Parse the structured output (nextest JSON, JUnit XML, or best interpretation).\n\
+         6. Map each `Test:` reference to its outcome.\n\
+         7. Write `behavior-tests-results.json` to: {}\n\n\
+         On command failure (compile error, non-zero exit before tests ran, timeout),\n\
+         write the JSON with `command_failure` set and `behaviors` array empty.\n\n\
+         Current Task model:\n{}\n",
+        item.id,
+        item.title,
+        attempt_id,
+        task_id,
+        read_paths,
+        review_context.candidate_workspace_id,
+        review_context.candidate_workspace_path,
+        review_context.source_branch,
+        review_context.candidate_commit,
+        review_diff_command,
+        writable_outputs_guidance,
+        candidate_workspace.display(),
+        results_path.display(),
+        task_json
+    );
+
+    let (sandbox, _sandbox_profile) = if no_sandbox {
+        (CoderSandbox::None, None)
+    } else {
+        let mut readable_roots = review_readable_sandbox_roots(readable_workspaces)?;
+        readable_roots.extend(input_artifact_readable_roots(&[]));
+        build_coder_sandbox_with_read_only_roots(
+            coder_kind,
+            resolver,
+            artifact_dir,
+            &readable_roots,
+        )?
+    };
+
+    eprintln!("  Factory           work task run");
+    eprintln!("  Work Item         {}", item.id);
+    eprintln!("  Attempt           {attempt_id}");
+    eprintln!("  Task              {task_id} (behavior-tests)");
+    eprintln!("  Artifact area     {}", artifact_dir.display());
+
+    let coder = coder_kind.boxed(sandbox);
+    let exit_code = coder.run(
+        &prompt,
+        &system_prompt,
+        artifact_dir,
+        extra_args,
+        &[],
+        None,
+    )?;
+    if exit_code == 0 {
+        Ok(())
+    } else {
+        bail!("Coder exited with code {exit_code}")
+    }
+}
+
 struct WorkReviewPrompts {
     system_prompt: String,
     review_prompt: String,
@@ -1216,7 +1581,24 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
     let task_instructions = task_instructions_prompt(task.instructions.as_deref());
     let input_artifacts_prompt = review_input_artifacts_prompt(input.input_artifacts);
     let behavior_review_input = if task.role == "behaviors" {
-        format!("{}\n", work_behavior_review_input(input.item))
+        let bt_results_hint = if let Some(dep_id) = task.depends_on.as_deref() {
+            let bt_artifact_path = format!(
+                ".factory/work/artifacts/{}/{}/{}/behavior-tests-results.json",
+                input.item.id,
+                input.attempt_id,
+                dep_id
+            );
+            format!(
+                "\nBehavior test results are available at: {bt_artifact_path}\n\
+                 Read the behavior-tests-results.json file. Use its per-behavior statuses\n\
+                 (pass, fail, untestable, missing_test_ref) to inform your verdict.\n\
+                 If it contains `command_failure`, produce a fail verdict naming the failed\n\
+                 command rather than flagging individual behaviors.\n"
+            )
+        } else {
+            String::new()
+        };
+        format!("{}\n{}", work_behavior_review_input(input.item), bt_results_hint)
     } else {
         String::new()
     };

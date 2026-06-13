@@ -212,7 +212,10 @@ THE SYSTEM SHALL [observable behavior]
 - **Flag what you added.** If you derive a behavior not in the brief,
   say so. Let the user confirm or reject.
 - **Testable.** Each behavior should suggest how to verify it. If you
-  can't imagine a test, the behavior is too vague.
+  can't imagine a test, the behavior is too vague. Each EARS statement
+  in `documentation/behaviors.md` must have either a `Test:` reference
+  naming the test that verifies it or an `Untestable:` marker with a
+  one-line reason explaining why it genuinely cannot be tested.
 - **One behavior per statement.** Do not combine multiple behaviors.
   Split them.
 - **Vocabulary matters.** Use the terms the user uses. Pin them down

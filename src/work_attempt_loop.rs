@@ -97,13 +97,17 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
         if let Some(task) = attempt
             .tasks
             .iter()
-            .find(|task| task.status == TaskStatus::Planned)
+            .find(|task| task.status == TaskStatus::Planned && is_task_ready(task, &attempt.tasks))
         {
-            if task.kind == TaskKind::Review && !attempt.kind.is_review_only_like() {
+            if is_review_phase_task(task) && !attempt.kind.is_review_only_like() {
                 let planned_review_ids: Vec<String> = attempt
                     .tasks
                     .iter()
-                    .filter(|t| t.kind == TaskKind::Review && t.status == TaskStatus::Planned)
+                    .filter(|t| {
+                        is_review_phase_task(t)
+                            && t.status == TaskStatus::Planned
+                            && is_task_ready(t, &attempt.tasks)
+                    })
                     .map(|t| t.id.clone())
                     .collect();
                 run_parallel_reviews(&config, &planned_review_ids, &mut outcomes)?;
@@ -368,6 +372,19 @@ fn review_task_round_number(attempt_id: &str, task_id: &str) -> Option<usize> {
     round.parse::<usize>().ok()
 }
 
+fn is_review_phase_task(task: &Task) -> bool {
+    matches!(task.kind, TaskKind::Review | TaskKind::BehaviorTests)
+}
+
+fn is_task_ready(task: &Task, all_tasks: &[Task]) -> bool {
+    let Some(dep_id) = task.depends_on.as_deref() else {
+        return true;
+    };
+    all_tasks
+        .iter()
+        .any(|t| t.id == dep_id && t.status == TaskStatus::Complete)
+}
+
 fn has_completed_write(tasks: &[Task]) -> bool {
     tasks
         .iter()
@@ -378,7 +395,11 @@ fn has_open_review_round(tasks: &[Task]) -> bool {
     for task in tasks.iter().rev() {
         match task.kind {
             TaskKind::Write => return false,
-            TaskKind::Review if task.status != TaskStatus::Complete => return true,
+            TaskKind::Review | TaskKind::BehaviorTests
+                if task.status != TaskStatus::Complete =>
+            {
+                return true
+            }
             _ => {}
         }
     }
@@ -391,7 +412,7 @@ fn has_review_after_latest_write(tasks: &[Task]) -> bool {
     };
     tasks[last_write_index + 1..]
         .iter()
-        .any(|task| task.kind == TaskKind::Review)
+        .any(|task| is_review_phase_task(task))
 }
 
 fn next_review_roles(attempt: &Attempt) -> Vec<&'static str> {
@@ -704,6 +725,7 @@ mod tests {
                 artifact_area: None,
                 review_context: None,
                 input_artifacts: Vec::new(),
+                depends_on: None,
                 output: None,
                 created_at: None,
                 started_at: None,
@@ -724,6 +746,7 @@ mod tests {
                 artifact_area: None,
                 review_context: None,
                 input_artifacts: Vec::new(),
+                depends_on: None,
                 output: None,
                 created_at: None,
                 started_at: None,
@@ -752,6 +775,7 @@ mod tests {
                 artifact_area: None,
                 review_context: None,
                 input_artifacts: Vec::new(),
+                depends_on: None,
                 output: None,
                 created_at: None,
                 started_at: None,
@@ -774,6 +798,7 @@ mod tests {
                 }),
                 review_context: None,
                 input_artifacts: Vec::new(),
+                depends_on: None,
                 output: None,
                 created_at: None,
                 started_at: None,
@@ -1013,11 +1038,138 @@ mod tests {
             artifact_area: None,
             review_context: None,
             input_artifacts,
+            depends_on: None,
             output: None,
             created_at: None,
             started_at: None,
             completed_at: None,
         }
+    }
+
+    #[test]
+    fn tasks_ready_to_run_returns_independent_tasks_immediately() {
+        let tasks = vec![
+            write_task("attempt-1-write-1", Vec::new()),
+            review_task("attempt-1-review-tests", "tests"),
+        ];
+        let review = &tasks[1];
+        assert!(is_task_ready(review, &tasks));
+    }
+
+    #[test]
+    fn tasks_ready_to_run_skips_dependents_until_dependency_complete() {
+        let bt_task = Task {
+            id: "attempt-1-behavior-tests".to_string(),
+            kind: TaskKind::BehaviorTests,
+            status: TaskStatus::Planned,
+            role: "behavior-tests".to_string(),
+            instructions: None,
+            work_item_id: "work-1".to_string(),
+            attempt_id: Some("attempt-1".to_string()),
+            workspace_access: WorkspaceAccess {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            },
+            artifact_area: None,
+            review_context: None,
+            input_artifacts: Vec::new(),
+            depends_on: None,
+            output: None,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+        };
+        let behaviors_review = Task {
+            id: "attempt-1-review-behaviors".to_string(),
+            kind: TaskKind::Review,
+            status: TaskStatus::Planned,
+            role: "behaviors".to_string(),
+            depends_on: Some("attempt-1-behavior-tests".to_string()),
+            ..review_task("attempt-1-review-behaviors", "behaviors")
+        };
+        let tasks = vec![
+            write_task("attempt-1-write-1", Vec::new()),
+            bt_task,
+            behaviors_review,
+        ];
+
+        assert!(
+            is_task_ready(&tasks[1], &tasks),
+            "BehaviorTests task has no depends_on, should be ready"
+        );
+        assert!(
+            !is_task_ready(&tasks[2], &tasks),
+            "behaviors review depends on incomplete BehaviorTests, should not be ready"
+        );
+    }
+
+    #[test]
+    fn tasks_ready_to_run_returns_dependent_after_dependency_completes() {
+        let bt_task = Task {
+            id: "attempt-1-behavior-tests".to_string(),
+            kind: TaskKind::BehaviorTests,
+            status: TaskStatus::Complete,
+            role: "behavior-tests".to_string(),
+            instructions: None,
+            work_item_id: "work-1".to_string(),
+            attempt_id: Some("attempt-1".to_string()),
+            workspace_access: WorkspaceAccess {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            },
+            artifact_area: None,
+            review_context: None,
+            input_artifacts: Vec::new(),
+            depends_on: None,
+            output: None,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+        };
+        let behaviors_review = Task {
+            id: "attempt-1-review-behaviors".to_string(),
+            kind: TaskKind::Review,
+            status: TaskStatus::Planned,
+            role: "behaviors".to_string(),
+            depends_on: Some("attempt-1-behavior-tests".to_string()),
+            ..review_task("attempt-1-review-behaviors", "behaviors")
+        };
+        let tasks = vec![
+            write_task("attempt-1-write-1", Vec::new()),
+            bt_task,
+            behaviors_review,
+        ];
+
+        assert!(
+            is_task_ready(&tasks[2], &tasks),
+            "behaviors review should be ready after BehaviorTests completes"
+        );
+    }
+
+    #[test]
+    fn behavior_tests_task_is_review_phase_task() {
+        let bt = Task {
+            id: "bt".to_string(),
+            kind: TaskKind::BehaviorTests,
+            status: TaskStatus::Planned,
+            role: "behavior-tests".to_string(),
+            instructions: None,
+            work_item_id: "w".to_string(),
+            attempt_id: None,
+            workspace_access: WorkspaceAccess {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            },
+            artifact_area: None,
+            review_context: None,
+            input_artifacts: Vec::new(),
+            depends_on: None,
+            output: None,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+        };
+        assert!(is_review_phase_task(&bt));
     }
 
     fn review_task(id: &str, role: &str) -> Task {
@@ -1036,6 +1188,7 @@ mod tests {
             artifact_area: None,
             review_context: None,
             input_artifacts: Vec::new(),
+            depends_on: None,
             output: None,
             created_at: None,
             started_at: None,

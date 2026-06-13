@@ -197,6 +197,22 @@ effort, or recovery of existing `.factory/runs` state. The fallback
 still manages the session loop by restarting agents across sessions as
 long as work remains.
 
+### Writer testing contract
+
+The writer owns producing tests alongside code. When committing a
+candidate:
+
+- `documentation/behaviors.md` has a top-level `RunBehaviorTests:` header
+  listing the project's batch test commands (one per line for multiple
+  harnesses, e.g., Rust nextest + shell).
+- Each EARS statement has either a `Test:` reference pointing at a real
+  test or an `Untestable:` marker with a one-line reason.
+- Run the project's tests before committing (best practice, not enforced).
+
+The `behavior-tests` Task is the safety net — it runs after the write
+completes and produces `behavior-tests-results.json` for the
+behaviors-completeness reviewer.
+
 ### 5. Execute
 
 Implement the approved Task in the assigned Workspace. In the Work model,
