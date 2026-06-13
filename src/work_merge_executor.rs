@@ -463,6 +463,7 @@ fn set_candidate_executing(
             check_artifacts: Vec::new(),
             review_artifacts: Vec::new(),
         };
+        crate::work_model::mark_merge_candidate_started(candidate);
     })
 }
 
@@ -492,6 +493,7 @@ fn record_candidate_failure(
             check_artifacts,
             review_artifacts,
         };
+        crate::work_model::set_merge_candidate_terminal(candidate, MergeCandidateMergeStatus::Failed);
     })
 }
 
@@ -512,6 +514,7 @@ fn record_candidate_merged(
             check_artifacts,
             review_artifacts,
         };
+        crate::work_model::set_merge_candidate_terminal(candidate, MergeCandidateMergeStatus::Merged);
     })
 }
 
@@ -654,6 +657,7 @@ fn rebase_candidate(
     let rebase_artifact_dir = artifact_dir.join(&rebase_task_id);
     fs::create_dir_all(&rebase_artifact_dir)?;
 
+    let now = crate::work_model::now_iso8601();
     let rebase_task = Task {
         id: rebase_task_id.clone(),
         kind: TaskKind::Rebase,
@@ -672,6 +676,9 @@ fn rebase_candidate(
         review_context: None,
         input_artifacts: Vec::new(),
         output: None,
+        created_at: Some(now.clone()),
+        started_at: Some(now),
+        completed_at: None,
     };
     add_rebase_task_to_attempt(
         config.store,
@@ -818,7 +825,11 @@ fn update_rebase_task_status(
         .find(|a| a.id == attempt_id)
         .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", attempt_id))?;
     if let Some(task) = attempt.tasks.iter_mut().find(|t| t.id == task_id) {
-        task.status = status;
+        if matches!(status, TaskStatus::Complete | TaskStatus::Failed | TaskStatus::NeedsUser) {
+            crate::work_model::set_task_terminal(task, status);
+        } else {
+            task.status = status;
+        }
     }
     store.write_work_item(&item)?;
     Ok(())
@@ -843,6 +854,7 @@ fn record_candidate_needs_user(
             check_artifacts: Vec::new(),
             review_artifacts: Vec::new(),
         };
+        crate::work_model::set_merge_candidate_terminal(candidate, MergeCandidateMergeStatus::NeedsUser);
     })
 }
 
@@ -1206,6 +1218,9 @@ mod tests {
                 source_branch: "main".to_string(),
                 commit: "old-sha-2".to_string(),
             }),
+            created_at: None,
+            started_at: None,
+            completed_at: None,
         };
         attempt.tasks.push(second_write);
         attempt.artifacts.push(ArtifactRef {
@@ -1282,6 +1297,9 @@ mod tests {
             review_context: None,
             input_artifacts: Vec::new(),
             output: None,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
         };
         attempt.tasks.push(rebase_task);
         store.write_work_item(&item).unwrap();
@@ -1353,6 +1371,9 @@ mod tests {
             review_context: None,
             input_artifacts: Vec::new(),
             output: None,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
         };
 
         item.attempts[0]

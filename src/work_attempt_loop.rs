@@ -476,14 +476,14 @@ fn interpret_reviews(
     if !failed.is_empty() {
         item.attempts[attempt_index].review_state = Some(AttemptReviewState::Failed);
         if item.attempts[attempt_index].kind.is_review_only_like() {
-            item.attempts[attempt_index].status = AttemptStatus::Failed;
+            crate::work_model::set_attempt_terminal(&mut item.attempts[attempt_index], AttemptStatus::Failed);
             store.write_work_item(&item)?;
             return Ok(WorkAttemptRunOutcome::ReviewOnlyFailed);
         }
         if !followup_budget_available {
             let handoff_path =
                 write_budget_exhausted_handoff(project_root, &item.id, attempt_id, &failed)?;
-            item.attempts[attempt_index].status = AttemptStatus::NeedsUser;
+            crate::work_model::set_attempt_terminal(&mut item.attempts[attempt_index], AttemptStatus::NeedsUser);
             item.attempts[attempt_index].artifacts.push(ArtifactRef {
                 producer_id: "attempt-loop".to_string(),
                 path: handoff_path.clone(),
@@ -501,7 +501,7 @@ fn interpret_reviews(
         let handoff_path =
             write_needs_user_handoff(project_root, &item.id, attempt_id, &uncertain)?;
         item.attempts[attempt_index].review_state = Some(AttemptReviewState::Uncertain);
-        item.attempts[attempt_index].status = AttemptStatus::NeedsUser;
+        crate::work_model::set_attempt_terminal(&mut item.attempts[attempt_index], AttemptStatus::NeedsUser);
         item.attempts[attempt_index].artifacts.push(ArtifactRef {
             producer_id: "attempt-loop".to_string(),
             path: handoff_path.clone(),
@@ -511,7 +511,7 @@ fn interpret_reviews(
     }
 
     item.attempts[attempt_index].review_state = Some(AttemptReviewState::Passed);
-    item.attempts[attempt_index].status = AttemptStatus::Complete;
+    crate::work_model::set_attempt_terminal(&mut item.attempts[attempt_index], AttemptStatus::Complete);
     if item.attempts[attempt_index].kind.is_review_only_like() {
         store.write_work_item(&item)?;
         return Ok(WorkAttemptRunOutcome::ReviewOnlyComplete);
@@ -693,6 +693,9 @@ mod tests {
                 review_context: None,
                 input_artifacts: Vec::new(),
                 output: None,
+                created_at: None,
+                started_at: None,
+                completed_at: None,
             },
             Task {
                 id: "attempt-1-review-tests".to_string(),
@@ -710,6 +713,9 @@ mod tests {
                 review_context: None,
                 input_artifacts: Vec::new(),
                 output: None,
+                created_at: None,
+                started_at: None,
+                completed_at: None,
             },
         ];
 
@@ -735,6 +741,9 @@ mod tests {
                 review_context: None,
                 input_artifacts: Vec::new(),
                 output: None,
+                created_at: None,
+                started_at: None,
+                completed_at: None,
             },
             Task {
                 id: "attempt-1-review-tests".to_string(),
@@ -754,6 +763,9 @@ mod tests {
                 review_context: None,
                 input_artifacts: Vec::new(),
                 output: None,
+                created_at: None,
+                started_at: None,
+                completed_at: None,
             },
         ];
 
@@ -765,6 +777,8 @@ mod tests {
             tasks,
             review_state: Some(AttemptReviewState::Passed),
             artifacts: Vec::new(),
+            created_at: None,
+            completed_at: None,
         };
 
         let error = latest_review_artifacts(Path::new("/tmp/project"), &attempt)
@@ -966,6 +980,8 @@ mod tests {
             tasks,
             review_state: Some(AttemptReviewState::NotReviewed),
             artifacts: Vec::new(),
+            created_at: None,
+            completed_at: None,
         }
     }
 
@@ -986,6 +1002,9 @@ mod tests {
             review_context: None,
             input_artifacts,
             output: None,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
         }
     }
 
@@ -1006,6 +1025,9 @@ mod tests {
             review_context: None,
             input_artifacts: Vec::new(),
             output: None,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
         }
     }
 }

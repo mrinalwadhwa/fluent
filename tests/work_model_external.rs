@@ -37,6 +37,9 @@ fn task(kind: TaskKind) -> Task {
             source_branch: "main".to_string(),
             commit: "abc123".to_string(),
         }),
+        created_at: None,
+        started_at: None,
+        completed_at: None,
     }
 }
 
@@ -55,6 +58,8 @@ fn work_item() -> WorkItem {
             tasks: vec![task(TaskKind::Write)],
             review_state: Some(AttemptReviewState::Passed),
             artifacts: Vec::new(),
+            created_at: None,
+            completed_at: None,
         }],
         merge_candidates: Vec::new(),
     }
@@ -71,6 +76,9 @@ fn merge_candidate() -> MergeCandidate {
         candidate_commit: "abc123".to_string(),
         review_state: MergeCandidateReviewState::Pending,
         merge_state: MergeCandidateMergeState::default(),
+        created_at: None,
+        started_at: None,
+        completed_at: None,
     }
 }
 

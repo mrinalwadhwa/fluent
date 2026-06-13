@@ -537,6 +537,17 @@ Task records carry the same internal `order` field; Factory sorts split
 Task files by that persisted order before exposing `Attempt.tasks`.
 Factory writes Work Item metadata to `items/` and operational records to
 the split Attempt, Task, and Merge Candidate collections.
+Tasks carry optional `created_at`, `started_at`, and `completed_at`
+timestamps (ISO 8601 / RFC 3339, UTC). Attempts carry `created_at` and
+`completed_at`. Merge Candidates carry all three. Factory populates
+`created_at` at construction, `started_at` at the first transition out
+of the initial state, and `completed_at` at terminal transitions.
+Helper functions `mark_task_started`, `set_task_terminal`,
+`set_attempt_terminal`, `mark_merge_candidate_started`, and
+`set_merge_candidate_terminal` in `work_model.rs` centralize timestamp
+assignment so every transition site uses the same format. Existing
+JSON files that lack the fields deserialize with `None` values; keys
+with `None` values are omitted on write.
 When `WorkModelStore` reads stored Work state, it normalizes legacy
 artifact references that still use
 `.factory/work/artifacts/<attempt-id>/...` into the current

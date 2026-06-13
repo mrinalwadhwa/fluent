@@ -1005,6 +1005,9 @@ mod tests {
             candidate_commit: "abc123".to_string(),
             review_state: MergeCandidateReviewState::Reviewing,
             merge_state: crate::work_model::MergeCandidateMergeState::default(),
+            created_at: None,
+            started_at: None,
+            completed_at: None,
         };
         let mut merging_candidate = reviewing_candidate.clone();
         merging_candidate.id = "candidate-merging".to_string();

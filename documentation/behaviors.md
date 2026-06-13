@@ -2379,3 +2379,68 @@ WHEN this Work Item lands,
 THE SYSTEM SHALL contain zero direct `Command::new("git")` call sites
 in `src/` outside the wrapper module.
 Test: tests/binary.rs (no_direct_git_command_in_src)
+
+## Per-task timestamps
+
+WHEN Factory creates a new Task (write, review, or rebase),
+THE SYSTEM SHALL set `task.created_at` to the current UTC time in
+ISO 8601 / RFC 3339 format before persisting the Task JSON.
+Test: src/work_model.rs (initial_attempt_populates_created_at_timestamps)
+
+WHEN Factory transitions a Task out of Planned for the first time,
+THE SYSTEM SHALL set `task.started_at` to the current UTC time if
+it is not already set.
+Test: src/work_model.rs (mark_task_started_is_idempotent)
+
+WHEN Factory transitions a Task to a terminal status (Complete,
+Failed, or NeedsUser),
+THE SYSTEM SHALL set `task.completed_at` to the current UTC time.
+Test: src/work_model.rs (set_task_terminal_sets_completed_at_and_status,
+set_task_terminal_is_idempotent_on_completed_at)
+
+WHEN Factory creates a new Attempt,
+THE SYSTEM SHALL set `attempt.created_at` to the current UTC time
+before persisting the Attempt JSON.
+Test: src/work_model.rs (initial_attempt_populates_created_at_timestamps)
+
+WHEN Factory transitions an Attempt to a terminal status (Complete,
+Failed, or NeedsUser),
+THE SYSTEM SHALL set `attempt.completed_at` to the current UTC time.
+Test: src/work_model.rs (set_attempt_terminal_round_trip)
+
+WHEN Factory creates a new MergeCandidate,
+THE SYSTEM SHALL set `merge_candidate.created_at` to the current
+UTC time before persisting the Merge Candidate JSON.
+Test: src/work_model.rs (merge_candidate_creation_populates_created_at)
+
+WHEN Factory transitions a MergeCandidate's merge_state.status out
+of Pending for the first time (typically to Executing),
+THE SYSTEM SHALL set `merge_candidate.started_at` to the current
+UTC time if it is not already set.
+Test: src/work_model.rs (mark_merge_candidate_started_is_idempotent)
+
+WHEN Factory transitions a MergeCandidate to a terminal status
+(Merged, Failed, or NeedsUser),
+THE SYSTEM SHALL set `merge_candidate.completed_at` to the current
+UTC time.
+Test: src/work_model.rs (set_merge_candidate_terminal_round_trip)
+
+WHEN `factory work show` returns Task, Attempt, and Merge Candidate
+JSON,
+THE SYSTEM SHALL include the timestamp fields verbatim from their
+on-disk representation.
+Test: src/work_model.rs (task_with_timestamps_round_trips,
+attempt_round_trips_with_timestamps,
+merge_candidate_round_trips_with_timestamps)
+
+WHEN Factory reads a pre-existing Task, Attempt, or Merge Candidate
+JSON file that does not contain the new timestamp fields,
+THE SYSTEM SHALL deserialize cleanly with None values for the
+missing fields and SHALL NOT fail the read or attempt any backfill.
+Test: src/work_model.rs (legacy_json_without_timestamp_fields_deserializes_to_none)
+
+WHEN Factory writes a Task, Attempt, or Merge Candidate JSON file,
+THE SYSTEM SHALL skip emitting timestamp keys whose value is None,
+so on-disk JSON stays compact and existing JSON files remain stable
+when re-saved unchanged.
+Test: src/work_model.rs (task_default_serializes_without_timestamps)

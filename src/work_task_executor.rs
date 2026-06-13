@@ -115,6 +115,7 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
 
     item.attempts[attempt_index].status = AttemptStatus::Executing;
     item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Executing;
+    crate::work_model::mark_task_started(&mut item.attempts[attempt_index].tasks[task_index]);
     item.attempts[attempt_index].tasks[task_index].output = None;
     config.store.write_work_item(&item)?;
 
@@ -135,8 +136,8 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         if let Some((attempt_index, task_index)) =
             find_attempt_task_indexes(&failed_item, config.attempt_id, config.task_id)
         {
-            failed_item.attempts[attempt_index].status = AttemptStatus::Failed;
-            failed_item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Failed;
+            crate::work_model::set_task_terminal(&mut failed_item.attempts[attempt_index].tasks[task_index], TaskStatus::Failed);
+            crate::work_model::set_attempt_terminal(&mut failed_item.attempts[attempt_index], AttemptStatus::Failed);
             config.store.write_work_item(&failed_item)?;
         }
         return Err(error);
@@ -187,7 +188,7 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     let (attempt_index, task_index) =
         find_attempt_task_indexes(&completed_item, config.attempt_id, config.task_id)
             .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", config.task_id))?;
-    completed_item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Complete;
+    crate::work_model::set_task_terminal(&mut completed_item.attempts[attempt_index].tasks[task_index], TaskStatus::Complete);
     completed_item.attempts[attempt_index].tasks[task_index].output = Some(output);
     completed_item.attempts[attempt_index]
         .artifacts
@@ -195,15 +196,15 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             producer_id: config.task_id.to_string(),
             path: commit.clone(),
         });
-    completed_item.attempts[attempt_index].status = if completed_item.attempts[attempt_index]
+    let all_complete = completed_item.attempts[attempt_index]
         .tasks
         .iter()
-        .all(|task| task.status == TaskStatus::Complete)
-    {
-        AttemptStatus::Complete
+        .all(|task| task.status == TaskStatus::Complete);
+    if all_complete {
+        crate::work_model::set_attempt_terminal(&mut completed_item.attempts[attempt_index], AttemptStatus::Complete);
     } else {
-        AttemptStatus::Executing
-    };
+        completed_item.attempts[attempt_index].status = AttemptStatus::Executing;
+    }
     config.store.write_work_item(&completed_item)?;
 
     Ok(WorkTaskRunResult {
@@ -301,6 +302,7 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
 
         item.attempts[attempt_index].status = AttemptStatus::Reviewing;
         item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Executing;
+        crate::work_model::mark_task_started(&mut item.attempts[attempt_index].tasks[task_index]);
         item.attempts[attempt_index].tasks[task_index].output = None;
         config.store.write_work_item(&item)?;
 
@@ -411,22 +413,22 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         let (attempt_index, task_index) =
             find_attempt_task_indexes(&completed_item, config.attempt_id, config.task_id)
                 .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", config.task_id))?;
-        completed_item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Complete;
+        crate::work_model::set_task_terminal(&mut completed_item.attempts[attempt_index].tasks[task_index], TaskStatus::Complete);
         completed_item.attempts[attempt_index]
             .artifacts
             .push(ArtifactRef {
                 producer_id: config.task_id.to_string(),
                 path: path_for_model(config.project_root, &review_path),
             });
-        completed_item.attempts[attempt_index].status = if completed_item.attempts[attempt_index]
+        let all_complete = completed_item.attempts[attempt_index]
             .tasks
             .iter()
-            .all(|task| task.status == TaskStatus::Complete)
-        {
-            AttemptStatus::Complete
+            .all(|task| task.status == TaskStatus::Complete);
+        if all_complete {
+            crate::work_model::set_attempt_terminal(&mut completed_item.attempts[attempt_index], AttemptStatus::Complete);
         } else {
-            AttemptStatus::Reviewing
-        };
+            completed_item.attempts[attempt_index].status = AttemptStatus::Reviewing;
+        }
         config.store.write_work_item(&completed_item)?;
     }
 
@@ -678,8 +680,8 @@ fn mark_task_failed(
     let mut item = read_work_item_or_not_found(store, work_item_id)?;
     if let Some((attempt_index, task_index)) = find_attempt_task_indexes(&item, attempt_id, task_id)
     {
-        item.attempts[attempt_index].status = AttemptStatus::Failed;
-        item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Failed;
+        crate::work_model::set_task_terminal(&mut item.attempts[attempt_index].tasks[task_index], TaskStatus::Failed);
+        crate::work_model::set_attempt_terminal(&mut item.attempts[attempt_index], AttemptStatus::Failed);
         store.write_work_item(&item)?;
     }
     Ok(())

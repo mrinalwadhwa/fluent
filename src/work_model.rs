@@ -7,6 +7,10 @@ use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
+pub fn now_iso8601() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
 pub const WORK_MODEL_DIR: &str = ".factory/work";
 pub const WORK_ITEMS_DIR: &str = "items";
 pub const WORK_ATTEMPTS_DIR: &str = "attempts";
@@ -212,9 +216,14 @@ impl WorkItem {
                 review_context: None,
                 input_artifacts: Vec::new(),
                 output: None,
+                created_at: Some(now_iso8601()),
+                started_at: None,
+                completed_at: None,
             }],
             review_state: None,
             artifacts: Vec::new(),
+            created_at: Some(now_iso8601()),
+            completed_at: None,
         });
 
         self.validate()
@@ -268,6 +277,9 @@ impl WorkItem {
                 }),
                 input_artifacts: Vec::new(),
                 output: None,
+                created_at: Some(now_iso8601()),
+                started_at: None,
+                completed_at: None,
             });
             task_ids.push(task_id);
         }
@@ -280,6 +292,8 @@ impl WorkItem {
             tasks,
             review_state: Some(AttemptReviewState::NotReviewed),
             artifacts: Vec::new(),
+            created_at: Some(now_iso8601()),
+            completed_at: None,
         });
 
         self.validate()?;
@@ -334,6 +348,9 @@ impl WorkItem {
                 }),
                 input_artifacts: Vec::new(),
                 output: None,
+                created_at: Some(now_iso8601()),
+                started_at: None,
+                completed_at: None,
             });
             task_ids.push(task_id);
         }
@@ -346,6 +363,8 @@ impl WorkItem {
             tasks,
             review_state: Some(AttemptReviewState::NotReviewed),
             artifacts: Vec::new(),
+            created_at: Some(now_iso8601()),
+            completed_at: None,
         });
 
         self.validate()?;
@@ -462,6 +481,9 @@ impl WorkItem {
                     .cloned()
                     .unwrap_or_default(),
                 output: None,
+                created_at: Some(now_iso8601()),
+                started_at: None,
+                completed_at: None,
             });
             task_ids.push(task_id);
         }
@@ -533,6 +555,9 @@ impl WorkItem {
             review_context: None,
             input_artifacts,
             output: None,
+            created_at: Some(now_iso8601()),
+            started_at: None,
+            completed_at: None,
         });
         attempt.status = AttemptStatus::Planned;
         attempt.review_state = Some(AttemptReviewState::Failed);
@@ -615,6 +640,9 @@ impl WorkItem {
             candidate_commit: write_output.commit.clone(),
             review_state: MergeCandidateReviewState::Pending,
             merge_state: MergeCandidateMergeState::default(),
+            created_at: Some(now_iso8601()),
+            started_at: None,
+            completed_at: None,
         });
 
         self.validate()?;
@@ -829,6 +857,10 @@ pub struct Attempt {
     pub review_state: Option<AttemptReviewState>,
     #[serde(default)]
     pub artifacts: Vec<ArtifactRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
 }
 
 impl Attempt {
@@ -1012,6 +1044,12 @@ pub struct Task {
     pub input_artifacts: Vec<ArtifactRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<TaskOutput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
 }
 
 impl Task {
@@ -1226,6 +1264,12 @@ pub struct MergeCandidate {
     pub review_state: MergeCandidateReviewState,
     #[serde(default)]
     pub merge_state: MergeCandidateMergeState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
 }
 
 impl MergeCandidate {
@@ -1363,6 +1407,40 @@ pub enum MergeCandidateMergeStatus {
     Failed,
     NeedsUser,
     Merged,
+}
+
+pub fn mark_task_started(task: &mut Task) {
+    task.started_at.get_or_insert_with(now_iso8601);
+}
+
+pub fn set_task_terminal(task: &mut Task, status: TaskStatus) {
+    debug_assert!(matches!(
+        status,
+        TaskStatus::Complete | TaskStatus::Failed | TaskStatus::NeedsUser
+    ));
+    task.status = status;
+    task.completed_at.get_or_insert_with(now_iso8601);
+}
+
+pub fn set_attempt_terminal(attempt: &mut Attempt, status: AttemptStatus) {
+    debug_assert!(matches!(
+        status,
+        AttemptStatus::Complete | AttemptStatus::Failed | AttemptStatus::NeedsUser
+    ));
+    attempt.status = status;
+    attempt.completed_at.get_or_insert_with(now_iso8601);
+}
+
+pub fn mark_merge_candidate_started(candidate: &mut MergeCandidate) {
+    candidate.started_at.get_or_insert_with(now_iso8601);
+}
+
+pub fn set_merge_candidate_terminal(candidate: &mut MergeCandidate, status: MergeCandidateMergeStatus) {
+    debug_assert!(matches!(
+        status,
+        MergeCandidateMergeStatus::Merged | MergeCandidateMergeStatus::Failed | MergeCandidateMergeStatus::NeedsUser
+    ));
+    candidate.completed_at.get_or_insert_with(now_iso8601);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1791,6 +1869,10 @@ struct AttemptRecord {
     review_state: Option<AttemptReviewState>,
     #[serde(default)]
     artifacts: Vec<ArtifactRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    completed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1837,6 +1919,8 @@ impl AttemptRecord {
             status: attempt.status.clone(),
             review_state: attempt.review_state.clone(),
             artifacts: attempt.artifacts.clone(),
+            created_at: attempt.created_at.clone(),
+            completed_at: attempt.completed_at.clone(),
         }
     }
 }
@@ -1851,6 +1935,8 @@ impl From<AttemptRecord> for Attempt {
             tasks: Vec::new(),
             review_state: record.review_state,
             artifacts: record.artifacts,
+            created_at: record.created_at,
+            completed_at: record.completed_at,
         }
     }
 }
@@ -2777,6 +2863,9 @@ mod tests {
             review_context,
             input_artifacts: Vec::new(),
             output: None,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
         }
     }
 
@@ -2923,6 +3012,9 @@ mod tests {
                 candidate_commit: "abc123".to_string(),
                 review_state: MergeCandidateReviewState::Reviewing,
                 merge_state: MergeCandidateMergeState::default(),
+                created_at: None,
+                started_at: None,
+                completed_at: None,
             }],
         };
 
@@ -3287,6 +3379,8 @@ mod tests {
                 ],
                 review_state: Some(AttemptReviewState::Failed),
                 artifacts: Vec::new(),
+                created_at: None,
+                completed_at: None,
             }],
             merge_candidates: Vec::new(),
         };
@@ -3404,6 +3498,9 @@ mod tests {
                         .to_string(),
                 }],
             },
+            created_at: None,
+            started_at: None,
+            completed_at: None,
         });
         store.create_work_item(&work_item).unwrap();
 
@@ -3528,6 +3625,9 @@ mod tests {
                         }),
                         input_artifacts: Vec::new(),
                         output: None,
+                        created_at: None,
+                        started_at: None,
+                        completed_at: None,
                     },
                     Task {
                         id: "attempt-1-review-behaviors".to_string(),
@@ -3550,11 +3650,16 @@ mod tests {
                         }),
                         input_artifacts: Vec::new(),
                         output: None,
+                        created_at: None,
+                        started_at: None,
+                        completed_at: None,
                     },
                     completed_write_task("attempt-1-write-2", "followup"),
                 ],
                 review_state: Some(AttemptReviewState::NotReviewed),
                 artifacts: Vec::new(),
+                created_at: None,
+                completed_at: None,
             }],
             merge_candidates: Vec::new(),
         };
@@ -3585,6 +3690,8 @@ mod tests {
                     producer_id: "task-1".to_string(),
                     path: ".factory/tasks/task-1/report.md".to_string(),
                 }],
+                created_at: None,
+                completed_at: None,
             }],
             merge_candidates: Vec::new(),
         };
@@ -3618,6 +3725,8 @@ mod tests {
                 ],
                 review_state: Some(AttemptReviewState::Passed),
                 artifacts: Vec::new(),
+                created_at: None,
+                completed_at: None,
             }],
             merge_candidates: Vec::new(),
         };
@@ -3660,6 +3769,8 @@ mod tests {
                 tasks: vec![completed_write_task("attempt-1-write-1", "original")],
                 review_state: Some(AttemptReviewState::Passed),
                 artifacts: Vec::new(),
+                created_at: None,
+                completed_at: None,
             }],
             merge_candidates: Vec::new(),
         };
@@ -3692,6 +3803,8 @@ mod tests {
                 tasks: vec![completed_write_task("attempt-1-write-1", "original")],
                 review_state: Some(AttemptReviewState::Passed),
                 artifacts: Vec::new(),
+                created_at: None,
+                completed_at: None,
             }],
             merge_candidates: Vec::new(),
         };
@@ -3726,6 +3839,8 @@ mod tests {
                 tasks: vec![completed_write_task("attempt-1-write-1", "original")],
                 review_state: Some(AttemptReviewState::Uncertain),
                 artifacts: Vec::new(),
+                created_at: None,
+                completed_at: None,
             }],
             merge_candidates: Vec::new(),
         };
@@ -3745,6 +3860,9 @@ mod tests {
             candidate_commit: "commit-original".to_string(),
             review_state: MergeCandidateReviewState::Pending,
             merge_state: MergeCandidateMergeState::default(),
+            created_at: None,
+            started_at: None,
+            completed_at: None,
         });
 
         assert_eq!(
@@ -3772,6 +3890,8 @@ mod tests {
                 tasks: vec![completed_write_task("attempt-1-write-1", "original")],
                 review_state: Some(AttemptReviewState::Passed),
                 artifacts: Vec::new(),
+                created_at: None,
+                completed_at: None,
             }],
             merge_candidates: Vec::new(),
         };
@@ -3791,6 +3911,9 @@ mod tests {
             candidate_commit: "stale-commit".to_string(),
             review_state: MergeCandidateReviewState::Pending,
             merge_state: MergeCandidateMergeState::default(),
+            created_at: None,
+            started_at: None,
+            completed_at: None,
         });
 
         assert_eq!(
@@ -3818,6 +3941,8 @@ mod tests {
                 tasks: vec![completed_write_task("attempt-1-write-1", "original")],
                 review_state: Some(AttemptReviewState::Failed),
                 artifacts: Vec::new(),
+                created_at: None,
+                completed_at: None,
             }],
             merge_candidates: Vec::new(),
         };
@@ -3843,6 +3968,9 @@ mod tests {
                 check_artifacts: Vec::new(),
                 review_artifacts: Vec::new(),
             },
+            created_at: None,
+            started_at: None,
+            completed_at: None,
         });
 
         work_item.validate().unwrap();
@@ -3864,6 +3992,8 @@ mod tests {
                 tasks: vec![completed_write_task("attempt-1-write-1", "original")],
                 review_state: Some(AttemptReviewState::Passed),
                 artifacts: Vec::new(),
+                created_at: None,
+                completed_at: None,
             }],
             merge_candidates: Vec::new(),
         };
@@ -3889,6 +4019,9 @@ mod tests {
                 check_artifacts: Vec::new(),
                 review_artifacts: Vec::new(),
             },
+            created_at: None,
+            started_at: None,
+            completed_at: None,
         });
 
         assert_eq!(
@@ -3910,6 +4043,8 @@ mod tests {
             tasks: Vec::new(),
             review_state: Some(AttemptReviewState::Uncertain),
             artifacts: Vec::new(),
+            created_at: None,
+            completed_at: None,
         };
         let candidate = MergeCandidate {
             id: "candidate-1".to_string(),
@@ -3921,6 +4056,9 @@ mod tests {
             candidate_commit: "abc123".to_string(),
             review_state: MergeCandidateReviewState::Passed,
             merge_state: MergeCandidateMergeState::default(),
+            created_at: None,
+            started_at: None,
+            completed_at: None,
         };
 
         assert_eq!(attempt.review_state, Some(AttemptReviewState::Uncertain));
@@ -3998,11 +4136,16 @@ mod tests {
                         }),
                         input_artifacts: Vec::new(),
                         output: None,
+                        created_at: None,
+                        started_at: None,
+                        completed_at: None,
                     },
                     completed_write_task("attempt-1-write-2", "followup"),
                 ],
                 review_state: Some(AttemptReviewState::NotReviewed),
                 artifacts: Vec::new(),
+                created_at: None,
+                completed_at: None,
             }],
             merge_candidates: Vec::new(),
         };
@@ -4053,6 +4196,9 @@ mod tests {
                 source_branch: "main".to_string(),
                 commit: format!("commit-{suffix}"),
             }),
+            created_at: None,
+            started_at: None,
+            completed_at: None,
         }
     }
 
@@ -4074,6 +4220,8 @@ mod tests {
                 }],
                 review_state: Some(AttemptReviewState::NotReviewed),
                 artifacts: Vec::new(),
+                created_at: None,
+                completed_at: None,
             }],
             merge_candidates: Vec::new(),
         }
@@ -4208,6 +4356,8 @@ mod tests {
             tasks: vec![completed_write_task("attempt-1-write-1", "first")],
             review_state: Some(AttemptReviewState::Passed),
             artifacts: Vec::new(),
+            created_at: None,
+            completed_at: None,
         });
         item.create_or_get_merge_candidate("attempt-1").unwrap();
         assert_eq!(
@@ -4274,5 +4424,283 @@ mod tests {
         task.kind = TaskKind::Write;
         let err = item.validate();
         assert!(err.is_err(), "PostMergeReview should reject write tasks");
+    }
+
+    #[test]
+    fn now_iso8601_returns_parseable_rfc3339() {
+        let ts = now_iso8601();
+        chrono::DateTime::parse_from_rfc3339(&ts).expect("should parse as RFC 3339");
+    }
+
+    #[test]
+    fn task_default_serializes_without_timestamps() {
+        let task = Task {
+            id: "t-1".to_string(),
+            kind: TaskKind::Write,
+            status: TaskStatus::Planned,
+            role: "author".to_string(),
+            instructions: None,
+            work_item_id: "w-1".to_string(),
+            attempt_id: None,
+            workspace_access: WorkspaceAccess { reads: Vec::new(), writes: Vec::new() },
+            artifact_area: None,
+            review_context: None,
+            input_artifacts: Vec::new(),
+            output: None,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+        };
+        let json = serde_json::to_string(&task).unwrap();
+        assert!(!json.contains("created_at"));
+        assert!(!json.contains("started_at"));
+        assert!(!json.contains("completed_at"));
+    }
+
+    #[test]
+    fn task_with_timestamps_round_trips() {
+        let task = Task {
+            id: "t-1".to_string(),
+            kind: TaskKind::Write,
+            status: TaskStatus::Complete,
+            role: "author".to_string(),
+            instructions: None,
+            work_item_id: "w-1".to_string(),
+            attempt_id: None,
+            workspace_access: WorkspaceAccess { reads: Vec::new(), writes: Vec::new() },
+            artifact_area: None,
+            review_context: None,
+            input_artifacts: Vec::new(),
+            output: None,
+            created_at: Some("2026-06-12T10:00:00+00:00".to_string()),
+            started_at: Some("2026-06-12T10:01:00+00:00".to_string()),
+            completed_at: Some("2026-06-12T10:05:00+00:00".to_string()),
+        };
+        let json = serde_json::to_string(&task).unwrap();
+        assert!(json.contains("\"created_at\":\"2026-06-12T10:00:00+00:00\""));
+        let round_tripped: Task = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped.created_at, task.created_at);
+        assert_eq!(round_tripped.started_at, task.started_at);
+        assert_eq!(round_tripped.completed_at, task.completed_at);
+    }
+
+    #[test]
+    fn attempt_round_trips_with_timestamps() {
+        let attempt = Attempt {
+            id: "a-1".to_string(),
+            work_item_id: "w-1".to_string(),
+            kind: AttemptKind::Write,
+            status: AttemptStatus::Complete,
+            tasks: Vec::new(),
+            review_state: None,
+            artifacts: Vec::new(),
+            created_at: Some("2026-06-12T10:00:00+00:00".to_string()),
+            completed_at: Some("2026-06-12T10:05:00+00:00".to_string()),
+        };
+        let json = serde_json::to_string(&attempt).unwrap();
+        assert!(json.contains("\"created_at\""));
+        assert!(json.contains("\"completed_at\""));
+        let round_tripped: Attempt = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped.created_at, attempt.created_at);
+        assert_eq!(round_tripped.completed_at, attempt.completed_at);
+    }
+
+    #[test]
+    fn merge_candidate_round_trips_with_timestamps() {
+        let candidate = MergeCandidate {
+            id: "mc-1".to_string(),
+            attempt_id: "a-1".to_string(),
+            source_workspace: workspace("src"),
+            target_workspace: workspace("tgt"),
+            source_branch: "main".to_string(),
+            target_branch: "main".to_string(),
+            candidate_commit: "abc123".to_string(),
+            review_state: MergeCandidateReviewState::Pending,
+            merge_state: MergeCandidateMergeState::default(),
+            created_at: Some("2026-06-12T10:00:00+00:00".to_string()),
+            started_at: Some("2026-06-12T10:01:00+00:00".to_string()),
+            completed_at: Some("2026-06-12T10:05:00+00:00".to_string()),
+        };
+        let json = serde_json::to_string(&candidate).unwrap();
+        let round_tripped: MergeCandidate = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped.created_at, candidate.created_at);
+        assert_eq!(round_tripped.started_at, candidate.started_at);
+        assert_eq!(round_tripped.completed_at, candidate.completed_at);
+    }
+
+    #[test]
+    fn legacy_json_without_timestamp_fields_deserializes_to_none() {
+        let json = r#"{
+            "id": "t-1",
+            "kind": "write",
+            "role": "author",
+            "work_item_id": "w-1",
+            "workspace_access": { "reads": [], "writes": [] }
+        }"#;
+        let task: Task = serde_json::from_str(json).unwrap();
+        assert_eq!(task.created_at, None);
+        assert_eq!(task.started_at, None);
+        assert_eq!(task.completed_at, None);
+    }
+
+    #[test]
+    fn set_task_terminal_sets_completed_at_and_status() {
+        let mut task = Task {
+            id: "t-1".to_string(),
+            kind: TaskKind::Write,
+            status: TaskStatus::Executing,
+            role: "author".to_string(),
+            instructions: None,
+            work_item_id: "w-1".to_string(),
+            attempt_id: None,
+            workspace_access: WorkspaceAccess { reads: Vec::new(), writes: Vec::new() },
+            artifact_area: None,
+            review_context: None,
+            input_artifacts: Vec::new(),
+            output: None,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+        };
+        set_task_terminal(&mut task, TaskStatus::Complete);
+        assert_eq!(task.status, TaskStatus::Complete);
+        assert!(task.completed_at.is_some());
+        chrono::DateTime::parse_from_rfc3339(task.completed_at.as_ref().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn set_task_terminal_is_idempotent_on_completed_at() {
+        let mut task = Task {
+            id: "t-1".to_string(),
+            kind: TaskKind::Write,
+            status: TaskStatus::Executing,
+            role: "author".to_string(),
+            instructions: None,
+            work_item_id: "w-1".to_string(),
+            attempt_id: None,
+            workspace_access: WorkspaceAccess { reads: Vec::new(), writes: Vec::new() },
+            artifact_area: None,
+            review_context: None,
+            input_artifacts: Vec::new(),
+            output: None,
+            created_at: None,
+            started_at: None,
+            completed_at: Some("2026-01-01T00:00:00+00:00".to_string()),
+        };
+        set_task_terminal(&mut task, TaskStatus::Failed);
+        assert_eq!(task.status, TaskStatus::Failed);
+        assert_eq!(task.completed_at.as_deref(), Some("2026-01-01T00:00:00+00:00"));
+    }
+
+    #[test]
+    fn mark_task_started_is_idempotent() {
+        let mut task = Task {
+            id: "t-1".to_string(),
+            kind: TaskKind::Write,
+            status: TaskStatus::Planned,
+            role: "author".to_string(),
+            instructions: None,
+            work_item_id: "w-1".to_string(),
+            attempt_id: None,
+            workspace_access: WorkspaceAccess { reads: Vec::new(), writes: Vec::new() },
+            artifact_area: None,
+            review_context: None,
+            input_artifacts: Vec::new(),
+            output: None,
+            created_at: None,
+            started_at: Some("2026-01-01T00:00:00+00:00".to_string()),
+            completed_at: None,
+        };
+        mark_task_started(&mut task);
+        assert_eq!(task.started_at.as_deref(), Some("2026-01-01T00:00:00+00:00"));
+    }
+
+    #[test]
+    fn set_attempt_terminal_round_trip() {
+        let mut attempt = Attempt {
+            id: "a-1".to_string(),
+            work_item_id: "w-1".to_string(),
+            kind: AttemptKind::Write,
+            status: AttemptStatus::Executing,
+            tasks: Vec::new(),
+            review_state: None,
+            artifacts: Vec::new(),
+            created_at: None,
+            completed_at: None,
+        };
+        set_attempt_terminal(&mut attempt, AttemptStatus::Complete);
+        assert_eq!(attempt.status, AttemptStatus::Complete);
+        assert!(attempt.completed_at.is_some());
+    }
+
+    #[test]
+    fn set_merge_candidate_terminal_round_trip() {
+        let mut candidate = MergeCandidate {
+            id: "mc-1".to_string(),
+            attempt_id: "a-1".to_string(),
+            source_workspace: workspace("src"),
+            target_workspace: workspace("tgt"),
+            source_branch: "main".to_string(),
+            target_branch: "main".to_string(),
+            candidate_commit: "abc123".to_string(),
+            review_state: MergeCandidateReviewState::Pending,
+            merge_state: MergeCandidateMergeState::default(),
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+        };
+        set_merge_candidate_terminal(&mut candidate, MergeCandidateMergeStatus::Merged);
+        assert!(candidate.completed_at.is_some());
+    }
+
+    #[test]
+    fn mark_merge_candidate_started_is_idempotent() {
+        let mut candidate = MergeCandidate {
+            id: "mc-1".to_string(),
+            attempt_id: "a-1".to_string(),
+            source_workspace: workspace("src"),
+            target_workspace: workspace("tgt"),
+            source_branch: "main".to_string(),
+            target_branch: "main".to_string(),
+            candidate_commit: "abc123".to_string(),
+            review_state: MergeCandidateReviewState::Pending,
+            merge_state: MergeCandidateMergeState::default(),
+            created_at: None,
+            started_at: Some("2026-01-01T00:00:00+00:00".to_string()),
+            completed_at: None,
+        };
+        mark_merge_candidate_started(&mut candidate);
+        assert_eq!(candidate.started_at.as_deref(), Some("2026-01-01T00:00:00+00:00"));
+    }
+
+    #[test]
+    fn initial_attempt_populates_created_at_timestamps() {
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Timestamp test".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        work_item.add_initial_attempt("attempt-1").unwrap();
+        let attempt = &work_item.attempts[0];
+        assert!(attempt.created_at.is_some());
+        let task = &attempt.tasks[0];
+        assert!(task.created_at.is_some());
+        assert_eq!(task.started_at, None);
+        assert_eq!(task.completed_at, None);
+    }
+
+    #[test]
+    fn merge_candidate_creation_populates_created_at() {
+        let mut work_item = work_item_with_completed_write("work-ts");
+        work_item.attempts[0].review_state = Some(AttemptReviewState::Passed);
+        let _candidate_id = work_item.create_or_get_merge_candidate("attempt-1").unwrap();
+        let candidate = &work_item.merge_candidates[0];
+        assert!(candidate.created_at.is_some());
+        assert_eq!(candidate.started_at, None);
+        assert_eq!(candidate.completed_at, None);
     }
 }
