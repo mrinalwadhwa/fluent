@@ -47,3 +47,5 @@ matches the domain model and component boundaries, while documentation
 can check whether user-facing names stay consistent across behaviors,
 docs, tests, commands, and dashboard copy. The design question is how to
 make this a gentle review signal rather than churn over harmless wording.
+
+→ Resolved: Obsolete. Slice 3 removed the legacy 'factory land' path and the top-level review-verdict mismatch surface this observation described. Work-model 'factory work merge' uses MergeCandidate review_state on the candidate itself; no leak from per-round review artifacts. The observation file also contained content from other observations (permission model, learning capture, vocabulary consistency) — those were unrelated paragraphs picked up during the monolithic-to-per-file split migration. The review-round-tuning kernel that survives is too speculative to design without data showing it's an active problem.
