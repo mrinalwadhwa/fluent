@@ -1,5 +1,5 @@
-use assert_cmd::assert::{Assert, OutputAssertExt};
 use assert_cmd::Command;
+use assert_cmd::assert::{Assert, OutputAssertExt};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Write as _;
