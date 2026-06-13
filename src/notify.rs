@@ -21,7 +21,13 @@ mod tests {
 
     #[test]
     fn notify_format_contract() {
-        assert_eq!(format_notification("Factory", "Test message"), "[Factory] Test message");
-        assert_eq!(format_notification("Rate Limit", "paused for 30s"), "[Rate Limit] paused for 30s");
+        assert_eq!(
+            format_notification("Factory", "Test message"),
+            "[Factory] Test message"
+        );
+        assert_eq!(
+            format_notification("Rate Limit", "paused for 30s"),
+            "[Rate Limit] paused for 30s"
+        );
     }
 }
