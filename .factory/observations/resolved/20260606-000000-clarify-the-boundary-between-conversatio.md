@@ -10,3 +10,5 @@ system unless the user explicitly approves recovery. To keep `main`
 available as a stable rebase and merge target, direct conversation edits
 should happen on a lightweight discussion branch or worktree whenever
 active runs or parent landing could overlap with those edits.
+
+→ Resolved: Adopted into CLAUDE.md. The conversation-vs-delegated-run boundary is the codified rule: 'Conversation agents may edit Factory planning and memory state directly... Do not meddle with live run execution state.' The 'discussion branch or worktree' suggestion wasn't separately implemented but the principle holds via the rule itself.
