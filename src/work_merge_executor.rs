@@ -493,7 +493,10 @@ fn record_candidate_failure(
             check_artifacts,
             review_artifacts,
         };
-        crate::work_model::set_merge_candidate_terminal(candidate, MergeCandidateMergeStatus::Failed);
+        crate::work_model::set_merge_candidate_terminal(
+            candidate,
+            MergeCandidateMergeStatus::Failed,
+        );
     })
 }
 
@@ -514,7 +517,10 @@ fn record_candidate_merged(
             check_artifacts,
             review_artifacts,
         };
-        crate::work_model::set_merge_candidate_terminal(candidate, MergeCandidateMergeStatus::Merged);
+        crate::work_model::set_merge_candidate_terminal(
+            candidate,
+            MergeCandidateMergeStatus::Merged,
+        );
     })
 }
 
@@ -825,7 +831,10 @@ fn update_rebase_task_status(
         .find(|a| a.id == attempt_id)
         .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", attempt_id))?;
     if let Some(task) = attempt.tasks.iter_mut().find(|t| t.id == task_id) {
-        if matches!(status, TaskStatus::Complete | TaskStatus::Failed | TaskStatus::NeedsUser) {
+        if matches!(
+            status,
+            TaskStatus::Complete | TaskStatus::Failed | TaskStatus::NeedsUser
+        ) {
             crate::work_model::set_task_terminal(task, status);
         } else {
             task.status = status;
@@ -854,7 +863,10 @@ fn record_candidate_needs_user(
             check_artifacts: Vec::new(),
             review_artifacts: Vec::new(),
         };
-        crate::work_model::set_merge_candidate_terminal(candidate, MergeCandidateMergeStatus::NeedsUser);
+        crate::work_model::set_merge_candidate_terminal(
+            candidate,
+            MergeCandidateMergeStatus::NeedsUser,
+        );
     })
 }
 

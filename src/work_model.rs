@@ -1435,10 +1435,15 @@ pub fn mark_merge_candidate_started(candidate: &mut MergeCandidate) {
     candidate.started_at.get_or_insert_with(now_iso8601);
 }
 
-pub fn set_merge_candidate_terminal(candidate: &mut MergeCandidate, status: MergeCandidateMergeStatus) {
+pub fn set_merge_candidate_terminal(
+    candidate: &mut MergeCandidate,
+    status: MergeCandidateMergeStatus,
+) {
     debug_assert!(matches!(
         status,
-        MergeCandidateMergeStatus::Merged | MergeCandidateMergeStatus::Failed | MergeCandidateMergeStatus::NeedsUser
+        MergeCandidateMergeStatus::Merged
+            | MergeCandidateMergeStatus::Failed
+            | MergeCandidateMergeStatus::NeedsUser
     ));
     candidate.completed_at.get_or_insert_with(now_iso8601);
 }
@@ -4442,7 +4447,10 @@ mod tests {
             instructions: None,
             work_item_id: "w-1".to_string(),
             attempt_id: None,
-            workspace_access: WorkspaceAccess { reads: Vec::new(), writes: Vec::new() },
+            workspace_access: WorkspaceAccess {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            },
             artifact_area: None,
             review_context: None,
             input_artifacts: Vec::new(),
@@ -4467,7 +4475,10 @@ mod tests {
             instructions: None,
             work_item_id: "w-1".to_string(),
             attempt_id: None,
-            workspace_access: WorkspaceAccess { reads: Vec::new(), writes: Vec::new() },
+            workspace_access: WorkspaceAccess {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            },
             artifact_area: None,
             review_context: None,
             input_artifacts: Vec::new(),
@@ -4553,7 +4564,10 @@ mod tests {
             instructions: None,
             work_item_id: "w-1".to_string(),
             attempt_id: None,
-            workspace_access: WorkspaceAccess { reads: Vec::new(), writes: Vec::new() },
+            workspace_access: WorkspaceAccess {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            },
             artifact_area: None,
             review_context: None,
             input_artifacts: Vec::new(),
@@ -4578,7 +4592,10 @@ mod tests {
             instructions: None,
             work_item_id: "w-1".to_string(),
             attempt_id: None,
-            workspace_access: WorkspaceAccess { reads: Vec::new(), writes: Vec::new() },
+            workspace_access: WorkspaceAccess {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            },
             artifact_area: None,
             review_context: None,
             input_artifacts: Vec::new(),
@@ -4589,7 +4606,10 @@ mod tests {
         };
         set_task_terminal(&mut task, TaskStatus::Failed);
         assert_eq!(task.status, TaskStatus::Failed);
-        assert_eq!(task.completed_at.as_deref(), Some("2026-01-01T00:00:00+00:00"));
+        assert_eq!(
+            task.completed_at.as_deref(),
+            Some("2026-01-01T00:00:00+00:00")
+        );
     }
 
     #[test]
@@ -4602,7 +4622,10 @@ mod tests {
             instructions: None,
             work_item_id: "w-1".to_string(),
             attempt_id: None,
-            workspace_access: WorkspaceAccess { reads: Vec::new(), writes: Vec::new() },
+            workspace_access: WorkspaceAccess {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            },
             artifact_area: None,
             review_context: None,
             input_artifacts: Vec::new(),
@@ -4612,7 +4635,10 @@ mod tests {
             completed_at: None,
         };
         mark_task_started(&mut task);
-        assert_eq!(task.started_at.as_deref(), Some("2026-01-01T00:00:00+00:00"));
+        assert_eq!(
+            task.started_at.as_deref(),
+            Some("2026-01-01T00:00:00+00:00")
+        );
     }
 
     #[test]
@@ -4670,7 +4696,10 @@ mod tests {
             completed_at: None,
         };
         mark_merge_candidate_started(&mut candidate);
-        assert_eq!(candidate.started_at.as_deref(), Some("2026-01-01T00:00:00+00:00"));
+        assert_eq!(
+            candidate.started_at.as_deref(),
+            Some("2026-01-01T00:00:00+00:00")
+        );
     }
 
     #[test]
@@ -4697,7 +4726,9 @@ mod tests {
     fn merge_candidate_creation_populates_created_at() {
         let mut work_item = work_item_with_completed_write("work-ts");
         work_item.attempts[0].review_state = Some(AttemptReviewState::Passed);
-        let _candidate_id = work_item.create_or_get_merge_candidate("attempt-1").unwrap();
+        let _candidate_id = work_item
+            .create_or_get_merge_candidate("attempt-1")
+            .unwrap();
         let candidate = &work_item.merge_candidates[0];
         assert!(candidate.created_at.is_some());
         assert_eq!(candidate.started_at, None);

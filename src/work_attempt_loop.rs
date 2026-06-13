@@ -476,14 +476,20 @@ fn interpret_reviews(
     if !failed.is_empty() {
         item.attempts[attempt_index].review_state = Some(AttemptReviewState::Failed);
         if item.attempts[attempt_index].kind.is_review_only_like() {
-            crate::work_model::set_attempt_terminal(&mut item.attempts[attempt_index], AttemptStatus::Failed);
+            crate::work_model::set_attempt_terminal(
+                &mut item.attempts[attempt_index],
+                AttemptStatus::Failed,
+            );
             store.write_work_item(&item)?;
             return Ok(WorkAttemptRunOutcome::ReviewOnlyFailed);
         }
         if !followup_budget_available {
             let handoff_path =
                 write_budget_exhausted_handoff(project_root, &item.id, attempt_id, &failed)?;
-            crate::work_model::set_attempt_terminal(&mut item.attempts[attempt_index], AttemptStatus::NeedsUser);
+            crate::work_model::set_attempt_terminal(
+                &mut item.attempts[attempt_index],
+                AttemptStatus::NeedsUser,
+            );
             item.attempts[attempt_index].artifacts.push(ArtifactRef {
                 producer_id: "attempt-loop".to_string(),
                 path: handoff_path.clone(),
@@ -501,7 +507,10 @@ fn interpret_reviews(
         let handoff_path =
             write_needs_user_handoff(project_root, &item.id, attempt_id, &uncertain)?;
         item.attempts[attempt_index].review_state = Some(AttemptReviewState::Uncertain);
-        crate::work_model::set_attempt_terminal(&mut item.attempts[attempt_index], AttemptStatus::NeedsUser);
+        crate::work_model::set_attempt_terminal(
+            &mut item.attempts[attempt_index],
+            AttemptStatus::NeedsUser,
+        );
         item.attempts[attempt_index].artifacts.push(ArtifactRef {
             producer_id: "attempt-loop".to_string(),
             path: handoff_path.clone(),
@@ -511,7 +520,10 @@ fn interpret_reviews(
     }
 
     item.attempts[attempt_index].review_state = Some(AttemptReviewState::Passed);
-    crate::work_model::set_attempt_terminal(&mut item.attempts[attempt_index], AttemptStatus::Complete);
+    crate::work_model::set_attempt_terminal(
+        &mut item.attempts[attempt_index],
+        AttemptStatus::Complete,
+    );
     if item.attempts[attempt_index].kind.is_review_only_like() {
         store.write_work_item(&item)?;
         return Ok(WorkAttemptRunOutcome::ReviewOnlyComplete);
