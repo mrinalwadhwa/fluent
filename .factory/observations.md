@@ -1167,14 +1167,6 @@ The next adoption slices should keep using the Work path end to end, then
 delete legacy `.factory/runs` compatibility once the replacement path is
 stable enough to stop carrying the old model.
 
-2026-06-09 — Work merge reviewers sometimes cannot read merge check or
-prior artifact directories even when prompts mention them. During
-`work-planning-bridge-cleanup`, multiple merge reviewers saw
-`Operation not permitted` while trying to inspect merge check or review
-artifact paths. Work merge review should either grant reviewers access
-to the referenced artifacts or avoid prompting reviewers to inspect paths
-they cannot read.
-
 2026-06-07 — Authors are increasingly using expertise, especially when
 the approach lists specific expertise files, but Factory should make this
 more explicit and auditable. A good next improvement would be: every run
