@@ -1042,9 +1042,12 @@ factory/main/
     plan.rs                  ← Parse plan.md into groups and steps
     post_merge_review.rs     ← Post-merge review orchestration
     prep.rs                  ← Pre-flight workspace preparation
+    queue.rs                 ← Work queue entry CRUD and ordering
     review.rs                ← Review verdict parsing and state
     review_diff_command.rs   ← Review diff CLI subcommand
+    scheduler.rs             ← Sequential scheduler loop for queued Work Items
     transcript.rs            ← Parse stream-json transcripts incrementally
+    usage.rs                 ← Per-turn usage row logging and summary cache
     version.rs               ← Version command output format
     work_attempt_loop.rs     ← Advance one Work model Attempt
     work_merge_executor.rs   ← Execute Work Merge Candidates
@@ -1358,17 +1361,19 @@ deferrals, coder switching, and calibration.
 
 ### Usage logging
 
-Each write Task's Coder invocation appends per-turn token usage rows to
-`~/.config/factory/usage/usage.jsonl`. Rows follow a fixed JSONL schema:
-`ts`, `coder`, `work_item_id`, `attempt_id`, `task_id`, `model`,
-`input_tokens`, `output_tokens`, `cached_input_tokens`, and
-`reasoning_output_tokens` (Codex only, omitted for Claude).
+Each Coder invocation (write, review, and behavior-tests tasks) appends
+per-turn token usage rows to `~/.config/factory/usage/usage.jsonl`. Rows
+follow a fixed JSONL schema: `ts`, `coder`, `work_item_id`, `attempt_id`,
+`task_id`, `model`, `input_tokens`, `output_tokens`,
+`cached_input_tokens`, and `reasoning_output_tokens` (Codex only, omitted
+for Claude).
 
 After appending rows, the system recomputes
-`~/.config/factory/usage/summary.json` with per-coder totals for 5-hour
-and 7-day sliding windows. Rows outside the window are excluded from
-the respective spent calculations. The summary exists for quick
-queries; future calibration slices populate remaining-estimate fields.
+`~/.config/factory/usage/summary.json` with per-coder totals
+(`input_tokens + output_tokens` per row) for 5-hour and 7-day sliding
+windows. Rows outside the window are excluded from the respective spent
+calculations. The summary exists for quick queries; future calibration
+slices populate remaining-estimate fields.
 
 Usage logging is best-effort: parse or I/O failures print a warning
 to stderr and do not fail the Task.
@@ -1394,7 +1399,8 @@ Malformed queue files are skipped with a warning.
 `factory work scheduler run` enters a polling loop that reads the queue,
 picks the highest-priority `queued` entry, sets its status to `running`,
 creates an Attempt via `factory work attempt <id>`, and executes it via
-`factory work attempt run <id>`.
+`factory work attempt run <id> --no-sandbox` (sandbox is disabled for
+unattended execution).
 
 When the Attempt terminates, the scheduler updates the queue entry
 status: `done` on success, `failed` on failure, `needs-user` when human

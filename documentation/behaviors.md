@@ -2434,7 +2434,7 @@ Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
 
 ## Usage logging
 
-WHEN any Coder's write Task completes (zero or non-zero exit),
+WHEN any Coder's run() completes (zero or non-zero exit),
 THE SYSTEM SHALL read the Task's transcript file, extract every
 turn-level token-usage event, and append one row per turn to
 `~/.config/factory/usage/usage.jsonl` with the documented
@@ -2449,8 +2449,8 @@ WHEN usage row appending fails (e.g., disk full, missing parent
 directory, JSON encode error),
 THE SYSTEM SHALL print a one-line warning to stderr and SHALL
 NOT fail the Task or block the Coder's exit.
-Test: src/work_task_executor.rs (usage logging is wrapped in
-warning-on-error via usage::log_usage_from_transcript)
+Test: src/usage.rs (log_usage_from_transcript wraps append_rows
+and recompute_summary in warning-on-error; append_rows_creates_parent_directory)
 
 WHEN a transcript contains zero parseable token events,
 THE SYSTEM SHALL skip the append step silently (no warning).
@@ -2570,3 +2570,14 @@ stderr, and continue with the next entry. The malformed file
 SHALL NOT be deleted automatically.
 Test: src/queue.rs (list function skips malformed files with
 warning, does not delete them)
+
+## Scheduler cross-cutting
+
+WHEN this Work Item lands,
+THE SYSTEM SHALL contain `Test:` references in
+`documentation/behaviors.md` for each new EARS statement here,
+covering usage row appending, queue CRUD operations, the
+scheduler's pick-and-run loop, signal handling, and the
+no-merge-from-scheduler rule.
+Test: all EARS statements in the Usage logging, Queue substrate,
+and Scheduler sections above carry `Test:` references

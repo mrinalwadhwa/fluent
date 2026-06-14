@@ -1353,6 +1353,7 @@ fn run_review_coder(
     eprintln!("  Task              {task_id}");
     eprintln!("  Artifact area     {}", artifact_dir.display());
 
+    let transcript_path = artifact_dir.join("transcript.jsonl");
     let coder = coder_kind.boxed(sandbox);
     let exit_code = coder.run(
         &prompts.review_prompt,
@@ -1360,8 +1361,15 @@ fn run_review_coder(
         artifact_dir,
         extra_args,
         &[],
-        None,
+        Some(&transcript_path),
     )?;
+    crate::usage::log_usage_from_transcript(
+        &transcript_path,
+        coder_kind.as_str(),
+        &item.id,
+        attempt_id,
+        task_id,
+    );
     if exit_code == 0 {
         Ok(())
     } else {
@@ -1504,6 +1512,7 @@ fn run_behavior_tests_coder(
     eprintln!("  Task              {task_id} (behavior-tests)");
     eprintln!("  Artifact area     {}", artifact_dir.display());
 
+    let transcript_path = artifact_dir.join("transcript.jsonl");
     let coder = coder_kind.boxed(sandbox);
     let exit_code = coder.run(
         &prompt,
@@ -1514,8 +1523,15 @@ fn run_behavior_tests_coder(
             "FACTORY_TASK_KIND".to_string(),
             "behavior-tests".to_string(),
         )],
-        None,
+        Some(&transcript_path),
     )?;
+    crate::usage::log_usage_from_transcript(
+        &transcript_path,
+        coder_kind.as_str(),
+        &item.id,
+        attempt_id,
+        task_id,
+    );
     if exit_code == 0 {
         Ok(())
     } else {
