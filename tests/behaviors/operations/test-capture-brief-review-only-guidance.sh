@@ -15,9 +15,9 @@ require_guidance() {
   fi
 }
 
-require_guidance "The Work-model review-only path currently runs the default reviewer set."
-require_guidance "use the legacy review-run state when the request depends on"
-require_guidance "asked for specific reviewers, use the legacy review-run path until"
+require_guidance "The review-only path currently runs the default reviewer set."
+require_guidance "Confirm that the user accepts the default reviewer set"
+require_guidance "review-only Attempt"
 
 if [ "$failures" -ne 0 ]; then
   exit 1

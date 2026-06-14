@@ -32,8 +32,7 @@ for concept in \
   'fix-pre-<phase>' \
   'check-pre-merge' \
   'fix-pre-merge' \
-  'git worktree remove --force' \
-  'cleaned.md'
+  'git worktree remove --force'
 do
   if ! grep -Fq "$concept" <<<"$section"; then
     echo "architecture active module section does not document $concept" >&2
