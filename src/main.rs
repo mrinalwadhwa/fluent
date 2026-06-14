@@ -105,7 +105,7 @@ fn main() -> Result<()> {
         }
         Some(Commands::Dashboard { path }) => {
             let search_root = path.map(PathBuf::from).unwrap_or(cwd);
-            dashboard::run_dashboard(&search_root, None)?;
+            dashboard::run_dashboard(&search_root)?;
         }
         Some(Commands::Fargate { command }) => match command {
             FargateCommands::EnsureSetup { force_rebuild } => {

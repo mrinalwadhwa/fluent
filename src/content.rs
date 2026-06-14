@@ -126,8 +126,8 @@ Check things.
 [full-codebase]
 Review the whole thing.
 
-[run-scoped]
-Review run {{RUN_ID}}.
+[detail]
+Check item {{ITEM_ID}}.
 ";
         assert_eq!(
             prompt_section(content, "system").trim(),
@@ -138,8 +138,8 @@ Review run {{RUN_ID}}.
             "Review the whole thing."
         );
         assert_eq!(
-            prompt_section(content, "run-scoped").trim(),
-            "Review run {{RUN_ID}}."
+            prompt_section(content, "detail").trim(),
+            "Check item {{ITEM_ID}}."
         );
     }
 

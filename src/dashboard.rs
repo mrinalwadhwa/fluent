@@ -57,7 +57,7 @@ impl App {
 }
 
 /// Launch the dashboard TUI.
-pub fn run_dashboard(search_root: &Path, _run_id: Option<&str>) -> Result<()> {
+pub fn run_dashboard(search_root: &Path) -> Result<()> {
     let mut app = App::new(search_root)?;
 
     // Set up terminal

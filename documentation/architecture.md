@@ -722,10 +722,8 @@ billing. The entrypoint also unsets `OPENAI_API_KEY` and rejects any
 
 The Fargate run image builds the Rust Factory binary during the Docker
 image build and copies it to `/usr/local/bin/factory`; the task
-entrypoint uses that binary to enter the shared Rust session loop.
-The Fargate wrapper owns durable runtime metadata, so the in-place
-local loop does not rewrite `runtime` or `handle` while it runs
-inside the task.
+entrypoint dispatches to `factory work attempt run` or
+`factory work merge` depending on the mode.
 
 Sandboxed local Claude runs refresh Claude OAuth credentials outside the
 sandbox at session boundaries. Sandboxed local Codex runs do not use that
@@ -794,18 +792,15 @@ workspace and invokes the binary.
 ```
 Local machine                    Fargate task
 ─────────────                    ────────────
-1. create worktree
-2. upload worktree → S3
-3. start task ────────────►
-                                 4. pull workspace from S3
-                                 5. write runtime=fargate and task handle
-                                 6. /usr/local/bin/factory
-                                    --runtime local
-                                    --no-sandbox --in-place
-                                    --coder $CODER
-                                 7. Factory launches coder
-                                 8. ...hours pass...
-                                 9. upload workspace → S3
+1. upload project workspace → S3
+2. start ECS task ───────────►
+                                 3. pull workspace from S3
+                                 4. factory work attempt run
+                                    --no-sandbox --coder $CODER
+                                    <work-item> <attempt>
+                                 5. Factory launches coder
+                                 6. ...hours pass...
+                                 7. upload workspace → S3
 ```
 
 #### IAM permissions (minimal)
@@ -835,11 +830,11 @@ containers via SSM. `work/` covers Work Attempt artifacts and
 
 No EFS. Fargate ephemeral storage is sufficient for a single container.
 
-#### Work model on Fargate
+#### Worktree layout
 
-The Work model Fargate path uses a worktrees-root layout that
-matches the local layout (project root + sibling candidate/review
-worktrees, all under a single parent directory).
+The Fargate path uses a worktrees-root layout that matches the
+local layout (project root + sibling candidate/review worktrees,
+all under a single parent directory).
 
 Container layout:
 
@@ -1322,9 +1317,9 @@ in `.factory/expertise/` at the project level. System documentation
 (`architecture.md`, `behaviors.md`) describes what IS: structure,
 behaviors, and contracts.
 
-Observations captured during usage become runs that build or improve
-things. Patterns observed across runs accumulate as project expertise
-in `.factory/expertise/`.
+Observations captured during usage become Work Items that build or
+improve things. Patterns observed across Work Items accumulate as
+project expertise in `.factory/expertise/`.
 
 ## Content resolution
 
@@ -1339,9 +1334,9 @@ merging:
 2. **User config**: `~/.config/factory/<relative_path>`
 3. **Bundled defaults**: compiled into the binary at build time
 
-For example, a project can override the author prompt with
-`<project>/.factory/prompts/author.md`, or a user can set a personal
-default at `~/.config/factory/prompts/author.md`.
+For example, a project can override the work-author prompt with
+`<project>/.factory/prompts/work-author.md`, or a user can set a
+personal default at `~/.config/factory/prompts/work-author.md`.
 
 Skills and expertise are outside this resolver boundary. Agents read
 skills from the repository or installed skill locations, and read
