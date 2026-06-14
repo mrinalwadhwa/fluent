@@ -13,7 +13,7 @@ use factory::cleanup::{
 use factory::cli;
 use factory::cli::{
     Cli, Commands, FargateCommands, KeepAwakeCommands, ObservationsCommands, WorkAttemptCommands,
-    WorkCommands, WorkTaskCommands,
+    WorkCommands, WorkQueueCommands, WorkSchedulerCommands, WorkTaskCommands,
 };
 use factory::coder::CoderKind;
 use factory::content::ContentResolver;
@@ -608,6 +608,39 @@ fn cmd_work(
                 for error in &outcome.errors {
                     eprintln!("  error: {error}");
                 }
+            }
+        },
+        WorkCommands::Queue { command } => match command {
+            WorkQueueCommands::Add {
+                work_item_id,
+                priority,
+            } => {
+                factory::queue::add(project_root, &work_item_id, priority)?;
+                println!("Queued Work Item {work_item_id}");
+            }
+            WorkQueueCommands::List => {
+                let entries = factory::queue::list(project_root)?;
+                if entries.is_empty() {
+                    println!("Queue is empty");
+                } else {
+                    for entry in entries {
+                        println!(
+                            "{} {} {} {}",
+                            entry.priority, entry.queued_at, entry.status, entry.work_item_id
+                        );
+                    }
+                }
+            }
+            WorkQueueCommands::Remove { work_item_id } => {
+                factory::queue::remove(project_root, &work_item_id)?;
+                println!("Removed {work_item_id} from queue");
+            }
+        },
+        WorkCommands::Scheduler { command } => match command {
+            WorkSchedulerCommands::Run { poll_seconds } => {
+                let poll = poll_seconds.unwrap_or(30);
+                let invoker = factory::scheduler::CliAttemptInvoker;
+                factory::scheduler::run(project_root, poll, &invoker)?;
             }
         },
     }

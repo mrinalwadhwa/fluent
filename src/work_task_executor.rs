@@ -1233,6 +1233,15 @@ fn run_task_coder(
         &[],
         transcript_path.as_deref(),
     )?;
+    if let Some(tp) = &transcript_path {
+        crate::usage::log_usage_from_transcript(
+            tp,
+            coder_kind.as_str(),
+            &item.id,
+            attempt_id,
+            task_id,
+        );
+    }
     if exit_code == 0 {
         Ok(())
     } else {

@@ -8980,3 +8980,227 @@ fn deleted_subcommands_absent_from_help() {
         "Status subcommand should appear"
     );
 }
+
+// =========================================================================
+// Queue CLI tests
+// =========================================================================
+
+#[test]
+fn work_queue_add_and_list_round_trip() {
+    let tmp = TempDir::new().unwrap();
+    write_work_item_json(tmp.path(), "wi-q1", "Queue test");
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "queue", "add", "wi-q1", "--priority", "5"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Queued Work Item wi-q1"));
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "queue", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("5"))
+        .stdout(predicate::str::contains("queued"))
+        .stdout(predicate::str::contains("wi-q1"));
+}
+
+#[test]
+fn work_queue_add_unknown_work_item_errors() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join(".factory/work/items")).unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "queue", "add", "nonexistent"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not found"));
+}
+
+#[test]
+fn work_queue_add_existing_with_priority_updates_only_priority() {
+    let tmp = TempDir::new().unwrap();
+    write_work_item_json(tmp.path(), "wi-q2", "Priority update");
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "queue", "add", "wi-q2", "--priority", "3"])
+        .assert()
+        .success();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "queue", "add", "wi-q2", "--priority", "10"])
+        .assert()
+        .success();
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "queue", "list"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("10"), "priority should be updated to 10");
+    assert!(stdout.contains("wi-q2"));
+}
+
+#[test]
+fn work_queue_list_format_includes_priority_queued_at_status_id() {
+    let tmp = TempDir::new().unwrap();
+    write_work_item_json(tmp.path(), "wi-fmt", "Format test");
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "queue", "add", "wi-fmt"])
+        .assert()
+        .success();
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "queue", "list"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.lines().next().unwrap();
+    assert!(line.contains("0"), "should contain default priority 0");
+    assert!(line.contains("queued"), "should contain status");
+    assert!(line.contains("wi-fmt"), "should contain work item id");
+}
+
+#[test]
+fn work_queue_remove_after_add_removes_entry() {
+    let tmp = TempDir::new().unwrap();
+    write_work_item_json(tmp.path(), "wi-rm", "Remove test");
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "queue", "add", "wi-rm"])
+        .assert()
+        .success();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "queue", "remove", "wi-rm"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Removed wi-rm"));
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "queue", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("empty"));
+}
+
+#[test]
+fn work_queue_remove_unknown_errors() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join(".factory/work/items")).unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "queue", "remove", "nonexistent"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not queued"));
+}
+
+// =========================================================================
+// Scheduler CLI tests
+// =========================================================================
+
+#[test]
+fn work_scheduler_run_exits_clean_on_sigterm_when_idle() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join(".factory/work/items")).unwrap();
+
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("factory"))
+        .current_dir(tmp.path())
+        .args(["work", "scheduler", "run", "--poll-seconds", "1"])
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    send_signal(child.id(), "TERM");
+    let status = child.wait().unwrap();
+    assert!(
+        status.success(),
+        "scheduler should exit cleanly on SIGTERM when idle"
+    );
+}
+
+#[test]
+fn work_scheduler_run_processes_queued_work_item_end_to_end() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+
+    let bin_dir = project.join("mock-bin");
+    write_mock_claude(
+        &bin_dir,
+        r#"#!/bin/bash
+# Mock writer: create a commit in the workspace
+git add -A 2>/dev/null
+git commit --allow-empty -m "mock write" 2>/dev/null
+exit 0
+"#,
+    );
+
+    write_work_item_json(project, "wi-sched", "Scheduler test");
+
+    factory_cmd()
+        .current_dir(project)
+        .args(["work", "queue", "add", "wi-sched", "--priority", "1"])
+        .assert()
+        .success();
+
+    let queue_entry_path = project.join(".factory/work/queue/wi-sched.json");
+    assert!(queue_entry_path.exists());
+    let before: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&queue_entry_path).unwrap()).unwrap();
+    assert_eq!(before["status"], "queued");
+
+    let child = std::process::Command::new(assert_cmd::cargo::cargo_bin("factory"))
+        .current_dir(project)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .args([
+            "work",
+            "scheduler",
+            "run",
+            "--poll-seconds",
+            "1",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_secs(8));
+    send_signal(child.id(), "TERM");
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains("[scheduler] starting wi-sched"),
+        "scheduler should log start: {stderr}"
+    );
+
+    let after: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&queue_entry_path).unwrap()).unwrap();
+    let status = after["status"].as_str().unwrap_or("");
+    assert!(
+        status == "done" || status == "failed",
+        "queue entry should be terminal after scheduler runs, got: {status}"
+    );
+}

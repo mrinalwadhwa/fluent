@@ -2431,3 +2431,142 @@ WHEN the mock prelude executes,
 THE SYSTEM SHALL tolerate missing `git` or `date` by writing a
 fallback fixture with placeholder values rather than failing.
 Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
+
+## Usage logging
+
+WHEN any Coder's write Task completes (zero or non-zero exit),
+THE SYSTEM SHALL read the Task's transcript file, extract every
+turn-level token-usage event, and append one row per turn to
+`~/.config/factory/usage/usage.jsonl` with the documented
+schema (ts, coder, work_item_id, attempt_id, task_id, model,
+input_tokens, output_tokens, cached_input_tokens, and
+reasoning_output_tokens for Codex only).
+Test: src/usage.rs (extract_claude_usage_returns_one_row_per_result_event,
+extract_codex_usage_returns_one_row_per_token_count_event,
+append_rows_creates_parent_directory)
+
+WHEN usage row appending fails (e.g., disk full, missing parent
+directory, JSON encode error),
+THE SYSTEM SHALL print a one-line warning to stderr and SHALL
+NOT fail the Task or block the Coder's exit.
+Test: src/work_task_executor.rs (usage logging is wrapped in
+warning-on-error via usage::log_usage_from_transcript)
+
+WHEN a transcript contains zero parseable token events,
+THE SYSTEM SHALL skip the append step silently (no warning).
+Test: src/usage.rs (extract_claude_usage_returns_empty_when_no_result_events,
+extract_codex_usage_skips_session_meta_and_response_item_events,
+append_rows_is_no_op_for_empty_slice)
+
+WHEN usage rows are written to `usage.jsonl`,
+THE SYSTEM SHALL update `~/.config/factory/usage/summary.json`
+to reflect new totals for `five_hour` and `weekly` windows per
+coder. Window boundaries advance based on `ts` of incoming rows
+(rows older than 5 hours / 7 days are excluded from the
+respective spent calculations).
+Test: src/usage.rs (recompute_summary_filters_by_five_hour_window,
+recompute_summary_filters_by_weekly_window)
+
+WHEN the summary file does not exist at write time,
+THE SYSTEM SHALL create it with default zero spent and unset
+remaining estimates (filled in by future calibration slices).
+Test: src/usage.rs (recompute_summary_creates_zero_summary_when_log_missing)
+
+## Queue substrate
+
+WHEN `factory work queue add <work-item-id>` is invoked,
+THE SYSTEM SHALL write
+`.factory/work/queue/<work-item-id>.json` with `{work_item_id,
+queued_at, priority (default 0), status: "queued"}`. If the
+file already exists, SHALL update `priority` if `--priority N`
+was passed; otherwise leave existing fields unchanged.
+Test: src/queue.rs (add_writes_queued_entry_with_default_priority,
+add_idempotent_updates_priority_only_when_passed,
+add_idempotent_preserves_queued_at_on_existing_entry)
+Test: tests/binary.rs (work_queue_add_and_list_round_trip,
+work_queue_add_existing_with_priority_updates_only_priority)
+
+WHEN `factory work queue add` is invoked with an unknown
+`work-item-id` (no matching `.factory/work/items/<id>.json`),
+THE SYSTEM SHALL exit non-zero with a clear error and SHALL NOT
+create the queue file.
+Test: src/queue.rs (add_fails_when_work_item_does_not_exist)
+Test: tests/binary.rs (work_queue_add_unknown_work_item_errors)
+
+WHEN `factory work queue list` is invoked,
+THE SYSTEM SHALL print each queue entry on its own line, sorted
+by `priority` descending then `queued_at` ascending, in the
+format `<priority> <queued_at> <status> <work-item-id>`.
+Test: src/queue.rs (list_sorts_by_priority_then_queued_at,
+list_returns_empty_when_no_queue_files)
+Test: tests/binary.rs (work_queue_list_format_includes_priority_queued_at_status_id)
+
+WHEN `factory work queue remove <work-item-id>` is invoked and
+the file exists,
+THE SYSTEM SHALL delete the file and exit zero. If the file
+does not exist, SHALL exit non-zero with a clear "not queued"
+message.
+Test: src/queue.rs (remove_deletes_file, remove_errors_when_not_queued)
+Test: tests/binary.rs (work_queue_remove_after_add_removes_entry,
+work_queue_remove_unknown_errors)
+
+## Scheduler
+
+WHEN `factory work scheduler run` is invoked,
+THE SYSTEM SHALL enter a polling loop that, on each iteration:
+reads `.factory/work/queue/`, picks the highest-priority entry
+with `status == "queued"` (ties broken by `queued_at` ascending),
+updates its `status` to `running`, and invokes the equivalent
+of `factory work attempt <work-item-id>` to create the next
+Attempt followed by `factory work attempt run <work-item-id>`
+to execute it.
+Test: src/scheduler.rs (pick_next_queued_returns_highest_priority_queued,
+pick_next_queued_breaks_priority_ties_by_queued_at,
+run_one_marks_running_before_invoking_attempt)
+Test: tests/binary.rs (work_scheduler_run_processes_queued_work_item_end_to_end)
+
+WHEN the running Attempt terminates,
+THE SYSTEM SHALL update the queue entry's `status` to:
+- `done` if the Attempt completes
+- `failed` if the Attempt ends in a `failed` terminal state
+- `needs-user` if the Attempt ends in `needs-user`
+The entry SHALL NOT be deleted; the user inspects via `factory
+work queue list`.
+Test: src/scheduler.rs (run_one_updates_status_to_done_on_complete_outcome,
+run_one_updates_status_to_failed_on_failed_outcome,
+run_one_updates_status_to_needs_user_on_needs_user_outcome)
+
+WHEN the running Attempt terminates,
+THE SYSTEM SHALL NOT invoke merge logic itself. Merging is the
+job of `factory work auto-merge --all`, which the user runs
+separately as a sibling long-running process.
+Test: src/scheduler.rs (run_one_updates_status_to_done_on_complete_outcome
+— mock invoker does not call merge; CliAttemptInvoker invokes
+only `factory work attempt` and `factory work attempt run`)
+
+WHEN the scheduler's poll finds no `queued` entries,
+THE SYSTEM SHALL sleep for a configurable interval (default 30
+seconds) before re-polling.
+Test: src/scheduler.rs (pick_next_queued_returns_none_when_empty)
+Test: tests/binary.rs (work_scheduler_run_exits_clean_on_sigterm_when_idle)
+
+WHEN the scheduler receives SIGTERM or SIGINT while idle (no
+Attempt currently running),
+THE SYSTEM SHALL exit zero immediately.
+Test: tests/binary.rs (work_scheduler_run_exits_clean_on_sigterm_when_idle)
+
+WHEN the scheduler receives SIGTERM or SIGINT while an Attempt
+is mid-execution,
+THE SYSTEM SHALL allow the Attempt to complete (do not interrupt
+the child `factory work attempt run` process), update the queue
+entry's `status` accordingly, then exit zero.
+Test: src/scheduler.rs (signal handling uses AtomicBool checked
+at loop boundaries, not mid-invocation; run_one completes
+before shutdown check)
+
+WHEN the scheduler reads a queue file that fails to parse,
+THE SYSTEM SHALL skip that entry, log a one-line warning to
+stderr, and continue with the next entry. The malformed file
+SHALL NOT be deleted automatically.
+Test: src/queue.rs (list function skips malformed files with
+warning, does not delete them)

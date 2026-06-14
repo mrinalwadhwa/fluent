@@ -1348,3 +1348,62 @@ skills from the repository or installed skill locations, and read
 expertise from `expertise/`, `.factory/expertise/`, or skill
 `references/` directories. Factory does not currently bundle or resolve
 skills and expertise through `ContentResolver`.
+
+## Scheduler
+
+The scheduler is a multi-slice architecture for unattended Work Item
+execution. Slice 1 delivers usage logging, a queue substrate, and a
+sequential worker. Later slices add cost estimation, capacity-aware
+deferrals, coder switching, and calibration.
+
+### Usage logging
+
+Each write Task's Coder invocation appends per-turn token usage rows to
+`~/.config/factory/usage/usage.jsonl`. Rows follow a fixed JSONL schema:
+`ts`, `coder`, `work_item_id`, `attempt_id`, `task_id`, `model`,
+`input_tokens`, `output_tokens`, `cached_input_tokens`, and
+`reasoning_output_tokens` (Codex only, omitted for Claude).
+
+After appending rows, the system recomputes
+`~/.config/factory/usage/summary.json` with per-coder totals for 5-hour
+and 7-day sliding windows. Rows outside the window are excluded from
+the respective spent calculations. The summary exists for quick
+queries; future calibration slices populate remaining-estimate fields.
+
+Usage logging is best-effort: parse or I/O failures print a warning
+to stderr and do not fail the Task.
+
+### Queue substrate
+
+Work Items are queued via `factory work queue add <work-item-id>
+[--priority N]`. Each entry is stored at
+`.factory/work/queue/<work-item-id>.json` with fields: `work_item_id`,
+`queued_at` (RFC 3339 UTC), `priority` (numeric, higher = sooner,
+default 0), and `status` (`queued`, `running`, `done`, `failed`,
+`needs-user`).
+
+`factory work queue list` prints entries sorted by priority descending,
+then `queued_at` ascending. `factory work queue remove` deletes the
+entry file.
+
+The queue validates that the Work Item exists before creating an entry.
+Malformed queue files are skipped with a warning.
+
+### Sequential scheduler
+
+`factory work scheduler run` enters a polling loop that reads the queue,
+picks the highest-priority `queued` entry, sets its status to `running`,
+creates an Attempt via `factory work attempt <id>`, and executes it via
+`factory work attempt run <id>`.
+
+When the Attempt terminates, the scheduler updates the queue entry
+status: `done` on success, `failed` on failure, `needs-user` when human
+input is required. The scheduler does not perform merges — that is the
+job of `factory work auto-merge --all`, which runs as a sibling process.
+
+On SIGTERM or SIGINT while idle, the scheduler exits immediately. While
+an Attempt is running, it allows the Attempt to complete before exiting.
+
+Slice 1 runs one Work Item at a time. Concurrency, capacity-awareness,
+coder switching, and dependency-aware ordering are planned for later
+slices.

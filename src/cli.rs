@@ -345,6 +345,18 @@ pub enum WorkCommands {
         #[command(subcommand)]
         command: WorkPostMergeReviewCommands,
     },
+
+    /// Manage the Work Item queue
+    Queue {
+        #[command(subcommand)]
+        command: WorkQueueCommands,
+    },
+
+    /// Run the sequential scheduler
+    Scheduler {
+        #[command(subcommand)]
+        command: WorkSchedulerCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -439,5 +451,37 @@ pub enum WorkTaskCommands {
         /// Extra args passed through to the agent
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum WorkQueueCommands {
+    /// Add a Work Item to the queue
+    Add {
+        /// Work Item ID
+        work_item_id: String,
+
+        /// Numeric priority (higher = sooner; default 0)
+        #[arg(long)]
+        priority: Option<i64>,
+    },
+
+    /// List queued Work Items
+    List,
+
+    /// Remove a Work Item from the queue
+    Remove {
+        /// Work Item ID
+        work_item_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum WorkSchedulerCommands {
+    /// Poll the queue and run Work Items sequentially
+    Run {
+        /// Seconds between queue polls when idle (default 30)
+        #[arg(long)]
+        poll_seconds: Option<u64>,
     },
 }
