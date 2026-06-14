@@ -1664,9 +1664,8 @@ exit 0
         .assert()
         .success();
 
-    let transcript = main_dir.join(
-        ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/transcript.jsonl",
-    );
+    let transcript = main_dir
+        .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/transcript.jsonl");
     assert!(
         transcript.is_file(),
         "transcript.jsonl should exist at {}",
@@ -1678,8 +1677,8 @@ exit 0
         "transcript should contain mock reviewer output"
     );
 
-    let review = main_dir
-        .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md");
+    let review =
+        main_dir.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md");
     assert!(
         review.is_file(),
         "review.md should exist alongside transcript"
@@ -1721,9 +1720,8 @@ exit 1
         .output()
         .unwrap();
 
-    let transcript = main_dir.join(
-        ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/transcript.jsonl",
-    );
+    let transcript = main_dir
+        .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/transcript.jsonl");
     assert!(
         transcript.is_file(),
         "transcript.jsonl should persist even on reviewer failure at {}",
@@ -1786,11 +1784,7 @@ JSON
 exit 0
 "##,
     );
-    write_mock_executable(
-        &bin_dir,
-        "sandbox-exec",
-        "#!/bin/bash\nexit 1\n",
-    );
+    write_mock_executable(&bin_dir, "sandbox-exec", "#!/bin/bash\nexit 1\n");
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -1807,9 +1801,8 @@ exit 0
         .assert()
         .success();
 
-    let transcript = main_dir.join(
-        ".factory/work/artifacts/work-1/attempt-1/attempt-1-behavior-tests/transcript.jsonl",
-    );
+    let transcript = main_dir
+        .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-behavior-tests/transcript.jsonl");
     assert!(
         transcript.is_file(),
         "transcript.jsonl should exist at {}",
@@ -1842,10 +1835,10 @@ fn reviewer_sandbox_does_not_include_other_reviewer_artifact_dirs() {
         .success();
 
     // Complete two review tasks so their artifact dirs exist with transcripts
-    let review_tests_artifact = main_dir
-        .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests");
-    let review_documentation_artifact = main_dir
-        .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-documentation");
+    let review_tests_artifact =
+        main_dir.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests");
+    let review_documentation_artifact =
+        main_dir.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-documentation");
     fs::create_dir_all(&review_tests_artifact).unwrap();
     fs::create_dir_all(&review_documentation_artifact).unwrap();
     fs::write(
@@ -1853,11 +1846,7 @@ fn reviewer_sandbox_does_not_include_other_reviewer_artifact_dirs() {
         r#"{"type":"transcript","line":"tests-reviewer"}"#,
     )
     .unwrap();
-    fs::write(
-        review_tests_artifact.join("review.md"),
-        "Verdict: pass\n",
-    )
-    .unwrap();
+    fs::write(review_tests_artifact.join("review.md"), "Verdict: pass\n").unwrap();
     fs::write(
         review_documentation_artifact.join("transcript.jsonl"),
         r#"{"type":"transcript","line":"docs-reviewer"}"#,
@@ -1871,8 +1860,7 @@ fn reviewer_sandbox_does_not_include_other_reviewer_artifact_dirs() {
 
     // Mark those two tasks as complete in the store
     for task_id in &["attempt-1-review-tests", "attempt-1-review-documentation"] {
-        let task_path =
-            work_task_record_path(&main_dir, "work-1", "attempt-1", task_id);
+        let task_path = work_task_record_path(&main_dir, "work-1", "attempt-1", task_id);
         let mut task = read_json_value(&task_path);
         task["status"] = serde_json::json!("complete");
         write_json_value(&task_path, &task);

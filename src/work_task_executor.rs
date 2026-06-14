@@ -2551,15 +2551,16 @@ mod tests {
 
         assert_eq!(
             transcript_path,
-            project_root.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/transcript.jsonl")
+            project_root.join(
+                ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/transcript.jsonl"
+            )
         );
     }
 
     #[test]
     fn behavior_tests_task_transcript_path_resolved_from_artifact_area() {
         let mut item = review_item();
-        item.add_review_tasks("attempt-1", &["behaviors"])
-            .unwrap();
+        item.add_review_tasks("attempt-1", &["behaviors"]).unwrap();
         let attempt = &item.attempts[0];
         let bt_task = attempt
             .tasks
@@ -2580,7 +2581,9 @@ mod tests {
 
         assert_eq!(
             transcript_path,
-            project_root.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-behavior-tests/transcript.jsonl")
+            project_root.join(
+                ".factory/work/artifacts/work-1/attempt-1/attempt-1-behavior-tests/transcript.jsonl"
+            )
         );
     }
 }
