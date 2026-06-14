@@ -1627,6 +1627,307 @@ fn reviewer_sandbox_does_not_include_writer_artifact_dir() {
 }
 
 #[test]
+fn review_task_transcript_persists_after_completion() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-review-transcript");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+printf '{"type":"transcript","line":"review-session-data"}\n'
+printf 'Verdict: pass\n\nAll tests present.\n' > review.md
+exit 0
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-review-tests",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let transcript = main_dir.join(
+        ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/transcript.jsonl",
+    );
+    assert!(
+        transcript.is_file(),
+        "transcript.jsonl should exist at {}",
+        transcript.display()
+    );
+    let content = fs::read_to_string(&transcript).unwrap();
+    assert!(
+        content.contains("review-session-data"),
+        "transcript should contain mock reviewer output"
+    );
+
+    let review = main_dir
+        .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md");
+    assert!(
+        review.is_file(),
+        "review.md should exist alongside transcript"
+    );
+}
+
+#[test]
+fn review_task_transcript_persists_on_failure() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-review-fail-transcript");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+printf '{"type":"partial","data":"reviewer-before-crash"}\n'
+exit 1
+"##,
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-review-tests",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .output()
+        .unwrap();
+
+    let transcript = main_dir.join(
+        ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/transcript.jsonl",
+    );
+    assert!(
+        transcript.is_file(),
+        "transcript.jsonl should persist even on reviewer failure at {}",
+        transcript.display()
+    );
+    let content = fs::read_to_string(&transcript).unwrap();
+    assert!(
+        content.contains("reviewer-before-crash"),
+        "partial transcript should contain content written before failure"
+    );
+}
+
+#[test]
+fn behavior_tests_task_transcript_persists_alongside_results_json() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-bt-transcript");
+    write_mock_executable(
+        &bin_dir,
+        "claude",
+        r##"#!/bin/bash
+printf '{"type":"transcript","line":"behavior-tests-session"}\n'
+
+args_blob=""
+for arg in "$@"; do
+    args_blob="$args_blob $arg"
+done
+results_path=$(printf '%s' "$args_blob" \
+    | grep -oE '/[^ ]*/behavior-tests-results\.json' \
+    | head -n 1)
+
+if [ -z "$results_path" ]; then
+    echo "could not extract behavior-tests-results.json path" >&2
+    exit 1
+fi
+
+mkdir -p "$(dirname "$results_path")" 2>/dev/null
+cat > "$results_path" <<JSON
+{
+  "ran_at": "1970-01-01T00:00:00Z",
+  "candidate_commit": "0000000",
+  "commands_run": [],
+  "summary": {
+    "behaviors_total": 0,
+    "tested_passing": 0,
+    "tested_failing": 0,
+    "untestable": 0,
+    "missing_test_ref": 0
+  },
+  "behaviors": []
+}
+JSON
+exit 0
+"##,
+    );
+    write_mock_executable(
+        &bin_dir,
+        "sandbox-exec",
+        "#!/bin/bash\nexit 1\n",
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-behavior-tests",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let transcript = main_dir.join(
+        ".factory/work/artifacts/work-1/attempt-1/attempt-1-behavior-tests/transcript.jsonl",
+    );
+    assert!(
+        transcript.is_file(),
+        "transcript.jsonl should exist at {}",
+        transcript.display()
+    );
+    let content = fs::read_to_string(&transcript).unwrap();
+    assert!(
+        content.contains("behavior-tests-session"),
+        "transcript should contain mock behavior-tests output"
+    );
+
+    let results = main_dir.join(
+        ".factory/work/artifacts/work-1/attempt-1/attempt-1-behavior-tests/behavior-tests-results.json",
+    );
+    assert!(
+        results.is_file(),
+        "behavior-tests-results.json should exist alongside transcript"
+    );
+}
+
+#[test]
+fn reviewer_sandbox_does_not_include_other_reviewer_artifact_dirs() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    // Complete two review tasks so their artifact dirs exist with transcripts
+    let review_tests_artifact = main_dir
+        .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests");
+    let review_documentation_artifact = main_dir
+        .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-documentation");
+    fs::create_dir_all(&review_tests_artifact).unwrap();
+    fs::create_dir_all(&review_documentation_artifact).unwrap();
+    fs::write(
+        review_tests_artifact.join("transcript.jsonl"),
+        r#"{"type":"transcript","line":"tests-reviewer"}"#,
+    )
+    .unwrap();
+    fs::write(
+        review_tests_artifact.join("review.md"),
+        "Verdict: pass\n",
+    )
+    .unwrap();
+    fs::write(
+        review_documentation_artifact.join("transcript.jsonl"),
+        r#"{"type":"transcript","line":"docs-reviewer"}"#,
+    )
+    .unwrap();
+    fs::write(
+        review_documentation_artifact.join("review.md"),
+        "Verdict: pass\n",
+    )
+    .unwrap();
+
+    // Mark those two tasks as complete in the store
+    for task_id in &["attempt-1-review-tests", "attempt-1-review-documentation"] {
+        let task_path =
+            work_task_record_path(&main_dir, "work-1", "attempt-1", task_id);
+        let mut task = read_json_value(&task_path);
+        task["status"] = serde_json::json!("complete");
+        write_json_value(&task_path, &task);
+    }
+
+    // Run a third reviewer (architecture) with sandbox profiling
+    let bin_dir = tmp.path().join("bin-reviewer-isolation");
+    let sandbox_profile_log = tmp.path().join("reviewer-isolation.sb");
+    write_mock_claude(
+        &bin_dir,
+        "#!/bin/bash\nprintf 'Verdict: pass\\n' > review.md\nexit 0\n",
+    );
+    write_mock_executable(
+        &bin_dir,
+        "sandbox-exec",
+        "#!/bin/bash\ncp \"$2\" \"${SANDBOX_PROFILE_LOG:?}\"\nshift 2\nexec \"$@\"\n",
+    );
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-review-architecture",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("SANDBOX_PROFILE_LOG", &sandbox_profile_log)
+        .env("CLAUDE_CODE_OAUTH_TOKEN", "mock-token")
+        .env("BRAVE_SEARCH_API_KEY", "mock-key")
+        .env("AWS_ACCESS_KEY_ID", "mock-access")
+        .assert()
+        .success();
+
+    let sandbox_profile = fs::read_to_string(&sandbox_profile_log).unwrap();
+    let tests_canonical = fs::canonicalize(&review_tests_artifact).unwrap();
+    let docs_canonical = fs::canonicalize(&review_documentation_artifact).unwrap();
+
+    assert!(
+        !sandbox_profile.contains(&format!(
+            "(allow file-read*  (subpath \"{}\"))",
+            tests_canonical.display()
+        )),
+        "reviewer sandbox should NOT include other reviewer (tests) artifact dir: {sandbox_profile}"
+    );
+    assert!(
+        !sandbox_profile.contains(&format!(
+            "(allow file-read*  (subpath \"{}\"))",
+            docs_canonical.display()
+        )),
+        "reviewer sandbox should NOT include other reviewer (documentation) artifact dir: {sandbox_profile}"
+    );
+}
+
+#[test]
 fn work_task_run_passes_task_context_to_coder_prompt() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);

@@ -550,6 +550,60 @@ in its sandbox readable roots, and the reviewer prompt SHALL NOT
 mention the writer transcript file.
 Test: tests/binary.rs (reviewer_sandbox_does_not_include_writer_artifact_dir)
 
+WHEN a `review` Task is executed,
+THE SYSTEM SHALL pass the path `<artifact_area>/transcript.jsonl` to
+the Coder's transcript argument so the agent's session is persisted
+to that file during execution.
+Test: tests/binary.rs (review_task_transcript_persists_after_completion)
+
+WHEN a `behavior-tests` Task is executed,
+THE SYSTEM SHALL pass the path `<artifact_area>/transcript.jsonl` to
+the Coder's transcript argument so the agent's session is persisted
+to that file during execution.
+Test: tests/binary.rs (behavior_tests_task_transcript_persists_alongside_results_json)
+
+WHEN a `review` Task completes (verdict pass, fail, or uncertain),
+THE SYSTEM SHALL leave the `transcript.jsonl` file in place under the
+artifact directory alongside `review.md`. The transcript SHALL NOT be
+deleted when the Task transitions to `complete`, `failed`, or
+`needs-user`.
+Test: tests/binary.rs (review_task_transcript_persists_after_completion)
+
+WHEN a `behavior-tests` Task completes,
+THE SYSTEM SHALL leave the `transcript.jsonl` file in place under the
+artifact directory alongside `behavior-tests-results.json`.
+Test: tests/binary.rs (behavior_tests_task_transcript_persists_alongside_results_json)
+
+WHEN a `review` or `behavior-tests` Task fails before producing its
+primary artifact (`review.md` or `behavior-tests-results.json`),
+THE SYSTEM SHALL still persist whatever transcript content the Coder
+wrote, so post-mortem analysis is possible.
+Test: tests/binary.rs (review_task_transcript_persists_on_failure)
+
+WHEN any reviewer Task (architecture, behaviors-completeness,
+documentation, skills, tests-completeness) is executed,
+THE SYSTEM SHALL NOT receive read access to other reviewers'
+transcripts in its sandbox readable roots, and the reviewer prompt
+SHALL NOT mention any other reviewer's transcript file.
+Test: tests/binary.rs (reviewer_sandbox_does_not_include_other_reviewer_artifact_dirs)
+
+WHEN any reviewer Task is executed,
+THE SYSTEM SHALL NOT receive read access to the writer transcript file
+in its sandbox readable roots (regression behavior preserved from
+`persist-writer-transcripts`).
+Test: tests/binary.rs (reviewer_sandbox_does_not_include_writer_artifact_dir)
+
+WHEN scheduler usage logging runs after a `review` or `behavior-tests`
+Task,
+THE SYSTEM SHALL find the transcript at the documented path and append
+per-turn token usage rows to `~/.config/factory/usage/usage.jsonl`
+with the documented schema, identifying the Task via `work_item_id`,
+`attempt_id`, and `task_id`.
+Test: src/usage.rs (log_usage_from_transcript appends rows when
+transcript file exists; review and behavior-tests Tasks provide
+transcript paths, so the existing usage-logging tests cover the
+parsing path)
+
 WHEN a `rebase` Task is created,
 THE SYSTEM SHALL continue to use the rebase Task's existing artifact
 directory (no change to the rebase Task surface).
@@ -2581,3 +2635,15 @@ scheduler's pick-and-run loop, signal handling, and the
 no-merge-from-scheduler rule.
 Test: all EARS statements in the Usage logging, Queue substrate,
 and Scheduler sections above carry `Test:` references
+
+## Reviewer transcript persistence cross-cutting
+
+WHEN this Work Item lands,
+THE SYSTEM SHALL contain `Test:` references in
+`documentation/behaviors.md` for each new EARS statement here,
+covering transcript-file presence checks for review and
+behavior-tests Tasks, the independent-verification regression
+test (reviewer cannot read writer transcript or other reviewers'
+transcripts), and the usage-logging integration.
+Test: all EARS statements in the reviewer transcript persistence
+section above carry `Test:` references

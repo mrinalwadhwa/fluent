@@ -457,8 +457,11 @@ Write Tasks carry an `artifact_area` under
 matching the review and behavior-tests convention. The writer's Coder
 persists `transcript.jsonl` into this directory during execution. The
 writer's sandbox grants write access to both the candidate workspace
-and the artifact directory. Reviewer sandboxes intentionally exclude
-writer artifact directories to preserve independent verification.
+and the artifact directory. Review and behavior-tests Tasks also persist
+`transcript.jsonl` alongside their primary artifact (`review.md` or
+`behavior-tests-results.json`). Reviewer sandboxes intentionally exclude
+writer artifact directories and other reviewers' artifact directories to
+preserve independent verification.
 
 Write Tasks may include optional `instructions` copied from explicit Work
 Item instructions or derived from Work Item planning context. JSON omits
