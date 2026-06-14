@@ -1501,7 +1501,10 @@ fn run_behavior_tests_coder(
         &system_prompt,
         artifact_dir,
         extra_args,
-        &[("FACTORY_TASK_KIND".to_string(), "behavior-tests".to_string())],
+        &[(
+            "FACTORY_TASK_KIND".to_string(),
+            "behavior-tests".to_string(),
+        )],
         None,
     )?;
     if exit_code == 0 {
