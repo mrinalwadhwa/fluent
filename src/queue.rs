@@ -93,27 +93,23 @@ pub fn list(project_root: &Path) -> Result<Vec<QueueEntry>> {
         let content = match fs::read_to_string(&path) {
             Ok(c) => c,
             Err(_) => {
-                eprintln!(
-                    "warning: could not read queue file {}",
-                    path.display()
-                );
+                eprintln!("warning: could not read queue file {}", path.display());
                 continue;
             }
         };
         match serde_json::from_str::<QueueEntry>(&content) {
             Ok(entry) => entries.push(entry),
             Err(e) => {
-                eprintln!(
-                    "warning: malformed queue file {}: {e}",
-                    path.display()
-                );
+                eprintln!("warning: malformed queue file {}: {e}", path.display());
                 continue;
             }
         }
     }
 
     entries.sort_by(|a, b| {
-        b.priority.cmp(&a.priority).then_with(|| a.queued_at.cmp(&b.queued_at))
+        b.priority
+            .cmp(&a.priority)
+            .then_with(|| a.queued_at.cmp(&b.queued_at))
     });
 
     Ok(entries)

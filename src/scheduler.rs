@@ -63,11 +63,7 @@ fn classify_attempt_outcome(project_root: &Path, work_item_id: &str) -> Result<A
     }
 }
 
-pub fn run(
-    project_root: &Path,
-    poll_seconds: u64,
-    invoker: &dyn AttemptInvoker,
-) -> Result<()> {
+pub fn run(project_root: &Path, poll_seconds: u64, invoker: &dyn AttemptInvoker) -> Result<()> {
     install_signal_handler();
 
     loop {
@@ -93,7 +89,9 @@ pub fn run(
 
 pub fn pick_next_queued(project_root: &Path) -> Result<Option<QueueEntry>> {
     let entries = queue::list(project_root)?;
-    Ok(entries.into_iter().find(|e| e.status == QueueStatus::Queued))
+    Ok(entries
+        .into_iter()
+        .find(|e| e.status == QueueStatus::Queued))
 }
 
 pub fn run_one(
@@ -112,7 +110,10 @@ pub fn run_one(
         AttemptOutcome::NeedsUser => QueueStatus::NeedsUser,
     };
     queue::update_status(project_root, &entry.work_item_id, new_status.clone())?;
-    eprintln!("[scheduler] finished {} -> {}", entry.work_item_id, new_status);
+    eprintln!(
+        "[scheduler] finished {} -> {}",
+        entry.work_item_id, new_status
+    );
     Ok(())
 }
 
@@ -308,11 +309,7 @@ mod tests {
         }
 
         impl AttemptInvoker for StatusCheckInvoker {
-            fn invoke(
-                &self,
-                _project_root: &Path,
-                work_item_id: &str,
-            ) -> Result<AttemptOutcome> {
+            fn invoke(&self, _project_root: &Path, work_item_id: &str) -> Result<AttemptOutcome> {
                 let entries = queue::list(&self.project_root).unwrap();
                 let entry = entries
                     .iter()

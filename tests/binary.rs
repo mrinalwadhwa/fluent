@@ -9174,13 +9174,7 @@ exit 0
                 std::env::var("PATH").unwrap_or_default()
             ),
         )
-        .args([
-            "work",
-            "scheduler",
-            "run",
-            "--poll-seconds",
-            "1",
-        ])
+        .args(["work", "scheduler", "run", "--poll-seconds", "1"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
