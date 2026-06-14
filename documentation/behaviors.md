@@ -554,12 +554,14 @@ WHEN a `review` Task is executed,
 THE SYSTEM SHALL pass the path `<artifact_area>/transcript.jsonl` to
 the Coder's transcript argument so the agent's session is persisted
 to that file during execution.
+Test: src/work_task_executor.rs (review_task_transcript_path_resolved_from_artifact_area)
 Test: tests/binary.rs (review_task_transcript_persists_after_completion)
 
 WHEN a `behavior-tests` Task is executed,
 THE SYSTEM SHALL pass the path `<artifact_area>/transcript.jsonl` to
 the Coder's transcript argument so the agent's session is persisted
 to that file during execution.
+Test: src/work_task_executor.rs (behavior_tests_task_transcript_path_resolved_from_artifact_area)
 Test: tests/binary.rs (behavior_tests_task_transcript_persists_alongside_results_json)
 
 WHEN a `review` Task completes (verdict pass, fail, or uncertain),

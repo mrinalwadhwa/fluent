@@ -2527,4 +2527,60 @@ mod tests {
         let result = PostMergeSourceGuard::begin(dir, "0000000000000000000000000000000000000000");
         assert!(result.is_err());
     }
+
+    #[test]
+    fn review_task_transcript_path_resolved_from_artifact_area() {
+        let item = review_item();
+        let attempt = &item.attempts[0];
+        let review_task = attempt
+            .tasks
+            .iter()
+            .find(|t| t.kind == TaskKind::Review)
+            .unwrap();
+        let artifact_area = review_task.artifact_area.as_ref().unwrap();
+        assert_eq!(
+            artifact_area.path,
+            ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests"
+        );
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let artifact_dir =
+            resolve_managed_artifact_area_path(project_root, &artifact_area.path).unwrap();
+        let transcript_path = artifact_dir.join("transcript.jsonl");
+
+        assert_eq!(
+            transcript_path,
+            project_root.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/transcript.jsonl")
+        );
+    }
+
+    #[test]
+    fn behavior_tests_task_transcript_path_resolved_from_artifact_area() {
+        let mut item = review_item();
+        item.add_review_tasks("attempt-1", &["behaviors"])
+            .unwrap();
+        let attempt = &item.attempts[0];
+        let bt_task = attempt
+            .tasks
+            .iter()
+            .find(|t| t.kind == TaskKind::BehaviorTests)
+            .unwrap();
+        let artifact_area = bt_task.artifact_area.as_ref().unwrap();
+        assert_eq!(
+            artifact_area.path,
+            ".factory/work/artifacts/work-1/attempt-1/attempt-1-behavior-tests"
+        );
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let artifact_dir =
+            resolve_managed_artifact_area_path(project_root, &artifact_area.path).unwrap();
+        let transcript_path = artifact_dir.join("transcript.jsonl");
+
+        assert_eq!(
+            transcript_path,
+            project_root.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-behavior-tests/transcript.jsonl")
+        );
+    }
 }
