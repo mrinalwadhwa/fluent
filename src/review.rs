@@ -506,5 +506,4 @@ mod tests {
 
         assert_eq!(effective_reviews_accepted(&primary, &fallback), Some(true));
     }
-
 }

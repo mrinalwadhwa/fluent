@@ -816,13 +816,9 @@ mod tests {
         let active = tmp.path().join("review-6-work-1-attempt-1-architecture");
         fs::create_dir_all(&active).unwrap();
 
-        let results = cleanup_stranded_reviewer_worktrees(
-            &project,
-            &CleanupOptions {
-                apply: false,
-            },
-        )
-        .unwrap();
+        let results =
+            cleanup_stranded_reviewer_worktrees(&project, &CleanupOptions { apply: false })
+                .unwrap();
 
         assert_eq!(results.len(), 2);
         let arch = results
@@ -884,13 +880,8 @@ mod tests {
         let reviewer_dir = tmp.path().join("review-6-work-1-attempt-1-tests");
         fs::create_dir_all(&reviewer_dir).unwrap();
 
-        let results = cleanup_stranded_reviewer_worktrees(
-            &project,
-            &CleanupOptions {
-                apply: true,
-            },
-        )
-        .unwrap();
+        let results =
+            cleanup_stranded_reviewer_worktrees(&project, &CleanupOptions { apply: true }).unwrap();
 
         assert!(results.is_empty());
         assert!(reviewer_dir.exists());
@@ -918,13 +909,8 @@ mod tests {
         let reviewer_dir = tmp.path().join("review-6-work-1-attempt-1-tests");
         fs::create_dir_all(&reviewer_dir).unwrap();
 
-        let results = cleanup_stranded_reviewer_worktrees(
-            &project,
-            &CleanupOptions {
-                apply: true,
-            },
-        )
-        .unwrap();
+        let results =
+            cleanup_stranded_reviewer_worktrees(&project, &CleanupOptions { apply: true }).unwrap();
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].work_item_id, "work-1");
@@ -962,13 +948,7 @@ mod tests {
         fs::create_dir_all(&merges_runtime).unwrap();
         fs::write(merges_runtime.join("fargate-task-arn"), "arn-2").unwrap();
 
-        let results = cleanup_work_items(
-            &project,
-            &CleanupOptions {
-                apply: true,
-            },
-        )
-        .unwrap();
+        let results = cleanup_work_items(&project, &CleanupOptions { apply: true }).unwrap();
 
         let work_item_result = results
             .iter()

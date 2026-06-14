@@ -909,9 +909,6 @@ fn status_shows_work_items_without_runs() {
         .stdout(predicate::str::contains("Build status view"));
 }
 
-
-
-
 // -------------------------------------------------------------------------
 // Work Items
 // -------------------------------------------------------------------------
@@ -7599,7 +7596,6 @@ fn mock_path(bin_dir: &Path) -> String {
     format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap())
 }
 
-
 fn patch_attempt_kind_to_post_merge_review(
     project_root: &Path,
     work_item_id: &str,
@@ -8705,7 +8701,12 @@ fn grep_recursive_for(dir: &Path, forbidden: &[&str], skip_self: bool) -> Vec<St
     offenders
 }
 
-fn grep_recursive_walk(dir: &Path, forbidden: &[&str], skip_self: bool, offenders: &mut Vec<String>) {
+fn grep_recursive_walk(
+    dir: &Path,
+    forbidden: &[&str],
+    skip_self: bool,
+    offenders: &mut Vec<String>,
+) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -8813,11 +8814,7 @@ fn no_legacy_run_strings_in_documentation() {
         for &needle in forbidden {
             for (line_num, line) in content.lines().enumerate() {
                 if line.contains(needle) {
-                    offenders.push(format!(
-                        "CLAUDE.md:{}: {}",
-                        line_num + 1,
-                        line.trim()
-                    ));
+                    offenders.push(format!("CLAUDE.md:{}: {}", line_num + 1, line.trim()));
                 }
             }
         }
@@ -8847,7 +8844,9 @@ fn no_legacy_prompt_files_in_prompts_dir() {
             continue;
         }
         assert!(
-            allowed_prefixes.iter().any(|prefix| name.starts_with(prefix)),
+            allowed_prefixes
+                .iter()
+                .any(|prefix| name.starts_with(prefix)),
             "Unexpected prompt file: {name}. Only work-*, review-*, and behavior-tests* prompts should exist."
         );
     }
@@ -8859,10 +8858,7 @@ fn no_legacy_prompt_files_in_prompts_dir() {
 
 #[test]
 fn deleted_subcommands_absent_from_help() {
-    let output = factory_cmd()
-        .args(["--help"])
-        .output()
-        .unwrap();
+    let output = factory_cmd().args(["--help"]).output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let in_commands = stdout
         .lines()
@@ -8870,12 +8866,20 @@ fn deleted_subcommands_absent_from_help() {
         .take_while(|line| !line.is_empty() || line.contains("Commands:"))
         .collect::<Vec<_>>()
         .join("\n");
-    for cmd in ["run", "resume", "watch", "summary", "pull", "shell", "merge", "review"] {
+    for cmd in [
+        "run", "resume", "watch", "summary", "pull", "shell", "merge", "review",
+    ] {
         assert!(
             !in_commands.lines().any(|line| line.trim().starts_with(cmd)),
             "Deleted subcommand {cmd:?} should not appear in Commands section:\n{in_commands}"
         );
     }
-    assert!(in_commands.contains("work"), "Work subcommand should appear");
-    assert!(in_commands.contains("status"), "Status subcommand should appear");
+    assert!(
+        in_commands.contains("work"),
+        "Work subcommand should appear"
+    );
+    assert!(
+        in_commands.contains("status"),
+        "Status subcommand should appear"
+    );
 }

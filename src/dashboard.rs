@@ -356,9 +356,7 @@ mod tests {
                 merge: "-".to_string(),
                 action: "task-ready".to_string(),
             }],
-            errors: vec![
-                "invalid Work Item file .factory/work/items/broken-work.json".to_string(),
-            ],
+            errors: vec!["invalid Work Item file .factory/work/items/broken-work.json".to_string()],
         });
 
         let text = render_app_text(&mut app);

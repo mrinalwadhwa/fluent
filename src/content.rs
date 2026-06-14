@@ -188,7 +188,11 @@ Check item {{ITEM_ID}}.
 
         // Set up both project-local and user-config files
         std::fs::create_dir_all(project.join(".factory/prompts")).unwrap();
-        std::fs::write(project.join(".factory/prompts/work-author.md"), "project prompt").unwrap();
+        std::fs::write(
+            project.join(".factory/prompts/work-author.md"),
+            "project prompt",
+        )
+        .unwrap();
         std::fs::create_dir_all(user_config.join("prompts")).unwrap();
         std::fs::write(user_config.join("prompts/work-author.md"), "user prompt").unwrap();
 

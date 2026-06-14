@@ -7,7 +7,9 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-use factory::cleanup::{self, CleanupOptions, WorkBranchCleanup, WorkCleanupResult, WorktreeCleanup};
+use factory::cleanup::{
+    self, CleanupOptions, WorkBranchCleanup, WorkCleanupResult, WorktreeCleanup,
+};
 use factory::cli;
 use factory::cli::{
     Cli, Commands, FargateCommands, KeepAwakeCommands, ObservationsCommands, WorkAttemptCommands,
@@ -697,8 +699,7 @@ fn cmd_interactive(
 
     let home = std::env::var("HOME").unwrap_or_default();
     let roots = vec![sandbox_root.to_path_buf()];
-    let profile =
-        os::render_profile_for_roots_for_coder(resolver, &home, &roots, coder_kind)?;
+    let profile = os::render_profile_for_roots_for_coder(resolver, &home, &roots, coder_kind)?;
     let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
 
     eprintln!("  Factory           interactive session");

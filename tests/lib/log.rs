@@ -6,7 +6,6 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::Output;
 
-
 pub struct LoggedCommand {
     inner: Command,
     cmd_args: Vec<String>,
