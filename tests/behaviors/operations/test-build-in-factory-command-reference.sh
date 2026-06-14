@@ -33,7 +33,6 @@ required_commands=(
   work
   status
   dashboard
-  land
   cleanup
   init
   version
@@ -74,13 +73,13 @@ work_model_entries=(
   "factory work list                    # list stored Work Items"
   "factory work show <id>               # show one Work Item as JSON"
   "factory work abandon <id> --reason <text> # mark a stale Work Item abandoned"
-  "factory work attempt <id> <attempt>  # add an Attempt with a write Task"
-  "factory work attempt run <id> <attempt> # advance an Attempt"
+  "factory work attempt <id> [<attempt>] # add an Attempt (auto-assigns attempt-N)"
+  "factory work attempt run <id> [<attempt>] # advance an Attempt (defaults to latest)"
   "factory work review <id> <attempt>   # plan review Tasks"
   "factory work review-codebase <id> <attempt> # add a review-only Attempt"
   "factory work task run <id> <attempt> <task> # run one Task"
   "factory work merge-candidate <id> <candidate> # show a Merge Candidate"
-  "factory work merge <id> <candidate>  # execute a Merge Candidate"
+  "factory work merge <id> [<candidate>] # execute a Merge Candidate (defaults to latest)"
   "factory status                       # show Work Items by default"
   "factory dashboard                    # open the live dashboard"
 )

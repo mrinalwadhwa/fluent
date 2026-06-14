@@ -8802,8 +8802,8 @@ fn no_legacy_run_strings_in_documentation() {
                 return true;
             }
             let line_num: usize = parts[1].parse().unwrap_or(0);
-            // The DeleteLegacyRunModel section starts near line 2390
-            line_num < 2389
+            // The DeleteLegacyRunModel section starts near line 2320
+            line_num < 2319
         });
         offenders.extend(dir_offenders);
     }

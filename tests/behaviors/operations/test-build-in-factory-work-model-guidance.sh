@@ -32,7 +32,7 @@ require_absent_from_file() {
 
 # Work model guidance that should still be present
 require_in_file "$SKILL" \
-  "The normal delegated build lifecycle is the Work model" \
+  "The delegated build lifecycle is the Work model" \
   "build-in-the-factory skill"
 require_in_file "$SKILL" \
   "Work Item → Attempt → Task →" \
@@ -56,16 +56,13 @@ require_in_file "$SKILL" \
   "For unrelated work that can proceed in parallel, create independent peer" \
   "build-in-the-factory skill"
 require_in_file "$SKILL" \
-  "Work Items rather than decomposing one parent run" \
-  "build-in-the-factory skill"
-require_in_file "$SKILL" \
   "Implement the approved Task in the assigned Workspace" \
   "build-in-the-factory skill"
 require_in_file "$SKILL" \
   ".factory/work/items/<work-item-id>.json" \
   "build-in-the-factory skill"
 require_in_file "$ARCHITECTURE" \
-  "Factory's primary execution lifecycle uses these durable nouns" \
+  "Factory's execution lifecycle uses these durable nouns" \
   "architecture documentation"
 
 # Legacy references that should be absent

@@ -1022,34 +1022,36 @@ factory/main/
   src/
     main.rs                  ← CLI dispatch (clap)
     lib.rs                   ← public API for tests
-    coder.rs                 ← Coder trait + Claude/Codex implementations
+    auto_merge.rs            ← Auto-merge watcher for merge-ready Work Items
+    behavior_tests.rs        ← BehaviorTests results schema
+    claude_auth.rs           ← Claude OAuth authentication
+    cleanup.rs               ← Cleanup of terminal Work state
     cli.rs                   ← CLI argument types
-    cleanup.rs               ← Cleanup of terminal run and Work state
+    coder.rs                 ← Coder trait + Claude/Codex implementations
     content.rs               ← Runtime content resolution (project → user → bundled)
     credential.rs            ← Keychain credential injection
+    dashboard.rs             ← Live TUI for Work Item activity
+    fargate.rs               ← Fargate launch, watch, stop, and pull for Work execution
     fargate_bootstrap.rs     ← JIT Fargate setup (CFN, base + project image builds)
+    git.rs                   ← Git command wrapper
     hooks.rs                 ← Project hook execution (.factory/hooks/<name>)
     keep_awake.rs            ← macOS idle-sleep prevention toggle
-    merge.rs                  ← Merging policy and pre-merge hook orchestration
-    run.rs                   ← Run state, resolution, status
-    session.rs               ← Session loop orchestration
-    review.rs                ← Review loop, verdict parsing
+    notify.rs                ← Push notification delivery
+    observations.rs          ← Observation CRUD and lifecycle
     os.rs                    ← Seatbelt sandbox rendering, prerequisites
-    worktree.rs              ← Git worktree operations
-    report.rs                ← Report generation
-    fargate.rs               ← Fargate launch, pull, shell
-    dashboard.rs             ← Live TUI for run activity
-    summary.rs               ← Text run summary from durable artifacts
+    plan.rs                  ← Parse plan.md into groups and steps
+    post_merge_review.rs     ← Post-merge review orchestration
+    prep.rs                  ← Pre-flight workspace preparation
+    review.rs                ← Review verdict parsing and state
+    review_diff_command.rs   ← Review diff CLI subcommand
     transcript.rs            ← Parse stream-json transcripts incrementally
-    behavior_tests.rs        ← BehaviorTests results schema
+    version.rs               ← Version command output format
+    work_attempt_loop.rs     ← Advance one Work model Attempt
+    work_merge_executor.rs   ← Execute Work Merge Candidates
     work_model.rs            ← Core Work Item / Attempt / Task model
     work_status.rs           ← Summarize Work Items for status and dashboard
-    work_merge_executor.rs   ← Execute Work Merge Candidates
     work_task_executor.rs    ← Execute Work Tasks
-    work_attempt_loop.rs     ← Advance one Work model Attempt
-    plan.rs                  ← Parse plan.md into groups and steps
-    parallel.rs              ← Parallel plan orchestrator (child runs)
-    version.rs               ← Version command output format
+    worktree.rs              ← Git worktree helpers (signing, repo detection)
   documentation/
     architecture.md          ← this file
     behaviors.md             ← behavioral statements (EARS)
@@ -1072,13 +1074,14 @@ factory/main/
       fix-pre-merge
     work/                    ← Work model durable state (not tracked)
   prompts/                   ← agent system prompts
-    author.md
     behavior-tests.md        ← BehaviorTests agent prompt
     review-architecture.md
     review-behaviors.md
     review-documentation.md
     review-skills.md
     review-tests.md
+    work-author.md           ← Work model author agent prompt
+    work-rebase.md           ← Work model rebase agent prompt
   sandboxes/                 ← Seatbelt profile templates
       common.sb              ← Shared Seatbelt profile template
       claude-code.sb         ← Claude-specific Seatbelt profile layer
@@ -1138,7 +1141,7 @@ bypass log writing.
 ## Active module responsibilities
 
 Several modules own operational policy that would otherwise blur across
-the CLI, run model, and git helpers.
+the CLI, Work model, and git helpers.
 
 ### Project hooks
 
@@ -1164,20 +1167,19 @@ configuration file, the filesystem is the manifest.
 
 ### Merging
 
-`merge.rs` owns the policy that happens immediately before a run
-branch is merged. It calls the `check-pre-merge` hook (if present)
-against the recorded run worktree and proceeds with merging only
+`work_merge_executor.rs` owns the merge policy for Work Merge
+Candidates. It calls the `check-pre-merge` hook (if present)
+against the candidate worktree and proceeds with merging only
 after the hook exits 0. If `check-pre-merge` fails and a
-`fix-pre-merge` hook is also present, `merge.rs` requires a clean
-worktree outside `.factory/`, runs the fix hook, commits any
-changes outside `.factory/`, reruns reviewers, reruns
-`check-pre-merge`, copies updated run artifacts back to the source
-run directory, and lands only when the recheck and reviewers pass.
+`fix-pre-merge` hook is also present, the executor requires a
+clean worktree outside `.factory/`, runs the fix hook, commits
+any changes outside `.factory/`, reruns reviewers, reruns
+`check-pre-merge`, and lands only when the recheck and reviewers
+pass.
 
-The lower-level git mechanics remain in `worktree.rs`: copying run
-artifacts, checking dirty worktrees, rebasing the run branch onto the
-source branch, fast-forward merging, deleting the run branch, removing
-the worktree, and setting status to `merged`.
+`worktree.rs` provides git worktree helpers: disabling commit
+signing in a worktree, detecting git repositories, and resolving
+the common git directory.
 
 ### Auto-merge watcher
 

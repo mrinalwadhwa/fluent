@@ -270,7 +270,7 @@ test_dashboard_lists_work_items() {
 
   RESULT=0
   OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)"
-  assert_contains "$OUTPUT" "Work Items (1)" || RESULT=1
+  assert_contains "$OUTPUT" "Work Items: 1" || RESULT=1
   assert_contains "$OUTPUT" "work-visible - Visible Work" || RESULT=1
   assert_contains "$OUTPUT" "Attempt: attempt-visible [planned]" || RESULT=1
   assert_contains "$OUTPUT" "Task: write:attempt-visible-write-1 [planned]" || RESULT=1
@@ -292,7 +292,7 @@ test_dashboard_refreshes_work_items_on_poll() {
     "work-visible - Visible Work" \
     "work-polled - Polled Work")"
   FINAL_OUTPUT="$(printf '%s' "$OUTPUT" | clean_dashboard_output_tail)"
-  assert_contains "$FINAL_OUTPUT" "Work Items (2)" || RESULT=1
+  assert_contains "$FINAL_OUTPUT" "Work Items: 2" || RESULT=1
   assert_contains "$FINAL_OUTPUT" "work-polled - Polled Work" || RESULT=1
   return $RESULT
 }
@@ -348,7 +348,7 @@ test_dashboard_shows_empty_work_view() {
 
   RESULT=0
   OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)"
-  assert_contains "$OUTPUT" "Work Items (0)" || RESULT=1
+  assert_contains "$OUTPUT" "Work Items: 0" || RESULT=1
   assert_contains "$OUTPUT" "No Work Items found" || RESULT=1
   return $RESULT
 }

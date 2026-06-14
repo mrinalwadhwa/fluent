@@ -501,37 +501,6 @@ test_work_list_id_mismatch_fails() {
   return $RESULT
 }
 
-test_runs_and_work_items_are_independent() {
-  setup_test_project
-  mkdir -p .factory/runs/run-legacy
-  printf 'run-legacy' > .factory/active-run
-  printf 'complete' > .factory/runs/run-legacy/status
-  printf 'local' > .factory/runs/run-legacy/runtime
-  printf 'claude' > .factory/runs/run-legacy/coder
-  printf 'Legacy run without Work Item state' > .factory/runs/run-legacy/brief.md
-
-  RESULT=0
-  STATUS_OUTPUT="$("$FACTORY_BIN" status 2>&1)"
-  assert_contains "$STATUS_OUTPUT" "No Work Items found" || RESULT=1
-  assert_not_contains "$STATUS_OUTPUT" "run-legacy" || RESULT=1
-
-  STATUS_OUTPUT="$("$FACTORY_BIN" status --runs 2>&1)"
-  assert_contains "$STATUS_OUTPUT" "run-legacy" || RESULT=1
-  assert_contains "$STATUS_OUTPUT" "complete" || RESULT=1
-
-  WORK_OUTPUT="$("$FACTORY_BIN" work list 2>&1)"
-  assert_contains "$WORK_OUTPUT" "No Work Items found" || RESULT=1
-  assert_not_contains "$WORK_OUTPUT" "run-legacy" || RESULT=1
-
-  "$FACTORY_BIN" work create work-from-run-project --title "Work from planning" > /dev/null
-  WORK_OUTPUT="$("$FACTORY_BIN" work list 2>&1)"
-  assert_contains "$WORK_OUTPUT" "work-from-run-project" || RESULT=1
-  assert_not_contains "$WORK_OUTPUT" "run-legacy" || RESULT=1
-
-  cleanup_test_project
-  return $RESULT
-}
-
 printf 'test-work-inspection\n\n'
 
 run_test "work create writes minimal Work Item" test_work_create_writes_minimal_item
@@ -557,6 +526,5 @@ run_test "work abandon active merge candidate fails without state change" \
   test_work_abandon_active_merge_candidate_fails_without_state_change
 run_test "work list reports invalid stored state" test_work_list_invalid_state_fails
 run_test "work list reports id mismatch" test_work_list_id_mismatch_fails
-run_test "legacy runs and work inspection are independent" test_runs_and_work_items_are_independent
 
 summarize_and_exit

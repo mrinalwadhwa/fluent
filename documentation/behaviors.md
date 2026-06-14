@@ -257,8 +257,6 @@ WHEN Work Items are stored,
 THE SYSTEM SHALL keep Work Item intake and inspection independent from
 other Factory state.
 Test: tests/binary.rs (work_list_empty_state_succeeds_without_work_items)
-Test: tests/binary.rs (work_create_is_independent_from_legacy_runs)
-Test: tests/behaviors/operations/test-work-inspection.sh (legacy runs and work inspection are independent)
 
 WHEN `factory work attempt <work-item-id>` is invoked without an
 attempt-id positional argument,
@@ -1447,7 +1445,7 @@ WHEN `factory status` is invoked and stored Work Items exist,
 THE SYSTEM SHALL display a Work Items section with each Work Item's
 latest Attempt, selected Task, review state, Merge Candidate, merge
 state, actionable label, and title.
-Test: tests/binary.rs (status_shows_work_items_without_runs, status_runs_shows_runs_and_work_items_together)
+Test: tests/binary.rs (status_shows_work_items_without_runs)
 
 WHEN `factory status` lists an abandoned Work Item before cleanup,
 THE SYSTEM SHALL surface it as terminal abandoned Work rather than as
@@ -1462,12 +1460,12 @@ Test: tests/binary.rs (status_shows_work_items_without_runs)
 WHEN `factory status` is invoked for a project with no Work Items and no
 Work Item read errors,
 THE SYSTEM SHALL report that no Work Items were found.
-Test: tests/binary.rs (status_no_factory_dir, status_hides_runs_by_default)
+Test: tests/binary.rs (status_no_factory_dir)
 
 WHEN `factory status` reads one or more invalid Work Item files,
 THE SYSTEM SHALL report the invalid Work model path in a Work Item read
 errors section while still displaying valid Work Items.
-Test: tests/binary.rs (status_reports_invalid_work_item_by_default_and_with_runs), tests/behaviors/operations/test-work-status-dashboard.sh (status reports invalid Work without hiding valid state)
+Test: tests/behaviors/operations/test-work-status-dashboard.sh (status reports invalid Work without hiding valid state)
 
 ## Cleanup
 
@@ -1540,15 +1538,15 @@ Test: tests/binary.rs (cleanup_work_items_reports_and_removes_orphan_artifact_ro
 
 WHEN `factory dashboard` is invoked,
 THE SYSTEM SHALL open the Work Items view by default.
-Test: src/dashboard.rs (test_app_new_opens_work_view_with_legacy_runs_present), tests/behaviors/operations/test-work-status-dashboard.sh (dashboard shows Work Items alongside legacy runs)
+Test: dashboard::tests::test_work_view_renders_work_items,
+tests/behaviors/operations/test-work-status-dashboard.sh (dashboard lists Work Items)
 
 WHEN `factory dashboard` is invoked and stored Work Items exist,
 THE SYSTEM SHALL provide a Work Items view that shows Work Items,
 latest Attempts, selected Tasks, review state, Merge Candidates, merge
 state, and actionable labels.
-Test: dashboard::tests::test_work_view_renders_work_items_without_runs,
-tests/behaviors/operations/test-work-status-dashboard.sh (dashboard shows
-Work Items alongside legacy runs)
+Test: dashboard::tests::test_work_view_renders_work_items,
+tests/behaviors/operations/test-work-status-dashboard.sh (dashboard lists Work Items)
 
 WHEN the dashboard polls Work model state,
 THE SYSTEM SHALL refresh the Work Items view from stored Work Item files
@@ -1563,9 +1561,8 @@ tests/behaviors/operations/test-work-status-dashboard.sh (dashboard
 surfaces actionable Work, dashboard reports Work read errors)
 
 WHEN the Work Items view is selected and no Work Items exist,
-THE SYSTEM SHALL show a Work empty state instead of the Runs empty
-state.
-Test: dashboard::tests::test_work_view_renders_empty_state_when_selected, tests/behaviors/operations/test-work-status-dashboard.sh (dashboard shows empty Work view)
+THE SYSTEM SHALL show a Work empty state.
+Test: dashboard::tests::test_work_view_renders_empty_state, tests/behaviors/operations/test-work-status-dashboard.sh (dashboard shows empty Work view)
 
 ### Dashboard layout
 
@@ -1573,65 +1570,14 @@ WHEN the dashboard Work Items view is displayed,
 THE SYSTEM SHALL render four vertical regions: Work Items counts header,
 view tabs, Work Items list, and help bar.
 Test: dashboard::tests::test_work_view_counts_errors,
-dashboard::tests::test_work_view_renders_work_items_without_runs,
-dashboard::tests::test_work_view_renders_empty_state_when_selected
+dashboard::tests::test_work_view_renders_work_items,
+dashboard::tests::test_work_view_renders_empty_state
 
-### Dashboard keyboard navigation
+### Dashboard keyboard
 
 WHEN the user presses `q` or Ctrl+C,
 THE SYSTEM SHALL exit the dashboard and restore the terminal.
 Untestable: Requires live terminal restore after process exit
-
-WHEN the user presses Tab,
-THE SYSTEM SHALL select the next agent tab within the current run,
-display that tab's transcript, report, or review artifact content in the
-activity feed, reset the scroll position, and re-enable auto-scroll.
-Untestable: Requires live TUI keyboard dispatch with visual feed update and scroll reset
-
-WHEN the user presses Shift-Tab,
-THE SYSTEM SHALL select the previous agent tab within the current run,
-display that tab's transcript, report, or review artifact content in the
-activity feed, reset the scroll position, and re-enable auto-scroll.
-Untestable: Requires live TUI keyboard dispatch with visual feed update and scroll reset
-
-WHEN the user presses ← or →,
-THE SYSTEM SHALL select the previous or next run and display that run's
-activity feed. Each run preserves its own scroll position and auto-scroll
-state independently.
-Untestable: Requires live TUI with multiple runs and per-run scroll state preservation
-
-WHEN the user presses j, k, ↑, or ↓,
-THE SYSTEM SHALL scroll the activity feed by one line and disable
-auto-scroll. If scrolling down reaches the bottom, auto-scroll
-re-enables.
-Test: dashboard::tests::test_scroll_down_reenables_auto_scroll_at_bottom
-
-WHEN the user presses G or End,
-THE SYSTEM SHALL scroll the activity feed to the bottom and re-enable
-auto-scroll.
-Test: dashboard::tests::test_scroll_to_bottom_enables_auto_scroll
-
-WHEN the user presses g or Home,
-THE SYSTEM SHALL scroll the activity feed to the top and disable
-auto-scroll.
-Untestable: Requires live TUI keyboard dispatch with scroll position and auto-scroll toggle
-
-WHEN the user presses PgUp or PgDn,
-THE SYSTEM SHALL scroll the activity feed by 20 lines. If PgDn reaches
-the bottom, auto-scroll re-enables.
-Test: dashboard::tests::test_page_down_reenables_auto_scroll_at_bottom
-
-### Dashboard mouse scroll
-
-WHEN the user scrolls the mouse wheel up,
-THE SYSTEM SHALL scroll the activity feed up by 3 lines and disable
-auto-scroll.
-Untestable: Requires live TUI mouse event capture with scroll position tracking
-
-WHEN the user scrolls the mouse wheel down,
-THE SYSTEM SHALL scroll the activity feed down by 3 lines. If the scroll
-position reaches the bottom, auto-scroll re-enables.
-Test: dashboard::tests::test_mouse_scroll_down_reenables_auto_scroll_at_bottom
 
 ### Dashboard copy mode
 
@@ -1640,22 +1586,6 @@ THE SYSTEM SHALL toggle copy mode: disable mouse capture so the terminal
 allows text selection, and show a [COPY MODE] indicator in the help bar.
 Pressing `c` again re-enables mouse capture.
 Test: dashboard::tests::test_toggle_copy_mode, dashboard::tests::test_help_bar_shows_copy_key, dashboard::tests::test_help_bar_shows_copy_mode_indicator
-
-### Dashboard activity feed
-
-WHEN a line in the activity feed exceeds the terminal width,
-THE SYSTEM SHALL wrap the line at display-column boundaries with a
-2-space continuation indent, preserving all characters.
-Test: dashboard::tests::test_activity_feed_wrapping_no_cutoff, dashboard::tests::test_activity_feed_wrapping_continuation_not_truncated, dashboard::tests::test_activity_feed_multibyte_wrapping
-
-WHEN the activity feed contains content with ANSI escape sequences,
-THE SYSTEM SHALL strip all ANSI CSI and OSC sequences before rendering,
-preserving the visible text that follows escape terminators.
-Test: dashboard::tests::test_strip_ansi_csi_terminator_preserves_next_char, dashboard::tests::test_activity_feed_ansi_multibyte_no_stray_chars
-
-WHILE auto-scroll is enabled,
-THE SYSTEM SHALL keep the bottom of the feed visible as new events arrive.
-Untestable: Requires live TUI feed rendering with streaming event arrival
 
 ### Dashboard render and poll cadence
 
@@ -2422,7 +2352,41 @@ THE SYSTEM SHALL NOT mention `.factory/runs`, `factory run`,
 `active-run`, `legacy fallback`, or `transitional bridge`.
 Test: tests/binary.rs::no_legacy_run_strings_in_documentation
 
+WHEN a user invokes `factory status`,
+THE SYSTEM SHALL show Work Items only (no legacy-Runs section)
+and exit zero with the Work-state output the Work model produces.
+Test: tests/binary.rs (status_shows_work_items_without_runs),
+tests/behaviors/operations/test-work-status-dashboard.sh (status prints Work Items)
+
+WHEN any test file under `tests/` is inspected after this Work
+Item lands,
+THE SYSTEM SHALL contain no test functions that exercise the
+legacy CLI commands (`factory run`, `factory resume`,
+`factory watch`) or the legacy storage paths
+(`.factory/runs/`, `active-run`, `sessions.log`).
+Test: tests/binary.rs::no_legacy_run_strings_in_src (forbidden substring scan covers test references indirectly via module-level grep)
+
+WHEN CLAUDE.md is inspected after this Work Item lands,
+THE SYSTEM SHALL NOT mention the legacy CLI commands or storage
+paths; the "Factory workflow" section SHALL describe Work-model
+exclusively.
+Test: tests/binary.rs::no_legacy_run_strings_in_documentation
+
+WHEN the dashboard (`factory dashboard`) renders after this Work
+Item lands,
+THE SYSTEM SHALL show only Work-Item state; the previous
+legacy Runs view is removed entirely.
+Test: dashboard::tests::test_work_view_renders_work_items,
+tests/behaviors/operations/test-work-status-dashboard.sh (dashboard lists Work Items)
+
 WHEN a `factory work *` subcommand is invoked,
 THE SYSTEM SHALL behave identically to before this Work Item
 lands. No Work-model behavior changes.
 Test: all work_* tests in tests/binary.rs (pre-existing Work model test suite)
+
+WHEN this Work Item lands,
+THE SYSTEM SHALL contain `Test:` references in
+`documentation/behaviors.md` for each EARS statement in the
+DeleteLegacyRunModel section, covering both absence-of-legacy
+assertions and CLI-error assertions.
+Test: tests/binary.rs::no_legacy_run_strings_in_documentation (verifies behaviors.md does not reintroduce legacy strings)
