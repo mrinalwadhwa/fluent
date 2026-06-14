@@ -23,7 +23,7 @@ flat_section="$(printf '%s\n' "$section" | tr '\n' ' ' | tr -s ' ')"
 
 for phrase in \
   'use the serialized `Task` shape from `factory::work_model` and call `Task::validate` after parsing' \
-  'The `kind` field accepts only `write`, `review`, `merge`, `report`, `learn`, or `probe`' \
+  'The `kind` field accepts `write`, `review`, `merge`, `report`, `learn`, `probe`, or `behavior-tests`' \
   '`workspace_access.reads` may list any number of workspaces' \
   '`workspace_access.writes` may be empty or contain one workspace' \
   'A `review` task must keep `writes` empty'

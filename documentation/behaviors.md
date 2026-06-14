@@ -12,7 +12,6 @@ RunBehaviorTests: for test in tests/behaviors/operations/*.sh; do bash "$test"; 
 | Harness | Runs | Usage |
 |---|---|---|
 | `tests/test-skill` | Skill conversation simulations | `tests/test-skill <scenario> <skill> [--judge]` |
-| `tests/test-run` | Operational assertions | `tests/test-run` |
 
 WHEN `tests/test-skill` completes a skill conversation simulation,
 THE HARNESS SHALL print the run directory and list `transcript.md` as

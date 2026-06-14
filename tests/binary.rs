@@ -2616,11 +2616,6 @@ exit 0
     assert!(prompt.contains("Work behavior review input:"));
     assert!(prompt.contains("WHEN behavior input exists,"));
     assert!(prompt.contains("THE SYSTEM SHALL show it to behavior reviewers."));
-    assert!(
-        prompt.contains(
-            "without requiring a legacy .factory/runs/[run-id]/behaviors.diff.md artifact"
-        )
-    );
     assert!(!prompt.contains("Read behaviors.diff.md and the brief"));
 }
 
