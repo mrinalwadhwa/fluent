@@ -38,10 +38,6 @@ test_init_creates_factory_directory() {
     printf '    FAIL: .factory/ directory was not created\n'
     RESULT=1
   fi
-  if [ ! -d "${TEST_DIR}/.factory/runs" ]; then
-    printf '    FAIL: .factory/runs/ directory was not created\n'
-    RESULT=1
-  fi
   if [ ! -d "${TEST_DIR}/.factory/expertise" ]; then
     printf '    FAIL: .factory/expertise/ directory was not created\n'
     RESULT=1

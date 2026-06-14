@@ -176,44 +176,7 @@ create_needs_user_work_item() {
       > "$TEST_DIR/needs-user-stdout" 2> "$TEST_DIR/needs-user-stderr"
 }
 
-test_status_hides_runs_by_default_and_prints_work_summary() {
-  setup_test_project
-  trap cleanup_test_project RETURN
-  mkdir -p .factory/runs/run-legacy
-  printf 'executing' > .factory/runs/run-legacy/status
-  printf 'local' > .factory/runs/run-legacy/runtime
-  printf 'Legacy run' > .factory/runs/run-legacy/brief.md
-  create_planned_work_item
-
-  RESULT=0
-  OUTPUT="$("$FACTORY_BIN" status 2>&1)"
-  assert_contains "$OUTPUT" "Work Items" || RESULT=1
-  assert_contains "$OUTPUT" "work-visible" || RESULT=1
-  assert_contains "$OUTPUT" "attempt-visible" || RESULT=1
-  assert_not_contains "$OUTPUT" "run-legacy" || RESULT=1
-  return $RESULT
-}
-
-test_status_runs_prints_legacy_runs_and_work_summary() {
-  setup_test_project
-  trap cleanup_test_project RETURN
-  mkdir -p .factory/runs/run-legacy
-  printf 'executing' > .factory/runs/run-legacy/status
-  printf 'local' > .factory/runs/run-legacy/runtime
-  printf 'Legacy run' > .factory/runs/run-legacy/brief.md
-  create_planned_work_item
-
-  RESULT=0
-  OUTPUT="$("$FACTORY_BIN" status --runs 2>&1)"
-  assert_contains "$OUTPUT" "run-legacy" || RESULT=1
-  assert_contains "$OUTPUT" "executing" || RESULT=1
-  assert_contains "$OUTPUT" "Work Items" || RESULT=1
-  assert_contains "$OUTPUT" "work-visible" || RESULT=1
-  assert_contains "$OUTPUT" "attempt-visible" || RESULT=1
-  return $RESULT
-}
-
-test_status_prints_work_without_legacy_runs() {
+test_status_prints_work_items() {
   setup_test_project
   trap cleanup_test_project RETURN
   create_planned_work_item
@@ -222,7 +185,7 @@ test_status_prints_work_without_legacy_runs() {
   OUTPUT="$("$FACTORY_BIN" status 2>&1)"
   assert_contains "$OUTPUT" "Work Items" || RESULT=1
   assert_contains "$OUTPUT" "work-visible" || RESULT=1
-  assert_not_contains "$OUTPUT" "No runs found" || RESULT=1
+  assert_contains "$OUTPUT" "attempt-visible" || RESULT=1
   return $RESULT
 }
 
@@ -288,10 +251,7 @@ PY
 test_status_reports_invalid_work_without_hiding_valid_state() {
   setup_test_project
   trap cleanup_test_project RETURN
-  mkdir -p .factory/runs/run-valid .factory/work/items
-  printf 'complete' > .factory/runs/run-valid/status
-  printf 'local' > .factory/runs/run-valid/runtime
-  printf 'Valid legacy run' > .factory/runs/run-valid/brief.md
+  mkdir -p .factory/work/items
   create_planned_work_item
   printf '{ invalid json\n' > .factory/work/items/broken-work.json
 
@@ -300,13 +260,6 @@ test_status_reports_invalid_work_without_hiding_valid_state() {
   assert_contains "$OUTPUT" "work-visible" || RESULT=1
   assert_contains "$OUTPUT" "Work Item read errors" || RESULT=1
   assert_contains "$OUTPUT" ".factory/work/items/broken-work.json" || RESULT=1
-  assert_not_contains "$OUTPUT" "run-valid" || RESULT=1
-
-  RUN_OUTPUT="$("$FACTORY_BIN" status --runs 2>&1 || true)"
-  assert_contains "$RUN_OUTPUT" "run-valid" || RESULT=1
-  assert_contains "$RUN_OUTPUT" "complete" || RESULT=1
-  assert_contains "$RUN_OUTPUT" "work-visible" || RESULT=1
-  assert_contains "$RUN_OUTPUT" ".factory/work/items/broken-work.json" || RESULT=1
   return $RESULT
 }
 
@@ -324,29 +277,6 @@ test_dashboard_lists_work_items() {
   assert_contains "$OUTPUT" "Review: -" || RESULT=1
   assert_contains "$OUTPUT" "Merge Candidate: -" || RESULT=1
   assert_contains "$OUTPUT" "Merge: -" || RESULT=1
-  return $RESULT
-}
-
-test_dashboard_shows_work_items_alongside_legacy_runs() {
-  setup_test_project
-  trap cleanup_test_project RETURN
-  mkdir -p .factory/runs/run-legacy
-  printf 'executing' > .factory/runs/run-legacy/status
-  printf 'local' > .factory/runs/run-legacy/runtime
-  printf 'Legacy run' > .factory/runs/run-legacy/brief.md
-  create_planned_work_item
-
-  RESULT=0
-  WORK_OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)"
-  assert_contains "$WORK_OUTPUT" "Runs (1)" || RESULT=1
-  assert_contains "$WORK_OUTPUT" "Work Items (1)" || RESULT=1
-  assert_contains "$WORK_OUTPUT" "work-visible - Visible Work" || RESULT=1
-  assert_contains "$WORK_OUTPUT" "Attempt: attempt-visible [planned]" || RESULT=1
-
-  RUN_OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" "r" | clean_dashboard_output)"
-  assert_contains "$RUN_OUTPUT" "Runs (1)" || RESULT=1
-  assert_contains "$RUN_OUTPUT" "run-legacy" || RESULT=1
-  assert_contains "$RUN_OUTPUT" "Work Items (1)" || RESULT=1
   return $RESULT
 }
 
@@ -425,18 +355,13 @@ test_dashboard_shows_empty_work_view() {
 
 printf 'test-work-status-dashboard\n\n'
 
-run_test "status hides runs by default and prints Work summary" \
-  test_status_hides_runs_by_default_and_prints_work_summary
-run_test "status --runs prints legacy runs and Work summary" \
-  test_status_runs_prints_legacy_runs_and_work_summary
-run_test "status prints Work summary without legacy runs" test_status_prints_work_without_legacy_runs
+run_test "status prints Work Items" test_status_prints_work_items
 run_test "status summarizes Work model vocabulary" test_status_summarizes_work_model_vocabulary
 run_test "status surfaces needs-user state" test_status_surfaces_needs_user_state
 run_test "status surfaces abandoned Work as terminal" \
   test_status_surfaces_abandoned_work_as_terminal
 run_test "status reports invalid Work without hiding valid state" test_status_reports_invalid_work_without_hiding_valid_state
 run_test "dashboard lists Work Items" test_dashboard_lists_work_items
-run_test "dashboard shows Work Items alongside legacy runs" test_dashboard_shows_work_items_alongside_legacy_runs
 run_test "dashboard refreshes Work Items on poll" test_dashboard_refreshes_work_items_on_poll
 run_test "dashboard surfaces actionable Work" test_dashboard_surfaces_actionable_work
 run_test "dashboard surfaces needs-user Work" test_dashboard_surfaces_needs_user_work

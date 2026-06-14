@@ -7,31 +7,27 @@ These instructions define how Coding Agents should assist with this project.
 Use the factory to build the factory. For non-trivial code,
 documentation, skill, expertise, or behavior changes, follow the
 `build-in-the-factory` skill and go through the Factory lifecycle:
-brief, behaviors, approach, plan, execution, review, and land. Prefer
-the Work model path for new delegated build work: Work Item, Attempt,
-Task, Workspace, and Merge Candidate.
+brief, behaviors, approach, plan, execution, review, and land.
 
 Do not implement substantial product/code changes directly on `main`.
 Use Factory Work Items and Attempts for delegated build work that needs
-isolation, reviewers, and merging. Use legacy `factory run` only for
-explicit fallback, Fargate-only execution, coordinated child-run
-decomposition, or recovery of existing run state.
+isolation, reviewers, and merging. The Work model path is: Work Item,
+Attempt, Task, Workspace, and Merge Candidate.
 
 Conversation agents may edit Factory planning and memory state directly
 when they are collaborating with the user in the discussion loop:
 observations, briefs, behavior drafts, approaches, plans, lightweight
 curation, and similar durable notes. These edits are part of shaping
-work, not delegated run execution.
+work, not delegated execution.
 
-Do not meddle with live run execution state directly: run branches,
-worktrees, statuses, session artifacts, child-run metadata, and merging
-state belong to the run system. Modify them only during explicit
-recovery with the user.
+Do not meddle with live execution state directly: branches, worktrees,
+statuses, session artifacts, and merging state belong to the execution
+system. Modify them only during explicit recovery with the user.
 
-Keep `main` available as a stable integration branch for runs to rebase
+Keep `main` available as a stable integration branch for Work to rebase
 from and merge into. If conversation-state edits could overlap with
-active runs or parent merging, make them on a lightweight discussion
-branch or worktree and land them separately instead of dirtying `main`.
+active Work or merging, make them on a lightweight discussion branch
+or worktree and land them separately instead of dirtying `main`.
 Use `factory observations add` to record future work and lessons.
 Open observations live as one file per entry under
 `.factory/observations/`; resolved ones move to

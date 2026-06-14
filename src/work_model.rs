@@ -888,7 +888,7 @@ pub fn work_behavior_review_input(item: &WorkItem) -> String {
 
     match behavior_increment {
         Some(behaviors) => format!(
-            "Work behavior review input:\nThe Work Item includes this behavior increment. Verify this behavior increment without requiring a legacy .factory/runs/[run-id]/behaviors.diff.md artifact:\n\n{}\n",
+            "Work behavior review input:\nThe Work Item includes this behavior increment. Verify it against the codebase:\n\n{}\n",
             behaviors.trim()
         ),
         None => {

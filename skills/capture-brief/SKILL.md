@@ -4,7 +4,7 @@ description: >
   Capture the user's intent for a new piece of work through a structured
   interview. Adapt depth to the clarity of the idea — sharpen vague ideas,
   ground clear ones in the codebase. Produce a brief that becomes Work
-  Item planning context, or a legacy run input only for fallback paths.
+  Item planning context.
 ---
 
 # Capture Brief
@@ -195,11 +195,9 @@ note it as an unknown. The define-behaviors stage will resolve it.
 ### Phase 6 — Write the brief
 
 Generate a work-id using the format `YYYYMMDD-HHMMSS-kebab-title`
-(e.g., `20260507-143022-cache-status`). Generate a matching legacy
-run-id from the timestamp prefix only when a fallback or recovery path
-requires legacy run artifacts.
+(e.g., `20260507-143022-cache-status`).
 
-Prefer the Work model for new delegated build work, but do not create
+Do not create
 the Work Item immediately after writing only the brief. Work Item
 planning context is set at `factory work create` time, and write Tasks
 derive their stored instructions from that context later. Defer Work
@@ -218,46 +216,17 @@ factory work create <work-id> --title "<short title>" \
 Store approved planning text in Work Item planning context with
 `--planning-context <text>`, `--planning-context-file <path>`, or the
 separate planning file flags so write Tasks receive the context through
-durable Work state. Do not create `.factory/runs/[run-id]/brief.md`,
-`status`, or `.factory/active-run` for ordinary Work-model planning.
-
-Write legacy bridge planning artifacts only when a later skill must
-review or revise file inputs that the Work path cannot yet carry, or
-when an explicit legacy fallback or recovery path needs them:
-
-```
-.factory/runs/[run-id]/
-  brief.md
-  status          ← write "briefed"
-```
-
-Write `.factory/active-run` containing the run-id only for that legacy
-fallback or recovery path.
+durable Work state.
 
 If the brief is a full-codebase review request, write the review target,
 focus areas, and any requested reviewers in the brief. Do not start
 review execution until the user confirms the brief.
 
-The Work-model review-only path currently runs the default reviewer set.
-If the user requests specific reviewers, call out that limitation before
-execution and use the legacy review-run state when the request depends on
-filtering reviewers.
+The review-only path currently runs the default reviewer set. If the
+user requests specific reviewers, call out that limitation before
+execution.
 
-Use the legacy review-run state only for compatibility or explicit
-recovery after the user confirms:
-
-- Write `.factory/runs/[run-id]/mode` containing `review`
-- If the user wants specific reviewers, write
-  `.factory/runs/[run-id]/reviewers` containing a comma-separated
-  list (e.g., `documentation,behaviors`)
-- If the user wants to focus on specific areas, write
-  `.factory/runs/[run-id]/scope` with the paths or description
-  (e.g., `skills/`, `src/session.rs`, `the session loop logic`)
-- Set status directly to `planned` — skip define-behaviors,
-  design-approach, and plan-execution (there are no new behaviors
-  to define or approaches to design)
-
-The brief for a review run is short: what to review, why, and
+The brief for a review request is short: what to review, why, and
 optionally which reviewers and which areas to focus on.
 
 ### Phase 7 — Confirm
@@ -278,9 +247,7 @@ build something new), continue into the Work-model review-only path
 instead of stopping after confirmation:
 
 - Write the brief as usual so the Work Item has durable context
-- Confirm that the user accepts the default reviewer set; if the user
-  asked for specific reviewers, use the legacy review-run path until
-  Work-model reviewer filtering exists
+- Confirm that the user accepts the default reviewer set
 - Create the Work Item with the approved brief:
   `factory work create <work-item-id> --title "<short title>" --brief-file <brief.md>`
 - Use `factory work review-codebase <work-item-id> <attempt-id>` to add

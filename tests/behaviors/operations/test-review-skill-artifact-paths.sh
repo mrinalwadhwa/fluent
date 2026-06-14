@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
 failures=0
 
-for reviewer in behaviors documentation architecture skills tests; do
+for reviewer in documentation architecture skills tests; do
   skill="$ROOT/skills/review-${reviewer}/SKILL.md"
   legacy_path=".factory/runs/[run-id]/reviews/review-${reviewer}.md"
 

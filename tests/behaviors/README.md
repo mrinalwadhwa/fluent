@@ -59,7 +59,7 @@ FACTORY_BIN_OVERRIDE="$REVIEW_ARTIFACT_DIR/target/debug/factory" \
 | Behavior | Scenarios |
 |---|---|
 | Interview user, research codebase, write brief.md | All capture-brief scenarios |
-| Set status to `briefed`, write active-run | All capture-brief scenarios |
+| Produce approved brief for Work Item planning context | All capture-brief scenarios |
 | Adapt depth — trivial request gets light pass | `fix-status-bug` |
 | Adapt depth — vague idea gets sharpened | `parallel-runs`, `session-snapshots-not-useful` |
 | Probe mechanics for partially clear requests | `code-reviewer`, `timeout-flag` |

@@ -26,8 +26,6 @@ Read:
   before `factory work create` stores Work Item planning context
 - Work Item planning context from `factory work show <work-item-id>` only
   when the Work Item already exists
-- `.factory/runs/[run-id]/brief.md` only in a legacy fallback or
-  recovery path
 - `behaviors.diff.md` from the active planning context — what the system
   must do
 - `approach.md` from the active planning context — how the system should
@@ -45,8 +43,7 @@ action, tell the user:
 > to plan further, or should we proceed?"
 
 If they agree, write a minimal plan. For Work-model planning, keep that
-minimal plan as planning context for `factory work create`; set legacy
-status to `planned` only in a legacy fallback or recovery path.
+minimal plan as planning context for `factory work create`.
 
 ### Phase 2 — Assess scope
 
@@ -192,15 +189,7 @@ Pass the approved planning files in this order:
 
 Use `factory work create --brief-file --behaviors-file --approach-file
 --plan-file` so Factory stores the approved context on the Work Item and
-derives write Task instructions from durable Work state. Create a legacy
-run `execution-instructions.md` file only when a compatibility,
-fallback, or recovery path still requires one. Do not write
-`.factory/runs/[run-id]/brief.md`, `status`, or `.factory/active-run`
-for ordinary Work-model planning when `factory work create` can express
-the delegated execution.
-
-Set legacy status to `planned` only when operating in a legacy fallback
-or recovery path.
+derives write Task instructions from durable Work state.
 
 ---
 
@@ -291,17 +280,6 @@ Merge Candidate: [candidate expectation and merging checks]
 
 - [Contract between parallel work — shared types, API shape, file paths]
 ```
-
-## Legacy fallback format (parallel child runs)
-
-Use the legacy group/step format only when the Work model cannot yet
-express the required coordination, such as coordinated child-run
-decomposition for one large effort or an explicit recovery path. In that
-case, the factory parses the structure and creates child runs
-automatically. Each H2 is a group executed in sequence. Each H3 is a
-step. Groups marked `(parallel)` launch their steps concurrently; unmarked
-groups run steps one at a time. Child run IDs are
-`{parent-id}-{group-idx}-{step-idx}` (1-indexed).
 
 ---
 

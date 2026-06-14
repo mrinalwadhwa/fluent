@@ -1,12 +1,10 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::git;
 use crate::review;
-use crate::run::{self, Run, RunStatus};
 use crate::work_model::{
     Attempt, AttemptStatus, MergeCandidate, MergeCandidateMergeStatus, MergeCandidateReviewState,
     Task, TaskStatus, WORK_ARTIFACTS_DIR, WorkItem, WorkModelStore,
@@ -15,7 +13,6 @@ use crate::work_model::{
 
 #[derive(Debug, Clone)]
 pub struct CleanupOptions {
-    pub run_id: Option<String>,
     pub apply: bool,
 }
 
@@ -26,14 +23,6 @@ pub enum WorktreeCleanup {
     Removed(PathBuf),
     SkippedUnregistered(PathBuf),
     Missing(PathBuf),
-}
-
-#[derive(Debug, Clone)]
-pub struct CleanupResult {
-    pub run_id: String,
-    pub status: RunStatus,
-    pub applied: bool,
-    pub worktree: WorktreeCleanup,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,37 +65,10 @@ pub struct StrandedReviewerWorktreeCleanupResult {
     pub applied: bool,
 }
 
-pub fn cleanup_runs(search_root: &Path, options: &CleanupOptions) -> Result<Vec<CleanupResult>> {
-    let source_root = cleanup_source_root(search_root)?;
-    let candidates = cleanup_candidates(&source_root, options.run_id.as_deref())?;
-    let registered = registered_worktrees(&source_root)?;
-    let mut results = Vec::new();
-
-    for run in candidates {
-        let status = run.status()?;
-        let worktree = cleanup_worktree(&source_root, &run, &registered, options.apply)?;
-        if options.apply {
-            write_cleaned_marker(&run, &status, &worktree)?;
-        }
-        results.push(CleanupResult {
-            run_id: run.id,
-            status,
-            applied: options.apply,
-            worktree,
-        });
-    }
-
-    Ok(results)
-}
-
 pub fn cleanup_work_items(
     search_root: &Path,
     options: &CleanupOptions,
 ) -> Result<Vec<WorkCleanupResult>> {
-    if options.run_id.is_some() {
-        return Ok(Vec::new());
-    }
-
     let source_root = cleanup_source_root(search_root)?;
     let store = WorkModelStore::new(&source_root);
     let work_items = store.list_work_items()?;
@@ -142,10 +104,6 @@ pub fn cleanup_stranded_reviewer_worktrees(
     search_root: &Path,
     options: &CleanupOptions,
 ) -> Result<Vec<StrandedReviewerWorktreeCleanupResult>> {
-    if options.run_id.is_some() {
-        return Ok(Vec::new());
-    }
-
     let source_root = cleanup_source_root(search_root)?;
     let store = WorkModelStore::new(&source_root);
     let sibling_root = source_root.parent().unwrap_or(&source_root);
@@ -223,113 +181,9 @@ fn has_executing_merge_candidate(store: &WorkModelStore, work_item_id: &str) -> 
         .any(|candidate| candidate.merge_state.status == MergeCandidateMergeStatus::Executing)
 }
 
-pub fn run_is_cleaned(run: &Run) -> bool {
-    run.dir.join("cleaned.md").exists()
-}
-
 fn cleanup_source_root(search_root: &Path) -> Result<PathBuf> {
     let search_root = fs::canonicalize(search_root).unwrap_or_else(|_| search_root.to_path_buf());
-    let current_worktree = git_worktree_root(&search_root).unwrap_or_else(|| search_root.clone());
-    let registered = registered_worktrees(&search_root)?;
-
-    for candidate in registered {
-        if candidate == current_worktree {
-            continue;
-        }
-        if registry_points_to_worktree(&candidate, &current_worktree)? {
-            return Ok(candidate);
-        }
-    }
-
     Ok(search_root)
-}
-
-fn git_worktree_root(search_root: &Path) -> Option<PathBuf> {
-    let output = git::run_raw(search_root, &["rev-parse", "--show-toplevel"]).ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if path.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(path))
-    }
-}
-
-fn registry_points_to_worktree(registry_root: &Path, worktree_root: &Path) -> Result<bool> {
-    let runs_dir = registry_root.join(".factory/runs");
-    if !runs_dir.is_dir() {
-        return Ok(false);
-    }
-
-    let canonical_worktree = worktree_root.canonicalize().ok();
-    for entry in fs::read_dir(runs_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let recorded = match fs::read_to_string(path.join("worktree")) {
-            Ok(content) => content.trim().to_string(),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => return Err(err).context("Failed to read run worktree path"),
-        };
-        if recorded.is_empty() {
-            continue;
-        }
-        let recorded_path = PathBuf::from(recorded);
-        if recorded_path == worktree_root {
-            return Ok(true);
-        }
-        if let (Some(worktree), Ok(recorded)) = (&canonical_worktree, recorded_path.canonicalize())
-            && recorded == *worktree
-        {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
-}
-
-fn cleanup_candidates(search_root: &Path, run_id: Option<&str>) -> Result<Vec<Run>> {
-    if let Some(id) = run_id {
-        let run = run::resolve_run_by_id(search_root, id)?;
-        if run_is_cleaned(&run) {
-            return Ok(Vec::new());
-        }
-        ensure_cleanable(&run)?;
-        return Ok(vec![run]);
-    }
-
-    let mut candidates = Vec::new();
-    for run in run::list_runs(search_root)? {
-        if run_is_cleaned(&run) {
-            continue;
-        }
-        if is_cleanable_status(&run.status()?) {
-            candidates.push(run);
-        }
-    }
-    Ok(candidates)
-}
-
-fn ensure_cleanable(run: &Run) -> Result<()> {
-    let status = run.status()?;
-    if !is_cleanable_status(&status) {
-        bail!(
-            "Run {} has status '{}', expected complete or merged",
-            run.id,
-            status
-        );
-    }
-    Ok(())
-}
-
-fn is_cleanable_status(status: &RunStatus) -> bool {
-    matches!(status, RunStatus::Complete | RunStatus::Merged)
 }
 
 fn cleanup_work_item_candidates(work_items: Vec<WorkItem>) -> Vec<WorkItem> {
@@ -448,9 +302,6 @@ fn work_cleanup_plan(
         store.work_attempts_dir().join(&work_item.id),
         store.work_tasks_dir().join(&work_item.id),
         store.work_merge_candidates_dir().join(&work_item.id),
-        // Fargate runtime metadata (recorded task ARNs etc.). Safe to
-        // remove with the rest of the terminal Work Item state because
-        // the referenced ECS tasks are stopped by the time cleanup runs.
         work_root.join("runtime/attempts").join(&work_item.id),
         work_root.join("runtime/merges").join(&work_item.id),
     ];
@@ -585,7 +436,7 @@ fn git_branch_exists(source_root: &Path, branch_name: &str) -> Result<bool> {
     match output.status.code() {
         Some(0) => Ok(true),
         Some(1) => Ok(false),
-        _ => bail!(
+        _ => anyhow::bail!(
             "Failed to check Work branch {branch_name:?}:\n{}",
             String::from_utf8_lossy(&output.stderr)
         ),
@@ -715,33 +566,6 @@ fn prune_empty_artifact_parents(plan: &WorkItemCleanupResult) -> Result<()> {
     Ok(())
 }
 
-fn cleanup_worktree(
-    search_root: &Path,
-    run: &Run,
-    registered: &[PathBuf],
-    apply: bool,
-) -> Result<WorktreeCleanup> {
-    let Some(path) = recorded_worktree_path(run)? else {
-        return Ok(WorktreeCleanup::None);
-    };
-
-    if !path.exists() {
-        return Ok(WorktreeCleanup::Missing(path));
-    }
-
-    if !path_is_registered(&path, registered) {
-        return Ok(WorktreeCleanup::SkippedUnregistered(path));
-    }
-
-    if !apply {
-        return Ok(WorktreeCleanup::WouldRemove(path));
-    }
-
-    remove_registered_worktree(search_root, &path)?;
-
-    Ok(WorktreeCleanup::Removed(path))
-}
-
 fn remove_registered_worktree(search_root: &Path, path: &Path) -> Result<()> {
     let path_str = path.to_string_lossy();
     git::run(
@@ -749,21 +573,6 @@ fn remove_registered_worktree(search_root: &Path, path: &Path) -> Result<()> {
         &["worktree", "remove", "--force", &path_str],
         "remove registered worktree",
     )
-}
-
-fn recorded_worktree_path(run: &Run) -> Result<Option<PathBuf>> {
-    match fs::read_to_string(run.dir.join("worktree")) {
-        Ok(content) => {
-            let trimmed = content.trim();
-            if trimmed.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(PathBuf::from(trimmed)))
-            }
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err).context("Failed to read run worktree path"),
-    }
 }
 
 fn registered_worktrees(search_root: &Path) -> Result<Vec<PathBuf>> {
@@ -796,27 +605,6 @@ fn path_is_registered(path: &Path, registered: &[PathBuf]) -> bool {
     })
 }
 
-fn write_cleaned_marker(run: &Run, status: &RunStatus, worktree: &WorktreeCleanup) -> Result<()> {
-    let cleaned_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
-    let worktree_line = match worktree {
-        WorktreeCleanup::None => "Worktree: none recorded".to_string(),
-        WorktreeCleanup::WouldRemove(path) => format!("Worktree: would remove {}", path.display()),
-        WorktreeCleanup::Removed(path) => format!("Worktree: removed {}", path.display()),
-        WorktreeCleanup::SkippedUnregistered(path) => {
-            format!("Worktree: skipped unregistered {}", path.display())
-        }
-        WorktreeCleanup::Missing(path) => format!("Worktree: missing {}", path.display()),
-    };
-    let content = format!(
-        "# Cleaned\n\nRun: {}\nStatus: {}\nCleaned at: unix-{cleaned_at}\nReason: stale terminal run cleanup\n{worktree_line}\n",
-        run.id, status
-    );
-    fs::write(run.dir.join("cleaned.md"), content).context("Failed to write cleanup marker")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -825,97 +613,6 @@ mod tests {
         WorkspaceAccess,
     };
     use tempfile::TempDir;
-
-    fn create_run(root: &Path, id: &str, status: &str) -> PathBuf {
-        let run_dir = root.join(format!(".factory/runs/{id}"));
-        fs::create_dir_all(&run_dir).unwrap();
-        fs::write(run_dir.join("status"), status).unwrap();
-        run_dir
-    }
-
-    #[test]
-    fn dry_run_does_not_write_marker() {
-        let tmp = TempDir::new().unwrap();
-        create_run(tmp.path(), "done", "complete");
-
-        let results = cleanup_runs(
-            tmp.path(),
-            &CleanupOptions {
-                run_id: None,
-                apply: false,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(results.len(), 1);
-        assert!(!tmp.path().join(".factory/runs/done/cleaned.md").exists());
-    }
-
-    #[test]
-    fn apply_writes_marker_without_status_change() {
-        let tmp = TempDir::new().unwrap();
-        create_run(tmp.path(), "done", "merged");
-
-        cleanup_runs(
-            tmp.path(),
-            &CleanupOptions {
-                run_id: None,
-                apply: true,
-            },
-        )
-        .unwrap();
-
-        let run_dir = tmp.path().join(".factory/runs/done");
-        assert_eq!(
-            fs::read_to_string(run_dir.join("status")).unwrap(),
-            "merged"
-        );
-        let marker = fs::read_to_string(run_dir.join("cleaned.md")).unwrap();
-        assert!(marker.contains("Reason: stale terminal run cleanup"));
-    }
-
-    #[test]
-    fn cleanup_skips_active_statuses() {
-        let tmp = TempDir::new().unwrap();
-        create_run(tmp.path(), "planned-run", "planned");
-        create_run(tmp.path(), "needs-user-run", "needs-user");
-        create_run(tmp.path(), "failed-run", "failed");
-
-        let results = cleanup_runs(
-            tmp.path(),
-            &CleanupOptions {
-                run_id: None,
-                apply: false,
-            },
-        )
-        .unwrap();
-
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn unregistered_worktree_path_is_not_removed() {
-        let tmp = TempDir::new().unwrap();
-        let run_dir = create_run(tmp.path(), "done", "complete");
-        let path = tmp.path().join("not-a-worktree");
-        fs::create_dir_all(&path).unwrap();
-        fs::write(run_dir.join("worktree"), path.to_str().unwrap()).unwrap();
-
-        let results = cleanup_runs(
-            tmp.path(),
-            &CleanupOptions {
-                run_id: None,
-                apply: true,
-            },
-        )
-        .unwrap();
-
-        assert!(path.is_dir());
-        assert_eq!(
-            results[0].worktree,
-            WorktreeCleanup::SkippedUnregistered(path)
-        );
-    }
 
     #[test]
     fn abandoned_needs_user_work_item_is_cleanup_candidate() {
@@ -1080,7 +777,6 @@ mod tests {
         assert_eq!(parse_reviewer_worktree_name("review-999-x-a-tests"), None);
     }
 
-    /// Initialize a deterministic git repo for tests.
     fn init_test_repo(project: &Path) {
         fs::create_dir_all(project).unwrap();
         for args in [
@@ -1123,7 +819,6 @@ mod tests {
         let results = cleanup_stranded_reviewer_worktrees(
             &project,
             &CleanupOptions {
-                run_id: None,
                 apply: false,
             },
         )
@@ -1136,12 +831,6 @@ mod tests {
             .expect("architecture result");
         assert_eq!(arch.work_item_id, "work-1");
         assert_eq!(arch.attempt_id, "attempt-1");
-        assert!(
-            arch.path
-                .ends_with("review-6-work-1-attempt-1-architecture"),
-            "unexpected path: {:?}",
-            arch.path
-        );
         assert!(!arch.applied);
         let tests_result = results
             .iter()
@@ -1149,13 +838,6 @@ mod tests {
             .expect("tests result");
         assert_eq!(tests_result.work_item_id, "work-1");
         assert_eq!(tests_result.attempt_id, "attempt-1");
-        assert!(
-            tests_result
-                .path
-                .ends_with("review-6-work-1-attempt-1-tests"),
-            "unexpected path: {:?}",
-            tests_result.path
-        );
         assert!(!tests_result.applied);
     }
 
@@ -1205,7 +887,6 @@ mod tests {
         let results = cleanup_stranded_reviewer_worktrees(
             &project,
             &CleanupOptions {
-                run_id: None,
                 apply: true,
             },
         )
@@ -1240,7 +921,6 @@ mod tests {
         let results = cleanup_stranded_reviewer_worktrees(
             &project,
             &CleanupOptions {
-                run_id: None,
                 apply: true,
             },
         )
@@ -1261,8 +941,6 @@ mod tests {
         fs::create_dir_all(&project).unwrap();
         let store = WorkModelStore::new(&project);
 
-        // Build an abandoned Work Item with no Attempts so cleanup is
-        // immediately eligible.
         let item = WorkItem {
             id: "runtime-cleanup".to_string(),
             title: "Cleanup removes Fargate runtime ARN dirs".to_string(),
@@ -1276,8 +954,6 @@ mod tests {
         };
         store.create_work_item(&item).unwrap();
 
-        // Place a Fargate ARN file under the runtime tree, mirroring
-        // what launch_work_attempt records.
         let attempts_runtime =
             project.join(".factory/work/runtime/attempts/runtime-cleanup/attempt-1");
         fs::create_dir_all(&attempts_runtime).unwrap();
@@ -1289,7 +965,6 @@ mod tests {
         let results = cleanup_work_items(
             &project,
             &CleanupOptions {
-                run_id: None,
                 apply: true,
             },
         )

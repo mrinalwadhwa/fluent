@@ -21,8 +21,6 @@ from intent capture through execution and review across multiple sessions.
 ├─────────────────────────────────────────────────┤
 │  Factory command                                │
 │  factory work / status / dashboard / cleanup    │
-│  factory run / review / summary / watch         │
-│  factory resume / land / pull / shell           │
 │  factory fargate teardown / init / version      │
 │  factory keep-awake on / off / status           │
 │  Deterministic, operational                     │
@@ -45,31 +43,26 @@ Brief → Behaviors → Approach → Plan → Execute → Review → Land
 Interactive stages happen in the agent's session with the user present.
 The agent follows skills directly.
 
-Autonomous stages don't need the user. The Work model is the primary
-delegated execution path. Legacy run commands remain available for
-compatibility, Fargate, and recovery.
+Autonomous stages don't need the user. The Work model is the delegated
+execution path.
 
 ## Core work model
 
-Factory's primary execution lifecycle uses these durable nouns: Work
-Item, Attempt, Task, Workspace, and Merge Candidate. This model is
-documented and represented in Rust so scheduling, status, review, and
-merge paths use the same vocabulary.
+Factory's execution lifecycle uses these durable nouns: Work Item,
+Attempt, Task, Workspace, and Merge Candidate. This model is documented
+and represented in Rust so scheduling, status, review, and merge paths
+use the same vocabulary.
 
-The Work model now has an execution bridge for real delegated work.
 `factory work task run <work-item-id> <attempt-id> <task-id>` executes a
 stored write or review Task through the selected coder, `factory work
 attempt run <work-item-id> <attempt-id>` advances an Attempt through safe
 write and review transitions, and `factory work merge <work-item-id>
-<merge-candidate-id>` executes a stored Merge Candidate. Legacy
-`.factory/runs` commands remain supported as legacy compatibility for
-explicit fallback, Fargate-only execution, coordinated child-run
-decomposition, and recovery of existing run state.
+<merge-candidate-id>` executes a stored Merge Candidate.
 
 `factory work create <id> --title <title>` exposes the first Work Item
 intake surface. It writes Work Item metadata under
 `.factory/work/items/` and leaves Attempt, Task, and Merge Candidate
-collections empty. It does not schedule work or mutate legacy run state.
+collections empty. It does not schedule work.
 Callers may attach approved planning context directly to the Work Item with
 `--planning-context <text>`, `--planning-context-file <path>`, or
 separate `--brief-file`, `--behaviors-file`, `--approach-file`, and
@@ -77,9 +70,7 @@ separate `--brief-file`, `--behaviors-file`, `--approach-file`, and
 `WorkItem.planning_context` so `factory work show <id>` exposes the
 brief, behaviors, approach, and plan that write Tasks use. Planning
 skills treat this Work Item planning context as the normal handoff to
-delegated Work execution; legacy `.factory/runs/<run-id>/` planning
-files are fallback or recovery state for paths the Work model cannot yet
-carry. Callers may also pass explicit prompt text with `--instructions <text>` or
+delegated Work execution. Callers may also pass explicit prompt text with `--instructions <text>` or
 `--instructions-file <path>`; Factory stores that text as optional
 `WorkItem.instructions` and gives it precedence over derived planning
 context when it creates write Task instructions. `factory work attempt
@@ -115,8 +106,7 @@ review-only Attempt for full-codebase review of the current source
 checkout. Review-only Attempts contain review Tasks only, read the source
 checkout through workspace id `source` at path `.`, and write artifacts
 under `.factory/work/artifacts/<work-item-id>/<attempt-id>/<task-id>/`.
-This is the default Work-model path for review-only work; legacy review
-runs remain for compatibility and recovery. The review Task executor
+The review Task executor
 treats the source checkout as a guarded readable workspace: the reviewer
 sandbox gets the source checkout as a read-only root and the managed
 artifact area as its writable root. For no-sandbox or failed-reviewer
@@ -215,19 +205,14 @@ write Task. Uncertain verdicts without failures mark the Attempt
 `needs-user` and write the same Work handoff artifact.
 `factory work list` and `factory work show <id>` expose the same durable
 Work Item model for inspection. These commands use `.factory/work/items/`
-through the Rust storage model and validate stored objects. This keeps
-Work Items and Attempts visible while the legacy `.factory/runs`
-lifecycle remains available as a fallback for full session loops and
-legacy review-run recovery.
+through the Rust storage model and validate stored objects.
 `factory status` and `factory dashboard` use Work Items as the default
 operator surface. They read Work Items through `work_status.rs`, which
 reduces stored Work Items to operator-facing rows. That boundary chooses
 the latest Attempt, the active or waiting Task, the matching Merge
 Candidate, and a short action label. It returns valid rows and per-file
 read errors together so one bad Work Item file does not hide the rest of
-the queue. Legacy `.factory/runs` rows remain available through
-`factory status --runs` and the dashboard Runs view as an explicit
-compatibility path while the old session loop remains in place.
+the queue.
 Write Task prompt generation reads `Task.instructions` from durable Work
 state and includes non-empty instructions in the coder prompt. A Task
 receives those instructions from explicit Work Item instructions first,
@@ -279,10 +264,7 @@ merge-check status note; Factory does not ask them to inspect
 merge-check artifact paths from the reviewer sandbox. When Factory
 builds the Work merge reviewer system prompt, it uses the prompt's
 `[work-system]` section when one exists and falls back to the raw
-`[system]` section otherwise. Bundled reviewer prompts keep legacy
-`.factory/runs` artifact paths in `[system]` and put Work-native
-artifact guidance in `[work-system]`, so Work merge reviews do not
-depend on filtering legacy run guidance out of bundled prompt text.
+`[system]` section otherwise.
 Factory then points the reviewer at the absolute candidate
 workspace skill path when that skill exists; if the candidate does not
 contain that skill file, the prompt tells the reviewer to apply the
@@ -513,9 +495,7 @@ produce learning artifacts in task artifact areas; Factory can later
 ingest those artifacts into project-local expertise after review.
 Work-model behavior reviewers receive the Work Item behavior increment
 from `WorkItem.planning_context.behaviors` in the prompt when one exists,
-or an explicit statement that no behavior increment was provided. Legacy
-`.factory/runs/<run-id>/behaviors.diff.md` remains a legacy run input,
-not the Work-model behavior review contract.
+or an explicit statement that no behavior increment was provided.
 
 Project-local `.factory/observations/` and `.factory/expertise/*` are
 durable Factory memory that belongs in normal repository history.
@@ -530,19 +510,10 @@ or resolve observations concurrently. A one-shot `migrate` command
 converted the prior monolithic `observations.md` and
 `observations-resolved.md` into the per-file layout.
 
-Legacy runtime compatibility state remains under `.factory/runs` and
-related run artifacts. Keeping these concepts separate lets learning and
-planning land through the same reviewed workflow as code without
-treating transient session state as project knowledge.
-
-Durable work model state lives under `.factory/work/`. This tree is
-separate from `.factory/runs`, which still stores legacy run execution
-state, session artifacts, reviewer state, worktree handles, and status
-files. The Work bridge does not migrate run directories. Existing commands
-keep supporting `.factory/runs` without requiring `.factory/work/`; the
-coexistence is a compatibility bridge while agents start using Work Items,
-Attempts, Tasks, Workspaces, and Merge Candidates for new delegated build
-work.
+Durable work model state lives under `.factory/work/`. Keeping learning
+and planning separate from transient session state lets them land through
+the same reviewed workflow as code without treating session state as
+project knowledge.
 
 Managed candidate worktrees do not live under `.factory/work/`. Factory
 keeps Work Item JSON, review artifacts, merge artifacts, and operator
@@ -611,11 +582,11 @@ Helper functions `mark_task_started`, `set_task_terminal`,
 assignment so every transition site uses the same format. Existing
 JSON files that lack the fields deserialize with `None` values; keys
 with `None` values are omitted on write.
-When `WorkModelStore` reads stored Work state, it normalizes legacy
+When `WorkModelStore` reads stored Work state, it normalizes older
 artifact references that still use
 `.factory/work/artifacts/<attempt-id>/...` into the current
 `.factory/work/artifacts/<work-item-id>/<attempt-id>/...` form before it
-validates the assembled Work Item. If the legacy path exists on disk and
+validates the assembled Work Item. If the older path exists on disk and
 the namespaced path does not, the store moves that artifact directory or
 file into the Work Item namespace during the read.
 
@@ -654,52 +625,7 @@ failures must report the file path or object that failed. Code that
 writes Work state must use deterministic pretty JSON and must not write
 invalid model state.
 
-## Legacy run compatibility
-
-The legacy recursive run model remains for compatibility, Fargate-only
-execution, coordinated child-run decomposition, and recovery of existing
-`.factory/runs` state. New delegated build work should use Work Items,
-Attempts, Tasks, Workspaces, and Merge Candidates instead.
-
-```
-Brief
-  └── Run (top-level)
-        ├── Requirements
-        ├── Plan
-        └── Run  Run  Run    ← plan spawns child runs
-```
-
-Each run executes in its own git worktree, branched from whatever the user
-is working on. The worktree is a sibling of the source worktree:
-
-```
-project/
-  main/                      ← source worktree
-    .factory/
-      active-run             ← current run-id
-      runs/
-        run-20260507/
-          brief.md
-          behaviors.diff.md
-          approach.md
-          plan.md
-          status
-          source-branch      ← "main"
-          worktree           ← "../run-20260507"
-  run-20260507/              ← run worktree (created at launch)
-    .factory/
-      active-run
-      runs/run-20260507/     ← copied from source
-    src/                     ← agent works here
-```
-
-When done, merging a worktree run executes the project's
-`check-pre-merge` hook (if present) against the worktree, copies
-artifacts back from the worktree, removes the worktree, rebases the
-run branch onto the source branch, fast-forward merges, deletes the
-branch, and sets the status to `merged`. This policy applies to
-normal `factory merge` runs and to child runs that the parallel
-orchestrator lands after each group completes.
+## Pre-merge hooks
 
 Projects wire pre-merge verification through the hooks system. A
 single executable at `.factory/hooks/check-pre-merge` gates merging:
@@ -728,186 +654,6 @@ cargo fmt --all -- --check
 cargo fmt --all
 ```
 
-### Run state
-
-| File | Purpose |
-|---|---|
-| `brief.md` | User's intent |
-| `behaviors.diff.md` | New behaviors this run adds |
-| `approach.md` | Solution direction and expertise references |
-| `plan.md` | Execution steps |
-| `status` | `briefed`, `behaviors-defined`, `approach-designed`, `planned`, `executing`, `reviewing`, `rate-limited`, `needs-user`, `complete`, `failed`, `merged` |
-| `handoff.md` | Context for the next session |
-| `active-run` | Current run-id (in `.factory/`) |
-| `source-branch` | Branch the run forked from |
-| `worktree` | Path to the run's worktree |
-| `runtime` | `local` or `fargate` |
-| `coder` | `claude` or `codex` |
-| `handle` | Runtime-specific identifier |
-| `mode` | `review` or absent (defaults to full lifecycle) |
-| `reviewers` | Comma-separated reviewer filter (optional) |
-| `scope` | Review focus targeting (optional) |
-| `sessions.log` | Per-session metadata: `{timestamp} session=N exit=CODE duration=Xs status=STATUS` and review-phase entries: `{timestamp} review=N duration=Xs verdict=VERDICT` |
-| `report.md` | Generated run report |
-| `cleaned.md` | Cleanup context written after `factory cleanup --apply` preserves the run directory and status |
-| `reviews/` | Current review artifacts, transcripts (`transcript-{name}.jsonl`), and prior round archives (`round-N/`) |
-| `review-state.json` | Effective outcome of the latest review phase |
-| `children` | Child run IDs, one per line (written by the parallel orchestrator for parent runs) |
-| `parent` | Parent run ID (written for each child run) |
-
-### Source and live artifacts
-
-The source run directory under `.factory/runs/<id>` remains the registry
-for known runs and durable metadata such as `worktree`, `runtime`,
-`coder`, `source-branch`, merging records, and cleanup records. When the
-source run directory has a `worktree` file that points at an existing
-worktree containing `.factory/runs/<id>/`, Factory treats that worktree
-run directory as the live artifact directory for current session-loop
-state.
-
-Commands that read current run progress ask the run model for effective
-artifacts. Effective reads prefer the live worktree run directory for
-`status`, `sessions.log`, `sessions/`, `reviews/`, `review-state.json`,
-`handoff.md`, and `report.md`, then fall back to the source run
-directory when the live artifact does not exist or the worktree pointer
-is invalid. This shared rule covers status listings, watch
-notifications, summaries, implicit resume selection, headless resume,
-mergeable-run scans, and review checks before merging. Dashboard views
-use the effective status and review-state rules and fall back from live
-`report.md` to source `report.md`; transcript and current reviewer tabs
-list artifacts from the resolved live artifact directory.
-
-### Run-id resolution
-
-The factory command resolves the run-id through a priority chain:
-
-1. `--run-id` flag
-2. `FACTORY_RUN_ID` environment variable
-3. `.factory/active-run` pointer file
-4. Scan `.factory/runs/` for active status (fallback)
-
-### Run summary
-
-`factory summary` resolves the active run through the standard run-id
-resolution chain and prints a compact text snapshot from durable run
-artifacts. `factory summary --run-id <id>` summarizes that run directly.
-The summary uses the shared source-and-live artifact rule for current
-status, sessions, reviews, handoff, and report presence.
-
-The summary intentionally avoids transcript or report dumps. It includes
-the run phase, brief excerpt, author metadata from `coder`, reviewer
-activity, child run activity from `children`, latest `sessions.log`
-entries, the effective review state from `review-state.json`, the first
-actionable handoff line or open question, whether `report.md` exists,
-and a rule-based next action. When `review-state.json` is absent, the
-summary falls back to top-level `reviews/review-*.md` verdicts so old
-runs remain readable. This makes the command useful in a terminal and
-keeps the same data shape available for later dashboard or
-reporting-agent integration.
-
-### Session continuity
-
-The factory command checks for a parallel plan before entering the session
-loop. If `plan.md` exists and describes multiple groups or any parallel
-group with more than one step, execution takes the orchestrator path instead.
-
-**Serial path** (default — single run, session loop):
-
-```
-while run is not complete:
-    launch author with the selected coder in non-interactive JSON mode
-    pipe stdout to sessions/session-N/transcript.jsonl
-    author works until context exhaustion or completion
-    author writes handoff.md + status file
-    write session metadata to sessions.log
-    if status is complete:
-        if no committed, staged, unstaged tracked, or untracked changes exist
-           and no explicit review scope exists: set status to complete, stop
-        set status to reviewing
-        run review phase (all reviewers in parallel)
-        if all pass and worktree is clean outside .factory:
-            set status to complete, stop
-        else if all pass and worktree is dirty outside .factory:
-            write handoff.md, set status to executing, restart
-        else:
-            set status to executing, restart with findings
-    if terminal status (needs-user, failed): stop
-    if executing: restart
-    if rate-limited: wait 5 minutes, restart
-```
-
-**Parallel path** (orchestrator — parent run with child runs):
-
-```
-for each group in plan:
-    create child run for each step (run dir, worktree, brief)
-    if group is parallel: launch all children concurrently
-    else: run children one at a time
-    wait for all children to complete
-    if any child failed: set parent to failed, stop
-    run pre-merge checks and merge each child's branch into parent branch
-    set each child's status to merged
-record children list in parent run dir
-set parent status to complete
-```
-
-The parent run's session loop never executes — the orchestrator
-(`parallel::run_parallel_plan`) replaces it entirely. Each child run
-gets its own session loop in its own worktree.
-
-After the orchestrator completes, all children are already merged and
-merged. `factory merge` on the parent run verifies all children are
-merged and sets the parent status to `merged` — there is no worktree
-to remove or branch to rebase for the parent itself.
-
-The agent writes one word to `status` before exiting. The loop reads that
-word. That's the entire contract.
-
-### Session directories
-
-Each session produces a single artifact:
-
-```
-.factory/runs/[run-id]/sessions/
-  session-1/
-    transcript.jsonl     ← JSON event output (piped from agent stdout)
-  session-2/
-    ...
-```
-
-The transcript is the stream-json verbose output captured during the
-session. Global `~/.claude` state (history, memory, todos, plans) is not
-copied into session directories.
-
-### Review scope
-
-Reviewers examine either the run's changes or the full codebase:
-
-- `ReviewScope::Changes` — review only the diff produced by this run.
-  Used in the normal post-execution review phase.
-- `ReviewScope::Full` — review the entire codebase. Used by review-mode
-  runs.
-
-When a run-scoped review triggers but no code has changed and no
-explicit scope file was provided, the review phase is skipped entirely.
-Factory treats the run as changed when the run branch has committed
-differences from the source branch, or when `git status --porcelain`
-reports staged changes, unstaged tracked changes, or untracked
-non-ignored files outside `.factory` in the run worktree. This avoids
-wasting reviewer sessions on runs that only modified run state files
-while still reviewing dirty author output.
-
-An author-session run can only finish as `complete` with a clean
-worktree. If reviewers pass while staged, unstaged, or untracked
-non-ignored files remain, the session loop writes a handoff and moves
-the run back to `executing` so the next author session can commit,
-revert, or intentionally ignore the remaining work. Review-only runs do
-not launch an author to modify the worktree; passing review-only runs
-set status to `complete`, and non-passing review-only runs set status to
-`failed`. The merging path also rejects dirty completed worktrees before
-removing them, so uncommitted author output is not discarded during
-land.
-
 ## Version Metadata
 
 `factory version` prints a single line:
@@ -926,14 +672,12 @@ is unavailable at build time, Factory prints
 
 ### Coder selection
 
-Local runs support Claude Code and OpenAI Codex. Claude remains the
-default for compatibility. Select Codex with `--coder codex` or
-`FACTORY_CODER=codex`. The factory records the selected coder in the
-run's `coder` file.
+Factory supports Claude Code and OpenAI Codex. Claude is the default.
+Select Codex with `--coder codex` or `FACTORY_CODER=codex`.
 
 Claude sessions use `claude -p --append-system-prompt` with stream-json
 output. Sandboxed Claude sessions run inside the macOS Seatbelt profile
-that Factory renders for the run worktree plus the source repository's
+that Factory renders for the worktree plus the source repository's
 common git directory. The worktree root lets the agent edit project
 files; the common git directory lets linked worktrees update branch,
 index, and worktree metadata without granting write access to unrelated
@@ -943,8 +687,8 @@ Codex sessions use `codex --ask-for-approval never exec --json --cd <worktree>`
 and receive the factory system prompt prepended to the session prompt
 because the Codex CLI has no Claude-style append-system-prompt flag.
 `--ask-for-approval` is a top-level Codex option and must appear before
-`exec`. Sandboxed local Codex runs are wrapped by Factory's macOS
-Seatbelt profile with the same writable roots as Claude: the run
+`exec`. Sandboxed local Codex sessions are wrapped by Factory's macOS
+Seatbelt profile with the same writable roots as Claude: the
 worktree and source repository common git directory. Factory passes
 `--dangerously-bypass-approvals-and-sandbox` to Codex in this mode so
 Codex does not apply its own sandbox or pause for approvals inside the
@@ -1016,110 +760,24 @@ each finding according to the reviewer's domain expertise. When reviewers
 disagree, the one with relevant expertise for that finding takes priority.
 The author escalates to `needs-user` only when genuinely stuck.
 
-### Review phase
-
-The session loop evaluates review eligibility when the author sets
-status to `complete`. It skips run-scoped reviews only when the user did
-not request an explicit review scope and the run worktree has no
-committed, staged, unstaged, or untracked non-ignored changes. Otherwise
-reviewers run in parallel, each producing an artifact in
-`.factory/runs/[run-id]/reviews/`. The review lifecycle records the
-effective outcome in `.factory/runs/[run-id]/review-state.json` with the
-state, round, source, and per-reviewer verdicts. Consumers use that file
-as the review boundary when it exists; old runs without it fall back to
-top-level `reviews/review-*.md` verdicts.
-
-The review subsystem owns verdict parsing and acceptance rules:
-`review.rs` reads `review-state.json`, falls back to current
-`reviews/review-*.md` artifacts for old runs, and decides whether the
-effective review outcome is accepted. `run.rs` does not interpret review
-verdicts directly; it resolves source versus live worktree artifact
-locations and delegates review acceptance to `review.rs`. This keeps
-durable run status (`status`) separate from review outcome semantics.
-
-The loop parses each reviewer's verdict:
-
-- All pass: the run completes only if the worktree is clean; if
-  uncommitted changes remain outside `.factory`, the loop writes a
-  handoff, sets status back to `executing`, and restarts the author to
-  resolve them.
-- Any fail or uncertain: status resets to `executing`, the author
-  restarts with instructions to read and address the review findings.
-- Reviewer execution failure: missing prompts, launch errors, non-zero
-  exits, missing review artifacts, reviewer errors, and reviewer thread
-  panics count as non-passing review results. The review lifecycle
-  writes a current-round `reviews/review-[name].md` artifact with
-  `Verdict: fail` for each operational reviewer failure, then records
-  the effective non-passing outcome in `review-state.json`.
-
-If the run exceeds the review-round limit, the loop accepts the current
-review state with the same clean-worktree guard: clean work completes,
-while uncommitted work receives a handoff and returns to `executing`.
-Clean review-limit completion records `state:
-accepted-review-limit`, `source: review-limit`, `max_rounds`, and a
-short reason in `review-state.json`. Dirty review-limit completion does
-not write that acceptance state.
-
-When a new review round starts, the review lifecycle moves the previous
-round's top-level `review-*.md` and `transcript-*.jsonl` files into
-`reviews/round-N/`. The top-level `reviews/` directory therefore
-represents only the current review round; archived `round-N/` contents
-remain historical records and do not drive current dashboard reviewer
-tabs or verdicts.
-
-Use `factory work review-codebase <work-item-id> <attempt-id>` for new
-full-codebase review-only work. `factory review` remains a compatibility
-and recovery path for legacy `.factory/runs` review runs. It creates or
-reuses a review run, writes `status` as `planned`, `mode` as `review`,
-updates `.factory/active-run`, and writes optional `reviewers` and
-`brief.md` files from `--reviewers` and `--brief`. After preparing that
-state, it enters the normal local run loop for the selected coder and
-sandbox mode.
-
-Legacy review runs (`mode=review`) produce findings only. Reviewers run
-with full-codebase scope. Their findings are written to the reviews/
-directory. Passing review-only runs set status to `complete`;
-non-passing review-only runs set status to `failed`. No author session is
-launched.
-
-### Resume
-
-`factory resume` without a run ID finds a run with status `needs-user`
-or `failed`. `factory resume [RUN_ID]` selects the named run directly.
-After selecting a run, Factory chooses the resume path from stdin. With a
-terminal on stdin, it launches an interactive agent session with the
-selected coder so the user can provide input or unblock the run.
-
-Without a terminal on stdin, `factory resume` restarts the selected run
-through the local session loop instead of launching an interactive
-agent. When the run records a worktree, the loop uses that worktree and
-its copied run directory. Otherwise it falls back to the command's
-search root and the source run directory. The loop captures the
-transcript, continues session numbering from existing run state, and
-keeps the normal status, handoff, and review handling. Headless resume
-rejects parallel parent runs because their session loop never executes;
-their child runs own the resumable work.
-
 ## Runtimes
 
 ### Local
 
-The factory command runs the session loop on the local machine. Claude
-and Codex run inside a macOS Seatbelt sandbox rendered by Factory.
-Factory renders each sandbox from `common.sb` plus the selected coder's
-profile layer: `claude-code.sb` for Claude Code and `codex.sb` for
-Codex.
-Claude uses the Claude token refresh hook at session boundaries; Codex
-does not.
+The factory command runs Tasks on the local machine. Claude and Codex
+run inside a macOS Seatbelt sandbox rendered by Factory. Factory renders
+each sandbox from `common.sb` plus the selected coder's profile layer:
+`claude-code.sb` for Claude Code and `codex.sb` for Codex. Claude uses
+the Claude token refresh hook at session boundaries; Codex does not.
 
 ### Local (bare)
 
-`factory run --no-sandbox` runs the session loop without Seatbelt
-sandboxing, Codex sandboxing, or credential refresh. A git worktree is
-still created when the directory is a git repo. Used on platforms
-without local sandbox support or when the agent is already isolated by
-other means. Claude runs with `--dangerously-skip-permissions`; Codex
-runs with `--dangerously-bypass-approvals-and-sandbox`.
+`--no-sandbox` runs without Seatbelt sandboxing, Codex sandboxing, or
+credential refresh. A git worktree is still created when the directory
+is a git repo. Used on platforms without local sandbox support or when
+the agent is already isolated by other means. Claude runs with
+`--dangerously-skip-permissions`; Codex runs with
+`--dangerously-bypass-approvals-and-sandbox`.
 
 ### Fargate
 
@@ -1141,34 +799,28 @@ Local machine                    Fargate task
 3. start task ────────────►
                                  4. pull workspace from S3
                                  5. write runtime=fargate and task handle
-                                 6. /usr/local/bin/factory run
+                                 6. /usr/local/bin/factory
                                     --runtime local
                                     --no-sandbox --in-place
-                                    --preserve-run-metadata
                                     --coder $CODER
-                                 7. Rust session loop launches coder
+                                 7. Factory launches coder
                                  8. ...hours pass...
                                  9. upload workspace → S3
-factory status --runs ───► (local run artifacts)
-factory shell ───────────► (ECS Exec into container)
-factory pull ────────────► (download from S3 into worktree)
 ```
 
 #### IAM permissions (minimal)
 
 | Permission | Scope | Purpose |
 |---|---|---|
-| `s3:GetObject` | `runs/*`, `work/*`, `work-merge/*` | Pull input workspace |
-| `s3:PutObject` | `runs/*`, `work/*`, `work-merge/*` | Upload completed workspace |
+| `s3:GetObject` | `work/*`, `work-merge/*` | Pull input workspace |
+| `s3:PutObject` | `work/*`, `work-merge/*` | Upload completed workspace |
 | `s3:*` Deny | Outside the allowed prefixes | Explicit deny on everything else |
 | `ssmmessages:*` | `*` | Accept incoming ECS Exec sessions |
 
 Six actions total. No ECS, IAM, STS, or other AWS permissions. The
 container can be connected to (ECS Exec) but cannot connect out to other
 containers via SSM. `work/` covers Work Attempt artifacts and
-`work-merge/` covers Merge Candidate artifacts; the legacy `runs/`
-prefix remains for the existing legacy `factory run --runtime fargate`
-flow.
+`work-merge/` covers Merge Candidate artifacts.
 
 #### Infrastructure (CloudFormation)
 
@@ -1418,7 +1070,6 @@ factory/main/
     hooks/                   ← project hook scripts (tracked)
       check-pre-merge
       fix-pre-merge
-    runs/                    ← working state (not tracked)
     work/                    ← Work model durable state (not tracked)
   prompts/                   ← agent system prompts
     author.md
@@ -1620,18 +1271,7 @@ External coder processes (Claude, Codex) run git outside this wrapper.
 
 ### Cleanup
 
-`cleanup.rs` owns cleanup of terminal legacy run artifacts and terminal
-Work model state. Legacy cleanup selects `complete` and `merged` runs by
-default, rejects non-terminal targets, and preserves the source run
-directory. Applying legacy cleanup writes `cleaned.md` with the original
-status, cleanup time, and worktree outcome. If a run records a
-git-registered worktree, cleanup removes it through
-`git worktree remove --force`; if the path is missing or is not a
-registered worktree, cleanup records that outcome instead of deleting
-arbitrary directories.
-
-Work cleanup runs from the same `factory cleanup` command when no
-`--run-id` is supplied. It selects Work Items only after every Attempt,
+`cleanup.rs` owns cleanup of terminal Work model state. It selects Work Items only after every Attempt,
 Task, and Merge Candidate is terminal, or after an operator explicitly
 marks the Work Item abandoned with no executing or reviewing Attempts,
 no executing Tasks, no reviewing Merge Candidates, and no executing
@@ -1653,11 +1293,9 @@ orphan Work artifact roots, and `--apply` removes only those top-level
 artifact directories. File entries under `.factory/work/artifacts/` and
 artifact roots for stored Work Items are ignored by orphan cleanup.
 
-Cleanup resolves source Factory state even when invoked from a run
+Cleanup resolves source Factory state even when invoked from a
 worktree by finding the registered worktree that points back to the
-current checkout. That keeps cleanup state beside `.factory/runs/` in
-the source repository instead of scattering cleanup markers into run
-worktrees.
+current checkout.
 
 ### Model selection environment
 

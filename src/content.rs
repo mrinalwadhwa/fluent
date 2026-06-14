@@ -69,7 +69,6 @@ fn dirs_config_path() -> PathBuf {
 pub fn bundled_content(relative: &str) -> Option<String> {
     // Prompts
     match relative {
-        "prompts/author.md" => Some(include_str!("../prompts/author.md").to_string()),
         "prompts/work-author.md" => Some(include_str!("../prompts/work-author.md").to_string()),
         "prompts/work-rebase.md" => Some(include_str!("../prompts/work-rebase.md").to_string()),
         "prompts/review-architecture.md" => {
@@ -204,14 +203,13 @@ Review run {{RUN_ID}}.
     #[test]
     fn test_content_resolver_bundled_fallback() {
         let resolver = ContentResolver::new(None);
-        let content = resolver.resolve_content("prompts/author.md");
+        let content = resolver.resolve_content("prompts/work-author.md");
         assert!(content.is_some());
-        assert!(content.unwrap().contains("Status file contract"));
+        assert!(content.unwrap().contains("Factory Work model"));
     }
 
     #[test]
     fn test_bundled_content_prompts() {
-        assert!(bundled_content("prompts/author.md").is_some());
         assert!(bundled_content("prompts/work-author.md").is_some());
         assert!(bundled_content("prompts/work-rebase.md").is_some());
         assert!(bundled_content("prompts/review-architecture.md").is_some());
@@ -229,36 +227,6 @@ Review run {{RUN_ID}}.
         assert!(!content.contains("Status file contract"));
         assert!(!content.contains(".factory/runs/"));
         assert!(!content.contains("handoff.md"));
-    }
-
-    #[test]
-    fn bundled_review_prompts_keep_legacy_and_work_sections_separate() {
-        for reviewer in [
-            "architecture",
-            "behaviors",
-            "documentation",
-            "skills",
-            "tests",
-        ] {
-            let content = bundled_content(&format!("prompts/review-{reviewer}.md")).unwrap();
-            let legacy_system = prompt_section(&content, "system");
-            let work_system = prompt_section(&content, "work-system");
-
-            assert!(
-                legacy_system.contains(&format!(
-                    ".factory/runs/{{{{RUN_ID}}}}/reviews/review-{reviewer}.md"
-                )),
-                "legacy system prompt for {reviewer} should keep run review path"
-            );
-            assert!(
-                work_system.contains("Work review artifact path"),
-                "Work system prompt for {reviewer} should name Work artifact guidance"
-            );
-            assert!(
-                !work_system.contains(".factory/runs/"),
-                "Work system prompt for {reviewer} should not name legacy run paths"
-            );
-        }
     }
 
     #[test]

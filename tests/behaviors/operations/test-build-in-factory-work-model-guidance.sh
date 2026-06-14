@@ -19,17 +19,23 @@ require_in_file() {
   fi
 }
 
+require_absent_from_file() {
+  local file="$1"
+  local phrase="$2"
+  local label="$3"
+
+  if grep -Fq "$phrase" "$file"; then
+    echo "${label} still contains deleted legacy reference: ${phrase}" >&2
+    failures=$((failures + 1))
+  fi
+}
+
+# Work model guidance that should still be present
 require_in_file "$SKILL" \
   "The normal delegated build lifecycle is the Work model" \
   "build-in-the-factory skill"
 require_in_file "$SKILL" \
   "Work Item → Attempt → Task →" \
-  "build-in-the-factory skill"
-require_in_file "$SKILL" \
-  'Use legacy run artifacts only for explicit fallback' \
-  "build-in-the-factory skill"
-require_in_file "$SKILL" \
-  'Fargate-only execution, coordinated child-run decomposition, or recovery' \
   "build-in-the-factory skill"
 require_in_file "$SKILL" \
   'Create a Work Item with the approved planning files' \
@@ -56,42 +62,37 @@ require_in_file "$SKILL" \
   "Implement the approved Task in the assigned Workspace" \
   "build-in-the-factory skill"
 require_in_file "$SKILL" \
-  "new Work-model Tasks as automatically creating legacy child runs" \
-  "build-in-the-factory skill"
-require_in_file "$SKILL" \
   ".factory/work/items/<work-item-id>.json" \
   "build-in-the-factory skill"
 require_in_file "$ARCHITECTURE" \
   "Factory's primary execution lifecycle uses these durable nouns" \
   "architecture documentation"
-require_in_file "$ARCHITECTURE" \
+
+# Legacy references that should be absent
+require_absent_from_file "$SKILL" \
+  'Use legacy run artifacts only for explicit fallback' \
+  "build-in-the-factory skill"
+require_absent_from_file "$SKILL" \
+  'Fargate-only execution, coordinated child-run decomposition, or recovery' \
+  "build-in-the-factory skill"
+require_absent_from_file "$SKILL" \
+  "new Work-model Tasks as automatically creating legacy child runs" \
+  "build-in-the-factory skill"
+require_absent_from_file "$ARCHITECTURE" \
   'commands remain supported as legacy compatibility' \
   "architecture documentation"
-require_in_file "$ARCHITECTURE" \
+require_absent_from_file "$ARCHITECTURE" \
   '## Legacy run compatibility' \
   "architecture documentation"
-require_in_file "$ARCHITECTURE" \
-  'New delegated build work should use Work Items' \
-  "architecture documentation"
-require_in_file "$AGENT_INSTRUCTIONS" \
+require_absent_from_file "$AGENT_INSTRUCTIONS" \
   'Use legacy `factory run` only for' \
   "agent instructions"
-require_in_file "$AGENT_INSTRUCTIONS" \
+require_absent_from_file "$AGENT_INSTRUCTIONS" \
   'explicit fallback, Fargate-only execution, coordinated child-run' \
   "agent instructions"
-require_in_file "$AGENT_INSTRUCTIONS" \
+require_absent_from_file "$AGENT_INSTRUCTIONS" \
   'decomposition, or recovery of existing run state' \
   "agent instructions"
-
-if grep -Fq 'The current `.factory/runs` lifecycle remains the execution implementation' "$ARCHITECTURE"; then
-  echo "architecture still names legacy runs as the execution implementation" >&2
-  failures=$((failures + 1))
-fi
-
-if grep -Fq 'the factory command detects the structured plan.md and automatically creates child run directories' "$SKILL"; then
-  echo "build-in-the-factory still frames structured plans as the default child-run path" >&2
-  failures=$((failures + 1))
-fi
 
 if grep -Fq 'transitional fallback when the Work path cannot yet carry the work' "$AGENT_INSTRUCTIONS"; then
   echo "agent instructions still describe legacy run as a broad transitional fallback" >&2

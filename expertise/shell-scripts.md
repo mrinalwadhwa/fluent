@@ -163,9 +163,9 @@ code minimal.
 **Document functions** that aren't self-explanatory:
 
 ```sh
-# Resolve the run ID from flag, env var, active-run file, or scan.
-# Sets RUN_ID and RUN_DIR.
-resolve_run_id() {
+# Resolve the work item ID from flag or env var.
+# Sets WORK_ITEM_ID and WORK_DIR.
+resolve_work_item_id() {
 ```
 
 List what globals the function reads and sets if it's not obvious

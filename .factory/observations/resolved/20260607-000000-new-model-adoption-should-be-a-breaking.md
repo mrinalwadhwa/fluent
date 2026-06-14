@@ -128,3 +128,5 @@ Progress:
 The next adoption slices should keep using the Work path end to end, then
 delete legacy `.factory/runs` compatibility once the replacement path is
 stable enough to stop carrying the old model.
+
+→ Resolved: Step 9 (delete the old model after the new path works) resolved. Legacy run model code deleted across src/, tests/, documentation/, skills/, prompts/, CLAUDE.md. Step 10 (iterate from the new base) continues outside this Work Item.

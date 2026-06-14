@@ -31,8 +31,6 @@ Read:
   `factory work create` stores Work Item planning context
 - Work Item planning context from `factory work show <work-item-id>` only
   when the Work Item already exists
-- `.factory/runs/[run-id]/brief.md` only in a legacy fallback or
-  recovery path
 - `behaviors.diff.md` from the active planning context — what the system
   must do
 - `documentation/architecture.md` — how the system is built today
@@ -168,8 +166,7 @@ section.
 
 After user approval, keep the approved approach with the active planning
 context that will be passed to `factory work create --approach-file`
-after the plan is approved. Set legacy status to `approach-designed`
-only when operating in a legacy fallback or recovery path.
+after the plan is approved.
 
 ---
 

@@ -40,70 +40,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Autonomous session loop
-    Run {
-        /// Target a specific run
-        #[arg(long)]
-        run_id: Option<String>,
-
-        /// Execution runtime: local (default), fargate
-        #[arg(long, default_value = "local")]
-        runtime: String,
-
-        /// Disable sandbox
-        #[arg(long)]
-        no_sandbox: bool,
-
-        /// Run the session loop in the current workspace without creating a worktree
-        #[arg(long, hide = true)]
-        in_place: bool,
-
-        /// Preserve existing runtime and handle metadata while running in place
-        #[arg(long, hide = true)]
-        preserve_run_metadata: bool,
-
-        /// Coding agent to launch: claude or codex
-        #[arg(long)]
-        coder: Option<String>,
-
-        /// Extra args passed through to the agent
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        extra_args: Vec<String>,
-    },
-
-    /// Run reviewers against the current codebase
-    Review {
-        /// Target run ID to create or reuse
-        #[arg(long)]
-        run_id: Option<String>,
-
-        /// Reviewer filter, such as "tests" or "architecture,tests"
-        #[arg(long)]
-        reviewers: Option<String>,
-
-        /// Brief text for a newly created review run
-        #[arg(long)]
-        brief: Option<String>,
-
-        /// Disable sandbox
-        #[arg(long)]
-        no_sandbox: bool,
-
-        /// Coding agent to launch: claude or codex
-        #[arg(long)]
-        coder: Option<String>,
-
-        /// Extra args passed through to the agent
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        extra_args: Vec<String>,
-    },
-
     /// Show Work Item state for a project
     Status {
-        /// Include legacy Run status rows
-        #[arg(long)]
-        runs: bool,
-
         /// Path to check (default: current directory)
         path: Option<String>,
     },
@@ -114,82 +52,20 @@ pub enum Commands {
         command: WorkCommands,
     },
 
-    /// Summarize one run from durable artifacts
-    Summary {
-        /// Target a specific run ID
-        #[arg(long)]
-        run_id: Option<String>,
-    },
-
-    /// Clean stale run and Work Item artifacts and registered worktrees
+    /// Clean stale Work Item artifacts and registered worktrees
     Cleanup {
-        /// Target a specific run ID
-        #[arg(long)]
-        run_id: Option<String>,
-
         /// Apply cleanup changes instead of printing a dry run
         #[arg(long)]
         apply: bool,
     },
 
-    /// Poll status, notify on change
-    Watch {
-        /// Polling interval in seconds (default: 60)
-        #[arg(default_value = "60")]
-        interval: u64,
-
-        /// Exit after N seconds (0 = run forever)
-        #[arg(long, default_value = "0")]
-        timeout: u64,
-    },
-
-    /// Download completed workspace from S3 (fargate)
-    Pull {
-        /// Run ID to pull
-        run_id: Option<String>,
-    },
-
-    /// Interactive shell into running task (fargate)
-    Shell {
-        /// Run ID to connect to
-        run_id: Option<String>,
-    },
-
-    /// Restart a paused or failed run
-    Resume {
-        /// Run ID to resume
-        run_id: Option<String>,
-
-        /// Disable sandbox
-        #[arg(long)]
-        no_sandbox: bool,
-
-        /// Coding agent to launch: claude or codex
-        #[arg(long)]
-        coder: Option<String>,
-
-        /// Extra args passed through to the agent
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        extra_args: Vec<String>,
-    },
-
     /// Initialize .factory/ directory
     Init,
 
-    /// Live TUI showing run activity
+    /// Live TUI showing Work Item activity
     Dashboard {
-        /// Target a specific run ID
-        #[arg(long)]
-        run_id: Option<String>,
-
         /// Path to project (default: current directory)
         path: Option<String>,
-    },
-
-    /// Rebase, merge, capture artifacts, and clean up a completed run
-    Merge {
-        /// Run ID to merge (default: most recent complete run)
-        run_id: Option<String>,
     },
 
     /// Manage Fargate infrastructure

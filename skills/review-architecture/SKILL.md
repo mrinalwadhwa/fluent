@@ -146,11 +146,7 @@ describes. Report gaps:
 
 ### Phase 5 — Produce verdict and findings
 
-Write the review artifact to the exact path named in the prompt. For
-legacy run reviews, that path is usually
-`.factory/runs/[run-id]/reviews/review-architecture.md`.
-
-Do not create legacy run review artifacts during Work-model reviews.
+Write the review artifact to the exact path named in the prompt.
 
 Determine the verdict:
 - **pass** — no findings that warrant changes

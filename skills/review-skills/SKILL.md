@@ -139,11 +139,7 @@ For each skill in scope:
 
 ### Phase 7 — Produce verdict and findings
 
-Write the review artifact to the exact path named in the prompt. For
-legacy run reviews, that path is usually
-`.factory/runs/[run-id]/reviews/review-skills.md`.
-
-Do not create legacy run review artifacts during Work-model reviews.
+Write the review artifact to the exact path named in the prompt.
 
 Determine the verdict:
 - **pass** — no findings that warrant changes

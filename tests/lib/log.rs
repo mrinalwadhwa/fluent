@@ -5,7 +5,7 @@ use std::fs;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::Output;
-use std::time::Duration;
+
 
 pub struct LoggedCommand {
     inner: Command,
@@ -64,11 +64,6 @@ impl LoggedCommand {
 
     pub fn write_stdin<S: Into<Vec<u8>>>(&mut self, buffer: S) -> &mut Self {
         self.inner.write_stdin(buffer);
-        self
-    }
-
-    pub fn timeout(&mut self, timeout: Duration) -> &mut Self {
-        self.inner.timeout(timeout);
         self
     }
 

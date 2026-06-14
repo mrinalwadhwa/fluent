@@ -165,17 +165,14 @@ Test: tests/behaviors/operations/test-work-inspection.sh (work create persists i
 WHEN `factory work create` is invoked with approved planning context,
 THE SYSTEM SHALL persist the brief, behaviors, approach, and plan context
 in stored Work Item state and make that context visible through
-`factory work show <id>` without requiring a legacy run execution
-instructions file.
+`factory work show <id>`.
 Test: tests/binary.rs (work_create_persists_planning_context_and_attempt_copies_it_to_write_task)
 
 WHEN planning skills describe how to pass approved planning context to
 delegated Work execution,
 THE SYSTEM SHALL describe Work Item planning context through
 `factory work create --brief-file --behaviors-file --approach-file
---plan-file` as the default path and SHALL confine
-`.factory/runs/<run-id>/` planning files to legacy fallback or recovery
-language.
+--plan-file` as the path for storing approved planning context.
 Test: tests/behaviors/operations/test-planning-skills-work-context.sh
 
 WHEN `factory work list` is invoked,
@@ -256,9 +253,9 @@ Test: tests/binary.rs (work_list_reports_invalid_stored_work_item_id)
 Test: tests/binary.rs (work_list_reports_invalid_stored_model)
 Test: tests/behaviors/operations/test-work-inspection.sh (work list reports invalid stored state)
 
-WHEN existing `.factory/runs` state exists,
-THE SYSTEM SHALL keep legacy run commands working and keep Work Item
-intake and inspection independent from `.factory/runs`.
+WHEN Work Items are stored,
+THE SYSTEM SHALL keep Work Item intake and inspection independent from
+other Factory state.
 Test: tests/binary.rs (work_list_empty_state_succeeds_without_work_items)
 Test: tests/binary.rs (work_create_is_independent_from_legacy_runs)
 Test: tests/behaviors/operations/test-work-inspection.sh (legacy runs and work inspection are independent)
@@ -420,10 +417,9 @@ filesystem `review.md` path the reviewer must write, and the reviewer
 artifact directory; SHALL tell the reviewer that the candidate's
 existing build outputs are readable; SHALL tell the reviewer that the
 reviewer artifact directory has been pre-populated with the writer's
-build outputs for warm-start incremental builds; SHALL include Cargo
+build outputs for warm-start incremental builds; and SHALL include Cargo
 guidance to set `CARGO_TARGET_DIR` under the reviewer artifact
-directory; and SHALL NOT instruct the reviewer to write legacy
-`.factory/runs/<run-id>/reviews/...` artifacts.
+directory.
 Test: src/work_task_executor.rs (work_review_prompt_names_work_artifacts_and_writable_outputs)
 
 WHEN Factory plans to launch an Attempt-time review Task and the
@@ -854,9 +850,8 @@ WHEN `factory work merge <work-item-id> <merge-candidate-id>` launches a
 merge-time reviewer for a Work Merge Candidate,
 THE SYSTEM SHALL name the exact
 `.factory/work/artifacts/<work-item-id>/<attempt-id>/<candidate-id>/merge/reviews/<role>/review.md`
-artifact as the review output, provide the absolute filesystem path the
-reviewer must write, and SHALL NOT instruct the reviewer to write legacy
-`.factory/runs/<run-id>/reviews/...` artifacts.
+artifact as the review output and provide the absolute filesystem path the
+reviewer must write.
 Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge lands after update, checks, and reviewers)
 
 WHEN Factory runs a merge-time behavior reviewer for a Merge Candidate
@@ -1256,23 +1251,19 @@ Untestable: Negative code path; all production callers configure a transcript
 
 WHEN the user invokes the capture-brief skill,
 THE SYSTEM SHALL interview the user, research the codebase, and write
-a brief for a Work Item, using `.factory/runs/[run-id]/brief.md` only
-as legacy fallback or recovery state.
+a brief for a Work Item.
 Test: tests/behaviors/skills/code-reviewer.md (test-skill)
 Test: tests/behaviors/operations/test-planning-skills-work-context.sh
 
 WHEN the user invokes the build-in-the-factory skill for new delegated
 build work,
 THE SYSTEM SHALL teach Work Items, Attempts, Tasks, Workspaces, and Merge
-Candidates as the normal lifecycle, direct the user through Work Item
-creation, Attempt execution, Merge Candidate inspection, and
-`factory work merge`, and describe legacy `factory run` as compatibility,
-Fargate-only, recovery, or explicit fallback.
+Candidates as the lifecycle, direct the user through Work Item creation,
+Attempt execution, Merge Candidate inspection, and `factory work merge`.
 Test: tests/behaviors/operations/test-build-in-factory-work-model-guidance.sh
 
 WHEN the brief is confirmed by the user,
-THE SYSTEM SHALL keep the approved brief available for later planning and
-set legacy status to `briefed` only when using the legacy fallback.
+THE SYSTEM SHALL keep the approved brief available for later planning.
 Untestable: Requires interactive user confirmation in a conversation session
 
 ## Behavior definition
@@ -1284,8 +1275,7 @@ Test: tests/behaviors/skills/run-summary-behaviors.md (test-skill)
 
 WHEN behaviors are approved by the user,
 THE SYSTEM SHALL keep the behavior diff available for Work Item planning
-context and set legacy status to `behaviors-defined` only when using the
-legacy fallback.
+context.
 Test: tests/behaviors/skills/run-summary-behaviors.md (test-skill)
 
 ## Approach design
@@ -1298,8 +1288,7 @@ Untestable: Requires interactive LLM skill invocation with codebase research
 
 WHEN the approach is approved by the user,
 THE SYSTEM SHALL keep the approach available for Work Item planning
-context and set legacy status to `approach-designed` only when using the
-legacy fallback.
+context.
 Untestable: Requires interactive user approval in a conversation session
 
 ## Execution planning
@@ -1312,103 +1301,14 @@ Test: tests/behaviors/skills/format-check-plan.md (test-skill)
 Test: tests/behaviors/operations/test-planning-skills-work-context.sh
 
 WHEN the plan is approved by the user,
-THE SYSTEM SHALL create the Work Item with approved planning context and
-set legacy status to `planned` only when using the legacy fallback.
+THE SYSTEM SHALL create the Work Item with approved planning context.
 Test: tests/behaviors/operations/test-planning-skills-work-context.sh
 
 WHEN the plan-execution skill describes parallel execution,
-THE SYSTEM SHALL describe peer Work Items first, keep Attempt and Task
-sequencing as planning notes rather than executable dependencies, and
-label child-run decomposition as a legacy fallback.
+THE SYSTEM SHALL describe peer Work Items first and keep Attempt and Task
+sequencing as planning notes rather than executable dependencies.
 Test: tests/behaviors/skills/parallel-work-items-plan.md (test-skill)
 Test: tests/behaviors/operations/test-planning-skills-work-context.sh
-
-## Legacy run worktree isolation
-
-WHEN legacy `factory run` is invoked,
-THE SYSTEM SHALL create a git worktree branched from the current HEAD,
-copy the run's state into it, and execute within the worktree.
-Test: src/worktree.rs (setup_run_worktree tests), tests/binary.rs (worktree creates and copies state)
-
-WHEN legacy `factory run` is invoked from a non-main branch,
-THE SYSTEM SHALL branch the worktree from that branch and record it as
-the source-branch.
-Test: tests/test-run (setup_run_worktree from non-main branch)
-
-## Legacy session loop (local)
-
-WHEN legacy `factory run` is invoked with the local runtime,
-THE SYSTEM SHALL launch the selected coder in non-interactive mode with
-the brief or handoff as the initial prompt.
-Test: src/session.rs (test_loop_initial_prompt_uses_brief, test_loop_initial_prompt_uses_handoff), tests/binary.rs (run_uses_handoff_prompt_when_handoff_exists)
-
-WHEN legacy `factory run --coder codex` is invoked with the local runtime,
-THE SYSTEM SHALL launch Codex with `codex exec --json`, prepend the
-factory system prompt to the run prompt, and capture Codex JSON output
-as the session transcript.
-Test: tests/binary.rs (run_with_codex_uses_exec_json_and_status_contract)
-
-WHEN legacy `factory run` is invoked with an unknown coder,
-THE SYSTEM SHALL fail before resolving or launching a run.
-Test: tests/binary.rs (run_unknown_coder_fails)
-
-WHEN the agent exits with status `executing`,
-THE SYSTEM SHALL restart the agent.
-Test: src/session.rs (test_loop_restarts_on_executing), tests/binary.rs (run_session_loop_restarts_on_executing)
-
-WHEN the agent exits with status `needs-user`, `complete`, or `failed`,
-THE SYSTEM SHALL stop the loop.
-Test: src/session.rs (test_loop_stops_on_needs_user, test_loop_stops_on_failed), tests/binary.rs (run_session_loop_stops_on_complete, run_session_loop_stops_on_needs_user)
-
-WHEN the agent exits with status `rate-limited`,
-THE SYSTEM SHALL wait 5 minutes plus per-run jitter and restart the
-agent.
-Test: src/session.rs (test_loop_restarts_on_rate_limited)
-
-IF the agent exits with a non-zero exit code 3 consecutive times,
-THEN THE SYSTEM SHALL set status to `failed` and stop the loop.
-Test: src/session.rs (test_loop_consecutive_failures_set_failed, test_loop_success_resets_failure_counter), tests/binary.rs (run_session_loop_consecutive_failures)
-
-IF the session count exceeds 50,
-THEN THE SYSTEM SHALL set status to `failed` and stop the loop.
-Test: src/session.rs (test_loop_max_sessions_sets_failed)
-
-## Legacy session observability
-
-WHEN a session completes within the session loop,
-THE SYSTEM SHALL write a line to `sessions.log` containing the session
-number, exit code, duration, and status.
-Test: src/session.rs (test_loop_writes_sessions_log, test_loop_writes_nonzero_exit_to_sessions_log), tests/binary.rs (run_writes_sessions_log), tests/behaviors/operations/test-observability.sh
-
-WHEN the session loop launches an agent session,
-THE SYSTEM SHALL request machine-readable JSON events from the selected
-coder and pipe stdout to `sessions/session-N/transcript.jsonl`.
-Test: src/session.rs (test_loop_creates_session_transcript_dir), tests/binary.rs (run_captures_stream_json_transcript), tests/behaviors/operations/test-observability.sh
-
-## Legacy review archiving
-
-WHEN a review round fails and a new round starts,
-THE SYSTEM SHALL archive previous review artifacts to `reviews/round-N/`
-before running new reviews. Review files and transcript files are moved,
-leaving top-level `reviews/` artifacts for the current round only.
-Test: src/review.rs (test_archive_previous_round_moves_reviews, test_archive_previous_round_noop_for_first_round), tests/binary.rs (run_archives_review_rounds), tests/behaviors/operations/test-observability.sh
-
-WHEN a reviewer runs,
-THE SYSTEM SHALL capture its stream-json output to
-`reviews/transcript-{name}.jsonl`.
-Test: tests/binary.rs (run_archives_review_rounds), tests/behaviors/operations/test-observability.sh
-
-## Legacy session loop (local) — credential refresh
-
-WHEN a new Claude session starts on the sandboxed local runtime,
-THE SYSTEM SHALL run an unsandboxed Claude invocation to refresh the
-OAuth token, then re-read the token from Keychain into the process
-environment.
-Test: src/session.rs (test_loop_calls_pre_session_before_each_session, test_loop_stops_when_pre_session_returns_error), tests/behaviors/operations/test-claude-runtime-hooks.sh (sandboxed claude runs refresh hook)
-
-WHEN a new Codex session starts on the sandboxed local runtime,
-THE SYSTEM SHALL NOT run the Claude credential refresh hook.
-Test: tests/behaviors/operations/test-codex-runtime.sh (codex does not run claude refresh hook, parallel codex does not run claude refresh hook)
 
 ## Fargate teardown
 
@@ -1460,37 +1360,6 @@ Test: tests/binary.rs (fargate_teardown_deletes_stack_ecr_s3_and_removes_state)
 Test: src/fargate_bootstrap.rs (teardown_outcome_display_all_removed)
 Test: src/fargate_bootstrap.rs (teardown_outcome_display_partial_keep_ecr)
 Test: src/fargate_bootstrap.rs (teardown_outcome_display_partial_keep_s3)
-
-## Legacy Fargate execution
-
-WHEN legacy `factory run --runtime fargate` is invoked,
-THE SYSTEM SHALL upload the worktree to S3, start an ECS Fargate task,
-record `runtime=fargate`, and record the ECS task handle in the source
-run directory.
-Test: tests/binary.rs (run_fargate_launch_uploads_workspace_and_records_task_handle), tests/behaviors/operations/test-fargate-launch.sh
-
-WHEN legacy `factory run --runtime fargate --coder codex` is invoked
-and the host `~/.codex/auth.json` is missing,
-THE SYSTEM SHALL fail with a clear error before launching the ECS task.
-Test: tests/binary.rs (run_fargate_with_codex_fails_when_host_auth_missing)
-Test: tests/behaviors/operations/test-codex-runtime.sh (fargate codex fails when host auth missing)
-
-WHEN legacy `factory run --runtime fargate --coder codex` is invoked
-and the host `~/.codex/auth.json` has `auth_mode != "chatgpt"`,
-THE SYSTEM SHALL refuse to launch with a clear error stating that
-Fargate Codex requires ChatGPT subscription auth.
-Test: tests/binary.rs (run_fargate_with_codex_fails_when_host_auth_mode_is_apikey)
-Test: tests/behaviors/operations/test-codex-runtime.sh (fargate codex fails when host auth mode is apikey)
-
-WHEN the Fargate task starts,
-THE SYSTEM SHALL pull the workspace from S3 and run the Rust session loop
-in the downloaded workspace while preserving `runtime=fargate` and the
-ECS task handle in the run directory.
-Test: tests/binary.rs (run_in_place_can_preserve_run_metadata), tests/behaviors/operations/test-fargate-entrypoint.sh
-
-WHEN the Fargate task reaches a terminal status,
-THE SYSTEM SHALL upload the workspace to S3.
-Test: tests/behaviors/operations/test-fargate-entrypoint.sh
 
 ## Fargate Codex support
 
@@ -1574,29 +1443,6 @@ Test: tests/behaviors/operations/test-fargate-entrypoint-codex.sh (codex missing
 
 ## Status reporting
 
-WHEN Factory reads current run status for a run whose `worktree` file
-points at an existing worktree containing `.factory/runs/[run-id]/`,
-THE SYSTEM SHALL read status from that live worktree run directory before
-falling back to the source run directory.
-Test: tests/behaviors/operations/test-live-run-state.sh (current run status prefers live worktree), tests/binary.rs (status_prefers_live_worktree_status)
-
-IF a run's `worktree` file is missing, empty, invalid, or points at a
-worktree without `.factory/runs/[run-id]/`,
-THEN THE SYSTEM SHALL continue to read current run artifacts from the
-source run directory.
-Test: tests/behaviors/operations/test-live-run-state.sh (invalid worktree falls back to source)
-
-WHEN `factory status` is invoked,
-THE SYSTEM SHALL display Work Item status by default and SHALL NOT
-display legacy Run rows by default.
-Test: tests/binary.rs (status_hides_runs_by_default), tests/behaviors/operations/test-work-status-dashboard.sh (status hides runs by default and prints Work summary)
-
-WHEN `factory status --runs` is invoked,
-THE SYSTEM SHALL display legacy Runs with their status, runtime, and
-brief summary using the existing run summary format, and SHALL still
-display Work Item status when Work Items or Work Item read errors exist.
-Test: tests/binary.rs (status_runs_shows_runs_with_correct_fields, status_runs_shows_runs_and_work_items_together, status_prefers_live_worktree_status), tests/behaviors/operations/test-live-run-state.sh (status lists live status)
-
 WHEN `factory status` is invoked and stored Work Items exist,
 THE SYSTEM SHALL display a Work Items section with each Work Item's
 latest Attempt, selected Task, review state, Merge Candidate, merge
@@ -1609,10 +1455,8 @@ Work that still needs human planning input.
 Test: src/work_status.rs (summarize_abandoned_work_item_shows_terminal_action)
 Test: tests/behaviors/operations/test-work-status-dashboard.sh (status surfaces abandoned Work as terminal)
 
-WHEN `factory status` is invoked for a project with Work Items and no
-legacy runs,
-THE SYSTEM SHALL display the Work Items section instead of reporting
-that no runs were found.
+WHEN `factory status` is invoked for a project with Work Items,
+THE SYSTEM SHALL display the Work Items section.
 Test: tests/binary.rs (status_shows_work_items_without_runs)
 
 WHEN `factory status` is invoked for a project with no Work Items and no
@@ -1622,110 +1466,10 @@ Test: tests/binary.rs (status_no_factory_dir, status_hides_runs_by_default)
 
 WHEN `factory status` reads one or more invalid Work Item files,
 THE SYSTEM SHALL report the invalid Work model path in a Work Item read
-errors section while still displaying valid Work Items, and SHALL display
-valid legacy Runs only when `--runs` is supplied.
+errors section while still displaying valid Work Items.
 Test: tests/binary.rs (status_reports_invalid_work_item_by_default_and_with_runs), tests/behaviors/operations/test-work-status-dashboard.sh (status reports invalid Work without hiding valid state)
 
-WHEN `factory status` is invoked after cleanup,
-THE SYSTEM SHALL hide cleaned legacy Runs unless `--runs` is supplied;
-when `--runs` is supplied, THE SYSTEM SHALL list cleaned runs with their
-existing run status and without a cleanup-specific status.
-Test: tests/behaviors/operations/test-cleanup.sh (status lists cleaned runs with original status)
-
-WHEN `factory status --runs` is invoked and a Fargate run exists,
-THE SYSTEM SHALL display the locally recorded run status, runtime, and
-brief summary without querying AWS.
-Test: tests/behaviors/operations/test-status-edges.sh (status fargate uses local state without AWS)
-
-## Legacy run summary
-
-WHEN legacy `factory summary` is invoked,
-THE SYSTEM SHALL summarize the active run using existing run artifacts
-and print the summary to stdout.
-Test: tests/binary.rs (summary_resolves_active_run)
-
-WHEN legacy `factory summary --run-id <id>` is invoked,
-THE SYSTEM SHALL summarize that run instead of resolving the active run.
-Test: tests/binary.rs (summary_uses_explicit_run_id)
-
-WHEN legacy `factory summary --run-id <id>` is invoked for a run with a
-live worktree run directory,
-THE SYSTEM SHALL prefer live status, sessions, review verdicts, handoff,
-and report presence before falling back to source artifacts.
-Test: tests/binary.rs (summary_prefers_live_worktree_artifacts), tests/behaviors/operations/test-live-run-state.sh (summary reads live artifacts)
-
-WHEN a run summary is printed,
-THE SYSTEM SHALL include the run's current phase derived from existing
-status artifacts.
-Test: tests/binary.rs (summary_resolves_active_run)
-
-WHEN a run summary is printed,
-THE SYSTEM SHALL include author activity from durable run artifacts.
-Test: tests/binary.rs (summary_includes_sessions_reviews_handoff_and_report)
-
-WHEN the summarized run has reviewer activity,
-THE SYSTEM SHALL include reviewer activity from durable run artifacts.
-Test: tests/binary.rs (summary_includes_sessions_reviews_handoff_and_report)
-
-WHEN the summarized run has child runs,
-THE SYSTEM SHALL include child run activity from durable run artifacts.
-Test: tests/binary.rs (summary_includes_child_activity)
-
-WHEN the summarized run has session history,
-THE SYSTEM SHALL include the latest entries from `sessions.log`.
-Test: tests/binary.rs (summary_includes_sessions_reviews_handoff_and_report)
-
-WHEN the summarized run has review artifacts,
-THE SYSTEM SHALL include reviewer verdicts grouped by reviewer name.
-Test: tests/binary.rs (summary_includes_sessions_reviews_handoff_and_report)
-
-WHEN the summarized run has `handoff.md`,
-THE SYSTEM SHALL include the first actionable handoff or question
-context.
-Test: tests/binary.rs (summary_includes_sessions_reviews_handoff_and_report), tests/binary.rs (summary_prefers_explicit_handoff_question)
-
-WHEN a run summary is printed,
-THE SYSTEM SHALL include a status-derived next action.
-Test: tests/binary.rs (summary_uses_explicit_run_id), tests/binary.rs (summary_prefers_explicit_handoff_question)
-
-WHEN the summarized run has `report.md`,
-THE SYSTEM SHALL show that a report is available without printing the
-entire report.
-Test: tests/binary.rs (summary_includes_sessions_reviews_handoff_and_report)
-
-WHEN no run can be resolved for legacy `factory summary`,
-THE SYSTEM SHALL fail with a clear error instead of printing an empty
-summary.
-Test: tests/binary.rs (summary_fails_without_resolved_run)
-
 ## Cleanup
-
-WHEN `factory cleanup` is invoked,
-THE SYSTEM SHALL scan the source `.factory/runs` registry and select
-stale complete and merged runs by default.
-Test: tests/binary.rs (cleanup_dry_run_reports_without_changes)
-
-WHEN `factory cleanup --apply` cleans a run,
-THE SYSTEM SHALL preserve the run directory and status while writing
-cleanup context to `cleaned.md`.
-Test: src/cleanup.rs (apply_writes_marker_without_status_change), tests/binary.rs (cleanup_apply_writes_marker_without_changing_status)
-
-WHEN `factory cleanup --run-id <id>` targets an active, needs-user, or
-failed run,
-THE SYSTEM SHALL fail without writing cleanup artifacts.
-Test: tests/binary.rs (cleanup_refuses_active_run, cleanup_refuses_failed_run)
-
-WHEN cleanup sees a registered git worktree for a selected run,
-THE SYSTEM SHALL remove that worktree through git worktree operations.
-Test: tests/binary.rs (cleanup_apply_removes_registered_worktree)
-
-WHEN cleanup runs without `--apply`,
-THE SYSTEM SHALL report registered worktree removal without removing it.
-Test: tests/binary.rs (cleanup_dry_run_keeps_registered_worktree)
-
-WHEN cleanup sees a recorded worktree path that git does not register,
-THE SYSTEM SHALL leave the path in place and report that it was skipped.
-Test: src/cleanup.rs (unregistered_worktree_path_is_not_removed), tests/binary.rs (cleanup_skips_unregistered_worktree_path)
 
 WHEN `factory cleanup` sees terminal Work Items,
 THE SYSTEM SHALL report Work Item state, artifacts, managed candidate
@@ -1750,11 +1494,11 @@ Test: tests/behaviors/operations/test-cleanup.sh (cleanup selects abandoned need
 Test: tests/behaviors/operations/test-cleanup.sh (cleanup skips abandoned Work with reviewing Attempt)
 Test: tests/behaviors/operations/test-cleanup.sh (cleanup skips abandoned Work with active Merge Candidate)
 
-WHEN Factory reads stored Work state with legacy artifact references
+WHEN Factory reads stored Work state with older artifact references
 under `.factory/work/artifacts/<attempt-id>/...`,
 THE SYSTEM SHALL expose those references under
 `.factory/work/artifacts/<work-item-id>/<attempt-id>/...` and move
-existing legacy artifacts into that namespace when no namespaced artifact
+existing older artifacts into that namespace when no namespaced artifact
 already exists.
 Test: src/work_model.rs (store_migrates_legacy_work_artifact_paths_on_read)
 
@@ -1792,334 +1536,6 @@ that are files or directories with matching stored Work Items,
 THE SYSTEM SHALL ignore them for orphan Work artifact cleanup.
 Test: tests/binary.rs (cleanup_work_items_reports_and_removes_orphan_artifact_roots), tests/behaviors/operations/test-cleanup.sh (cleanup removes orphan Work artifact roots)
 
-WHEN the dashboard legacy Runs view selects a run,
-THE SYSTEM SHALL prefer actionable runs over cleaned runs.
-Test: src/dashboard.rs (test_app_new_prefers_actionable_run_over_cleaned_terminal_run)
-
-## Workspace retrieval
-
-WHEN `factory pull` is invoked,
-THE SYSTEM SHALL download the completed workspace from S3 into the run's
-worktree directory.
-Test: tests/binary.rs (pull_downloads_workspace_to_recorded_worktree,
-pull_downloads_workspace_to_fallback_target)
-
-## Interactive access
-
-WHEN `factory shell` is invoked,
-THE SYSTEM SHALL open an interactive shell into the running Fargate
-container via ECS Exec.
-Test: tests/binary.rs (shell_opens_ecs_exec_for_recorded_task)
-
-## Watch and notification
-
-WHEN `factory watch` is invoked,
-THE SYSTEM SHALL poll run status at the specified interval.
-Test: tests/behaviors/operations/test-watch-and-status-edges.sh
-
-WHEN a run's status changes to `complete`, `needs-user`, or `failed`,
-THE SYSTEM SHALL fire a macOS notification containing the run ID, status,
-and brief summary.
-Test: tests/behaviors/operations/test-notification-content.sh
-
-WHEN the status is `complete`,
-THE NOTIFICATION SHALL include the session count and review verdict.
-Test: tests/behaviors/operations/test-notification-content.sh
-
-WHEN the status is `needs-user`,
-THE NOTIFICATION SHALL include the first open question from handoff.md.
-Test: tests/behaviors/operations/test-notification-content.sh
-
-## Run-id resolution
-
-WHEN a factory command needs the run-id,
-THE SYSTEM SHALL check in order: `--run-id` flag, `FACTORY_RUN_ID` env
-var, `.factory/active-run` file, then scan for active runs. The scan
-considers a run active if its status is `planned`, `executing`, or `reviewing`.
-Test: src/run.rs (resolve run-id tests), tests/binary.rs (run-id resolution tests)
-
-## Review phase
-
-WHEN the author sets status to `complete`,
-THE SYSTEM SHALL set status to `reviewing`, run all reviewers in parallel,
-and restore status to `complete` if all pass or `executing` if any fail,
-unless the run qualifies for the no-change skip or still has dirty
-worktree content after passing review.
-Test: src/session.rs (review phase tests), tests/binary.rs (run_archives_review_rounds, run_reviews_when_complete_worktree_is_dirty)
-
-WHEN all reviewers return verdict `pass`,
-THE SYSTEM SHALL accept the run as complete and stop the loop when the
-run worktree has no tracked changes, staged changes, or untracked
-non-ignored files outside `.factory`.
-Test: src/review.rs (verdict tests), src/session.rs (review phase tests)
-
-WHEN any reviewer returns verdict `fail` or `uncertain`,
-THE SYSTEM SHALL set status back to `executing` and restart the author
-with the review findings.
-Test: src/review.rs (test_extract_verdict_fail, test_extract_verdict_uncertain), tests/binary.rs (run_archives_review_rounds)
-
-WHEN a review phase completes,
-THE SYSTEM SHALL write `review-state.json` with the effective state,
-round, source, and per-reviewer verdicts for that phase.
-Test: src/review.rs (review-state tests), src/session.rs (review-only mode tests)
-
-WHEN a reviewer prompt is missing, fails to launch, exits non-zero,
-returns an error, panics, or fails to write its review artifact,
-THE SYSTEM SHALL treat the reviewer result as non-passing and make the
-review phase fail with a `reviews/review-[name].md` artifact that
-records `Verdict: fail`.
-Test: src/review.rs (reviewer execution failure tests)
-
-## Legacy review runs
-
-Full-codebase review-only work defaults to `factory work review-codebase`
-and `factory work attempt run`. Legacy review runs remain available for
-compatibility and recovery of existing `.factory/runs` state.
-
-WHEN legacy `factory run` is invoked and the run's mode is `review`,
-THE SYSTEM SHALL set status to `reviewing`, run reviewers with
-full-codebase scope, and produce findings. No author session is launched.
-Test: src/session.rs (review-only mode tests)
-
-WHEN legacy `factory run` is invoked and the run has a `scope` file,
-THE SYSTEM SHALL copy the scope file into the worktree.
-Test: src/worktree.rs (test_worktree_copies_scope_file)
-
-WHEN a review run completes its single review round and all reviewers
-pass,
-THE SYSTEM SHALL set status to `complete` and stop without launching
-the author.
-Test: src/session.rs (review-only mode tests)
-
-WHEN a review run completes its single review round and any reviewer
-does not pass,
-THE SYSTEM SHALL set status to `failed` and stop without launching the
-author.
-Test: src/session.rs (review-only mode tests)
-
-## Watch timeout
-
-WHEN `factory watch --timeout N` is invoked,
-THE SYSTEM SHALL stop polling after N seconds.
-Test: tests/behaviors/operations/test-watch-timeout.sh (watch exits on timeout), tests/binary.rs (watch_exits_on_timeout)
-
-## Skip reviews when no changes
-
-WHEN the review phase triggers but the run has no committed changes, no
-tracked worktree changes, no staged changes, no untracked non-ignored
-files, and no explicit scope file was provided,
-THE SYSTEM SHALL skip the review phase entirely and accept the run as
-complete.
-Test: tests/binary.rs (run_skips_reviews_when_no_code_changed)
-
-WHEN the author sets status to `complete` and the run worktree has
-tracked changes, staged changes, or untracked non-ignored files,
-THE SYSTEM SHALL treat the run as changed and enter the review phase.
-Test: src/session.rs (has_changes tests)
-
-WHEN reviewers pass for a completed run but the run worktree still has
-tracked changes, staged changes, or untracked non-ignored files outside
-`.factory`,
-THE SYSTEM SHALL write a handoff, set status to `executing`, and require
-the author to make the worktree clean before final completion.
-Test: tests/binary.rs (run_reviews_when_complete_worktree_is_dirty)
-
-## Review round limit
-
-IF the review-fix cycle has run 10 times,
-THEN THE SYSTEM SHALL accept the current state, generate a report, and
-complete the run when the worktree has no tracked changes, staged
-changes, or untracked non-ignored files outside `.factory`.
-Test: src/session.rs (complete_or_continue_dirty_completes_review_limit_clean_run, test_loop_review_limit_clean_worktree_records_acceptance)
-
-IF the review-fix cycle has run 10 times and the worktree is clean,
-THEN THE SYSTEM SHALL write `review-state.json` with state
-`accepted-review-limit`, source `review-limit`, per-reviewer verdicts,
-`max_rounds`, and a short reason.
-Test: src/session.rs (test_loop_review_limit_clean_worktree_records_acceptance)
-
-IF the review-fix cycle has run 10 times and the worktree is dirty,
-THEN THE SYSTEM SHALL NOT write `accepted-review-limit`.
-Test: src/session.rs (test_loop_review_limit_dirty_worktree_restarts_author)
-
-## Effective review state
-
-WHEN `factory merge` validates a complete run with `review-state.json`,
-THE SYSTEM SHALL use that file as the effective review state before
-consulting current review artifacts.
-Test: src/run.rs (review-state tests), tests/binary.rs (run_merge_accepts_review_limit_state_with_stale_fail_artifact)
-
-WHEN `factory merge` validates a complete run with review state `passed`
-or `accepted-review-limit`,
-THE SYSTEM SHALL treat the review state as accepted.
-Test: src/run.rs (test_reviews_passed_prefers_review_state), tests/binary.rs (run_merge_accepts_review_limit_state_with_stale_fail_artifact)
-
-WHEN `factory merge` validates a complete run with review state `failed`,
-`uncertain`, or malformed JSON,
-THE SYSTEM SHALL refuse to land.
-Test: src/run.rs (test_reviews_passed_rejects_failed_review_state, test_reviews_passed_rejects_malformed_review_state)
-
-WHEN `factory summary`, the generated run report, or the dashboard shows
-a run with `review-state.json`,
-THE SYSTEM SHALL use the recorded review state when presenting the run's
-effective review outcome.
-Test: src/summary.rs (summarize_prefers_review_state), src/report.rs (test_generate_report_prefers_review_state), src/dashboard.rs (test_run_view_review_state_summary_prefers_state_file)
-
-## Parent death detection
-
-WHILE `factory watch` is running, IF the parent process exits
-(ppid changes),
-THEN THE SYSTEM SHALL stop polling and exit.
-Test: tests/behaviors/operations/test-watch-timeout.sh (watch detects parent exit)
-
-## Resume
-
-WHEN `factory resume` is invoked without a run ID and with a terminal on
-stdin,
-THE SYSTEM SHALL find a run with status `needs-user` or `failed` and
-launch an interactive agent session for that run.
-Test: tests/behaviors/operations/test-resume-resolve.sh, tests/binary.rs (resume_finds_live_needs_user_run)
-
-WHEN `factory resume [RUN_ID]` is invoked with a terminal on stdin,
-THE SYSTEM SHALL launch an interactive agent session for the named run.
-Test: tests/behaviors/operations/test-resume-resolve.sh
-
-WHEN `factory resume [RUN_ID]` is invoked without a terminal on stdin,
-THE SYSTEM SHALL restart the selected run's session loop without
-launching an interactive agent.
-Test: tests/binary.rs (headless_resume_restarts_selected_run_loop), tests/behaviors/operations/test-headless-resume.sh
-
-WHEN `factory resume [RUN_ID] --no-sandbox --coder codex` is invoked
-without a terminal on stdin,
-THE SYSTEM SHALL restart the selected run's session loop without
-invoking `sandbox-exec`, and SHALL require the selected coder without
-requiring the local Seatbelt runtime.
-Test: tests/binary.rs (headless_resume_restarts_selected_run_loop, headless_resume_no_sandbox_does_not_require_sandbox_exec)
-
-WHEN `factory --no-sandbox resume [RUN_ID] --coder codex` is invoked,
-THE SYSTEM SHALL preserve the top-level no-sandbox behavior for resume.
-Test: tests/binary.rs (headless_resume_global_no_sandbox_does_not_require_sandbox_exec),
-tests/behaviors/operations/test-live-run-state.sh (resume uses live status rule)
-
-WHEN both the top-level form (`factory --no-sandbox resume ...`) and
-the local form (`factory resume ... --no-sandbox`) are present on the
-same invocation,
-THE SYSTEM SHALL honor the local form.
-Test: tests/binary.rs (resume_local_coder_takes_precedence_over_global, headless_resume_global_no_sandbox_does_not_require_sandbox_exec)
-
-WHEN neither `--no-sandbox` nor `--coder` is provided to `factory resume`,
-THE SYSTEM SHALL apply the same defaults as `factory run` (sandbox
-enabled, default coder).
-Test: tests/binary.rs (resume_finds_needs_user_run)
-
-WHEN `factory resume [RUN_ID] --no-sandbox` is invoked,
-THE SYSTEM SHALL NOT pass `--no-sandbox` to the underlying coder as an
-extra agent argument.
-Test: tests/binary.rs (resume_local_no_sandbox_does_not_leak_into_extra_args)
-
-WHEN `factory resume --help` is shown,
-THE SYSTEM SHALL list the same local runtime flags as `factory run --help`,
-including `--no-sandbox` and `--coder`.
-Test: tests/binary.rs (resume_help_lists_local_runtime_flags)
-
-WHEN `factory resume` is invoked without a run ID and without a terminal
-on stdin,
-THE SYSTEM SHALL find a run with status `needs-user` or `failed` and
-restart that run's session loop without launching an interactive agent.
-Test: tests/behaviors/operations/test-headless-resume.sh
-
-WHEN `factory resume` selects or resumes a run,
-THE SYSTEM SHALL use the live status rule to identify `needs-user` or
-`failed` runs and to restart headless runs from the live worktree run
-directory when it exists.
-Test: tests/binary.rs (resume_finds_live_needs_user_run, headless_resume_restarts_selected_run_loop), tests/behaviors/operations/test-live-run-state.sh (resume uses live status rule)
-
-WHEN headless `factory resume [RUN_ID]` targets a parallel parent run,
-THE SYSTEM SHALL reject the resume without launching an agent.
-Test: tests/binary.rs (headless_resume_rejects_parallel_parent), tests/behaviors/operations/test-headless-resume.sh
-
-## Merge
-
-WHEN `factory merge` is invoked and the run status is not `complete`,
-THE SYSTEM SHALL refuse and exit non-zero.
-Test: tests/behaviors/operations/test-run-merge.sh (land rejects non-complete run), tests/binary.rs (run_merge_rejects_non_complete_run)
-
-WHEN `factory merge` is invoked for a run without `review-state.json` and
-any current review artifact has verdict `fail`, `uncertain`, or is
-missing a verdict line,
-THE SYSTEM SHALL refuse and exit non-zero.
-Test: tests/behaviors/operations/test-run-merge.sh (land rejects fail review verdict, land rejects uncertain review verdict), tests/binary.rs (run_merge_rejects_failed_reviews, run_merge_rejects_live_failed_reviews)
-
-WHEN `factory merge [RUN_ID]` validates status and review artifacts before
-merging,
-THE SYSTEM SHALL prefer live worktree status and review artifacts before
-falling back to source run artifacts.
-Test: tests/binary.rs (run_merge_rejects_live_failed_reviews), tests/behaviors/operations/test-live-run-state.sh (land uses live status and reviews)
-
-WHEN the project has no executable `.factory/hooks/check-pre-merge`,
-THE SYSTEM SHALL run `factory merge` without requiring project checks.
-Test: tests/binary.rs (run_merge_completes_full_lifecycle)
-
-WHEN `.factory/hooks/check-pre-merge` exists and is executable,
-THE SYSTEM SHALL run it in the run worktree before removing the
-worktree, rebasing, merging, or marking the run merged, with Factory
-context (`FACTORY_HOOK`, `FACTORY_ARTIFACT_DIR`, and any available
-work/attempt/task identifiers) exposed as environment variables and
-stdout+stderr captured to `<run_dir>/hooks/check-pre-merge.log`.
-Test: tests/binary.rs (run_merge_runs_configured_check_before_merging)
-
-WHEN `check-pre-merge` exits non-zero and no executable
-`.factory/hooks/fix-pre-merge` is present,
-THE SYSTEM SHALL exit non-zero, keep the worktree intact, keep the run
-unlanded, and print the hook's exit code and the path to its captured
-log file.
-Test: tests/binary.rs (run_merge_runs_configured_check_before_merging)
-
-WHEN `check-pre-merge` exits non-zero and an executable
-`.factory/hooks/fix-pre-merge` is present,
-THE SYSTEM SHALL require no uncommitted changes outside `.factory`
-before running `fix-pre-merge`, run `fix-pre-merge` in the run worktree,
-commit project changes outside `.factory` when the fix changes project
-files, rerun reviewers after the autofix commit, rerun `check-pre-merge`,
-and continue merging only if `fix-pre-merge` succeeds, the rerun
-reviewers pass, and the recheck passes.
-Test: tests/binary.rs (run_merge_refuses_autofix_when_worktree_has_user_changes, run_merge_autofixes_and_reruns_reviewers)
-
-WHEN `fix-pre-merge` changes files and the subsequent reviewer rerun
-fails or is uncertain,
-THE SYSTEM SHALL keep the worktree intact, leave the run unlanded, copy
-the new review artifacts to the source run directory, and exit non-zero.
-Test: tests/binary.rs (run_merge_keeps_worktree_when_autofix_review_fails)
-
-WHEN `factory merge` is invoked and the run worktree has tracked changes,
-staged changes, or untracked non-ignored files outside `.factory`,
-THE SYSTEM SHALL refuse and exit non-zero.
-Test: tests/binary.rs (run_merge_rejects_dirty_completed_worktree)
-
-WHEN `factory merge` completes successfully,
-THE SYSTEM SHALL copy sessions/, sessions.log, reviews/, report.md, and
-status from the worktree back to the source run directory.
-Test: tests/behaviors/operations/test-run-merge.sh (land copies artifacts from worktree), tests/binary.rs (run_merge_completes_full_lifecycle)
-
-WHEN `factory merge` completes successfully,
-THE SYSTEM SHALL remove the worktree, rebase the run branch onto the
-source branch, fast-forward merge into the source branch, and delete the
-run branch.
-Test: tests/behaviors/operations/test-run-merge.sh (land removes worktree, land deletes run branch, land merges run commits into main), tests/binary.rs (run_merge_completes_full_lifecycle, run_merge_preserves_linear_history)
-
-WHEN `factory merge` completes successfully,
-THE SYSTEM SHALL set the run status to `merged`.
-Test: tests/binary.rs (run_merge_completes_full_lifecycle)
-
-WHEN `factory merge` is invoked and the rebase has conflicts,
-THE SYSTEM SHALL abort the rebase, exit non-zero, and leave the
-repository in a clean state.
-Test: tests/behaviors/operations/test-run-merge.sh (land fails on rebase conflict), tests/binary.rs (run_merge_fails_on_rebase_conflict)
-
-WHEN `factory merge` is invoked without a run ID,
-THE SYSTEM SHALL land the most recent complete run.
-Test: tests/behaviors/operations/test-run-merge.sh, tests/binary.rs (run_merge_resolves_most_recent_complete_run)
-
 ## Dashboard
 
 WHEN `factory dashboard` is invoked,
@@ -2133,11 +1549,6 @@ state, and actionable labels.
 Test: dashboard::tests::test_work_view_renders_work_items_without_runs,
 tests/behaviors/operations/test-work-status-dashboard.sh (dashboard shows
 Work Items alongside legacy runs)
-
-WHEN legacy Runs exist,
-THE SYSTEM SHALL let the user switch to the legacy Runs view from the
-dashboard without making legacy Runs the default view.
-Test: tests/behaviors/operations/test-work-status-dashboard.sh (dashboard shows Work Items alongside legacy runs)
 
 WHEN the dashboard polls Work model state,
 THE SYSTEM SHALL refresh the Work Items view from stored Work Item files
@@ -2156,110 +1567,6 @@ THE SYSTEM SHALL show a Work empty state instead of the Runs empty
 state.
 Test: dashboard::tests::test_work_view_renders_empty_state_when_selected, tests/behaviors/operations/test-work-status-dashboard.sh (dashboard shows empty Work view)
 
-WHEN `factory dashboard` is invoked for a project with no runs,
-THE SYSTEM SHALL show an empty state instead of exiting with an error.
-Test: tests/behaviors/operations/test-dashboard.sh (empty state instead of error with no runs), dashboard::tests::test_run_tabs_empty_no_panic
-
-WHEN there are more runs than fit in the run tab bar,
-THE SYSTEM SHALL keep the selected run visible and indicate
-that more runs exist beyond the visible area.
-Test: tests/behaviors/operations/test-dashboard.sh (no crash with many runs), dashboard::tests::test_run_tabs_overflow_shows_right_arrow, dashboard::tests::test_run_tabs_selected_always_visible, dashboard::tests::test_clamp_run_tab_offset_keeps_selected_visible
-
-WHEN the dashboard renders run tabs,
-THE SYSTEM SHALL show each run's status from its live run directory
-when available.
-Test: dashboard::tests::test_run_tabs_show_cached_live_status
-
-WHEN `factory dashboard` chooses an initial run without `--run-id`,
-THE SYSTEM SHALL prefer runs whose live status is `executing` or
-`planned`.
-Test: dashboard::tests::test_app_new_selects_run_with_live_active_status
-
-WHEN the dashboard polls run state,
-THE SYSTEM SHALL remove runs whose source run directories no longer
-exist.
-Test: dashboard::tests::test_app_poll_removes_deleted_runs_and_selects_existing_run
-
-IF the selected run is removed during dashboard polling,
-THEN THE SYSTEM SHALL select an existing run when one remains.
-Test: dashboard::tests::test_app_poll_removes_deleted_runs_and_selects_existing_run
-
-IF all runs are removed during dashboard polling,
-THEN THE SYSTEM SHALL render the empty-state dashboard.
-Test: dashboard::tests::test_app_poll_renders_empty_state_after_all_runs_removed
-
-WHEN `factory dashboard --run-id` is invoked with a non-existent run ID,
-THE SYSTEM SHALL exit gracefully without crashing.
-Test: tests/behaviors/operations/test-dashboard.sh (dashboard handles invalid run-id)
-
-WHEN `factory dashboard` is invoked,
-THE SYSTEM SHALL not modify any run state files.
-Test: tests/behaviors/operations/test-dashboard.sh (dashboard does not modify run state)
-
-WHEN the dashboard displays a run with status `complete` or `merged`
-and that run has `report.md`,
-THE SYSTEM SHALL show the run report in the activity feed by default.
-Test: dashboard::tests::test_completed_run_with_report_shows_report_by_default
-
-WHEN the dashboard displays a completed run without `report.md`,
-THE SYSTEM SHALL continue to show the available transcript activity.
-Test: dashboard::tests::test_completed_run_without_report_shows_author_transcript
-
-WHEN the dashboard displays a run whose status is not `complete` or
-`merged`,
-THE SYSTEM SHALL continue to show live transcript activity by default,
-even when `report.md` exists.
-Test: dashboard::tests::test_nonterminal_run_with_report_shows_author_transcript
-
-WHEN a completed run has `report.md` and author or reviewer transcripts,
-THE SYSTEM SHALL keep the transcript views accessible from the dashboard.
-Test: dashboard::tests::test_report_view_keeps_transcript_tabs_accessible
-
-WHEN a run completes after the user has selected a transcript tab,
-THE SYSTEM SHALL keep that transcript tab selected instead of switching
-to the report view during dashboard polling.
-Test: dashboard::tests::test_completion_poll_keeps_touched_transcript_selection
-
-WHEN a run is in the review phase,
-THE SYSTEM SHALL show each reviewer as an agent tab displaying a status
-symbol and color: ✓ (Green) for pass, ✗ (Red) for fail, ? (Yellow) for
-uncertain, ⟳ (Cyan) for running.
-Untestable: Requires live TUI rendering with review-phase run state and colored symbols
-
-WHEN a new review round starts,
-THE SYSTEM SHALL derive current reviewer tabs and verdicts only from
-top-level `reviews/transcript-*.jsonl` and `reviews/review-*.md`
-artifacts. Archived `reviews/round-N/` artifacts shall not create
-reviewer tabs or current verdicts.
-Test: dashboard::tests::test_discover_agents_resets_archived_review_round_verdicts, tests/behaviors/operations/test-dashboard-review-rounds.sh (archived reviews do not drive current verdict, archived transcripts do not create current tabs)
-
-WHILE a run is actively executing (author or reviewers running),
-THE SYSTEM SHALL show a visual indicator that distinguishes "active"
-from "idle" at a glance in the selected-run header, dashboard title,
-agent tabs, and run tabs.
-Test: dashboard::tests::test_header_spinner_advances_with_tick, dashboard::tests::test_dashboard_title_shows_global_activity, dashboard::tests::test_run_view_has_activity_from_status, dashboard::tests::test_run_view_has_activity_from_running_reviewer, dashboard::tests::test_agent_tab_running_shows_spinner_symbol, dashboard::tests::test_header_author_executing_shows_spinner, dashboard::tests::test_run_tabs_show_active_status_marker, dashboard::tests::test_run_tabs_active_status_marker_advances, tests/behaviors/operations/test-dashboard-activity.sh (no crash when run is actively executing, no crash when reviewers are running)
-
-WHEN the dashboard polls run state,
-THE SYSTEM SHALL keep actionable runs sorted before terminal runs, keep
-cleaned terminal runs last, and preserve the selected run by run ID.
-Test: dashboard::tests::test_app_poll_sorts_actionable_runs_first, dashboard::tests::test_app_new_prefers_actionable_run_over_cleaned_terminal_run
-
-WHEN everything is done (no processes running, terminal status),
-THE SYSTEM SHALL stop showing the spinner animation in the header and
-display the final status without activity indicators.
-Test: dashboard::tests::test_header_complete_no_spinner, dashboard::tests::test_header_failed_no_spinner, tests/behaviors/operations/test-dashboard-activity.sh (no crash when run is complete)
-
-WHEN a reviewer finishes,
-THE SYSTEM SHALL reflect the new verdict immediately.
-Test: dashboard::tests::test_agent_tab_shows_verdict_immediately, dashboard::tests::test_discover_agents_updates_verdict, tests/behaviors/operations/test-dashboard-activity.sh (no crash when reviewer verdict arrives)
-
-WHEN the dashboard legacy Runs view displays a run,
-THE SYSTEM SHALL show a phase label that accurately describes what is
-happening right now (executing, reviewing, complete, failed, needs input,
-rate-limited, planned). The `reviewing` phase shows a spinner, including
-before reviewer transcripts exist.
-Test: dashboard::tests::test_header_reviewing_shows_progress, dashboard::tests::test_header_complete_no_spinner, dashboard::tests::test_header_failed_no_spinner, dashboard::tests::test_compute_phase_needs_user, dashboard::tests::test_compute_phase_rate_limited, dashboard::tests::test_header_rate_limited_shows_spinner, dashboard::tests::test_compute_phase_planned, tests/behaviors/operations/test-dashboard-activity.sh (no crash when run has failed, no crash when run needs user input, no crash with mixed run states), tests/behaviors/operations/test-dashboard-review-rounds.sh (reviewing status shows active work before transcripts)
-
 ### Dashboard layout
 
 WHEN the dashboard Work Items view is displayed,
@@ -2268,12 +1575,6 @@ view tabs, Work Items list, and help bar.
 Test: dashboard::tests::test_work_view_counts_errors,
 dashboard::tests::test_work_view_renders_work_items_without_runs,
 dashboard::tests::test_work_view_renders_empty_state_when_selected
-
-WHEN the dashboard legacy Runs view is displayed,
-THE SYSTEM SHALL render five vertical regions: header (run ID, status,
-session count, event count), run tabs, agent tabs, activity feed, and
-help bar.
-Untestable: Requires live TUI rendering of five-region vertical layout
 
 ### Dashboard keyboard navigation
 
@@ -2362,86 +1663,6 @@ WHILE the dashboard is running,
 THE SYSTEM SHALL render frames at ~75ms intervals for smooth animation
 and poll for new data at ~2s intervals to avoid unnecessary I/O.
 Untestable: Requires timing measurement of render and poll intervals in live TUI
-
-## Parallel plan execution
-
-### Plan parsing
-
-WHEN a run has a plan.md with structured parallel groups,
-THE SYSTEM SHALL create a child run for each step before execution begins.
-Test: tests/behaviors/operations/test-parallel-runs.sh (parallel plan creates child runs)
-
-WHEN a plan has no parallel groups (single sequential list),
-THE SYSTEM SHALL execute normally as a single session loop.
-Test: tests/behaviors/operations/test-parallel-runs.sh (single-step plan uses serial loop, no plan uses serial loop)
-
-### Parallel execution
-
-WHEN a parallel group is ready to execute,
-THE SYSTEM SHALL launch all child runs in that group concurrently, each
-in its own worktree.
-Test: tests/behaviors/operations/test-parallel-runs.sh (parallel plan creates child runs, child failure preserves sibling worktrees)
-
-WHILE child runs are executing,
-THE SYSTEM SHALL show their status in the dashboard.
-Test: tests/behaviors/operations/test-parallel-runs.sh (child runs shown in dashboard without crash)
-
-### Merging
-
-WHEN all child runs in a parallel group complete successfully,
-THE SYSTEM SHALL run configured pre-merge checks for each child run and
-merge their changes into the parent branch before launching the next
-group.
-Test: tests/behaviors/operations/test-parallel-runs.sh (sequential groups run in order), src/parallel.rs (test_parallel_children_run_pre_land_checks)
-
-### Failure handling
-
-WHEN a child run fails,
-THE SYSTEM SHALL stop execution, report which step failed, and leave
-sibling runs' worktrees intact for inspection.
-Test: tests/behaviors/operations/test-parallel-runs.sh (child failure marks parent failed, child failure preserves sibling worktrees)
-
-### Sequential gating
-
-WHEN a plan has multiple groups,
-THE SYSTEM SHALL execute them in order, launching each group only after
-the previous group's merge completes.
-Test: tests/behaviors/operations/test-parallel-runs.sh (sequential groups run in order)
-
-## Legacy sandbox compatibility (local)
-
-WHILE running Claude on the sandboxed local runtime,
-THE SYSTEM SHALL execute Claude inside a macOS Seatbelt sandbox with
-filesystem write access restricted to the run worktree and the source
-repository's common git directory.
-Test: tests/behaviors/operations/test-sandbox.sh (dry-run renders profile with workspace root, sandbox enforces filesystem boundary, sandbox blocks write outside workspace, sandboxed run uses sandbox-exec, sandboxed run can commit and blocks sibling write)
-
-WHEN the sandbox behavior suite starts on a host where `sandbox-exec`
-exists but cannot apply a minimal Seatbelt profile,
-THE SUITE SHALL fail with an explicit message that sandbox behavior
-coverage requires a working Seatbelt runtime.
-Test: tests/behaviors/operations/test-sandbox-prereq.sh
-
-WHEN legacy `factory run --coder codex` is invoked with the sandboxed
-local runtime,
-THE SYSTEM SHALL launch Codex under `sandbox-exec` with Factory's
-Seatbelt profile, approval policy `never`, and the run worktree as
-`--cd`, while disabling Codex's own sandbox. The rendered profile SHALL
-include `common.sb` plus the Codex-specific `codex.sb` layer. The
-Codex process SHALL receive `SSL_CERT_FILE` for a file-based CA bundle
-selected by Factory, even when the caller inherited a different
-`SSL_CERT_FILE`.
-Test: tests/behaviors/operations/test-codex-runtime.sh (sandboxed codex uses factory seatbelt, sandboxed codex prefers factory ca bundle), tests/behaviors/operations/test-codex-approval-flag.sh (approval-policy flag appears before exec)
-
-WHEN legacy `factory run --coder codex --no-sandbox` is invoked,
-THE SYSTEM SHALL launch Codex with
-`--dangerously-bypass-approvals-and-sandbox`.
-Test: tests/binary.rs (run_with_codex_uses_exec_json_and_status_contract)
-
-WHILE running inside the sandbox,
-THE SYSTEM SHALL inject credentials via environment variables, never by
-opening filesystem access to credential stores.
-Test: tests/behaviors/operations/test-sandbox.sh (profile denies Keychain Mach services, profile denies credential filesystem access, credentials injected via env vars)
 
 ## Per-project Fargate images
 
@@ -3165,3 +2386,43 @@ covering the rule's presence in each of the four skills and
 the consistency of wording across them. Tests are shell-based
 grep checks (or equivalent) that the rule string is present.
 Test: tests/behaviors/operations/test-easy-to-answer-skill-rule.sh (wording consistency across all four skills)
+
+## DeleteLegacyRunModel
+
+WHEN a user invokes `factory run`, `factory resume`, or
+`factory watch` after this Work Item lands,
+THE SYSTEM SHALL NOT recognize these as valid subcommands;
+they are absent from the Commands section of `factory --help`.
+Test: tests/binary.rs::deleted_subcommands_absent_from_help
+
+WHEN the source tree is inspected after this Work Item lands,
+THE SYSTEM SHALL NOT contain the files `src/run.rs`,
+`src/session.rs`, `src/parallel.rs`, or the legacy
+`src/merge.rs`.
+Test: tests/binary.rs::no_legacy_run_strings_in_src (absence of `mod run;`, `mod session;`, `mod parallel;`, `mod merge;`)
+
+WHEN any file under `src/` is inspected after this Work Item
+lands,
+THE SYSTEM SHALL NOT contain any references to `.factory/runs`,
+`active-run`, or `sessions.log`.
+Test: tests/binary.rs::no_legacy_run_strings_in_src
+
+WHEN any file under `prompts/` is inspected after this Work
+Item lands,
+THE SYSTEM SHALL contain only Work-model prompts
+(`work-author.md`, `work-rebase.md`, `review-*.md`,
+`behavior-tests.md`); the legacy `author.md` SHALL NOT be
+present.
+Test: tests/binary.rs::no_legacy_prompt_files_in_prompts_dir
+
+WHEN any documentation file under `documentation/` or skill
+file under `skills/` is inspected after this Work Item lands,
+THE SYSTEM SHALL NOT mention `.factory/runs`, `factory run`,
+`factory resume`, `factory watch`, `sessions.log`,
+`active-run`, `legacy fallback`, or `transitional bridge`.
+Test: tests/binary.rs::no_legacy_run_strings_in_documentation
+
+WHEN a `factory work *` subcommand is invoked,
+THE SYSTEM SHALL behave identically to before this Work Item
+lands. No Work-model behavior changes.
+Test: all work_* tests in tests/binary.rs (pre-existing Work model test suite)
