@@ -38,15 +38,6 @@ BEHAVIORS="$ROOT/documentation/behaviors.md"
 require_in_file "$CAPTURE" \
   'planning context is set at `factory work create` time' \
   "capture-brief skill"
-require_in_file "$CAPTURE" \
-  'Do not create `.factory/runs/[run-id]/brief.md`,' \
-  "capture-brief skill"
-require_in_file "$CAPTURE" \
-  'for ordinary Work-model planning.' \
-  "capture-brief skill"
-require_in_file "$CAPTURE" \
-  'when an explicit legacy fallback or recovery path needs them' \
-  "capture-brief skill"
 
 for skill in "$DEFINE" "$APPROACH" "$PLAN"; do
   require_in_file "$skill" \
@@ -57,9 +48,6 @@ for skill in "$DEFINE" "$APPROACH" "$PLAN"; do
     "$skill"
   require_in_file "$skill" \
     'Work Item planning context from `factory work show <work-item-id>` only' \
-    "$skill"
-  require_in_file "$skill" \
-    "only in a legacy fallback or" \
     "$skill"
 done
 
@@ -75,15 +63,6 @@ require_in_file "$PLAN" \
 
 require_in_file "$PLAN" \
   "normal path for delegated Work execution" \
-  "plan-execution skill"
-require_in_file "$PLAN" \
-  'Do not write' \
-  "plan-execution skill"
-require_in_file "$PLAN" \
-  '`.factory/runs/[run-id]/brief.md`, `status`, or `.factory/active-run`' \
-  "plan-execution skill"
-require_in_file "$PLAN" \
-  'when `factory work create` can express' \
   "plan-execution skill"
 require_in_file "$PLAN" \
   '## Output format (Work Item planning)' \
@@ -115,27 +94,15 @@ require_in_file "$PLAN" \
 require_in_file "$PLAN" \
   '## Dependencies and sync points' \
   "plan-execution skill"
-require_in_file "$PLAN" \
-  '## Legacy fallback format (parallel child runs)' \
-  "plan-execution skill"
-require_in_file "$PLAN" \
-  'Use the legacy group/step format only when the Work model cannot yet' \
-  "plan-execution skill"
 
 require_in_file "$BUILD" \
   "Write a brief that will become" \
-  "build-in-the-factory skill"
-require_in_file "$BUILD" \
-  "These files are not the normal planning handoff for Work-model" \
   "build-in-the-factory skill"
 require_in_file "$ARCH" \
   "skills treat this Work Item planning context as the normal handoff" \
   "architecture documentation"
 require_in_file "$BEHAVIORS" \
   'describe Work Item planning context through' \
-  "behavior documentation"
-require_in_file "$BEHAVIORS" \
-  'planning files to legacy fallback or recovery' \
   "behavior documentation"
 require_in_file "$BEHAVIORS" \
   "create the Work Item with approved planning context" \

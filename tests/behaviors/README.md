@@ -32,13 +32,12 @@ tests/test-skill tests/behaviors/skills/timeout-flag.md skills/capture-brief/SKI
 
 ## Operational behaviors
 
-Tested through the Rust binary integration tests, operation scripts, and
-the remaining `tests/test-run` harness. These tests create temp projects,
-run factory commands, and assert terminal output plus file system state.
+Tested through the Rust binary integration tests and operation scripts.
+These tests create temp projects, run factory commands, and assert
+terminal output plus file system state.
 
 ```sh
 cargo test --test binary
-tests/test-run
 for test in tests/behaviors/operations/*.sh; do bash "$test"; done
 ```
 
@@ -101,7 +100,7 @@ FACTORY_BIN_OVERRIDE="$REVIEW_ARTIFACT_DIR/target/debug/factory" \
 | Prefer peer Work Items for independent parallel work | `parallel-work-items-plan` |
 | Define sync points without default Task dependencies or child-run groups | `parallel-work-items-plan` |
 
-### Operational (tested by test-run, binary.rs, and others)
+### Operational (tested by binary.rs and operation scripts)
 
 | Behavior | Test |
 |---|---|
@@ -131,36 +130,3 @@ FACTORY_BIN_OVERRIDE="$REVIEW_ARTIFACT_DIR/target/debug/factory" \
 | Work merge rejects invalid stored candidate provenance without rewriting state | `binary.rs`, `test-work-merge-candidate.sh` |
 | Work merge records durable failed state for rebase, check, review, and late target-move failures | `binary.rs`, `test-work-merge-candidate.sh` |
 | Work merge records merged commit and artifacts after fast-forwarding the target branch | `binary.rs`, `test-work-merge-candidate.sh` |
-| Create worktree from current HEAD | `test-run` |
-| Branch from non-main branch | `test-run` |
-| Run-id resolution priority chain | `test-run` |
-| Worktree copies all run state files | `binary.rs` |
-| Worktree records source-branch and worktree path | `binary.rs` |
-| Run-id scan ignores completed runs | `binary.rs` |
-| Status display includes runtime and brief | `binary.rs` |
-| Worktree copies scope file | `binary.rs` |
-| Run-id scan treats `executing` as active | `binary.rs` |
-| Run-id scan skips `needs-user` and `failed` | `binary.rs` |
-| Status display works with no runs | `test-status-edges`, `binary.rs` |
-| Review mode copies mode/reviewers to worktree | `src/worktree.rs` |
-| Resume finds `needs-user` or `failed` runs | `test-resume-resolve`, `binary.rs` |
-| Headless resume restarts a selected run | `test-headless-resume`, `binary.rs` |
-| Headless resume rejects parallel parent runs | `test-headless-resume`, `binary.rs` |
-| Status displays fargate runtime | `test-watch-and-status-edges` |
-| Status displays mixed runtimes | `test-watch-and-status-edges` |
-| Watch polls at default interval | `test-watch-and-status-edges` |
-| Watch accepts custom interval | `test-watch-and-status-edges` |
-| Watch displays run status | `test-watch-and-status-edges` |
-| Notification includes run ID, status, and brief | `test-notification-content` |
-| Complete notification includes session count and review verdict | `test-notification-content` |
-| Needs-user notification includes handoff content | `test-notification-content` |
-
-### Session loop (tested by binary.rs and src/session.rs)
-
-| Behavior | Test |
-|---|---|
-| Session loop restarts on `executing` | `binary.rs`, `src/session.rs` |
-| Session loop stops on terminal status | `binary.rs`, `src/session.rs` |
-| Consecutive failure guard (3 strikes) | `binary.rs` |
-| Max session limit (50) | `binary.rs` |
-| Session loop uses handoff prompt | `binary.rs` |

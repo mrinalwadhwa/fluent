@@ -154,10 +154,10 @@ Check item {{ITEM_ID}}.
         let tmp = TempDir::new().unwrap();
         let factory_dir = tmp.path().join(".factory/prompts");
         std::fs::create_dir_all(&factory_dir).unwrap();
-        std::fs::write(factory_dir.join("author.md"), "custom prompt").unwrap();
+        std::fs::write(factory_dir.join("work-author.md"), "custom prompt").unwrap();
 
         let resolver = ContentResolver::new(Some(tmp.path()));
-        let path = resolver.resolve_path("prompts/author.md");
+        let path = resolver.resolve_path("prompts/work-author.md");
         assert!(path.is_some());
         let content = std::fs::read_to_string(path.unwrap()).unwrap();
         assert_eq!(content, "custom prompt");
@@ -168,13 +168,13 @@ Check item {{ITEM_ID}}.
         let tmp = TempDir::new().unwrap();
         let user_config = tmp.path().join("config");
         std::fs::create_dir_all(user_config.join("prompts")).unwrap();
-        std::fs::write(user_config.join("prompts/author.md"), "user prompt").unwrap();
+        std::fs::write(user_config.join("prompts/work-author.md"), "user prompt").unwrap();
 
         let resolver = ContentResolver {
             project_root: None,
             user_config: user_config.clone(),
         };
-        let path = resolver.resolve_path("prompts/author.md");
+        let path = resolver.resolve_path("prompts/work-author.md");
         assert!(path.is_some());
         let content = std::fs::read_to_string(path.unwrap()).unwrap();
         assert_eq!(content, "user prompt");
@@ -188,15 +188,15 @@ Check item {{ITEM_ID}}.
 
         // Set up both project-local and user-config files
         std::fs::create_dir_all(project.join(".factory/prompts")).unwrap();
-        std::fs::write(project.join(".factory/prompts/author.md"), "project prompt").unwrap();
+        std::fs::write(project.join(".factory/prompts/work-author.md"), "project prompt").unwrap();
         std::fs::create_dir_all(user_config.join("prompts")).unwrap();
-        std::fs::write(user_config.join("prompts/author.md"), "user prompt").unwrap();
+        std::fs::write(user_config.join("prompts/work-author.md"), "user prompt").unwrap();
 
         let resolver = ContentResolver {
             project_root: Some(project),
             user_config,
         };
-        let content = resolver.resolve_content("prompts/author.md").unwrap();
+        let content = resolver.resolve_content("prompts/work-author.md").unwrap();
         assert_eq!(content, "project prompt");
     }
 

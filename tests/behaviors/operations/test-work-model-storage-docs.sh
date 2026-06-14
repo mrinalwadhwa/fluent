@@ -23,7 +23,6 @@ flat_section="$(printf '%s\n' "$section" | tr '\n' ' ' | tr -s ' ')"
 
 for phrase in \
   'Durable work model state lives under `.factory/work/`' \
-  'separate from `.factory/runs`' \
   'Managed candidate worktrees do not live under `.factory/work/`' \
   'sibling directories beside the source checkout' \
   '../work-6-work-1-attempt-1' \
