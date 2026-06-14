@@ -21,3 +21,5 @@ Related to the existing
 20260607-000000-factory-discussion-agents-should-frame-c
 observation; that's the broader principle, this is one specific
 failure mode and its fix.
+
+→ Resolved: Resolved. The skill-side rule landed today in Work Item easy-to-answer-skill-rule at 2d68954 (inline rule in capture-brief, define-behaviors, design-approach, plan-execution skills). The conversation-agent side is codified in MEMORY.md feedback_easy_to_answer_questions.md.
