@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 fn factory_cmd() -> LoggedCommand {
-    LoggedCommand::cargo_bin("factory")
+    let mut cmd = LoggedCommand::cargo_bin("factory");
+    cmd.env_remove("FACTORY_TASK_KIND");
+    cmd
 }
 
 fn work_item_value(project_root: &Path, id: &str) -> serde_json::Value {
