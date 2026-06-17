@@ -12,4 +12,4 @@
 
 ;; Pi configuration, extensions, and session data.
 (allow file-read*  (subpath "_HOME_/.pi"))
-(allow file-write* (subpath "_HOME_/.pi/agent/sessions"))
+(allow file-write* (subpath "_HOME_/.pi/agent"))
