@@ -2649,3 +2649,99 @@ test (reviewer cannot read writer transcript or other reviewers'
 transcripts), and the usage-logging integration.
 Test: all EARS statements in the reviewer transcript persistence
 section above carry `Test:` references
+
+## Pi as a third CoderKind
+
+THE SYSTEM SHALL recognize `pi` as a valid Coder kind alongside
+`claude` and `codex`. Specifying `pi` via `--coder`,
+`FACTORY_CODER`, or a coder mapping entry SHALL be accepted.
+Error messages, help output, and any documentation of available
+Coders SHALL list `pi`.
+Test: src/coder.rs (coder_kind_resolves_pi)
+Test: src/coder.rs (coder_kind_serializes_pi_as_kebab_case)
+
+## Per-Attempt coder mapping
+
+WHEN Factory executes a Task within an Attempt,
+THE SYSTEM SHALL invoke the Coder mapped to that Task's kind in
+the Attempt's coder mapping.
+Test: src/work_model.rs (coder_mapping_for_task_kind_returns_correct_pair)
+
+WHEN `--coder X` or `FACTORY_CODER=X` is set and no per-Task-kind
+mapping is specified for an Attempt,
+THE SYSTEM SHALL set that Attempt's coder mapping so every Task
+kind uses Coder X.
+Test: src/work_model.rs (resolve_coder_mapping_factory_coder_sets_all_task_kinds)
+
+IF an Attempt is created with no coder configuration,
+THEN THE SYSTEM SHALL set the Attempt's coder mapping to the
+user-configured default mapping, falling back to Claude for every
+Task kind when no user default is configured.
+Test: src/work_model.rs (resolve_coder_mapping_default_when_nothing_set)
+
+WHEN Factory invokes a Coder for a Task,
+THE SYSTEM SHALL invoke the Coder with the model from the
+Attempt's coder mapping entry for that Task's kind.
+Test: src/work_model.rs (resolve_coder_mapping_stores_resolved_model_at_creation)
+
+WHEN Factory creates an Attempt and a Task kind's mapping entry
+has no explicit model,
+THE SYSTEM SHALL resolve the model from the per-Coder environment
+variable (`FACTORY_CLAUDE_MODEL`, `FACTORY_CODEX_MODEL`,
+`FACTORY_PI_MODEL`) or the Coder's built-in default, and store
+the resolved model in the mapping entry.
+Test: src/work_model.rs (resolve_coder_mapping_per_task_cli_flag_wins)
+
+WHEN Factory creates an Attempt,
+THE SYSTEM SHALL store the Attempt's coder mapping on the Attempt
+record so it can be inspected via `factory work show <work-item-id>`.
+Test: src/work_model.rs (coder_mapping_round_trips_json)
+Test: src/work_model.rs (attempt_with_coder_mapping_round_trips)
+
+## Pi invocation mechanics
+
+WHEN Factory invokes a Coder for a Task,
+THE SYSTEM SHALL capture the Coder's version in the Task's
+artifact area.
+Test: src/work_task_executor.rs (capture_coder_info_writes_json)
+
+WHEN Factory invokes Pi for a Task and a transcript path is
+configured,
+THE SYSTEM SHALL run Pi in JSONL streaming mode (`--mode json`)
+and write Pi's stdout to that transcript path.
+Untestable: verified by subprocess invocation integration test;
+Pi subprocess is not mockable in unit tests.
+
+WHEN Factory invokes Pi for a Task,
+THE SYSTEM SHALL pass an explicit `--thinking <level>` flag (off,
+low, medium, or high) rather than relying on Pi's default.
+Untestable: verified by code inspection of PiCode::run() which
+always passes `--thinking off`.
+
+## Transcript parsing
+
+WHEN Factory parses a Pi transcript after Task completion,
+THE SYSTEM SHALL extract per-turn token usage from Pi's JSONL
+events and append usage rows to
+`~/.config/factory/usage/usage.jsonl`, identifying the Task via
+`work_item_id`, `attempt_id`, and `task_id`.
+Test: src/usage.rs (extract_pi_usage_returns_one_row_per_result_event)
+Test: src/usage.rs (extract_pi_usage_returns_empty_when_no_result_events)
+
+WHEN Factory parses a Coder transcript after Task completion,
+THE SYSTEM SHALL extract per-turn end-to-end duration (and any
+other available timing signals) from the transcript and include
+them in the appended usage rows for Claude, Codex, and Pi.
+Test: src/usage.rs (usage_row_serializes_with_duration_ms)
+Test: src/usage.rs (extract_claude_usage_populates_duration_ms)
+
+## Pi coder cross-cutting
+
+WHEN this Work Item lands,
+THE SYSTEM SHALL contain `Test:` references in
+`documentation/behaviors.md` for each new EARS statement here,
+covering Pi coder kind recognition, per-Attempt coder mapping
+resolution, coder version capture, Pi transcript parsing, and
+cross-coder timing extraction.
+Test: all EARS statements in the Pi coder sections above carry
+`Test:` or `Untestable:` references

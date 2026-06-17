@@ -1,4 +1,5 @@
 use anyhow::{Result, bail};
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -6,6 +7,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-4-6";
+const DEFAULT_PI_MODEL: &str = "qwen3-30b-a3b";
 
 fn claude_model() -> String {
     std::env::var("FACTORY_CLAUDE_MODEL")
@@ -15,6 +17,12 @@ fn claude_model() -> String {
 
 fn codex_model() -> Option<String> {
     std::env::var("FACTORY_CODEX_MODEL").ok()
+}
+
+fn pi_model() -> String {
+    std::env::var("FACTORY_PI_MODEL")
+        .or_else(|_| std::env::var("FACTORY_MODEL"))
+        .unwrap_or_else(|_| DEFAULT_PI_MODEL.to_string())
 }
 
 fn codex_ca_bundle() -> Option<PathBuf> {
@@ -38,10 +46,12 @@ fn codex_ca_bundle() -> Option<PathBuf> {
 }
 
 /// Which coding agent the factory should launch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum CoderKind {
     Claude,
     Codex,
+    Pi,
 }
 
 /// Sandbox mode requested for the coder launch.
@@ -62,7 +72,8 @@ impl CoderKind {
         match value.trim().to_lowercase().as_str() {
             "claude" | "claude-code" => Ok(Self::Claude),
             "codex" => Ok(Self::Codex),
-            other => bail!("Unknown coder '{other}'. Available: claude, codex."),
+            "pi" => Ok(Self::Pi),
+            other => bail!("Unknown coder '{other}'. Available: claude, codex, pi."),
         }
     }
 
@@ -70,22 +81,46 @@ impl CoderKind {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Pi => "pi",
+        }
+    }
+
+    pub fn default_model(&self) -> String {
+        match self {
+            Self::Claude => claude_model(),
+            Self::Codex => codex_model().unwrap_or_else(|| "o3".to_string()),
+            Self::Pi => pi_model(),
         }
     }
 
     pub fn boxed(&self, sandbox: CoderSandbox) -> Box<dyn Coder> {
+        self.boxed_with_model(sandbox, None)
+    }
+
+    pub fn boxed_with_model(&self, sandbox: CoderSandbox, model: Option<&str>) -> Box<dyn Coder> {
         match self {
             Self::Claude => match sandbox {
                 CoderSandbox::SeatbeltProfile(profile) => Box::new(SandboxedClaudeCode {
                     sandbox_profile: Some(profile),
+                    model_override: model.map(str::to_string),
                 }),
-                _ => Box::new(BareClaudeCode),
+                _ => Box::new(BareClaudeCode {
+                    model_override: model.map(str::to_string),
+                }),
             },
             Self::Codex => Box::new(CodexCode {
                 sandbox_profile: match &sandbox {
                     CoderSandbox::SeatbeltProfile(profile) => Some(profile.clone()),
                     _ => None,
                 },
+                model_override: model.map(str::to_string),
+            }),
+            Self::Pi => Box::new(PiCode {
+                sandbox_profile: match &sandbox {
+                    CoderSandbox::SeatbeltProfile(profile) => Some(profile.clone()),
+                    _ => None,
+                },
+                model_override: model.map(str::to_string),
             }),
         }
     }
@@ -120,6 +155,7 @@ pub trait Coder: Send + Sync {
 /// Claude Code invoked via sandbox-exec.
 pub struct SandboxedClaudeCode {
     pub sandbox_profile: Option<String>,
+    pub model_override: Option<String>,
 }
 
 impl Coder for SandboxedClaudeCode {
@@ -174,13 +210,20 @@ impl Coder for SandboxedClaudeCode {
 }
 
 impl SandboxedClaudeCode {
+    fn effective_model(&self) -> String {
+        self.model_override
+            .clone()
+            .unwrap_or_else(claude_model)
+    }
+
     fn build_command(&self, working_dir: &Path) -> Command {
+        let model = self.effective_model();
         if let Some(ref profile) = self.sandbox_profile {
             let mut cmd = Command::new("sandbox-exec");
             cmd.args(["-f", profile]);
             cmd.arg("claude");
             cmd.arg("--dangerously-skip-permissions");
-            cmd.args(["--model", &claude_model()]);
+            cmd.args(["--model", &model]);
             cmd.current_dir(working_dir);
             cmd
         } else {
@@ -192,7 +235,17 @@ impl SandboxedClaudeCode {
 }
 
 /// Bare Claude Code (no sandbox, for Fargate/Linux/--no-sandbox).
-pub struct BareClaudeCode;
+pub struct BareClaudeCode {
+    pub model_override: Option<String>,
+}
+
+impl BareClaudeCode {
+    fn effective_model(&self) -> String {
+        self.model_override
+            .clone()
+            .unwrap_or_else(claude_model)
+    }
+}
 
 impl Coder for BareClaudeCode {
     fn run(
@@ -208,6 +261,7 @@ impl Coder for BareClaudeCode {
             bail!(auth_err.user_message());
         }
         let want_transcript = transcript_file.is_some();
+        let model = self.effective_model();
         run_with_transcript_retrying(
             || {
                 let mut cmd = Command::new("claude");
@@ -216,7 +270,7 @@ impl Coder for BareClaudeCode {
                     cmd.env(key, value);
                 }
                 cmd.args(["--dangerously-skip-permissions"]);
-                cmd.args(["--model", &claude_model()]);
+                cmd.args(["--model", &model]);
                 if want_transcript {
                     cmd.args(["--verbose", "--output-format", "stream-json"]);
                 }
@@ -253,6 +307,7 @@ impl Coder for BareClaudeCode {
 /// OpenAI Codex CLI.
 pub struct CodexCode {
     pub sandbox_profile: Option<String>,
+    pub model_override: Option<String>,
 }
 
 impl Coder for CodexCode {
@@ -304,6 +359,10 @@ impl Coder for CodexCode {
 }
 
 impl CodexCode {
+    fn effective_model(&self) -> Option<String> {
+        self.model_override.clone().or_else(codex_model)
+    }
+
     fn build_command(&self, working_dir: &Path, exec_mode: bool) -> Command {
         let mut cmd = if let Some(profile) = &self.sandbox_profile {
             let mut cmd = Command::new("sandbox-exec");
@@ -327,11 +386,94 @@ impl CodexCode {
         }
         cmd.args(["--cd", &working_dir.to_string_lossy()]);
         cmd.args(["--dangerously-bypass-approvals-and-sandbox"]);
-        if let Some(model) = codex_model() {
+        if let Some(model) = self.effective_model() {
             cmd.args(["--model", &model]);
         }
         cmd.current_dir(working_dir);
         cmd
+    }
+}
+
+/// Pi (pi.dev) coding agent backed by a local vllm-mlx model.
+pub struct PiCode {
+    pub sandbox_profile: Option<String>,
+    pub model_override: Option<String>,
+}
+
+impl PiCode {
+    fn effective_model(&self) -> String {
+        self.model_override
+            .clone()
+            .unwrap_or_else(pi_model)
+    }
+
+    fn build_command(&self, working_dir: &Path) -> Command {
+        let model = self.effective_model();
+        if let Some(ref profile) = self.sandbox_profile {
+            let mut cmd = Command::new("sandbox-exec");
+            cmd.args(["-f", profile]);
+            cmd.arg("pi");
+            cmd.args(["--provider", "local-openai"]);
+            cmd.args(["--model", &model]);
+            cmd.current_dir(working_dir);
+            cmd
+        } else {
+            let mut cmd = Command::new("pi");
+            cmd.args(["--provider", "local-openai"]);
+            cmd.args(["--model", &model]);
+            cmd.current_dir(working_dir);
+            cmd
+        }
+    }
+}
+
+impl Coder for PiCode {
+    fn run(
+        &self,
+        prompt: &str,
+        system_prompt: &str,
+        working_dir: &Path,
+        extra_args: &[String],
+        extra_env: &[(String, String)],
+        transcript_file: Option<&Path>,
+    ) -> Result<i32> {
+        let want_transcript = transcript_file.is_some();
+        run_with_transcript_retrying(
+            || {
+                let mut cmd = self.build_command(working_dir);
+                for (key, value) in extra_env {
+                    cmd.env(key, value);
+                }
+                if want_transcript {
+                    cmd.args(["--mode", "json"]);
+                }
+                cmd.args(["--thinking", "off"]);
+                cmd.args(["--append-system-prompt", system_prompt]);
+                cmd.args(["-p", prompt]);
+                cmd.args(extra_args);
+                cmd
+            },
+            transcript_file,
+        )
+    }
+
+    fn run_interactive(
+        &self,
+        system_prompt: &str,
+        working_dir: &Path,
+        extra_args: &[String],
+        extra_env: &[(String, String)],
+    ) -> Result<i32> {
+        let mut cmd = self.build_command(working_dir);
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
+        cmd.args(["--thinking", "off"]);
+        cmd.args(["--append-system-prompt", system_prompt]);
+        cmd.args(extra_args);
+
+        let status = cmd.status()?;
+        Ok(status.code().unwrap_or(1))
     }
 }
 
@@ -1080,5 +1222,62 @@ mod rate_limit_state_tests {
 
         // The leave notification is checked separately in run_with_transcript_retrying
         // via the `if matches!(rl_state, RateLimited)` guard on exit-0.
+    }
+}
+
+#[cfg(test)]
+mod coder_kind_tests {
+    use super::*;
+
+    #[test]
+    fn coder_kind_resolves_pi() {
+        let kind = CoderKind::resolve(Some("pi")).unwrap();
+        assert_eq!(kind, CoderKind::Pi);
+    }
+
+    #[test]
+    fn coder_kind_resolves_claude() {
+        let kind = CoderKind::resolve(Some("claude")).unwrap();
+        assert_eq!(kind, CoderKind::Claude);
+    }
+
+    #[test]
+    fn coder_kind_resolves_codex() {
+        let kind = CoderKind::resolve(Some("codex")).unwrap();
+        assert_eq!(kind, CoderKind::Codex);
+    }
+
+    #[test]
+    fn coder_kind_rejects_unknown() {
+        let result = CoderKind::resolve(Some("unknown"));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("pi"), "error should list pi: {err}");
+    }
+
+    #[test]
+    fn coder_kind_serializes_pi_as_kebab_case() {
+        let json = serde_json::to_string(&CoderKind::Pi).unwrap();
+        assert_eq!(json, "\"pi\"");
+    }
+
+    #[test]
+    fn coder_kind_serializes_claude_as_kebab_case() {
+        let json = serde_json::to_string(&CoderKind::Claude).unwrap();
+        assert_eq!(json, "\"claude\"");
+    }
+
+    #[test]
+    fn coder_kind_round_trips_all_variants() {
+        for kind in [CoderKind::Claude, CoderKind::Codex, CoderKind::Pi] {
+            let json = serde_json::to_string(&kind).unwrap();
+            let parsed: CoderKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, kind);
+        }
+    }
+
+    #[test]
+    fn pi_as_str_returns_pi() {
+        assert_eq!(CoderKind::Pi.as_str(), "pi");
     }
 }

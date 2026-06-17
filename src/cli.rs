@@ -29,7 +29,7 @@ pub struct Cli {
     #[arg(long)]
     pub no_sandbox: bool,
 
-    /// Coding agent to launch: claude or codex
+    /// Coding agent to launch: claude, codex, or pi
     #[arg(long)]
     pub coder: Option<String>,
 
@@ -388,9 +388,33 @@ pub enum WorkAttemptCommands {
         #[arg(long)]
         no_sandbox: bool,
 
-        /// Coding agent to launch: claude or codex
+        /// Coding agent to launch: claude, codex, or pi
         #[arg(long)]
         coder: Option<String>,
+
+        /// Coder for write Tasks: claude, codex, or pi
+        #[arg(long)]
+        write_coder: Option<String>,
+
+        /// Model for write Tasks
+        #[arg(long)]
+        write_model: Option<String>,
+
+        /// Coder for review Tasks: claude, codex, or pi
+        #[arg(long)]
+        review_coder: Option<String>,
+
+        /// Model for review Tasks
+        #[arg(long)]
+        review_model: Option<String>,
+
+        /// Coder for behavior-tests Tasks: claude, codex, or pi
+        #[arg(long)]
+        behavior_tests_coder: Option<String>,
+
+        /// Model for behavior-tests Tasks
+        #[arg(long)]
+        behavior_tests_model: Option<String>,
 
         /// Execution runtime: local (default) or fargate
         #[arg(long)]
@@ -444,9 +468,33 @@ pub enum WorkTaskCommands {
         #[arg(long)]
         no_sandbox: bool,
 
-        /// Coding agent to launch: claude or codex
+        /// Coding agent to launch: claude, codex, or pi
         #[arg(long)]
         coder: Option<String>,
+
+        /// Coder for write Tasks: claude, codex, or pi
+        #[arg(long)]
+        write_coder: Option<String>,
+
+        /// Model for write Tasks
+        #[arg(long)]
+        write_model: Option<String>,
+
+        /// Coder for review Tasks: claude, codex, or pi
+        #[arg(long)]
+        review_coder: Option<String>,
+
+        /// Model for review Tasks
+        #[arg(long)]
+        review_model: Option<String>,
+
+        /// Coder for behavior-tests Tasks: claude, codex, or pi
+        #[arg(long)]
+        behavior_tests_coder: Option<String>,
+
+        /// Model for behavior-tests Tasks
+        #[arg(long)]
+        behavior_tests_model: Option<String>,
 
         /// Extra args passed through to the agent
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]

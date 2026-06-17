@@ -31,7 +31,7 @@ use factory::version;
 use factory::work_attempt_loop::{self, WorkAttemptRunConfig, WorkAttemptRunOutcome};
 use factory::work_merge_executor::{self, WorkMergeConfig};
 use factory::work_model::{
-    PlanningContext, WorkItem, WorkModelStorageError, WorkModelStore, to_json_pretty,
+    self, PlanningContext, WorkItem, WorkModelStorageError, WorkModelStore, to_json_pretty,
 };
 use factory::work_status;
 use factory::work_task_executor::{self, WorkTaskRunConfig};
@@ -239,6 +239,12 @@ fn cmd_work(
                 attempt_id,
                 no_sandbox,
                 coder,
+                write_coder,
+                write_model,
+                review_coder,
+                review_model,
+                behavior_tests_coder,
+                behavior_tests_model,
                 runtime,
                 extra_args,
             }) => {
@@ -261,10 +267,23 @@ fn cmd_work(
                             .to_string()
                     }
                 };
-                let coder_kind = CoderKind::resolve(coder.as_deref().or(global_coder))?;
+                let coder_mapping = work_model::resolve_coder_mapping(
+                    &work_model::CoderMappingInputs::from_env().merge_cli(
+                        write_coder,
+                        write_model,
+                        review_coder,
+                        review_model,
+                        behavior_tests_coder,
+                        behavior_tests_model,
+                        coder.or_else(|| global_coder.map(str::to_string)),
+                    ),
+                )?;
                 let runtime = runtime.unwrap_or_else(|| "local".to_string());
                 match runtime.as_str() {
                     "fargate" => {
+                        let coder_kind = CoderKind::resolve(
+                            coder_mapping.write.coder.as_str().into(),
+                        )?;
                         fargate::launch_work_attempt(
                             project_root,
                             &work_item_id,
@@ -279,6 +298,20 @@ fn cmd_work(
                     "local" => {}
                     other => bail!("Unknown runtime '{other}'. Available: local, fargate."),
                 }
+
+                // Store the resolved mapping on the Attempt before running.
+                {
+                    let mut item = store.read_work_item(&work_item_id)?;
+                    if let Some(attempt) = item
+                        .attempts
+                        .iter_mut()
+                        .find(|a| a.id == attempt_id)
+                    {
+                        attempt.coder_mapping = coder_mapping.clone();
+                    }
+                    store.write_work_item(&item)?;
+                }
+
                 let result = work_attempt_loop::run_attempt(WorkAttemptRunConfig {
                     project_root,
                     store: &store,
@@ -286,7 +319,6 @@ fn cmd_work(
                     attempt_id: &attempt_id,
                     resolver,
                     extra_args: &extra_args,
-                    coder_kind,
                     no_sandbox: no_sandbox || global_no_sandbox,
                 })?;
                 for outcome in result.outcomes {
@@ -540,9 +572,39 @@ fn cmd_work(
                 task_id,
                 no_sandbox,
                 coder,
+                write_coder,
+                write_model,
+                review_coder,
+                review_model,
+                behavior_tests_coder,
+                behavior_tests_model,
                 extra_args,
             } => {
-                let coder_kind = CoderKind::resolve(coder.as_deref().or(global_coder))?;
+                let coder_mapping = work_model::resolve_coder_mapping(
+                    &work_model::CoderMappingInputs::from_env().merge_cli(
+                        write_coder,
+                        write_model,
+                        review_coder,
+                        review_model,
+                        behavior_tests_coder,
+                        behavior_tests_model,
+                        coder.or_else(|| global_coder.map(str::to_string)),
+                    ),
+                )?;
+
+                // Store the resolved mapping on the Attempt before running.
+                {
+                    let mut item = store.read_work_item(&work_item_id)?;
+                    if let Some(attempt) = item
+                        .attempts
+                        .iter_mut()
+                        .find(|a| a.id == attempt_id)
+                    {
+                        attempt.coder_mapping = coder_mapping;
+                    }
+                    store.write_work_item(&item)?;
+                }
+
                 let result = work_task_executor::run_task(WorkTaskRunConfig {
                     project_root,
                     store: &store,
@@ -551,7 +613,6 @@ fn cmd_work(
                     task_id: &task_id,
                     resolver,
                     extra_args: &extra_args,
-                    coder_kind,
                     no_sandbox: no_sandbox || global_no_sandbox,
                     store_lock: None,
                 })?;

@@ -285,7 +285,6 @@ fn review_one(project_root: &Path, entry: &QueueEntry) -> Result<PerBranchOutcom
         .map_err(|e| anyhow::anyhow!("write post-merge review Work Item: {e}"))?;
 
     let resolver = ContentResolver::new(Some(project_root));
-    let coder_kind = CoderKind::resolve(None)?;
     let _ = work_attempt_loop::run_attempt(WorkAttemptRunConfig {
         project_root,
         store: &store,
@@ -293,7 +292,6 @@ fn review_one(project_root: &Path, entry: &QueueEntry) -> Result<PerBranchOutcom
         attempt_id,
         resolver: &resolver,
         extra_args: &[],
-        coder_kind,
         no_sandbox: true,
     });
 
@@ -393,7 +391,6 @@ fn auto_run_post_merge_review_fix(
         attempt_id: "attempt-1",
         resolver: &resolver,
         extra_args: &[],
-        coder_kind,
         no_sandbox: true,
     })?;
     for outcome in &run_result.outcomes {

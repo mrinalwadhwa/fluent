@@ -86,6 +86,7 @@ pub fn bundled_content(relative: &str) -> Option<String> {
         "sandbox/common.sb" => Some(include_str!("../sandboxes/common.sb").to_string()),
         "sandbox/claude-code.sb" => Some(include_str!("../sandboxes/claude-code.sb").to_string()),
         "sandbox/codex.sb" => Some(include_str!("../sandboxes/codex.sb").to_string()),
+        "sandbox/pi.sb" => Some(include_str!("../sandboxes/pi.sb").to_string()),
         _ => None,
     }
 }

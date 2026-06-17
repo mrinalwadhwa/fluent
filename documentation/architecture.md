@@ -680,8 +680,18 @@ is unavailable at build time, Factory prints
 
 ### Coder selection
 
-Factory supports Claude Code and OpenAI Codex. Claude is the default.
-Select Codex with `--coder codex` or `FACTORY_CODER=codex`.
+Factory supports three Coders: Claude Code, OpenAI Codex, and Pi.
+Claude is the default. Select a different Coder with `--coder codex`,
+`--coder pi`, or `FACTORY_CODER=<coder>`.
+
+Each Attempt stores a per-Task-kind **coder mapping** that determines
+which Coder and model run each Task kind (write, review,
+behavior-tests). Configure with per-Task-kind flags like
+`--write-coder pi --write-model qwen3-30b-a3b --review-coder claude`.
+When no per-Task-kind flag is set, `--coder` or `FACTORY_CODER` sets
+all Task kinds to the same Coder. The resolved mapping is stored on
+the Attempt record so different Attempts of the same Work Item can
+use different Coder configurations.
 
 Claude sessions use `claude -p --append-system-prompt` with stream-json
 output. Sandboxed Claude sessions run inside the macOS Seatbelt profile
@@ -706,6 +716,16 @@ using a file-based CA bundle so Codex can connect without Keychain IPC.
 caller-provided `SSL_CERT_FILE`. In bare mode, Codex also runs with
 `--dangerously-bypass-approvals-and-sandbox`, but without
 `sandbox-exec`.
+
+Pi sessions use `pi -p <prompt> --append-system-prompt <file> --mode json
+--thinking off --provider local-openai --model <model>`. Pi talks to a
+local vllm-mlx server (default `127.0.0.1:8000`) configured via
+`~/.pi/extensions/local-vllm.js`. Factory does not manage the vllm-mlx
+server lifecycle — the user starts it externally. The default model is
+`qwen3-30b-a3b`, overridden by `FACTORY_PI_MODEL`. Sandboxed Pi sessions
+run inside a Seatbelt profile with read access to `~/.pi/` and write
+access to `~/.pi/agent/sessions/`. Pi is local-only and cannot run on
+Fargate.
 
 Fargate supports both Claude and Codex. The base image
 (`infrastructure/run/Dockerfile`) installs both `@anthropic-ai/claude-code`

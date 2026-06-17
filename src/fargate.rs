@@ -614,6 +614,12 @@ pub fn coder_task_overrides(coder: CoderKind) -> Result<Vec<(String, String)>> {
             }
             env.push(("CODEX_AUTH_JSON".to_string(), auth_json));
         }
+        CoderKind::Pi => {
+            anyhow::bail!(
+                "Pi coder is local-only and cannot run on Fargate. \
+                 Use --coder claude or --coder codex for remote execution."
+            );
+        }
     }
     Ok(env)
 }

@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
-use crate::coder::CoderKind;
 use crate::content::ContentResolver;
 use crate::review::{self, Verdict};
 use crate::work_model::{
@@ -50,7 +49,6 @@ pub struct WorkAttemptRunConfig<'a> {
     pub attempt_id: &'a str,
     pub resolver: &'a ContentResolver,
     pub extra_args: &'a [String],
-    pub coder_kind: CoderKind,
     pub no_sandbox: bool,
 }
 
@@ -122,7 +120,6 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                 task_id: &task.id,
                 resolver: config.resolver,
                 extra_args: config.extra_args,
-                coder_kind: config.coder_kind,
                 no_sandbox: config.no_sandbox,
                 store_lock: None,
             })?;
@@ -254,7 +251,6 @@ fn run_parallel_reviews(
                         task_id,
                         resolver: config.resolver,
                         extra_args: config.extra_args,
-                        coder_kind: config.coder_kind,
                         no_sandbox: config.no_sandbox,
                         store_lock: Some(store_lock_ref),
                     })
@@ -662,7 +658,7 @@ mod tests {
     use crate::content::ContentResolver;
     use crate::work_model::AttemptKind;
     use crate::work_model::WorkItemAbandonment;
-    use crate::work_model::{Attempt, TaskArtifactArea, WorkspaceAccess};
+    use crate::work_model::{Attempt, CoderMapping, TaskArtifactArea, WorkspaceAccess};
 
     #[test]
     fn run_attempt_rejects_abandoned_work_item_without_mutating_state() {
@@ -691,7 +687,6 @@ mod tests {
             attempt_id: "attempt-1",
             resolver: &resolver,
             extra_args: &[],
-            coder_kind: CoderKind::Codex,
             no_sandbox: true,
         }) {
             Ok(_) => panic!("abandoned Work Item should reject attempt run"),
@@ -809,6 +804,7 @@ mod tests {
             work_item_id: "work-1".to_string(),
             kind: AttemptKind::Write,
             status: AttemptStatus::Complete,
+            coder_mapping: CoderMapping::default(),
             tasks,
             review_state: Some(AttemptReviewState::Passed),
             artifacts: Vec::new(),
@@ -1012,6 +1008,7 @@ mod tests {
             work_item_id: "work-1".to_string(),
             kind: AttemptKind::Write,
             status: AttemptStatus::Planned,
+            coder_mapping: CoderMapping::default(),
             tasks,
             review_state: Some(AttemptReviewState::NotReviewed),
             artifacts: Vec::new(),

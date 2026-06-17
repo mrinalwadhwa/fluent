@@ -27,7 +27,6 @@ pub struct WorkTaskRunConfig<'a> {
     pub task_id: &'a str,
     pub resolver: &'a ContentResolver,
     pub extra_args: &'a [String],
-    pub coder_kind: CoderKind,
     pub no_sandbox: bool,
     pub store_lock: Option<&'a std::sync::Mutex<()>>,
 }
@@ -44,10 +43,19 @@ pub fn run_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         find_attempt_task_indexes(&item, config.attempt_id, config.task_id)
             .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", config.task_id))?;
 
-    match item.attempts[attempt_index].tasks[task_index].kind {
-        TaskKind::Write => run_write_task(config),
-        TaskKind::Review => run_review_task(config),
-        TaskKind::BehaviorTests => run_behavior_tests_task(config),
+    let task_kind = item.attempts[attempt_index].tasks[task_index].kind;
+    let mapping_pair = item.attempts[attempt_index].coder_mapping.for_task_kind(task_kind);
+    let coder_kind = mapping_pair.coder;
+    let model = if mapping_pair.model.is_empty() {
+        None
+    } else {
+        Some(mapping_pair.model.as_str())
+    };
+
+    match task_kind {
+        TaskKind::Write => run_write_task(config, coder_kind, model),
+        TaskKind::Review => run_review_task(config, coder_kind, model),
+        TaskKind::BehaviorTests => run_behavior_tests_task(config, coder_kind, model),
         kind => bail!(
             "Task {:?} is kind {kind}; unsupported by task run",
             config.task_id
@@ -55,7 +63,7 @@ pub fn run_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     }
 }
 
-fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
+fn run_write_task(config: WorkTaskRunConfig<'_>, coder_kind: CoderKind, model: Option<&str>) -> Result<WorkTaskRunResult> {
     let mut item = read_work_item_or_not_found(config.store, config.work_item_id)?;
     let attempt_index = item
         .attempts
@@ -129,8 +137,9 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         &input_artifacts,
         config.resolver,
         config.extra_args,
-        config.coder_kind,
+        coder_kind,
         config.no_sandbox,
+        model,
     );
 
     if let Err(error) = run_result {
@@ -227,7 +236,7 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     })
 }
 
-fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
+fn run_review_task(config: WorkTaskRunConfig<'_>, coder_kind: CoderKind, model: Option<&str>) -> Result<WorkTaskRunResult> {
     let (
         attempt_kind,
         workspace_reads,
@@ -378,8 +387,9 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         attempt_kind.is_review_only_like(),
         config.resolver,
         config.extra_args,
-        config.coder_kind,
+        coder_kind,
         config.no_sandbox,
+        model,
     );
 
     if let Err(error) = readable_workspaces.finish() {
@@ -458,7 +468,7 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     })
 }
 
-fn run_behavior_tests_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
+fn run_behavior_tests_task(config: WorkTaskRunConfig<'_>, coder_kind: CoderKind, model: Option<&str>) -> Result<WorkTaskRunResult> {
     let (attempt_kind, workspace_reads, candidate_commit, artifact_dir, results_path) = {
         let _lock = config
             .store_lock
@@ -591,8 +601,9 @@ fn run_behavior_tests_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunR
         &readable_workspace_paths,
         config.resolver,
         config.extra_args,
-        config.coder_kind,
+        coder_kind,
         config.no_sandbox,
+        model,
     );
 
     if let Err(error) = readable_workspaces.finish() {
@@ -1145,6 +1156,38 @@ fn ensure_registered_worktree(project_root: &Path, workspace_path: &Path) -> Res
     )
 }
 
+fn capture_coder_info(coder_kind: CoderKind, model: &str, artifact_dir: &Path) {
+    let binary = coder_kind.as_str();
+    let version = std::process::Command::new(binary)
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let info = serde_json::json!({
+        "coder": binary,
+        "version": version,
+        "model": model,
+        "captured_at": chrono::Utc::now().to_rfc3339(),
+    });
+
+    if let Err(e) = fs::create_dir_all(artifact_dir) {
+        eprintln!("warning: cannot create artifact dir for coder-info.json: {e}");
+        return;
+    }
+    let path = artifact_dir.join("coder-info.json");
+    if let Err(e) = fs::write(&path, serde_json::to_string_pretty(&info).unwrap_or_default()) {
+        eprintln!("warning: cannot write coder-info.json: {e}");
+    }
+}
+
 fn run_task_coder(
     item: &WorkItem,
     attempt_id: &str,
@@ -1156,6 +1199,7 @@ fn run_task_coder(
     extra_args: &[String],
     coder_kind: CoderKind,
     no_sandbox: bool,
+    model: Option<&str>,
 ) -> Result<()> {
     if !no_sandbox {
         os::check_prerequisites_for(coder_kind)?;
@@ -1218,13 +1262,25 @@ fn run_task_coder(
         )?
     };
 
+    let effective_model = model
+        .map(str::to_string)
+        .unwrap_or_else(|| coder_kind.default_model());
+
     eprintln!("  Factory           work task run");
     eprintln!("  Work Item         {}", item.id);
     eprintln!("  Attempt           {attempt_id}");
     eprintln!("  Task              {task_id}");
+    eprintln!("  Coder             {}", coder_kind.as_str());
+    eprintln!("  Model             {effective_model}");
     eprintln!("  Worktree          {}", workspace_path.display());
 
-    let coder = coder_kind.boxed(sandbox);
+    if let Some(ref tp) = transcript_path {
+        if let Some(artifact_dir) = tp.parent() {
+            capture_coder_info(coder_kind, &effective_model, artifact_dir);
+        }
+    }
+
+    let coder = coder_kind.boxed_with_model(sandbox, model);
     let exit_code = coder.run(
         &prompt,
         &system_prompt,
@@ -1316,6 +1372,7 @@ fn run_review_coder(
     extra_args: &[String],
     coder_kind: CoderKind,
     no_sandbox: bool,
+    model: Option<&str>,
 ) -> Result<()> {
     if !no_sandbox {
         os::check_prerequisites_for(coder_kind)?;
@@ -1347,14 +1404,22 @@ fn run_review_coder(
         )?
     };
 
+    let effective_model = model
+        .map(str::to_string)
+        .unwrap_or_else(|| coder_kind.default_model());
+
     eprintln!("  Factory           work task run");
     eprintln!("  Work Item         {}", item.id);
     eprintln!("  Attempt           {attempt_id}");
     eprintln!("  Task              {task_id}");
+    eprintln!("  Coder             {}", coder_kind.as_str());
+    eprintln!("  Model             {effective_model}");
     eprintln!("  Artifact area     {}", artifact_dir.display());
 
+    capture_coder_info(coder_kind, &effective_model, artifact_dir);
+
     let transcript_path = artifact_dir.join("transcript.jsonl");
-    let coder = coder_kind.boxed(sandbox);
+    let coder = coder_kind.boxed_with_model(sandbox, model);
     let exit_code = coder.run(
         &prompts.review_prompt,
         &prompts.system_prompt,
@@ -1388,6 +1453,7 @@ fn run_behavior_tests_coder(
     extra_args: &[String],
     coder_kind: CoderKind,
     no_sandbox: bool,
+    model: Option<&str>,
 ) -> Result<()> {
     if !no_sandbox {
         os::check_prerequisites_for(coder_kind)?;
@@ -1506,14 +1572,22 @@ fn run_behavior_tests_coder(
         )?
     };
 
+    let effective_model = model
+        .map(str::to_string)
+        .unwrap_or_else(|| coder_kind.default_model());
+
     eprintln!("  Factory           work task run");
     eprintln!("  Work Item         {}", item.id);
     eprintln!("  Attempt           {attempt_id}");
     eprintln!("  Task              {task_id} (behavior-tests)");
+    eprintln!("  Coder             {}", coder_kind.as_str());
+    eprintln!("  Model             {effective_model}");
     eprintln!("  Artifact area     {}", artifact_dir.display());
 
+    capture_coder_info(coder_kind, &effective_model, artifact_dir);
+
     let transcript_path = artifact_dir.join("transcript.jsonl");
-    let coder = coder_kind.boxed(sandbox);
+    let coder = coder_kind.boxed_with_model(sandbox, model);
     let exit_code = coder.run(
         &prompt,
         &system_prompt,
@@ -2320,7 +2394,6 @@ mod tests {
             task_id: "attempt-1-write-1",
             resolver: &resolver,
             extra_args: &[],
-            coder_kind: CoderKind::Codex,
             no_sandbox: true,
             store_lock: None,
         }) {
@@ -2585,5 +2658,27 @@ mod tests {
                 ".factory/work/artifacts/work-1/attempt-1/attempt-1-behavior-tests/transcript.jsonl"
             )
         );
+    }
+
+    #[test]
+    fn capture_coder_info_writes_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifact_dir = dir.path().join("artifacts");
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+
+        // capture_coder_info runs `<binary> --version` which may not be
+        // available in test environments, but the function handles that
+        // gracefully by writing "unknown" for the version.
+        capture_coder_info(CoderKind::Claude, "test-model", &artifact_dir);
+
+        let info_path = artifact_dir.join("coder-info.json");
+        assert!(info_path.exists(), "coder-info.json should be created");
+
+        let content = std::fs::read_to_string(&info_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["coder"], "claude");
+        assert_eq!(parsed["model"], "test-model");
+        assert!(parsed["captured_at"].is_string());
+        assert!(parsed["version"].is_string());
     }
 }

@@ -18,6 +18,8 @@ pub struct UsageRow {
     pub cached_input_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
@@ -175,6 +177,7 @@ pub fn extract_claude_usage(
                 .or_else(|| usage["cached_input_tokens"].as_u64())
                 .unwrap_or(0),
             reasoning_output_tokens: None,
+            duration_ms: val["duration_ms"].as_u64(),
         });
     }
 
@@ -232,6 +235,68 @@ pub fn extract_codex_usage(
             output_tokens,
             cached_input_tokens: last_usage["cached_input_tokens"].as_u64().unwrap_or(0),
             reasoning_output_tokens: last_usage["reasoning_output_tokens"].as_u64(),
+            duration_ms: val["payload"]["info"]["duration_ms"].as_u64(),
+        });
+    }
+
+    rows
+}
+
+/// Extract per-turn token usage from a Pi JSONL transcript.
+///
+/// Pi's `--mode json` emits events with `type: "result"` containing
+/// `usage` objects similar to Claude's format. Each result event
+/// produces one UsageRow.
+pub fn extract_pi_usage(
+    transcript_path: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    task_id: &str,
+) -> Vec<UsageRow> {
+    let content = match fs::read_to_string(transcript_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut rows = Vec::new();
+    for line in content.lines() {
+        let val: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        if val["type"].as_str() != Some("result") {
+            continue;
+        }
+
+        let usage = &val["usage"];
+        let input_tokens = match usage["input_tokens"].as_u64() {
+            Some(n) => n,
+            None => continue,
+        };
+        let output_tokens = match usage["output_tokens"].as_u64() {
+            Some(n) => n,
+            None => continue,
+        };
+
+        let model = val["model"]
+            .as_str()
+            .or_else(|| val["session_model"].as_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        rows.push(UsageRow {
+            ts: chrono::Utc::now().to_rfc3339(),
+            coder: "pi".to_string(),
+            work_item_id: work_item_id.to_string(),
+            attempt_id: attempt_id.to_string(),
+            task_id: task_id.to_string(),
+            model,
+            input_tokens,
+            output_tokens,
+            cached_input_tokens: usage["cached_input_tokens"].as_u64().unwrap_or(0),
+            reasoning_output_tokens: None,
+            duration_ms: val["duration_ms"].as_u64(),
         });
     }
 
@@ -248,6 +313,7 @@ pub fn log_usage_from_transcript(
     let rows = match coder {
         "claude" => extract_claude_usage(transcript_path, work_item_id, attempt_id, task_id),
         "codex" => extract_codex_usage(transcript_path, work_item_id, attempt_id, task_id),
+        "pi" => extract_pi_usage(transcript_path, work_item_id, attempt_id, task_id),
         _ => return,
     };
 
@@ -280,6 +346,7 @@ mod tests {
             output_tokens: 500,
             cached_input_tokens: 200,
             reasoning_output_tokens: Some(100),
+            duration_ms: None,
         };
         let json = serde_json::to_string(&row).unwrap();
         let parsed: UsageRow = serde_json::from_str(&json).unwrap();
@@ -304,6 +371,7 @@ mod tests {
             output_tokens: 500,
             cached_input_tokens: 0,
             reasoning_output_tokens: None,
+            duration_ms: None,
         };
         let json = serde_json::to_string(&row).unwrap();
         assert!(!json.contains("reasoning_output_tokens"));
@@ -326,6 +394,7 @@ mod tests {
             output_tokens: 50,
             cached_input_tokens: 0,
             reasoning_output_tokens: None,
+            duration_ms: None,
         };
         append_rows_to(&path, &[row]).unwrap();
         assert!(path.exists());
@@ -363,6 +432,7 @@ mod tests {
                 output_tokens: 50,
                 cached_input_tokens: 0,
                 reasoning_output_tokens: None,
+                duration_ms: None,
             },
             UsageRow {
                 ts: old,
@@ -375,6 +445,7 @@ mod tests {
                 output_tokens: 100,
                 cached_input_tokens: 0,
                 reasoning_output_tokens: None,
+                duration_ms: None,
             },
         ];
         append_rows_to(&log_path, &rows).unwrap();
@@ -406,6 +477,7 @@ mod tests {
                 output_tokens: 200,
                 cached_input_tokens: 0,
                 reasoning_output_tokens: None,
+                duration_ms: None,
             },
             UsageRow {
                 ts: old,
@@ -418,6 +490,7 @@ mod tests {
                 output_tokens: 500,
                 cached_input_tokens: 0,
                 reasoning_output_tokens: None,
+                duration_ms: None,
             },
         ];
         append_rows_to(&log_path, &rows).unwrap();
@@ -597,5 +670,147 @@ mod tests {
     fn extract_codex_usage_returns_empty_for_missing_file() {
         let rows = extract_codex_usage(Path::new("/nonexistent"), "wi-1", "a1", "t1");
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn extract_pi_usage_returns_one_row_per_result_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                r#"{"type":"system","subtype":"init","session_id":"s1","model":"qwen3-30b-a3b"}"#,
+                "\n",
+                r#"{"type":"result","model":"qwen3-30b-a3b","usage":{"input_tokens":500,"output_tokens":200,"cached_input_tokens":0},"duration_ms":4000}"#,
+                "\n",
+                r#"{"type":"result","model":"qwen3-30b-a3b","usage":{"input_tokens":800,"output_tokens":300,"cached_input_tokens":50},"duration_ms":3000}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let rows = extract_pi_usage(&path, "wi-1", "attempt-1", "task-1");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].input_tokens, 500);
+        assert_eq!(rows[0].output_tokens, 200);
+        assert_eq!(rows[0].coder, "pi");
+        assert_eq!(rows[0].model, "qwen3-30b-a3b");
+        assert_eq!(rows[0].duration_ms, Some(4000));
+        assert_eq!(rows[1].input_tokens, 800);
+    }
+
+    #[test]
+    fn extract_pi_usage_returns_empty_when_no_result_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                r#"{"type":"system","subtype":"init","session_id":"s1","model":"qwen3-30b-a3b"}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let rows = extract_pi_usage(&path, "wi-1", "attempt-1", "task-1");
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn extract_pi_usage_populates_model_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        fs::write(
+            &path,
+            r#"{"type":"result","model":"custom-model","usage":{"input_tokens":100,"output_tokens":50}}"#,
+        )
+        .unwrap();
+
+        let rows = extract_pi_usage(&path, "wi-1", "a1", "t1");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].model, "custom-model");
+    }
+
+    #[test]
+    fn extract_pi_usage_skips_malformed_lines_silently() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "not valid json\n",
+                r#"{"type":"result","usage":{"input_tokens":100,"output_tokens":50}}"#,
+                "\n",
+                r#"{"type":"result","no_usage":true}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let rows = extract_pi_usage(&path, "wi-1", "a1", "t1");
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn extract_pi_usage_returns_empty_for_missing_file() {
+        let rows = extract_pi_usage(Path::new("/nonexistent"), "wi-1", "a1", "t1");
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn usage_row_serializes_with_duration_ms() {
+        let row = UsageRow {
+            ts: "2026-06-17T10:00:00Z".to_string(),
+            coder: "claude".to_string(),
+            work_item_id: "wi-1".to_string(),
+            attempt_id: "a1".to_string(),
+            task_id: "t1".to_string(),
+            model: "claude-opus-4-6".to_string(),
+            input_tokens: 100,
+            output_tokens: 50,
+            cached_input_tokens: 0,
+            reasoning_output_tokens: None,
+            duration_ms: Some(5000),
+        };
+        let json = serde_json::to_string(&row).unwrap();
+        assert!(json.contains("\"duration_ms\":5000"));
+        let parsed: UsageRow = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.duration_ms, Some(5000));
+    }
+
+    #[test]
+    fn usage_row_skips_serialization_when_duration_ms_is_none() {
+        let row = UsageRow {
+            ts: "2026-06-17T10:00:00Z".to_string(),
+            coder: "claude".to_string(),
+            work_item_id: "wi-1".to_string(),
+            attempt_id: "a1".to_string(),
+            task_id: "t1".to_string(),
+            model: "claude-opus-4-6".to_string(),
+            input_tokens: 100,
+            output_tokens: 50,
+            cached_input_tokens: 0,
+            reasoning_output_tokens: None,
+            duration_ms: None,
+        };
+        let json = serde_json::to_string(&row).unwrap();
+        assert!(!json.contains("duration_ms"));
+    }
+
+    #[test]
+    fn extract_claude_usage_populates_duration_ms() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        fs::write(
+            &path,
+            r#"{"type":"result","model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":50},"duration_ms":5000}"#,
+        )
+        .unwrap();
+
+        let rows = extract_claude_usage(&path, "wi-1", "a1", "t1");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].duration_ms, Some(5000));
     }
 }

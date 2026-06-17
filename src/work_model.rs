@@ -7,6 +7,8 @@ use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
+use crate::coder::CoderKind;
+
 pub fn now_iso8601() -> String {
     chrono::Utc::now().to_rfc3339()
 }
@@ -198,6 +200,7 @@ impl WorkItem {
             work_item_id: self.id.clone(),
             kind: AttemptKind::Write,
             status: AttemptStatus::Planned,
+            coder_mapping: CoderMapping::default(),
             tasks: vec![Task {
                 id: task_id,
                 kind: TaskKind::Write,
@@ -294,6 +297,7 @@ impl WorkItem {
             work_item_id: self.id.clone(),
             kind: AttemptKind::ReviewOnly,
             status: AttemptStatus::Reviewing,
+            coder_mapping: CoderMapping::default(),
             tasks,
             review_state: Some(AttemptReviewState::NotReviewed),
             artifacts: Vec::new(),
@@ -366,6 +370,7 @@ impl WorkItem {
             work_item_id: self.id.clone(),
             kind: AttemptKind::PostMergeReview,
             status: AttemptStatus::Reviewing,
+            coder_mapping: CoderMapping::default(),
             tasks,
             review_state: Some(AttemptReviewState::NotReviewed),
             artifacts: Vec::new(),
@@ -910,6 +915,151 @@ fn push_planning_section(sections: &mut Vec<String>, title: &str, content: &Opti
     }
 }
 
+/// A (CoderKind, model name) pair for one Task kind in a coder mapping.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoderModelPair {
+    pub coder: CoderKind,
+    pub model: String,
+}
+
+/// Per-Task-kind coder mapping stored on each Attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoderMapping {
+    pub write: CoderModelPair,
+    pub review: CoderModelPair,
+    #[serde(rename = "behavior-tests")]
+    pub behavior_tests: CoderModelPair,
+}
+
+impl Default for CoderMapping {
+    fn default() -> Self {
+        let default_pair = CoderModelPair {
+            coder: CoderKind::Claude,
+            model: String::new(),
+        };
+        Self {
+            write: default_pair.clone(),
+            review: default_pair.clone(),
+            behavior_tests: default_pair,
+        }
+    }
+}
+
+impl CoderMapping {
+    pub fn for_task_kind(&self, kind: TaskKind) -> &CoderModelPair {
+        match kind {
+            TaskKind::Write => &self.write,
+            TaskKind::Review => &self.review,
+            TaskKind::BehaviorTests => &self.behavior_tests,
+            _ => &self.write,
+        }
+    }
+}
+
+/// Inputs for resolving a CoderMapping at Attempt creation time.
+#[derive(Debug, Default)]
+pub struct CoderMappingInputs {
+    pub write_coder: Option<String>,
+    pub write_model: Option<String>,
+    pub review_coder: Option<String>,
+    pub review_model: Option<String>,
+    pub behavior_tests_coder: Option<String>,
+    pub behavior_tests_model: Option<String>,
+    pub global_coder: Option<String>,
+}
+
+impl CoderMappingInputs {
+    pub fn from_env() -> Self {
+        Self {
+            write_coder: std::env::var("FACTORY_WRITE_CODER").ok(),
+            write_model: std::env::var("FACTORY_WRITE_MODEL").ok(),
+            review_coder: std::env::var("FACTORY_REVIEW_CODER").ok(),
+            review_model: std::env::var("FACTORY_REVIEW_MODEL").ok(),
+            behavior_tests_coder: std::env::var("FACTORY_BEHAVIOR_TESTS_CODER").ok(),
+            behavior_tests_model: std::env::var("FACTORY_BEHAVIOR_TESTS_MODEL").ok(),
+            global_coder: std::env::var("FACTORY_CODER").ok(),
+        }
+    }
+
+    pub fn merge_cli(
+        mut self,
+        write_coder: Option<String>,
+        write_model: Option<String>,
+        review_coder: Option<String>,
+        review_model: Option<String>,
+        behavior_tests_coder: Option<String>,
+        behavior_tests_model: Option<String>,
+        global_coder: Option<String>,
+    ) -> Self {
+        if write_coder.is_some() {
+            self.write_coder = write_coder;
+        }
+        if write_model.is_some() {
+            self.write_model = write_model;
+        }
+        if review_coder.is_some() {
+            self.review_coder = review_coder;
+        }
+        if review_model.is_some() {
+            self.review_model = review_model;
+        }
+        if behavior_tests_coder.is_some() {
+            self.behavior_tests_coder = behavior_tests_coder;
+        }
+        if behavior_tests_model.is_some() {
+            self.behavior_tests_model = behavior_tests_model;
+        }
+        if global_coder.is_some() {
+            self.global_coder = global_coder;
+        }
+        self
+    }
+}
+
+/// Resolve a fully-populated CoderMapping from CLI flags, env vars, and defaults.
+///
+/// Precedence per Task kind:
+/// 1. Per-Task-kind CLI flag / env var
+/// 2. Global `FACTORY_CODER` / per-Coder model env var
+/// 3. Coder's built-in default
+pub fn resolve_coder_mapping(
+    inputs: &CoderMappingInputs,
+) -> Result<CoderMapping, anyhow::Error> {
+    let global_kind = inputs
+        .global_coder
+        .as_deref()
+        .map(|s| CoderKind::resolve(Some(s)))
+        .transpose()?;
+
+    let resolve_pair =
+        |task_coder: &Option<String>,
+         task_model: &Option<String>|
+         -> Result<CoderModelPair, anyhow::Error> {
+            let coder = if let Some(c) = task_coder {
+                CoderKind::resolve(Some(c))?
+            } else {
+                global_kind.unwrap_or(CoderKind::Claude)
+            };
+
+            let model = if let Some(m) = task_model {
+                m.clone()
+            } else {
+                coder.default_model()
+            };
+
+            Ok(CoderModelPair { coder, model })
+        };
+
+    Ok(CoderMapping {
+        write: resolve_pair(&inputs.write_coder, &inputs.write_model)?,
+        review: resolve_pair(&inputs.review_coder, &inputs.review_model)?,
+        behavior_tests: resolve_pair(
+            &inputs.behavior_tests_coder,
+            &inputs.behavior_tests_model,
+        )?,
+    })
+}
+
 /// One execution history branch for a work item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attempt {
@@ -918,6 +1068,8 @@ pub struct Attempt {
     #[serde(default, skip_serializing_if = "attempt_kind_is_write")]
     pub kind: AttemptKind,
     pub status: AttemptStatus,
+    #[serde(default)]
+    pub coder_mapping: CoderMapping,
     #[serde(default)]
     pub tasks: Vec<Task>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1946,6 +2098,8 @@ struct AttemptRecord {
     #[serde(default)]
     order: usize,
     status: AttemptStatus,
+    #[serde(default)]
+    coder_mapping: CoderMapping,
     #[serde(skip_serializing_if = "Option::is_none")]
     review_state: Option<AttemptReviewState>,
     #[serde(default)]
@@ -1998,6 +2152,7 @@ impl AttemptRecord {
             kind: attempt.kind.clone(),
             order,
             status: attempt.status.clone(),
+            coder_mapping: attempt.coder_mapping.clone(),
             review_state: attempt.review_state.clone(),
             artifacts: attempt.artifacts.clone(),
             created_at: attempt.created_at.clone(),
@@ -2013,6 +2168,7 @@ impl From<AttemptRecord> for Attempt {
             work_item_id: record.work_item_id,
             kind: record.kind,
             status: record.status,
+            coder_mapping: record.coder_mapping,
             tasks: Vec::new(),
             review_state: record.review_state,
             artifacts: record.artifacts,
@@ -3635,6 +3791,7 @@ mod tests {
                 work_item_id: "work-1".to_string(),
                 kind: AttemptKind::Write,
                 status: AttemptStatus::Planned,
+                coder_mapping: CoderMapping::default(),
                 tasks: vec![
                     completed_write_task("attempt-1-write-1", "original"),
                     completed_write_task("attempt-1-write-2", "followup"),
@@ -3864,6 +4021,7 @@ mod tests {
                 work_item_id: "work-1".to_string(),
                 kind: AttemptKind::Write,
                 status: AttemptStatus::Planned,
+                coder_mapping: CoderMapping::default(),
                 tasks: vec![
                     completed_write_task("attempt-1-write-1", "initial"),
                     Task {
@@ -3949,6 +4107,7 @@ mod tests {
                 work_item_id: "work-1".to_string(),
                 kind: AttemptKind::Write,
                 status: AttemptStatus::Complete,
+                coder_mapping: CoderMapping::default(),
                 tasks: vec![task(TaskKind::Write, vec![workspace("candidate")])],
                 review_state: Some(AttemptReviewState::Passed),
                 artifacts: vec![ArtifactRef {
@@ -3984,6 +4143,7 @@ mod tests {
                 work_item_id: "work-1".to_string(),
                 kind: AttemptKind::Write,
                 status: AttemptStatus::Complete,
+                coder_mapping: CoderMapping::default(),
                 tasks: vec![
                     completed_write_task("attempt-1-write-1", "original"),
                     completed_write_task("attempt-1-write-2", "followup"),
@@ -4031,6 +4191,7 @@ mod tests {
                 work_item_id: "work-1".to_string(),
                 kind: AttemptKind::Write,
                 status: AttemptStatus::Complete,
+                coder_mapping: CoderMapping::default(),
                 tasks: vec![completed_write_task("attempt-1-write-1", "original")],
                 review_state: Some(AttemptReviewState::Passed),
                 artifacts: Vec::new(),
@@ -4065,6 +4226,7 @@ mod tests {
                 work_item_id: "work-1".to_string(),
                 kind: AttemptKind::Write,
                 status: AttemptStatus::Complete,
+                coder_mapping: CoderMapping::default(),
                 tasks: vec![completed_write_task("attempt-1-write-1", "original")],
                 review_state: Some(AttemptReviewState::Passed),
                 artifacts: Vec::new(),
@@ -4101,6 +4263,7 @@ mod tests {
                 work_item_id: "work-1".to_string(),
                 kind: AttemptKind::Write,
                 status: AttemptStatus::Reviewing,
+                coder_mapping: CoderMapping::default(),
                 tasks: vec![completed_write_task("attempt-1-write-1", "original")],
                 review_state: Some(AttemptReviewState::Uncertain),
                 artifacts: Vec::new(),
@@ -4152,6 +4315,7 @@ mod tests {
                 work_item_id: "work-1".to_string(),
                 kind: AttemptKind::Write,
                 status: AttemptStatus::Complete,
+                coder_mapping: CoderMapping::default(),
                 tasks: vec![completed_write_task("attempt-1-write-1", "original")],
                 review_state: Some(AttemptReviewState::Passed),
                 artifacts: Vec::new(),
@@ -4203,6 +4367,7 @@ mod tests {
                 work_item_id: "work-1".to_string(),
                 kind: AttemptKind::Write,
                 status: AttemptStatus::Reviewing,
+                coder_mapping: CoderMapping::default(),
                 tasks: vec![completed_write_task("attempt-1-write-1", "original")],
                 review_state: Some(AttemptReviewState::Failed),
                 artifacts: Vec::new(),
@@ -4255,6 +4420,7 @@ mod tests {
                 work_item_id: "work-1".to_string(),
                 kind: AttemptKind::Write,
                 status: AttemptStatus::Complete,
+                coder_mapping: CoderMapping::default(),
                 tasks: vec![completed_write_task("attempt-1-write-1", "original")],
                 review_state: Some(AttemptReviewState::Passed),
                 artifacts: Vec::new(),
@@ -4307,6 +4473,7 @@ mod tests {
             work_item_id: "work-1".to_string(),
             kind: AttemptKind::Write,
             status: AttemptStatus::Reviewing,
+            coder_mapping: CoderMapping::default(),
             tasks: Vec::new(),
             review_state: Some(AttemptReviewState::Uncertain),
             artifacts: Vec::new(),
@@ -4380,6 +4547,7 @@ mod tests {
                 work_item_id: "work-1".to_string(),
                 kind: AttemptKind::Write,
                 status: AttemptStatus::Reviewing,
+                coder_mapping: CoderMapping::default(),
                 tasks: vec![
                     completed_write_task("attempt-1-write-1", "initial"),
                     Task {
@@ -4483,6 +4651,7 @@ mod tests {
                 work_item_id: id.to_string(),
                 kind: AttemptKind::Write,
                 status: AttemptStatus::Complete,
+                coder_mapping: CoderMapping::default(),
                 tasks: vec![Task {
                     work_item_id: id.to_string(),
                     ..completed_write_task("attempt-1-write-1", "initial")
@@ -4622,6 +4791,7 @@ mod tests {
             work_item_id: "work-1".to_string(),
             kind: AttemptKind::Write,
             status: AttemptStatus::Complete,
+            coder_mapping: CoderMapping::default(),
             tasks: vec![completed_write_task("attempt-1-write-1", "first")],
             review_state: Some(AttemptReviewState::Passed),
             artifacts: Vec::new(),
@@ -4768,6 +4938,7 @@ mod tests {
             work_item_id: "w-1".to_string(),
             kind: AttemptKind::Write,
             status: AttemptStatus::Complete,
+            coder_mapping: CoderMapping::default(),
             tasks: Vec::new(),
             review_state: None,
             artifacts: Vec::new(),
@@ -4917,6 +5088,7 @@ mod tests {
             work_item_id: "w-1".to_string(),
             kind: AttemptKind::Write,
             status: AttemptStatus::Executing,
+            coder_mapping: CoderMapping::default(),
             tasks: Vec::new(),
             review_state: None,
             artifacts: Vec::new(),
@@ -5055,6 +5227,151 @@ mod tests {
         assert_eq!(
             reloaded.merge_candidates[0].merge_state.auto_merge_skipped,
             Some(true)
+        );
+    }
+
+    #[test]
+    fn coder_mapping_round_trips_json() {
+        let mapping = CoderMapping {
+            write: CoderModelPair {
+                coder: CoderKind::Pi,
+                model: "qwen3-30b-a3b".to_string(),
+            },
+            review: CoderModelPair {
+                coder: CoderKind::Claude,
+                model: "claude-opus-4-6".to_string(),
+            },
+            behavior_tests: CoderModelPair {
+                coder: CoderKind::Codex,
+                model: "o3".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&mapping).unwrap();
+        assert!(json.contains("\"behavior-tests\""));
+        let parsed: CoderMapping = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, mapping);
+    }
+
+    #[test]
+    fn attempt_without_coder_mapping_deserializes_with_default() {
+        let json = r#"{"id":"a1","work_item_id":"w1","status":"planned"}"#;
+        let record: Attempt = serde_json::from_str(json).unwrap();
+        assert_eq!(record.coder_mapping.write.coder, CoderKind::Claude);
+        assert_eq!(record.coder_mapping.review.coder, CoderKind::Claude);
+        assert_eq!(record.coder_mapping.behavior_tests.coder, CoderKind::Claude);
+    }
+
+    #[test]
+    fn attempt_with_coder_mapping_round_trips() {
+        let attempt = Attempt {
+            id: "a1".to_string(),
+            work_item_id: "w1".to_string(),
+            kind: AttemptKind::Write,
+            status: AttemptStatus::Planned,
+            coder_mapping: CoderMapping {
+                write: CoderModelPair {
+                    coder: CoderKind::Pi,
+                    model: "qwen3-30b-a3b".to_string(),
+                },
+                review: CoderModelPair {
+                    coder: CoderKind::Claude,
+                    model: "claude-opus-4-6".to_string(),
+                },
+                behavior_tests: CoderModelPair {
+                    coder: CoderKind::Claude,
+                    model: "claude-opus-4-6".to_string(),
+                },
+            },
+            tasks: Vec::new(),
+            review_state: None,
+            artifacts: Vec::new(),
+            created_at: None,
+            completed_at: None,
+        };
+        let json = serde_json::to_string(&attempt).unwrap();
+        let parsed: Attempt = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.coder_mapping.write.coder, CoderKind::Pi);
+        assert_eq!(parsed.coder_mapping.review.coder, CoderKind::Claude);
+    }
+
+    #[test]
+    fn coder_mapping_for_task_kind_returns_correct_pair() {
+        let mapping = CoderMapping {
+            write: CoderModelPair {
+                coder: CoderKind::Pi,
+                model: "write-model".to_string(),
+            },
+            review: CoderModelPair {
+                coder: CoderKind::Claude,
+                model: "review-model".to_string(),
+            },
+            behavior_tests: CoderModelPair {
+                coder: CoderKind::Codex,
+                model: "bt-model".to_string(),
+            },
+        };
+        assert_eq!(mapping.for_task_kind(TaskKind::Write).coder, CoderKind::Pi);
+        assert_eq!(
+            mapping.for_task_kind(TaskKind::Review).coder,
+            CoderKind::Claude
+        );
+        assert_eq!(
+            mapping.for_task_kind(TaskKind::BehaviorTests).coder,
+            CoderKind::Codex
+        );
+    }
+
+    #[test]
+    fn resolve_coder_mapping_default_when_nothing_set() {
+        let inputs = CoderMappingInputs::default();
+        let mapping = resolve_coder_mapping(&inputs).unwrap();
+        assert_eq!(mapping.write.coder, CoderKind::Claude);
+        assert_eq!(mapping.review.coder, CoderKind::Claude);
+        assert_eq!(mapping.behavior_tests.coder, CoderKind::Claude);
+        assert!(!mapping.write.model.is_empty());
+    }
+
+    #[test]
+    fn resolve_coder_mapping_factory_coder_sets_all_task_kinds() {
+        let inputs = CoderMappingInputs {
+            global_coder: Some("pi".to_string()),
+            ..Default::default()
+        };
+        let mapping = resolve_coder_mapping(&inputs).unwrap();
+        assert_eq!(mapping.write.coder, CoderKind::Pi);
+        assert_eq!(mapping.review.coder, CoderKind::Pi);
+        assert_eq!(mapping.behavior_tests.coder, CoderKind::Pi);
+    }
+
+    #[test]
+    fn resolve_coder_mapping_per_task_cli_flag_wins() {
+        let inputs = CoderMappingInputs {
+            global_coder: Some("claude".to_string()),
+            write_coder: Some("pi".to_string()),
+            write_model: Some("custom-model".to_string()),
+            ..Default::default()
+        };
+        let mapping = resolve_coder_mapping(&inputs).unwrap();
+        assert_eq!(mapping.write.coder, CoderKind::Pi);
+        assert_eq!(mapping.write.model, "custom-model");
+        assert_eq!(mapping.review.coder, CoderKind::Claude);
+    }
+
+    #[test]
+    fn resolve_coder_mapping_stores_resolved_model_at_creation() {
+        let inputs = CoderMappingInputs::default();
+        let mapping = resolve_coder_mapping(&inputs).unwrap();
+        assert!(
+            !mapping.write.model.is_empty(),
+            "model should be resolved at creation"
+        );
+        assert!(
+            !mapping.review.model.is_empty(),
+            "model should be resolved at creation"
+        );
+        assert!(
+            !mapping.behavior_tests.model.is_empty(),
+            "model should be resolved at creation"
         );
     }
 }

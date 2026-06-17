@@ -92,6 +92,7 @@ fn sandbox_profile_path(coder_kind: CoderKind) -> &'static str {
     match coder_kind {
         CoderKind::Claude => "sandbox/claude-code.sb",
         CoderKind::Codex => "sandbox/codex.sb",
+        CoderKind::Pi => "sandbox/pi.sb",
     }
 }
 
@@ -132,8 +133,7 @@ pub fn check_prerequisites() -> Result<()> {
 
 /// Check that sandbox prerequisites and the selected coder are available.
 pub fn check_prerequisites_for(coder_kind: CoderKind) -> Result<()> {
-    if matches!(coder_kind, CoderKind::Claude | CoderKind::Codex) && !command_exists("sandbox-exec")
-    {
+    if !command_exists("sandbox-exec") {
         bail!("sandbox-exec not found (macOS only)");
     }
     check_coder_prerequisite(coder_kind)?;

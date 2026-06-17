@@ -1,7 +1,7 @@
 use factory::work_model::{
-    Attempt, AttemptKind, AttemptReviewState, AttemptStatus, Task, TaskArtifactArea, TaskKind,
-    TaskOutput, TaskStatus, WorkItem, WorkModelError, WorkModelStorageError, WorkModelStore,
-    WorkspaceAccess, WorkspaceRef,
+    Attempt, AttemptKind, AttemptReviewState, AttemptStatus, CoderMapping, Task, TaskArtifactArea,
+    TaskKind, TaskOutput, TaskStatus, WorkItem, WorkModelError, WorkModelStorageError,
+    WorkModelStore, WorkspaceAccess, WorkspaceRef,
 };
 use std::fs;
 
@@ -24,6 +24,7 @@ fn documented_work_item() -> WorkItem {
             work_item_id: "work-review".to_string(),
             kind: AttemptKind::Write,
             status: AttemptStatus::Complete,
+            coder_mapping: CoderMapping::default(),
             tasks: vec![Task {
                 id: "write-review".to_string(),
                 kind: TaskKind::Write,

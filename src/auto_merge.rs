@@ -214,8 +214,8 @@ fn sleep_with_shutdown_check(duration: Duration) {
 mod tests {
     use super::*;
     use crate::work_model::{
-        Attempt, AttemptKind, MergeCandidateMergeState, Task, TaskKind, TaskOutput, TaskStatus,
-        WorkItem, WorkspaceAccess, WorkspaceRef,
+        Attempt, AttemptKind, CoderMapping, MergeCandidateMergeState, Task, TaskKind, TaskOutput,
+        TaskStatus, WorkItem, WorkspaceAccess, WorkspaceRef,
     };
 
     fn make_work_item_with_candidate(
@@ -236,6 +236,7 @@ mod tests {
                 work_item_id: "wi-1".to_string(),
                 kind: AttemptKind::Write,
                 status: attempt_status,
+                coder_mapping: CoderMapping::default(),
                 tasks: vec![Task {
                     id: "attempt-1-write-1".to_string(),
                     kind: TaskKind::Write,
@@ -378,6 +379,7 @@ mod tests {
             work_item_id: "wi-1".to_string(),
             kind: AttemptKind::Write,
             status: AttemptStatus::Executing,
+            coder_mapping: CoderMapping::default(),
             tasks: vec![],
             review_state: None,
             artifacts: vec![],

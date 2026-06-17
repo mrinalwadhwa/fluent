@@ -1,5 +1,5 @@
 use factory::work_model::{
-    Attempt, AttemptKind, AttemptReviewState, AttemptStatus, MergeCandidate,
+    Attempt, AttemptKind, AttemptReviewState, AttemptStatus, CoderMapping, MergeCandidate,
     MergeCandidateMergeState, MergeCandidateReviewState, ReviewContext, Task, TaskArtifactArea,
     TaskKind, TaskOutput, TaskStatus, WorkItem, WorkModelError, WorkModelStorageError,
     WorkModelStore, WorkspaceAccess, WorkspaceRef, from_json,
@@ -56,6 +56,7 @@ fn work_item() -> WorkItem {
             work_item_id: "work-1".to_string(),
             kind: AttemptKind::Write,
             status: AttemptStatus::Complete,
+            coder_mapping: CoderMapping::default(),
             tasks: vec![task(TaskKind::Write)],
             review_state: Some(AttemptReviewState::Passed),
             artifacts: Vec::new(),
