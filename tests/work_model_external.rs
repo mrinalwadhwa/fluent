@@ -730,7 +730,12 @@ fn work_item_add_initial_attempt_creates_scheduler_facing_write_task() {
             path: "../work-6-work-1-attempt-1".to_string(),
         }]
     );
-    assert_eq!(task.artifact_area, None);
+    assert_eq!(
+        task.artifact_area,
+        Some(TaskArtifactArea {
+            path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1".to_string(),
+        })
+    );
     work_item.validate().unwrap();
 }
 

@@ -514,6 +514,7 @@ THE SYSTEM SHALL set `Task.artifact_area` to
 following the same convention as review and behavior-tests Tasks.
 Test: src/work_model.rs (initial_write_task_has_artifact_area_path)
 Test: src/work_model.rs (followup_write_task_has_artifact_area_path)
+Test: tests/work_model_external.rs (work_item_add_initial_attempt_creates_scheduler_facing_write_task)
 
 WHEN a `write` Task is executed,
 THE SYSTEM SHALL pass the path `<artifact_area>/transcript.jsonl` to
@@ -2512,7 +2513,13 @@ WHEN a transcript contains zero parseable token events,
 THE SYSTEM SHALL skip the append step silently (no warning).
 Test: src/usage.rs (extract_claude_usage_returns_empty_when_no_result_events,
 extract_codex_usage_skips_session_meta_and_response_item_events,
-append_rows_is_no_op_for_empty_slice)
+append_rows_is_no_op_for_empty_slice,
+log_usage_from_transcript_skips_empty_transcript)
+
+WHEN log_usage_from_transcript is called with an unknown coder type,
+THE SYSTEM SHALL return immediately without extracting or appending
+usage rows.
+Test: src/usage.rs (log_usage_from_transcript_skips_unknown_coder)
 
 WHEN usage rows are written to `usage.jsonl`,
 THE SYSTEM SHALL update `~/.config/factory/usage/summary.json`

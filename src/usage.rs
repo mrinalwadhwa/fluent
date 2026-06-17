@@ -813,4 +813,26 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].duration_ms, Some(5000));
     }
+
+    #[test]
+    fn log_usage_from_transcript_skips_unknown_coder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        fs::write(
+            &path,
+            r#"{"type":"result","model":"m","usage":{"input_tokens":100,"output_tokens":50}}"#,
+        )
+        .unwrap();
+
+        log_usage_from_transcript(&path, "unknown-coder", "wi-1", "a1", "t1");
+    }
+
+    #[test]
+    fn log_usage_from_transcript_skips_empty_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        fs::write(&path, "").unwrap();
+
+        log_usage_from_transcript(&path, "claude", "wi-1", "a1", "t1");
+    }
 }

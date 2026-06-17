@@ -9334,7 +9334,10 @@ fn work_queue_add_existing_with_priority_updates_only_priority() {
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("10"), "priority should be updated to 10");
+    assert!(
+        stdout.lines().any(|l| l.starts_with("10 ")),
+        "a line should start with priority 10: {stdout}"
+    );
     assert!(stdout.contains("wi-q2"));
 }
 
@@ -9356,7 +9359,7 @@ fn work_queue_list_format_includes_priority_queued_at_status_id() {
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let line = stdout.lines().next().unwrap();
-    assert!(line.contains("0"), "should contain default priority 0");
+    assert!(line.starts_with("0 "), "line should start with default priority 0: {line}");
     assert!(line.contains("queued"), "should contain status");
     assert!(line.contains("wi-fmt"), "should contain work item id");
 }
@@ -9471,7 +9474,20 @@ exit 0
         .spawn()
         .unwrap();
 
-    std::thread::sleep(std::time::Duration::from_secs(8));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let entry: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&queue_entry_path).unwrap()).unwrap();
+        let s = entry["status"].as_str().unwrap_or("");
+        if s == "done" || s == "failed" {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "scheduler did not reach terminal state within 30s, got: {s}"
+        );
+    }
     send_signal(child.id(), "TERM");
     let output = child.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
