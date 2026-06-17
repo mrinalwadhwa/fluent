@@ -516,7 +516,7 @@ pub struct RateLimitInfo {
 #[derive(Debug, Clone)]
 enum RateLimitState {
     Normal,
-    RateLimited { retry_at: SystemTime },
+    RateLimited,
 }
 
 fn rate_limit_retry_after() -> Duration {
@@ -672,9 +672,9 @@ fn transition_rate_limit_state(
                 "Factory",
                 &format!("Factory paused: {reason}. Will retry at {retry_time}."),
             );
-            RateLimitState::RateLimited { retry_at }
+            RateLimitState::RateLimited
         }
-        RateLimitState::RateLimited { .. } => RateLimitState::RateLimited { retry_at },
+        RateLimitState::RateLimited => RateLimitState::RateLimited,
     }
 }
 
@@ -710,7 +710,7 @@ where
     loop {
         let exit = run_with_transcript(build_cmd(), transcript_file)?;
         if exit == 0 {
-            if matches!(rl_state, RateLimitState::RateLimited { .. }) {
+            if matches!(rl_state, RateLimitState::RateLimited) {
                 crate::notify::notify("Factory", "Factory resumed after rate-limit pause.");
                 eprintln!("  Rate-limit cleared — resuming.");
             }
@@ -1155,7 +1155,7 @@ mod rate_limit_state_tests {
         let retry_at = SystemTime::now() + Duration::from_secs(300);
         let new_state = transition_rate_limit_state(&state, "Rate limited", retry_at, &notify);
 
-        assert!(matches!(new_state, RateLimitState::RateLimited { .. }));
+        assert!(matches!(new_state, RateLimitState::RateLimited));
         let notifications = calls.lock().unwrap();
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].0, "Factory");
@@ -1173,16 +1173,13 @@ mod rate_limit_state_tests {
                 .push((title.to_string(), body.to_string()));
         };
 
-        let retry_at = SystemTime::now() + Duration::from_secs(300);
-        let state = RateLimitState::RateLimited { retry_at };
+        let _retry_at = SystemTime::now() + Duration::from_secs(300);
+        let state = RateLimitState::RateLimited;
         let new_retry_at = SystemTime::now() + Duration::from_secs(600);
         let new_state =
             transition_rate_limit_state(&state, "Rate limited again", new_retry_at, &notify);
 
-        assert!(matches!(new_state, RateLimitState::RateLimited { .. }));
-        if let RateLimitState::RateLimited { retry_at } = new_state {
-            assert_eq!(retry_at, new_retry_at);
-        }
+        assert!(matches!(new_state, RateLimitState::RateLimited));
         let notifications = calls.lock().unwrap();
         assert_eq!(notifications.len(), 0);
     }
