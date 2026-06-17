@@ -281,9 +281,8 @@ fn cmd_work(
                 let runtime = runtime.unwrap_or_else(|| "local".to_string());
                 match runtime.as_str() {
                     "fargate" => {
-                        let coder_kind = CoderKind::resolve(
-                            coder_mapping.write.coder.as_str().into(),
-                        )?;
+                        let coder_kind =
+                            CoderKind::resolve(coder_mapping.write.coder.as_str().into())?;
                         fargate::launch_work_attempt(
                             project_root,
                             &work_item_id,
@@ -302,11 +301,7 @@ fn cmd_work(
                 // Store the resolved mapping on the Attempt before running.
                 {
                     let mut item = store.read_work_item(&work_item_id)?;
-                    if let Some(attempt) = item
-                        .attempts
-                        .iter_mut()
-                        .find(|a| a.id == attempt_id)
-                    {
+                    if let Some(attempt) = item.attempts.iter_mut().find(|a| a.id == attempt_id) {
                         attempt.coder_mapping = coder_mapping.clone();
                     }
                     store.write_work_item(&item)?;
@@ -595,11 +590,7 @@ fn cmd_work(
                 // Store the resolved mapping on the Attempt before running.
                 {
                     let mut item = store.read_work_item(&work_item_id)?;
-                    if let Some(attempt) = item
-                        .attempts
-                        .iter_mut()
-                        .find(|a| a.id == attempt_id)
-                    {
+                    if let Some(attempt) = item.attempts.iter_mut().find(|a| a.id == attempt_id) {
                         attempt.coder_mapping = coder_mapping;
                     }
                     store.write_work_item(&item)?;

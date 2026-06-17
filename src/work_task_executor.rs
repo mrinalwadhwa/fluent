@@ -44,7 +44,9 @@ pub fn run_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", config.task_id))?;
 
     let task_kind = item.attempts[attempt_index].tasks[task_index].kind;
-    let mapping_pair = item.attempts[attempt_index].coder_mapping.for_task_kind(task_kind);
+    let mapping_pair = item.attempts[attempt_index]
+        .coder_mapping
+        .for_task_kind(task_kind);
     let coder_kind = mapping_pair.coder;
     let model = if mapping_pair.model.is_empty() {
         None
@@ -63,7 +65,11 @@ pub fn run_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     }
 }
 
-fn run_write_task(config: WorkTaskRunConfig<'_>, coder_kind: CoderKind, model: Option<&str>) -> Result<WorkTaskRunResult> {
+fn run_write_task(
+    config: WorkTaskRunConfig<'_>,
+    coder_kind: CoderKind,
+    model: Option<&str>,
+) -> Result<WorkTaskRunResult> {
     let mut item = read_work_item_or_not_found(config.store, config.work_item_id)?;
     let attempt_index = item
         .attempts
@@ -236,7 +242,11 @@ fn run_write_task(config: WorkTaskRunConfig<'_>, coder_kind: CoderKind, model: O
     })
 }
 
-fn run_review_task(config: WorkTaskRunConfig<'_>, coder_kind: CoderKind, model: Option<&str>) -> Result<WorkTaskRunResult> {
+fn run_review_task(
+    config: WorkTaskRunConfig<'_>,
+    coder_kind: CoderKind,
+    model: Option<&str>,
+) -> Result<WorkTaskRunResult> {
     let (
         attempt_kind,
         workspace_reads,
@@ -468,7 +478,11 @@ fn run_review_task(config: WorkTaskRunConfig<'_>, coder_kind: CoderKind, model: 
     })
 }
 
-fn run_behavior_tests_task(config: WorkTaskRunConfig<'_>, coder_kind: CoderKind, model: Option<&str>) -> Result<WorkTaskRunResult> {
+fn run_behavior_tests_task(
+    config: WorkTaskRunConfig<'_>,
+    coder_kind: CoderKind,
+    model: Option<&str>,
+) -> Result<WorkTaskRunResult> {
     let (attempt_kind, workspace_reads, candidate_commit, artifact_dir, results_path) = {
         let _lock = config
             .store_lock
@@ -1164,7 +1178,9 @@ fn capture_coder_info(coder_kind: CoderKind, model: &str, artifact_dir: &Path) {
         .ok()
         .and_then(|o| {
             if o.status.success() {
-                String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
+                String::from_utf8(o.stdout)
+                    .ok()
+                    .map(|s| s.trim().to_string())
             } else {
                 None
             }
@@ -1183,7 +1199,10 @@ fn capture_coder_info(coder_kind: CoderKind, model: &str, artifact_dir: &Path) {
         return;
     }
     let path = artifact_dir.join("coder-info.json");
-    if let Err(e) = fs::write(&path, serde_json::to_string_pretty(&info).unwrap_or_default()) {
+    if let Err(e) = fs::write(
+        &path,
+        serde_json::to_string_pretty(&info).unwrap_or_default(),
+    ) {
         eprintln!("warning: cannot write coder-info.json: {e}");
     }
 }

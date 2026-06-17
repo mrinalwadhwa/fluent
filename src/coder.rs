@@ -211,9 +211,7 @@ impl Coder for SandboxedClaudeCode {
 
 impl SandboxedClaudeCode {
     fn effective_model(&self) -> String {
-        self.model_override
-            .clone()
-            .unwrap_or_else(claude_model)
+        self.model_override.clone().unwrap_or_else(claude_model)
     }
 
     fn build_command(&self, working_dir: &Path) -> Command {
@@ -241,9 +239,7 @@ pub struct BareClaudeCode {
 
 impl BareClaudeCode {
     fn effective_model(&self) -> String {
-        self.model_override
-            .clone()
-            .unwrap_or_else(claude_model)
+        self.model_override.clone().unwrap_or_else(claude_model)
     }
 }
 
@@ -402,9 +398,7 @@ pub struct PiCode {
 
 impl PiCode {
     fn effective_model(&self) -> String {
-        self.model_override
-            .clone()
-            .unwrap_or_else(pi_model)
+        self.model_override.clone().unwrap_or_else(pi_model)
     }
 
     fn build_command(&self, working_dir: &Path) -> Command {

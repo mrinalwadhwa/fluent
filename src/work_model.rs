@@ -1022,41 +1022,35 @@ impl CoderMappingInputs {
 /// 1. Per-Task-kind CLI flag / env var
 /// 2. Global `FACTORY_CODER` / per-Coder model env var
 /// 3. Coder's built-in default
-pub fn resolve_coder_mapping(
-    inputs: &CoderMappingInputs,
-) -> Result<CoderMapping, anyhow::Error> {
+pub fn resolve_coder_mapping(inputs: &CoderMappingInputs) -> Result<CoderMapping, anyhow::Error> {
     let global_kind = inputs
         .global_coder
         .as_deref()
         .map(|s| CoderKind::resolve(Some(s)))
         .transpose()?;
 
-    let resolve_pair =
-        |task_coder: &Option<String>,
-         task_model: &Option<String>|
-         -> Result<CoderModelPair, anyhow::Error> {
-            let coder = if let Some(c) = task_coder {
-                CoderKind::resolve(Some(c))?
-            } else {
-                global_kind.unwrap_or(CoderKind::Claude)
-            };
-
-            let model = if let Some(m) = task_model {
-                m.clone()
-            } else {
-                coder.default_model()
-            };
-
-            Ok(CoderModelPair { coder, model })
+    let resolve_pair = |task_coder: &Option<String>,
+                        task_model: &Option<String>|
+     -> Result<CoderModelPair, anyhow::Error> {
+        let coder = if let Some(c) = task_coder {
+            CoderKind::resolve(Some(c))?
+        } else {
+            global_kind.unwrap_or(CoderKind::Claude)
         };
+
+        let model = if let Some(m) = task_model {
+            m.clone()
+        } else {
+            coder.default_model()
+        };
+
+        Ok(CoderModelPair { coder, model })
+    };
 
     Ok(CoderMapping {
         write: resolve_pair(&inputs.write_coder, &inputs.write_model)?,
         review: resolve_pair(&inputs.review_coder, &inputs.review_model)?,
-        behavior_tests: resolve_pair(
-            &inputs.behavior_tests_coder,
-            &inputs.behavior_tests_model,
-        )?,
+        behavior_tests: resolve_pair(&inputs.behavior_tests_coder, &inputs.behavior_tests_model)?,
     })
 }
 
