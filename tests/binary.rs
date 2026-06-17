@@ -9359,7 +9359,10 @@ fn work_queue_list_format_includes_priority_queued_at_status_id() {
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let line = stdout.lines().next().unwrap();
-    assert!(line.starts_with("0 "), "line should start with default priority 0: {line}");
+    assert!(
+        line.starts_with("0 "),
+        "line should start with default priority 0: {line}"
+    );
     assert!(line.contains("queued"), "should contain status");
     assert!(line.contains("wi-fmt"), "should contain work item id");
 }
