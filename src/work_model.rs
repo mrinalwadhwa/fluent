@@ -529,6 +529,15 @@ impl WorkItem {
                     ),
                 });
             }
+            let progress_md_path = format!(
+                "{WORK_ARTIFACTS_DIR}/{}/{}/progress.md",
+                self.id,
+                attempt_id,
+            );
+            task_input_artifacts.push(ArtifactRef {
+                producer_id: "writer".to_string(),
+                path: progress_md_path,
+            });
             attempt.tasks.push(Task {
                 id: task_id.clone(),
                 kind: TaskKind::Review,
@@ -3324,6 +3333,42 @@ mod tests {
 
         assert!(matches!(error, WorkModelError::WorkItemAbandoned { .. }));
         assert_eq!(work_item.attempts[0].tasks.len(), 1);
+    }
+
+    #[test]
+    fn progress_md_in_reviewer_input_artifacts() {
+        let mut work_item = work_item_with_completed_write("work-1");
+        let task_ids = work_item
+            .add_next_review_tasks("attempt-1", &["documentation", "behaviors", "tests"])
+            .unwrap();
+
+        for task_id in &task_ids {
+            let review_task = work_item
+                .attempts[0]
+                .tasks
+                .iter()
+                .find(|t| t.id == *task_id)
+                .unwrap();
+            if review_task.kind == TaskKind::Review {
+                assert!(
+                    review_task.input_artifacts.iter().any(|ref_| {
+                        ref_.producer_id == "writer"
+                            && ref_.path == ".factory/work/artifacts/work-1/attempt-1/progress.md"
+                    }),
+                    "review task {} should have progress.md in input_artifacts",
+                    task_id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn review_behaviors_prompt_mentions_progress_md_cross_check() {
+        let prompt = std::fs::read_to_string("prompts/review-behaviors.md").unwrap();
+        assert!(
+            prompt.contains("Verify every plan.md step appears as a Checklist item"),
+            "review-behaviors.md should contain the progress.md cross-check instruction"
+        );
     }
 
     #[test]

@@ -463,6 +463,23 @@ and the artifact directory. Review and behavior-tests Tasks also persist
 writer artifact directories and other reviewers' artifact directories to
 preserve independent verification.
 
+### progress.md
+
+Each Attempt records a `progress.md` file at
+`.factory/work/artifacts/<work-item-id>/<attempt-id>/progress.md`,
+gitignored alongside other artifacts. It holds two sections:
+
+- ## Checklist — one `- [ ]` or `- [x]` line per plan.md step,
+  in plan.md order
+- ## Notes — `### Step N` subsections with Done / Note / Next
+  lines for each completed step
+
+The writer reads progress.md at the start of every step (so
+context compaction doesn't lose state), picks the first unchecked
+item, commits code, then updates progress.md outside git.
+Reviewers receive progress.md as an input artifact and may
+cross-check plan-step coverage.
+
 Write Tasks may include optional `instructions` copied from explicit Work
 Item instructions or derived from Work Item planning context. JSON omits
 `instructions` when the Task has no rich execution context.

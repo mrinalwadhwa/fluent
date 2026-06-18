@@ -2784,3 +2784,56 @@ resolution, coder version capture, Pi transcript parsing, and
 cross-coder timing extraction.
 Test: all EARS statements in the Pi coder sections above carry
 `Test:` or `Untestable:` references
+
+## Plan execution: progress.md
+
+WHEN a write Task runs within an Attempt,
+THE SYSTEM SHALL place progress.md at
+`.factory/work/artifacts/<work-item-id>/<attempt-id>/progress.md`,
+alongside other Attempt-level artifacts. Progress.md SHALL NOT be
+tracked by git.
+Test: src/work_model.rs (progress_md_in_reviewer_input_artifacts)
+
+WHEN a write Task creates or updates progress.md,
+THE SYSTEM SHALL maintain two sections in the file: a top
+`## Checklist` section containing one `- [ ]` or `- [x]` line per
+plan.md step (in the same order as plan.md's step list), and a
+`## Notes` section containing per-step `### Step N` subsections
+with `Done`, `Note`, and `Next` lines for each completed step.
+Untestable: Writer protocol is prompt-driven convention, not
+enforced by code
+
+WHEN a writer Task starts and progress.md does not yet exist at
+`.factory/work/artifacts/<work-item-id>/<attempt-id>/progress.md`,
+THE SYSTEM SHALL create progress.md with a `## Checklist` section
+seeded with one `- [ ]` line per plan.md step (in plan.md order)
+and an empty `## Notes` section.
+Test: src/work_task_executor.rs (write_task_prompt_includes_progress_md_path_substitution)
+
+WHEN a writer Task starts a new step (at session start, or
+after completing the previous step),
+THE SYSTEM SHALL read progress.md, find the first `- [ ]` item in
+the Checklist section, and treat that as the next step to work on.
+Test: src/work_task_executor.rs (write_task_prompt_includes_protocol_when_plan_md_present)
+
+WHEN a writer Task commits code changes for a step,
+THE SYSTEM SHALL update progress.md after the commit: toggle the
+step's Checklist item from `- [ ]` to `- [x]`, and append a
+`### Step N` subsection under Notes containing `Done` (including
+the commit hash of the just-made commit), `Note`, and `Next` lines.
+Untestable: Writer protocol is prompt-driven convention, not
+enforced by code
+
+WHEN a reviewer Task runs for an Attempt that has a
+progress.md file in its artifact area,
+THE SYSTEM SHALL include progress.md as a readable input in the
+reviewer's sandbox, and the reviewer prompt SHALL name progress.md
+as a relevant input artifact.
+Test: src/work_model.rs (progress_md_in_reviewer_input_artifacts)
+
+WHEN the behaviors-completeness reviewer runs for an Attempt
+with both plan.md and progress.md present,
+THE SYSTEM SHALL check that every plan.md step appears as a
+Checklist item in progress.md, and that the writer's review verdict
+reflects whether all items are `- [x]`.
+Test: review-behaviors prompt contains cross-check instruction

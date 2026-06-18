@@ -4742,7 +4742,7 @@ fn work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews() {
     let second_round_inputs = second_round_reviews[0]["input_artifacts"]
         .as_array()
         .unwrap();
-    assert_eq!(second_round_inputs.len(), 1);
+    assert_eq!(second_round_inputs.len(), 2);
     assert_eq!(
         second_round_inputs[0]["path"],
         ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-documentation/review.md"
@@ -4750,6 +4750,14 @@ fn work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews() {
     assert_eq!(
         second_round_inputs[0]["producer_id"],
         "attempt-1-review-documentation"
+    );
+    assert_eq!(
+        second_round_inputs[1]["path"],
+        ".factory/work/artifacts/work-1/attempt-1/progress.md"
+    );
+    assert_eq!(
+        second_round_inputs[1]["producer_id"],
+        "writer"
     );
 }
 
