@@ -2728,12 +2728,42 @@ always passes `--thinking off`.
 ## Transcript parsing
 
 WHEN Factory parses a Pi transcript after Task completion,
+THE SYSTEM SHALL emit one usage row per completed Pi turn
+(identified by a `turn_end` event), with `input_tokens` and
+`output_tokens` taken from `message.usage.input` and
+`message.usage.output`.
+Test: src/usage.rs (extract_pi_usage_returns_one_row_per_turn_end_event)
+Test: src/usage.rs (extract_pi_usage_skips_non_turn_end_events)
+
+WHEN Factory parses a Pi transcript after Task completion,
+THE SYSTEM SHALL populate each usage row's `model` field from the
+`message.model` value on the corresponding `turn_end` event.
+Test: src/usage.rs (extract_pi_usage_populates_model_from_message_model)
+
+WHEN Factory parses a Pi transcript after Task completion,
+THE SYSTEM SHALL populate each usage row's `duration_ms` field as
+the difference between the `turn_end` event's `message.timestamp`
+(epoch ms) and the previous `turn_end` event's `message.timestamp`
+(or the `session` event's `timestamp` for the first turn). All
+durations SHALL be expressed in milliseconds.
+Test: src/usage.rs (extract_pi_usage_first_turn_duration_anchored_to_session_timestamp)
+Test: src/usage.rs (extract_pi_usage_subsequent_turn_duration_uses_previous_turn_end)
+Test: src/usage.rs (extract_pi_usage_first_turn_duration_none_when_session_missing)
+
+WHEN Factory parses a Claude transcript after Task completion,
+THE SYSTEM SHALL populate each usage row's `model` field from the
+`system` event with `subtype: "init"` (the session-initialization
+event that names the model the session was launched with).
+Test: src/usage.rs (extract_claude_usage_populates_model_from_system_init)
+Test: src/usage.rs (extract_claude_usage_falls_back_to_unknown_when_init_missing)
+
+WHEN Factory parses a Pi transcript after Task completion,
 THE SYSTEM SHALL extract per-turn token usage from Pi's JSONL
 events and append usage rows to
 `~/.config/factory/usage/usage.jsonl`, identifying the Task via
 `work_item_id`, `attempt_id`, and `task_id`.
-Test: src/usage.rs (extract_pi_usage_returns_one_row_per_result_event)
-Test: src/usage.rs (extract_pi_usage_returns_empty_when_no_result_events)
+Test: src/usage.rs (extract_pi_usage_returns_one_row_per_turn_end_event)
+Test: src/usage.rs (extract_pi_usage_returns_empty_when_no_turn_end_events)
 
 WHEN Factory parses a Coder transcript after Task completion,
 THE SYSTEM SHALL extract per-turn end-to-end duration (and any

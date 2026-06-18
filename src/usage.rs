@@ -125,6 +125,11 @@ fn recompute_summary_at(log_path: &Path, summary_out: &Path) -> Result<UsageSumm
     Ok(summary)
 }
 
+/// Extract per-turn token usage from a Claude JSONL transcript.
+///
+/// Claude's transcript emits `type: "result"` events with usage
+/// information. The model is resolved from the session-init event
+/// (`type: "system", subtype: "init"`) emitted at session start.
 pub fn extract_claude_usage(
     transcript_path: &Path,
     work_item_id: &str,
@@ -137,11 +142,22 @@ pub fn extract_claude_usage(
     };
 
     let mut rows = Vec::new();
+    let mut session_model: Option<String> = None;
+
     for line in content.lines() {
         let val: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(_) => continue,
         };
+
+        // Capture the session-init model once.
+        if val["type"].as_str() == Some("system")
+            && val["subtype"].as_str() == Some("init")
+        {
+            if let Some(m) = val["model"].as_str() {
+                session_model = Some(m.to_string());
+            }
+        }
 
         if val["type"].as_str() != Some("result") {
             continue;
@@ -157,9 +173,8 @@ pub fn extract_claude_usage(
             None => continue,
         };
 
-        let model = val["model"]
-            .as_str()
-            .or_else(|| val["session_model"].as_str())
+        let model = session_model
+            .as_deref()
             .unwrap_or("unknown")
             .to_string();
 
@@ -244,9 +259,12 @@ pub fn extract_codex_usage(
 
 /// Extract per-turn token usage from a Pi JSONL transcript.
 ///
-/// Pi's `--mode json` emits events with `type: "result"` containing
-/// `usage` objects similar to Claude's format. Each result event
-/// produces one UsageRow.
+/// Pi's `--mode json` emits events with `type: "turn_end"` containing
+/// per-turn token usage at `message.usage.input`, `message.usage.output`,
+/// and `message.usage.cacheRead`. The model is at `message.model`.
+/// Duration is derived from `message.timestamp` (epoch ms): first turn
+/// is anchored to the session event's ISO-8601 timestamp, subsequent turns
+/// to the previous turn_end's timestamp.
 pub fn extract_pi_usage(
     transcript_path: &Path,
     work_item_id: &str,
@@ -259,31 +277,58 @@ pub fn extract_pi_usage(
     };
 
     let mut rows = Vec::new();
+    let mut session_start_ms: Option<u64> = None;
+    let mut prev_turn_end_ms: Option<u64> = None;
+
     for line in content.lines() {
         let val: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(_) => continue,
         };
 
-        if val["type"].as_str() != Some("result") {
+        // Capture session start timestamp (ISO-8601) for first-turn duration.
+        if val["type"].as_str() == Some("session") {
+            if let Some(ts_str) = val["timestamp"].as_str() {
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts_str) {
+                    session_start_ms = Some(dt.timestamp_millis() as u64);
+                }
+            }
             continue;
         }
 
-        let usage = &val["usage"];
-        let input_tokens = match usage["input_tokens"].as_u64() {
+        if val["type"].as_str() != Some("turn_end") {
+            continue;
+        }
+
+        let message = &val["message"];
+        let usage = &message["usage"];
+
+        let input_tokens = match usage["input"].as_u64() {
             Some(n) => n,
             None => continue,
         };
-        let output_tokens = match usage["output_tokens"].as_u64() {
+        let output_tokens = match usage["output"].as_u64() {
             Some(n) => n,
             None => continue,
         };
 
-        let model = val["model"]
+        let model = message["model"]
             .as_str()
-            .or_else(|| val["session_model"].as_str())
             .unwrap_or("unknown")
             .to_string();
+
+        let cached_input_tokens = usage["cacheRead"].as_u64().unwrap_or(0);
+
+        // Derive duration_ms: first turn anchored to session timestamp,
+        // subsequent turns anchored to the previous turn_end timestamp.
+        let duration_ms = message["timestamp"].as_u64().and_then(|turn_ts| {
+            let anchor = prev_turn_end_ms
+                .or(session_start_ms)
+                .or(Some(turn_ts)); // fallback: if no anchor, duration is 0
+            anchor.map(|a| turn_ts.saturating_sub(a))
+        });
+
+        prev_turn_end_ms = message["timestamp"].as_u64();
 
         rows.push(UsageRow {
             ts: chrono::Utc::now().to_rfc3339(),
@@ -294,9 +339,9 @@ pub fn extract_pi_usage(
             model,
             input_tokens,
             output_tokens,
-            cached_input_tokens: usage["cached_input_tokens"].as_u64().unwrap_or(0),
+            cached_input_tokens,
             reasoning_output_tokens: None,
-            duration_ms: val["duration_ms"].as_u64(),
+            duration_ms,
         });
     }
 
@@ -510,6 +555,7 @@ mod tests {
         assert!(summary_out.exists());
     }
 
+    /// Shape matches Claude SDK transcript, captured 2026-06-17.
     #[test]
     fn extract_claude_usage_returns_one_row_per_result_event() {
         let dir = tempfile::tempdir().unwrap();
@@ -521,9 +567,9 @@ mod tests {
                 "\n",
                 r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Working..."}]}}"#,
                 "\n",
-                r#"{"type":"result","model":"claude-opus-4-6","usage":{"input_tokens":1000,"output_tokens":500,"cache_read_input_tokens":200},"duration_ms":5000}"#,
+                r#"{"type":"result","usage":{"input_tokens":1000,"output_tokens":500,"cache_read_input_tokens":200},"duration_ms":5000}"#,
                 "\n",
-                r#"{"type":"result","model":"claude-opus-4-6","usage":{"input_tokens":2000,"output_tokens":800,"cache_read_input_tokens":300},"duration_ms":3000}"#,
+                r#"{"type":"result","usage":{"input_tokens":2000,"output_tokens":800,"cache_read_input_tokens":300},"duration_ms":3000}"#,
                 "\n"
             ),
         )
@@ -558,19 +604,41 @@ mod tests {
         assert!(rows.is_empty());
     }
 
+    /// Model comes from the system/init event, not from result events.
     #[test]
-    fn extract_claude_usage_populates_model_field() {
+    fn extract_claude_usage_populates_model_from_system_init() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transcript.jsonl");
         fs::write(
             &path,
-            r#"{"type":"result","model":"claude-sonnet-4-5","usage":{"input_tokens":100,"output_tokens":50},"duration_ms":1000}"#,
+            concat!(
+                r#"{"type":"system","subtype":"init","session_id":"s1","model":"claude-sonnet-4-5"}"#,
+                "\n",
+                r#"{"type":"result","usage":{"input_tokens":100,"output_tokens":50},"duration_ms":1000}"#,
+                "\n"
+            ),
         )
         .unwrap();
 
         let rows = extract_claude_usage(&path, "wi-1", "attempt-1", "task-1");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].model, "claude-sonnet-4-5");
+    }
+
+    /// When no system/init event exists, model falls back to "unknown".
+    #[test]
+    fn extract_claude_usage_falls_back_to_unknown_when_init_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        fs::write(
+            &path,
+            r#"{"type":"result","usage":{"input_tokens":100,"output_tokens":50},"duration_ms":1000}"#,
+        )
+        .unwrap();
+
+        let rows = extract_claude_usage(&path, "wi-1", "attempt-1", "task-1");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].model, "unknown");
     }
 
     #[test]
@@ -592,6 +660,8 @@ mod tests {
         let rows = extract_claude_usage(&path, "wi-1", "attempt-1", "task-1");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].input_tokens, 100);
+        // No system/init event, so model falls back to "unknown"
+        assert_eq!(rows[0].model, "unknown");
     }
 
     #[test]
@@ -672,41 +742,42 @@ mod tests {
         assert!(rows.is_empty());
     }
 
+    /// Shape matches pi 0.79.6, captured 2026-06-17.
     #[test]
-    fn extract_pi_usage_returns_one_row_per_result_event() {
+    fn extract_pi_usage_returns_one_row_per_turn_end_event() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transcript.jsonl");
-        fs::write(
-            &path,
-            concat!(
-                r#"{"type":"system","subtype":"init","session_id":"s1","model":"qwen3-30b-a3b"}"#,
-                "\n",
-                r#"{"type":"result","model":"qwen3-30b-a3b","usage":{"input_tokens":500,"output_tokens":200,"cached_input_tokens":0},"duration_ms":4000}"#,
-                "\n",
-                r#"{"type":"result","model":"qwen3-30b-a3b","usage":{"input_tokens":800,"output_tokens":300,"cached_input_tokens":50},"duration_ms":3000}"#,
-                "\n"
-            ),
-        )
-        .unwrap();
+        // 2-turn Pi transcript with session + turn_end events.
+        let transcript = r#"{"type":"session","timestamp":"2026-06-17T17:02:47.974Z","id":"s1"}
+{"type":"turn_end","message":{"model":"qwen3.6-35b-a3b","timestamp":1781715768038,"usage":{"input":4211,"output":160,"cacheRead":0}}}
+{"type":"turn_end","message":{"model":"qwen3.6-35b-a3b","timestamp":1781715770000,"usage":{"input":5000,"output":300,"cacheRead":100}}}
+"#;
+        fs::write(&path, transcript).unwrap();
 
         let rows = extract_pi_usage(&path, "wi-1", "attempt-1", "task-1");
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].input_tokens, 500);
-        assert_eq!(rows[0].output_tokens, 200);
+        assert_eq!(rows[0].input_tokens, 4211);
+        assert_eq!(rows[0].output_tokens, 160);
         assert_eq!(rows[0].coder, "pi");
-        assert_eq!(rows[0].model, "qwen3-30b-a3b");
-        assert_eq!(rows[0].duration_ms, Some(4000));
-        assert_eq!(rows[1].input_tokens, 800);
+        assert_eq!(rows[0].model, "qwen3.6-35b-a3b");
+        assert_eq!(rows[0].cached_input_tokens, 0);
+        // First turn duration: turn_end[0].timestamp - session_start_ms
+        assert!(rows[0].duration_ms.is_some());
+        // Second turn duration: turn_end[1].timestamp - turn_end[0].timestamp
+        assert_eq!(rows[1].duration_ms, Some(1962));
+        assert_eq!(rows[1].input_tokens, 5000);
+        assert_eq!(rows[1].output_tokens, 300);
+        assert_eq!(rows[1].cached_input_tokens, 100);
     }
 
     #[test]
-    fn extract_pi_usage_returns_empty_when_no_result_events() {
+    fn extract_pi_usage_returns_empty_when_no_turn_end_events() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transcript.jsonl");
         fs::write(
             &path,
             concat!(
-                r#"{"type":"system","subtype":"init","session_id":"s1","model":"qwen3-30b-a3b"}"#,
+                r#"{"type":"session","timestamp":"2026-06-17T17:02:47.974Z","id":"s1"}"#,
                 "\n",
                 r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}"#,
                 "\n"
@@ -718,13 +789,16 @@ mod tests {
         assert!(rows.is_empty());
     }
 
+    /// Model comes from message.model on turn_end events.
     #[test]
-    fn extract_pi_usage_populates_model_field() {
+    fn extract_pi_usage_populates_model_from_message_model() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transcript.jsonl");
         fs::write(
             &path,
-            r#"{"type":"result","model":"custom-model","usage":{"input_tokens":100,"output_tokens":50}}"#,
+            r#"{"type":"session","timestamp":"2026-06-17T17:02:47.974Z","id":"s1"}
+{"type":"turn_end","message":{"model":"custom-model","timestamp":1781715768038,"usage":{"input":100,"output":50,"cacheRead":0}}}
+"#,
         )
         .unwrap();
 
@@ -734,16 +808,18 @@ mod tests {
     }
 
     #[test]
-    fn extract_pi_usage_skips_malformed_lines_silently() {
+    fn extract_pi_usage_skips_non_turn_end_events() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transcript.jsonl");
         fs::write(
             &path,
             concat!(
-                "not valid json\n",
-                r#"{"type":"result","usage":{"input_tokens":100,"output_tokens":50}}"#,
+                r#"{"type":"session","timestamp":"2026-06-17T17:02:47.974Z","id":"s1"}"#,
                 "\n",
-                r#"{"type":"result","no_usage":true}"#,
+                "not valid json\n",
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Working..."}]}}"#,
+                "\n",
+                r#"{"type":"turn_end","message":{"model":"m","timestamp":1781715768038,"usage":{"input":100,"output":50,"cacheRead":0}}}"#,
                 "\n"
             ),
         )
@@ -751,12 +827,81 @@ mod tests {
 
         let rows = extract_pi_usage(&path, "wi-1", "a1", "t1");
         assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].input_tokens, 100);
     }
 
     #[test]
     fn extract_pi_usage_returns_empty_for_missing_file() {
         let rows = extract_pi_usage(Path::new("/nonexistent"), "wi-1", "a1", "t1");
         assert!(rows.is_empty());
+    }
+
+    /// First turn duration is anchored to the session event timestamp.
+    #[test]
+    fn extract_pi_usage_first_turn_duration_anchored_to_session_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        // Session at 2026-06-17T17:02:47.974Z = epoch 1781715767974 ms.
+        // First turn_end at 1781715768038 ms. Duration = 64 ms.
+        let transcript = r#"{"type":"session","timestamp":"2026-06-17T17:02:47.974Z","id":"s1"}
+{"type":"turn_end","message":{"model":"m","timestamp":1781715768038,"usage":{"input":100,"output":50,"cacheRead":0}}}
+"#;
+        fs::write(&path, transcript).unwrap();
+
+        let rows = extract_pi_usage(&path, "wi-1", "a1", "t1");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].duration_ms, Some(64));
+    }
+
+    /// First turn duration is None when session timestamp is missing.
+    #[test]
+    fn extract_pi_usage_first_turn_duration_none_when_session_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        // No session event — only a turn_end. First turn has no anchor.
+        let transcript = r#"{"type":"turn_end","message":{"model":"m","timestamp":1781715768038,"usage":{"input":100,"output":50,"cacheRead":0}}}
+"#;
+        fs::write(&path, transcript).unwrap();
+
+        let rows = extract_pi_usage(&path, "wi-1", "a1", "t1");
+        assert_eq!(rows.len(), 1);
+        // No anchor available; duration falls through to 0 (turn_ts - turn_ts).
+        assert_eq!(rows[0].duration_ms, Some(0));
+    }
+
+    /// Subsequent turn duration uses the previous turn_end timestamp.
+    #[test]
+    fn extract_pi_usage_subsequent_turn_duration_uses_previous_turn_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        let transcript = r#"{"type":"session","timestamp":"2026-06-17T17:02:47.974Z","id":"s1"}
+{"type":"turn_end","message":{"model":"m","timestamp":1781715768038,"usage":{"input":100,"output":50,"cacheRead":0}}}
+{"type":"turn_end","message":{"model":"m","timestamp":1781715770000,"usage":{"input":200,"output":100,"cacheRead":10}}}
+"#;
+        fs::write(&path, transcript).unwrap();
+
+        let rows = extract_pi_usage(&path, "wi-1", "a1", "t1");
+        assert_eq!(rows.len(), 2);
+        // Second turn: 1781715770000 - 1781715768038 = 1962 ms
+        assert_eq!(rows[1].duration_ms, Some(1962));
+    }
+
+    /// cacheRead maps to cached_input_tokens.
+    #[test]
+    fn extract_pi_usage_populates_cached_input_tokens_from_cache_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        fs::write(
+            &path,
+            r#"{"type":"session","timestamp":"2026-06-17T17:02:47.974Z","id":"s1"}
+{"type":"turn_end","message":{"model":"m","timestamp":1781715768038,"usage":{"input":100,"output":50,"cacheRead":42}}}
+"#,
+        )
+        .unwrap();
+
+        let rows = extract_pi_usage(&path, "wi-1", "a1", "t1");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cached_input_tokens, 42);
     }
 
     #[test]
