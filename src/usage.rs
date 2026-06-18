@@ -151,9 +151,7 @@ pub fn extract_claude_usage(
         };
 
         // Capture the session-init model once.
-        if val["type"].as_str() == Some("system")
-            && val["subtype"].as_str() == Some("init")
-        {
+        if val["type"].as_str() == Some("system") && val["subtype"].as_str() == Some("init") {
             if let Some(m) = val["model"].as_str() {
                 session_model = Some(m.to_string());
             }
@@ -173,10 +171,7 @@ pub fn extract_claude_usage(
             None => continue,
         };
 
-        let model = session_model
-            .as_deref()
-            .unwrap_or("unknown")
-            .to_string();
+        let model = session_model.as_deref().unwrap_or("unknown").to_string();
 
         rows.push(UsageRow {
             ts: chrono::Utc::now().to_rfc3339(),
@@ -312,19 +307,14 @@ pub fn extract_pi_usage(
             None => continue,
         };
 
-        let model = message["model"]
-            .as_str()
-            .unwrap_or("unknown")
-            .to_string();
+        let model = message["model"].as_str().unwrap_or("unknown").to_string();
 
         let cached_input_tokens = usage["cacheRead"].as_u64().unwrap_or(0);
 
         // Derive duration_ms: first turn anchored to session timestamp,
         // subsequent turns anchored to the previous turn_end timestamp.
         let duration_ms = message["timestamp"].as_u64().and_then(|turn_ts| {
-            let anchor = prev_turn_end_ms
-                .or(session_start_ms)
-                .or(Some(turn_ts)); // fallback: if no anchor, duration is 0
+            let anchor = prev_turn_end_ms.or(session_start_ms).or(Some(turn_ts)); // fallback: if no anchor, duration is 0
             anchor.map(|a| turn_ts.saturating_sub(a))
         });
 
