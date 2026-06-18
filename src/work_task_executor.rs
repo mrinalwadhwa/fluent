@@ -1070,9 +1070,7 @@ fn resolve_input_artifact_paths(
             // receive it as an input artifact before the writer has
             // initialized it. Skip missing progress.md entries rather
             // than failing the Task.
-            if artifact.producer_id == "writer"
-                && artifact.path.ends_with("/progress.md")
-            {
+            if artifact.producer_id == "writer" && artifact.path.ends_with("/progress.md") {
                 continue;
             }
             bail!(
@@ -2744,7 +2742,8 @@ mod tests {
         let item = review_item();
         let prompt = build_write_task_prompt(&item, "attempt-1", "attempt-1-write-1", &[]);
         assert!(
-            prompt.contains("progress_md_path: .factory/work/artifacts/work-1/attempt-1/progress.md"),
+            prompt
+                .contains("progress_md_path: .factory/work/artifacts/work-1/attempt-1/progress.md"),
             "prompt should include progress_md_path substitution"
         );
     }
@@ -2759,12 +2758,16 @@ mod tests {
         // The protocol lives in work-author.md system prompt, not the task prompt.
         // Verify work-author.md contains the protocol section.
         let system_prompt = std::fs::read_to_string("prompts/work-author.md").unwrap();
-        assert!(system_prompt.contains("If plan.md is part of your Work Item's planning context"),
-            "work-author.md should contain the writer protocol section");
+        assert!(
+            system_prompt.contains("If plan.md is part of your Work Item's planning context"),
+            "work-author.md should contain the writer protocol section"
+        );
         // Verify progress_md_path is present in the task prompt
         let prompt = build_write_task_prompt(&item, "attempt-1", "attempt-1-write-1", &[]);
-        assert!(prompt.contains("progress_md_path:"),
-            "prompt should contain progress_md_path when plan.md is present");
+        assert!(
+            prompt.contains("progress_md_path:"),
+            "prompt should contain progress_md_path when plan.md is present"
+        );
     }
 
     #[test]
@@ -2772,8 +2775,10 @@ mod tests {
         let item = review_item();
         // review_item() has planning_context = None, so no plan.md
         let prompt = build_write_task_prompt(&item, "attempt-1", "attempt-1-write-1", &[]);
-        assert!(!prompt.contains("If plan.md is part of your Work Item's planning context"),
-            "prompt should NOT contain the protocol section when plan.md is absent");
+        assert!(
+            !prompt.contains("If plan.md is part of your Work Item's planning context"),
+            "prompt should NOT contain the protocol section when plan.md is absent"
+        );
     }
 
     #[test]
@@ -2782,7 +2787,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let project_root = tmp.path();
         // Create a non-progress artifact so the test has something to resolve
-        let artifact_dir = project_root.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-docs");
+        let artifact_dir =
+            project_root.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-docs");
         std::fs::create_dir_all(&artifact_dir).unwrap();
         let other_artifact = artifact_dir.join("review.md");
         std::fs::write(&other_artifact, "review content").unwrap();
@@ -2795,7 +2801,8 @@ mod tests {
             },
             ArtifactRef {
                 producer_id: "attempt-1-review-docs".to_string(),
-                path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-docs/review.md".to_string(),
+                path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-docs/review.md"
+                    .to_string(),
             },
         ];
         let resolved = resolve_input_artifact_paths(project_root, &refs).unwrap();
@@ -2815,6 +2822,9 @@ mod tests {
             path: ".factory/work/artifacts/work-1/attempt-1/some-artifact.md".to_string(),
         }];
         let result = resolve_input_artifact_paths(project_root, &refs);
-        assert!(result.is_err(), "should error on missing non-progress artifact");
+        assert!(
+            result.is_err(),
+            "should error on missing non-progress artifact"
+        );
     }
 }

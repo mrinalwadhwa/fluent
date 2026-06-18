@@ -4755,10 +4755,7 @@ fn work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews() {
         second_round_inputs[1]["path"],
         ".factory/work/artifacts/work-1/attempt-1/progress.md"
     );
-    assert_eq!(
-        second_round_inputs[1]["producer_id"],
-        "writer"
-    );
+    assert_eq!(second_round_inputs[1]["producer_id"], "writer");
 }
 
 #[test]

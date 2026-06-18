@@ -531,8 +531,7 @@ impl WorkItem {
             }
             let progress_md_path = format!(
                 "{WORK_ARTIFACTS_DIR}/{}/{}/progress.md",
-                self.id,
-                attempt_id,
+                self.id, attempt_id,
             );
             task_input_artifacts.push(ArtifactRef {
                 producer_id: "writer".to_string(),
@@ -3343,8 +3342,7 @@ mod tests {
             .unwrap();
 
         for task_id in &task_ids {
-            let review_task = work_item
-                .attempts[0]
+            let review_task = work_item.attempts[0]
                 .tasks
                 .iter()
                 .find(|t| t.id == *task_id)
