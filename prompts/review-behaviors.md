@@ -8,7 +8,7 @@ The Attempt's progress.md is at the path provided in the input
 artifacts list — read it to see which plan steps the writer worked
 on and the notes they left.
 Verify every plan.md step appears as a Checklist item in
-progress.md (in the same order), and that the writer's verdict
+progress.md (in the same order), and that the review verdict
 reflects whether all items are `- [x]`.
 Write your review only to the Work review artifact path provided by the
 review Task or Work Merge Candidate prompt.

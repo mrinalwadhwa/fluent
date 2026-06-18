@@ -1241,36 +1241,7 @@ fn run_task_coder(
         .find(|attempt| attempt.id == attempt_id)
         .and_then(|attempt| attempt.tasks.iter().find(|task| task.id == task_id))
         .ok_or_else(|| anyhow::anyhow!("Task {task_id:?} not found"))?;
-    let task_json = to_json_pretty(task)?;
-    let input_artifacts_prompt = input_artifacts_instruction(input_artifacts);
-    let preflight_prompt = write_task_preflight_prompt(input_artifacts);
-    let task_instructions = task_instructions_prompt(task.instructions.as_deref());
-    let progress_md_path = item
-        .attempts
-        .iter()
-        .find(|a| a.id == attempt_id)
-        .map(|a| {
-            format!(
-                "{}/{}/{}/progress.md",
-                crate::work_model::WORK_ARTIFACTS_DIR,
-                item.id,
-                a.id
-            )
-        })
-        .unwrap_or_default();
-    let prompt = format!(
-        "Execute this Factory write Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\nCompletion contract:\n- Commit all Task output in the writable workspace before marking the Task complete.\n- Leave the writable workspace clean: no unstaged, staged, or untracked Task changes.\n- If no code, documentation, skill, behavior, or other repository change is needed, do not mark the Task complete; under the current write Task executor contract, no committed Task output makes the Task fail.\n\n{}{}Input artifacts:\n{}\n\nprogress_md_path: {}\n\nCurrent Task model:\n{}\n",
-        item.id,
-        item.title,
-        attempt_id,
-        task_id,
-        task.role,
-        preflight_prompt,
-        task_instructions,
-        input_artifacts_prompt,
-        progress_md_path,
-        task_json
-    );
+    let prompt = build_write_task_prompt(item, attempt_id, task_id, input_artifacts);
 
     let transcript_path = task
         .artifact_area
@@ -1345,6 +1316,50 @@ fn run_task_coder(
     } else {
         bail!("Coder exited with code {exit_code}")
     }
+}
+
+fn build_write_task_prompt(
+    item: &WorkItem,
+    attempt_id: &str,
+    task_id: &str,
+    input_artifacts: &[PathBuf],
+) -> String {
+    let task = item
+        .attempts
+        .iter()
+        .find(|a| a.id == attempt_id)
+        .and_then(|a| a.tasks.iter().find(|t| t.id == task_id))
+        .expect("Task must exist");
+    let task_json = to_json_pretty(task).unwrap_or_default();
+    let input_artifacts_prompt = input_artifacts_instruction(input_artifacts);
+    let preflight_prompt = write_task_preflight_prompt(input_artifacts);
+    let task_instructions = task_instructions_prompt(task.instructions.as_deref());
+    let progress_md_path = item
+        .attempts
+        .iter()
+        .find(|a| a.id == attempt_id)
+        .map(|a| {
+            format!(
+                "{}/{}/{}/progress.md",
+                crate::work_model::WORK_ARTIFACTS_DIR,
+                item.id,
+                a.id
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "Execute this Factory write Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\nCompletion contract:\n- Commit all Task output in the writable workspace before marking the Task complete.\n- Leave the writable workspace clean: no unstaged, staged, or untracked Task changes.\n- If no code, documentation, skill, behavior, or other repository change is needed, do not mark the Task complete; under the current write Task executor contract, no committed Task output makes the Task fail.\n\n{}{}Input artifacts:\n{}\n\nprogress_md_path: {}\n\nCurrent Task model:\n{}\n",
+        item.id,
+        item.title,
+        attempt_id,
+        task_id,
+        task.role,
+        preflight_prompt,
+        task_instructions,
+        input_artifacts_prompt,
+        progress_md_path,
+        task_json
+    )
 }
 
 fn write_task_preflight_prompt(input_artifacts: &[PathBuf]) -> String {
@@ -2727,21 +2742,9 @@ mod tests {
     #[test]
     fn write_task_prompt_includes_progress_md_path_substitution() {
         let item = review_item();
-        let prompt = format!(
-            "Execute this Factory write Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\nCompletion contract:\n- Commit all Task output in the writable workspace before marking the Task complete.\n- Leave the writable workspace clean: no unstaged, staged, or untracked Task changes.\n- If no code, documentation, skill, behavior, or other repository change is needed, do not mark the Task complete; under the current write Task executor contract, no committed Task output makes the Task fail.\n\n{}{}Input artifacts:\n{}\n\nprogress_md_path: {}/plan-pure-input-progress-md/attempt-1/progress.md\n\nCurrent Task model:\n{}\n",
-            item.id,
-            item.title,
-            "attempt-1",
-            "attempt-1-write-1",
-            "author",
-            String::new(),
-            String::new(),
-            "None.",
-            ".factory/work/artifacts",
-            to_json_pretty(&item.attempts[0].tasks[0]).unwrap()
-        );
+        let prompt = build_write_task_prompt(&item, "attempt-1", "attempt-1-write-1", &[]);
         assert!(
-            prompt.contains("progress_md_path: .factory/work/artifacts/plan-pure-input-progress-md/attempt-1/progress.md"),
+            prompt.contains("progress_md_path: .factory/work/artifacts/work-1/attempt-1/progress.md"),
             "prompt should include progress_md_path substitution"
         );
     }
@@ -2753,29 +2756,65 @@ mod tests {
             plan: Some("## 1. Step one\n## 2. Step two\n".to_string()),
             ..Default::default()
         });
-        let system_prompt = item
-            .attempts[0]
-            .tasks
-            .first()
-            .and_then(|t| t.instructions.clone())
-            .unwrap_or_default();
-        // The system prompt from work-author.md should contain the protocol
-        // section that references plan.md and progress.md
-        let prompt = format!(
-            "Execute this Factory write Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\nCompletion contract:\n- Commit all Task output in the writable workspace before marking the Task complete.\n- Leave the writable workspace clean: no unstaged, staged, or untracked Task changes.\n- If no code, documentation, skill, behavior, or other repository change is needed, do not mark the Task complete; under the current write Task executor contract, no committed Task output makes the Task fail.\n\n{}{}Input artifacts:\n{}\n\nprogress_md_path: {}/plan-pure-input-progress-md/attempt-1/progress.md\n\nCurrent Task model:\n{}\n",
-            item.id,
-            item.title,
-            "attempt-1",
-            "attempt-1-write-1",
-            "author",
-            String::new(),
-            String::new(),
-            "None.",
-            ".factory/work/artifacts",
-            to_json_pretty(&item.attempts[0].tasks[0]).unwrap()
-        );
-        // Verify progress_md_path is present in the prompt
+        // The protocol lives in work-author.md system prompt, not the task prompt.
+        // Verify work-author.md contains the protocol section.
+        let system_prompt = std::fs::read_to_string("prompts/work-author.md").unwrap();
+        assert!(system_prompt.contains("If plan.md is part of your Work Item's planning context"),
+            "work-author.md should contain the writer protocol section");
+        // Verify progress_md_path is present in the task prompt
+        let prompt = build_write_task_prompt(&item, "attempt-1", "attempt-1-write-1", &[]);
         assert!(prompt.contains("progress_md_path:"),
             "prompt should contain progress_md_path when plan.md is present");
+    }
+
+    #[test]
+    fn write_task_prompt_omits_protocol_when_no_plan_md() {
+        let item = review_item();
+        // review_item() has planning_context = None, so no plan.md
+        let prompt = build_write_task_prompt(&item, "attempt-1", "attempt-1-write-1", &[]);
+        assert!(!prompt.contains("If plan.md is part of your Work Item's planning context"),
+            "prompt should NOT contain the protocol section when plan.md is absent");
+    }
+
+    #[test]
+    fn resolve_input_artifact_paths_skips_missing_progress_md() {
+        use crate::work_model::ArtifactRef;
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        // Create a non-progress artifact so the test has something to resolve
+        let artifact_dir = project_root.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-docs");
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        let other_artifact = artifact_dir.join("review.md");
+        std::fs::write(&other_artifact, "review content").unwrap();
+        // progress.md does NOT exist — the writer hasn't created it yet
+
+        let refs = vec![
+            ArtifactRef {
+                producer_id: "writer".to_string(),
+                path: ".factory/work/artifacts/work-1/attempt-1/progress.md".to_string(),
+            },
+            ArtifactRef {
+                producer_id: "attempt-1-review-docs".to_string(),
+                path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-docs/review.md".to_string(),
+            },
+        ];
+        let resolved = resolve_input_artifact_paths(project_root, &refs).unwrap();
+        // Only the existing review.md should be resolved; progress.md is skipped
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0], other_artifact);
+    }
+
+    #[test]
+    fn resolve_input_artifact_paths_errors_on_missing_non_progress_md() {
+        use crate::work_model::ArtifactRef;
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+
+        let refs = vec![ArtifactRef {
+            producer_id: "some-other-task".to_string(),
+            path: ".factory/work/artifacts/work-1/attempt-1/some-artifact.md".to_string(),
+        }];
+        let result = resolve_input_artifact_paths(project_root, &refs);
+        assert!(result.is_err(), "should error on missing non-progress artifact");
     }
 }

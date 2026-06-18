@@ -465,7 +465,7 @@ preserve independent verification.
 
 ### progress.md
 
-Each Attempt records a `progress.md` file at
+Each Attempt with a plan.md records a `progress.md` file at
 `.factory/work/artifacts/<work-item-id>/<attempt-id>/progress.md`,
 gitignored alongside other artifacts. It holds two sections:
 
