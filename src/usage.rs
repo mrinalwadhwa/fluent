@@ -843,9 +843,9 @@ mod tests {
         assert_eq!(rows[0].duration_ms, Some(64));
     }
 
-    /// First turn duration is None when session timestamp is missing.
+    /// First turn duration is zero when session event is missing.
     #[test]
-    fn extract_pi_usage_first_turn_duration_none_when_session_missing() {
+    fn extract_pi_usage_first_turn_duration_zero_when_session_missing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transcript.jsonl");
         // No session event — only a turn_end. First turn has no anchor.

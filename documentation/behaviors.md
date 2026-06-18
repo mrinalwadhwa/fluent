@@ -2744,11 +2744,13 @@ WHEN Factory parses a Pi transcript after Task completion,
 THE SYSTEM SHALL populate each usage row's `duration_ms` field as
 the difference between the `turn_end` event's `message.timestamp`
 (epoch ms) and the previous `turn_end` event's `message.timestamp`
-(or the `session` event's `timestamp` for the first turn). All
+(or the `session` event's `timestamp` for the first turn). When
+no anchor timestamp is available (no `session` event and no
+previous `turn_end`), `duration_ms` SHALL be `Some(0)`. All
 durations SHALL be expressed in milliseconds.
 Test: src/usage.rs (extract_pi_usage_first_turn_duration_anchored_to_session_timestamp)
 Test: src/usage.rs (extract_pi_usage_subsequent_turn_duration_uses_previous_turn_end)
-Test: src/usage.rs (extract_pi_usage_first_turn_duration_none_when_session_missing)
+Test: src/usage.rs (extract_pi_usage_first_turn_duration_zero_when_session_missing)
 
 WHEN Factory parses a Claude transcript after Task completion,
 THE SYSTEM SHALL populate each usage row's `model` field from the

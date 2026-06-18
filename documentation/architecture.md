@@ -724,7 +724,7 @@ local vllm-mlx server (default `127.0.0.1:8000`) configured via
 server lifecycle — the user starts it externally. The default model is
 `qwen3-30b-a3b`, overridden by `FACTORY_PI_MODEL`. Sandboxed Pi sessions
 run inside a Seatbelt profile with read access to `~/.pi/` and write
-access to `~/.pi/agent/sessions/`. Pi is local-only and cannot run on
+access to `~/.pi/agent/`. Pi is local-only and cannot run on
 Fargate.
 
 Fargate supports both Claude and Codex. The base image
