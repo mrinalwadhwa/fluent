@@ -699,16 +699,21 @@ fn rebase_candidate(
 
     let workspace_resolver = ContentResolver::new(Some(source_workspace));
     let system_prompt = workspace_resolver
-        .resolve_content("prompts/work-rebase.md")
+        .resolve_content("prompts/rebase-system.md")
         .unwrap_or_default();
 
-    let prompt = format!(
-        "Rebase the candidate branch onto `{target_branch}`.\n\n\
-         If you cannot resolve a conflict, write your diagnostic to:\n\
-         {artifact_dir}/give-up.md\n\n\
-         Then run `git rebase --abort` and exit with a non-zero exit code.",
-        artifact_dir = rebase_artifact_dir.display(),
-    );
+    let user_template = workspace_resolver
+        .resolve_content("prompts/rebase-user.md")
+        .expect("bundled rebase-user.md must resolve");
+    let artifact_dir_display = rebase_artifact_dir.display().to_string();
+    let prompt = crate::content::render_template(
+        &user_template,
+        &[
+            ("target_branch", target_branch),
+            ("artifact_dir", &artifact_dir_display),
+        ],
+    )
+    .expect("rebase-user.md template must render with the documented context");
 
     let transcript_path = rebase_artifact_dir.join("transcript.jsonl");
 

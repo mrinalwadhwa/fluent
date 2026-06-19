@@ -76,7 +76,10 @@ pub fn bundled_content(relative: &str) -> Option<String> {
             Some(include_str!("../prompts/review-system.md").to_string())
         }
         "prompts/review-user.md" => Some(include_str!("../prompts/review-user.md").to_string()),
-        "prompts/work-rebase.md" => Some(include_str!("../prompts/work-rebase.md").to_string()),
+        "prompts/rebase-system.md" => {
+            Some(include_str!("../prompts/rebase-system.md").to_string())
+        }
+        "prompts/rebase-user.md" => Some(include_str!("../prompts/rebase-user.md").to_string()),
         // Sandbox profiles
         "sandbox/common.sb" => Some(include_str!("../sandboxes/common.sb").to_string()),
         "sandbox/claude-code.sb" => Some(include_str!("../sandboxes/claude-code.sb").to_string()),
@@ -618,7 +621,8 @@ Check item {{ITEM_ID}}.
         assert!(bundled_content("prompts/write-user.md").is_some());
         assert!(bundled_content("prompts/review-system.md").is_some());
         assert!(bundled_content("prompts/review-user.md").is_some());
-        assert!(bundled_content("prompts/work-rebase.md").is_some());
+        assert!(bundled_content("prompts/rebase-system.md").is_some());
+        assert!(bundled_content("prompts/rebase-user.md").is_some());
     }
 
     #[test]
