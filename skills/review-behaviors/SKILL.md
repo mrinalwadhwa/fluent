@@ -25,7 +25,7 @@ concerns were addressed but new ones emerged.
 ---
 name: review-behaviors
 description: >
-  Behaviors completeness reviewer. Reads behavior-tests-results.json and
+  Behaviors completeness reviewer. Reads tester-results.json and
   the behaviors diff to verify every new or changed EARS statement has a
   Test: or Untestable: marker and every Test: reference passed. Produces
   a verdict and findings.
@@ -36,8 +36,8 @@ description: >
 Verify that the candidate's behavior increment is complete: every EARS
 statement has test coverage or an explicit untestable marker, and every
 referenced test passed. You do not write or run tests — the
-`behavior-tests` Task handles execution and produces
-`behavior-tests-results.json` before you run.
+Tester Task handles execution and produces
+`tester-results.json` before you run.
 
 ---
 
@@ -46,9 +46,9 @@ referenced test passed. You do not write or run tests — the
 ### Phase 1 — Read inputs
 
 Read:
-- `behavior-tests-results.json` from the artifact path named in the
+- `tester-results.json` from the artifact path named in the
   prompt. This contains per-behavior statuses produced by the
-  `behavior-tests` Task.
+  Tester Task.
 - The Work behavior review input in the prompt — the behavior increment
   to verify.
 - `documentation/behaviors.md` — existing behaviors and their markers.
@@ -60,17 +60,18 @@ For each new or changed EARS statement in the behavior increment:
 1. Verify it has either a `Test:` reference or an `Untestable:` marker.
    Missing either → finding.
 
-2. If it has a `Test:` reference, find the matching entry in
-   `behavior-tests-results.json`. Verify `status` is `pass`. If `fail`,
-   include the `failure_excerpt` in your finding. If `missing_test_ref`,
-   the test reference did not resolve to a real test — finding.
+2. If it has a `Test:` reference, find the matching entry in the
+   `tests` array of `tester-results.json`. Verify `status` is `pass`.
+   If `fail`, include the `failure_excerpt` in your finding. If the
+   test is not present in the array, the reference did not resolve to
+   a real test — finding.
 
-3. If it has an `Untestable:` marker, verify `status` is `untestable`
-   in the JSON and that `untestable_reason` is present and reasonable.
+3. If it has an `Untestable:` marker, verify the rationale is
+   reasonable. The Tester does not produce per-behavior untestable
+   status — untestable markers are a documentation concern.
 
-If the JSON contains `command_failure`:
-- Produce a single high-level finding naming the failed command and its
-  error excerpt.
+If the JSON `error` field is non-null:
+- Produce a `fail` verdict naming the error `kind` and `message`.
 - Do not flag individual behaviors — the test infrastructure itself
   failed.
 - Verdict: fail.
@@ -93,7 +94,7 @@ Progress: [yes | no | partial | first-pass]
 
 ## Rules
 
-- **Do not write or run tests.** The `behavior-tests` Task handles
+- **Do not write or run tests.** The Tester Task handles
   execution. You verify completeness from its output.
 - **Do not read source code.** If documentation is insufficient to
   understand a behavior, report that as a finding.

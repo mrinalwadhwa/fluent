@@ -24,8 +24,8 @@ if grep -Fq 'brief.md' "$SKILL"; then
   failures=$((failures + 1))
 fi
 
-if ! grep -Fq 'behavior-tests-results.json' "$SKILL"; then
-  echo "review-behaviors no longer references behavior-tests-results.json" >&2
+if ! grep -Fq 'tester-results.json' "$SKILL"; then
+  echo "review-behaviors no longer references tester-results.json" >&2
   failures=$((failures + 1))
 fi
 

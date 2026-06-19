@@ -447,7 +447,7 @@ the core model.
 ```
 
 The `kind` field accepts `write`, `review`, `merge`, `report`,
-`learn`, `probe`, or `behavior-tests`. `workspace_access.reads` may list any number of
+`learn`, `probe`, `tester`, or `behavior-tests`. `workspace_access.reads` may list any number of
 workspaces. `workspace_access.writes` may be empty or contain one
 workspace. A `review` task must keep `writes` empty; reviewers write
 findings and notes under a required `artifact_area`.

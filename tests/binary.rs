@@ -39,6 +39,21 @@ fn write_json_path(path: &Path, value: &serde_json::Value) {
 }
 
 #[test]
+fn factory_help_lists_tester_subcommand() {
+    let tmp = TempDir::new().unwrap();
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["work", "--help"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("tester"),
+        "factory work --help should list the tester subcommand; got:\n{stdout}"
+    );
+}
+
+#[test]
 fn version_prints_package_version_and_commit() {
     let tmp = TempDir::new().unwrap();
 
@@ -9229,7 +9244,7 @@ fn no_legacy_prompt_files_in_prompts_dir() {
         "Legacy prompts/author.md should not exist"
     );
 
-    let allowed_prefixes = ["work-", "review-", "behavior-tests"];
+    let allowed_prefixes = ["work-", "review-"];
     for entry in fs::read_dir(&prompts_dir).unwrap() {
         let entry = entry.unwrap();
         let name = entry.file_name().to_string_lossy().to_string();
@@ -9240,7 +9255,7 @@ fn no_legacy_prompt_files_in_prompts_dir() {
             allowed_prefixes
                 .iter()
                 .any(|prefix| name.starts_with(prefix)),
-            "Unexpected prompt file: {name}. Only work-*, review-*, and behavior-tests* prompts should exist."
+            "Unexpected prompt file: {name}. Only work-* and review-* prompts should exist."
         );
     }
 }

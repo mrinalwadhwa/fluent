@@ -24,7 +24,7 @@ flat_section="$(printf '%s\n' "$section" | tr '\n' ' ' | tr -s ' ')"
 
 for phrase in \
   'Work Item, Attempt, Task, Workspace, and Merge Candidate' \
-  'Task kinds stay generic: `write`, `review`, `merge`, `report`, `learn`, `probe`, and `behavior-tests`' \
+  'Task kinds stay generic: `write`, `review`, `merge`, `report`, `learn`, `probe`, and `tester`' \
   'A task may read many workspaces and write at most one' \
   'Review tasks are read-only with respect to candidate workspaces' \
   'Merge Candidate' \
