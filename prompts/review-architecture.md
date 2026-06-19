@@ -10,3 +10,7 @@ Write your review only to the Work review artifact path provided by the
 review Task or Work Merge Candidate prompt.
 Read the project decision file if the prompt names one. Do not flag
 findings that contradict a recorded decision.
+`tester-results.json` is available in your input artifacts. It is the
+authoritative record of whether the canonical test suite passes. Do NOT
+re-run the canonical test suite yourself. Ad-hoc verifications (targeted
+invocations, custom scripts) for judgment calls remain explicitly OK.
