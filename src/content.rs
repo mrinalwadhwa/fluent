@@ -1,3 +1,4 @@
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 /// Resolve runtime content the Factory binary reads directly.
@@ -89,6 +90,410 @@ pub fn bundled_content(relative: &str) -> Option<String> {
         "sandbox/pi.sb" => Some(include_str!("../sandboxes/pi.sb").to_string()),
         _ => None,
     }
+}
+
+/// Render a template with `{{name}}` substitutions and `{{#if name}}...{{else}}...{{/if}}` blocks.
+///
+/// Syntax:
+/// - `{{name}}` substitutes the value of `name` from `ctx`. A missing name is an error.
+/// - `{{#if name}}body{{/if}}` renders `body` when `name` is present in `ctx` and non-empty.
+/// - `{{#if name}}body{{else}}otherwise{{/if}}` adds an else branch.
+/// - `{{{{` in the template renders as a literal `{{` in the output.
+/// - When a `{{#if}}`, `{{else}}`, or `{{/if}}` tag is the only non-whitespace content
+///   on its line, the tag's entire line — including the trailing newline — is consumed.
+///   Variable tags `{{name}}` never strip surrounding whitespace.
+///
+/// Constraints:
+/// - Nested `{{#if}}` blocks are not supported. A nested block is an error.
+/// - Tags must close on the same line they open. A `{{` without a `}}` before the next
+///   newline is an unclosed-tag error.
+pub fn render_template(template: &str, ctx: &[(&str, &str)]) -> Result<String, TemplateError> {
+    let tokens = tokenize(template)?;
+    validate(template, &tokens)?;
+    let mut out = String::with_capacity(template.len());
+    render_tokens(template, &tokens, ctx, &mut out)?;
+    Ok(out)
+}
+
+/// Errors from `render_template`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TemplateError {
+    UnclosedTag {
+        line: usize,
+        col: usize,
+    },
+    UnclosedIf {
+        line: usize,
+        col: usize,
+        name: String,
+    },
+    UnmatchedEndIf {
+        line: usize,
+        col: usize,
+    },
+    UnmatchedElse {
+        line: usize,
+        col: usize,
+    },
+    UnknownVariable {
+        line: usize,
+        col: usize,
+        name: String,
+        available: Vec<String>,
+    },
+    EmptyTag {
+        line: usize,
+        col: usize,
+    },
+    NestedIf {
+        line: usize,
+        col: usize,
+    },
+}
+
+impl fmt::Display for TemplateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnclosedTag { line, col } => write!(
+                f,
+                "template error at line {line}, col {col}: tag opened with {{{{ but not closed on the same line"
+            ),
+            Self::UnclosedIf { line, col, name } => write!(
+                f,
+                "template error at line {line}, col {col}: {{{{#if {name}}}}} block was never closed"
+            ),
+            Self::UnmatchedEndIf { line, col } => write!(
+                f,
+                "template error at line {line}, col {col}: {{{{/if}}}} without a matching {{{{#if}}}}"
+            ),
+            Self::UnmatchedElse { line, col } => write!(
+                f,
+                "template error at line {line}, col {col}: {{{{else}}}} outside a {{{{#if}}}} block"
+            ),
+            Self::UnknownVariable {
+                line,
+                col,
+                name,
+                available,
+            } => write!(
+                f,
+                "template error at line {line}, col {col}: unknown variable {{{{{name}}}}}. Available: {}",
+                available.join(", ")
+            ),
+            Self::EmptyTag { line, col } => write!(
+                f,
+                "template error at line {line}, col {col}: empty tag"
+            ),
+            Self::NestedIf { line, col } => write!(
+                f,
+                "template error at line {line}, col {col}: nested {{{{#if}}}} blocks are not supported"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TemplateError {}
+
+#[derive(Debug)]
+enum Token<'a> {
+    Literal(String),
+    Variable { name: &'a str, offset: usize },
+    IfStart { name: &'a str, offset: usize },
+    Else { offset: usize },
+    EndIf { offset: usize },
+}
+
+fn tokenize(template: &str) -> Result<Vec<Token<'_>>, TemplateError> {
+    let mut tokens: Vec<Token<'_>> = Vec::new();
+    let mut pending_literal = String::new();
+    let mut cursor = 0;
+    let bytes = template.as_bytes();
+
+    while cursor < template.len() {
+        let remaining = &template[cursor..];
+        let Some(rel) = remaining.find("{{") else {
+            pending_literal.push_str(remaining);
+            break;
+        };
+        let tag_start = cursor + rel;
+        pending_literal.push_str(&template[cursor..tag_start]);
+
+        // Brace-doubling escape: {{{{ in source -> {{ in output.
+        if template[tag_start + 2..].starts_with("{{") {
+            pending_literal.push_str("{{");
+            cursor = tag_start + 4;
+            continue;
+        }
+
+        // Find the closing `}}` on the same line as the opening `{{`.
+        let after_open = &template[tag_start + 2..];
+        let line_text = after_open
+            .split_once('\n')
+            .map(|(line, _)| line)
+            .unwrap_or(after_open);
+        let Some(close_rel) = line_text.find("}}") else {
+            let (line, col) = line_col(template, tag_start);
+            return Err(TemplateError::UnclosedTag { line, col });
+        };
+        let content = line_text[..close_rel].trim();
+        let tag_end = tag_start + 2 + close_rel + 2;
+
+        if content.is_empty() {
+            let (line, col) = line_col(template, tag_start);
+            return Err(TemplateError::EmptyTag { line, col });
+        }
+
+        let block_kind = classify_tag(content);
+        let new_token = match block_kind {
+            TagKind::Variable(name) => Token::Variable {
+                name,
+                offset: tag_start,
+            },
+            TagKind::IfStart(name) => {
+                if name.is_empty() {
+                    let (line, col) = line_col(template, tag_start);
+                    return Err(TemplateError::EmptyTag { line, col });
+                }
+                Token::IfStart {
+                    name,
+                    offset: tag_start,
+                }
+            }
+            TagKind::Else => Token::Else { offset: tag_start },
+            TagKind::EndIf => Token::EndIf { offset: tag_start },
+            TagKind::Invalid => {
+                // `#if` with no name, or some other malformed `#`-prefixed tag.
+                let (line, col) = line_col(template, tag_start);
+                return Err(TemplateError::EmptyTag { line, col });
+            }
+        };
+
+        let is_block_tag = matches!(
+            new_token,
+            Token::IfStart { .. } | Token::Else { .. } | Token::EndIf { .. }
+        );
+
+        // Standalone-tag whitespace rule applies only to block tags.
+        let mut consume_to = tag_end;
+        if is_block_tag {
+            let leading_ws_start = literal_trailing_ws_start(&pending_literal);
+            let trailing_consume = trailing_line_consume(bytes, tag_end);
+            let leading_is_standalone = pending_literal[leading_ws_start..]
+                .chars()
+                .all(|c| c == ' ' || c == '\t');
+            let prev_char_is_newline_or_start =
+                leading_ws_start == 0 || pending_literal.as_bytes()[leading_ws_start - 1] == b'\n';
+            let trailing_is_standalone = trailing_consume.is_some();
+            if leading_is_standalone
+                && prev_char_is_newline_or_start
+                && trailing_is_standalone
+            {
+                pending_literal.truncate(leading_ws_start);
+                consume_to = trailing_consume.unwrap();
+            }
+        }
+
+        if !pending_literal.is_empty() {
+            tokens.push(Token::Literal(std::mem::take(&mut pending_literal)));
+        }
+        tokens.push(new_token);
+        cursor = consume_to;
+    }
+
+    if !pending_literal.is_empty() {
+        tokens.push(Token::Literal(pending_literal));
+    }
+    Ok(tokens)
+}
+
+enum TagKind<'a> {
+    Variable(&'a str),
+    IfStart(&'a str),
+    Else,
+    EndIf,
+    Invalid,
+}
+
+fn classify_tag(content: &str) -> TagKind<'_> {
+    if content == "else" {
+        return TagKind::Else;
+    }
+    if content == "/if" {
+        return TagKind::EndIf;
+    }
+    if let Some(rest) = content.strip_prefix("#if") {
+        let name = rest.trim_start();
+        if name.is_empty() || rest == name {
+            // `#if` with no whitespace before name, or `#if` with nothing after.
+            return TagKind::Invalid;
+        }
+        return TagKind::IfStart(name);
+    }
+    if content.starts_with('#') || content.starts_with('/') {
+        return TagKind::Invalid;
+    }
+    TagKind::Variable(content)
+}
+
+/// Byte index in `s` at which trailing run of ASCII spaces/tabs begins.
+fn literal_trailing_ws_start(s: &str) -> usize {
+    let bytes = s.as_bytes();
+    let mut i = bytes.len();
+    while i > 0 {
+        match bytes[i - 1] {
+            b' ' | b'\t' => i -= 1,
+            _ => break,
+        }
+    }
+    i
+}
+
+/// If the run of bytes at `start..` is "[ \t]*\n" or "[ \t]*$", return the index
+/// one past the consumed run. Otherwise return None (tag is not standalone on the right).
+fn trailing_line_consume(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut i = start;
+    while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+        i += 1;
+    }
+    if i == bytes.len() {
+        Some(i)
+    } else if bytes[i] == b'\n' {
+        Some(i + 1)
+    } else {
+        None
+    }
+}
+
+/// Validate that `{{#if}}` / `{{else}}` / `{{/if}}` tags are matched and not nested.
+fn validate(template: &str, tokens: &[Token<'_>]) -> Result<(), TemplateError> {
+    let mut open_if: Option<(&str, usize)> = None;
+    let mut saw_else = false;
+    for token in tokens {
+        match token {
+            Token::IfStart { name, offset } => {
+                if open_if.is_some() {
+                    let (line, col) = line_col(template, *offset);
+                    return Err(TemplateError::NestedIf { line, col });
+                }
+                open_if = Some((name, *offset));
+                saw_else = false;
+            }
+            Token::Else { offset } => {
+                if open_if.is_none() {
+                    let (line, col) = line_col(template, *offset);
+                    return Err(TemplateError::UnmatchedElse { line, col });
+                }
+                if saw_else {
+                    let (line, col) = line_col(template, *offset);
+                    return Err(TemplateError::UnmatchedElse { line, col });
+                }
+                saw_else = true;
+            }
+            Token::EndIf { offset } => {
+                if open_if.is_none() {
+                    let (line, col) = line_col(template, *offset);
+                    return Err(TemplateError::UnmatchedEndIf { line, col });
+                }
+                open_if = None;
+                saw_else = false;
+            }
+            _ => {}
+        }
+    }
+    if let Some((name, offset)) = open_if {
+        let (line, col) = line_col(template, offset);
+        return Err(TemplateError::UnclosedIf {
+            line,
+            col,
+            name: name.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn render_tokens(
+    template: &str,
+    tokens: &[Token<'_>],
+    ctx: &[(&str, &str)],
+    out: &mut String,
+) -> Result<(), TemplateError> {
+    let mut i = 0;
+    while i < tokens.len() {
+        match &tokens[i] {
+            Token::Literal(s) => {
+                out.push_str(s);
+                i += 1;
+            }
+            Token::Variable { name, offset } => match lookup(ctx, name) {
+                Some(v) => {
+                    out.push_str(v);
+                    i += 1;
+                }
+                None => {
+                    let (line, col) = line_col(template, *offset);
+                    return Err(TemplateError::UnknownVariable {
+                        line,
+                        col,
+                        name: (*name).to_string(),
+                        available: ctx.iter().map(|(k, _)| (*k).to_string()).collect(),
+                    });
+                }
+            },
+            Token::IfStart { name, .. } => {
+                let truthy = lookup(ctx, name).map(|v| !v.is_empty()).unwrap_or(false);
+                let (else_idx, endif_idx) = find_else_endif(tokens, i);
+                let endif_idx = endif_idx.expect("validate ensures EndIf");
+                if truthy {
+                    let body_end = else_idx.unwrap_or(endif_idx);
+                    render_tokens(template, &tokens[i + 1..body_end], ctx, out)?;
+                } else if let Some(e) = else_idx {
+                    render_tokens(template, &tokens[e + 1..endif_idx], ctx, out)?;
+                }
+                i = endif_idx + 1;
+            }
+            Token::Else { .. } | Token::EndIf { .. } => {
+                unreachable!("Else/EndIf consumed by IfStart branch");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn lookup<'a>(ctx: &'a [(&str, &str)], name: &str) -> Option<&'a str> {
+    ctx.iter().find(|(k, _)| *k == name).map(|(_, v)| *v)
+}
+
+/// Given an IfStart at `start_idx`, find the matching Else (if any) and EndIf
+/// at the same nesting level. Since nesting is forbidden, both can be located
+/// by linear scan returning the first match.
+fn find_else_endif(tokens: &[Token<'_>], start_idx: usize) -> (Option<usize>, Option<usize>) {
+    let mut else_idx = None;
+    for (i, token) in tokens.iter().enumerate().skip(start_idx + 1) {
+        match token {
+            Token::Else { .. } if else_idx.is_none() => else_idx = Some(i),
+            Token::EndIf { .. } => return (else_idx, Some(i)),
+            _ => {}
+        }
+    }
+    (else_idx, None)
+}
+
+/// Convert a byte offset into the original template into (line, col), 1-indexed.
+fn line_col(template: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1;
+    let mut col = 1;
+    for (i, ch) in template.char_indices() {
+        if i >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
 }
 
 /// Extract a named section from a prompt file.
@@ -251,5 +656,230 @@ Check item {{ITEM_ID}}.
     #[test]
     fn test_bundled_content_missing() {
         assert!(bundled_content("nonexistent").is_none());
+    }
+
+    // ---- render_template tests ----
+
+    #[test]
+    fn render_no_tags_is_identity() {
+        let out = render_template("Hello world.\nNo tags here.", &[]).unwrap();
+        assert_eq!(out, "Hello world.\nNo tags here.");
+    }
+
+    #[test]
+    fn render_simple_substitution() {
+        let out = render_template("Hello {{name}}.", &[("name", "Alice")]).unwrap();
+        assert_eq!(out, "Hello Alice.");
+    }
+
+    #[test]
+    fn render_multiple_substitutions() {
+        let out = render_template(
+            "{{greeting}}, {{name}}!",
+            &[("greeting", "Hi"), ("name", "Bob")],
+        )
+        .unwrap();
+        assert_eq!(out, "Hi, Bob!");
+    }
+
+    #[test]
+    fn render_substitution_with_empty_value() {
+        let out = render_template("[{{x}}]", &[("x", "")]).unwrap();
+        assert_eq!(out, "[]");
+    }
+
+    #[test]
+    fn render_missing_variable_errors_with_available_list() {
+        let err = render_template("Hello {{name}}.", &[("greeting", "Hi")]).unwrap_err();
+        match err {
+            TemplateError::UnknownVariable {
+                name, available, ..
+            } => {
+                assert_eq!(name, "name");
+                assert_eq!(available, vec!["greeting".to_string()]);
+            }
+            other => panic!("expected UnknownVariable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_empty_tag_errors() {
+        let err = render_template("{{}}", &[]).unwrap_err();
+        assert!(matches!(err, TemplateError::EmptyTag { .. }));
+    }
+
+    #[test]
+    fn render_whitespace_only_tag_errors() {
+        let err = render_template("{{   }}", &[]).unwrap_err();
+        assert!(matches!(err, TemplateError::EmptyTag { .. }));
+    }
+
+    #[test]
+    fn render_unclosed_tag_errors_with_line_col() {
+        let err = render_template("line 1\nline 2 {{name no close\nline 3", &[]).unwrap_err();
+        match err {
+            TemplateError::UnclosedTag { line, col } => {
+                assert_eq!(line, 2);
+                assert_eq!(col, 8);
+            }
+            other => panic!("expected UnclosedTag, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_if_truthy_renders_body() {
+        let out = render_template("a{{#if x}}b{{/if}}c", &[("x", "v")]).unwrap();
+        assert_eq!(out, "abc");
+    }
+
+    #[test]
+    fn render_if_empty_value_skips_body() {
+        let out = render_template("a{{#if x}}b{{/if}}c", &[("x", "")]).unwrap();
+        assert_eq!(out, "ac");
+    }
+
+    #[test]
+    fn render_if_missing_key_skips_body() {
+        let out = render_template("a{{#if x}}b{{/if}}c", &[]).unwrap();
+        assert_eq!(out, "ac");
+    }
+
+    #[test]
+    fn render_if_truthy_with_else_skips_else_branch() {
+        let out = render_template("a{{#if x}}B{{else}}E{{/if}}c", &[("x", "v")]).unwrap();
+        assert_eq!(out, "aBc");
+    }
+
+    #[test]
+    fn render_if_falsy_with_else_renders_else_branch() {
+        let out = render_template("a{{#if x}}B{{else}}E{{/if}}c", &[("x", "")]).unwrap();
+        assert_eq!(out, "aEc");
+    }
+
+    #[test]
+    fn render_unmatched_endif_errors() {
+        let err = render_template("body {{/if}}", &[]).unwrap_err();
+        assert!(matches!(err, TemplateError::UnmatchedEndIf { .. }));
+    }
+
+    #[test]
+    fn render_unmatched_else_errors() {
+        let err = render_template("body {{else}} more", &[]).unwrap_err();
+        assert!(matches!(err, TemplateError::UnmatchedElse { .. }));
+    }
+
+    #[test]
+    fn render_unclosed_if_errors() {
+        let err = render_template("a{{#if x}}body", &[("x", "v")]).unwrap_err();
+        match err {
+            TemplateError::UnclosedIf { name, .. } => assert_eq!(name, "x"),
+            other => panic!("expected UnclosedIf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_nested_if_errors() {
+        let err = render_template(
+            "a{{#if x}}{{#if y}}b{{/if}}{{/if}}",
+            &[("x", "v"), ("y", "v")],
+        )
+        .unwrap_err();
+        assert!(matches!(err, TemplateError::NestedIf { .. }));
+    }
+
+    #[test]
+    fn render_brace_doubling_escapes_to_literal_braces() {
+        let out = render_template("use {{{{name}} as a literal", &[]).unwrap();
+        assert_eq!(out, "use {{name}} as a literal");
+    }
+
+    #[test]
+    fn render_brace_doubling_around_substitution() {
+        let out = render_template(
+            "literal {{{{ then {{name}}",
+            &[("name", "value")],
+        )
+        .unwrap();
+        assert_eq!(out, "literal {{ then value");
+    }
+
+    #[test]
+    fn render_standalone_if_consumes_whole_line() {
+        // {{#if foo}} on its own line, {{/if}} on its own line.
+        // Body line is kept; surrounding tag lines vanish.
+        let template = "before\n{{#if foo}}\nbody\n{{/if}}\nafter\n";
+        let out = render_template(template, &[("foo", "v")]).unwrap();
+        assert_eq!(out, "before\nbody\nafter\n");
+    }
+
+    #[test]
+    fn render_standalone_if_falsy_consumes_whole_block() {
+        let template = "before\n{{#if foo}}\nbody\n{{/if}}\nafter\n";
+        let out = render_template(template, &[("foo", "")]).unwrap();
+        assert_eq!(out, "before\nafter\n");
+    }
+
+    #[test]
+    fn render_standalone_else_branches_render_cleanly() {
+        let template = "a\n{{#if foo}}\nyes\n{{else}}\nno\n{{/if}}\nz\n";
+        let out_true = render_template(template, &[("foo", "v")]).unwrap();
+        assert_eq!(out_true, "a\nyes\nz\n");
+        let out_false = render_template(template, &[("foo", "")]).unwrap();
+        assert_eq!(out_false, "a\nno\nz\n");
+    }
+
+    #[test]
+    fn render_standalone_tag_with_indent_strips_indent() {
+        let template = "x\n  {{#if a}}\nbody\n  {{/if}}\ny\n";
+        let out = render_template(template, &[("a", "v")]).unwrap();
+        assert_eq!(out, "x\nbody\ny\n");
+    }
+
+    #[test]
+    fn render_inline_block_tag_keeps_surrounding_text() {
+        // {{#if x}} not on its own line — surrounding text preserved.
+        let out = render_template("a{{#if x}}B{{/if}}c", &[("x", "v")]).unwrap();
+        assert_eq!(out, "aBc");
+    }
+
+    #[test]
+    fn render_variable_tag_never_strips_whitespace() {
+        // Even if {{name}} appears alone on a line in source, it should NOT
+        // consume its surrounding newlines — only block tags get that treatment.
+        let template = "before\n{{name}}\nafter\n";
+        let out = render_template(template, &[("name", "MID")]).unwrap();
+        assert_eq!(out, "before\nMID\nafter\n");
+    }
+
+    #[test]
+    fn render_consecutive_substitutions_work() {
+        let out = render_template(
+            "{{a}}{{b}}{{c}}",
+            &[("a", "1"), ("b", "2"), ("c", "3")],
+        )
+        .unwrap();
+        assert_eq!(out, "123");
+    }
+
+    #[test]
+    fn render_value_containing_braces_is_not_re_parsed() {
+        // If a substituted value contains `{{`, it must appear verbatim in output
+        // and NOT trigger further tag parsing.
+        let out = render_template(
+            "value is {{x}}",
+            &[("x", "literal {{not_a_tag}}")],
+        )
+        .unwrap();
+        assert_eq!(out, "value is literal {{not_a_tag}}");
+    }
+
+    #[test]
+    fn render_if_with_dashes_in_name() {
+        let out = render_template(
+            "{{#if review_only}}A{{/if}}",
+            &[("review_only", "yes")],
+        )
+        .unwrap();
+        assert_eq!(out, "A");
     }
 }
