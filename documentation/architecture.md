@@ -407,7 +407,7 @@ managed sibling path and are registered git worktrees.
 |---|---|
 | Work Item | Planned Factory work. Planning operates on work items. |
 | Attempt | One execution history branch under a work item. Attempts are visible state and history, but they are usually not their own queue. |
-| Task | Schedulable unit of work. Task kinds stay generic: `write`, `review`, `merge`, `report`, `learn`, `probe`, and `behavior-tests`. Roles carry prompt and domain behavior. |
+| Task | Schedulable unit of work. Task kinds stay generic: `write`, `review`, `merge`, `report`, `learn`, `probe`, and `tester`. Roles carry prompt and domain behavior. |
 | Workspace | Factory-managed filesystem/git context. A task may read many workspaces and write at most one. |
 | Merge Candidate | Candidate result prepared for merge. Its review state is separate from attempt review state. |
 
@@ -1207,6 +1207,42 @@ stderr are captured to `<log_dir>/<hook-name>.log` so failures stay
 inspectable after the fact. Hooks that are missing or not
 executable are silently skipped — no central registry, no
 configuration file, the filesystem is the manifest.
+
+### Tester
+
+`tester.rs` implements the deterministic Tester subcommand. Tester
+replaces the LLM-driven BehaviorTests Task with a subcommand that
+reads `.factory/tester.yaml`, runs each declared command sequentially,
+invokes `.factory/extract-tester-results` to normalize per-test
+output, and assembles `tester-results.json` — the canonical artifact
+all reviewers consume.
+
+Three files form the Tester contract:
+
+- `.factory/tester.yaml` — project's declaration of the test commands
+  Tester runs. Each entry has a `command` (shell string) and a
+  `test_harness` (parser identifier for the extractor).
+- `.factory/extract-tester-results` — project's executable that
+  normalizes raw command output into a per-test JSON array on stdout.
+  Receives the artifact directory as its single argument, reads
+  `commands.json` and per-command log files, emits structured results.
+- `tester-results.json` — canonical artifact with `commands`, `tests`,
+  `summary`, and `error` fields. All five reviewers receive it via
+  `input_artifacts`.
+
+These contract files live at the top of `.factory/`, not under
+`.factory/hooks/`. Top-level `.factory/` entries are required
+schema-bound contracts that Factory depends on structurally (like
+`tester.yaml` and `extract-tester-results`). `.factory/hooks/` holds
+optional auxiliary lifecycle gates that Factory invokes when present
+but does not require.
+
+When either contract file is missing in a candidate workspace, the
+writer Task's prompt includes a bootstrap section instructing the
+writer to author and commit it. Tester soft-fails when contract files
+are missing or malformed, producing a `tester-results.json` with an
+`error` field; the Task still completes successfully so the review
+loop can surface the problem and the next writer round can fix it.
 
 ### Merging
 

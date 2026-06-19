@@ -1880,80 +1880,14 @@ THE SYSTEM SHALL gitignore it so per-run logs never appear in
 `git status`, never get committed, and never appear in diffs.
 Test: .gitignore (tests/output/ entry)
 
-## Behavior tests Task
-
-WHEN Factory plans review Tasks for a completed Attempt,
-THE SYSTEM SHALL include one `TaskKind::BehaviorTests` Task with
-id `<attempt-id>-behavior-tests` alongside the review Tasks when
-the behaviors reviewer role is included.
-Test: src/work_model.rs (review_tasks_include_behavior_tests_task_when_behaviors_role_present)
-
-WHEN the behaviors reviewer role is absent from the review plan,
-THE SYSTEM SHALL skip creating a BehaviorTests Task.
-Test: src/work_model.rs (review_tasks_skip_behavior_tests_when_behaviors_role_absent)
-
-WHEN a `TaskKind::BehaviorTests` Task is executed,
-THE SYSTEM SHALL launch an LLM agent that reads
-`documentation/behaviors.md` from the candidate workspace, runs each
-`RunBehaviorTests:` command, parses structured output, maps each
-`Test:` reference to its outcome, and writes
-`behavior-tests-results.json` to the Task's artifact directory.
-Untestable: Requires live LLM agent execution environment
-
-WHEN `behavior-tests-results.json` is written,
-THE SYSTEM SHALL produce per-behavior entries with `anchor`,
-`test_refs`, `status` (pass, fail, untestable, missing_test_ref),
-`duration_ms` when known, and `failure_excerpt` when status is fail.
-Test: src/behavior_tests.rs (behavior_tests_results_round_trip)
-
-WHEN the candidate's `behaviors.md` contains an EARS statement with
-an `Untestable:` marker,
-THE SYSTEM SHALL record that behavior as `status: untestable` in the
-results JSON with `untestable_reason` set to the marker's text.
-Test: src/behavior_tests.rs (behavior_tests_results_round_trip)
-
-WHEN the candidate's `behaviors.md` contains an EARS statement with
-no `Test:` reference and no `Untestable:` marker,
-THE SYSTEM SHALL record that behavior as `status: missing_test_ref`.
-Test: src/behavior_tests.rs (behavior_status_serializes_lowercase)
-
-WHEN Factory schedules the review-phase Tasks of an Attempt,
-THE SYSTEM SHALL start `behavior-tests` in parallel with the other
-reviewers, and SHALL block the behaviors-completeness reviewer until
-`behavior-tests` completes.
-Test: src/work_model.rs (review_tasks_include_behavior_tests_task_when_behaviors_role_present)
-Test: src/work_attempt_loop.rs (tasks_ready_to_run_skips_dependents_until_dependency_complete)
-Test: src/work_attempt_loop.rs (tasks_ready_to_run_returns_dependent_after_dependency_completes)
-
-WHEN the behaviors-completeness reviewer runs,
-THE SYSTEM SHALL read `behavior-tests-results.json` and the candidate's
-behavior increment, verify that every new or changed EARS statement has
-either a `Test:` reference or an `Untestable:` marker, verify that
-every `Test:` reference's entry has `status: pass`, and produce a
-review.md artifact with a verdict and findings.
-Untestable: Reviewer behavior is LLM-driven and verified by the skill definition
-
-IF the `behavior-tests` Task's LLM agent cannot resolve the
-`RunBehaviorTests:` commands,
-THEN the agent SHALL write `behavior-tests-results.json` with a
-top-level `command_failure` field and an empty `behaviors` array.
-Test: src/behavior_tests.rs (command_failure_results_round_trip)
-
-WHEN the behaviors-completeness reviewer reads a results JSON
-containing `command_failure`,
-THE SYSTEM SHALL produce a `fail` verdict naming the failed command.
-Untestable: Reviewer behavior is LLM-driven and verified by the skill definition
-
-WHEN `TaskKind::BehaviorTests` is serialized and deserialized,
-THE SYSTEM SHALL round-trip as `"behavior-tests"`.
-Test: src/work_model.rs (task_kind_behavior_tests_round_trips)
+## Task dependencies
 
 WHEN a Task has a `depends_on` field referencing another Task,
 THE SYSTEM SHALL skip that Task in the ready-to-run check until the
 dependency completes.
 Test: src/work_model.rs (task_with_depends_on_round_trips)
-Test: src/work_attempt_loop.rs (tasks_ready_to_run_skips_dependents_until_dependency_complete)
-Test: src/work_attempt_loop.rs (tasks_ready_to_run_returns_dependent_after_dependency_completes)
+Test: src/work_attempt_loop.rs (tasks_ready_to_run_skips_reviewers_until_tester_complete)
+Test: src/work_attempt_loop.rs (tasks_ready_to_run_returns_dependent_after_tester_completes)
 
 WHEN a Task has no `depends_on` field,
 THE SYSTEM SHALL consider it immediately ready to run.
@@ -2447,48 +2381,6 @@ DeleteLegacyRunModel section, covering both absence-of-legacy
 assertions and CLI-error assertions.
 Test: tests/binary.rs::no_legacy_run_strings_in_documentation (verifies behaviors.md does not reintroduce legacy strings)
 
-## Mock coder BehaviorTests fixture
-
-WHEN Factory invokes the Coder for a `behavior-tests` Task,
-THE SYSTEM SHALL set the environment variable
-`FACTORY_TASK_KIND=behavior-tests` in the Coder process's env,
-in addition to all other env vars Factory normally propagates.
-Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
-
-WHEN Factory invokes the Coder for any other Task kind (write,
-review),
-THE SYSTEM SHALL NOT set `FACTORY_TASK_KIND=behavior-tests`.
-Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
-
-WHEN `tests/binary.rs::write_mock_claude` writes a mock script,
-THE SYSTEM SHALL prepend a prelude that detects
-`FACTORY_TASK_KIND=behavior-tests`, extracts the
-`behavior-tests-results.json` artifact path from the agent
-prompt, writes a minimal-valid JSON fixture, and exits 0. If
-`FACTORY_TASK_KIND` is not `behavior-tests`, the prelude falls
-through to the test-supplied script body unchanged.
-Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
-
-WHEN a test exercises an Attempt loop end-to-end with mock
-coders,
-THE SYSTEM SHALL produce a BehaviorTests Task that completes
-with a valid `behavior-tests-results.json` artifact, allowing
-the downstream behaviors-completeness reviewer Task to read it
-without erroring.
-Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
-
-WHEN a test wants the BehaviorTests Task to fail (for negative-
-path coverage),
-THE SYSTEM SHALL allow an alternate helper or explicit env-var
-override; the default-injected prelude SHALL NOT prevent this
-customization.
-Untestable: Structural allowance; negative-path helpers are a follow-up
-
-WHEN the mock prelude executes,
-THE SYSTEM SHALL tolerate missing `git` or `date` by writing a
-fallback fixture with placeholder values rather than failing.
-Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
-
 ## Usage logging
 
 WHEN any Coder's run() completes (zero or non-zero exit),
@@ -2839,3 +2731,190 @@ THE SYSTEM SHALL check that every plan.md step appears as a
 Checklist item in progress.md, and that the review verdict
 reflects whether all items are `- [x]`.
 Test: review-behaviors prompt contains cross-check instruction
+
+## Tester Task
+
+WHEN an Attempt has a candidate workspace to test (either from a
+completed writer Task, or as the target of a review-codebase Attempt),
+THE SYSTEM SHALL include exactly one `TaskKind::Tester` Task with id
+`<attempt-id>-tester` (or `<attempt-id>-tester-<round>` for review
+rounds beyond the first) alongside the reviewer Tasks for that round.
+Test: src/work_model.rs (review_tasks_include_tester_task_when_candidate_exists)
+Test: src/work_model.rs (review_tasks_tester_id_includes_round_after_first)
+
+WHEN `TaskKind::Tester` is serialized and deserialized,
+THE SYSTEM SHALL round-trip as `"tester"`.
+Test: src/tester.rs (task_kind_tester_round_trips)
+
+WHEN reviewer Tasks are scheduled for the same Attempt round as a
+Tester Task,
+THE SYSTEM SHALL set each reviewer Task's `depends_on` to include
+the Tester Task id, and reviewer Tasks SHALL NOT begin until the
+Tester Task completes.
+Test: src/work_model.rs (review_tasks_depend_on_tester_task)
+Test: src/work_attempt_loop.rs (tasks_ready_to_run_skips_reviewers_until_tester_complete)
+
+IF the writer Task fails before producing a candidate workspace,
+THEN no Tester Task SHALL be created for that round.
+Test: src/work_model.rs (no_tester_task_when_writer_failed)
+
+WHEN a `TaskKind::Tester` Task is executed,
+THE SYSTEM SHALL invoke the `factory` binary's Tester subcommand
+against the candidate workspace, without spawning any Coder process
+for that Task.
+Test: src/work_task_executor.rs (tester_task_invokes_subcommand_not_coder)
+
+WHEN the Tester subcommand runs,
+THE SYSTEM SHALL read `.factory/tester.yaml` from the candidate
+workspace, run each declared command in the candidate workspace
+sequentially, and capture each command's stdout, stderr, exit code,
+and wall-clock duration.
+Test: src/tester.rs (tester_runs_declared_commands_sequentially)
+Test: src/tester.rs (tester_captures_stdout_stderr_exit_duration)
+
+WHEN the Tester subcommand has captured all command outputs,
+THE SYSTEM SHALL invoke `.factory/extract-tester-results` with the
+captured per-command data, receive a normalized per-test array back,
+assemble a `tester-results.json` artifact (containing `commands`,
+`tests`, `summary`, and `error`), and write it to the Tester Task's
+artifact directory.
+Test: src/tester.rs (tester_invokes_extractor_and_writes_results_json)
+
+IF `.factory/tester.yaml` is missing, unreadable, or malformed,
+THEN the Tester subcommand SHALL produce `tester-results.json` with
+a top-level `error` field describing the problem, empty `commands`
+and `tests` arrays, and a zero summary. The Tester Task SHALL
+complete successfully.
+Test: src/tester.rs (tester_soft_fails_when_tester_yaml_missing)
+Test: src/tester.rs (tester_soft_fails_when_tester_yaml_malformed)
+
+IF `.factory/extract-tester-results` is missing or not executable,
+THEN the Tester subcommand SHALL produce `tester-results.json` with
+a top-level `error` field describing the problem, the captured
+`commands` array, an empty `tests` array, and a zero summary. The
+Tester Task SHALL complete successfully.
+Test: src/tester.rs (tester_soft_fails_when_extractor_missing)
+Test: src/tester.rs (tester_soft_fails_when_extractor_not_executable)
+
+WHEN a command declared in `tester.yaml` exits non-zero,
+THE SYSTEM SHALL still run subsequent declared commands AND SHALL
+still produce `tester-results.json` containing each command's exit
+info. The Tester Task itself SHALL complete successfully — individual
+command failures are data the reviewers interpret, not Tester errors.
+Test: src/tester.rs (tester_continues_when_command_exits_nonzero)
+Test: src/tester.rs (tester_task_succeeds_when_individual_commands_fail)
+
+IF `.factory/extract-tester-results` exits non-zero or emits output
+that does not match the expected schema,
+THEN the Tester subcommand SHALL produce `tester-results.json` with
+a top-level `error` field carrying the script's exit code and stderr
+tail, the captured `commands` array, an empty `tests` array, and a
+zero summary. The Tester Task SHALL complete successfully.
+Test: src/tester.rs (tester_soft_fails_when_extractor_exits_nonzero)
+Test: src/tester.rs (tester_soft_fails_when_extractor_emits_invalid_schema)
+
+WHEN a writer Task runs in a candidate workspace where
+`.factory/tester.yaml` does not exist,
+THE SYSTEM SHALL include in the writer's prompt an instruction to
+author `.factory/tester.yaml` and commit it alongside the rest of
+the Work Item's changes.
+Test: src/work_task_executor.rs (writer_prompt_includes_tester_yaml_bootstrap_when_missing)
+
+WHEN a writer Task runs in a candidate workspace where
+`.factory/extract-tester-results` does not exist,
+THE SYSTEM SHALL include in the writer's prompt an instruction to
+author `.factory/extract-tester-results` and commit it alongside the
+rest of the Work Item's changes.
+Test: src/work_task_executor.rs (writer_prompt_includes_extract_tester_results_bootstrap_when_missing)
+
+WHEN both `.factory/tester.yaml` and `.factory/extract-tester-results`
+already exist in the candidate workspace at the start of a writer Task,
+THE SYSTEM SHALL NOT include the bootstrap instructions in the
+writer's prompt.
+Test: src/work_task_executor.rs (writer_prompt_omits_bootstrap_when_both_files_present)
+
+WHEN `tester-results.json` is written,
+THE SYSTEM SHALL include exactly these top-level fields: `commands`
+(array), `tests` (array), `summary` (object), `error` (object or
+null). No other top-level fields.
+Test: src/tester.rs (tester_results_top_level_shape)
+
+Each entry in `commands` SHALL have: `command` (string, as declared
+in `tester.yaml`), `exit_code` (integer), `duration_ms` (integer),
+`stdout_log` (string, relative path from the artifact directory),
+`stderr_log` (string, relative path).
+Test: src/tester.rs (tester_results_command_entry_shape)
+
+Each entry in `tests` SHALL have: `id` (string), `test_harness`
+(string identifying the source command), `status` (one of `"pass"`,
+`"fail"`, `"skipped"`, `"not_run"`), `duration_ms` (integer or
+null), `failure_excerpt` (string or null, at most 500 characters).
+Test: src/tester.rs (tester_results_test_entry_shape)
+Test: src/tester.rs (tester_results_failure_excerpt_capped_at_500_chars)
+
+`summary` SHALL have: `total`, `pass`, `fail`, `skipped` (all
+integers). Counts SHALL equal the corresponding partition of the
+`tests` array.
+Test: src/tester.rs (tester_results_summary_counts_match_tests_partition)
+
+WHEN the Tester subcommand runs each declared command,
+THE SYSTEM SHALL write the command's complete stdout to
+`commands/<n>-stdout.log` and its complete stderr to
+`commands/<n>-stderr.log` in the Task's artifact directory, where
+`<n>` is the zero-based index of the command in `tester.yaml`'s
+declaration order. No truncation.
+Test: src/tester.rs (tester_writes_complete_command_logs_to_artifact_dir)
+
+The `tests` array SHALL be ordered by `(test_harness, id)`.
+Test: src/tester.rs (tester_results_tests_ordered_by_test_harness_then_id)
+
+WHEN the `error` field is non-null,
+IT SHALL have: `kind` (one of `"tester_yaml_problem"`,
+`"extractor_missing"`, `"extractor_failure"`), `message` (string),
+`details` (string).
+Test: src/tester.rs (tester_results_error_object_shape)
+
+WHEN Factory schedules reviewer Tasks for an Attempt round that has a
+Tester Task,
+THE SYSTEM SHALL include the `tester-results.json` artifact path in
+each reviewer Task's `input_artifacts` list, with producer id set to
+the Tester Task id.
+Test: src/work_model.rs (each_reviewer_task_receives_tester_results_in_input_artifacts)
+
+Each reviewer prompt (`prompts/review-architecture.md`,
+`prompts/review-behaviors.md`, `prompts/review-documentation.md`,
+`prompts/review-skills.md`, `prompts/review-tests.md`) SHALL state
+that `tester-results.json` is authoritative for whether the canonical
+test suite passes, that reviewers SHALL NOT re-run the canonical
+suite, and that ad-hoc verifications (targeted invocations, custom
+scripts) for judgment calls remain explicitly OK.
+Test: src/work_model.rs (reviewer_prompts_mention_tester_results_authoritative)
+Test: src/work_model.rs (reviewer_prompts_disallow_canonical_rerun)
+Test: src/work_model.rs (reviewer_prompts_allow_adhoc_verification)
+
+`prompts/review-behaviors.md` SHALL include explicit instruction to
+compute per-EARS coverage by joining `Test:` references from
+`behaviors.md` against the `tests` array in `tester-results.json`,
+flagging any EARS statement whose `Test:` references have
+`status: fail` or are not present in the `tests` array.
+Test: src/work_model.rs (review_behaviors_prompt_describes_ears_coverage_join)
+
+`prompts/review-behaviors.md` SHALL include explicit instruction to
+interpret test failures: distinguish *real* failures (introduced by
+the candidate's changes), *infrastructure* failures (environment,
+network, flaky dependencies), and *pre-existing baseline* failures
+(failed on main before this Attempt). The reviewer's verdict SHALL
+reflect this interpretation.
+Test: src/work_model.rs (review_behaviors_prompt_describes_failure_interpretation)
+
+WHEN the `error` field in `tester-results.json` is non-null,
+`prompts/review-behaviors.md` SHALL instruct the reviewer to produce
+a `fail` verdict that names the error `kind` and `message`.
+Test: src/work_model.rs (review_behaviors_prompt_handles_error_field)
+
+WHEN the Tester subcommand executes a Task,
+THE SYSTEM SHALL NOT spawn any Coder process for that Task. No
+transcript file SHALL be written by Tester (the existing reviewer
+and writer transcript paths are unaffected).
+Test: src/work_task_executor.rs (tester_task_does_not_spawn_coder_process)
+Test: src/work_task_executor.rs (tester_task_does_not_write_transcript)
