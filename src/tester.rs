@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
 use crate::content::ContentResolver;
+use crate::os;
 
 const TESTER_YAML_PATH: &str = ".factory/tester.yaml";
 const EXTRACTOR_PATH: &str = ".factory/extract-tester-results";
@@ -67,8 +68,8 @@ struct TesterCommand {
 pub fn run(
     candidate_workspace: &Path,
     artifact_dir: &Path,
-    _no_sandbox: bool,
-    _resolver: &ContentResolver,
+    no_sandbox: bool,
+    resolver: &ContentResolver,
 ) -> Result<()> {
     let tester_yaml_path = candidate_workspace.join(TESTER_YAML_PATH);
 
@@ -107,6 +108,37 @@ pub fn run(
     let commands_dir = artifact_dir.join("commands");
     fs::create_dir_all(&commands_dir)?;
 
+    let _sandbox_profile = if no_sandbox {
+        None
+    } else {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let candidate_abs = fs::canonicalize(candidate_workspace)
+            .unwrap_or_else(|_| candidate_workspace.to_path_buf());
+        let artifact_abs =
+            fs::canonicalize(artifact_dir).unwrap_or_else(|_| artifact_dir.to_path_buf());
+        let mut writable_roots = vec![candidate_abs, artifact_abs];
+        let cargo_registry = PathBuf::from(&home).join(".cargo/registry");
+        let cargo_git = PathBuf::from(&home).join(".cargo/git/db");
+        if cargo_registry.is_dir() {
+            writable_roots.push(cargo_registry);
+        }
+        if cargo_git.is_dir() {
+            writable_roots.push(cargo_git);
+        }
+        match os::render_profile_common_only(resolver, &home, &writable_roots, &[]) {
+            Ok(profile) => {
+                eprintln!("  Sandbox profile  {}", profile.path.display());
+                Some(profile)
+            }
+            Err(err) => {
+                eprintln!("  Warning: sandbox render failed: {err:#}; running unsandboxed");
+                None
+            }
+        }
+    };
+
+    let sandbox_path = _sandbox_profile.as_ref().map(|p| &p.path);
+
     let mut command_results = Vec::new();
     for (index, cmd) in config.commands.iter().enumerate() {
         eprintln!("  Running command {}: {}", index, cmd.command);
@@ -116,6 +148,7 @@ pub fn run(
             &cmd.test_harness,
             index,
             &commands_dir,
+            sandbox_path,
         )?;
         eprintln!(
             "    exit_code={} duration={}ms",
@@ -147,7 +180,7 @@ pub fn run(
         return Ok(());
     }
 
-    let tests = match run_extractor(&extractor_path, artifact_dir) {
+    let tests = match run_extractor(&extractor_path, artifact_dir, sandbox_path) {
         Ok(tests) => tests,
         Err(error) => {
             let results = TesterResults {
@@ -207,17 +240,30 @@ fn run_command(
     test_harness: &str,
     index: usize,
     commands_dir: &Path,
+    sandbox_path: Option<&PathBuf>,
 ) -> Result<CommandResult> {
     let stdout_path = commands_dir.join(format!("{index}-stdout.log"));
     let stderr_path = commands_dir.join(format!("{index}-stderr.log"));
 
     let start = Instant::now();
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(working_dir)
-        .output()
-        .with_context(|| format!("spawning command: {command}"))?;
+    let output = if let Some(profile) = sandbox_path {
+        Command::new("sandbox-exec")
+            .arg("-f")
+            .arg(profile)
+            .arg("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(working_dir)
+            .output()
+            .with_context(|| format!("spawning sandboxed command: {command}"))?
+    } else {
+        Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(working_dir)
+            .output()
+            .with_context(|| format!("spawning command: {command}"))?
+    };
     let duration = start.elapsed();
 
     fs::write(&stdout_path, &output.stdout)?;
@@ -238,11 +284,25 @@ fn run_command(
     })
 }
 
-fn run_extractor(extractor_path: &Path, artifact_dir: &Path) -> Result<Vec<TestResult>> {
-    let output = Command::new(extractor_path)
-        .arg(artifact_dir)
-        .output()
-        .with_context(|| format!("running {}", extractor_path.display()))?;
+fn run_extractor(
+    extractor_path: &Path,
+    artifact_dir: &Path,
+    sandbox_path: Option<&PathBuf>,
+) -> Result<Vec<TestResult>> {
+    let output = if let Some(profile) = sandbox_path {
+        Command::new("sandbox-exec")
+            .arg("-f")
+            .arg(profile)
+            .arg(extractor_path)
+            .arg(artifact_dir)
+            .output()
+            .with_context(|| format!("running sandboxed {}", extractor_path.display()))?
+    } else {
+        Command::new(extractor_path)
+            .arg(artifact_dir)
+            .output()
+            .with_context(|| format!("running {}", extractor_path.display()))?
+    };
 
     if !output.status.success() {
         let stderr_tail = String::from_utf8_lossy(&output.stderr);

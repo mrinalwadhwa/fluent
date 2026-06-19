@@ -52,18 +52,49 @@ pub fn render_profile_for_access_for_coder(
     readable_roots: &[PathBuf],
     coder_kind: CoderKind,
 ) -> Result<SandboxProfile> {
+    render_profile_for_access(
+        resolver,
+        home,
+        writable_roots,
+        readable_roots,
+        Some(coder_kind),
+    )
+}
+
+/// Render a Seatbelt sandbox profile with common rules only (no tool overlay).
+pub fn render_profile_common_only(
+    resolver: &ContentResolver,
+    home: &str,
+    writable_roots: &[PathBuf],
+    readable_roots: &[PathBuf],
+) -> Result<SandboxProfile> {
+    render_profile_for_access(resolver, home, writable_roots, readable_roots, None)
+}
+
+fn render_profile_for_access(
+    resolver: &ContentResolver,
+    home: &str,
+    writable_roots: &[PathBuf],
+    readable_roots: &[PathBuf],
+    coder_kind: Option<CoderKind>,
+) -> Result<SandboxProfile> {
     if writable_roots.is_empty() {
         bail!("At least one writable sandbox root is required");
     }
     let common = resolver
         .resolve_content("sandbox/common.sb")
         .context("Common sandbox profile not found")?;
-    let specific_path = sandbox_profile_path(coder_kind);
-    let specific = resolver
-        .resolve_content(specific_path)
-        .with_context(|| format!("Sandbox profile {specific_path} not found"))?;
 
-    let combined = format!("{common}\n{specific}");
+    let combined = if let Some(kind) = coder_kind {
+        let specific_path = sandbox_profile_path(kind);
+        let specific = resolver
+            .resolve_content(specific_path)
+            .with_context(|| format!("Sandbox profile {specific_path} not found"))?;
+        format!("{common}\n{specific}")
+    } else {
+        common
+    };
+
     let root_rules = render_root_rules(writable_roots, readable_roots);
     let primary_root = writable_roots[0].to_string_lossy();
     let combined = if combined.contains("_SANDBOX_ROOT_RULES_") {
@@ -266,6 +297,59 @@ mod tests {
         assert!(content.contains("Codex CLI -- profile-specific Seatbelt rules"));
         assert!(content.contains("/Users/test/.codex"));
         assert!(!content.contains("Claude Code CLI -- profile-specific Seatbelt rules"));
+    }
+
+    #[test]
+    fn rendered_profile_with_no_overlay_uses_common_only() {
+        let resolver = ContentResolver::new(None);
+        let profile = render_profile_common_only(
+            &resolver,
+            "/Users/test",
+            &[PathBuf::from("/Users/test/workspace")],
+            &[],
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&profile.path).unwrap();
+        assert!(content.contains("(version 1)"));
+        assert!(content.contains("(deny default)"));
+        assert!(
+            !content.contains("Claude Code CLI -- profile-specific"),
+            "common-only profile should not contain Claude-specific overlay"
+        );
+        assert!(
+            !content.contains("Codex CLI -- profile-specific"),
+            "common-only profile should not contain Codex-specific overlay"
+        );
+        assert!(
+            !content.contains("Pi CLI -- profile-specific"),
+            "common-only profile should not contain Pi-specific overlay"
+        );
+    }
+
+    #[test]
+    fn rendered_profile_grants_workspace_and_artifact_writable() {
+        let resolver = ContentResolver::new(None);
+        let workspace = PathBuf::from("/Users/test/workspace/candidate");
+        let artifact = PathBuf::from("/Users/test/.factory/artifacts/tester");
+        let profile = render_profile_common_only(
+            &resolver,
+            "/Users/test",
+            &[workspace.clone(), artifact.clone()],
+            &[],
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&profile.path).unwrap();
+        assert!(
+            content.contains("(allow file-write* (subpath \"/Users/test/workspace/candidate\"))"),
+            "workspace should be writable: {content}"
+        );
+        assert!(
+            content
+                .contains("(allow file-write* (subpath \"/Users/test/.factory/artifacts/tester\"))"),
+            "artifact dir should be writable: {content}"
+        );
     }
 
     #[test]
