@@ -628,7 +628,10 @@ fn cmd_work(
                     no_sandbox: no_sandbox || global_no_sandbox,
                     store_lock: None,
                 })?;
-                println!("Completed Tester Task {} at {}", result.task_id, result.output);
+                println!(
+                    "Completed Tester Task {} at {}",
+                    result.task_id, result.output
+                );
             }
         },
         WorkCommands::AutoMerge {

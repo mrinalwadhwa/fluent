@@ -224,8 +224,8 @@ pub fn run(
 }
 
 fn read_tester_config(path: &Path) -> Result<TesterConfig> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let config: TesterConfig =
         serde_yaml::from_str(&content).with_context(|| format!("parsing {}", path.display()))?;
     if config.commands.is_empty() {
@@ -454,10 +454,7 @@ mod tests {
             workspace.path(),
             "commands:\n  - command: echo hello\n    test_harness: shell-harness\n",
         );
-        write_extractor(
-            workspace.path(),
-            "#!/bin/sh\necho '[]'\n",
-        );
+        write_extractor(workspace.path(), "#!/bin/sh\necho '[]'\n");
 
         run(workspace.path(), artifact_dir.path(), true, &resolver()).unwrap();
         let results = read_results(artifact_dir.path());
@@ -647,8 +644,12 @@ echo '[
         assert_eq!(error.kind, "tester_yaml_problem");
         assert!(!error.message.is_empty());
         assert!(
-            ["tester_yaml_problem", "extractor_missing", "extractor_failure"]
-                .contains(&error.kind.as_str())
+            [
+                "tester_yaml_problem",
+                "extractor_missing",
+                "extractor_failure"
+            ]
+            .contains(&error.kind.as_str())
         );
     }
 
@@ -772,7 +773,14 @@ echo '[
         let results = read_results(artifact_dir.path());
 
         assert_eq!(results.error.as_ref().unwrap().kind, "extractor_failure");
-        assert!(results.error.as_ref().unwrap().details.contains("error detail"));
+        assert!(
+            results
+                .error
+                .as_ref()
+                .unwrap()
+                .details
+                .contains("error detail")
+        );
         assert!(!results.commands.is_empty());
         assert!(results.tests.is_empty());
     }

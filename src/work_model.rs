@@ -3422,7 +3422,9 @@ mod tests {
     fn review_behaviors_prompt_describes_ears_coverage_join() {
         let content = std::fs::read_to_string("prompts/review-behaviors.md").unwrap();
         assert!(
-            content.contains("Test:") && content.contains("tests") && content.contains("tester-results.json"),
+            content.contains("Test:")
+                && content.contains("tests")
+                && content.contains("tester-results.json"),
             "review-behaviors.md should describe joining Test: refs against tests array"
         );
     }
@@ -3439,7 +3441,9 @@ mod tests {
             "review-behaviors.md should mention infrastructure failures"
         );
         assert!(
-            content.contains("Pre-existing") || content.contains("pre-existing") || content.contains("baseline"),
+            content.contains("Pre-existing")
+                || content.contains("pre-existing")
+                || content.contains("baseline"),
             "review-behaviors.md should mention pre-existing baseline failures"
         );
     }
@@ -3604,16 +3608,10 @@ mod tests {
         );
 
         let doc_review = tasks.iter().find(|t| t.role == "documentation").unwrap();
-        assert_eq!(
-            doc_review.depends_on.as_deref(),
-            Some("attempt-1-tester")
-        );
+        assert_eq!(doc_review.depends_on.as_deref(), Some("attempt-1-tester"));
 
         let tests_review = tasks.iter().find(|t| t.role == "tests").unwrap();
-        assert_eq!(
-            tests_review.depends_on.as_deref(),
-            Some("attempt-1-tester")
-        );
+        assert_eq!(tests_review.depends_on.as_deref(), Some("attempt-1-tester"));
     }
 
     #[test]
@@ -3690,15 +3688,20 @@ mod tests {
         work_item
             .add_next_review_tasks(
                 "attempt-1",
-                &["behaviors", "tests", "documentation", "skills", "architecture"],
+                &[
+                    "behaviors",
+                    "tests",
+                    "documentation",
+                    "skills",
+                    "architecture",
+                ],
             )
             .unwrap();
 
         let tasks = &work_item.attempts[0].tasks;
         for task in tasks.iter().filter(|t| t.kind == TaskKind::Review) {
             let has_tester_results = task.input_artifacts.iter().any(|a| {
-                a.path.ends_with("/tester-results.json")
-                    && a.producer_id.contains("tester")
+                a.path.ends_with("/tester-results.json") && a.producer_id.contains("tester")
             });
             assert!(
                 has_tester_results,
@@ -4251,11 +4254,7 @@ mod tests {
             .find(|t| t.id == "attempt-1-review-tests")
             .expect("review-tests task");
         assert_eq!(
-            review_tests_task
-                .artifact_area
-                .as_ref()
-                .unwrap()
-                .path,
+            review_tests_task.artifact_area.as_ref().unwrap().path,
             ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests"
         );
         assert_eq!(

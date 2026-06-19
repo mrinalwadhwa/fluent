@@ -57,9 +57,9 @@ pub fn run_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     match task_kind {
         TaskKind::Write => run_write_task(config, coder_kind, model),
         TaskKind::Review => run_review_task(config, coder_kind, model),
-        TaskKind::BehaviorTests => bail!(
-            "BehaviorTests tasks are retired; use Tester tasks instead"
-        ),
+        TaskKind::BehaviorTests => {
+            bail!("BehaviorTests tasks are retired; use Tester tasks instead")
+        }
         TaskKind::Tester => run_tester_task(config),
         kind => bail!(
             "Task {:?} is kind {kind}; unsupported by task run",
@@ -623,7 +623,6 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         output: path_for_model(config.project_root, &results_path),
     })
 }
-
 
 struct ReviewReadableWorkspaces {
     workspaces: Vec<ReviewReadableWorkspace>,
