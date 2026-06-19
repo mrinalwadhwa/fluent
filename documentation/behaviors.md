@@ -2734,8 +2734,8 @@ Test: review-behaviors prompt contains cross-check instruction
 
 ## Tester Task
 
-WHEN an Attempt has a candidate workspace to test (either from a
-completed writer Task, or as the target of a review-codebase Attempt),
+WHEN an Attempt has a candidate workspace to test from a completed
+writer Task,
 THE SYSTEM SHALL include exactly one `TaskKind::Tester` Task with id
 `<attempt-id>-tester` (or `<attempt-id>-tester-<round>` for review
 rounds beyond the first) alongside the reviewer Tasks for that round.
@@ -2911,6 +2911,10 @@ WHEN the `error` field in `tester-results.json` is non-null,
 `prompts/review-behaviors.md` SHALL instruct the reviewer to produce
 a `fail` verdict that names the error `kind` and `message`.
 Test: src/work_model.rs (review_behaviors_prompt_handles_error_field)
+
+The Tester subcommand SHALL be reachable through the existing
+`factory` binary's CLI surface.
+Test: tests/binary.rs (factory_help_lists_tester_subcommand)
 
 WHEN the Tester subcommand executes a Task,
 THE SYSTEM SHALL NOT spawn any Coder process for that Task. No

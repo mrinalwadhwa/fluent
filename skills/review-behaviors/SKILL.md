@@ -100,5 +100,5 @@ Progress: [yes | no | partial | first-pass]
   understand a behavior, report that as a finding.
 - **Every new EARS statement needs coverage.** Either a `Test:` reference
   that passed or an `Untestable:` marker with a reason.
-- **command_failure is a single finding.** When the test infrastructure
-  failed, do not flag individual behaviors.
+- **A non-null `error` field is a single finding.** When the test
+  infrastructure failed, do not flag individual behaviors.

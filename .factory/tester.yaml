@@ -5,7 +5,7 @@ commands:
     test_harness: cargo-test
   - command: |
       exit_code=0
-      for script in tests/shell/*.sh; do
+      for script in tests/behaviors/operations/*.sh; do
         [ -f "$script" ] || continue
         echo "--- $script ---"
         if bash "$script"; then

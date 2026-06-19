@@ -1582,17 +1582,17 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
     let task_instructions = task_instructions_prompt(task.instructions.as_deref());
     let input_artifacts_prompt = review_input_artifacts_prompt(input.input_artifacts);
     let behavior_review_input = if task.role == "behaviors" {
-        let bt_results_hint = if let Some(dep_id) = task.depends_on.as_deref() {
-            let bt_artifact_path = format!(
-                ".factory/work/artifacts/{}/{}/{}/behavior-tests-results.json",
+        let tester_results_hint = if let Some(dep_id) = task.depends_on.as_deref() {
+            let tester_artifact_path = format!(
+                ".factory/work/artifacts/{}/{}/{}/tester-results.json",
                 input.item.id, input.attempt_id, dep_id
             );
             format!(
-                "\nBehavior test results are available at: {bt_artifact_path}\n\
-                 Read the behavior-tests-results.json file. Use its per-behavior statuses\n\
-                 (pass, fail, untestable, missing_test_ref) to inform your verdict.\n\
-                 If it contains `command_failure`, produce a fail verdict naming the failed\n\
-                 command rather than flagging individual behaviors.\n"
+                "\nTester results are available at: {tester_artifact_path}\n\
+                 Read the tester-results.json file. Use its per-test statuses\n\
+                 (pass, fail, skipped, not_run) to inform your verdict.\n\
+                 If its `error` field is non-null, produce a fail verdict naming the error\n\
+                 `kind` and `message` rather than flagging individual behaviors.\n"
             )
         } else {
             String::new()
@@ -1600,7 +1600,7 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
         format!(
             "{}\n{}",
             work_behavior_review_input(input.item),
-            bt_results_hint
+            tester_results_hint
         )
     } else {
         String::new()

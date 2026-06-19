@@ -128,32 +128,21 @@ a background post-merge review is in flight. If the source HEAD moves
 during the review (e.g. another merge lands), the guard fails the
 review Tasks with a clear error and does not attempt restoration.
 
-When the behaviors reviewer role is included in a review plan, Factory
-also creates a `TaskKind::BehaviorTests` Task alongside the review
-Tasks. This Task runs an LLM agent that reads `documentation/behaviors.md`,
-executes the `RunBehaviorTests:` commands, parses structured output, and
-writes `behavior-tests-results.json` to its artifact directory. The
-behaviors-completeness reviewer (role `behaviors`) declares a `depends_on`
-reference to the BehaviorTests Task; the Attempt scheduler blocks it until
-the dependency completes. Other reviewers have no dependency and start
-immediately in parallel with the BehaviorTests Task.
+When a review round includes a candidate workspace, Factory creates a
+`TaskKind::Tester` Task alongside the reviewer Tasks. The Tester is a
+deterministic subcommand (`factory work tester run`) that reads
+`.factory/tester.yaml` from the candidate workspace, runs each declared
+test command sequentially, invokes `.factory/extract-tester-results` to
+normalize the raw output into per-test entries, and writes
+`tester-results.json` to its artifact directory. Every reviewer Task
+declares a `depends_on` reference to the Tester Task; the Attempt
+scheduler blocks all reviewers until the Tester completes. The Tester
+does not spawn a Coder process or write a transcript — it is a
+deterministic subprocess, not an LLM agent.
 
-The `behaviors.md` format supports three markers on EARS statements:
+The `behaviors.md` format supports two markers on EARS statements:
 - `Test:` — names a test that verifies the behavior.
 - `Untestable:` — marks a behavior as genuinely untestable with a reason.
-- `RunBehaviorTests:` — top-level header lines naming batch test commands.
-
-The `behavior-tests-results.json` schema is defined in
-`src/behavior_tests.rs` and includes per-behavior entries with `anchor`,
-`test_refs`, `status` (pass, fail, untestable, missing_test_ref),
-`duration_ms`, `failure_excerpt`, and `untestable_reason`. When a
-`RunBehaviorTests:` command fails, the JSON includes a `command_failure`
-field and an empty `behaviors` array.
-
-Factory sets `FACTORY_TASK_KIND=behavior-tests` in the Coder process env
-when invoking the agent for a BehaviorTests Task. Test mock scripts use
-this env var to detect BehaviorTests invocations and write a minimal-valid
-`behavior-tests-results.json` fixture without requiring per-test setup.
 
 Before launching each review Task, Factory pre-populates the reviewer's
 artifact directory with the candidate's build outputs so reviewers start
@@ -447,21 +436,24 @@ the core model.
 ```
 
 The `kind` field accepts `write`, `review`, `merge`, `report`,
-`learn`, `probe`, `tester`, or `behavior-tests`. `workspace_access.reads` may list any number of
+`learn`, `probe`, or `tester`. The value `behavior-tests` is accepted
+on read for backward compatibility with stored state but is not created
+by current code. `workspace_access.reads` may list any number of
 workspaces. `workspace_access.writes` may be empty or contain one
 workspace. A `review` task must keep `writes` empty; reviewers write
 findings and notes under a required `artifact_area`.
 
 Write Tasks carry an `artifact_area` under
 `.factory/work/artifacts/<work-item-id>/<attempt-id>/<task-id>/`,
-matching the review and behavior-tests convention. The writer's Coder
-persists `transcript.jsonl` into this directory during execution. The
-writer's sandbox grants write access to both the candidate workspace
-and the artifact directory. Review and behavior-tests Tasks also persist
-`transcript.jsonl` alongside their primary artifact (`review.md` or
-`behavior-tests-results.json`). Reviewer sandboxes intentionally exclude
-writer artifact directories and other reviewers' artifact directories to
-preserve independent verification.
+matching the review convention. The writer's Coder persists
+`transcript.jsonl` into this directory during execution. The writer's
+sandbox grants write access to both the candidate workspace and the
+artifact directory. Review Tasks also persist `transcript.jsonl`
+alongside their primary artifact (`review.md`). Tester Tasks write
+`tester-results.json`, per-command log files, and `commands.json` to
+their artifact directory but do not write a transcript. Reviewer
+sandboxes intentionally exclude writer artifact directories and other
+reviewers' artifact directories to preserve independent verification.
 
 ### progress.md
 
@@ -702,8 +694,9 @@ Claude is the default. Select a different Coder with `--coder codex`,
 `--coder pi`, or `FACTORY_CODER=<coder>`.
 
 Each Attempt stores a per-Task-kind **coder mapping** that determines
-which Coder and model run each Task kind (write, review,
-behavior-tests). Configure with per-Task-kind flags like
+which Coder and model run each Task kind (write, review). Tester Tasks
+bypass the coder mapping entirely — they run as a deterministic
+subprocess without a Coder. Configure with per-Task-kind flags like
 `--write-coder pi --write-model qwen3-30b-a3b --review-coder claude`.
 When no per-Task-kind flag is set, `--coder` or `FACTORY_CODER` sets
 all Task kinds to the same Coder. The resolved mapping is stored on
@@ -1063,7 +1056,7 @@ factory/main/
     main.rs                  ← CLI dispatch (clap)
     lib.rs                   ← public API for tests
     auto_merge.rs            ← Auto-merge watcher for merge-ready Work Items
-    behavior_tests.rs        ← BehaviorTests results schema
+    tester.rs                ← Tester subcommand (deterministic test runner)
     claude_auth.rs           ← Claude OAuth authentication
     cleanup.rs               ← Cleanup of terminal Work state
     cli.rs                   ← CLI argument types
@@ -1107,6 +1100,8 @@ factory/main/
     tests.md
   .factory/
     Dockerfile               ← per-project Fargate image (Rust toolchain)
+    tester.yaml              ← test command declarations for the Tester subcommand
+    extract-tester-results   ← normalize raw test output into per-test JSON
     observations/             ← per-file observation queue (tracked)
       <id>.md                ← open observations
       resolved/
@@ -1117,7 +1112,6 @@ factory/main/
       fix-pre-merge
     work/                    ← Work model durable state (not tracked)
   prompts/                   ← agent system prompts
-    behavior-tests.md        ← BehaviorTests agent prompt
     review-architecture.md
     review-behaviors.md
     review-documentation.md
