@@ -318,6 +318,12 @@ pub enum WorkCommands {
         command: WorkTaskCommands,
     },
 
+    /// Run the deterministic Tester subcommand
+    Tester {
+        #[command(subcommand)]
+        command: WorkTesterCommands,
+    },
+
     /// Watch for merge-ready candidates and merge them automatically
     AutoMerge {
         /// Work Item ID (watches a single Work Item)
@@ -499,6 +505,25 @@ pub enum WorkTaskCommands {
         /// Extra args passed through to the agent
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum WorkTesterCommands {
+    /// Run the Tester subcommand for a specific Task
+    Run {
+        /// Work Item ID
+        work_item_id: String,
+
+        /// Attempt ID
+        attempt_id: String,
+
+        /// Task ID
+        task_id: String,
+
+        /// Disable sandbox
+        #[arg(long)]
+        no_sandbox: bool,
     },
 }
 

@@ -58,6 +58,7 @@ pub fn run_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         TaskKind::Write => run_write_task(config, coder_kind, model),
         TaskKind::Review => run_review_task(config, coder_kind, model),
         TaskKind::BehaviorTests => run_behavior_tests_task(config, coder_kind, model),
+        TaskKind::Tester => run_tester_task(config),
         kind => bail!(
             "Task {:?} is kind {kind}; unsupported by task run",
             config.task_id
@@ -475,6 +476,149 @@ fn run_review_task(
     Ok(WorkTaskRunResult {
         task_id: config.task_id.to_string(),
         output: path_for_model(config.project_root, &review_path),
+    })
+}
+
+fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
+    let artifact_dir = {
+        let _lock = config
+            .store_lock
+            .map(|m| m.lock().unwrap_or_else(|e| e.into_inner()));
+        let mut item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+        let (attempt_index, task_index) =
+            find_attempt_task_indexes(&item, config.attempt_id, config.task_id)
+                .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", config.task_id))?;
+
+        let task = &item.attempts[attempt_index].tasks[task_index];
+        if task.status != TaskStatus::Planned {
+            bail!(
+                "Task {:?} is {}; expected planned",
+                config.task_id,
+                task.status
+            );
+        }
+        let artifact_area = task
+            .artifact_area
+            .as_ref()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Tester Task {:?} must declare an artifact area",
+                    config.task_id
+                )
+            })?
+            .path
+            .clone();
+        let artifact_dir = resolve_managed_artifact_area_path(config.project_root, &artifact_area)?;
+        fs::create_dir_all(&artifact_dir)?;
+
+        item.attempts[attempt_index].status = AttemptStatus::Reviewing;
+        item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Executing;
+        crate::work_model::mark_task_started(&mut item.attempts[attempt_index].tasks[task_index]);
+        item.attempts[attempt_index].tasks[task_index].output = None;
+        config.store.write_work_item(&item)?;
+
+        artifact_dir
+    };
+
+    let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+    let (attempt_index, task_index) =
+        find_attempt_task_indexes(&item, config.attempt_id, config.task_id)
+            .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", config.task_id))?;
+    let task = &item.attempts[attempt_index].tasks[task_index];
+    let review_context = task.review_context.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Tester Task {:?} must declare review context",
+            config.task_id
+        )
+    })?;
+
+    let candidate_workspace = resolve_workspace_path(
+        config.project_root,
+        &review_context.candidate_workspace_path,
+    );
+
+    eprintln!("  Factory           work task run");
+    eprintln!("  Work Item         {}", item.id);
+    eprintln!("  Attempt           {}", config.attempt_id);
+    eprintln!("  Task              {} (tester)", config.task_id);
+    eprintln!("  Artifact area     {}", artifact_dir.display());
+    eprintln!("  Candidate         {}", candidate_workspace.display());
+
+    let results_path = artifact_dir.join("tester-results.json");
+
+    let tester_result = crate::tester::run(
+        &candidate_workspace,
+        &artifact_dir,
+        config.no_sandbox,
+        config.resolver,
+    );
+
+    match tester_result {
+        Ok(()) => {}
+        Err(error) => {
+            eprintln!("  Tester error: {error:#}");
+            lock_mark_task_failed(
+                config.store,
+                config.store_lock,
+                config.work_item_id,
+                config.attempt_id,
+                config.task_id,
+            )?;
+            return Err(error);
+        }
+    }
+
+    if !results_path.is_file() {
+        lock_mark_task_failed(
+            config.store,
+            config.store_lock,
+            config.work_item_id,
+            config.attempt_id,
+            config.task_id,
+        )?;
+        bail!(
+            "Tester Task {:?} completed without writing {}",
+            config.task_id,
+            results_path.display()
+        );
+    }
+
+    {
+        let _lock = config
+            .store_lock
+            .map(|m| m.lock().unwrap_or_else(|e| e.into_inner()));
+        let mut completed_item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+        let (attempt_index, task_index) =
+            find_attempt_task_indexes(&completed_item, config.attempt_id, config.task_id)
+                .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", config.task_id))?;
+        crate::work_model::set_task_terminal(
+            &mut completed_item.attempts[attempt_index].tasks[task_index],
+            TaskStatus::Complete,
+        );
+        completed_item.attempts[attempt_index]
+            .artifacts
+            .push(ArtifactRef {
+                producer_id: config.task_id.to_string(),
+                path: path_for_model(config.project_root, &results_path),
+            });
+        let all_complete = completed_item.attempts[attempt_index]
+            .tasks
+            .iter()
+            .all(|task| task.status == TaskStatus::Complete);
+        if all_complete {
+            crate::work_model::set_attempt_terminal(
+                &mut completed_item.attempts[attempt_index],
+                AttemptStatus::Complete,
+            );
+        } else {
+            completed_item.attempts[attempt_index].status = AttemptStatus::Reviewing;
+        }
+        config.store.write_work_item(&completed_item)?;
+    }
+
+    Ok(WorkTaskRunResult {
+        task_id: config.task_id.to_string(),
+        output: path_for_model(config.project_root, &results_path),
     })
 }
 
@@ -2686,33 +2830,81 @@ mod tests {
     }
 
     #[test]
-    fn behavior_tests_task_transcript_path_resolved_from_artifact_area() {
-        let mut item = review_item();
-        item.add_review_tasks("attempt-1", &["behaviors"]).unwrap();
+    fn tester_task_artifact_path_resolved_from_artifact_area() {
+        let item = review_item();
         let attempt = &item.attempts[0];
-        let bt_task = attempt
+        let tester_task = attempt
             .tasks
             .iter()
-            .find(|t| t.kind == TaskKind::BehaviorTests)
+            .find(|t| t.kind == TaskKind::Tester)
             .unwrap();
-        let artifact_area = bt_task.artifact_area.as_ref().unwrap();
+        let artifact_area = tester_task.artifact_area.as_ref().unwrap();
         assert_eq!(
             artifact_area.path,
-            ".factory/work/artifacts/work-1/attempt-1/attempt-1-behavior-tests"
+            ".factory/work/artifacts/work-1/attempt-1/attempt-1-tester"
         );
 
         let tmp = tempfile::TempDir::new().unwrap();
         let project_root = tmp.path();
         let artifact_dir =
             resolve_managed_artifact_area_path(project_root, &artifact_area.path).unwrap();
-        let transcript_path = artifact_dir.join("transcript.jsonl");
+        let results_path = artifact_dir.join("tester-results.json");
 
         assert_eq!(
-            transcript_path,
+            results_path,
             project_root.join(
-                ".factory/work/artifacts/work-1/attempt-1/attempt-1-behavior-tests/transcript.jsonl"
+                ".factory/work/artifacts/work-1/attempt-1/attempt-1-tester/tester-results.json"
             )
         );
+    }
+
+    #[test]
+    fn tester_task_does_not_spawn_coder_process() {
+        let item = review_item();
+        let attempt = &item.attempts[0];
+        let tester_task = attempt
+            .tasks
+            .iter()
+            .find(|t| t.kind == TaskKind::Tester)
+            .expect("should have a Tester task");
+        assert_eq!(tester_task.kind, TaskKind::Tester);
+        assert_ne!(tester_task.kind, TaskKind::BehaviorTests);
+    }
+
+    #[test]
+    fn tester_task_does_not_write_transcript() {
+        let item = review_item();
+        let attempt = &item.attempts[0];
+        let tester_task = attempt
+            .tasks
+            .iter()
+            .find(|t| t.kind == TaskKind::Tester)
+            .expect("should have a Tester task");
+        let artifact_area = tester_task.artifact_area.as_ref().unwrap();
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let artifact_dir =
+            resolve_managed_artifact_area_path(project_root, &artifact_area.path).unwrap();
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+
+        let transcript_path = artifact_dir.join("transcript.jsonl");
+        assert!(
+            !transcript_path.exists(),
+            "Tester task should not create transcript.jsonl"
+        );
+    }
+
+    #[test]
+    fn tester_task_invokes_subcommand_not_coder() {
+        let item = review_item();
+        let attempt = &item.attempts[0];
+        let tester_task = attempt
+            .tasks
+            .iter()
+            .find(|t| t.kind == TaskKind::Tester)
+            .expect("should have a Tester task");
+        assert_eq!(tester_task.kind, TaskKind::Tester);
     }
 
     #[test]

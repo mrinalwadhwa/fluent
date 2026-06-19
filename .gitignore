@@ -15,12 +15,15 @@ __pycache__/
 # Dependencies
 node_modules/
 
-# Factory — working state, except observations, expertise, hooks, and Dockerfile
+# Factory — working state, except observations, expertise, hooks, Dockerfile,
+# and tester contract files
 .factory/*
 !.factory/observations/
 !.factory/expertise/
 !.factory/hooks/
 !.factory/Dockerfile
+!.factory/tester.yaml
+!.factory/extract-tester-results
 
 
 # Test output (per-case logs, never committed)

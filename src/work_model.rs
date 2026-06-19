@@ -460,27 +460,26 @@ impl WorkItem {
         };
         let mut task_ids = Vec::new();
 
-        let needs_behavior_tests = roles.contains(&"behaviors");
-        let behavior_tests_task_id = if needs_behavior_tests {
-            let bt_id = match round {
-                Some(round) => format!("{attempt_id}-behavior-tests-{round}"),
-                None => format!("{attempt_id}-behavior-tests"),
+        let tester_task_id = {
+            let tester_id = match round {
+                Some(round) => format!("{attempt_id}-tester-{round}"),
+                None => format!("{attempt_id}-tester"),
             };
-            validate_id("task", &bt_id)?;
-            if attempt.tasks.iter().any(|task| task.id == bt_id) {
-                return Err(WorkModelError::TaskAlreadyExists { id: bt_id });
+            validate_id("task", &tester_id)?;
+            if attempt.tasks.iter().any(|task| task.id == tester_id) {
+                return Err(WorkModelError::TaskAlreadyExists { id: tester_id });
             }
             attempt.tasks.push(Task {
-                id: bt_id.clone(),
-                kind: TaskKind::BehaviorTests,
+                id: tester_id.clone(),
+                kind: TaskKind::Tester,
                 status: TaskStatus::Planned,
-                role: "behavior-tests".to_string(),
+                role: "tester".to_string(),
                 instructions: None,
                 work_item_id: self.id.clone(),
                 attempt_id: Some(attempt_id.to_string()),
                 workspace_access: WorkspaceAccess::read_only(vec![candidate.clone()]),
                 artifact_area: Some(TaskArtifactArea {
-                    path: work_artifact_path(&self.id, attempt_id, &bt_id),
+                    path: work_artifact_path(&self.id, attempt_id, &tester_id),
                 }),
                 review_context: Some(ReviewContext {
                     candidate_workspace_id: write_output.workspace_id.clone(),
@@ -495,10 +494,8 @@ impl WorkItem {
                 started_at: None,
                 completed_at: None,
             });
-            task_ids.push(bt_id.clone());
-            Some(bt_id)
-        } else {
-            None
+            task_ids.push(tester_id.clone());
+            tester_id
         };
 
         for role in roles {
@@ -511,24 +508,17 @@ impl WorkItem {
             if attempt.tasks.iter().any(|task| task.id == task_id) {
                 return Err(WorkModelError::TaskAlreadyExists { id: task_id });
             }
-            let depends_on = if *role == "behaviors" {
-                behavior_tests_task_id.clone()
-            } else {
-                None
-            };
             let mut task_input_artifacts = review_input_artifacts
                 .get(*role)
                 .cloned()
                 .unwrap_or_default();
-            if let (Some(bt_id), "behaviors") = (behavior_tests_task_id.as_deref(), *role) {
-                task_input_artifacts.push(ArtifactRef {
-                    producer_id: bt_id.to_string(),
-                    path: format!(
-                        "{}/behavior-tests-results.json",
-                        work_artifact_path(&self.id, attempt_id, bt_id)
-                    ),
-                });
-            }
+            task_input_artifacts.push(ArtifactRef {
+                producer_id: tester_task_id.clone(),
+                path: format!(
+                    "{}/tester-results.json",
+                    work_artifact_path(&self.id, attempt_id, &tester_task_id)
+                ),
+            });
             let progress_md_path = format!(
                 "{WORK_ARTIFACTS_DIR}/{}/{}/progress.md",
                 self.id, attempt_id,
@@ -556,7 +546,7 @@ impl WorkItem {
                     candidate_commit: write_output.commit.clone(),
                 }),
                 input_artifacts: task_input_artifacts,
-                depends_on,
+                depends_on: Some(tester_task_id.clone()),
                 output: None,
                 created_at: Some(now_iso8601()),
                 started_at: None,
@@ -959,6 +949,7 @@ impl CoderMapping {
             TaskKind::Write => &self.write,
             TaskKind::Review => &self.review,
             TaskKind::BehaviorTests => &self.behavior_tests,
+            TaskKind::Tester => &self.write,
             _ => &self.write,
         }
     }
@@ -1372,6 +1363,7 @@ pub enum TaskKind {
     Learn,
     Probe,
     BehaviorTests,
+    Tester,
 }
 
 impl TaskKind {
@@ -1385,6 +1377,7 @@ impl TaskKind {
             Self::Learn => "learn",
             Self::Probe => "probe",
             Self::BehaviorTests => "behavior-tests",
+            Self::Tester => "tester",
         }
     }
 }
@@ -1402,6 +1395,7 @@ impl FromStr for TaskKind {
             "learn" => Ok(Self::Learn),
             "probe" => Ok(Self::Probe),
             "behavior-tests" => Ok(Self::BehaviorTests),
+            "tester" => Ok(Self::Tester),
             other => Err(ParseTaskKindError(other.to_string())),
         }
     }
@@ -3495,20 +3489,20 @@ mod tests {
     }
 
     #[test]
-    fn review_tasks_include_behavior_tests_task_when_behaviors_role_present() {
+    fn review_tasks_include_tester_task_when_candidate_exists() {
         let mut work_item = work_item_with_completed_write("work-1");
         work_item
             .add_next_review_tasks("attempt-1", &["documentation", "behaviors", "tests"])
             .unwrap();
 
         let tasks = &work_item.attempts[0].tasks;
-        let bt_task = tasks
+        let tester_task = tasks
             .iter()
-            .find(|t| t.kind == TaskKind::BehaviorTests)
-            .expect("should have a BehaviorTests task");
-        assert_eq!(bt_task.id, "attempt-1-behavior-tests");
-        assert_eq!(bt_task.role, "behavior-tests");
-        assert!(bt_task.depends_on.is_none());
+            .find(|t| t.kind == TaskKind::Tester)
+            .expect("should have a Tester task");
+        assert_eq!(tester_task.id, "attempt-1-tester");
+        assert_eq!(tester_task.role, "tester");
+        assert!(tester_task.depends_on.is_none());
 
         let behaviors_review = tasks
             .iter()
@@ -3516,27 +3510,171 @@ mod tests {
             .expect("should have a behaviors review task");
         assert_eq!(
             behaviors_review.depends_on.as_deref(),
-            Some("attempt-1-behavior-tests")
+            Some("attempt-1-tester")
         );
 
         let doc_review = tasks.iter().find(|t| t.role == "documentation").unwrap();
-        assert!(doc_review.depends_on.is_none());
+        assert_eq!(
+            doc_review.depends_on.as_deref(),
+            Some("attempt-1-tester")
+        );
 
         let tests_review = tasks.iter().find(|t| t.role == "tests").unwrap();
-        assert!(tests_review.depends_on.is_none());
+        assert_eq!(
+            tests_review.depends_on.as_deref(),
+            Some("attempt-1-tester")
+        );
     }
 
     #[test]
-    fn review_tasks_skip_behavior_tests_when_behaviors_role_absent() {
+    fn review_tasks_depend_on_tester_task() {
         let mut work_item = work_item_with_completed_write("work-1");
         work_item
             .add_next_review_tasks("attempt-1", &["documentation", "tests"])
             .unwrap();
 
         let tasks = &work_item.attempts[0].tasks;
+        let tester_task = tasks
+            .iter()
+            .find(|t| t.kind == TaskKind::Tester)
+            .expect("Tester task should be present");
+
+        for task in tasks.iter().filter(|t| t.kind == TaskKind::Review) {
+            assert_eq!(
+                task.depends_on.as_deref(),
+                Some(tester_task.id.as_str()),
+                "reviewer task {} should depend on tester",
+                task.role,
+            );
+        }
+    }
+
+    #[test]
+    fn review_tasks_tester_id_includes_round_after_first() {
+        let mut work_item = work_item_with_completed_write("work-1");
+        work_item
+            .add_next_review_tasks("attempt-1", &["tests"])
+            .unwrap();
+        // Complete all tasks so we can add another round
+        for task in &mut work_item.attempts[0].tasks {
+            crate::work_model::set_task_terminal(task, TaskStatus::Complete);
+        }
+        work_item.attempts[0].review_state = Some(AttemptReviewState::NotReviewed);
+        work_item.attempts[0].status = AttemptStatus::Complete;
+        // Add a second write task
+        work_item
+            .add_next_write_round("attempt-1", Vec::new())
+            .unwrap();
+        let write_idx = work_item.attempts[0]
+            .tasks
+            .iter()
+            .rposition(|t| t.kind == TaskKind::Write)
+            .unwrap();
+        work_item.attempts[0].tasks[write_idx].status = TaskStatus::Complete;
+        work_item.attempts[0].tasks[write_idx].output = Some(TaskOutput {
+            workspace_id: "candidate".to_string(),
+            workspace_path: "../work-6-work-1-attempt-1-second".to_string(),
+            source_branch: "main".to_string(),
+            commit: "commit-second".to_string(),
+        });
+        work_item.attempts[0].status = AttemptStatus::Complete;
+        work_item
+            .add_next_review_tasks("attempt-1", &["tests"])
+            .unwrap();
+
+        let tasks = &work_item.attempts[0].tasks;
+        let tester_tasks: Vec<_> = tasks
+            .iter()
+            .filter(|t| t.kind == TaskKind::Tester)
+            .collect();
         assert!(
-            !tasks.iter().any(|t| t.kind == TaskKind::BehaviorTests),
-            "no BehaviorTests task when behaviors role not requested"
+            tester_tasks.iter().any(|t| t.id == "attempt-1-tester-2"),
+            "second round tester should have -2 suffix; got {:?}",
+            tester_tasks.iter().map(|t| &t.id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn each_reviewer_task_receives_tester_results_in_input_artifacts() {
+        let mut work_item = work_item_with_completed_write("work-1");
+        work_item
+            .add_next_review_tasks(
+                "attempt-1",
+                &["behaviors", "tests", "documentation", "skills", "architecture"],
+            )
+            .unwrap();
+
+        let tasks = &work_item.attempts[0].tasks;
+        for task in tasks.iter().filter(|t| t.kind == TaskKind::Review) {
+            let has_tester_results = task.input_artifacts.iter().any(|a| {
+                a.path.ends_with("/tester-results.json")
+                    && a.producer_id.contains("tester")
+            });
+            assert!(
+                has_tester_results,
+                "reviewer task {} should have tester-results.json in input_artifacts",
+                task.role,
+            );
+        }
+    }
+
+    #[test]
+    fn no_tester_task_when_writer_failed() {
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Test failed writer".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: vec![Attempt {
+                id: "attempt-1".to_string(),
+                work_item_id: "work-1".to_string(),
+                kind: AttemptKind::Write,
+                status: AttemptStatus::Failed,
+                coder_mapping: CoderMapping::default(),
+                tasks: vec![Task {
+                    id: "attempt-1-write-1".to_string(),
+                    kind: TaskKind::Write,
+                    status: TaskStatus::Failed,
+                    role: "author".to_string(),
+                    instructions: None,
+                    work_item_id: "work-1".to_string(),
+                    attempt_id: Some("attempt-1".to_string()),
+                    workspace_access: WorkspaceAccess {
+                        reads: Vec::new(),
+                        writes: vec![WorkspaceRef {
+                            id: "candidate".to_string(),
+                            path: "../work-6-work-1-attempt-1-initial".to_string(),
+                        }],
+                    },
+                    artifact_area: None,
+                    review_context: None,
+                    input_artifacts: Vec::new(),
+                    depends_on: None,
+                    output: None,
+                    created_at: None,
+                    started_at: None,
+                    completed_at: None,
+                }],
+                review_state: None,
+                artifacts: Vec::new(),
+                created_at: None,
+                completed_at: None,
+            }],
+            merge_candidates: Vec::new(),
+        };
+
+        let result = work_item.add_next_review_tasks("attempt-1", &["tests"]);
+        assert!(
+            result.is_err(),
+            "should error when no completed write task exists"
+        );
+        assert!(
+            !work_item.attempts[0]
+                .tasks
+                .iter()
+                .any(|t| t.kind == TaskKind::Tester),
+            "no Tester task when writer failed"
         );
     }
 
@@ -3876,27 +4014,28 @@ mod tests {
             .add_next_review_tasks("attempt-1", &["tests"])
             .unwrap();
 
-        let first_path = first.attempts[0].tasks[1]
-            .artifact_area
-            .as_ref()
-            .unwrap()
-            .path
-            .as_str();
-        let second_path = second.attempts[0].tasks[1]
-            .artifact_area
-            .as_ref()
-            .unwrap()
-            .path
-            .as_str();
+        let first_review = first.attempts[0]
+            .tasks
+            .iter()
+            .find(|t| t.role == "tests" && t.kind == TaskKind::Review)
+            .unwrap();
+        let second_review = second.attempts[0]
+            .tasks
+            .iter()
+            .find(|t| t.role == "tests" && t.kind == TaskKind::Review)
+            .unwrap();
         assert_eq!(
-            first_path,
+            first_review.artifact_area.as_ref().unwrap().path,
             ".factory/work/artifacts/work-alpha/attempt-1/attempt-1-review-tests"
         );
         assert_eq!(
-            second_path,
+            second_review.artifact_area.as_ref().unwrap().path,
             ".factory/work/artifacts/work-beta/attempt-1/attempt-1-review-tests"
         );
-        assert_ne!(first_path, second_path);
+        assert_ne!(
+            first_review.artifact_area.as_ref().unwrap().path,
+            second_review.artifact_area.as_ref().unwrap().path,
+        );
     }
 
     #[test]
@@ -3907,7 +4046,10 @@ mod tests {
         work_item
             .add_next_review_tasks("attempt-1", &["tests"])
             .unwrap();
-        work_item.attempts[0].tasks[1].status = TaskStatus::Complete;
+        // Complete tester and review tasks (tester is tasks[1], review-tests is tasks[2])
+        for task in work_item.attempts[0].tasks.iter_mut().skip(1) {
+            set_task_terminal(task, TaskStatus::Complete);
+        }
         work_item
             .add_next_write_round(
                 "attempt-1",
@@ -4013,8 +4155,13 @@ mod tests {
 
         let read = store.read_work_item("work-1").unwrap();
 
+        let review_tests_task = read.attempts[0]
+            .tasks
+            .iter()
+            .find(|t| t.id == "attempt-1-review-tests")
+            .expect("review-tests task");
         assert_eq!(
-            read.attempts[0].tasks[1]
+            review_tests_task
                 .artifact_area
                 .as_ref()
                 .unwrap()
@@ -4025,8 +4172,13 @@ mod tests {
             read.attempts[0].artifacts[0].path,
             ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
         );
+        let write_2_task = read.attempts[0]
+            .tasks
+            .iter()
+            .find(|t| t.id.contains("write-2"))
+            .expect("write-2 task");
         assert_eq!(
-            read.attempts[0].tasks[2].input_artifacts[0].path,
+            write_2_task.input_artifacts[0].path,
             ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
         );
         assert_eq!(
@@ -4128,7 +4280,10 @@ mod tests {
             .add_next_review_tasks("attempt-1", &["tests"])
             .unwrap();
 
-        assert_eq!(task_ids, vec!["attempt-1-review-2-tests"]);
+        assert_eq!(
+            task_ids,
+            vec!["attempt-1-tester-2", "attempt-1-review-2-tests"]
+        );
     }
 
     #[test]
@@ -4639,6 +4794,7 @@ mod tests {
                 "attempt-1-write-1",
                 "attempt-1-review-tests",
                 "attempt-1-write-2",
+                "attempt-1-tester-2",
                 "attempt-1-review-2-tests"
             ]
         );

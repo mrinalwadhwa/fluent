@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Extract per-test results from Tester command outputs.
+
+Receives the artifact directory as a single argument. Reads commands.json
+and the per-command log files. Emits a JSON array of per-test entries on
+stdout.
+
+Supported test_harness values:
+  - cargo-nextest: parses libtest-json events from stdout log
+  - cargo-test: parses libtest-json events from stdout log
+  - shell-harness: parses "ok <name>" / "not ok <name>" lines
+"""
+
+import json
+import os
+import sys
+
+FAILURE_EXCERPT_MAX = 500
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: extract-tester-results <artifact-dir>", file=sys.stderr)
+        sys.exit(1)
+
+    artifact_dir = sys.argv[1]
+    commands_path = os.path.join(artifact_dir, "commands.json")
+
+    with open(commands_path) as f:
+        commands = json.load(f)
+
+    tests = []
+    for cmd in commands:
+        harness = cmd["test_harness"]
+        stdout_path = os.path.join(artifact_dir, cmd["stdout_log"])
+
+        if not os.path.isfile(stdout_path):
+            continue
+
+        with open(stdout_path) as f:
+            stdout = f.read()
+
+        if harness in ("cargo-nextest", "cargo-test"):
+            tests.extend(parse_libtest_json(stdout, harness))
+        elif harness == "shell-harness":
+            tests.extend(parse_shell_harness(stdout, harness))
+
+    json.dump(tests, sys.stdout)
+
+
+def parse_libtest_json(stdout, harness):
+    tests = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        if event.get("type") != "test":
+            continue
+
+        event_field = event.get("event")
+        if event_field not in ("ok", "failed", "ignored"):
+            continue
+
+        name = event.get("name", "")
+        if not name:
+            continue
+
+        status_map = {"ok": "pass", "failed": "fail", "ignored": "skipped"}
+        status = status_map.get(event_field, "not_run")
+
+        duration_ms = None
+        if "exec_time" in event:
+            try:
+                duration_ms = int(float(event["exec_time"]) * 1000)
+            except (ValueError, TypeError):
+                pass
+
+        failure_excerpt = None
+        if status == "fail" and "stdout" in event:
+            excerpt = event["stdout"]
+            if len(excerpt) > FAILURE_EXCERPT_MAX:
+                excerpt = excerpt[-FAILURE_EXCERPT_MAX:]
+            failure_excerpt = excerpt
+
+        tests.append({
+            "id": name,
+            "test_harness": harness,
+            "status": status,
+            "duration_ms": duration_ms,
+            "failure_excerpt": failure_excerpt,
+        })
+
+    return tests
+
+
+def parse_shell_harness(stdout, harness):
+    tests = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if line.startswith("ok "):
+            name = line[3:].strip()
+            tests.append({
+                "id": name,
+                "test_harness": harness,
+                "status": "pass",
+                "duration_ms": None,
+                "failure_excerpt": None,
+            })
+        elif line.startswith("not ok "):
+            name = line[7:].strip()
+            tests.append({
+                "id": name,
+                "test_harness": harness,
+                "status": "fail",
+                "duration_ms": None,
+                "failure_excerpt": None,
+            })
+
+    return tests
+
+
+if __name__ == "__main__":
+    main()

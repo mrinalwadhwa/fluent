@@ -13,7 +13,7 @@ use factory::cleanup::{
 use factory::cli;
 use factory::cli::{
     Cli, Commands, FargateCommands, KeepAwakeCommands, ObservationsCommands, WorkAttemptCommands,
-    WorkCommands, WorkQueueCommands, WorkSchedulerCommands, WorkTaskCommands,
+    WorkCommands, WorkQueueCommands, WorkSchedulerCommands, WorkTaskCommands, WorkTesterCommands,
 };
 use factory::coder::CoderKind;
 use factory::content::ContentResolver;
@@ -608,6 +608,27 @@ fn cmd_work(
                     store_lock: None,
                 })?;
                 println!("Completed Task {} at {}", result.task_id, result.output);
+            }
+        },
+        WorkCommands::Tester { command } => match command {
+            WorkTesterCommands::Run {
+                work_item_id,
+                attempt_id,
+                task_id,
+                no_sandbox,
+            } => {
+                let result = work_task_executor::run_task(WorkTaskRunConfig {
+                    project_root,
+                    store: &store,
+                    work_item_id: &work_item_id,
+                    attempt_id: &attempt_id,
+                    task_id: &task_id,
+                    resolver,
+                    extra_args: &[],
+                    no_sandbox: no_sandbox || global_no_sandbox,
+                    store_lock: None,
+                })?;
+                println!("Completed Tester Task {} at {}", result.task_id, result.output);
             }
         },
         WorkCommands::AutoMerge {

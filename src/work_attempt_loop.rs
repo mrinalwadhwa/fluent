@@ -369,7 +369,10 @@ fn review_task_round_number(attempt_id: &str, task_id: &str) -> Option<usize> {
 }
 
 fn is_review_phase_task(task: &Task) -> bool {
-    matches!(task.kind, TaskKind::Review | TaskKind::BehaviorTests)
+    matches!(
+        task.kind,
+        TaskKind::Review | TaskKind::BehaviorTests | TaskKind::Tester
+    )
 }
 
 fn is_task_ready(task: &Task, all_tasks: &[Task]) -> bool {
@@ -391,7 +394,9 @@ fn has_open_review_round(tasks: &[Task]) -> bool {
     for task in tasks.iter().rev() {
         match task.kind {
             TaskKind::Write => return false,
-            TaskKind::Review | TaskKind::BehaviorTests if task.status != TaskStatus::Complete => {
+            TaskKind::Review | TaskKind::BehaviorTests | TaskKind::Tester
+                if task.status != TaskStatus::Complete =>
+            {
                 return true;
             }
             _ => {}
@@ -1052,12 +1057,12 @@ mod tests {
     }
 
     #[test]
-    fn tasks_ready_to_run_skips_dependents_until_dependency_complete() {
-        let bt_task = Task {
-            id: "attempt-1-behavior-tests".to_string(),
-            kind: TaskKind::BehaviorTests,
+    fn tasks_ready_to_run_skips_reviewers_until_tester_complete() {
+        let tester_task = Task {
+            id: "attempt-1-tester".to_string(),
+            kind: TaskKind::Tester,
             status: TaskStatus::Planned,
-            role: "behavior-tests".to_string(),
+            role: "tester".to_string(),
             instructions: None,
             work_item_id: "work-1".to_string(),
             attempt_id: Some("attempt-1".to_string()),
@@ -1079,32 +1084,32 @@ mod tests {
             kind: TaskKind::Review,
             status: TaskStatus::Planned,
             role: "behaviors".to_string(),
-            depends_on: Some("attempt-1-behavior-tests".to_string()),
+            depends_on: Some("attempt-1-tester".to_string()),
             ..review_task("attempt-1-review-behaviors", "behaviors")
         };
         let tasks = vec![
             write_task("attempt-1-write-1", Vec::new()),
-            bt_task,
+            tester_task,
             behaviors_review,
         ];
 
         assert!(
             is_task_ready(&tasks[1], &tasks),
-            "BehaviorTests task has no depends_on, should be ready"
+            "Tester task has no depends_on, should be ready"
         );
         assert!(
             !is_task_ready(&tasks[2], &tasks),
-            "behaviors review depends on incomplete BehaviorTests, should not be ready"
+            "behaviors review depends on incomplete Tester, should not be ready"
         );
     }
 
     #[test]
-    fn tasks_ready_to_run_returns_dependent_after_dependency_completes() {
-        let bt_task = Task {
-            id: "attempt-1-behavior-tests".to_string(),
-            kind: TaskKind::BehaviorTests,
+    fn tasks_ready_to_run_returns_dependent_after_tester_completes() {
+        let tester_task = Task {
+            id: "attempt-1-tester".to_string(),
+            kind: TaskKind::Tester,
             status: TaskStatus::Complete,
-            role: "behavior-tests".to_string(),
+            role: "tester".to_string(),
             instructions: None,
             work_item_id: "work-1".to_string(),
             attempt_id: Some("attempt-1".to_string()),
@@ -1126,28 +1131,28 @@ mod tests {
             kind: TaskKind::Review,
             status: TaskStatus::Planned,
             role: "behaviors".to_string(),
-            depends_on: Some("attempt-1-behavior-tests".to_string()),
+            depends_on: Some("attempt-1-tester".to_string()),
             ..review_task("attempt-1-review-behaviors", "behaviors")
         };
         let tasks = vec![
             write_task("attempt-1-write-1", Vec::new()),
-            bt_task,
+            tester_task,
             behaviors_review,
         ];
 
         assert!(
             is_task_ready(&tasks[2], &tasks),
-            "behaviors review should be ready after BehaviorTests completes"
+            "behaviors review should be ready after Tester completes"
         );
     }
 
     #[test]
-    fn behavior_tests_task_is_review_phase_task() {
-        let bt = Task {
-            id: "bt".to_string(),
-            kind: TaskKind::BehaviorTests,
+    fn tester_task_is_review_phase_task() {
+        let tester = Task {
+            id: "tester".to_string(),
+            kind: TaskKind::Tester,
             status: TaskStatus::Planned,
-            role: "behavior-tests".to_string(),
+            role: "tester".to_string(),
             instructions: None,
             work_item_id: "w".to_string(),
             attempt_id: None,
@@ -1164,7 +1169,7 @@ mod tests {
             started_at: None,
             completed_at: None,
         };
-        assert!(is_review_phase_task(&bt));
+        assert!(is_review_phase_task(&tester));
     }
 
     fn review_task(id: &str, role: &str) -> Task {

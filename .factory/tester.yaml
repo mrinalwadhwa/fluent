@@ -1,0 +1,19 @@
+commands:
+  - command: cargo nextest run --no-fail-fast --message-format libtest-json 2>&1
+    test_harness: cargo-nextest
+  - command: cargo test --lib -- --format json -Z unstable-options 2>&1
+    test_harness: cargo-test
+  - command: |
+      exit_code=0
+      for script in tests/shell/*.sh; do
+        [ -f "$script" ] || continue
+        echo "--- $script ---"
+        if bash "$script"; then
+          echo "ok $script"
+        else
+          echo "not ok $script"
+          exit_code=1
+        fi
+      done
+      exit $exit_code
+    test_harness: shell-harness

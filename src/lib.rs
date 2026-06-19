@@ -31,4 +31,5 @@ pub mod worktree;
 pub mod observations;
 pub mod queue;
 pub mod scheduler;
+pub mod tester;
 pub mod usage;
