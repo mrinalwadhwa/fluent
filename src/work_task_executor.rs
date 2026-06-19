@@ -1383,7 +1383,13 @@ fn run_task_coder(
         .find(|attempt| attempt.id == attempt_id)
         .and_then(|attempt| attempt.tasks.iter().find(|task| task.id == task_id))
         .ok_or_else(|| anyhow::anyhow!("Task {task_id:?} not found"))?;
-    let prompt = build_write_task_prompt(item, attempt_id, task_id, input_artifacts);
+    let prompt = build_write_task_prompt_with_workspace(
+        item,
+        attempt_id,
+        task_id,
+        input_artifacts,
+        Some(workspace_path),
+    );
 
     let transcript_path = task
         .artifact_area
@@ -1466,6 +1472,16 @@ fn build_write_task_prompt(
     task_id: &str,
     input_artifacts: &[PathBuf],
 ) -> String {
+    build_write_task_prompt_with_workspace(item, attempt_id, task_id, input_artifacts, None)
+}
+
+fn build_write_task_prompt_with_workspace(
+    item: &WorkItem,
+    attempt_id: &str,
+    task_id: &str,
+    input_artifacts: &[PathBuf],
+    workspace_path: Option<&Path>,
+) -> String {
     let task = item
         .attempts
         .iter()
@@ -1489,8 +1505,9 @@ fn build_write_task_prompt(
             )
         })
         .unwrap_or_default();
+    let tester_bootstrap = tester_bootstrap_prompt(workspace_path);
     format!(
-        "Execute this Factory write Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\nCompletion contract:\n- Commit all Task output in the writable workspace before marking the Task complete.\n- Leave the writable workspace clean: no unstaged, staged, or untracked Task changes.\n- If no code, documentation, skill, behavior, or other repository change is needed, do not mark the Task complete; under the current write Task executor contract, no committed Task output makes the Task fail.\n\n{}{}Input artifacts:\n{}\n\nprogress_md_path: {}\n\nCurrent Task model:\n{}\n",
+        "Execute this Factory write Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\nCompletion contract:\n- Commit all Task output in the writable workspace before marking the Task complete.\n- Leave the writable workspace clean: no unstaged, staged, or untracked Task changes.\n- If no code, documentation, skill, behavior, or other repository change is needed, do not mark the Task complete; under the current write Task executor contract, no committed Task output makes the Task fail.\n\n{}{}Input artifacts:\n{}\n\nprogress_md_path: {}\n\nCurrent Task model:\n{}\n{}",
         item.id,
         item.title,
         attempt_id,
@@ -1500,8 +1517,60 @@ fn build_write_task_prompt(
         task_instructions,
         input_artifacts_prompt,
         progress_md_path,
-        task_json
+        task_json,
+        tester_bootstrap,
     )
+}
+
+fn tester_bootstrap_prompt(workspace_path: Option<&Path>) -> String {
+    let Some(workspace) = workspace_path else {
+        return String::new();
+    };
+    let tester_yaml_missing = !workspace.join(".factory/tester.yaml").exists();
+    let extract_missing = !workspace.join(".factory/extract-tester-results").exists();
+    if !tester_yaml_missing && !extract_missing {
+        return String::new();
+    }
+    let mut sections = Vec::new();
+    if tester_yaml_missing {
+        sections.push(
+            "\n## Bootstrap: .factory/tester.yaml\n\n\
+             The candidate workspace is missing `.factory/tester.yaml`. \
+             Author this file and commit it alongside your Work Item changes.\n\n\
+             The file declares which commands the Tester subcommand runs. Schema:\n\
+             ```yaml\n\
+             commands:\n\
+               - command: <shell command to run>\n\
+                 test_harness: <identifier: cargo-nextest | cargo-test | shell-harness>\n\
+             ```\n\n\
+             Each entry's `command` is a shell string Tester runs sequentially in the \
+             workspace root. `test_harness` identifies which parser the \
+             `extract-tester-results` script uses to normalize the output.\n"
+                .to_string(),
+        );
+    }
+    if extract_missing {
+        sections.push(
+            "\n## Bootstrap: .factory/extract-tester-results\n\n\
+             The candidate workspace is missing `.factory/extract-tester-results`. \
+             Author this executable script and commit it alongside your Work Item changes.\n\n\
+             Contract:\n\
+             - Receives the artifact directory as its single argument.\n\
+             - Reads `commands.json` from that directory (array of objects with \
+             `command`, `test_harness`, `exit_code`, `duration_ms`, `stdout_log`, `stderr_log`).\n\
+             - Reads the per-command log files (`commands/<n>-stdout.log`, `commands/<n>-stderr.log`).\n\
+             - Emits a JSON array on stdout, one entry per test:\n\
+             ```json\n\
+             [{\"id\": \"test_name\", \"test_harness\": \"cargo-nextest\", \"status\": \"pass\", \
+             \"duration_ms\": 42, \"failure_excerpt\": null}]\n\
+             ```\n\
+             - `status` must be one of: `pass`, `fail`, `skipped`, `not_run`.\n\
+             - `failure_excerpt` is a string (at most 500 chars) or null.\n\
+             - Make the file executable (`chmod +x`).\n"
+                .to_string(),
+        );
+    }
+    sections.join("")
 }
 
 fn write_task_preflight_prompt(input_artifacts: &[PathBuf]) -> String {
@@ -2970,6 +3039,81 @@ mod tests {
         assert!(
             !prompt.contains("If plan.md is part of your Work Item's planning context"),
             "prompt should NOT contain the protocol section when plan.md is absent"
+        );
+    }
+
+    #[test]
+    fn writer_prompt_includes_tester_yaml_bootstrap_when_missing() {
+        let item = review_item();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path();
+        std::fs::create_dir_all(workspace.join(".factory")).unwrap();
+
+        let prompt = build_write_task_prompt_with_workspace(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            &[],
+            Some(workspace),
+        );
+        assert!(
+            prompt.contains("Bootstrap: .factory/tester.yaml"),
+            "prompt should include tester.yaml bootstrap when missing"
+        );
+    }
+
+    #[test]
+    fn writer_prompt_includes_extract_tester_results_bootstrap_when_missing() {
+        let item = review_item();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path();
+        std::fs::create_dir_all(workspace.join(".factory")).unwrap();
+
+        let prompt = build_write_task_prompt_with_workspace(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            &[],
+            Some(workspace),
+        );
+        assert!(
+            prompt.contains("Bootstrap: .factory/extract-tester-results"),
+            "prompt should include extract-tester-results bootstrap when missing"
+        );
+    }
+
+    #[test]
+    fn writer_prompt_omits_bootstrap_when_both_files_present() {
+        let item = review_item();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path();
+        let factory_dir = workspace.join(".factory");
+        std::fs::create_dir_all(&factory_dir).unwrap();
+        std::fs::write(factory_dir.join("tester.yaml"), "commands: []").unwrap();
+        let extractor = factory_dir.join("extract-tester-results");
+        std::fs::write(&extractor, "#!/bin/sh\necho '[]'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&extractor).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&extractor, perms).unwrap();
+        }
+
+        let prompt = build_write_task_prompt_with_workspace(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            &[],
+            Some(workspace),
+        );
+        assert!(
+            !prompt.contains("Bootstrap: .factory/tester.yaml"),
+            "prompt should NOT include tester.yaml bootstrap when present"
+        );
+        assert!(
+            !prompt.contains("Bootstrap: .factory/extract-tester-results"),
+            "prompt should NOT include extract-tester-results bootstrap when present"
         );
     }
 
