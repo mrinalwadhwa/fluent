@@ -70,7 +70,8 @@ fn dirs_config_path() -> PathBuf {
 pub fn bundled_content(relative: &str) -> Option<String> {
     // Prompts
     match relative {
-        "prompts/work-author.md" => Some(include_str!("../prompts/work-author.md").to_string()),
+        "prompts/write-system.md" => Some(include_str!("../prompts/write-system.md").to_string()),
+        "prompts/write-user.md" => Some(include_str!("../prompts/write-user.md").to_string()),
         "prompts/work-rebase.md" => Some(include_str!("../prompts/work-rebase.md").to_string()),
         "prompts/review-architecture.md" => {
             Some(include_str!("../prompts/review-architecture.md").to_string())
@@ -560,10 +561,10 @@ Check item {{ITEM_ID}}.
         let tmp = TempDir::new().unwrap();
         let factory_dir = tmp.path().join(".factory/prompts");
         std::fs::create_dir_all(&factory_dir).unwrap();
-        std::fs::write(factory_dir.join("work-author.md"), "custom prompt").unwrap();
+        std::fs::write(factory_dir.join("write-system.md"), "custom prompt").unwrap();
 
         let resolver = ContentResolver::new(Some(tmp.path()));
-        let path = resolver.resolve_path("prompts/work-author.md");
+        let path = resolver.resolve_path("prompts/write-system.md");
         assert!(path.is_some());
         let content = std::fs::read_to_string(path.unwrap()).unwrap();
         assert_eq!(content, "custom prompt");
@@ -574,13 +575,13 @@ Check item {{ITEM_ID}}.
         let tmp = TempDir::new().unwrap();
         let user_config = tmp.path().join("config");
         std::fs::create_dir_all(user_config.join("prompts")).unwrap();
-        std::fs::write(user_config.join("prompts/work-author.md"), "user prompt").unwrap();
+        std::fs::write(user_config.join("prompts/write-system.md"), "user prompt").unwrap();
 
         let resolver = ContentResolver {
             project_root: None,
             user_config: user_config.clone(),
         };
-        let path = resolver.resolve_path("prompts/work-author.md");
+        let path = resolver.resolve_path("prompts/write-system.md");
         assert!(path.is_some());
         let content = std::fs::read_to_string(path.unwrap()).unwrap();
         assert_eq!(content, "user prompt");
@@ -595,32 +596,33 @@ Check item {{ITEM_ID}}.
         // Set up both project-local and user-config files
         std::fs::create_dir_all(project.join(".factory/prompts")).unwrap();
         std::fs::write(
-            project.join(".factory/prompts/work-author.md"),
+            project.join(".factory/prompts/write-system.md"),
             "project prompt",
         )
         .unwrap();
         std::fs::create_dir_all(user_config.join("prompts")).unwrap();
-        std::fs::write(user_config.join("prompts/work-author.md"), "user prompt").unwrap();
+        std::fs::write(user_config.join("prompts/write-system.md"), "user prompt").unwrap();
 
         let resolver = ContentResolver {
             project_root: Some(project),
             user_config,
         };
-        let content = resolver.resolve_content("prompts/work-author.md").unwrap();
+        let content = resolver.resolve_content("prompts/write-system.md").unwrap();
         assert_eq!(content, "project prompt");
     }
 
     #[test]
     fn test_content_resolver_bundled_fallback() {
         let resolver = ContentResolver::new(None);
-        let content = resolver.resolve_content("prompts/work-author.md");
+        let content = resolver.resolve_content("prompts/write-system.md");
         assert!(content.is_some());
         assert!(content.unwrap().contains("Factory Work model"));
     }
 
     #[test]
     fn test_bundled_content_prompts() {
-        assert!(bundled_content("prompts/work-author.md").is_some());
+        assert!(bundled_content("prompts/write-system.md").is_some());
+        assert!(bundled_content("prompts/write-user.md").is_some());
         assert!(bundled_content("prompts/work-rebase.md").is_some());
         assert!(bundled_content("prompts/review-architecture.md").is_some());
         assert!(bundled_content("prompts/review-behaviors.md").is_some());
@@ -630,8 +632,8 @@ Check item {{ITEM_ID}}.
     }
 
     #[test]
-    fn bundled_work_author_prompt_avoids_legacy_run_state_contract() {
-        let content = bundled_content("prompts/work-author.md").unwrap();
+    fn bundled_write_system_prompt_avoids_legacy_run_state_contract() {
+        let content = bundled_content("prompts/write-system.md").unwrap();
 
         assert!(content.contains("Factory Work model"));
         assert!(!content.contains("Status file contract"));

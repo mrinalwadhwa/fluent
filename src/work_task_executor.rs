@@ -1185,7 +1185,7 @@ fn run_task_coder(
 
     let workspace_resolver = ContentResolver::new(Some(workspace_path));
     let system_prompt = workspace_resolver
-        .resolve_content("prompts/work-author.md")
+        .resolve_content("prompts/write-system.md")
         .unwrap_or_default();
     let (sandbox, _sandbox_profile) = if no_sandbox {
         (CoderSandbox::None, None)
@@ -1274,9 +1274,12 @@ fn build_write_task_prompt_with_workspace(
         .and_then(|a| a.tasks.iter().find(|t| t.id == task_id))
         .expect("Task must exist");
     let task_json = to_json_pretty(task).unwrap_or_default();
-    let input_artifacts_prompt = input_artifacts_instruction(input_artifacts);
-    let preflight_prompt = write_task_preflight_prompt(input_artifacts);
-    let task_instructions = task_instructions_prompt(task.instructions.as_deref());
+    let input_artifacts_list = input_artifacts_instruction(input_artifacts);
+    let task_instructions_value = task
+        .instructions
+        .as_deref()
+        .filter(|i| !i.trim().is_empty())
+        .unwrap_or("");
     let progress_md_path = item
         .attempts
         .iter()
@@ -1290,100 +1293,41 @@ fn build_write_task_prompt_with_workspace(
             )
         })
         .unwrap_or_default();
-    let tester_bootstrap = tester_bootstrap_prompt(workspace_path);
-    format!(
-        "Execute this Factory write Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\nCompletion contract:\n- Commit all Task output in the writable workspace before marking the Task complete.\n- Leave the writable workspace clean: no unstaged, staged, or untracked Task changes.\n- If no code, documentation, skill, behavior, or other repository change is needed, do not mark the Task complete; under the current write Task executor contract, no committed Task output makes the Task fail.\n\n{}{}Input artifacts:\n{}\n\nprogress_md_path: {}\n\nCurrent Task model:\n{}\n{}",
-        item.id,
-        item.title,
-        attempt_id,
-        task_id,
-        task.role,
-        preflight_prompt,
-        task_instructions,
-        input_artifacts_prompt,
-        progress_md_path,
-        task_json,
-        tester_bootstrap,
+    let (bootstrap_yaml, bootstrap_extract) = tester_bootstrap_flags(workspace_path);
+    let has_input_artifacts = if input_artifacts.is_empty() { "" } else { "yes" };
+    let bootstrap_yaml_value = if bootstrap_yaml { "yes" } else { "" };
+    let bootstrap_extract_value = if bootstrap_extract { "yes" } else { "" };
+
+    let template = ContentResolver::new(workspace_path)
+        .resolve_content("prompts/write-user.md")
+        .expect("bundled write-user.md must resolve");
+    crate::content::render_template(
+        &template,
+        &[
+            ("work_item_id", &item.id),
+            ("work_item_title", &item.title),
+            ("attempt_id", attempt_id),
+            ("task_id", task_id),
+            ("role", &task.role),
+            ("has_input_artifacts", has_input_artifacts),
+            ("task_instructions", task_instructions_value),
+            ("input_artifacts_list", &input_artifacts_list),
+            ("progress_md_path", &progress_md_path),
+            ("task_json", &task_json),
+            ("bootstrap_tester_yaml", bootstrap_yaml_value),
+            ("bootstrap_extract_script", bootstrap_extract_value),
+        ],
     )
+    .expect("write-user.md template must render with the documented context")
 }
 
-fn tester_bootstrap_prompt(workspace_path: Option<&Path>) -> String {
+fn tester_bootstrap_flags(workspace_path: Option<&Path>) -> (bool, bool) {
     let Some(workspace) = workspace_path else {
-        return String::new();
+        return (false, false);
     };
-    let tester_yaml_missing = !workspace.join(".factory/tester.yaml").exists();
+    let yaml_missing = !workspace.join(".factory/tester.yaml").exists();
     let extract_missing = !workspace.join(".factory/extract-tester-results").exists();
-    if !tester_yaml_missing && !extract_missing {
-        return String::new();
-    }
-    let mut sections = Vec::new();
-    if tester_yaml_missing {
-        sections.push(
-            "\n## Bootstrap: .factory/tester.yaml\n\n\
-             The candidate workspace is missing `.factory/tester.yaml`. \
-             Author this file and commit it alongside your Work Item changes.\n\n\
-             The file declares which commands the Tester subcommand runs. Schema:\n\
-             ```yaml\n\
-             commands:\n\
-               - command: <shell command to run>\n\
-                 test_harness: <identifier: cargo-nextest | cargo-test | shell-harness>\n\
-             ```\n\n\
-             Each entry's `command` is a shell string Tester runs sequentially in the \
-             workspace root. `test_harness` identifies which parser the \
-             `extract-tester-results` script uses to normalize the output.\n"
-                .to_string(),
-        );
-    }
-    if extract_missing {
-        sections.push(
-            "\n## Bootstrap: .factory/extract-tester-results\n\n\
-             The candidate workspace is missing `.factory/extract-tester-results`. \
-             Author this executable script and commit it alongside your Work Item changes.\n\n\
-             Contract:\n\
-             - Receives the artifact directory as its single argument.\n\
-             - Reads `commands.json` from that directory (array of objects with \
-             `command`, `test_harness`, `exit_code`, `duration_ms`, `stdout_log`, `stderr_log`).\n\
-             - Reads the per-command log files (`commands/<n>-stdout.log`, `commands/<n>-stderr.log`).\n\
-             - Emits a JSON array on stdout, one entry per test:\n\
-             ```json\n\
-             [{\"id\": \"test_name\", \"test_harness\": \"cargo-nextest\", \"status\": \"pass\", \
-             \"duration_ms\": 42, \"failure_excerpt\": null}]\n\
-             ```\n\
-             - `status` must be one of: `pass`, `fail`, `skipped`, `not_run`.\n\
-             - `failure_excerpt` is a string (at most 500 chars) or null.\n\
-             - Make the file executable (`chmod +x`).\n"
-                .to_string(),
-        );
-    }
-    sections.join("")
-}
-
-fn write_task_preflight_prompt(input_artifacts: &[PathBuf]) -> String {
-    let follow_up = if input_artifacts.is_empty() {
-        String::new()
-    } else {
-        concat!(
-            "- This Task has input artifacts. Read the review input artifacts first, ",
-            "address the concrete findings, and check whether each finding reveals ",
-            "a missing first-pass preflight item.\n"
-        )
-        .to_string()
-    };
-    format!(
-        concat!(
-            "Author preflight:\n",
-            "- Before editing, identify the likely touched surfaces: behavior ",
-            "statements, user-facing docs, tests, skills/expertise, and ",
-            "verification commands.\n",
-            "- When changing a user-facing command, behavior, skill, or ",
-            "documentation surface, update the applicable behavior contract, ",
-            "docs, tests, and verification notes in this first pass.\n",
-            "- If this Task is intentionally code-only or docs-only, record why ",
-            "the other related artifacts do not apply instead of adding churn.\n",
-            "{follow_up}\n",
-        ),
-        follow_up = follow_up
-    )
+    (yaml_missing, extract_missing)
 }
 
 fn input_artifacts_instruction(input_artifacts: &[PathBuf]) -> String {
@@ -2630,12 +2574,12 @@ mod tests {
             plan: Some("## 1. Step one\n## 2. Step two\n".to_string()),
             ..Default::default()
         });
-        // The protocol lives in work-author.md system prompt, not the task prompt.
-        // Verify work-author.md contains the protocol section.
-        let system_prompt = std::fs::read_to_string("prompts/work-author.md").unwrap();
+        // The protocol lives in write-system.md system prompt, not the task prompt.
+        // Verify write-system.md contains the protocol section.
+        let system_prompt = std::fs::read_to_string("prompts/write-system.md").unwrap();
         assert!(
             system_prompt.contains("If plan.md is part of your Work Item's planning context"),
-            "work-author.md should contain the writer protocol section"
+            "write-system.md should contain the writer protocol section"
         );
         // Verify progress_md_path is present in the task prompt
         let prompt = build_write_task_prompt(&item, "attempt-1", "attempt-1-write-1", &[]);
