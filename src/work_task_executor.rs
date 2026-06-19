@@ -1342,13 +1342,6 @@ fn input_artifacts_instruction(input_artifacts: &[PathBuf]) -> String {
         .join("\n")
 }
 
-fn task_instructions_prompt(instructions: Option<&str>) -> String {
-    match instructions.filter(|instructions| !instructions.trim().is_empty()) {
-        Some(instructions) => format!("Task instructions:\n{instructions}\n\n"),
-        None => String::new(),
-    }
-}
-
 fn input_artifact_readable_roots(input_artifacts: &[PathBuf]) -> Vec<PathBuf> {
     input_artifacts
         .iter()
@@ -1471,9 +1464,18 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
         )
     })?;
     let review_artifact_path = work_review_artifact_path(task)?;
-    let review_skill_instruction =
-        review_skill_instruction(&task.role, input.readable_workspaces, input.review_only);
-    let decisions_instruction = decisions_instruction(input.readable_workspaces);
+
+    // Skill instruction: split into skill_path (or empty) for the template if/else.
+    let skill_path = review_skill_path(&task.role, input.readable_workspaces);
+    let workspace_kind = if input.review_only {
+        "source checkout"
+    } else {
+        "readable candidate workspaces"
+    };
+
+    // Decisions: split into decisions_path (or empty).
+    let decisions_path = decisions_path(input.readable_workspaces);
+
     let read_paths = task
         .workspace_access
         .reads
@@ -1484,15 +1486,10 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let scope_prompt = if input.review_only {
-        format!(
-            "Readable source checkout:\n{}\n\nReview context:\n- Source checkout: {} ({})\n- Source ref: {}\n- Source commit: {}\n",
-            read_paths,
-            review_context.candidate_workspace_id,
-            review_context.candidate_workspace_path,
-            review_context.source_branch,
-            review_context.candidate_commit
-        )
+
+    // Review-diff command is only meaningful when not review_only.
+    let review_diff_command = if input.review_only {
+        String::new()
     } else {
         let candidate_workspace = task
             .workspace_access
@@ -1506,87 +1503,136 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
             "{}..{}",
             review_context.source_branch, review_context.candidate_commit
         );
-        let review_diff_command = render_review_diff_command(candidate_workspace, &review_range);
-        format!(
-            "Readable candidate workspaces:\n{}\n\nReview context:\n- Candidate workspace: {} ({})\n- Source branch: {}\n- Candidate commit: {}\n- Review diff: {}\n",
-            read_paths,
-            review_context.candidate_workspace_id,
-            review_context.candidate_workspace_path,
-            review_context.source_branch,
-            review_context.candidate_commit,
-            review_diff_command
-        )
+        render_review_diff_command(candidate_workspace, &review_range)
     };
+
     let edit_target = if input.review_only {
         "source checkout"
     } else {
         "candidate workspaces"
     };
-    let task_instructions = task_instructions_prompt(task.instructions.as_deref());
-    let input_artifacts_prompt = review_input_artifacts_prompt(input.input_artifacts);
+    let task_instructions = task_instructions_prompt_value(task.instructions.as_deref());
+    let input_artifacts_block = review_input_artifacts_prompt(input.input_artifacts);
     let behavior_review_input = if task.role == "behaviors" {
-        let tester_results_hint = if let Some(dep_id) = task.depends_on.as_deref() {
-            let tester_artifact_path = format!(
-                ".factory/work/artifacts/{}/{}/{}/tester-results.json",
-                input.item.id, input.attempt_id, dep_id
-            );
-            format!(
-                "\nTester results are available at: {tester_artifact_path}\n\
-                 Read the tester-results.json file. Use its per-test statuses\n\
-                 (pass, fail, skipped, not_run) to inform your verdict.\n\
-                 If its `error` field is non-null, produce a fail verdict naming the error\n\
-                 `kind` and `message` rather than flagging individual behaviors.\n"
-            )
-        } else {
-            String::new()
-        };
-        format!(
-            "{}\n{}",
-            work_behavior_review_input(input.item),
-            tester_results_hint
-        )
+        behavior_review_input_block(input.item, input.attempt_id, task)
     } else {
         String::new()
     };
-    let scope_prompt = format!("{scope_prompt}{behavior_review_input}");
-    let writable_outputs_guidance = reviewer_writable_outputs_guidance(input.artifact_dir);
-    let review_prompt = format!(
-        "Execute this Factory review Task.\n\nWork Item: {} - {}\nAttempt: {}\nTask: {}\nRole: {}\n\n{}{}{}\nWork review artifact path:\n{}\nWrite the review artifact to exactly this filesystem path:\n{}\nYour reviewer artifact directory is:\n{}\n\n{}\n\nThe Task completes when that artifact exists. The artifact may contain Verdict: pass, Verdict: fail, or Verdict: uncertain; do not edit {}.\n\nCurrent Task model:\n{}\n",
-        input.item.id,
-        input.item.title,
-        input.attempt_id,
-        input.task_id,
-        task.role,
-        task_instructions,
-        input_artifacts_prompt,
-        scope_prompt,
-        review_artifact_path,
-        input.review_path.display(),
-        input.artifact_dir.display(),
-        writable_outputs_guidance,
-        edit_target,
-        task_json
-    );
 
-    let system_scope = if input.review_only {
-        "Read the source checkout only; do not edit or commit in it."
-    } else {
-        "Read candidate workspaces only; do not edit or commit in them."
-    };
-    let system_prompt = format!(
-        "You are a Factory {} reviewer operating as a Work model review Task.\n{}\n{}\nWrite the review artifact only to {} with a verdict (pass, fail, or uncertain) and findings. The Work review artifact path is {}.\n{}\n{} Do not flag findings that contradict a recorded decision.",
-        task.role,
-        review_skill_instruction,
-        system_scope,
-        input.review_path.display(),
-        review_artifact_path,
-        writable_outputs_guidance,
-        decisions_instruction
-    );
+    let review_only_value = if input.review_only { "yes" } else { "" };
+    let review_path_display = input.review_path.display().to_string();
+    let artifact_dir_display = input.artifact_dir.display().to_string();
+
+    let resolver = ContentResolver::new(input.readable_workspaces.first().map(|p| p.as_path()));
+
+    let user_template = resolver
+        .resolve_content("prompts/review-user.md")
+        .expect("bundled review-user.md must resolve");
+    let review_prompt = crate::content::render_template(
+        &user_template,
+        &[
+            ("work_item_id", &input.item.id),
+            ("work_item_title", &input.item.title),
+            ("attempt_id", input.attempt_id),
+            ("task_id", input.task_id),
+            ("role", &task.role),
+            ("task_instructions", &task_instructions),
+            ("input_artifacts_block", &input_artifacts_block),
+            ("review_only", review_only_value),
+            ("read_paths", &read_paths),
+            (
+                "candidate_workspace_id",
+                &review_context.candidate_workspace_id,
+            ),
+            (
+                "candidate_workspace_path",
+                &review_context.candidate_workspace_path,
+            ),
+            ("source_branch", &review_context.source_branch),
+            ("candidate_commit", &review_context.candidate_commit),
+            ("review_diff_command", &review_diff_command),
+            ("behavior_review_input", &behavior_review_input),
+            ("artifact_path", &review_artifact_path),
+            ("review_path", &review_path_display),
+            ("artifact_dir", &artifact_dir_display),
+            ("edit_target", edit_target),
+            ("task_json", &task_json),
+        ],
+    )
+    .expect("review-user.md template must render with the documented context");
+
+    let system_template = resolver
+        .resolve_content("prompts/review-system.md")
+        .expect("bundled review-system.md must resolve");
+    let system_prompt = crate::content::render_template(
+        &system_template,
+        &[
+            ("role", &task.role),
+            ("skill_path", &skill_path),
+            ("workspace_kind", workspace_kind),
+            ("review_only", review_only_value),
+            ("review_path", &review_path_display),
+            ("artifact_path", &review_artifact_path),
+            ("artifact_dir", &artifact_dir_display),
+            ("decisions_path", &decisions_path),
+        ],
+    )
+    .expect("review-system.md template must render with the documented context");
+
     Ok(WorkReviewPrompts {
         system_prompt,
         review_prompt,
     })
+}
+
+fn task_instructions_prompt_value(instructions: Option<&str>) -> String {
+    instructions
+        .filter(|i| !i.trim().is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn behavior_review_input_block(
+    item: &WorkItem,
+    attempt_id: &str,
+    task: &crate::work_model::Task,
+) -> String {
+    let tester_results_hint = if let Some(dep_id) = task.depends_on.as_deref() {
+        let tester_artifact_path = format!(
+            ".factory/work/artifacts/{}/{}/{}/tester-results.json",
+            item.id, attempt_id, dep_id
+        );
+        format!(
+            "\nTester results are available at: {tester_artifact_path}\n\
+             Read the tester-results.json file. Use its per-test statuses\n\
+             (pass, fail, skipped, not_run) to inform your verdict.\n\
+             If its `error` field is non-null, produce a fail verdict naming the error\n\
+             `kind` and `message` rather than flagging individual behaviors."
+        )
+    } else {
+        String::new()
+    };
+    format!("{}\n{}", work_behavior_review_input(item), tester_results_hint)
+}
+
+fn review_skill_path(role: &str, readable_workspaces: &[PathBuf]) -> String {
+    let relative = format!("skills/review-{role}/SKILL.md");
+    readable_workspaces
+        .iter()
+        .map(|workspace| workspace.join(&relative))
+        .find(|path| path.is_file())
+        .map(|path| path.display().to_string())
+        .unwrap_or_default()
+}
+
+fn decisions_path(readable_workspaces: &[PathBuf]) -> String {
+    let relative = Path::new(".factory/expertise/decisions.md");
+    readable_workspaces
+        .iter()
+        .map(|workspace| workspace.join(relative))
+        .find(|path| path.is_file())
+        .map(|path| path.display().to_string())
+        .unwrap_or_default()
 }
 
 fn work_review_artifact_path(task: &crate::work_model::Task) -> Result<String> {
@@ -1597,18 +1643,6 @@ fn work_review_artifact_path(task: &crate::work_model::Task) -> Result<String> {
         "{}/review.md",
         artifact_area.path.trim_end_matches('/')
     ))
-}
-
-fn reviewer_writable_outputs_guidance(artifact_dir: &Path) -> String {
-    format!(
-        "Build cache and writable outputs:\n\
-         - You may READ the candidate workspace's existing build outputs (binaries, compiled artifacts, installed dependencies) freely. The writer produced them as part of completing the write task.\n\
-         - You may NOT write to the candidate workspace, including its build outputs. Concurrent reviewers cannot safely share a build cache.\n\
-         - Factory has pre-populated your reviewer artifact directory at {} with copies of the writer's build outputs for warm-start incremental builds. When you need to build new outputs the writer didn't produce, redirect them there.\n\
-         - For Cargo: CARGO_TARGET_DIR=\"{}/target\" cargo build (or cargo test). If the writer already built the binary you need, invoke it directly from the candidate workspace instead of recompiling.",
-        artifact_dir.display(),
-        artifact_dir.display()
-    )
 }
 
 fn prepare_reviewer_build_cache(
@@ -1696,46 +1730,6 @@ fn review_readable_sandbox_roots(readable_workspaces: &[PathBuf]) -> Result<Vec<
         }
     }
     Ok(roots)
-}
-
-fn review_skill_instruction(
-    role: &str,
-    readable_workspaces: &[PathBuf],
-    review_only: bool,
-) -> String {
-    let relative = format!("skills/review-{role}/SKILL.md");
-    readable_workspaces
-        .iter()
-        .map(|workspace| workspace.join(&relative))
-        .find(|path| path.is_file())
-        .map(|path| format!("Follow the review-{role} skill at {}.", path.display()))
-        .unwrap_or_else(|| {
-            let workspace_kind = if review_only {
-                "source checkout"
-            } else {
-                "readable candidate workspaces"
-            };
-            format!(
-                "No review-{role} skill file was found in the {workspace_kind}; apply the Task role directly."
-            )
-        })
-}
-
-fn decisions_instruction(readable_workspaces: &[PathBuf]) -> String {
-    let relative = Path::new(".factory/expertise/decisions.md");
-    readable_workspaces
-        .iter()
-        .map(|workspace| workspace.join(relative))
-        .find(|path| path.is_file())
-        .map(|path| {
-            format!(
-                "Read recorded decisions at {} if it exists.",
-                path.display()
-            )
-        })
-        .unwrap_or_else(|| {
-            "No project decision file was found in the readable candidate workspaces.".to_string()
-        })
 }
 
 fn build_coder_sandbox_with_writable_and_read_only_roots(

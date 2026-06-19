@@ -72,18 +72,11 @@ pub fn bundled_content(relative: &str) -> Option<String> {
     match relative {
         "prompts/write-system.md" => Some(include_str!("../prompts/write-system.md").to_string()),
         "prompts/write-user.md" => Some(include_str!("../prompts/write-user.md").to_string()),
+        "prompts/review-system.md" => {
+            Some(include_str!("../prompts/review-system.md").to_string())
+        }
+        "prompts/review-user.md" => Some(include_str!("../prompts/review-user.md").to_string()),
         "prompts/work-rebase.md" => Some(include_str!("../prompts/work-rebase.md").to_string()),
-        "prompts/review-architecture.md" => {
-            Some(include_str!("../prompts/review-architecture.md").to_string())
-        }
-        "prompts/review-behaviors.md" => {
-            Some(include_str!("../prompts/review-behaviors.md").to_string())
-        }
-        "prompts/review-documentation.md" => {
-            Some(include_str!("../prompts/review-documentation.md").to_string())
-        }
-        "prompts/review-skills.md" => Some(include_str!("../prompts/review-skills.md").to_string()),
-        "prompts/review-tests.md" => Some(include_str!("../prompts/review-tests.md").to_string()),
         // Sandbox profiles
         "sandbox/common.sb" => Some(include_str!("../sandboxes/common.sb").to_string()),
         "sandbox/claude-code.sb" => Some(include_str!("../sandboxes/claude-code.sb").to_string()),
@@ -623,12 +616,9 @@ Check item {{ITEM_ID}}.
     fn test_bundled_content_prompts() {
         assert!(bundled_content("prompts/write-system.md").is_some());
         assert!(bundled_content("prompts/write-user.md").is_some());
+        assert!(bundled_content("prompts/review-system.md").is_some());
+        assert!(bundled_content("prompts/review-user.md").is_some());
         assert!(bundled_content("prompts/work-rebase.md").is_some());
-        assert!(bundled_content("prompts/review-architecture.md").is_some());
-        assert!(bundled_content("prompts/review-behaviors.md").is_some());
-        assert!(bundled_content("prompts/review-documentation.md").is_some());
-        assert!(bundled_content("prompts/review-skills.md").is_some());
-        assert!(bundled_content("prompts/review-tests.md").is_some());
     }
 
     #[test]
