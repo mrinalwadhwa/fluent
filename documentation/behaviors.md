@@ -3,10 +3,6 @@
 Observable behaviors of the factory system. Each statement describes what
 the system does, not how. EARS format.
 
-RunBehaviorTests: cargo nextest run --test binary --message-format libtest-json
-RunBehaviorTests: cargo test --lib --message-format json
-RunBehaviorTests: for test in tests/behaviors/operations/*.sh; do bash "$test"; done
-
 ## Test harnesses
 
 | Harness | Runs | Usage |

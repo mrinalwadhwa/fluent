@@ -152,16 +152,14 @@ Work Item, running `factory work review-codebase <work-item-id>
 The writer owns producing tests alongside code. When committing a
 candidate:
 
-- `documentation/behaviors.md` has a top-level `RunBehaviorTests:` header
-  listing the project's batch test commands (one per line for multiple
-  harnesses, e.g., Rust nextest + shell).
+- `.factory/tester.yaml` declares the project's test commands (one entry
+  per harness, e.g., Rust nextest + shell).
 - Each EARS statement has either a `Test:` reference pointing at a real
   test or an `Untestable:` marker with a one-line reason.
 - Run the project's tests before committing (best practice, not enforced).
 
-The `behavior-tests` Task is the safety net — it runs after the write
-completes and produces `behavior-tests-results.json` for the
-behaviors-completeness reviewer.
+The Tester Task is the safety net — it runs after the write completes
+and produces `tester-results.json` for all reviewers.
 
 ### 5. Execute
 
