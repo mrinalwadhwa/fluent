@@ -1,5 +1,4 @@
 pub mod auto_merge;
-pub mod behavior_tests;
 pub mod claude_auth;
 pub mod cleanup;
 pub mod cli;
