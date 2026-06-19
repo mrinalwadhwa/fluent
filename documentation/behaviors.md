@@ -511,7 +511,7 @@ after failed review),
 THE SYSTEM SHALL set `Task.artifact_area` to
 `Some(TaskArtifactArea { path:
 ".factory/work/artifacts/<work-item-id>/<attempt-id>/<task-id>" })`
-following the same convention as review and behavior-tests Tasks.
+following the same convention as review and tester Tasks.
 Test: src/work_model.rs (initial_write_task_has_artifact_area_path)
 Test: src/work_model.rs (followup_write_task_has_artifact_area_path)
 Test: tests/work_model_external.rs (work_item_add_initial_attempt_creates_scheduler_facing_write_task)
@@ -558,13 +558,6 @@ to that file during execution.
 Test: src/work_task_executor.rs (review_task_transcript_path_resolved_from_artifact_area)
 Test: tests/binary.rs (review_task_transcript_persists_after_completion)
 
-WHEN a `behavior-tests` Task is executed,
-THE SYSTEM SHALL pass the path `<artifact_area>/transcript.jsonl` to
-the Coder's transcript argument so the agent's session is persisted
-to that file during execution.
-Test: src/work_task_executor.rs (behavior_tests_task_transcript_path_resolved_from_artifact_area)
-Test: tests/binary.rs (behavior_tests_task_transcript_persists_alongside_results_json)
-
 WHEN a `review` Task completes (verdict pass, fail, or uncertain),
 THE SYSTEM SHALL leave the `transcript.jsonl` file in place under the
 artifact directory alongside `review.md`. The transcript SHALL NOT be
@@ -572,13 +565,7 @@ deleted when the Task transitions to `complete`, `failed`, or
 `needs-user`.
 Test: tests/binary.rs (review_task_transcript_persists_after_completion)
 
-WHEN a `behavior-tests` Task completes,
-THE SYSTEM SHALL leave the `transcript.jsonl` file in place under the
-artifact directory alongside `behavior-tests-results.json`.
-Test: tests/binary.rs (behavior_tests_task_transcript_persists_alongside_results_json)
-
-WHEN a `review` or `behavior-tests` Task fails before producing its
-primary artifact (`review.md` or `behavior-tests-results.json`),
+WHEN a `review` Task fails before producing `review.md`,
 THE SYSTEM SHALL still persist whatever transcript content the Coder
 wrote, so post-mortem analysis is possible.
 Test: tests/binary.rs (review_task_transcript_persists_on_failure)
@@ -596,16 +583,14 @@ in its sandbox readable roots (regression behavior preserved from
 `persist-writer-transcripts`).
 Test: tests/binary.rs (reviewer_sandbox_does_not_include_writer_artifact_dir)
 
-WHEN scheduler usage logging runs after a `review` or `behavior-tests`
-Task,
+WHEN scheduler usage logging runs after a `write` or `review` Task,
 THE SYSTEM SHALL find the transcript at the documented path and append
 per-turn token usage rows to `~/.config/factory/usage/usage.jsonl`
 with the documented schema, identifying the Task via `work_item_id`,
 `attempt_id`, and `task_id`.
 Test: src/usage.rs (log_usage_from_transcript appends rows when
-transcript file exists; review and behavior-tests Tasks provide
-transcript paths, so the existing usage-logging tests cover the
-parsing path)
+transcript file exists; write and review Tasks provide transcript
+paths, so the existing usage-logging tests cover the parsing path)
 
 WHEN a `rebase` Task is created,
 THE SYSTEM SHALL continue to use the rebase Task's existing artifact
@@ -2330,9 +2315,8 @@ Test: tests/binary.rs::no_legacy_run_strings_in_src
 WHEN any file under `prompts/` is inspected after this Work
 Item lands,
 THE SYSTEM SHALL contain only Work-model prompts
-(`work-author.md`, `work-rebase.md`, `review-*.md`,
-`behavior-tests.md`); the legacy `author.md` SHALL NOT be
-present.
+(`work-author.md`, `work-rebase.md`, `review-*.md`); the legacy
+`author.md` and `behavior-tests.md` SHALL NOT be present.
 Test: tests/binary.rs::no_legacy_prompt_files_in_prompts_dir
 
 WHEN any documentation file under `documentation/` or skill
@@ -2542,10 +2526,10 @@ and Scheduler sections above carry `Test:` references
 WHEN this Work Item lands,
 THE SYSTEM SHALL contain `Test:` references in
 `documentation/behaviors.md` for each new EARS statement here,
-covering transcript-file presence checks for review and
-behavior-tests Tasks, the independent-verification regression
-test (reviewer cannot read writer transcript or other reviewers'
-transcripts), and the usage-logging integration.
+covering transcript-file presence checks for write and review
+Tasks, the independent-verification regression test (reviewer
+cannot read writer transcript or other reviewers' transcripts),
+and the usage-logging integration.
 Test: all EARS statements in the reviewer transcript persistence
 section above carry `Test:` references
 

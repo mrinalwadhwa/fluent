@@ -1431,7 +1431,7 @@ deferrals, coder switching, and calibration.
 
 ### Usage logging
 
-Each Coder invocation (write, review, and behavior-tests tasks) appends
+Each Coder invocation (write and review tasks) appends
 per-turn token usage rows to `~/.config/factory/usage/usage.jsonl`. Rows
 follow a fixed JSONL schema: `ts`, `coder`, `work_item_id`, `attempt_id`,
 `task_id`, `model`, `input_tokens`, `output_tokens`,
