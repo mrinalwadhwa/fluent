@@ -5,11 +5,19 @@ Attempt: {{attempt_id}}
 Task: {{task_id}}
 Role: {{role}}
 
-{{#if task_instructions}}
-Task instructions:
-{{task_instructions}}
-
+{{#if brief_path}}
+Brief: {{brief_path}}
 {{/if}}
+{{#if behaviors_path}}
+Behaviors: {{behaviors_path}}
+{{/if}}
+{{#if approach_path}}
+Approach: {{approach_path}}
+{{/if}}
+{{#if plan_path}}
+Plan: {{plan_path}}
+{{/if}}
+
 {{#if input_artifacts_block}}
 {{input_artifacts_block}}
 

@@ -393,6 +393,7 @@ fn run_review_task(
         &item,
         config.attempt_id,
         config.task_id,
+        config.project_root,
         &artifact_dir,
         &review_path,
         &readable_workspace_paths,
@@ -1167,12 +1168,17 @@ fn run_task_coder(
         .find(|attempt| attempt.id == attempt_id)
         .and_then(|attempt| attempt.tasks.iter().find(|task| task.id == task_id))
         .ok_or_else(|| anyhow::anyhow!("Task {task_id:?} not found"))?;
+    materialize_planning_files(item, project_root)?;
+    let progress_dir = progress_md_dir(project_root, &item.id, attempt_id);
+    fs::create_dir_all(&progress_dir)
+        .with_context(|| format!("Failed to create progress dir at {}", progress_dir.display()))?;
     let prompt = build_write_task_prompt_with_workspace(
         item,
         attempt_id,
         task_id,
         input_artifacts,
         Some(workspace_path),
+        Some(project_root),
     );
 
     let transcript_path = task
@@ -1191,8 +1197,9 @@ fn run_task_coder(
         (CoderSandbox::None, None)
     } else {
         let common_git_dir = worktree::git_common_dir(workspace_path)?;
-        let readable_roots = input_artifact_readable_roots(input_artifacts);
-        let mut additional_writable = vec![common_git_dir];
+        let mut readable_roots = input_artifact_readable_roots(input_artifacts);
+        readable_roots.push(planning_files_dir(project_root, &item.id));
+        let mut additional_writable = vec![common_git_dir, progress_dir.clone()];
         if let Some(ref tp) = transcript_path {
             if let Some(artifact_dir) = tp.parent() {
                 additional_writable.push(artifact_dir.to_path_buf());
@@ -1257,7 +1264,7 @@ fn build_write_task_prompt(
     task_id: &str,
     input_artifacts: &[PathBuf],
 ) -> String {
-    build_write_task_prompt_with_workspace(item, attempt_id, task_id, input_artifacts, None)
+    build_write_task_prompt_with_workspace(item, attempt_id, task_id, input_artifacts, None, None)
 }
 
 fn build_write_task_prompt_with_workspace(
@@ -1266,6 +1273,7 @@ fn build_write_task_prompt_with_workspace(
     task_id: &str,
     input_artifacts: &[PathBuf],
     workspace_path: Option<&Path>,
+    project_root: Option<&Path>,
 ) -> String {
     let task = item
         .attempts
@@ -1275,26 +1283,26 @@ fn build_write_task_prompt_with_workspace(
         .expect("Task must exist");
     let task_json = to_json_pretty(task).unwrap_or_default();
     let input_artifacts_list = input_artifacts_instruction(input_artifacts);
-    let task_instructions_value = task
-        .instructions
-        .as_deref()
-        .filter(|i| !i.trim().is_empty())
-        .unwrap_or("");
-    let progress_md_path = item
-        .attempts
-        .iter()
-        .find(|a| a.id == attempt_id)
-        .map(|a| {
-            format!(
-                "{}/{}/{}/progress.md",
-                crate::work_model::WORK_ARTIFACTS_DIR,
-                item.id,
-                a.id
-            )
+    let progress_md_path = project_root
+        .and_then(|root| {
+            item.attempts
+                .iter()
+                .find(|a| a.id == attempt_id)
+                .map(|a| {
+                    progress_md_path_for(root, &item.id, &a.id)
+                        .display()
+                        .to_string()
+                })
         })
         .unwrap_or_default();
+    let planning = project_root
+        .map(|root| compute_planning_paths(item, root))
+        .unwrap_or_default();
+    let brief_path = planning.brief();
+    let behaviors_path = planning.behaviors();
+    let approach_path = planning.approach();
+    let plan_path = planning.plan();
     let (bootstrap_yaml, bootstrap_extract) = tester_bootstrap_flags(workspace_path);
-    let has_input_artifacts = if input_artifacts.is_empty() { "" } else { "yes" };
     let bootstrap_yaml_value = if bootstrap_yaml { "yes" } else { "" };
     let bootstrap_extract_value = if bootstrap_extract { "yes" } else { "" };
 
@@ -1309,8 +1317,10 @@ fn build_write_task_prompt_with_workspace(
             ("attempt_id", attempt_id),
             ("task_id", task_id),
             ("role", &task.role),
-            ("has_input_artifacts", has_input_artifacts),
-            ("task_instructions", task_instructions_value),
+            ("brief_path", &brief_path),
+            ("behaviors_path", &behaviors_path),
+            ("approach_path", &approach_path),
+            ("plan_path", &plan_path),
             ("input_artifacts_list", &input_artifacts_list),
             ("progress_md_path", &progress_md_path),
             ("task_json", &task_json),
@@ -1319,6 +1329,130 @@ fn build_write_task_prompt_with_workspace(
         ],
     )
     .expect("write-user.md template must render with the documented context")
+}
+
+#[derive(Default, Debug, Clone)]
+struct PlanningFilePaths {
+    brief: Option<PathBuf>,
+    behaviors: Option<PathBuf>,
+    approach: Option<PathBuf>,
+    plan: Option<PathBuf>,
+}
+
+impl PlanningFilePaths {
+    fn brief(&self) -> String {
+        self.brief
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    }
+    fn behaviors(&self) -> String {
+        self.behaviors
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    }
+    fn approach(&self) -> String {
+        self.approach
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    }
+    fn plan(&self) -> String {
+        self.plan
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    }
+}
+
+fn planning_files_dir(project_root: &Path, work_item_id: &str) -> PathBuf {
+    project_root.join(".factory/work/items").join(work_item_id)
+}
+
+fn progress_md_dir(project_root: &Path, work_item_id: &str, attempt_id: &str) -> PathBuf {
+    project_root
+        .join(crate::work_model::WORK_PROGRESS_DIR)
+        .join(work_item_id)
+        .join(attempt_id)
+}
+
+fn progress_md_path_for(project_root: &Path, work_item_id: &str, attempt_id: &str) -> PathBuf {
+    progress_md_dir(project_root, work_item_id, attempt_id).join("progress.md")
+}
+
+/// Compute the absolute paths the writer/reviewer prompts reference for each
+/// planning section. Returns `None` for sections with empty content.
+fn compute_planning_paths(item: &WorkItem, project_root: &Path) -> PlanningFilePaths {
+    let Some(ctx) = item.planning_context.as_ref() else {
+        return PlanningFilePaths::default();
+    };
+    let dir = planning_files_dir(project_root, &item.id);
+    PlanningFilePaths {
+        brief: section_path(&dir, "brief.md", &ctx.brief),
+        behaviors: section_path(&dir, "behaviors.md", &ctx.behaviors),
+        approach: section_path(&dir, "approach.md", &ctx.approach),
+        plan: section_path(&dir, "plan.md", &ctx.plan),
+    }
+}
+
+fn section_path(dir: &Path, name: &str, content: &Option<String>) -> Option<PathBuf> {
+    content
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|_| dir.join(name))
+}
+
+/// Materialize planning sections as files at
+/// `<project_root>/.factory/work/items/<work-item-id>/<section>.md`. Writes are
+/// atomic (write-to-temp + rename) so concurrent calls from parallel review
+/// Tasks cannot tear a file. Returns the same paths as `compute_planning_paths`.
+fn materialize_planning_files(item: &WorkItem, project_root: &Path) -> Result<PlanningFilePaths> {
+    let Some(ctx) = item.planning_context.as_ref() else {
+        return Ok(PlanningFilePaths::default());
+    };
+    let dir = planning_files_dir(project_root, &item.id);
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("Failed to create planning files dir at {}", dir.display()))?;
+
+    let brief = write_section_atomically(&dir, "brief.md", &ctx.brief)?;
+    let behaviors = write_section_atomically(&dir, "behaviors.md", &ctx.behaviors)?;
+    let approach = write_section_atomically(&dir, "approach.md", &ctx.approach)?;
+    let plan = write_section_atomically(&dir, "plan.md", &ctx.plan)?;
+
+    Ok(PlanningFilePaths {
+        brief,
+        behaviors,
+        approach,
+        plan,
+    })
+}
+
+fn write_section_atomically(
+    dir: &Path,
+    name: &str,
+    content: &Option<String>,
+) -> Result<Option<PathBuf>> {
+    let Some(text) = content.as_deref().filter(|s| !s.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let final_path = dir.join(name);
+    let mut tmp = tempfile::NamedTempFile::new_in(dir).with_context(|| {
+        format!(
+            "Failed to create temp file while writing planning section {}",
+            final_path.display()
+        )
+    })?;
+    use std::io::Write;
+    tmp.write_all(text.as_bytes()).with_context(|| {
+        format!(
+            "Failed to write planning section content for {}",
+            final_path.display()
+        )
+    })?;
+    tmp.persist(&final_path)
+        .with_context(|| format!("Failed to persist planning section at {}", final_path.display()))?;
+    Ok(Some(final_path))
 }
 
 fn tester_bootstrap_flags(workspace_path: Option<&Path>) -> (bool, bool) {
@@ -1353,6 +1487,7 @@ fn run_review_coder(
     item: &WorkItem,
     attempt_id: &str,
     task_id: &str,
+    project_root: &Path,
     artifact_dir: &Path,
     review_path: &Path,
     readable_workspaces: &[PathBuf],
@@ -1370,10 +1505,13 @@ fn run_review_coder(
         credential::setup_git_signing();
     }
 
+    materialize_planning_files(item, project_root)?;
+
     let prompts = build_work_review_prompts(WorkReviewPromptInput {
         item,
         attempt_id,
         task_id,
+        project_root,
         artifact_dir,
         review_path,
         readable_workspaces,
@@ -1386,6 +1524,7 @@ fn run_review_coder(
     } else {
         let mut readable_roots = review_readable_sandbox_roots(readable_workspaces)?;
         readable_roots.extend(input_artifact_readable_roots(input_artifacts));
+        readable_roots.push(planning_files_dir(project_root, &item.id));
         build_coder_sandbox_with_read_only_roots(
             coder_kind,
             resolver,
@@ -1441,6 +1580,7 @@ struct WorkReviewPromptInput<'a> {
     item: &'a WorkItem,
     attempt_id: &'a str,
     task_id: &'a str,
+    project_root: &'a Path,
     artifact_dir: &'a Path,
     review_path: &'a Path,
     readable_workspaces: &'a [PathBuf],
@@ -1511,7 +1651,6 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
     } else {
         "candidate workspaces"
     };
-    let task_instructions = task_instructions_prompt_value(task.instructions.as_deref());
     let input_artifacts_block = review_input_artifacts_prompt(input.input_artifacts);
     let behavior_review_input = if task.role == "behaviors" {
         behavior_review_input_block(input.item, input.attempt_id, task)
@@ -1522,6 +1661,12 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
     let review_only_value = if input.review_only { "yes" } else { "" };
     let review_path_display = input.review_path.display().to_string();
     let artifact_dir_display = input.artifact_dir.display().to_string();
+
+    let planning = compute_planning_paths(input.item, input.project_root);
+    let brief_path = planning.brief();
+    let behaviors_path = planning.behaviors();
+    let approach_path = planning.approach();
+    let plan_path = planning.plan();
 
     let resolver = ContentResolver::new(input.readable_workspaces.first().map(|p| p.as_path()));
 
@@ -1536,7 +1681,10 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
             ("attempt_id", input.attempt_id),
             ("task_id", input.task_id),
             ("role", &task.role),
-            ("task_instructions", &task_instructions),
+            ("brief_path", &brief_path),
+            ("behaviors_path", &behaviors_path),
+            ("approach_path", &approach_path),
+            ("plan_path", &plan_path),
             ("input_artifacts_block", &input_artifacts_block),
             ("review_only", review_only_value),
             ("read_paths", &read_paths),
@@ -1583,13 +1731,6 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
         system_prompt,
         review_prompt,
     })
-}
-
-fn task_instructions_prompt_value(instructions: Option<&str>) -> String {
-    instructions
-        .filter(|i| !i.trim().is_empty())
-        .unwrap_or("")
-        .to_string()
 }
 
 fn behavior_review_input_block(
@@ -2235,6 +2376,7 @@ mod tests {
             item: &item,
             attempt_id: "attempt-1",
             task_id: "attempt-1-review-tests",
+            project_root: Path::new("/tmp/project"),
             artifact_dir: Path::new("/tmp/project/.factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests"),
             review_path: Path::new("/tmp/project/.factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"),
             readable_workspaces: &[PathBuf::from("/tmp/project/../work-6-work-1-attempt-1")],
@@ -2286,6 +2428,7 @@ mod tests {
             item: &item,
             attempt_id: "attempt-1",
             task_id: "attempt-1-review-tests",
+            project_root: tmp.path(),
             artifact_dir: tmp.path(),
             review_path: &review_path,
             readable_workspaces: std::slice::from_ref(&workspace),
@@ -2553,44 +2696,48 @@ mod tests {
     #[test]
     fn write_task_prompt_includes_progress_md_path_substitution() {
         let item = review_item();
-        let prompt = build_write_task_prompt(&item, "attempt-1", "attempt-1-write-1", &[]);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let prompt = build_write_task_prompt_with_workspace(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            &[],
+            None,
+            Some(tmp.path()),
+        );
+        let expected_suffix =
+            ".factory/work/progress/work-1/attempt-1/progress.md";
+        let expected_line = format!(
+            "progress_md_path: {}/{}",
+            tmp.path().display(),
+            expected_suffix
+        );
         assert!(
-            prompt
-                .contains("progress_md_path: .factory/work/artifacts/work-1/attempt-1/progress.md"),
-            "prompt should include progress_md_path substitution"
+            prompt.contains(&expected_line),
+            "prompt should include absolute progress_md_path; got prompt:\n{prompt}"
         );
     }
 
     #[test]
-    fn write_task_prompt_includes_protocol_when_plan_md_present() {
+    fn write_system_prompt_contains_round_by_round_discipline() {
+        let system_prompt = std::fs::read_to_string("prompts/write-system.md").unwrap();
+        assert!(
+            system_prompt.contains("Round-by-round discipline"),
+            "write-system.md should contain the round-by-round discipline section"
+        );
+    }
+
+    #[test]
+    fn write_task_prompt_includes_progress_md_path_when_plan_present() {
         let mut item = review_item();
         item.planning_context = Some(crate::work_model::PlanningContext {
             plan: Some("## 1. Step one\n## 2. Step two\n".to_string()),
             ..Default::default()
         });
-        // The protocol lives in write-system.md system prompt, not the task prompt.
-        // Verify write-system.md contains the protocol section.
-        let system_prompt = std::fs::read_to_string("prompts/write-system.md").unwrap();
-        assert!(
-            system_prompt.contains("If plan.md is part of your Work Item's planning context"),
-            "write-system.md should contain the writer protocol section"
-        );
-        // Verify progress_md_path is present in the task prompt
         let prompt = build_write_task_prompt(&item, "attempt-1", "attempt-1-write-1", &[]);
         assert!(
             prompt.contains("progress_md_path:"),
-            "prompt should contain progress_md_path when plan.md is present"
-        );
-    }
-
-    #[test]
-    fn write_task_prompt_omits_protocol_when_no_plan_md() {
-        let item = review_item();
-        // review_item() has planning_context = None, so no plan.md
-        let prompt = build_write_task_prompt(&item, "attempt-1", "attempt-1-write-1", &[]);
-        assert!(
-            !prompt.contains("If plan.md is part of your Work Item's planning context"),
-            "prompt should NOT contain the protocol section when plan.md is absent"
+            "user prompt should contain progress_md_path when the plan is present"
         );
     }
 
@@ -2607,6 +2754,7 @@ mod tests {
             "attempt-1-write-1",
             &[],
             Some(workspace),
+            None,
         );
         assert!(
             prompt.contains("Bootstrap: .factory/tester.yaml"),
@@ -2627,6 +2775,7 @@ mod tests {
             "attempt-1-write-1",
             &[],
             Some(workspace),
+            None,
         );
         assert!(
             prompt.contains("Bootstrap: .factory/extract-tester-results"),
@@ -2658,6 +2807,7 @@ mod tests {
             "attempt-1-write-1",
             &[],
             Some(workspace),
+            None,
         );
         assert!(
             !prompt.contains("Bootstrap: .factory/tester.yaml"),

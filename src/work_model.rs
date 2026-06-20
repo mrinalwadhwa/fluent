@@ -19,6 +19,7 @@ pub const WORK_ATTEMPTS_DIR: &str = "attempts";
 pub const WORK_TASKS_DIR: &str = "tasks";
 pub const WORK_MERGE_CANDIDATES_DIR: &str = "merge-candidates";
 pub const WORK_ARTIFACTS_DIR: &str = ".factory/work/artifacts";
+pub const WORK_PROGRESS_DIR: &str = ".factory/work/progress";
 
 pub fn work_artifact_path(work_item_id: &str, attempt_id: &str, artifact: &str) -> String {
     format!("{WORK_ARTIFACTS_DIR}/{work_item_id}/{attempt_id}/{artifact}")
@@ -520,7 +521,7 @@ impl WorkItem {
                 ),
             });
             let progress_md_path = format!(
-                "{WORK_ARTIFACTS_DIR}/{}/{}/progress.md",
+                "{WORK_PROGRESS_DIR}/{}/{}/progress.md",
                 self.id, attempt_id,
             );
             task_input_artifacts.push(ArtifactRef {
@@ -3345,7 +3346,7 @@ mod tests {
                 assert!(
                     review_task.input_artifacts.iter().any(|ref_| {
                         ref_.producer_id == "writer"
-                            && ref_.path == ".factory/work/artifacts/work-1/attempt-1/progress.md"
+                            && ref_.path == ".factory/work/progress/work-1/attempt-1/progress.md"
                     }),
                     "review task {} should have progress.md in input_artifacts",
                     task_id

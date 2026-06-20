@@ -5,24 +5,19 @@ Attempt: {{attempt_id}}
 Task: {{task_id}}
 Role: {{role}}
 
-Completion contract:
-- Commit all Task output in the writable workspace before marking the Task complete.
-- Leave the writable workspace clean: no unstaged, staged, or untracked Task changes.
-- If no code, documentation, skill, behavior, or other repository change is needed, do not mark the Task complete; under the current write Task executor contract, no committed Task output makes the Task fail.
-
-Author preflight:
-- Before editing, identify the likely touched surfaces: behavior statements, user-facing docs, tests, skills/expertise, and verification commands.
-- When changing a user-facing command, behavior, skill, or documentation surface, update the applicable behavior contract, docs, tests, and verification notes in this first pass.
-- If this Task is intentionally code-only or docs-only, record why the other related artifacts do not apply instead of adding churn.
-{{#if has_input_artifacts}}
-- This Task has input artifacts. Read the review input artifacts first, address the concrete findings, and check whether each finding reveals a missing first-pass preflight item.
+{{#if brief_path}}
+Brief: {{brief_path}}
+{{/if}}
+{{#if behaviors_path}}
+Behaviors: {{behaviors_path}}
+{{/if}}
+{{#if approach_path}}
+Approach: {{approach_path}}
+{{/if}}
+{{#if plan_path}}
+Plan: {{plan_path}}
 {{/if}}
 
-{{#if task_instructions}}
-Task instructions:
-{{task_instructions}}
-
-{{/if}}
 Input artifacts:
 {{input_artifacts_list}}
 
