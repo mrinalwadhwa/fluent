@@ -15,7 +15,7 @@ use crate::review_diff_command::render_review_diff_command;
 use crate::work_model::{
     ArtifactRef, AttemptKind, AttemptStatus, TaskKind, TaskOutput, TaskStatus, WorkItem,
     WorkModelStorageError, WorkModelStore, WorkspaceRef, resolve_expected_candidate_workspace_path,
-    to_json_pretty, work_behavior_review_input,
+    to_json_pretty,
 };
 use crate::worktree;
 
@@ -115,7 +115,7 @@ fn run_write_task(
         config.work_item_id,
         config.attempt_id,
     )?;
-    let input_artifacts = resolve_input_artifact_paths(config.project_root, &task.input_artifacts)?;
+    let prior_reviews = resolve_input_artifact_paths(config.project_root, &task.input_artifacts)?;
     let source_branch = current_branch(config.project_root)?;
     let branch_name = format!(
         "work/{}/{}/{}",
@@ -143,7 +143,7 @@ fn run_write_task(
         config.task_id,
         config.project_root,
         &workspace_path,
-        &input_artifacts,
+        &prior_reviews,
         config.resolver,
         config.extra_args,
         coder_kind,
@@ -353,6 +353,13 @@ fn run_review_task(
     };
 
     let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+
+    // Materialize planning artifacts and bundled expertise BEFORE the source
+    // checkout review guard snapshots the workspace. Otherwise the guard
+    // treats these Factory-managed files as reviewer-induced changes when
+    // diffing against its baseline.
+    materialize_planning_files(&item, config.project_root)?;
+    materialize_general_expertise(config.project_root)?;
 
     let readable_workspaces = match ReviewReadableWorkspaces::resolve(
         config.project_root,
@@ -987,13 +994,40 @@ pub(crate) fn resolve_managed_artifact_area_path(
     Ok(resolve_workspace_path(project_root, path))
 }
 
+fn resolve_input_artifact_path(project_root: &Path, path: &str) -> Result<PathBuf> {
+    let relative_path = Path::new(path);
+    if relative_path.is_absolute() {
+        bail!("Input artifact path must be relative: {path}");
+    }
+    let mut components = Vec::new();
+    for component in relative_path.components() {
+        match component {
+            Component::Normal(part) => components.push(part.to_owned()),
+            _ => bail!(
+                "Input artifact path must stay under .factory/work/artifacts/ or .factory/work/progress/: {path}"
+            ),
+        }
+    }
+    let valid = components.len() >= 3
+        && components[0] == std::ffi::OsStr::new(".factory")
+        && components[1] == std::ffi::OsStr::new("work")
+        && (components[2] == std::ffi::OsStr::new("artifacts")
+            || components[2] == std::ffi::OsStr::new("progress"));
+    if !valid {
+        bail!(
+            "Input artifact path must be under .factory/work/artifacts/ or .factory/work/progress/: {path}"
+        );
+    }
+    Ok(resolve_workspace_path(project_root, path))
+}
+
 fn resolve_input_artifact_paths(
     project_root: &Path,
     input_artifacts: &[ArtifactRef],
 ) -> Result<Vec<PathBuf>> {
     let mut resolved = Vec::new();
     for artifact in input_artifacts {
-        let path = resolve_managed_artifact_area_path(project_root, &artifact.path)?;
+        let path = resolve_input_artifact_path(project_root, &artifact.path)?;
         if !path.is_file() {
             // progress.md is lazily created by the writer; reviewers may
             // receive it as an input artifact before the writer has
@@ -1149,7 +1183,7 @@ fn run_task_coder(
     task_id: &str,
     project_root: &Path,
     workspace_path: &Path,
-    input_artifacts: &[PathBuf],
+    prior_reviews: &[PathBuf],
     resolver: &ContentResolver,
     extra_args: &[String],
     coder_kind: CoderKind,
@@ -1169,6 +1203,7 @@ fn run_task_coder(
         .and_then(|attempt| attempt.tasks.iter().find(|task| task.id == task_id))
         .ok_or_else(|| anyhow::anyhow!("Task {task_id:?} not found"))?;
     materialize_planning_files(item, project_root)?;
+    materialize_general_expertise(project_root)?;
     let progress_dir = progress_md_dir(project_root, &item.id, attempt_id);
     fs::create_dir_all(&progress_dir)
         .with_context(|| format!("Failed to create progress dir at {}", progress_dir.display()))?;
@@ -1176,7 +1211,7 @@ fn run_task_coder(
         item,
         attempt_id,
         task_id,
-        input_artifacts,
+        prior_reviews,
         Some(workspace_path),
         Some(project_root),
     );
@@ -1197,8 +1232,9 @@ fn run_task_coder(
         (CoderSandbox::None, None)
     } else {
         let common_git_dir = worktree::git_common_dir(workspace_path)?;
-        let mut readable_roots = input_artifact_readable_roots(input_artifacts);
+        let mut readable_roots = input_artifact_readable_roots(prior_reviews);
         readable_roots.push(planning_files_dir(project_root, &item.id));
+        readable_roots.push(general_expertise_dir(project_root));
         let mut additional_writable = vec![common_git_dir, progress_dir.clone()];
         if let Some(ref tp) = transcript_path {
             if let Some(artifact_dir) = tp.parent() {
@@ -1262,16 +1298,16 @@ fn build_write_task_prompt(
     item: &WorkItem,
     attempt_id: &str,
     task_id: &str,
-    input_artifacts: &[PathBuf],
+    prior_reviews: &[PathBuf],
 ) -> String {
-    build_write_task_prompt_with_workspace(item, attempt_id, task_id, input_artifacts, None, None)
+    build_write_task_prompt_with_workspace(item, attempt_id, task_id, prior_reviews, None, None)
 }
 
 fn build_write_task_prompt_with_workspace(
     item: &WorkItem,
     attempt_id: &str,
     task_id: &str,
-    input_artifacts: &[PathBuf],
+    prior_reviews: &[PathBuf],
     workspace_path: Option<&Path>,
     project_root: Option<&Path>,
 ) -> String {
@@ -1282,19 +1318,22 @@ fn build_write_task_prompt_with_workspace(
         .and_then(|a| a.tasks.iter().find(|t| t.id == task_id))
         .expect("Task must exist");
     let task_json = to_json_pretty(task).unwrap_or_default();
-    let input_artifacts_list = input_artifacts_instruction(input_artifacts);
-    let progress_md_path = project_root
-        .and_then(|root| {
-            item.attempts
-                .iter()
-                .find(|a| a.id == attempt_id)
-                .map(|a| {
-                    progress_md_path_for(root, &item.id, &a.id)
-                        .display()
-                        .to_string()
-                })
-        })
+    let prior_reviews_list = prior_reviews_block(prior_reviews, "   ");
+    let progress_md_pathbuf = project_root.and_then(|root| {
+        item.attempts
+            .iter()
+            .find(|a| a.id == attempt_id)
+            .map(|a| progress_md_path_for(root, &item.id, &a.id))
+    });
+    let progress_md_path = progress_md_pathbuf
+        .as_ref()
+        .map(|p| p.display().to_string())
         .unwrap_or_default();
+    let has_progress_md = progress_md_pathbuf
+        .as_ref()
+        .map(|p| p.exists())
+        .unwrap_or(false);
+    let has_prior_reviews = !prior_reviews.is_empty();
     let planning = project_root
         .map(|root| compute_planning_paths(item, root))
         .unwrap_or_default();
@@ -1302,9 +1341,31 @@ fn build_write_task_prompt_with_workspace(
     let behaviors_path = planning.behaviors();
     let approach_path = planning.approach();
     let plan_path = planning.plan();
+    let general_expertise_index = project_root
+        .map(|root| {
+            general_expertise_dir(root)
+                .join("INDEX.md")
+                .display()
+                .to_string()
+        })
+        .unwrap_or_default();
+    let project_expertise_index_pathbuf =
+        workspace_path.map(|ws| ws.join(".factory/expertise/INDEX.md"));
+    let project_expertise_index = project_expertise_index_pathbuf
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let has_project_expertise_index = project_expertise_index_pathbuf
+        .as_ref()
+        .map(|p| p.is_file())
+        .unwrap_or(false);
     let (bootstrap_yaml, bootstrap_extract) = tester_bootstrap_flags(workspace_path);
     let bootstrap_yaml_value = if bootstrap_yaml { "yes" } else { "" };
     let bootstrap_extract_value = if bootstrap_extract { "yes" } else { "" };
+    let bootstrap_anything_value = if bootstrap_yaml || bootstrap_extract { "yes" } else { "" };
+    let has_prior_reviews_value = if has_prior_reviews { "yes" } else { "" };
+    let has_progress_md_value = if has_progress_md { "yes" } else { "" };
+    let has_project_expertise_index_value = if has_project_expertise_index { "yes" } else { "" };
 
     let template = ContentResolver::new(workspace_path)
         .resolve_content("prompts/write-user.md")
@@ -1321,11 +1382,20 @@ fn build_write_task_prompt_with_workspace(
             ("behaviors_path", &behaviors_path),
             ("approach_path", &approach_path),
             ("plan_path", &plan_path),
-            ("input_artifacts_list", &input_artifacts_list),
+            ("prior_reviews_list", &prior_reviews_list),
             ("progress_md_path", &progress_md_path),
             ("task_json", &task_json),
+            ("bootstrap_anything", bootstrap_anything_value),
             ("bootstrap_tester_yaml", bootstrap_yaml_value),
             ("bootstrap_extract_script", bootstrap_extract_value),
+            ("has_prior_reviews", has_prior_reviews_value),
+            ("has_progress_md", has_progress_md_value),
+            ("general_expertise_index", &general_expertise_index),
+            ("project_expertise_index", &project_expertise_index),
+            (
+                "has_project_expertise_index",
+                has_project_expertise_index_value,
+            ),
         ],
     )
     .expect("write-user.md template must render with the documented context")
@@ -1368,6 +1438,44 @@ impl PlanningFilePaths {
 
 fn planning_files_dir(project_root: &Path, work_item_id: &str) -> PathBuf {
     project_root.join(".factory/work/items").join(work_item_id)
+}
+
+fn general_expertise_dir(project_root: &Path) -> PathBuf {
+    project_root.join(".factory/work/expertise")
+}
+
+/// Materialize the bundled general-expertise files at
+/// `<project_root>/.factory/work/expertise/<name>`. Writes are atomic
+/// (write-to-temp + rename) so concurrent calls from parallel writer/reviewer
+/// Tasks cannot tear a file.
+fn materialize_general_expertise(project_root: &Path) -> Result<PathBuf> {
+    let dir = general_expertise_dir(project_root);
+    fs::create_dir_all(&dir).with_context(|| {
+        format!("Failed to create general expertise dir at {}", dir.display())
+    })?;
+    for name in crate::content::GENERAL_EXPERTISE_FILES {
+        let relative = format!("expertise/{name}");
+        let content = crate::content::bundled_content(&relative)
+            .ok_or_else(|| anyhow::anyhow!("missing bundled expertise file: {relative}"))?;
+        let final_path = dir.join(name);
+        let mut tmp = tempfile::NamedTempFile::new_in(&dir).with_context(|| {
+            format!(
+                "Failed to create temp file while writing expertise {}",
+                final_path.display()
+            )
+        })?;
+        use std::io::Write;
+        tmp.write_all(content.as_bytes()).with_context(|| {
+            format!(
+                "Failed to write expertise content for {}",
+                final_path.display()
+            )
+        })?;
+        tmp.persist(&final_path).with_context(|| {
+            format!("Failed to persist expertise at {}", final_path.display())
+        })?;
+    }
+    Ok(dir)
 }
 
 fn progress_md_dir(project_root: &Path, work_item_id: &str, attempt_id: &str) -> PathBuf {
@@ -1464,16 +1572,31 @@ fn tester_bootstrap_flags(workspace_path: Option<&Path>) -> (bool, bool) {
     (yaml_missing, extract_missing)
 }
 
-fn input_artifacts_instruction(input_artifacts: &[PathBuf]) -> String {
-    if input_artifacts.is_empty() {
-        return "None.".to_string();
+fn prior_reviews_block(prior_reviews: &[PathBuf], indent: &str) -> String {
+    if prior_reviews.is_empty() {
+        return String::new();
     }
 
-    input_artifacts
+    prior_reviews
         .iter()
-        .map(|path| format!("- {}", path.display()))
+        .map(|path| format!("{indent}- {}", path.display()))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Filter resolved input artifacts to just the prior `review.md` files
+/// (excluding tester-results.json, progress.md, and any other non-review
+/// artifacts a reviewer Task may receive).
+fn prior_reviews_only(input_artifacts: &[PathBuf]) -> Vec<PathBuf> {
+    input_artifacts
+        .iter()
+        .filter(|path| {
+            path.file_name()
+                .map(|name| name == "review.md")
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect()
 }
 
 fn input_artifact_readable_roots(input_artifacts: &[PathBuf]) -> Vec<PathBuf> {
@@ -1505,8 +1628,10 @@ fn run_review_coder(
         credential::setup_git_signing();
     }
 
-    materialize_planning_files(item, project_root)?;
-
+    // Planning artifacts and bundled expertise were materialized earlier (in
+    // run_review_task, before the source-checkout review guard snapshotted
+    // the workspace). Build prompts here only; a missing review-<role> skill
+    // will surface as a Result error.
     let prompts = build_work_review_prompts(WorkReviewPromptInput {
         item,
         attempt_id,
@@ -1525,6 +1650,7 @@ fn run_review_coder(
         let mut readable_roots = review_readable_sandbox_roots(readable_workspaces)?;
         readable_roots.extend(input_artifact_readable_roots(input_artifacts));
         readable_roots.push(planning_files_dir(project_root, &item.id));
+        readable_roots.push(general_expertise_dir(project_root));
         build_coder_sandbox_with_read_only_roots(
             coder_kind,
             resolver,
@@ -1596,36 +1722,18 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
         .find(|attempt| attempt.id == input.attempt_id)
         .and_then(|attempt| attempt.tasks.iter().find(|task| task.id == input.task_id))
         .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", input.task_id))?;
-    let task_json = to_json_pretty(task)?;
     let review_context = task.review_context.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
             "Review Task {:?} must declare review context",
             input.task_id
         )
     })?;
-    let review_artifact_path = work_review_artifact_path(task)?;
 
-    // Skill instruction: split into skill_path (or empty) for the template if/else.
-    let skill_path = review_skill_path(&task.role, input.readable_workspaces);
-    let workspace_kind = if input.review_only {
-        "source checkout"
-    } else {
-        "readable candidate workspaces"
-    };
+    // Skill is required; fail if the review-<role>/SKILL.md isn't in any readable workspace.
+    let skill_path = review_skill_path(&task.role, input.readable_workspaces)?;
 
     // Decisions: split into decisions_path (or empty).
     let decisions_path = decisions_path(input.readable_workspaces);
-
-    let read_paths = task
-        .workspace_access
-        .reads
-        .iter()
-        .zip(input.readable_workspaces.iter())
-        .map(|(workspace, resolved_path)| {
-            format!("- {}: {}", workspace.id, resolved_path.display())
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
 
     // Review-diff command is only meaningful when not review_only.
     let review_diff_command = if input.review_only {
@@ -1646,19 +1754,14 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
         render_review_diff_command(candidate_workspace, &review_range)
     };
 
-    let edit_target = if input.review_only {
-        "source checkout"
+    let reviewer_prior_reviews = prior_reviews_only(input.input_artifacts);
+    let reviewer_prior_reviews_list = prior_reviews_block(&reviewer_prior_reviews, "");
+    let reviewer_has_prior_reviews = if reviewer_prior_reviews.is_empty() {
+        ""
     } else {
-        "candidate workspaces"
-    };
-    let input_artifacts_block = review_input_artifacts_prompt(input.input_artifacts);
-    let behavior_review_input = if task.role == "behaviors" {
-        behavior_review_input_block(input.item, input.attempt_id, task)
-    } else {
-        String::new()
+        "yes"
     };
 
-    let review_only_value = if input.review_only { "yes" } else { "" };
     let review_path_display = input.review_path.display().to_string();
     let artifact_dir_display = input.artifact_dir.display().to_string();
 
@@ -1668,30 +1771,66 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
     let approach_path = planning.approach();
     let plan_path = planning.plan();
 
+    let general_expertise_index = general_expertise_dir(input.project_root)
+        .join("INDEX.md")
+        .display()
+        .to_string();
+    let candidate_workspace_pathbuf = Path::new(&review_context.candidate_workspace_path);
+    let project_expertise_index_pathbuf =
+        candidate_workspace_pathbuf.join(".factory/expertise/INDEX.md");
+    let project_expertise_index = project_expertise_index_pathbuf.display().to_string();
+    let has_project_expertise_index_value =
+        if project_expertise_index_pathbuf.is_file() { "yes" } else { "" };
+
+    let tester_results_path = task
+        .depends_on
+        .as_deref()
+        .map(|dep_id| {
+            input
+                .project_root
+                .join(".factory/work/artifacts")
+                .join(&input.item.id)
+                .join(input.attempt_id)
+                .join(dep_id)
+                .join("tester-results.json")
+                .display()
+                .to_string()
+        })
+        .unwrap_or_default();
+    let reviewer_progress_md_path =
+        progress_md_path_for(input.project_root, &input.item.id, input.attempt_id)
+            .display()
+            .to_string();
+
     let resolver = ContentResolver::new(input.readable_workspaces.first().map(|p| p.as_path()));
 
+    let user_template_name = if input.review_only {
+        "prompts/review-only-user.md"
+    } else {
+        "prompts/review-user.md"
+    };
     let user_template = resolver
-        .resolve_content("prompts/review-user.md")
-        .expect("bundled review-user.md must resolve");
+        .resolve_content(user_template_name)
+        .unwrap_or_else(|| panic!("bundled {user_template_name} must resolve"));
     let review_prompt = crate::content::render_template(
         &user_template,
         &[
             ("work_item_id", &input.item.id),
             ("work_item_title", &input.item.title),
-            ("attempt_id", input.attempt_id),
-            ("task_id", input.task_id),
             ("role", &task.role),
             ("brief_path", &brief_path),
             ("behaviors_path", &behaviors_path),
             ("approach_path", &approach_path),
             ("plan_path", &plan_path),
-            ("input_artifacts_block", &input_artifacts_block),
-            ("review_only", review_only_value),
-            ("read_paths", &read_paths),
+            ("general_expertise_index", &general_expertise_index),
+            ("project_expertise_index", &project_expertise_index),
             (
-                "candidate_workspace_id",
-                &review_context.candidate_workspace_id,
+                "has_project_expertise_index",
+                has_project_expertise_index_value,
             ),
+            ("skill_path", &skill_path),
+            ("has_prior_reviews", reviewer_has_prior_reviews),
+            ("prior_reviews_list", &reviewer_prior_reviews_list),
             (
                 "candidate_workspace_path",
                 &review_context.candidate_workspace_path,
@@ -1699,33 +1838,28 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
             ("source_branch", &review_context.source_branch),
             ("candidate_commit", &review_context.candidate_commit),
             ("review_diff_command", &review_diff_command),
-            ("behavior_review_input", &behavior_review_input),
-            ("artifact_path", &review_artifact_path),
+            ("tester_results_path", &tester_results_path),
+            ("progress_md_path", &reviewer_progress_md_path),
             ("review_path", &review_path_display),
-            ("artifact_dir", &artifact_dir_display),
-            ("edit_target", edit_target),
-            ("task_json", &task_json),
-        ],
-    )
-    .expect("review-user.md template must render with the documented context");
-
-    let system_template = resolver
-        .resolve_content("prompts/review-system.md")
-        .expect("bundled review-system.md must resolve");
-    let system_prompt = crate::content::render_template(
-        &system_template,
-        &[
-            ("role", &task.role),
-            ("skill_path", &skill_path),
-            ("workspace_kind", workspace_kind),
-            ("review_only", review_only_value),
-            ("review_path", &review_path_display),
-            ("artifact_path", &review_artifact_path),
             ("artifact_dir", &artifact_dir_display),
             ("decisions_path", &decisions_path),
         ],
     )
-    .expect("review-system.md template must render with the documented context");
+    .expect("review-user.md template must render with the documented context");
+
+    let system_template_name = if input.review_only {
+        "prompts/review-only-system.md"
+    } else {
+        "prompts/review-system.md"
+    };
+    let system_template = resolver
+        .resolve_content(system_template_name)
+        .unwrap_or_else(|| panic!("bundled {system_template_name} must resolve"));
+    let system_prompt = crate::content::render_template(
+        &system_template,
+        &[("role", &task.role)],
+    )
+    .unwrap_or_else(|err| panic!("{system_template_name} template must render: {err}"));
 
     Ok(WorkReviewPrompts {
         system_prompt,
@@ -1733,37 +1867,23 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
     })
 }
 
-fn behavior_review_input_block(
-    item: &WorkItem,
-    attempt_id: &str,
-    task: &crate::work_model::Task,
-) -> String {
-    let tester_results_hint = if let Some(dep_id) = task.depends_on.as_deref() {
-        let tester_artifact_path = format!(
-            ".factory/work/artifacts/{}/{}/{}/tester-results.json",
-            item.id, attempt_id, dep_id
-        );
-        format!(
-            "\nTester results are available at: {tester_artifact_path}\n\
-             Read the tester-results.json file. Use its per-test statuses\n\
-             (pass, fail, skipped, not_run) to inform your verdict.\n\
-             If its `error` field is non-null, produce a fail verdict naming the error\n\
-             `kind` and `message` rather than flagging individual behaviors."
-        )
-    } else {
-        String::new()
-    };
-    format!("{}\n{}", work_behavior_review_input(item), tester_results_hint)
-}
-
-fn review_skill_path(role: &str, readable_workspaces: &[PathBuf]) -> String {
+fn review_skill_path(role: &str, readable_workspaces: &[PathBuf]) -> Result<String> {
     let relative = format!("skills/review-{role}/SKILL.md");
     readable_workspaces
         .iter()
         .map(|workspace| workspace.join(&relative))
         .find(|path| path.is_file())
         .map(|path| path.display().to_string())
-        .unwrap_or_default()
+        .ok_or_else(|| {
+            let searched = readable_workspaces
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::anyhow!(
+                "Required review-{role} skill not found. Searched for {relative} in: {searched}"
+            )
+        })
 }
 
 fn decisions_path(readable_workspaces: &[PathBuf]) -> String {
@@ -1774,16 +1894,6 @@ fn decisions_path(readable_workspaces: &[PathBuf]) -> String {
         .find(|path| path.is_file())
         .map(|path| path.display().to_string())
         .unwrap_or_default()
-}
-
-fn work_review_artifact_path(task: &crate::work_model::Task) -> Result<String> {
-    let artifact_area = task.artifact_area.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("Review Task {:?} must declare an artifact area", task.id)
-    })?;
-    Ok(format!(
-        "{}/review.md",
-        artifact_area.path.trim_end_matches('/')
-    ))
 }
 
 fn prepare_reviewer_build_cache(
@@ -1844,21 +1954,6 @@ fn prepare_reviewer_build_cache(
             }
         }
     }
-}
-
-fn review_input_artifacts_prompt(input_artifacts: &[PathBuf]) -> String {
-    if input_artifacts.is_empty() {
-        return String::new();
-    }
-
-    let artifacts = input_artifacts
-        .iter()
-        .map(|path| format!("- {}", path.display()))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "A previous review of this candidate (from a prior review round) is included as input:\n{artifacts}\n\nTreat that previous review as another reviewer's findings, not as your past self. Read it first. For each finding it raised, verify against the current candidate whether the writer addressed the concern. Then evaluate the candidate independently and add any new findings. Use the `Progress:` field in your output to summarize whether you observed any movement on prior concerns (`yes`, `no`, `partial`, or `first-pass` when no prior review is included). `Progress:` is independent of `Verdict:`.\n\n"
-    )
 }
 
 fn review_readable_sandbox_roots(readable_workspaces: &[PathBuf]) -> Result<Vec<PathBuf>> {
@@ -2371,6 +2466,12 @@ mod tests {
 
     #[test]
     fn work_review_prompt_names_work_artifacts_and_writable_outputs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path().join("work-6-work-1-attempt-1");
+        let skill_dir = workspace.join("skills/review-tests");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), "test skill").unwrap();
+
         let item = review_item();
         let prompts = build_work_review_prompts(WorkReviewPromptInput {
             item: &item,
@@ -2379,20 +2480,15 @@ mod tests {
             project_root: Path::new("/tmp/project"),
             artifact_dir: Path::new("/tmp/project/.factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests"),
             review_path: Path::new("/tmp/project/.factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"),
-            readable_workspaces: &[PathBuf::from("/tmp/project/../work-6-work-1-attempt-1")],
+            readable_workspaces: std::slice::from_ref(&workspace),
             input_artifacts: &[],
             review_only: false,
         })
         .unwrap();
 
         assert!(prompts.review_prompt.contains(
-            "Work review artifact path:\n.factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
+            "/tmp/project/.factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
         ));
-        assert!(
-            prompts
-                .review_prompt
-                .contains("Your reviewer artifact directory is:")
-        );
         assert!(prompts.review_prompt.contains("CARGO_TARGET_DIR"));
         assert!(prompts.review_prompt.contains("cargo build"));
         assert!(
@@ -2400,9 +2496,7 @@ mod tests {
             "prompt should tell reviewer they can read candidate build outputs"
         );
         assert!(
-            prompts
-                .review_prompt
-                .contains("may NOT write to the candidate"),
+            prompts.review_prompt.contains("Do not edit or commit"),
             "prompt should tell reviewer not to write to candidate"
         );
         assert!(
@@ -2410,11 +2504,9 @@ mod tests {
             "prompt should mention pre-populated warm cache"
         );
         assert!(!prompts.review_prompt.contains(".factory/runs/"));
-        assert!(prompts.system_prompt.contains(
-            "The Work review artifact path is .factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
-        ));
-        assert!(prompts.system_prompt.contains("CARGO_TARGET_DIR"));
-        assert!(prompts.system_prompt.contains("pre-populated"));
+        // System prompt is now thin (identity + lifecycle); build cache + artifact details live in the user message.
+        assert!(!prompts.system_prompt.contains("CARGO_TARGET_DIR"));
+        assert!(!prompts.system_prompt.contains("pre-populated"));
         assert!(!prompts.system_prompt.contains(".factory/runs/"));
     }
 
@@ -2423,6 +2515,9 @@ mod tests {
         let item = review_item();
         let tmp = tempfile::TempDir::new().unwrap();
         let workspace = tmp.path().join("candidate'space");
+        let skill_dir = workspace.join("skills/review-tests");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), "test skill").unwrap();
         let review_path = tmp.path().join("review.md");
         let prompts = build_work_review_prompts(WorkReviewPromptInput {
             item: &item,
@@ -2439,7 +2534,11 @@ mod tests {
         let command = prompts
             .review_prompt
             .lines()
-            .find_map(|line| line.strip_prefix("- Review diff: "))
+            .find_map(|line| {
+                let prefix = "1. Run the review diff command (`";
+                let suffix = "`) to see what the Writer changed in this round.";
+                line.strip_prefix(prefix)?.strip_suffix(suffix)
+            })
             .unwrap();
 
         assert_eq!(
@@ -2694,6 +2793,91 @@ mod tests {
     }
 
     #[test]
+    fn materialize_general_expertise_writes_all_bundled_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = materialize_general_expertise(tmp.path()).unwrap();
+        for name in crate::content::GENERAL_EXPERTISE_FILES {
+            let path = dir.join(name);
+            assert!(
+                path.is_file(),
+                "expected materialized expertise file at {}",
+                path.display()
+            );
+            let body = std::fs::read_to_string(&path).unwrap();
+            assert!(!body.is_empty(), "{} should not be empty", path.display());
+        }
+        assert_eq!(dir, tmp.path().join(".factory/work/expertise"));
+    }
+
+    #[test]
+    fn write_task_prompt_includes_general_expertise_index_path() {
+        let item = review_item();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let prompt = build_write_task_prompt_with_workspace(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            &[],
+            None,
+            Some(tmp.path()),
+        );
+        let expected = tmp
+            .path()
+            .join(".factory/work/expertise/INDEX.md")
+            .display()
+            .to_string();
+        assert!(
+            prompt.contains(&expected),
+            "prompt should reference the general expertise INDEX path; got prompt:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn write_task_prompt_omits_project_expertise_index_when_missing() {
+        let item = review_item();
+        let tmp_workspace = tempfile::TempDir::new().unwrap();
+        let prompt = build_write_task_prompt_with_workspace(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            &[],
+            Some(tmp_workspace.path()),
+            None,
+        );
+        assert!(
+            !prompt.contains("workspace-specific decisions"),
+            "prompt should NOT include the project expertise line when missing; got prompt:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn write_task_prompt_includes_project_expertise_index_when_present() {
+        let item = review_item();
+        let tmp_workspace = tempfile::TempDir::new().unwrap();
+        let project_expertise_dir = tmp_workspace.path().join(".factory/expertise");
+        std::fs::create_dir_all(&project_expertise_dir).unwrap();
+        std::fs::write(project_expertise_dir.join("INDEX.md"), "# Project").unwrap();
+
+        let prompt = build_write_task_prompt_with_workspace(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            &[],
+            Some(tmp_workspace.path()),
+            None,
+        );
+        let expected = project_expertise_dir.join("INDEX.md").display().to_string();
+        assert!(
+            prompt.contains("workspace-specific decisions"),
+            "prompt should include the project expertise line when present; got prompt:\n{prompt}"
+        );
+        assert!(
+            prompt.contains(&expected),
+            "prompt should reference the project expertise INDEX path; got prompt:\n{prompt}"
+        );
+    }
+
+    #[test]
     fn write_task_prompt_includes_progress_md_path_substitution() {
         let item = review_item();
         let tmp = tempfile::TempDir::new().unwrap();
@@ -2705,25 +2889,100 @@ mod tests {
             None,
             Some(tmp.path()),
         );
-        let expected_suffix =
-            ".factory/work/progress/work-1/attempt-1/progress.md";
-        let expected_line = format!(
-            "progress_md_path: {}/{}",
-            tmp.path().display(),
-            expected_suffix
+        let expected_path = format!(
+            "{}/.factory/work/progress/work-1/attempt-1/progress.md",
+            tmp.path().display()
         );
         assert!(
-            prompt.contains(&expected_line),
-            "prompt should include absolute progress_md_path; got prompt:\n{prompt}"
+            prompt.contains(&expected_path),
+            "prompt should include the absolute progress file path; got prompt:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("Create progress.md"),
+            "first-round prompt (no progress.md) should include the Create progress.md instruction; got prompt:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains("Read progress.md"),
+            "first-round prompt (no progress.md) should NOT include the Read instruction; got prompt:\n{prompt}"
         );
     }
 
     #[test]
-    fn write_system_prompt_contains_round_by_round_discipline() {
-        let system_prompt = std::fs::read_to_string("prompts/write-system.md").unwrap();
+    fn write_task_prompt_uses_read_progress_md_when_file_exists() {
+        let item = review_item();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let progress_dir = tmp
+            .path()
+            .join(".factory/work/progress/work-1/attempt-1");
+        std::fs::create_dir_all(&progress_dir).unwrap();
+        std::fs::write(progress_dir.join("progress.md"), "## Checklist\n").unwrap();
+
+        let prompt = build_write_task_prompt_with_workspace(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            &[],
+            None,
+            Some(tmp.path()),
+        );
         assert!(
-            system_prompt.contains("Round-by-round discipline"),
-            "write-system.md should contain the round-by-round discipline section"
+            prompt.contains("Read progress.md"),
+            "follow-up-round prompt (progress.md exists) should include the Read instruction; got prompt:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains("Create progress.md"),
+            "follow-up-round prompt (progress.md exists) should NOT include the Create instruction; got prompt:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn write_task_prompt_omits_prior_reviews_section_on_first_round() {
+        let prompt = build_write_task_prompt(&review_item(), "attempt-1", "attempt-1-write-1", &[]);
+        assert!(
+            !prompt.contains("Read each prior review file"),
+            "first-round prompt should NOT include the prior-reviews instruction; got prompt:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains("Address review finding:"),
+            "first-round prompt should NOT include the prior-finding-record instruction; got prompt:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn write_task_prompt_includes_prior_reviews_section_when_present() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let review_path = tmp.path().join("review.md");
+        std::fs::write(&review_path, "review body").unwrap();
+        let prompt = build_write_task_prompt(
+            &review_item(),
+            "attempt-1",
+            "attempt-1-write-1",
+            std::slice::from_ref(&review_path),
+        );
+        assert!(
+            prompt.contains("Read each prior review file"),
+            "follow-up-round prompt should include the prior-reviews instruction; got prompt:\n{prompt}"
+        );
+        assert!(
+            prompt.contains(&format!("   - {}", review_path.display())),
+            "follow-up-round prompt should list each prior review path with sub-bullet indent; got prompt:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("Address review finding:"),
+            "follow-up-round prompt should include the prior-finding-record instruction; got prompt:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn write_user_prompt_contains_phase_headings() {
+        let prompt = build_write_task_prompt(&review_item(), "attempt-1", "attempt-1-write-1", &[]);
+        assert!(
+            prompt.contains("## Phase 1"),
+            "user prompt should contain Phase 1 (Read the Work Item)"
+        );
+        assert!(
+            prompt.contains("## Phase 2"),
+            "user prompt should contain Phase 2 (Implement each planned step)"
         );
     }
 
@@ -2736,8 +2995,8 @@ mod tests {
         });
         let prompt = build_write_task_prompt(&item, "attempt-1", "attempt-1-write-1", &[]);
         assert!(
-            prompt.contains("progress_md_path:"),
-            "user prompt should contain progress_md_path when the plan is present"
+            prompt.contains("progress.md"),
+            "user prompt should reference progress.md when the plan is present"
         );
     }
 
@@ -2757,7 +3016,7 @@ mod tests {
             None,
         );
         assert!(
-            prompt.contains("Bootstrap: .factory/tester.yaml"),
+            prompt.contains("`.factory/tester.yaml` is missing"),
             "prompt should include tester.yaml bootstrap when missing"
         );
     }
@@ -2778,7 +3037,7 @@ mod tests {
             None,
         );
         assert!(
-            prompt.contains("Bootstrap: .factory/extract-tester-results"),
+            prompt.contains("`.factory/extract-tester-results` is missing"),
             "prompt should include extract-tester-results bootstrap when missing"
         );
     }
@@ -2810,11 +3069,11 @@ mod tests {
             None,
         );
         assert!(
-            !prompt.contains("Bootstrap: .factory/tester.yaml"),
+            !prompt.contains("`.factory/tester.yaml` is missing"),
             "prompt should NOT include tester.yaml bootstrap when present"
         );
         assert!(
-            !prompt.contains("Bootstrap: .factory/extract-tester-results"),
+            !prompt.contains("`.factory/extract-tester-results` is missing"),
             "prompt should NOT include extract-tester-results bootstrap when present"
         );
     }

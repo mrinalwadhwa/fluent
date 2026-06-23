@@ -989,8 +989,9 @@ fn ensure_clean_worktree(workspace_path: &Path) -> Result<()> {
     let status = worktree_status(workspace_path)?;
     if !status.is_empty() {
         bail!(
-            "Workspace {} has uncommitted changes",
-            workspace_path.display()
+            "Workspace {} has uncommitted changes:\n{}",
+            workspace_path.display(),
+            status
         );
     }
     Ok(())
