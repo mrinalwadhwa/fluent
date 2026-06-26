@@ -90,6 +90,12 @@ pub fn bundled_content(relative: &str) -> Option<String> {
             Some(include_str!("../prompts/review-system.md").to_string())
         }
         "prompts/review-user.md" => Some(include_str!("../prompts/review-user.md").to_string()),
+        "prompts/review-only-system.md" => {
+            Some(include_str!("../prompts/review-only-system.md").to_string())
+        }
+        "prompts/review-only-user.md" => {
+            Some(include_str!("../prompts/review-only-user.md").to_string())
+        }
         "prompts/rebase-system.md" => {
             Some(include_str!("../prompts/rebase-system.md").to_string())
         }

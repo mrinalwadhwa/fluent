@@ -1,28 +1,4 @@
 ---
-
-## Prior reviews of this candidate
-
-When the inputs to your review Task include a previous review of this
-candidate by your role, treat it as another reviewer's findings, not
-as your past self. Read it first.
-
-For each finding in that previous review:
-- Verify against the current candidate state whether the writer
-  addressed the concern.
-- If addressed, note it in your "Prior concerns addressed" section.
-- If not addressed, carry it forward into your current findings.
-
-Then evaluate the current candidate independently and add any new
-findings. The writer may have addressed prior concerns while
-introducing new ones — both pieces of information matter.
-
-Use the `Progress:` field to summarize whether you observed any
-movement on prior concerns: `yes`, `no`, `partial`, or `first-pass`
-(when no prior review exists). This is independent of `Verdict:` — a
-failing `Verdict:` can co-occur with `Progress: yes` when prior
-concerns were addressed but new ones emerged.
-
----
 name: review-architecture
 description: >
   Code-aware architecture reviewer. Reads the codebase and evaluates
@@ -33,22 +9,15 @@ description: >
 
 # Review Architecture
 
-Review code by reading it alongside the architectural expertise.
-Evaluate structural decisions at whatever scale is relevant to the
-changes: function organization, module boundaries, component
-interactions, system topology. Produce findings the author can act on.
+Review code by reading it alongside the architectural expertise. Evaluate structural decisions at whatever scale is relevant to the changes: function organization, module boundaries, component interactions, system topology. Produce findings the author can act on.
 
-This reviewer is code-aware — it reads both source code and
-architecture documentation.
+This reviewer is code-aware — it reads both source code and architecture documentation.
 
 ---
 
 ## Build outputs and warm cache
 
-Factory pre-populates your artifact directory with copies of the writer's
-build outputs for warm-start incremental builds. Point your toolchain
-at this directory for incremental builds; reading binaries the writer
-built directly from the candidate workspace is also fine.
+Factory pre-populates your artifact directory with copies of the writer's build outputs for warm-start incremental builds. Point your toolchain at this directory for incremental builds; reading binaries the writer built directly from the candidate workspace is also fine.
 
 ---
 
@@ -57,73 +26,50 @@ built directly from the candidate workspace is also fine.
 ### Phase 1 — Read the inputs and load expertise
 
 Read the architectural expertise:
-- `references/architecture.md` — core principles, viewpoints,
-  anti-patterns
+- `references/architecture.md` — core principles, viewpoints, anti-patterns
 
-If the codebase uses a specific language, check for language-specific
-expertise. Read `references/{language}.md` if it exists (e.g.,
-`references/shell-scripts.md`).
+If the codebase uses a specific language, check for language-specific expertise. Read `references/{language}.md` if it exists (e.g., `references/shell-scripts.md`).
 
 Read the system context:
 - `documentation/architecture.md` — how the system is built today
 
 Check how the review was triggered:
 
-**Run-scoped (default):** Use the git diff of the worktree against
-the source branch to identify what changed. Read the run's brief
-and approach.md to understand what the run was trying to do.
+**Run-scoped (default):** Use the git diff of the worktree against the source branch to identify what changed. Read the run's brief and approach.md to understand what the run was trying to do.
 
-The diff identifies where to look. The review happens in full
-context — read the changed code and everything it depends on.
+The diff identifies where to look. The review happens in full context — read the changed code and everything it depends on.
 
-**Full-codebase:** Read all significant code and evaluate the overall
-structure.
+**Full-codebase:** Read all significant code and evaluate the overall structure.
 
 ### Phase 2 — Identify relevant viewpoints
 
-Not every viewpoint applies to every change. Based on what the code
-does, determine which viewpoints to apply:
+Not every viewpoint applies to every change. Based on what the code does, determine which viewpoints to apply:
 
-- **Functional** — component responsibilities, collaboration. Apply
-  when new components are added or responsibilities shift.
-- **Development** — code organization, dependencies, module structure.
-  Apply to most code changes.
-- **Information** — data flow, data ownership. Apply when data models
-  or data paths change.
-- **Deployment** — infrastructure, runtime configuration. Apply when
-  deployment or infrastructure changes.
-- **Operational** — monitoring, debugging, error handling. Apply when
-  error paths or observability change.
+- **Functional** — component responsibilities, collaboration. Apply when new components are added or responsibilities shift.
+- **Development** — code organization, dependencies, module structure. Apply to most code changes.
+- **Information** — data flow, data ownership. Apply when data models or data paths change.
+- **Deployment** — infrastructure, runtime configuration. Apply when deployment or infrastructure changes.
+- **Operational** — monitoring, debugging, error handling. Apply when error paths or observability change.
 
-Most run-scoped reviews need the development viewpoint. Full-codebase
-reviews should consider all viewpoints.
+Most run-scoped reviews need the development viewpoint. Full-codebase reviews should consider all viewpoints.
 
 ### Phase 3 — Evaluate against principles
 
-For each relevant viewpoint, evaluate the code against the
-architectural expertise:
+For each relevant viewpoint, evaluate the code against the architectural expertise:
 
-**Simplicity:** Is the solution as simple as it can be? Is there
-complexity that isn't justified by a concrete benefit?
+**Simplicity:** Is the solution as simple as it can be? Is there complexity that isn't justified by a concrete benefit?
 
-**Separation of concerns:** Does each component focus on one thing?
-Are concerns mixed?
+**Separation of concerns:** Does each component focus on one thing? Are concerns mixed?
 
-**Modularity:** Are modules independently understandable and
-testable? Can they be changed without rippling?
+**Modularity:** Are modules independently understandable and testable? Can they be changed without rippling?
 
-**Boundaries:** Are boundaries explicit? Are contracts clear between
-components?
+**Boundaries:** Are boundaries explicit? Are contracts clear between components?
 
-**Vocabulary:** Do code, architecture docs, behaviors, tests, and user
-conversation use the same terms for the same concepts? Is a term being
-introduced that conflicts with the system's domain model?
+**Vocabulary:** Do code, architecture docs, behaviors, tests, and user conversation use the same terms for the same concepts? Is a term being introduced that conflicts with the system's domain model?
 
-**Coupling:** Is there unnecessary coupling? Check for the
-shared-utils trap, deep import paths, circular dependencies.
+**Coupling:** Is there unnecessary coupling? Check for the shared-utils trap, deep import paths, circular dependencies.
 
-**Anti-patterns:** Check for god objects, circular dependencies,
-leaky abstractions, premature abstractions, big ball of mud patterns.
+**Anti-patterns:** Check for god objects, circular dependencies, leaky abstractions, premature abstractions, big ball of mud patterns.
 
 For each finding, record:
 - The location in the code
@@ -131,15 +77,11 @@ For each finding, record:
 - Why it matters — what problem it causes or will cause
 - Severity — is this blocking or advisory?
 
-Treat vocabulary findings as architectural findings when inconsistent
-terms obscure component boundaries, domain concepts, or contracts. Make
-them advisory unless the mismatch would cause real ambiguity for users,
-authors, or future reviewers.
+Treat vocabulary findings as architectural findings when inconsistent terms obscure component boundaries, domain concepts, or contracts. Make them advisory unless the mismatch would cause real ambiguity for users, authors, or future reviewers.
 
 ### Phase 4 — Check architecture documentation
 
-Compare what the code does with what `documentation/architecture.md`
-describes. Report gaps:
+Compare what the code does with what `documentation/architecture.md` describes. Report gaps:
 - Components that exist in code but not in docs
 - Structural changes that docs don't reflect
 - Architectural decisions that should be recorded
@@ -151,8 +93,7 @@ Write the review artifact to the exact path named in the prompt.
 Determine the verdict:
 - **pass** — no findings that warrant changes
 - **fail** — findings the author should address before completion
-- **uncertain** — findings that could go either way, need the user's
-  judgment
+- **uncertain** — findings that could go either way, need the user's judgment
 
 Format:
 
@@ -182,32 +123,17 @@ Progress: [yes | no | partial | first-pass]
 3. [What exists in code but not in architecture.md]
 ```
 
-Each finding should have enough context for the author to understand
-the concern and decide how to address it.
+Each finding should have enough context for the author to understand the concern and decide how to address it.
 
 ---
 
 ## Rules
 
-- **Read the expertise.** Evaluate against the principles in
-  `references/architecture.md`, not your own assumptions.
-  The expertise captures the project's architectural values.
-- **Findings, not rewrites.** Report what concerns you and why.
-  The author determines the fix.
-- **Scale to the change.** A small function refactoring doesn't need
-  a system-level review. A new service boundary does. Match the depth
-  of review to the scope of the change.
-- **Viewpoints are lenses, not checklists.** Apply the viewpoints
-  that are relevant. Don't force every viewpoint on every review.
-- **Nudge vocabulary consistency.** Check for domain terms that drift
-  across code, documentation, behaviors, tests, and dashboard copy.
-  Report meaningful drift, not harmless wording differences.
-- **Severity matters.** A circular dependency that prevents deployment
-  is blocking. A function that could be slightly simpler is advisory.
-  Lead with the findings that matter most.
-- **Context, not just diff.** The diff tells you where to look.
-  Evaluate in the context of the full codebase and the system's
-  architecture.
-- **Overlapping findings are fine.** If the documentation reviewer
-  also noticed a gap in architecture.md, report it anyway. Redundant
-  detection is better than missed problems.
+- **Read the expertise.** Evaluate against the principles in `references/architecture.md`, not your own assumptions. The expertise captures the project's architectural values.
+- **Findings, not rewrites.** Report what concerns you and why. The author determines the fix.
+- **Scale to the change.** A small function refactoring doesn't need a system-level review. A new service boundary does. Match the depth of review to the scope of the change.
+- **Viewpoints are lenses, not checklists.** Apply the viewpoints that are relevant. Don't force every viewpoint on every review.
+- **Nudge vocabulary consistency.** Check for domain terms that drift across code, documentation, behaviors, tests, and dashboard copy. Report meaningful drift, not harmless wording differences.
+- **Severity matters.** A circular dependency that prevents deployment is blocking. A function that could be slightly simpler is advisory. Lead with the findings that matter most.
+- **Context, not just diff.** The diff tells you where to look. Evaluate in the context of the full codebase and the system's architecture.
+- **Overlapping findings are fine.** If the documentation reviewer also noticed a gap in architecture.md, report it anyway. Redundant detection is better than missed problems.
