@@ -66,6 +66,20 @@ fn dirs_config_path() -> PathBuf {
     }
 }
 
+/// General expertise files bundled with the binary. File names relative to the `expertise/` directory.
+pub const GENERAL_EXPERTISE_FILES: &[&str] = &[
+    "INDEX.md",
+    "README.md",
+    "architecture.md",
+    "documentation.md",
+    "pdf.md",
+    "shell-scripts.md",
+    "skills.md",
+    "terminal-ui.md",
+    "tests.md",
+    "youtube.md",
+];
+
 /// Bundled runtime content compiled into the binary.
 pub fn bundled_content(relative: &str) -> Option<String> {
     // Prompts
@@ -85,6 +99,25 @@ pub fn bundled_content(relative: &str) -> Option<String> {
         "sandbox/claude-code.sb" => Some(include_str!("../sandboxes/claude-code.sb").to_string()),
         "sandbox/codex.sb" => Some(include_str!("../sandboxes/codex.sb").to_string()),
         "sandbox/pi.sb" => Some(include_str!("../sandboxes/pi.sb").to_string()),
+        // General expertise
+        "expertise/INDEX.md" => Some(include_str!("../expertise/INDEX.md").to_string()),
+        "expertise/README.md" => Some(include_str!("../expertise/README.md").to_string()),
+        "expertise/architecture.md" => {
+            Some(include_str!("../expertise/architecture.md").to_string())
+        }
+        "expertise/documentation.md" => {
+            Some(include_str!("../expertise/documentation.md").to_string())
+        }
+        "expertise/pdf.md" => Some(include_str!("../expertise/pdf.md").to_string()),
+        "expertise/shell-scripts.md" => {
+            Some(include_str!("../expertise/shell-scripts.md").to_string())
+        }
+        "expertise/skills.md" => Some(include_str!("../expertise/skills.md").to_string()),
+        "expertise/terminal-ui.md" => {
+            Some(include_str!("../expertise/terminal-ui.md").to_string())
+        }
+        "expertise/tests.md" => Some(include_str!("../expertise/tests.md").to_string()),
+        "expertise/youtube.md" => Some(include_str!("../expertise/youtube.md").to_string()),
         _ => None,
     }
 }
@@ -645,8 +678,18 @@ Check item {{ITEM_ID}}.
     #[test]
     fn test_bundled_content_does_not_include_agent_managed_content() {
         assert!(bundled_content("skills/build-in-the-factory/SKILL.md").is_none());
-        assert!(bundled_content("expertise/architecture.md").is_none());
         assert!(bundled_content(".factory/expertise/testing.md").is_none());
+    }
+
+    #[test]
+    fn test_bundled_content_expertise() {
+        for name in GENERAL_EXPERTISE_FILES {
+            let key = format!("expertise/{name}");
+            assert!(
+                bundled_content(&key).is_some(),
+                "expected bundled content for {key}"
+            );
+        }
     }
 
     #[test]
