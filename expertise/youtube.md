@@ -1,8 +1,6 @@
 # How to consume YouTube content as an agent
 
-Agents can't watch videos, but they can read transcripts.
-YouTube auto-generates captions for most videos. Use yt-dlp to
-download these captions as text.
+Agents can't watch videos, but they can read transcripts. YouTube auto-generates captions for most videos. Use yt-dlp to download these captions as text.
 
 ## Setup
 
@@ -12,8 +10,7 @@ Or check if already available: `which yt-dlp`
 
 ## Downloading transcripts
 
-Download auto-generated English subtitles without downloading the
-video:
+Download auto-generated English subtitles without downloading the video:
 
 ```bash
 yt-dlp --write-auto-sub --sub-lang en --skip-download \
@@ -33,9 +30,7 @@ done
 
 ## Cleaning VTT into readable text
 
-VTT files contain timestamps and duplicate lines (auto-captions
-repeat text across overlapping time segments). Clean them into
-readable text:
+VTT files contain timestamps and duplicate lines (auto-captions repeat text across overlapping time segments). Clean them into readable text:
 
 ```bash
 # Strip timestamps and metadata, deduplicate lines
@@ -67,33 +62,25 @@ def clean_vtt(vtt_text):
 
 ## Working with transcripts
 
-Auto-generated captions have no punctuation and imperfect word
-boundaries. They're good enough for extracting key ideas but not
-for direct quotation. When referencing a speaker's point:
+Auto-generated captions have no punctuation and imperfect word boundaries. They're good enough for extracting key ideas but not for direct quotation. When referencing a speaker's point:
 
 - Paraphrase rather than quote directly
 - Note that the source is an auto-generated transcript
-- Use timestamps from the VTT if you need to reference a
-  specific segment
+- Use timestamps from the VTT if you need to reference a specific segment
 
 ## When transcripts aren't available
 
-Some videos have captions disabled. yt-dlp will fail silently or
-report no subtitles found. Check with:
+Some videos have captions disabled. yt-dlp will fail silently or report no subtitles found. Check with:
 
 ```bash
 yt-dlp --list-subs "https://youtube.com/watch?v=VIDEO_ID"
 ```
 
-If no auto-generated subs exist, the video content is not
-accessible to agents through this method.
+If no auto-generated subs exist, the video content is not accessible to agents through this method.
 
 ## Batch research
 
-When researching a topic across multiple videos (e.g., a
-speaker's talks, a conference series), download all transcripts
-first, then read them. This is more efficient than downloading
-and reading one at a time.
+When researching a topic across multiple videos (e.g., a speaker's talks, a conference series), download all transcripts first, then read them. This is more efficient than downloading and reading one at a time.
 
 ```bash
 mkdir -p transcripts
@@ -110,5 +97,4 @@ for f in *.vtt; do
 done
 ```
 
-Then read the .txt files to extract insights, compare positions,
-and synthesize findings across sources.
+Then read the .txt files to extract insights, compare positions, and synthesize findings across sources.

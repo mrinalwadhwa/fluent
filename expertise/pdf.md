@@ -2,19 +2,13 @@
 
 ## Creating PDFs with Typst
 
-Typst is a modern typesetting system that compiles markup to PDF.
-It replaces LaTeX for most document types: reports, invoices,
-letters, presentations, technical documents. Typst compiles in
-milliseconds, has readable syntax, and produces clean PDF output.
+Typst is a modern typesetting system that compiles markup to PDF. It replaces LaTeX for most document types: reports, invoices, letters, presentations, technical documents. Typst compiles in milliseconds, has readable syntax, and produces clean PDF output.
 
 Install via nix: `nix-shell -p typst`
 
 ## Baseline grid
 
-Derive all vertical spacing from a single baseline unit. This
-creates consistent rhythm throughout the document. Every margin,
-paragraph gap, heading space, and list spacing should be a
-multiple of the baseline.
+Derive all vertical spacing from a single baseline unit. This creates consistent rhythm throughout the document. Every margin, paragraph gap, heading space, and list spacing should be a multiple of the baseline.
 
 ```typst
 #let baseline = 14pt
@@ -25,9 +19,7 @@ multiple of the baseline.
 #let sp-two     = baseline * 2     // large: before sections
 ```
 
-Set page margins, paragraph leading, and list spacing as
-multiples of the baseline. When the entire document uses one
-number as its source of rhythm, changing it retunes everything.
+Set page margins, paragraph leading, and list spacing as multiples of the baseline. When the entire document uses one number as its source of rhythm, changing it retunes everything.
 
 ```typst
 #set page(margin: (
@@ -41,9 +33,7 @@ number as its source of rhythm, changing it retunes everything.
 
 ## Page and text
 
-Choose a readable font at 9-10pt for dense documents, 10-12pt
-for longer-form documents. Set `justify: false` for short
-documents; justify for reports and articles.
+Choose a readable font at 9-10pt for dense documents, 10-12pt for longer-form documents. Set `justify: false` for short documents; justify for reports and articles.
 
 ```typst
 #set text(font: "Meta Serif OT", size: 9.5pt, fill: rgb("#000000"))
@@ -51,9 +41,7 @@ documents; justify for reports and articles.
 
 ## Colors and accents
 
-Define a small palette. One accent color is enough for most
-documents. Use it for section headings, links, and decorative
-elements. Keep body text black.
+Define a small palette. One accent color is enough for most documents. Use it for section headings, links, and decorative elements. Keep body text black.
 
 ```typst
 #let accent = rgb("#BE4728")
@@ -63,9 +51,7 @@ elements. Keep body text black.
 
 ## Headings
 
-Style each heading level explicitly. Headings use `#show` rules
-to control size, weight, color, and spacing. Add vertical space
-before headings using the baseline grid multiples.
+Style each heading level explicitly. Headings use `#show` rules to control size, weight, color, and spacing. Add vertical space before headings using the baseline grid multiples.
 
 ```typst
 #show heading.where(level: 1): it => {
@@ -82,8 +68,7 @@ before headings using the baseline grid multiples.
 
 ## Layout techniques
 
-Use `#place` for elements outside the normal flow: decorative
-bars, contact info in corners, watermarks.
+Use `#place` for elements outside the normal flow: decorative bars, contact info in corners, watermarks.
 
 ```typst
 // Red bar at page top
@@ -103,13 +88,11 @@ Use `#h(1fr)` to push content to the right on the same line:
 === Job Title #h(1fr) #text(size: 8.5pt, fill: muted)[2020–Present]
 ```
 
-Use pipe separators (`|`) with `#h(0.3em)` spacing for inline
-metadata: `Company | Role | Dates`.
+Use pipe separators (`|`) with `#h(0.3em)` spacing for inline metadata: `Company | Role | Dates`.
 
 ## Lists
 
-Configure list markers, indent, and spacing to match the baseline
-grid:
+Configure list markers, indent, and spacing to match the baseline grid:
 
 ```typst
 #set list(
@@ -147,12 +130,8 @@ qlmanage -t -s 2000 -o . page1.pdf
 5. Adjust spacing, font, or layout as needed
 6. Repeat until the document looks right
 
-Typst compiles fast enough to iterate in tight loops. Don't
-batch changes: make one adjustment, compile, assess.
+Typst compiles fast enough to iterate in tight loops. Don't batch changes: make one adjustment, compile, assess.
 
 ## When to use Typst
 
-Typst works well for structured documents with predictable
-layouts: reports, invoices, letters, academic papers, technical
-documents. For documents that need complex interactive elements,
-forms, or dynamic content, other tools may be more appropriate.
+Typst works well for structured documents with predictable layouts: reports, invoices, letters, academic papers, technical documents. For documents that need complex interactive elements, forms, or dynamic content, other tools may be more appropriate.
