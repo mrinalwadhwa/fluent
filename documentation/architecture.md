@@ -9,11 +9,10 @@ from intent capture through execution and review across multiple sessions.
 ┌─────────────────────────────────────────────────┐
 │  Skills                                         │
 │  capture-brief, define-behaviors,               │
-│  design-approach, plan-execution                │
+│  design-approach, plan-execution,               │
 │  review-documentation, review-behaviors,        │
 │  review-architecture, review-skills,            │
-│  review-tests, architect, write-documentation,   │
-│  write-tests, test-terminal-ui                  │
+│  review-tests                                   │
 │  Portable procedures any agent follows          │
 ├─────────────────────────────────────────────────┤
 │  build-in-the-factory skill                     │
@@ -1124,8 +1123,6 @@ factory/main/
       claude-code.sb         ← Claude-specific Seatbelt profile layer
       codex.sb               ← Codex-specific Seatbelt profile layer
   skills/
-    architect/SKILL.md
-    architect/references/
     build-in-the-factory/SKILL.md
     capture-brief/SKILL.md
     define-behaviors/SKILL.md
@@ -1141,12 +1138,6 @@ factory/main/
     review-skills/references/
     review-tests/SKILL.md
     review-tests/references/
-    test-terminal-ui/SKILL.md
-    test-terminal-ui/references/
-    write-documentation/SKILL.md
-    write-documentation/references/
-    write-tests/SKILL.md
-    write-tests/references/
   infrastructure/
     cloudformation.yaml
     run/
