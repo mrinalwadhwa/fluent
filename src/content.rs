@@ -645,7 +645,7 @@ Check item {{ITEM_ID}}.
         let resolver = ContentResolver::new(None);
         let content = resolver.resolve_content("prompts/write-system.md");
         assert!(content.is_some());
-        assert!(content.unwrap().contains("Factory Work model"));
+        assert!(content.unwrap().contains("Factory Writer"));
     }
 
     #[test]
@@ -662,7 +662,7 @@ Check item {{ITEM_ID}}.
     fn bundled_write_system_prompt_avoids_legacy_run_state_contract() {
         let content = bundled_content("prompts/write-system.md").unwrap();
 
-        assert!(content.contains("Factory Work model"));
+        assert!(content.contains("Factory Writer"));
         assert!(!content.contains("Status file contract"));
         assert!(!content.contains(".factory/runs/"));
         assert!(!content.contains("handoff.md"));
