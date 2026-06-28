@@ -247,6 +247,11 @@ pub enum WorkCommands {
 
         /// Attempt ID
         attempt_id: String,
+
+        /// Review the current working tree at `.` (with the source-checkout
+        /// restorative guard) instead of the per-branch review-only worktree.
+        #[arg(long)]
+        from_working_tree: bool,
     },
 
     /// Show one stored Merge Candidate as JSON
@@ -352,6 +357,12 @@ pub enum WorkCommands {
         command: WorkPostMergeReviewCommands,
     },
 
+    /// Manage per-branch review-only worktrees
+    ReviewOnlyWorktree {
+        #[command(subcommand)]
+        command: WorkReviewOnlyWorktreeCommands,
+    },
+
     /// Manage the Work Item queue
     Queue {
         #[command(subcommand)]
@@ -362,6 +373,23 @@ pub enum WorkCommands {
     Scheduler {
         #[command(subcommand)]
         command: WorkSchedulerCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum WorkReviewOnlyWorktreeCommands {
+    /// Remove review-only worktrees whose branch no longer exists
+    Prune {
+        /// Remove every review-only worktree, regardless of whether its
+        /// corresponding branch still exists. In-use worktrees are still
+        /// skipped.
+        #[arg(long)]
+        all: bool,
+
+        /// Report what would be removed without actually removing
+        /// anything. Exits 0 either way.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 

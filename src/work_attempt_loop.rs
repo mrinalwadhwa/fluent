@@ -8,6 +8,7 @@ use std::thread;
 
 use crate::content::ContentResolver;
 use crate::review::{self, Verdict};
+use crate::review_only_worktree;
 use crate::work_model::{
     ArtifactRef, Attempt, AttemptReviewState, AttemptStatus, Task, TaskKind, TaskStatus, WorkItem,
     WorkModelStorageError, WorkModelStore, work_artifact_path,
@@ -69,6 +70,7 @@ pub struct WorkAttemptRunResult {
 
 pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunResult> {
     let mut outcomes = Vec::new();
+    let mut worktree_ensured = false;
 
     loop {
         let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
@@ -80,6 +82,17 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", config.attempt_id))?;
 
         reject_terminal_attempt(attempt.status.clone())?;
+
+        if !worktree_ensured && attempt.kind.is_review_only_like() {
+            reject_if_review_only_worktree_in_flight(
+                config.store,
+                config.work_item_id,
+                config.attempt_id,
+                attempt,
+            )?;
+            ensure_review_only_worktree_if_applicable(config.project_root, attempt)?;
+            worktree_ensured = true;
+        }
 
         if !attempt.kind.is_review_only_like()
             && attempt.status == AttemptStatus::Complete
@@ -97,7 +110,7 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             .iter()
             .find(|task| task.status == TaskStatus::Planned && is_task_ready(task, &attempt.tasks))
         {
-            if is_review_phase_task(task) && !attempt.kind.is_review_only_like() {
+            if is_review_phase_task(task) && supports_parallel_review_phase(attempt) {
                 let planned_review_ids: Vec<String> = attempt
                     .tasks
                     .iter()
@@ -288,6 +301,95 @@ fn run_parallel_reviews(
         return Err(error);
     }
     Ok(())
+}
+
+/// Whether the Attempt can fan its review-phase Tasks out in parallel.
+///
+/// Write Attempts always can. Review-only Attempts can when they read
+/// from an isolated per-branch worktree — that's the case for
+/// PostMergeReview today, and for ReviewCodebase once step 2 lands.
+/// Review-only Attempts whose workspace is the source checkout (`.`)
+/// must run serially: parallel reviewers would collide on the project
+/// root's `.factory/work/artifacts/` tree and trip the source-checkout
+/// review guard.
+fn supports_parallel_review_phase(attempt: &Attempt) -> bool {
+    if !attempt.kind.is_review_only_like() {
+        return true;
+    }
+    attempt
+        .tasks
+        .first()
+        .and_then(|task| task.workspace_access.reads.first())
+        .map(|workspace| {
+            review_only_worktree::is_review_only_worktree_workspace_path(&workspace.path)
+        })
+        .unwrap_or(false)
+}
+
+/// If the Attempt's tasks read from a review-only worktree, refuse to
+/// start when another review-only Attempt is already in flight against
+/// the same worktree. Bails with a message naming the in-flight
+/// Attempt so the operator can investigate.
+fn reject_if_review_only_worktree_in_flight(
+    store: &WorkModelStore,
+    work_item_id: &str,
+    attempt_id: &str,
+    attempt: &Attempt,
+) -> Result<()> {
+    let Some(branch) = attempt
+        .tasks
+        .first()
+        .and_then(|task| task.review_context.as_ref())
+        .map(|context| context.source_branch.as_str())
+    else {
+        return Ok(());
+    };
+    let workspace_path = attempt
+        .tasks
+        .first()
+        .and_then(|task| task.workspace_access.reads.first())
+        .map(|workspace| workspace.path.as_str())
+        .unwrap_or("");
+    if !review_only_worktree::is_review_only_worktree_workspace_path(workspace_path) {
+        return Ok(());
+    }
+    if let Some(in_flight) =
+        review_only_worktree::detect_in_flight(store, branch, Some((work_item_id, attempt_id)))?
+    {
+        bail!(
+            "Review-only worktree for branch {:?} is already in flight (Work Item {:?}, Attempt {:?}); \
+             wait for it to complete or recover it before re-running",
+            in_flight.branch,
+            in_flight.work_item_id,
+            in_flight.attempt_id
+        );
+    }
+    Ok(())
+}
+
+/// If the Attempt's tasks read from a review-only worktree, make sure
+/// the worktree exists at the recorded `candidate_commit` before any
+/// Task runs. PostMergeReview Attempts always need this; ReviewCodebase
+/// Attempts will once step 2 introduces the worktree path there.
+fn ensure_review_only_worktree_if_applicable(project_root: &Path, attempt: &Attempt) -> Result<()> {
+    let Some(task) = attempt.tasks.first() else {
+        return Ok(());
+    };
+    let Some(workspace) = task.workspace_access.reads.first() else {
+        return Ok(());
+    };
+    if !review_only_worktree::is_review_only_worktree_workspace_path(&workspace.path) {
+        return Ok(());
+    }
+    let Some(context) = task.review_context.as_ref() else {
+        return Ok(());
+    };
+    review_only_worktree::ensure(
+        project_root,
+        &context.source_branch,
+        &context.candidate_commit,
+    )
+    .map(|_| ())
 }
 
 fn reject_terminal_attempt(status: AttemptStatus) -> Result<()> {

@@ -15,7 +15,7 @@ use crate::review_diff_command::render_review_diff_command;
 use crate::work_model::{
     ArtifactRef, AttemptKind, AttemptStatus, TaskKind, TaskOutput, TaskStatus, WorkItem,
     WorkModelStorageError, WorkModelStore, WorkspaceRef, resolve_expected_candidate_workspace_path,
-    to_json_pretty,
+    resolve_managed_sibling_workspace_path, to_json_pretty,
 };
 use crate::worktree;
 
@@ -384,16 +384,14 @@ fn run_review_task(
     };
     let readable_workspace_paths = readable_workspaces.paths();
 
-    if !attempt_kind.is_review_only_like() {
-        if let Some(candidate_path) = readable_workspace_paths.first() {
-            prepare_reviewer_build_cache(
-                candidate_path,
-                &artifact_dir,
-                config.work_item_id,
-                config.attempt_id,
-                config.task_id,
-            );
-        }
+    if let Some(candidate_path) = readable_workspace_paths.first() {
+        prepare_reviewer_build_cache(
+            candidate_path,
+            &artifact_dir,
+            config.work_item_id,
+            config.attempt_id,
+            config.task_id,
+        );
     }
 
     let run_result = run_review_coder(
@@ -657,10 +655,6 @@ impl ReviewReadableWorkspaces {
             if *attempt_kind == AttemptKind::ReviewOnly && workspace_path == project_root {
                 ensure_head_matches_review_context(&workspace_path, expected_source_head)?;
                 ensure_no_non_factory_worktree_changes(&workspace_path)?;
-            } else if *attempt_kind == AttemptKind::PostMergeReview
-                && workspace_path == project_root
-            {
-                ensure_head_matches_review_context(&workspace_path, expected_source_head)?;
             } else {
                 ensure_registered_worktree(project_root, &workspace_path)?;
                 ensure_clean_worktree(&workspace_path)?;
@@ -695,13 +689,6 @@ impl ReviewReadableWorkspaces {
                         expected_source_head,
                         artifact_dir,
                     )?)
-                } else if *attempt_kind == AttemptKind::PostMergeReview
-                    && workspace_path == project_root
-                {
-                    ReviewReadableWorkspace::PostMergeSource(PostMergeSourceGuard::begin(
-                        workspace_path,
-                        expected_source_head,
-                    )?)
                 } else {
                     ensure_registered_worktree(project_root, &workspace_path)?;
                     ensure_clean_worktree(&workspace_path)?;
@@ -733,7 +720,6 @@ impl ReviewReadableWorkspaces {
 enum ReviewReadableWorkspace {
     Candidate(CandidateReviewWorkspace),
     Source(SourceCheckoutReviewGuard),
-    PostMergeSource(PostMergeSourceGuard),
 }
 
 impl ReviewReadableWorkspace {
@@ -741,7 +727,6 @@ impl ReviewReadableWorkspace {
         match self {
             Self::Candidate(workspace) => workspace.path.clone(),
             Self::Source(guard) => guard.path.clone(),
-            Self::PostMergeSource(guard) => guard.path.clone(),
         }
     }
 
@@ -749,7 +734,6 @@ impl ReviewReadableWorkspace {
         match self {
             Self::Candidate(workspace) => workspace.finish(),
             Self::Source(guard) => guard.finish(),
-            Self::PostMergeSource(guard) => guard.finish(),
         }
     }
 }
@@ -804,36 +788,6 @@ impl SourceCheckoutReviewGuard {
             return Err(error);
         }
         Ok(())
-    }
-}
-
-struct PostMergeSourceGuard {
-    path: PathBuf,
-    head: String,
-}
-
-impl PostMergeSourceGuard {
-    fn begin(path: PathBuf, expected_head: &str) -> Result<Self> {
-        ensure_head_matches_review_context(&path, expected_head)?;
-        Ok(Self {
-            head: head_commit(&path)?,
-            path,
-        })
-    }
-
-    fn finish(&self) -> Result<()> {
-        let current_head = head_commit(&self.path)?;
-        if current_head == self.head {
-            Ok(())
-        } else {
-            bail!(
-                "Source HEAD moved during post-merge review from {} to {}: {}; \
-                 review is stale",
-                self.head,
-                current_head,
-                self.path.display()
-            )
-        }
     }
 }
 
@@ -935,6 +889,16 @@ fn resolve_review_readable_workspace_path(
     if attempt_kind.is_source_checkout_review() && workspace.id == "source" && workspace.path == "."
     {
         return Ok(project_root.to_path_buf());
+    }
+    if attempt_kind.is_review_only_like()
+        && workspace.id == "source"
+        && crate::review_only_worktree::is_review_only_worktree_workspace_path(&workspace.path)
+    {
+        return Ok(resolve_managed_sibling_workspace_path(
+            project_root,
+            &workspace.path,
+            "Review-only worktree",
+        )?);
     }
 
     resolve_managed_readable_workspace_path(project_root, &workspace.path, work_item_id, attempt_id)
@@ -2591,76 +2555,6 @@ mod tests {
             .map(|arg| format!("<{arg}>\n"))
             .collect::<String>();
         assert_eq!(fs::read_to_string(log_path).unwrap(), expected_log);
-    }
-
-    fn setup_test_repo(tmp: &tempfile::TempDir) -> PathBuf {
-        let dir = tmp.path().join("repo");
-        fs::create_dir_all(&dir).unwrap();
-        git::run(&dir, &["init", "-b", "main"], "init repo").unwrap();
-        git::run(&dir, &["config", "user.email", "test@test"], "config email").unwrap();
-        git::run(&dir, &["config", "user.name", "test"], "config name").unwrap();
-        fs::write(dir.join("README.md"), "test").unwrap();
-        git::run(&dir, &["add", "."], "stage files").unwrap();
-        git::run(&dir, &["commit", "-m", "init"], "initial commit").unwrap();
-        dir
-    }
-
-    #[test]
-    fn post_merge_source_guard_finish_succeeds_with_worktree_edits() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let dir = setup_test_repo(&tmp);
-        let head = head_commit(&dir).unwrap();
-
-        let guard = PostMergeSourceGuard::begin(dir.clone(), &head).unwrap();
-
-        fs::write(dir.join("new-file.txt"), "user edit\n").unwrap();
-        fs::write(dir.join("README.md"), "modified\n").unwrap();
-
-        assert!(guard.finish().is_ok());
-    }
-
-    #[test]
-    fn post_merge_source_guard_finish_succeeds_with_factory_mutations() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let dir = setup_test_repo(&tmp);
-        let head = head_commit(&dir).unwrap();
-
-        let guard = PostMergeSourceGuard::begin(dir.clone(), &head).unwrap();
-
-        fs::create_dir_all(dir.join(".factory/work/items")).unwrap();
-        fs::write(dir.join(".factory/work/items/new-work-item.json"), "{}").unwrap();
-
-        assert!(guard.finish().is_ok());
-    }
-
-    #[test]
-    fn post_merge_source_guard_finish_fails_when_head_moves() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let dir = setup_test_repo(&tmp);
-        let head = head_commit(&dir).unwrap();
-
-        let guard = PostMergeSourceGuard::begin(dir.clone(), &head).unwrap();
-
-        fs::write(dir.join("new-commit.txt"), "extra commit\n").unwrap();
-        git::run(&dir, &["add", "new-commit.txt"], "stage file").unwrap();
-        git::run(&dir, &["commit", "-m", "move head"], "commit").unwrap();
-
-        let result = guard.finish();
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("Source HEAD moved during post-merge review"),
-            "unexpected error: {msg}"
-        );
-    }
-
-    #[test]
-    fn post_merge_source_guard_begin_rejects_mismatched_head() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let dir = setup_test_repo(&tmp);
-
-        let result = PostMergeSourceGuard::begin(dir, "0000000000000000000000000000000000000000");
-        assert!(result.is_err());
     }
 
     #[test]

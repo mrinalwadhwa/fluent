@@ -2,6 +2,7 @@
 mod log;
 
 use factory::git;
+use factory::review;
 use log::LoggedCommand;
 use predicates::prelude::*;
 use serial_test::serial;
@@ -2130,11 +2131,11 @@ fn work_review_codebase_creates_review_only_attempt() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Created review-only Attempt attempt-review with 5 review Tasks",
+            "Created review-only Attempt attempt-review against source checkout with 5 task(s)",
         ))
         .stdout(predicate::str::contains("attempt-review-review-tests"));
 
@@ -2188,7 +2189,7 @@ fn work_review_codebase_creates_review_only_attempt() {
 }
 
 #[test]
-fn work_review_codebase_missing_or_duplicate_leaves_state_unchanged() {
+fn work_review_codebase_default_creates_worktree_attempt_with_tester() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
@@ -2200,6 +2201,47 @@ fn work_review_codebase_missing_or_duplicate_leaves_state_unchanged() {
     factory_cmd()
         .current_dir(&main_dir)
         .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Created review-only Attempt attempt-review against per-branch worktree with 6 task(s)",
+        ))
+        .stdout(predicate::str::contains("attempt-review-tester"));
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let attempt = &value["attempts"][0];
+    assert_eq!(attempt["kind"], "review-only");
+    let tasks = attempt["tasks"].as_array().unwrap();
+    assert_eq!(tasks.len(), 1 + review::REVIEWERS.len());
+    assert_eq!(tasks[0]["kind"], "tester");
+    assert_eq!(tasks[0]["id"], "attempt-review-tester");
+    assert_eq!(
+        tasks[0]["workspace_access"]["reads"][0]["path"],
+        "../work-review-main"
+    );
+    for task in tasks.iter().skip(1) {
+        assert_eq!(task["kind"], "review");
+        assert_eq!(
+            task["workspace_access"]["reads"][0]["path"],
+            "../work-review-main"
+        );
+        assert_eq!(task["depends_on"], "attempt-review-tester");
+    }
+}
+
+#[test]
+fn work_review_codebase_missing_or_duplicate_leaves_state_unchanged() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "create", "work-1", "--title", "Review codebase"])
+        .assert()
+        .success();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
         .assert()
         .success();
     let item_path = main_dir.join(".factory/work/items/work-1.json");
@@ -2215,7 +2257,7 @@ fn work_review_codebase_missing_or_duplicate_leaves_state_unchanged() {
         ));
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -2249,7 +2291,7 @@ fn work_task_run_review_only_fails_when_skill_missing() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
         .assert()
         .success();
 
@@ -2472,7 +2514,7 @@ fn work_attempt_run_review_only_passes_without_merge_candidate() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
         .assert()
         .success();
 
@@ -2520,7 +2562,7 @@ fn work_attempt_run_review_only_rejects_source_changes() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
         .assert()
         .success();
 
@@ -2573,7 +2615,7 @@ fn work_attempt_run_review_only_restores_changed_source_head() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
         .assert()
         .success();
 
@@ -2626,7 +2668,7 @@ fn work_attempt_run_review_only_requires_recorded_source_commit() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
         .assert()
         .success();
 
@@ -2697,7 +2739,7 @@ fn work_attempt_run_review_only_rejects_factory_state_changes() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
         .assert()
         .success();
 
@@ -2748,7 +2790,7 @@ fn work_attempt_run_review_only_rejects_work_state_changes() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
         .assert()
         .success();
 
@@ -2823,7 +2865,7 @@ fn work_attempt_run_review_only_restores_mixed_source_and_factory_changes() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
         .assert()
         .success();
 
@@ -2885,7 +2927,7 @@ fn work_attempt_run_review_only_fails_without_followup() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
         .assert()
         .success();
 
@@ -2931,7 +2973,7 @@ fn work_attempt_run_review_only_uncertain_needs_user() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
         .assert()
         .success();
 
@@ -6533,54 +6575,6 @@ fn create_completed_work_attempt(tmp: &TempDir, main_dir: &Path) {
     create_completed_work_attempt_with_instructions(tmp, main_dir, None);
 }
 
-fn create_completed_work_attempt_with_behaviors(tmp: &TempDir, main_dir: &Path, behaviors: &str) {
-    let bin_dir = tmp.path().join("bin-write-with-behaviors");
-    let behaviors_path = tmp.path().join("behaviors.md");
-    fs::write(&behaviors_path, behaviors).unwrap();
-    write_mock_claude(
-        &bin_dir,
-        r##"#!/bin/bash
-printf 'task output\n' > task-output.txt
-git add task-output.txt
-git commit -m "Add task output" >/dev/null
-exit 0
-"##,
-    );
-
-    factory_cmd()
-        .current_dir(main_dir)
-        .args([
-            "work",
-            "create",
-            "work-1",
-            "--title",
-            "Run review",
-            "--behaviors-file",
-            &behaviors_path.to_string_lossy(),
-        ])
-        .assert()
-        .success();
-    factory_cmd()
-        .current_dir(main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
-        .assert()
-        .success();
-    factory_cmd()
-        .current_dir(main_dir)
-        .args([
-            "work",
-            "task",
-            "run",
-            "work-1",
-            "attempt-1",
-            "attempt-1-write-1",
-            "--no-sandbox",
-        ])
-        .env("PATH", mock_path(&bin_dir))
-        .assert()
-        .success();
-}
-
 fn create_completed_work_attempt_with_instructions(
     tmp: &TempDir,
     main_dir: &Path,
@@ -7202,99 +7196,138 @@ fn mock_path(bin_dir: &Path) -> String {
     format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap())
 }
 
-fn patch_attempt_kind_to_post_merge_review(
+fn write_post_merge_review_queue_entry(
     project_root: &Path,
-    work_item_id: &str,
-    attempt_id: &str,
+    target_branch: &str,
+    merged_commit: &str,
+    source_work_item_id: &str,
 ) {
-    let attempt_path = project_root
-        .join(".factory/work/attempts")
-        .join(work_item_id)
-        .join(format!("{attempt_id}.json"));
-    let content = fs::read_to_string(&attempt_path).unwrap();
-    let patched = content.replace("\"review-only\"", "\"post-merge-review\"");
-    assert_ne!(
-        content, patched,
-        "expected to patch review-only to post-merge-review in {attempt_path:?}"
+    let queue_path = project_root.join(".factory/work/post-merge-review-queue.json");
+    fs::create_dir_all(queue_path.parent().unwrap()).unwrap();
+    let body = format!(
+        "{{\"entries\":[{{\"target_branch\":\"{target_branch}\",\"merged_commit\":\"{merged_commit}\",\"merged_at_unix\":0,\"source_work_item_id\":\"{source_work_item_id}\",\"source_merge_candidate_id\":\"{source_work_item_id}-attempt-1-merge-candidate\"}}]}}"
     );
-    fs::write(&attempt_path, patched).unwrap();
+    fs::write(&queue_path, body).unwrap();
 }
 
 #[test]
-fn post_merge_review_guard_allows_source_changes() {
+fn post_merge_review_creates_worktree_and_runs_tester_then_reviewers() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
-        .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Post-merge review"])
-        .assert()
-        .success();
-    factory_cmd()
-        .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review"])
-        .assert()
-        .success();
-    patch_attempt_kind_to_post_merge_review(&main_dir, "work-1", "attempt-review");
-
     let main_head = git_head(&main_dir);
-    let bin_dir = tmp.path().join("bin-pmr-dirty");
-    write_mock_claude(&bin_dir, &review_only_dirty_source_mock_script());
+    let expected_worktree = tmp.path().join("work-review-main");
+
+    let bin_dir = tmp.path().join("bin-post-merge-walking-skeleton");
+    write_mock_claude(&bin_dir, &review_only_mock_script("pass"));
+
+    write_post_merge_review_queue_entry(&main_dir, "main", &main_head, "source-work");
 
     factory_cmd()
         .current_dir(&main_dir)
         .args([
             "work",
-            "attempt",
+            "post-merge-review",
             "run",
-            "work-1",
-            "attempt-review",
-            "--no-sandbox",
+            "--debounce-seconds",
+            "0",
         ])
         .env("PATH", mock_path(&bin_dir))
         .assert()
         .success();
 
-    let value = read_work_show_json(&main_dir, "work-1");
+    assert!(
+        expected_worktree.exists(),
+        "review-only worktree must be created at {}",
+        expected_worktree.display()
+    );
+    assert!(
+        expected_worktree.join(".git").exists(),
+        "review-only worktree must be a registered git worktree"
+    );
+
+    let short = &main_head[..8.min(main_head.len())];
+    let work_item_id = format!("post-merge-main-{short}");
+    let value = read_work_show_json(&main_dir, &work_item_id);
     let attempt = &value["attempts"][0];
     assert_eq!(attempt["kind"], "post-merge-review");
     assert_eq!(attempt["status"], "complete");
     assert_eq!(attempt["review_state"], "passed");
+
+    let tasks = attempt["tasks"].as_array().expect("attempt has tasks array");
+    assert_eq!(
+        tasks.len(),
+        1 + review::REVIEWERS.len(),
+        "1 tester + {} reviewers",
+        review::REVIEWERS.len()
+    );
+    assert_eq!(tasks[0]["kind"], "tester");
+    assert_eq!(tasks[0]["status"], "complete");
+    assert_eq!(
+        tasks[0]["workspace_access"]["reads"][0]["path"],
+        "../work-review-main"
+    );
+    for task in tasks.iter().skip(1) {
+        assert_eq!(task["kind"], "review");
+        assert_eq!(task["status"], "complete");
+        assert_eq!(
+            task["workspace_access"]["reads"][0]["path"],
+            "../work-review-main"
+        );
+        assert_eq!(task["depends_on"], "attempt-1-tester");
+    }
     assert_eq!(git_head(&main_dir), main_head);
+
+    // Re-run on a new commit on the same branch: the worktree must
+    // be reused (not recreated) and resynced to the new commit.
+    commit_file(&main_dir, "follow-up.txt", "second\n", "second commit");
+    let new_head = git_head(&main_dir);
+    write_post_merge_review_queue_entry(&main_dir, "main", &new_head, "source-work-2");
+    let worktree_inode_before = fs::metadata(&expected_worktree).unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work",
+            "post-merge-review",
+            "run",
+            "--debounce-seconds",
+            "0",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let worktree_inode_after = fs::metadata(&expected_worktree).unwrap();
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(
+        worktree_inode_before.ino(),
+        worktree_inode_after.ino(),
+        "worktree directory must be the same inode after re-sync"
+    );
+    let worktree_head =
+        git::run_stdout(&expected_worktree, &["rev-parse", "HEAD"], "worktree head").unwrap();
+    assert_eq!(
+        worktree_head, new_head,
+        "review-only worktree must be synced to the new target commit"
+    );
 }
 
 #[test]
-fn post_merge_review_guard_allows_factory_state_changes() {
+fn work_attempt_run_rejects_review_only_worktree_already_in_flight() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    fs::create_dir_all(main_dir.join(".factory/expertise")).unwrap();
-    fs::write(
-        main_dir.join(".factory/expertise/decisions.md"),
-        "initial\n",
-    )
-    .unwrap();
-    git::run(&main_dir, &["add", ".factory"], "stage factory state").unwrap();
-    git::run(
-        &main_dir,
-        &["commit", "-m", "add factory state"],
-        "commit factory state",
-    )
-    .unwrap();
-
-    factory_cmd()
-        .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Post-merge review"])
-        .assert()
-        .success();
-    factory_cmd()
-        .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review"])
-        .assert()
-        .success();
-    patch_attempt_kind_to_post_merge_review(&main_dir, "work-1", "attempt-review");
-
-    let main_head = git_head(&main_dir);
-    let bin_dir = tmp.path().join("bin-pmr-factory-dirty");
-    write_mock_claude(&bin_dir, &review_only_dirty_factory_mock_script());
+    for wi in ["work-1", "work-2"] {
+        factory_cmd()
+            .current_dir(&main_dir)
+            .args(["work", "create", wi, "--title", "Review codebase"])
+            .assert()
+            .success();
+        factory_cmd()
+            .current_dir(&main_dir)
+            .args(["work", "review-codebase", wi, "attempt-review"])
+            .assert()
+            .success();
+    }
 
     factory_cmd()
         .current_dir(&main_dir)
@@ -7302,76 +7335,23 @@ fn post_merge_review_guard_allows_factory_state_changes() {
             "work",
             "attempt",
             "run",
-            "work-1",
+            "work-2",
             "attempt-review",
             "--no-sandbox",
         ])
-        .env("PATH", mock_path(&bin_dir))
-        .assert()
-        .success();
-
-    let value = read_work_show_json(&main_dir, "work-1");
-    let attempt = &value["attempts"][0];
-    assert_eq!(attempt["kind"], "post-merge-review");
-    assert_eq!(attempt["status"], "complete");
-    assert_eq!(attempt["review_state"], "passed");
-    assert_eq!(git_head(&main_dir), main_head);
-}
-
-#[test]
-fn post_merge_review_guard_fails_when_head_moves() {
-    let tmp = TempDir::new().unwrap();
-    let main_dir = setup_git_project(&tmp);
-    factory_cmd()
-        .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Post-merge review"])
-        .assert()
-        .success();
-    factory_cmd()
-        .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review"])
-        .assert()
-        .success();
-    patch_attempt_kind_to_post_merge_review(&main_dir, "work-1", "attempt-review");
-
-    let bin_dir = tmp.path().join("bin-pmr-head");
-    write_mock_claude(&bin_dir, &review_only_changed_head_mock_script());
-
-    factory_cmd()
-        .current_dir(&main_dir)
-        .args([
-            "work",
-            "attempt",
-            "run",
-            "work-1",
-            "attempt-review",
-            "--no-sandbox",
-        ])
-        .env("PATH", mock_path(&bin_dir))
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "Source HEAD moved during post-merge review",
-        ));
-
-    let value = read_work_show_json(&main_dir, "work-1");
-    let attempt = &value["attempts"][0];
-    assert!(
-        attempt["tasks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|task| task["kind"] == "review" && task["status"] == "failed")
-    );
+        .stderr(predicate::str::contains("already in flight"))
+        .stderr(predicate::str::contains("\"work-1\""));
 }
 
 #[test]
-fn post_merge_review_guard_passes_clean_review() {
+fn post_merge_review_defers_queue_entry_when_worktree_in_flight() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Post-merge review"])
+        .args(["work", "create", "work-1", "--title", "Review codebase"])
         .assert()
         .success();
     factory_cmd()
@@ -7379,84 +7359,217 @@ fn post_merge_review_guard_passes_clean_review() {
         .args(["work", "review-codebase", "work-1", "attempt-review"])
         .assert()
         .success();
-    patch_attempt_kind_to_post_merge_review(&main_dir, "work-1", "attempt-review");
 
     let main_head = git_head(&main_dir);
-    let bin_dir = tmp.path().join("bin-pmr-pass");
-    write_mock_claude(&bin_dir, &review_only_mock_script("pass"));
+    write_post_merge_review_queue_entry(&main_dir, "main", &main_head, "source-work");
 
     factory_cmd()
         .current_dir(&main_dir)
         .args([
             "work",
-            "attempt",
+            "post-merge-review",
             "run",
-            "work-1",
-            "attempt-review",
-            "--no-sandbox",
+            "--debounce-seconds",
+            "0",
         ])
-        .env("PATH", mock_path(&bin_dir))
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Review-only Attempt attempt-review passed",
-        ));
+        .stderr(predicate::str::contains("Deferring post-merge review"))
+        .stderr(predicate::str::contains("\"work-1\""));
 
-    let value = read_work_show_json(&main_dir, "work-1");
-    let attempt = &value["attempts"][0];
-    assert_eq!(attempt["kind"], "post-merge-review");
-    assert_eq!(attempt["status"], "complete");
-    assert_eq!(attempt["review_state"], "passed");
-    assert_eq!(git_head(&main_dir), main_head);
+    let queue_path = main_dir.join(".factory/work/post-merge-review-queue.json");
+    let queue: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&queue_path).unwrap()).unwrap();
+    let entries = queue["entries"].as_array().expect("queue entries array");
+    assert_eq!(
+        entries.len(),
+        1,
+        "deferred entry must remain in the queue for the next pass"
+    );
+    assert_eq!(entries[0]["target_branch"], "main");
+    let short = &main_head[..8.min(main_head.len())];
+    let post_merge_item_path = main_dir
+        .join(".factory/work/items")
+        .join(format!("post-merge-main-{short}.json"));
+    assert!(
+        !post_merge_item_path.exists(),
+        "no post-merge Work Item should be created while the worktree is in flight"
+    );
+}
+
+fn create_review_only_worktree(main_dir: &Path, tmp: &TempDir, branch: &str) -> PathBuf {
+    git::run(main_dir, &["branch", branch], "create branch").unwrap();
+    let path = tmp.path().join(format!("work-review-{branch}"));
+    git::run(
+        main_dir,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            &path.to_string_lossy(),
+            branch,
+        ],
+        "create review-only worktree",
+    )
+    .unwrap();
+    path
+}
+
+fn seed_in_flight_review_only_attempt(main_dir: &Path, work_item_id: &str, branch: &str) {
+    git::run(main_dir, &["checkout", branch], "checkout branch for seed").unwrap();
+    factory_cmd()
+        .current_dir(main_dir)
+        .args(["work", "create", work_item_id, "--title", "Seed in-flight"])
+        .assert()
+        .success();
+    factory_cmd()
+        .current_dir(main_dir)
+        .args(["work", "review-codebase", work_item_id, "attempt-review"])
+        .assert()
+        .success();
+    git::run(main_dir, &["checkout", "main"], "checkout main").unwrap();
 }
 
 #[test]
-fn post_merge_review_preflight_allows_non_factory_worktree_changes() {
+fn review_only_worktree_prune_default_removes_orphan_keeps_others() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
-        .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Post-merge review"])
-        .assert()
-        .success();
-    factory_cmd()
-        .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review"])
-        .assert()
-        .success();
-    patch_attempt_kind_to_post_merge_review(&main_dir, "work-1", "attempt-review");
+    let keep = create_review_only_worktree(&main_dir, &tmp, "keep-me");
+    let gone = create_review_only_worktree(&main_dir, &tmp, "gone");
+    let busy = create_review_only_worktree(&main_dir, &tmp, "busy");
+    seed_in_flight_review_only_attempt(&main_dir, "work-busy", "busy");
+    git::run(&main_dir, &["branch", "-D", "gone"], "delete orphaned branch").unwrap();
+    git::run(&main_dir, &["branch", "-D", "busy"], "delete in-use branch").unwrap();
 
-    fs::write(main_dir.join("user-edit.txt"), "concurrent user work\n").unwrap();
+    let output = factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review-only-worktree", "prune"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "prune failed: stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("removed   ") && stdout.contains("work-review-gone"));
+    assert!(stdout.contains("in-use    ") && stdout.contains("work-review-busy"));
+    assert!(stdout.contains("\"work-busy\""));
+    assert!(stdout.contains("Summary: removed 1, skipped in-use 1, kept 1"));
+    assert!(!gone.exists(), "orphan worktree should be removed");
+    assert!(busy.exists(), "in-use worktree must remain");
+    assert!(keep.exists(), "live worktree must remain");
+}
+
+#[test]
+fn review_only_worktree_prune_all_removes_everything_but_in_use() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let keep = create_review_only_worktree(&main_dir, &tmp, "keep-me");
+    let busy = create_review_only_worktree(&main_dir, &tmp, "busy");
+    seed_in_flight_review_only_attempt(&main_dir, "work-busy", "busy");
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review-only-worktree", "prune", "--all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("removed   "))
+        .stdout(predicate::str::contains("work-review-keep-me"))
+        .stdout(predicate::str::contains("in-use    "))
+        .stdout(predicate::str::contains("work-review-busy"))
+        .stdout(predicate::str::contains(
+            "Summary: removed 1, skipped in-use 1, kept 0",
+        ));
+    assert!(!keep.exists(), "live worktree should be removed by --all");
+    assert!(busy.exists(), "in-use worktree must remain even with --all");
+}
+
+#[test]
+fn post_merge_review_auto_prunes_orphan_worktree_before_processing_queue() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let orphan = create_review_only_worktree(&main_dir, &tmp, "gone");
+    git::run(&main_dir, &["branch", "-D", "gone"], "delete orphan branch").unwrap();
 
     let main_head = git_head(&main_dir);
-    let bin_dir = tmp.path().join("bin-pmr-concurrent");
+    write_post_merge_review_queue_entry(&main_dir, "main", &main_head, "source-work");
+
+    let bin_dir = tmp.path().join("bin-post-merge-auto-prune");
     write_mock_claude(&bin_dir, &review_only_mock_script("pass"));
 
-    factory_cmd()
+    let output = factory_cmd()
         .current_dir(&main_dir)
         .args([
             "work",
-            "attempt",
+            "post-merge-review",
             "run",
-            "work-1",
-            "attempt-review",
-            "--no-sandbox",
+            "--debounce-seconds",
+            "0",
         ])
         .env("PATH", mock_path(&bin_dir))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "post-merge-review failed: stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("Auto-pruned orphan review-only worktree"),
+        "stderr must announce auto-prune: {stderr}"
+    );
+    assert!(
+        stderr.contains("work-review-gone"),
+        "auto-prune notice must name the orphan path: {stderr}"
+    );
+
+    assert!(
+        !orphan.exists(),
+        "orphan worktree must be removed before queue processing"
+    );
+
+    let short = &main_head[..8.min(main_head.len())];
+    let post_merge_item_path = main_dir
+        .join(".factory/work/items")
+        .join(format!("post-merge-main-{short}.json"));
+    assert!(
+        post_merge_item_path.exists(),
+        "queue entry must still be processed in the same pass"
+    );
+    let queue_path = main_dir.join(".factory/work/post-merge-review-queue.json");
+    let queue: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&queue_path).unwrap()).unwrap();
+    assert!(
+        queue["entries"].as_array().unwrap().is_empty(),
+        "processed entry must be cleared from the queue"
+    );
+}
+
+#[test]
+fn review_only_worktree_prune_dry_run_changes_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let gone = create_review_only_worktree(&main_dir, &tmp, "gone");
+    let busy = create_review_only_worktree(&main_dir, &tmp, "busy");
+    seed_in_flight_review_only_attempt(&main_dir, "work-busy", "busy");
+    git::run(&main_dir, &["branch", "-D", "gone"], "delete orphaned branch").unwrap();
+    git::run(&main_dir, &["branch", "-D", "busy"], "delete in-use branch").unwrap();
+
+    factory_cmd()
+        .current_dir(&main_dir)
+        .args(["work", "review-only-worktree", "prune", "--dry-run"])
         .assert()
         .success()
+        .stdout(predicate::str::contains("would-remove"))
+        .stdout(predicate::str::contains("work-review-gone"))
+        .stdout(predicate::str::contains("would-skip-in-use"))
+        .stdout(predicate::str::contains("work-review-busy"))
         .stdout(predicate::str::contains(
-            "Review-only Attempt attempt-review passed",
+            "Summary: would remove 1, would skip in-use 1, keep 0",
         ));
-
-    let value = read_work_show_json(&main_dir, "work-1");
-    let attempt = &value["attempts"][0];
-    assert_eq!(attempt["status"], "complete");
-    assert_eq!(git_head(&main_dir), main_head);
-    assert!(
-        main_dir.join("user-edit.txt").exists(),
-        "user's concurrent edit should be preserved"
-    );
+    assert!(gone.exists(), "dry-run must not remove anything");
+    assert!(busy.exists(), "dry-run must not remove anything");
 }
 
 // --- Observations management ---
@@ -8085,7 +8198,7 @@ fn auto_merge_skips_candidate_already_marked_skipped() {
     )
     .unwrap();
 
-    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("factory"))
+    let child = std::process::Command::new(assert_cmd::cargo::cargo_bin("factory"))
         .current_dir(tmp.path())
         .args(["work", "auto-merge", "wi-skip", "--poll-seconds", "1"])
         .stderr(std::process::Stdio::piped())
@@ -8153,7 +8266,14 @@ fn init_git_repo(dir: &Path) {
         .output()
         .expect("git init");
     std::process::Command::new("git")
-        .args(["commit", "--allow-empty", "-m", "init"])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ])
         .current_dir(dir)
         .env("GIT_AUTHOR_NAME", "test")
         .env("GIT_AUTHOR_EMAIL", "test@test.com")

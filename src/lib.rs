@@ -18,6 +18,7 @@ pub mod post_merge_review;
 pub mod prep;
 pub mod review;
 pub mod review_diff_command;
+pub mod review_only_worktree;
 pub mod transcript;
 pub mod version;
 pub mod work_attempt_loop;

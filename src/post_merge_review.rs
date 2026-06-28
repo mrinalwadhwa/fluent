@@ -168,6 +168,8 @@ pub fn run(
     let now = now_unix();
     let mut outcome = RunOutcome::default();
 
+    auto_prune_orphan_review_only_worktrees(project_root);
+
     // Find candidate branches: latest entry per branch that's at least
     // debounce_secs old.
     let mut latest_by_branch: std::collections::BTreeMap<String, QueueEntry> =
@@ -199,7 +201,33 @@ pub fn run(
     }
 
     let mut succeeded_branches: Vec<&QueueEntry> = Vec::new();
+    let inflight_store = WorkModelStore::new(project_root);
     for entry in &branches_to_process {
+        match crate::review_only_worktree::detect_in_flight(
+            &inflight_store,
+            &entry.target_branch,
+            None,
+        ) {
+            Ok(Some(in_flight)) => {
+                eprintln!(
+                    "  Deferring post-merge review for {}: review-only worktree in flight via Work Item {:?} Attempt {:?}",
+                    entry.target_branch, in_flight.work_item_id, in_flight.attempt_id
+                );
+                continue;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!(
+                    "  In-flight check for {} failed: {error}",
+                    entry.target_branch
+                );
+                outcome.errors.push(format!(
+                    "branch {}: in-flight check: {error}",
+                    entry.target_branch
+                ));
+                continue;
+            }
+        }
         eprintln!(
             "  Running post-merge review for {} at {}",
             entry.target_branch, entry.merged_commit
@@ -245,6 +273,57 @@ pub struct PerBranchOutcome {
     pub post_merge_review_fix_work_item: Option<String>,
 }
 
+/// Best-effort orphan cleanup at the start of every post-merge review
+/// queue pass. Reuses the manual-prune path with default (orphan-only)
+/// semantics: live worktrees are left alone, and in-use worktrees are
+/// skipped regardless of orphan status. Failures are logged but do not
+/// abort the queue pass — orphan cleanup is convenience, not safety.
+fn auto_prune_orphan_review_only_worktrees(project_root: &Path) {
+    let store = WorkModelStore::new(project_root);
+    let options = crate::review_only_worktree::PruneOptions {
+        all: false,
+        dry_run: false,
+    };
+    match crate::review_only_worktree::prune(&store, project_root, options) {
+        Ok(report) => {
+            let mut removed = 0_usize;
+            let mut skipped_in_use = 0_usize;
+            for entry in &report.entries {
+                match entry {
+                    crate::review_only_worktree::PruneEntry::Removed { path } => {
+                        removed += 1;
+                        eprintln!(
+                            "  Auto-pruned orphan review-only worktree {}",
+                            path.display()
+                        );
+                    }
+                    crate::review_only_worktree::PruneEntry::SkippedInUse {
+                        path,
+                        in_flight,
+                    } => {
+                        skipped_in_use += 1;
+                        eprintln!(
+                            "  Auto-prune skipped in-use review-only worktree {} (Work Item {:?} Attempt {:?})",
+                            path.display(),
+                            in_flight.work_item_id,
+                            in_flight.attempt_id
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            if removed > 0 || skipped_in_use > 0 {
+                eprintln!(
+                    "  Auto-prune: removed {removed}, skipped in-use {skipped_in_use}"
+                );
+            }
+        }
+        Err(error) => {
+            eprintln!("  Auto-prune of review-only worktrees failed: {error:#}");
+        }
+    }
+}
+
 fn review_one(project_root: &Path, entry: &QueueEntry) -> Result<PerBranchOutcome> {
     let store = WorkModelStore::new(project_root);
     let short = &entry.merged_commit[..8.min(entry.merged_commit.len())];
@@ -263,10 +342,20 @@ fn review_one(project_root: &Path, entry: &QueueEntry) -> Result<PerBranchOutcom
         });
     }
 
+    let brief = format!(
+        "Post-merge review of `{}` at commit `{}`. Triggered by Work Item `{}` merging into `{}`.",
+        entry.target_branch, short, entry.source_work_item_id, entry.target_branch
+    );
     let mut item = WorkItem {
         id: work_item_id.clone(),
         title: format!("Post-merge review of {} at {}", entry.target_branch, short),
-        planning_context: None,
+        planning_context: Some(PlanningContext {
+            brief: Some(brief),
+            behaviors: None,
+            approach: None,
+            plan: None,
+            combined: None,
+        }),
         instructions: None,
         abandonment: None,
         attempts: Vec::new(),
@@ -285,7 +374,7 @@ fn review_one(project_root: &Path, entry: &QueueEntry) -> Result<PerBranchOutcom
         .map_err(|e| anyhow::anyhow!("write post-merge review Work Item: {e}"))?;
 
     let resolver = ContentResolver::new(Some(project_root));
-    let _ = work_attempt_loop::run_attempt(WorkAttemptRunConfig {
+    if let Err(error) = work_attempt_loop::run_attempt(WorkAttemptRunConfig {
         project_root,
         store: &store,
         work_item_id: &work_item_id,
@@ -293,7 +382,9 @@ fn review_one(project_root: &Path, entry: &QueueEntry) -> Result<PerBranchOutcom
         resolver: &resolver,
         extra_args: &[],
         no_sandbox: true,
-    });
+    }) {
+        eprintln!("  Post-merge review for {} failed: {error:#}", entry.target_branch);
+    }
 
     let item = store
         .read_work_item(&work_item_id)

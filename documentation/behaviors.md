@@ -610,13 +610,27 @@ Test: tests/binary.rs (work_review_requires_completed_write_output)
 Test: tests/behaviors/operations/test-work-task-run.sh (review planning requires completed write output)
 
 WHEN `factory work review-codebase <work-item-id> <attempt-id>` is
-invoked for a stored Work Item with no existing Attempt of that id,
+invoked (without `--from-working-tree`) for a stored Work Item with no
+existing Attempt of that id,
+THE SYSTEM SHALL append a review-only Attempt with a planned Tester Task
+scheduled before the planned review Tasks for the default reviewer set,
+and SHALL set the workspace for every Task in the Attempt to the
+review-only worktree for the current branch
+(`../work-review-<sanitized-branch>/`).
+Test: tests/binary.rs (work_review_codebase_default_creates_worktree_attempt_with_tester)
+
+WHEN `factory work review-codebase <work-item-id> <attempt-id>
+--from-working-tree` is invoked for a stored Work Item with no existing
+Attempt of that id,
 THE SYSTEM SHALL append a review-only Attempt with planned review Tasks
-for the default reviewer set.
+only (no Tester Task) for the default reviewer set, and SHALL set the
+workspace for every review Task to the current source checkout (`.`)
+under the restorative source-checkout guard.
 Test: tests/binary.rs (work_review_codebase_creates_review_only_attempt)
 Test: tests/behaviors/operations/test-work-review-codebase.sh (review-codebase creates review-only Attempt)
 
-WHEN a review-only Attempt is created,
+WHEN a review-only Attempt is created against the source checkout
+(`--from-working-tree`),
 THE SYSTEM SHALL give each review Task read-only access to the current
 source checkout and a managed artifact area under
 `.factory/work/artifacts/<work-item-id>/<attempt-id>/<task-id>/`.
@@ -682,9 +696,18 @@ Test: src/work_attempt_loop.rs (cap_enforcement_limits_in_flight_reviewers)
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop passes review round)
 
 WHEN `factory work attempt run <work-item-id> <attempt-id>` is invoked
-for a review-only Attempt with planned review Tasks,
-THE SYSTEM SHALL run the planned review Tasks serially because
-review-only reviewers share a source checkout.
+for a review-only Attempt whose workspace is a review-only worktree
+(`../work-review-<sanitized-branch>/`) with planned review Tasks,
+THE SYSTEM SHALL run the planned review Tasks in parallel with
+concurrency limited to `FACTORY_MAX_PARALLEL_REVIEWERS` (default 5,
+minimum 1).
+Test: tests/binary.rs (post_merge_review_creates_worktree_and_runs_tester_then_reviewers)
+
+WHEN `factory work attempt run <work-item-id> <attempt-id>` is invoked
+for a review-only Attempt whose workspace is the source checkout (`.`)
+with planned review Tasks,
+THE SYSTEM SHALL run the planned review Tasks serially because reviewers
+share the source checkout under the restorative guard.
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop runs planned review Tasks)
 
 WHEN the planned review-task count for a round exceeds the configured
@@ -707,9 +730,10 @@ Untestable: Requires detached process spawn with debounce timing and queue file 
 WHEN `factory work post-merge-review run` runs,
 THE SYSTEM SHALL sleep the debounce window, then for each target
 branch with a queued entry at least `debounce_seconds` old, run a
-review-only Attempt against the target branch's current HEAD using
-the full reviewer set, and clear processed queue entries.
-Untestable: Requires end-to-end post-merge runner with debounce sleep and LLM reviewer set
+review-only Attempt inside the review-only worktree for that branch
+at the queued merged commit, using a Tester Task scheduled before the
+full reviewer set, and clear processed queue entries.
+Test: tests/binary.rs (post_merge_review_creates_worktree_and_runs_tester_then_reviewers)
 
 WHEN multiple merges arrive for the same target branch within the
 debounce window,
@@ -728,27 +752,14 @@ The auto-merge spawns its own detached post-merge review with
 `FACTORY_MAX_POST_MERGE_REVIEW_FIX_DEPTH` (default 5).
 Untestable: Requires end-to-end post-merge review with LLM reviewers, auto-fix, and recursive depth tracking
 
-WHEN the post-merge review runner spawns a review-only Attempt
-against the source checkout for a synthetic `post-merge-<branch>-<short>`
-Work Item,
-THE SYSTEM SHALL apply a non-restoring guard that checks
-source-HEAD-still-matches-the-merged-commit on completion but does
-NOT snapshot or restore non-Factory worktree changes or protected
-`.factory/` file contents.
-Test: tests/binary.rs (post_merge_review_guard_allows_source_changes)
-Test: tests/binary.rs (post_merge_review_guard_allows_factory_state_changes)
-Test: tests/binary.rs (post_merge_review_preflight_allows_non_factory_worktree_changes)
-Test: src/work_task_executor.rs (post_merge_source_guard_finish_succeeds_with_worktree_edits)
-Test: src/work_task_executor.rs (post_merge_source_guard_finish_succeeds_with_factory_mutations)
-
-WHEN the source HEAD moves during a post-merge review (e.g., the
-user lands another merge concurrently),
-THE SYSTEM SHALL mark the review tasks failed with a clear error
-explaining the source HEAD changed, leave the merged-commit's queue
-entry in place so the next post-merge runner can re-attempt, and
-SHALL NOT attempt to restore the head.
-Test: tests/binary.rs (post_merge_review_guard_fails_when_head_moves)
-Test: src/work_task_executor.rs (post_merge_source_guard_finish_fails_when_head_moves)
+WHEN the post-merge review runner creates a review-only Attempt for a
+queued entry,
+THE SYSTEM SHALL set every Task's workspace to the review-only worktree
+for the target branch (`../work-review-<sanitized-branch>/`) and schedule
+a Tester Task before the review Tasks; the work-attempt loop ensures the
+worktree exists at the queued merged commit before the Tester runs.
+Test: tests/binary.rs (post_merge_review_creates_worktree_and_runs_tester_then_reviewers)
+Test: src/work_model.rs (post_merge_review_attempt_round_trips_through_storage)
 
 WHEN `factory work review-codebase` is invoked interactively by the
 user against the current source checkout,
@@ -760,11 +771,10 @@ Test: tests/binary.rs (work_attempt_run_review_only_rejects_source_changes)
 Test: tests/binary.rs (work_attempt_run_review_only_rejects_factory_state_changes)
 Test: tests/binary.rs (work_attempt_run_review_only_restores_mixed_source_and_factory_changes)
 
-WHEN a reviewer task running under either guard variant modifies a
-file inside its allowed reviewer artifact directory,
-THE SYSTEM SHALL leave that change in place (artifact directories
-are the reviewer's writable surface, unchanged from today).
-Test: tests/binary.rs (post_merge_review_guard_passes_clean_review)
+WHEN a reviewer task modifies a file inside its allowed reviewer
+artifact directory,
+THE SYSTEM SHALL leave that change in place (artifact directories are
+the reviewer's writable surface, unchanged from today).
 Test: tests/binary.rs (work_attempt_run_review_only_passes_without_merge_candidate)
 
 IF the post-merge review's review-only Attempt completes with at
@@ -789,6 +799,106 @@ THEN THE SYSTEM SHALL log the failure to the post-merge review log
 and leave the synthetic Work Item state intact so an operator can
 inspect the findings manually.
 Untestable: Requires storage write failure injection during post-merge forward-fix creation
+
+WHEN the work-attempt loop starts a review-only Attempt whose workspace
+is a review-only worktree and that worktree does not yet exist on disk,
+THE SYSTEM SHALL create it as a sibling Git worktree at
+`../work-review-<sanitized-branch>/` checked out detached at the recorded
+candidate commit before the Tester Task runs.
+Test: tests/binary.rs (post_merge_review_creates_worktree_and_runs_tester_then_reviewers)
+
+WHEN the work-attempt loop starts a review-only Attempt whose workspace
+is a review-only worktree and that worktree already exists,
+THE SYSTEM SHALL sync it to the recorded candidate commit (`git checkout
+--detach <commit>` and `git reset --hard <commit>`) before the Tester
+Task runs, reusing the existing directory rather than recreating it.
+Test: tests/binary.rs (post_merge_review_creates_worktree_and_runs_tester_then_reviewers)
+
+IF the existing review-only worktree has uncommitted tracked changes
+when the work-attempt loop tries to sync it,
+THEN THE SYSTEM SHALL reset it (`git reset --hard && git clean -fdx`)
+before checking out the recorded candidate commit.
+Untestable: Requires the worktree to be left in a dirty state between Attempts; covered by inspection of `src/review_only_worktree.rs::sync`
+
+WHEN a review-only Attempt completes,
+THE SYSTEM SHALL retain its review-only worktree on disk so that the
+next review-only Attempt targeting the same branch reuses the warm cache
+of build outputs inside it.
+Test: tests/binary.rs (post_merge_review_creates_worktree_and_runs_tester_then_reviewers)
+
+WHEN a review-only Attempt with a planned Tester Task is started,
+THE WORK-ATTEMPT LOOP SHALL run the Tester Task to completion, then plan
+and run the review Tasks regardless of the Tester Task's outcome (each
+reviewer receives the Tester's `tester-results.json` as an input
+artifact).
+Test: tests/binary.rs (post_merge_review_creates_worktree_and_runs_tester_then_reviewers)
+Test: src/work_model.rs (post_merge_review_attempt_round_trips_through_storage)
+
+WHEN a review Task in a review-only Attempt is about to run,
+THE SYSTEM SHALL pre-populate the reviewer's artifact directory with
+copies of the workspace's existing build outputs (using the same warm-
+cache mechanism that candidate-review uses) so the reviewer can run
+ephemeral verification builds without contending with peer reviewers or
+mutating the workspace.
+Untestable: Requires a candidate workspace with a detected toolchain build directory at review time; mechanism is the same as `prepare_reviewer_build_cache` for candidate-review.
+
+WHEN `factory work attempt run <work-item-id> <attempt-id>` is invoked
+for a review-only Attempt whose review-only worktree is already in use
+by another in-flight review-only Attempt (state-based detection: any
+review-only-like Attempt against the same worktree whose status is
+`executing` or `reviewing`),
+THE SYSTEM SHALL exit non-zero with an error message naming the
+in-flight Work Item and Attempt, and SHALL leave both Attempts' stored
+states unchanged.
+Test: tests/binary.rs (work_attempt_run_rejects_review_only_worktree_already_in_flight)
+
+WHILE a review-only Attempt is being processed against the review-only
+worktree for a target branch,
+THE POST-MERGE REVIEW SUBPROCESS SHALL skip any queued entry whose
+target branch maps to that worktree, leaving the entry in the queue for
+the next pass.
+Test: tests/binary.rs (post_merge_review_defers_queue_entry_when_worktree_in_flight)
+
+WHEN `factory work review-only-worktree prune` is invoked without
+options,
+THE SYSTEM SHALL remove every registered review-only worktree
+(`../work-review-*`) whose corresponding local branch no longer exists,
+and SHALL leave others in place.
+Test: tests/binary.rs (review_only_worktree_prune_default_removes_orphan_keeps_others)
+
+WHEN `factory work review-only-worktree prune --all` is invoked,
+THE SYSTEM SHALL remove every registered review-only worktree present,
+regardless of whether the corresponding branch still exists.
+Test: tests/binary.rs (review_only_worktree_prune_all_removes_everything_but_in_use)
+
+IF `factory work review-only-worktree prune` would remove a review-only
+worktree currently in use by an in-flight review-only Attempt,
+THEN THE SYSTEM SHALL skip that worktree and continue with the others,
+printing a notice naming the in-flight Work Item and Attempt.
+Test: tests/binary.rs (review_only_worktree_prune_default_removes_orphan_keeps_others)
+Test: tests/binary.rs (review_only_worktree_prune_all_removes_everything_but_in_use)
+
+WHEN `factory work review-only-worktree prune --dry-run` is invoked
+(with or without `--all`),
+THE SYSTEM SHALL report the worktrees that would be removed and any
+that would be skipped (with reasons) without actually removing any, and
+SHALL exit successfully.
+Test: tests/binary.rs (review_only_worktree_prune_dry_run_changes_nothing)
+
+WHEN `factory work review-only-worktree prune` completes (in any mode),
+THE SYSTEM SHALL print a summary line counting removed, skipped-in-use,
+and kept worktrees.
+Test: tests/binary.rs (review_only_worktree_prune_default_removes_orphan_keeps_others)
+Test: tests/binary.rs (review_only_worktree_prune_all_removes_everything_but_in_use)
+Test: tests/binary.rs (review_only_worktree_prune_dry_run_changes_nothing)
+
+WHEN `factory work post-merge-review run` starts a pass,
+THE SYSTEM SHALL prune orphan review-only worktrees (the same default
+mode the manual `factory work review-only-worktree prune` command
+uses, including the "skip if in use" rule) before processing queued
+entries, and log removed and skipped paths to the post-merge review
+log.
+Test: tests/binary.rs (post_merge_review_auto_prunes_orphan_worktree_before_processing_queue)
 
 WHEN `factory cleanup` runs and finds a sibling directory matching
 `../review-<bytelen>-<work-item-id>-<attempt-id>-<reviewer>` whose

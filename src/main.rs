@@ -422,6 +422,7 @@ fn cmd_work(
         WorkCommands::ReviewCodebase {
             work_item_id,
             attempt_id,
+            from_working_tree,
         } => {
             let mut item = match store.read_work_item(&work_item_id) {
                 Ok(item) => item,
@@ -439,10 +440,16 @@ fn cmd_work(
                 review::REVIEWERS,
                 source_ref,
                 source_commit,
+                from_working_tree,
             )?;
             store.write_work_item(&item)?;
+            let variant = if from_working_tree {
+                "source checkout"
+            } else {
+                "per-branch worktree"
+            };
             println!(
-                "Created review-only Attempt {attempt_id} with {} review Tasks",
+                "Created review-only Attempt {attempt_id} against {variant} with {} task(s)",
                 task_ids.len()
             );
             for task_id in task_ids {
@@ -683,6 +690,70 @@ fn cmd_work(
                 }
                 for error in &outcome.errors {
                     eprintln!("  error: {error}");
+                }
+            }
+        },
+        WorkCommands::ReviewOnlyWorktree { command } => match command {
+            cli::WorkReviewOnlyWorktreeCommands::Prune { all, dry_run } => {
+                let store = WorkModelStore::new(project_root);
+                let report = factory::review_only_worktree::prune(
+                    &store,
+                    project_root,
+                    factory::review_only_worktree::PruneOptions { all, dry_run },
+                )?;
+                let mut removed = 0_usize;
+                let mut skipped_in_use = 0_usize;
+                let mut would_remove = 0_usize;
+                let mut would_skip_in_use = 0_usize;
+                let mut skipped_not_orphan = 0_usize;
+                for entry in &report.entries {
+                    match entry {
+                        factory::review_only_worktree::PruneEntry::Removed { path } => {
+                            removed += 1;
+                            println!("  removed   {}", path.display());
+                        }
+                        factory::review_only_worktree::PruneEntry::SkippedInUse {
+                            path,
+                            in_flight,
+                        } => {
+                            skipped_in_use += 1;
+                            println!(
+                                "  in-use    {} (Work Item {:?} Attempt {:?})",
+                                path.display(),
+                                in_flight.work_item_id,
+                                in_flight.attempt_id
+                            );
+                        }
+                        factory::review_only_worktree::PruneEntry::SkippedNotOrphan { path } => {
+                            skipped_not_orphan += 1;
+                            println!("  keep      {}", path.display());
+                        }
+                        factory::review_only_worktree::PruneEntry::WouldRemove { path } => {
+                            would_remove += 1;
+                            println!("  would-remove   {}", path.display());
+                        }
+                        factory::review_only_worktree::PruneEntry::WouldSkipInUse {
+                            path,
+                            in_flight,
+                        } => {
+                            would_skip_in_use += 1;
+                            println!(
+                                "  would-skip-in-use   {} (Work Item {:?} Attempt {:?})",
+                                path.display(),
+                                in_flight.work_item_id,
+                                in_flight.attempt_id
+                            );
+                        }
+                    }
+                }
+                if dry_run {
+                    println!(
+                        "Summary: would remove {would_remove}, would skip in-use {would_skip_in_use}, keep {skipped_not_orphan}"
+                    );
+                } else {
+                    println!(
+                        "Summary: removed {removed}, skipped in-use {skipped_in_use}, kept {skipped_not_orphan}"
+                    );
                 }
             }
         },

@@ -70,7 +70,7 @@ assert_fails() {
 }
 
 run_review_codebase() {
-  "$FACTORY_BIN" work review-codebase work-1 attempt-review
+  "$FACTORY_BIN" work review-codebase work-1 attempt-review --from-working-tree
 }
 
 run_attempt_loop() {

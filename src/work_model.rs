@@ -243,9 +243,56 @@ impl WorkItem {
         roles: &[&str],
         source_ref: impl Into<String>,
         source_commit: impl Into<String>,
+        from_working_tree: bool,
+    ) -> Result<Vec<String>, WorkModelError> {
+        let attempt_id = attempt_id.into();
+        let source_ref = source_ref.into();
+        let source_commit = source_commit.into();
+        if from_working_tree {
+            self.append_review_only_source_checkout_attempt(
+                attempt_id,
+                roles,
+                source_ref,
+                source_commit,
+            )
+        } else {
+            self.append_review_only_worktree_attempt(
+                attempt_id,
+                AttemptKind::ReviewOnly,
+                roles,
+                source_ref,
+                source_commit,
+            )
+        }
+    }
+
+    pub fn add_post_merge_review_attempt(
+        &mut self,
+        attempt_id: impl Into<String>,
+        roles: &[&str],
+        source_ref: impl Into<String>,
+        source_commit: impl Into<String>,
+    ) -> Result<Vec<String>, WorkModelError> {
+        let attempt_id = attempt_id.into();
+        let source_ref = source_ref.into();
+        let source_commit = source_commit.into();
+        self.append_review_only_worktree_attempt(
+            attempt_id,
+            AttemptKind::PostMergeReview,
+            roles,
+            source_ref,
+            source_commit,
+        )
+    }
+
+    fn append_review_only_source_checkout_attempt(
+        &mut self,
+        attempt_id: String,
+        roles: &[&str],
+        source_ref: String,
+        source_commit: String,
     ) -> Result<Vec<String>, WorkModelError> {
         self.ensure_not_abandoned()?;
-        let attempt_id = attempt_id.into();
         validate_id("work item", &self.id)?;
         validate_id("attempt", &attempt_id)?;
         if self.attempts.iter().any(|attempt| attempt.id == attempt_id) {
@@ -256,8 +303,6 @@ impl WorkItem {
             id: "source".to_string(),
             path: ".".to_string(),
         };
-        let source_ref = source_ref.into();
-        let source_commit = source_commit.into();
         let review_task_instructions = self.write_task_instructions();
         let mut task_ids = Vec::new();
         let mut tasks = Vec::new();
@@ -310,15 +355,16 @@ impl WorkItem {
         Ok(task_ids)
     }
 
-    pub fn add_post_merge_review_attempt(
+    fn append_review_only_worktree_attempt(
         &mut self,
-        attempt_id: impl Into<String>,
+        attempt_id: String,
+        kind: AttemptKind,
         roles: &[&str],
-        source_ref: impl Into<String>,
-        source_commit: impl Into<String>,
+        source_ref: String,
+        source_commit: String,
     ) -> Result<Vec<String>, WorkModelError> {
+        debug_assert!(kind.is_review_only_like(), "kind must be review-only-like");
         self.ensure_not_abandoned()?;
-        let attempt_id = attempt_id.into();
         validate_id("work item", &self.id)?;
         validate_id("attempt", &attempt_id)?;
         if self.attempts.iter().any(|attempt| attempt.id == attempt_id) {
@@ -327,17 +373,52 @@ impl WorkItem {
 
         let source = WorkspaceRef {
             id: "source".to_string(),
-            path: ".".to_string(),
+            path: crate::review_only_worktree::review_only_worktree_path(&source_ref),
         };
-        let source_ref = source_ref.into();
-        let source_commit = source_commit.into();
         let review_task_instructions = self.write_task_instructions();
         let mut task_ids = Vec::new();
         let mut tasks = Vec::new();
+
+        let tester_task_id = format!("{attempt_id}-tester");
+        validate_id("task", &tester_task_id)?;
+        tasks.push(Task {
+            id: tester_task_id.clone(),
+            kind: TaskKind::Tester,
+            status: TaskStatus::Planned,
+            role: "tester".to_string(),
+            instructions: None,
+            work_item_id: self.id.clone(),
+            attempt_id: Some(attempt_id.clone()),
+            workspace_access: WorkspaceAccess::read_only(vec![source.clone()]),
+            artifact_area: Some(TaskArtifactArea {
+                path: work_artifact_path(&self.id, &attempt_id, &tester_task_id),
+            }),
+            review_context: Some(ReviewContext {
+                candidate_workspace_id: source.id.clone(),
+                candidate_workspace_path: source.path.clone(),
+                source_branch: source_ref.clone(),
+                candidate_commit: source_commit.clone(),
+            }),
+            input_artifacts: Vec::new(),
+            depends_on: None,
+            output: None,
+            created_at: Some(now_iso8601()),
+            started_at: None,
+            completed_at: None,
+        });
+        task_ids.push(tester_task_id.clone());
+
         for role in roles {
             validate_id("review role", role)?;
             let task_id = format!("{attempt_id}-review-{role}");
             validate_id("task", &task_id)?;
+            let tester_results_artifact = ArtifactRef {
+                producer_id: tester_task_id.clone(),
+                path: format!(
+                    "{}/tester-results.json",
+                    work_artifact_path(&self.id, &attempt_id, &tester_task_id)
+                ),
+            };
             tasks.push(Task {
                 id: task_id.clone(),
                 kind: TaskKind::Review,
@@ -356,8 +437,8 @@ impl WorkItem {
                     source_branch: source_ref.clone(),
                     candidate_commit: source_commit.clone(),
                 }),
-                input_artifacts: Vec::new(),
-                depends_on: None,
+                input_artifacts: vec![tester_results_artifact],
+                depends_on: Some(tester_task_id.clone()),
                 output: None,
                 created_at: Some(now_iso8601()),
                 started_at: None,
@@ -369,7 +450,7 @@ impl WorkItem {
         self.attempts.push(Attempt {
             id: attempt_id,
             work_item_id: self.id.clone(),
-            kind: AttemptKind::PostMergeReview,
+            kind,
             status: AttemptStatus::Reviewing,
             coder_mapping: CoderMapping::default(),
             tasks,
@@ -1076,8 +1157,16 @@ impl Attempt {
                 });
             }
         }
-        if self.kind.is_review_only_like() {
-            self.validate_review_only_shape(work_item_id)?;
+        match self.kind {
+            AttemptKind::ReviewOnly => {
+                if self.is_review_only_worktree_shape() {
+                    self.validate_review_only_worktree_shape(work_item_id)?;
+                } else {
+                    self.validate_review_only_source_checkout_shape(work_item_id)?;
+                }
+            }
+            AttemptKind::PostMergeReview => self.validate_review_only_worktree_shape(work_item_id)?,
+            AttemptKind::Write => {}
         }
         for task in &self.tasks {
             task.validate()?;
@@ -1096,7 +1185,20 @@ impl Attempt {
         Ok(())
     }
 
-    fn validate_review_only_shape(&self, work_item_id: &str) -> Result<(), WorkModelError> {
+    fn is_review_only_worktree_shape(&self) -> bool {
+        self.tasks
+            .first()
+            .and_then(|task| task.workspace_access.reads.first())
+            .map(|workspace| {
+                crate::review_only_worktree::is_review_only_worktree_workspace_path(&workspace.path)
+            })
+            .unwrap_or(false)
+    }
+
+    fn validate_review_only_source_checkout_shape(
+        &self,
+        work_item_id: &str,
+    ) -> Result<(), WorkModelError> {
         for task in &self.tasks {
             if task.kind != TaskKind::Review {
                 return Err(WorkModelError::ReviewOnlyAttemptInvalidTask {
@@ -1105,44 +1207,115 @@ impl Attempt {
                     field: "kind",
                 });
             }
-            if task.workspace_access.reads.len() != 1
-                || task.workspace_access.reads[0].id != "source"
-                || task.workspace_access.reads[0].path != "."
-            {
-                return Err(WorkModelError::ReviewOnlyAttemptInvalidTask {
-                    attempt_id: self.id.clone(),
-                    task_id: task.id.clone(),
-                    field: "workspace_access.reads",
-                });
+            self.validate_review_only_task_shape(work_item_id, task, ".")?;
+        }
+        Ok(())
+    }
+
+    fn validate_review_only_worktree_shape(
+        &self,
+        work_item_id: &str,
+    ) -> Result<(), WorkModelError> {
+        let expected_workspace_path = self
+            .tasks
+            .iter()
+            .find_map(|task| {
+                task.workspace_access
+                    .reads
+                    .first()
+                    .map(|workspace| workspace.path.clone())
+            })
+            .ok_or_else(|| WorkModelError::ReviewOnlyAttemptInvalidTask {
+                attempt_id: self.id.clone(),
+                task_id: String::new(),
+                field: "tasks",
+            })?;
+        if !crate::review_only_worktree::is_review_only_worktree_workspace_path(
+            &expected_workspace_path,
+        ) {
+            return Err(WorkModelError::ReviewOnlyAttemptInvalidTask {
+                attempt_id: self.id.clone(),
+                task_id: String::new(),
+                field: "workspace_access.reads",
+            });
+        }
+
+        let mut tester_count = 0;
+        let mut review_count = 0;
+        for task in &self.tasks {
+            match task.kind {
+                TaskKind::Tester => tester_count += 1,
+                TaskKind::Review => review_count += 1,
+                _ => {
+                    return Err(WorkModelError::ReviewOnlyAttemptInvalidTask {
+                        attempt_id: self.id.clone(),
+                        task_id: task.id.clone(),
+                        field: "kind",
+                    });
+                }
             }
-            let Some(review_context) = task.review_context.as_ref() else {
-                return Err(WorkModelError::ReviewOnlyAttemptInvalidTask {
-                    attempt_id: self.id.clone(),
-                    task_id: task.id.clone(),
-                    field: "review_context",
-                });
-            };
-            if review_context.candidate_workspace_id != "source"
-                || review_context.candidate_workspace_path != "."
-            {
-                return Err(WorkModelError::ReviewOnlyAttemptInvalidTask {
-                    attempt_id: self.id.clone(),
-                    task_id: task.id.clone(),
-                    field: "review_context.candidate_workspace",
-                });
-            }
-            let expected_artifact_path = work_artifact_path(work_item_id, &self.id, &task.id);
-            if task
-                .artifact_area
-                .as_ref()
-                .is_none_or(|area| area.path != expected_artifact_path)
-            {
-                return Err(WorkModelError::ReviewOnlyAttemptInvalidTask {
-                    attempt_id: self.id.clone(),
-                    task_id: task.id.clone(),
-                    field: "artifact_area.path",
-                });
-            }
+            self.validate_review_only_task_shape(work_item_id, task, &expected_workspace_path)?;
+        }
+        if tester_count != 1 {
+            return Err(WorkModelError::ReviewOnlyAttemptInvalidTask {
+                attempt_id: self.id.clone(),
+                task_id: String::new(),
+                field: "tester",
+            });
+        }
+        if review_count == 0 {
+            return Err(WorkModelError::ReviewOnlyAttemptInvalidTask {
+                attempt_id: self.id.clone(),
+                task_id: String::new(),
+                field: "review",
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_review_only_task_shape(
+        &self,
+        work_item_id: &str,
+        task: &Task,
+        expected_workspace_path: &str,
+    ) -> Result<(), WorkModelError> {
+        if task.workspace_access.reads.len() != 1
+            || task.workspace_access.reads[0].id != "source"
+            || task.workspace_access.reads[0].path != expected_workspace_path
+        {
+            return Err(WorkModelError::ReviewOnlyAttemptInvalidTask {
+                attempt_id: self.id.clone(),
+                task_id: task.id.clone(),
+                field: "workspace_access.reads",
+            });
+        }
+        let Some(review_context) = task.review_context.as_ref() else {
+            return Err(WorkModelError::ReviewOnlyAttemptInvalidTask {
+                attempt_id: self.id.clone(),
+                task_id: task.id.clone(),
+                field: "review_context",
+            });
+        };
+        if review_context.candidate_workspace_id != "source"
+            || review_context.candidate_workspace_path != expected_workspace_path
+        {
+            return Err(WorkModelError::ReviewOnlyAttemptInvalidTask {
+                attempt_id: self.id.clone(),
+                task_id: task.id.clone(),
+                field: "review_context.candidate_workspace",
+            });
+        }
+        let expected_artifact_path = work_artifact_path(work_item_id, &self.id, &task.id);
+        if task
+            .artifact_area
+            .as_ref()
+            .is_none_or(|area| area.path != expected_artifact_path)
+        {
+            return Err(WorkModelError::ReviewOnlyAttemptInvalidTask {
+                attempt_id: self.id.clone(),
+                task_id: task.id.clone(),
+                field: "artifact_area.path",
+            });
         }
         Ok(())
     }
@@ -3097,7 +3270,7 @@ mod tests {
             merge_candidates: Vec::new(),
         };
         work_item
-            .add_review_only_attempt("attempt-review", &["tests"], "main", "abc123")
+            .add_review_only_attempt("attempt-review", &["tests"], "main", "abc123", true)
             .unwrap();
         work_item
     }
@@ -3289,7 +3462,7 @@ mod tests {
         };
 
         let error = work_item
-            .add_review_only_attempt("attempt-review", &["tests"], "main", "abc123")
+            .add_review_only_attempt("attempt-review", &["tests"], "main", "abc123", true)
             .unwrap_err();
 
         assert!(matches!(error, WorkModelError::WorkItemAbandoned { .. }));
@@ -3820,7 +3993,7 @@ mod tests {
         };
 
         work_item
-            .add_review_only_attempt("attempt-review", &["skills"], "main", "abc123")
+            .add_review_only_attempt("attempt-review", &["skills"], "main", "abc123", true)
             .unwrap();
 
         let instructions = work_item.attempts[0].tasks[0]
@@ -4972,7 +5145,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let store = WorkModelStore::new(tmp.path());
         let mut item = WorkItem {
-            id: "work-pmr".to_string(),
+            id: "work-post-merge-review".to_string(),
             title: "Post-merge review".to_string(),
             planning_context: None,
             instructions: None,
@@ -4983,13 +5156,25 @@ mod tests {
         let task_ids = item
             .add_post_merge_review_attempt("attempt-1", &["skills", "tests"], "main", "abc123")
             .unwrap();
-        assert_eq!(task_ids.len(), 2);
+        assert_eq!(task_ids.len(), 3, "1 tester + 2 reviewers");
+        assert_eq!(task_ids[0], "attempt-1-tester");
         assert_eq!(item.attempts[0].kind, AttemptKind::PostMergeReview);
+        assert_eq!(item.attempts[0].tasks[0].kind, TaskKind::Tester);
+        assert_eq!(item.attempts[0].tasks[1].kind, TaskKind::Review);
+        assert_eq!(
+            item.attempts[0].tasks[1].depends_on.as_deref(),
+            Some("attempt-1-tester")
+        );
+        let worktree_path =
+            crate::review_only_worktree::review_only_worktree_path("main");
+        for task in &item.attempts[0].tasks {
+            assert_eq!(task.workspace_access.reads[0].path, worktree_path);
+        }
 
         store.create_work_item(&item).unwrap();
-        let loaded = store.read_work_item("work-pmr").unwrap();
+        let loaded = store.read_work_item("work-post-merge-review").unwrap();
         assert_eq!(loaded.attempts[0].kind, AttemptKind::PostMergeReview);
-        assert_eq!(loaded.attempts[0].tasks.len(), 2);
+        assert_eq!(loaded.attempts[0].tasks.len(), 3);
     }
 
     #[test]
@@ -5009,8 +5194,8 @@ mod tests {
     #[test]
     fn post_merge_review_attempt_validates_same_as_review_only() {
         let mut item = WorkItem {
-            id: "work-pmr".to_string(),
-            title: "PMR".to_string(),
+            id: "work-post-merge-review".to_string(),
+            title: "Post-merge review".to_string(),
             planning_context: None,
             instructions: None,
             abandonment: None,
