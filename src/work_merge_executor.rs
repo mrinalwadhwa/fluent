@@ -225,6 +225,7 @@ fn execute_merge(
         merged_at_unix: crate::post_merge_review::now_unix(),
         source_work_item_id: config.work_item_id.to_string(),
         source_merge_candidate_id: candidate.id.clone(),
+        base_commit: target_head_before.clone(),
     };
     if let Err(error) = crate::post_merge_review::queue_and_spawn(
         config.project_root,

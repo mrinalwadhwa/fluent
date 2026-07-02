@@ -246,6 +246,7 @@ fn work_model_store_preserves_task_append_order() {
         candidate_workspace_path: "../workspaces/candidate".to_string(),
         source_branch: "main".to_string(),
         candidate_commit: "abc123".to_string(),
+        base_commit: None,
     });
     work_item.attempts[0].tasks = vec![followup.clone(), review.clone()];
     work_item.attempts[0].status = AttemptStatus::Reviewing;

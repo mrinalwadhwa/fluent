@@ -262,6 +262,7 @@ impl WorkItem {
                 roles,
                 source_ref,
                 source_commit,
+                None,
             )
         }
     }
@@ -272,6 +273,7 @@ impl WorkItem {
         roles: &[&str],
         source_ref: impl Into<String>,
         source_commit: impl Into<String>,
+        base_commit: Option<String>,
     ) -> Result<Vec<String>, WorkModelError> {
         let attempt_id = attempt_id.into();
         let source_ref = source_ref.into();
@@ -282,6 +284,7 @@ impl WorkItem {
             roles,
             source_ref,
             source_commit,
+            base_commit,
         )
     }
 
@@ -327,6 +330,7 @@ impl WorkItem {
                     candidate_workspace_path: source.path.clone(),
                     source_branch: source_ref.clone(),
                     candidate_commit: source_commit.clone(),
+                    base_commit: None,
                 }),
                 input_artifacts: Vec::new(),
                 depends_on: None,
@@ -362,6 +366,7 @@ impl WorkItem {
         roles: &[&str],
         source_ref: String,
         source_commit: String,
+        base_commit: Option<String>,
     ) -> Result<Vec<String>, WorkModelError> {
         debug_assert!(kind.is_review_only_like(), "kind must be review-only-like");
         self.ensure_not_abandoned()?;
@@ -398,6 +403,7 @@ impl WorkItem {
                 candidate_workspace_path: source.path.clone(),
                 source_branch: source_ref.clone(),
                 candidate_commit: source_commit.clone(),
+                base_commit: base_commit.clone(),
             }),
             input_artifacts: Vec::new(),
             depends_on: None,
@@ -436,6 +442,7 @@ impl WorkItem {
                     candidate_workspace_path: source.path.clone(),
                     source_branch: source_ref.clone(),
                     candidate_commit: source_commit.clone(),
+                    base_commit: base_commit.clone(),
                 }),
                 input_artifacts: vec![tester_results_artifact],
                 depends_on: Some(tester_task_id.clone()),
@@ -568,6 +575,7 @@ impl WorkItem {
                     candidate_workspace_path: write_output.workspace_path.clone(),
                     source_branch: write_output.source_branch.clone(),
                     candidate_commit: write_output.commit.clone(),
+                    base_commit: None,
                 }),
                 input_artifacts: Vec::new(),
                 depends_on: None,
@@ -626,6 +634,7 @@ impl WorkItem {
                     candidate_workspace_path: write_output.workspace_path.clone(),
                     source_branch: write_output.source_branch.clone(),
                     candidate_commit: write_output.commit.clone(),
+                    base_commit: None,
                 }),
                 input_artifacts: task_input_artifacts,
                 depends_on: Some(tester_task_id.clone()),
@@ -1610,6 +1619,8 @@ pub struct ReviewContext {
     pub candidate_workspace_path: String,
     pub source_branch: String,
     pub candidate_commit: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
 }
 
 /// Durable output produced by a completed task.
@@ -3233,6 +3244,7 @@ mod tests {
             candidate_workspace_path: "/workspaces/candidate".to_string(),
             source_branch: "main".to_string(),
             candidate_commit: "abc123".to_string(),
+            base_commit: None,
         });
         Task {
             id: "task-1".to_string(),
@@ -3590,6 +3602,7 @@ mod tests {
                 candidate_workspace_path: "/workspaces/candidate".to_string(),
                 source_branch: "main".to_string(),
                 candidate_commit: "abc123".to_string(),
+                base_commit: None,
             }),
             input_artifacts: Vec::new(),
             depends_on: Some("attempt-1-behavior-tests".to_string()),
@@ -3967,6 +3980,7 @@ mod tests {
             candidate_workspace_path: "/workspaces/other".to_string(),
             source_branch: "main".to_string(),
             candidate_commit: "abc123".to_string(),
+            base_commit: None,
         });
 
         assert_eq!(
@@ -4374,6 +4388,7 @@ mod tests {
                             candidate_workspace_path: "/workspaces/candidate".to_string(),
                             source_branch: "main".to_string(),
                             candidate_commit: "commit-initial".to_string(),
+                            base_commit: None,
                         }),
                         input_artifacts: Vec::new(),
                         depends_on: None,
@@ -4400,6 +4415,7 @@ mod tests {
                             candidate_workspace_path: "/workspaces/candidate".to_string(),
                             source_branch: "main".to_string(),
                             candidate_commit: "commit-initial".to_string(),
+                            base_commit: None,
                         }),
                         input_artifacts: Vec::new(),
                         depends_on: None,
@@ -4902,6 +4918,7 @@ mod tests {
                             candidate_workspace_path: "/workspaces/candidate".to_string(),
                             source_branch: "main".to_string(),
                             candidate_commit: "commit-initial".to_string(),
+                            base_commit: None,
                         }),
                         input_artifacts: Vec::new(),
                         depends_on: None,
@@ -5154,7 +5171,13 @@ mod tests {
             merge_candidates: Vec::new(),
         };
         let task_ids = item
-            .add_post_merge_review_attempt("attempt-1", &["skills", "tests"], "main", "abc123")
+            .add_post_merge_review_attempt(
+                "attempt-1",
+                &["skills", "tests"],
+                "main",
+                "abc123",
+                None,
+            )
             .unwrap();
         assert_eq!(task_ids.len(), 3, "1 tester + 2 reviewers");
         assert_eq!(task_ids[0], "attempt-1-tester");
@@ -5202,7 +5225,7 @@ mod tests {
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
-        item.add_post_merge_review_attempt("attempt-1", &["skills"], "main", "abc123")
+        item.add_post_merge_review_attempt("attempt-1", &["skills"], "main", "abc123", None)
             .unwrap();
 
         let attempt = &mut item.attempts[0];

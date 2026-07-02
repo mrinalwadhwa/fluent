@@ -23,6 +23,7 @@ Read:
 - The approved brief from the active planning conversation or draft artifact — the normal source of intent before `factory work create` stores Work Item planning context
 - Work Item planning context from `factory work show <work-item-id>` only when the Work Item already exists
 - `documentation/behaviors.md` — what the system already does
+- `.factory/expertise/decisions.md` (if it exists) — recorded project-accepted choices; behaviors declared here must not contradict them
 - Relevant code in the areas the brief describes
 
 Understand the gap between what exists and what the brief asks for. Identify unknowns from the brief that need resolution.
@@ -153,6 +154,7 @@ THE SYSTEM SHALL [observable behavior]
 - **Observable, not internal.** Every behavior describes something a user or external system can observe.
 - **No implementation.** Do not specify technologies, libraries, or architecture. That belongs in design-approach.
 - **Incremental.** The behaviors extend `documentation/behaviors.md`. Do not restate what already exists. Reference existing behaviors when new ones depend on them.
+- **Don't contradict recorded decisions.** If a proposed behavior contradicts a recorded decision, revise the behavior or surface the conflict for the user to resolve. Do not silently declare contradicting behaviors.
 - **Don't over-specify implicit behavior.** Conventions are implicit. Only call them out when ambiguous or when the project departs from convention.
 - **Flag what you added.** If you derive a behavior not in the brief, say so. Let the user confirm or reject.
 - **Testable.** Each behavior should suggest how to verify it. If you can't imagine a test, the behavior is too vague. Each EARS statement in `documentation/behaviors.md` must have either a `Test:` reference naming the test that verifies it or an `Untestable:` marker with a one-line reason explaining why it genuinely cannot be tested.

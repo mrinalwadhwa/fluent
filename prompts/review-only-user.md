@@ -19,25 +19,30 @@ Review the codebase at {{candidate_workspace_path}}.
 1. Use the Brief to decide what to look at.
 {{#if review_diff_command}}
 2. Run the review diff command (`{{review_diff_command}}`) to see the change that triggered this review.
-3. Survey breadth-first before going deep.
 {{else}}
-2. Survey breadth-first before going deep.
+2. Read the areas the Brief names first, then follow their dependencies outward.
 {{/if}}
 
 ## Phase 3 — Review the codebase and write the report
 
 1. Read the review-{{role}} skill at {{skill_path}} and apply it to evaluate the codebase.
-2. Consult expertise files relevant to your role's work.
-3. Identify findings — concerns about the codebase from a {{role}} perspective.
+2. Identify findings — concerns from your {{role}} review perspective.
    - List each finding as `- [ ]`.
+3. Determine the overall Verdict:
+   - `pass` — no findings.
+   - `fail` — at least one finding.
 4. Write your review report to {{review_path}}. Format:
 
     ```
+    Verdict: <pass | fail>
+
     ## Findings
 
     - [ ] <short title>
       - <what's wrong, where, why it matters, how it could be addressed>
     ```
+
+If you found nothing, still write the file with `Verdict: pass` and an empty `## Findings` section.
 
 The Task completes when the review report exists at {{review_path}}.
 

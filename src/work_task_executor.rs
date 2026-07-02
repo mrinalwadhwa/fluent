@@ -1699,18 +1699,25 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
     // Decisions: split into decisions_path (or empty).
     let decisions_path = decisions_path(input.readable_workspaces);
 
-    // Review-diff command is only meaningful when not review_only.
+    // For write reviews, always include the diff command using source_branch..candidate_commit.
+    // For review-only, include one only when review_context.base_commit is set (post-merge review):
+    // <base_commit>..HEAD shows the change that landed and triggered this review.
+    let candidate_workspace = task
+        .workspace_access
+        .reads
+        .iter()
+        .zip(input.readable_workspaces.iter())
+        .find(|(workspace, _)| workspace.id == review_context.candidate_workspace_id)
+        .map(|(_, resolved_path)| resolved_path.as_path())
+        .unwrap_or_else(|| Path::new(&review_context.candidate_workspace_path));
     let review_diff_command = if input.review_only {
-        String::new()
+        match review_context.base_commit.as_deref() {
+            Some(base) if !base.is_empty() => {
+                render_review_diff_command(candidate_workspace, &format!("{base}..HEAD"))
+            }
+            _ => String::new(),
+        }
     } else {
-        let candidate_workspace = task
-            .workspace_access
-            .reads
-            .iter()
-            .zip(input.readable_workspaces.iter())
-            .find(|(workspace, _)| workspace.id == review_context.candidate_workspace_id)
-            .map(|(_, resolved_path)| resolved_path.as_path())
-            .unwrap_or_else(|| Path::new(&review_context.candidate_workspace_path));
         let review_range = format!(
             "{}..{}",
             review_context.source_branch, review_context.candidate_commit
@@ -2518,6 +2525,93 @@ mod tests {
                 "diff".to_string(),
                 "main..abc123".to_string(),
             ],
+        );
+    }
+
+    fn post_merge_review_item(base_commit: Option<String>) -> WorkItem {
+        let mut item = WorkItem {
+            id: "work-post-merge".to_string(),
+            title: "Post-merge review of main".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_post_merge_review_attempt(
+            "attempt-1",
+            &["tests"],
+            "main",
+            "merged-commit-abc",
+            base_commit,
+        )
+        .unwrap();
+        item
+    }
+
+    #[test]
+    fn work_review_prompt_populates_diff_command_for_post_merge_when_base_commit_present() {
+        let item = post_merge_review_item(Some("pre-merge-xyz".to_string()));
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path().join("work-review-main");
+        let skill_dir = workspace.join("skills/review-tests");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), "test skill").unwrap();
+        let review_path = tmp.path().join("review.md");
+        let prompts = build_work_review_prompts(WorkReviewPromptInput {
+            item: &item,
+            attempt_id: "attempt-1",
+            task_id: "attempt-1-review-tests",
+            project_root: tmp.path(),
+            artifact_dir: tmp.path(),
+            review_path: &review_path,
+            readable_workspaces: std::slice::from_ref(&workspace),
+            input_artifacts: &[],
+            review_only: true,
+        })
+        .unwrap();
+
+        let command = prompts
+            .review_prompt
+            .lines()
+            .find_map(|line| {
+                let prefix = "2. Run the review diff command (`";
+                let suffix = "`) to see the change that triggered this review.";
+                line.strip_prefix(prefix)?.strip_suffix(suffix)
+            })
+            .expect("post-merge review prompt should render diff command with base_commit..HEAD");
+
+        assert_eq!(
+            command,
+            render_review_diff_command(&workspace, "pre-merge-xyz..HEAD")
+        );
+    }
+
+    #[test]
+    fn work_review_prompt_omits_diff_command_for_review_only_without_base_commit() {
+        let item = post_merge_review_item(None);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path().join("work-review-main");
+        let skill_dir = workspace.join("skills/review-tests");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), "test skill").unwrap();
+        let review_path = tmp.path().join("review.md");
+        let prompts = build_work_review_prompts(WorkReviewPromptInput {
+            item: &item,
+            attempt_id: "attempt-1",
+            task_id: "attempt-1-review-tests",
+            project_root: tmp.path(),
+            artifact_dir: tmp.path(),
+            review_path: &review_path,
+            readable_workspaces: std::slice::from_ref(&workspace),
+            input_artifacts: &[],
+            review_only: true,
+        })
+        .unwrap();
+
+        assert!(
+            !prompts.review_prompt.contains("Run the review diff command"),
+            "review-only without base_commit should skip the diff step"
         );
     }
 

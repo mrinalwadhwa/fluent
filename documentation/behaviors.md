@@ -761,6 +761,19 @@ worktree exists at the queued merged commit before the Tester runs.
 Test: tests/binary.rs (post_merge_review_creates_worktree_and_runs_tester_then_reviewers)
 Test: src/work_model.rs (post_merge_review_attempt_round_trips_through_storage)
 
+WHEN a merge lands on a target branch, the merge executor SHALL record
+the target branch's head commit immediately before the merge on the
+post-merge review queue entry as the `base_commit`; when the post-merge
+review runner creates the review-only Attempt from that queue entry, it
+SHALL thread the `base_commit` onto each Task's review context, and the
+review prompt SHALL then include a `git -C <worktree> diff
+<base_commit>..HEAD` review diff command so reviewers can inspect exactly
+the change that landed and triggered the review. Review-only Attempts
+without a `base_commit` (e.g., `factory work review-codebase`) SHALL omit
+the review diff command from the prompt.
+Test: src/work_task_executor.rs (work_review_prompt_populates_diff_command_for_post_merge_when_base_commit_present)
+Test: src/work_task_executor.rs (work_review_prompt_omits_diff_command_for_review_only_without_base_commit)
+
 WHEN `factory work review-codebase` is invoked interactively by the
 user against the current source checkout,
 THE SYSTEM SHALL apply the existing restorative guard semantics:

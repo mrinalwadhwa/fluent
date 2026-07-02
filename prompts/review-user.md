@@ -20,7 +20,7 @@ The Writer's workspace and commits:
 6. Read recorded decisions at {{decisions_path}} — project-accepted choices not to flag in findings.
 {{/if}}
 {{#if has_prior_reviews}}
-7. Read each prior review file. The list below is the complete set from the most recent prior round: {{prior_reviews_list}}
+7. Read each prior review file. The list below is the complete set of {{role}} reviews from the most recent prior round: {{prior_reviews_list}}
 {{/if}}
 
 ## Phase 2 — Inspect the candidate
@@ -32,18 +32,20 @@ The Writer's workspace and commits:
 ## Phase 3 — Review and write the review report
 
 1. Read the review-{{role}} skill at {{skill_path}} and apply it to evaluate the candidate.
-2. Consult expertise files relevant to your role's work.
-3. Identify findings — concerns the Writer should address.
+2. Identify findings — concerns the Writer should address.
    {{#if has_prior_reviews}}
-   - Carry forward each finding from prior review(s). Mark `- [x]` if the Writer addressed it; `- [ ]` if not. For partial credit, mark `- [ ]` and add "(partial — what's still incomplete)" to the title.
+   - For each finding in the prior reviews you read in Phase 1, mark `- [x]` if the Writer addressed it; `- [ ]` if not. For partial credit, mark `- [ ]` and add "(partial — what's still incomplete)" to the title.
    - Add any new finding you identified as `- [ ]`.
    {{else}}
    - List each finding as `- [ ]`.
    {{/if}}
+3. Tag each `- [ ]` finding with severity in its title:
+   - `(blocking)` — must be addressed before the Writer's changes can land.
+   - `(minor)` — should be addressed but doesn't block landing.
 4. Determine the overall Verdict:
-   - `pass` — no `- [ ]` findings, or only minor / non-blocking ones
-   - `fail` — at least one blocking `- [ ]` finding
-   - `uncertain` — you're not confident; surface for human or other-reviewer judgment
+   - `pass` — no `- [ ] (blocking)` findings.
+   - `fail` — at least one `- [ ] (blocking)` finding.
+   - `uncertain` — you're not confident; surface for human or other-reviewer judgment.
 5. Write your review report to {{review_path}}. Format:
 
     ```
@@ -51,15 +53,20 @@ The Writer's workspace and commits:
 
     ## Findings
 
-    - [ ] <short title>
+    - [ ] <short title> (blocking)
+      - <what's wrong, where, why it matters, what would fix it>
+
+    - [ ] <short title> (minor)
       - <what's wrong, where, why it matters, what would fix it>
 
     - [x] <short title>
       - <why you consider this addressed in this round>
 
-    - [ ] <short title> (partial — what's still incomplete)
+    - [ ] <short title> (blocking, partial — what's still incomplete)
       - <what remains>
     ```
+
+If you found nothing, still write the file with `Verdict: pass` and an empty `## Findings` section.
 
 The Task completes when the review report exists at {{review_path}}.
 
@@ -78,5 +85,5 @@ Do not edit or commit in {{candidate_workspace_path}}. Multiple reviewers run ag
 {{#if decisions_path}}
 ### Do not flag against recorded decisions
 
-Do not flag findings that contradict a recorded decision.
+Do not flag findings that contradict a recorded decision. If a recorded decision conflicts with a declared behavior, mark Verdict `uncertain` and record the conflict as a finding.
 {{/if}}

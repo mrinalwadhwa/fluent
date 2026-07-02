@@ -57,6 +57,8 @@ pub struct QueueEntry {
     pub merged_at_unix: u64,
     pub source_work_item_id: String,
     pub source_merge_candidate_id: String,
+    #[serde(default)]
+    pub base_commit: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -362,11 +364,17 @@ fn review_one(project_root: &Path, entry: &QueueEntry) -> Result<PerBranchOutcom
         merge_candidates: Vec::new(),
     };
     let attempt_id = "attempt-1";
+    let base_commit = if entry.base_commit.is_empty() {
+        None
+    } else {
+        Some(entry.base_commit.clone())
+    };
     item.add_post_merge_review_attempt(
         attempt_id,
         review::REVIEWERS,
         &entry.target_branch,
         &entry.merged_commit,
+        base_commit,
     )
     .map_err(|e| anyhow::anyhow!("create post-merge review Attempt: {e}"))?;
     store
@@ -581,6 +589,7 @@ mod tests {
             merged_at_unix: 42,
             source_work_item_id: "work-1".into(),
             source_merge_candidate_id: "attempt-1-merge-candidate".into(),
+            base_commit: String::new(),
         };
         append_entry(tmp.path(), entry.clone()).unwrap();
         let queue = load_queue(tmp.path()).unwrap();
@@ -600,6 +609,7 @@ mod tests {
                 merged_at_unix: now,
                 source_work_item_id: "work-1".into(),
                 source_merge_candidate_id: "attempt-1-merge-candidate".into(),
+                base_commit: String::new(),
             },
         )
         .unwrap();
@@ -623,6 +633,7 @@ mod tests {
                     merged_at_unix: now - 5 + n,
                     source_work_item_id: format!("work-{n}"),
                     source_merge_candidate_id: format!("attempt-{n}-merge-candidate"),
+                    base_commit: String::new(),
                 },
             )
             .unwrap();
