@@ -33,6 +33,10 @@ The Writer's workspace and commits:
 
 1. Read the review-{{role}} skill at {{skill_path}} and apply it to evaluate the candidate.
 2. Identify findings — concerns the Writer should address.
+{{#if is_review_tests}}
+   - Verify `Untestable:` justifications from progress.md rather than accepting them at face value. Reasons like "trivial delegation" or "framework guarantee" are fair; "hard to set up" usually isn't.
+   - Each behavior in behaviors.md should have at least one test that verifies it. Flag behaviors without a verifying test.
+{{/if}}
    {{#if has_prior_reviews}}
    - For each finding in the prior reviews you read in Phase 1, mark `- [x]` if the Writer addressed it; `- [ ]` if not. For partial credit, mark `- [ ]` and add "(partial — what's still incomplete)" to the title.
    - Add any new finding you identified as `- [ ]`.

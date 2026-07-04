@@ -22,6 +22,7 @@
   - Run all suites after cross-system changes
   - Where to find failure logs
   - When tests fail for an unclear reason, instrument before guessing
+- Related guides
 - Patterns
 
 ## Why tests exist
@@ -190,6 +191,12 @@ Most test runners write per-case stdout and stderr to a known location after eac
 ### When tests fail for an unclear reason, instrument before guessing
 
 If you can't tell from the failure message why the test broke — a side effect appears in the wrong place, output differs subtly, a value is wrong — add one or two targeted print or log statements to the suspect code path (including test doubles). Re-run once and inspect the new evidence. This is cheaper than iterating on hypothetical fixes. Remove the instrumentation once you've understood the cause.
+
+## Related guides
+
+Topic-scoped guides for specific areas. Read what applies to the code you're writing or reviewing.
+
+- [terminal-ui](terminal-ui.md) — read when the code you're writing or reviewing is a terminal UI.
 
 ## Patterns
 

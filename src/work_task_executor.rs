@@ -1732,6 +1732,7 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
     } else {
         "yes"
     };
+    let is_review_tests_value = if task.role == "tests" { "yes" } else { "" };
 
     let review_path_display = input.review_path.display().to_string();
     let artifact_dir_display = input.artifact_dir.display().to_string();
@@ -1801,6 +1802,7 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
             ),
             ("skill_path", &skill_path),
             ("has_prior_reviews", reviewer_has_prior_reviews),
+            ("is_review_tests", is_review_tests_value),
             ("prior_reviews_list", &reviewer_prior_reviews_list),
             (
                 "candidate_workspace_path",
