@@ -1735,6 +1735,7 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
     let is_review_tests_value = if task.role == "tests" { "yes" } else { "" };
     let is_review_behaviors_value = if task.role == "behaviors" { "yes" } else { "" };
     let is_review_architecture_value = if task.role == "architecture" { "yes" } else { "" };
+    let is_review_documentation_value = if task.role == "documentation" { "yes" } else { "" };
 
     let review_path_display = input.review_path.display().to_string();
     let artifact_dir_display = input.artifact_dir.display().to_string();
@@ -1807,6 +1808,7 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
             ("is_review_tests", is_review_tests_value),
             ("is_review_behaviors", is_review_behaviors_value),
             ("is_review_architecture", is_review_architecture_value),
+            ("is_review_documentation", is_review_documentation_value),
             ("prior_reviews_list", &reviewer_prior_reviews_list),
             (
                 "candidate_workspace_path",

@@ -46,6 +46,9 @@ The Writer's workspace and commits:
    - Flag structural choices that diverge from what `approach.md` specifies. Do not re-litigate `approach.md` itself — that judgment lives with `define-approach`. If the approach is itself the problem, mark Verdict `uncertain` and record the concern as a finding.
    - Flag any structural decision the Writer made that isn't already in `decisions.md` and that a future contributor would want to know about.
 {{/if}}
+{{#if is_review_documentation}}
+   - Verify that user-facing docs read like polished prose, not a restated version of behaviors.md's EARS statements.
+{{/if}}
    {{#if has_prior_reviews}}
    - For each finding in the prior reviews you read in Phase 1, mark `- [x]` if the Writer addressed it; `- [ ]` if not. For partial credit, mark `- [ ]` and add "(partial — what's still incomplete)" to the title.
    - Add any new finding you identified as `- [ ]`.
