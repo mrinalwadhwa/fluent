@@ -42,6 +42,10 @@ The Writer's workspace and commits:
    - For each `Test:` reference, verify the matching entry in the `tests` array of tester-results.json has `status: pass`. A failed test or a missing reference is a finding.
    - If tester-results.json has a non-null `error` field, produce a single finding naming the error `kind` and `message` — don't flag individual behaviors when the test infrastructure itself failed.
 {{/if}}
+{{#if is_review_architecture}}
+   - Flag structural choices that diverge from what `approach.md` specifies. Do not re-litigate `approach.md` itself — that judgment lives with `define-approach`. If the approach is itself the problem, mark Verdict `uncertain` and record the concern as a finding.
+   - Flag any structural decision the Writer made that isn't already in `decisions.md` and that a future contributor would want to know about.
+{{/if}}
    {{#if has_prior_reviews}}
    - For each finding in the prior reviews you read in Phase 1, mark `- [x]` if the Writer addressed it; `- [ ]` if not. For partial credit, mark `- [ ]` and add "(partial — what's still incomplete)" to the title.
    - Add any new finding you identified as `- [ ]`.
