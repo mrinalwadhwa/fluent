@@ -1,48 +1,27 @@
 ---
 name: review-behaviors
-description: >
-  Behaviors completeness reviewer. Reads tester-results.json and the
-  behaviors increment to verify every new or changed EARS statement has
-  a Test: or Untestable: marker and every Test: reference passed.
-  Produces a verdict and findings.
+description: Reviews the quality and coherence of behavior statements. Use when reviewing behavior changes in a diff, checking a new or edited behavior statement, or auditing the behavior statements of a codebase.
 ---
 
-# Review Behaviors (completeness)
+## Purpose
 
-Verify that the candidate's behavior increment is complete: every EARS statement has test coverage or an explicit untestable marker, and every referenced test passed. You do not write or run tests — the Tester Task handles execution and produces `tester-results.json` before you run.
+Decide whether the behavior statements under review are fit to ship. Identify improvements that would make each statement more precise about what the system does, or the collection more coherent and complete as a whole.
 
----
+## Scope
 
-## How to run this skill
+The invoking layer decides what's in scope. For a diff-scoped review, that's the behavior statements changed in the diff. For a full-codebase audit, that's the entire set of behavior statements. Check each statement for quality and check the collection for coherence and completeness.
 
-### Phase 1 — Read inputs
+## Method
 
-Read:
+1. Read `references/behaviors.md` for behavior-writing standards.
 
-- `behaviors.md` (path in the user prompt's Phase 1) — the behavior increment to verify.
-- `tester-results.json` (path in the user prompt's Phase 2) — per-test statuses produced by the Tester Task.
+2. For each in-scope behavior statement:
+   - Verify it uses one of the six EARS patterns from `references/behaviors.md`. Statements without a recognized trigger (WHEN, WHILE, IF, WHERE) or without "the system shall" are hard to verify.
+   - Evaluate against the "Properties of a good behavior statement" and "What not to specify" sections in `references/behaviors.md`.
+   - Identify improvements.
 
-### Phase 2 — Verify
+3. Check the collection for coherence — vocabulary consistency, contradictions, coverage, and redundancy — using the "Coherence across behavior statements" section of `references/behaviors.md`.
 
-For each new or changed EARS statement in the behavior increment:
+4. For each improvement, decide if it blocks shipping. Statements that leak implementation, combine multiple behaviors, or lack a way to verify typically block. Style issues and minor phrasing don't.
 
-1. Verify it has either a `Test:` reference or an `Untestable:` marker. Missing either → finding.
-
-2. If it has a `Test:` reference, find the matching entry in the `tests` array of `tester-results.json`. Verify `status` is `pass`. If `fail`, include the `failure_excerpt` in your finding. If the test is not present in the array, the reference did not resolve to a real test → finding.
-
-3. If it has an `Untestable:` marker, verify the rationale is reasonable.
-
-If the JSON `error` field is non-null:
-
-- Verdict: `fail`.
-- Add a single finding naming the error `kind` and `message`.
-- Do not flag individual behaviors — the test infrastructure itself failed.
-
----
-
-## Rules
-
-- **Do not write or run tests.** The Tester Task handles execution. You verify completeness from its output.
-- **Do not read source code.** If documentation is insufficient to understand a behavior, report that as a finding.
-- **Every new EARS statement needs coverage.** Either a `Test:` reference that passed or an `Untestable:` marker with a reason.
-- **A non-null `error` field is a single finding.** When the test infrastructure failed, do not flag individual behaviors.
+The invoking layer may add checks in addition to those above.

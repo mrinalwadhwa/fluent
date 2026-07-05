@@ -37,6 +37,11 @@ The Writer's workspace and commits:
    - Verify `Untestable:` justifications from progress.md rather than accepting them at face value. Reasons like "trivial delegation" or "framework guarantee" are fair; "hard to set up" usually isn't.
    - Each behavior in behaviors.md should have at least one test that verifies it. Flag behaviors without a verifying test.
 {{/if}}
+{{#if is_review_behaviors}}
+   - Every new or changed EARS statement should have a `Test:` reference or `Untestable:` marker. Missing markers are gaps.
+   - For each `Test:` reference, verify the matching entry in the `tests` array of tester-results.json has `status: pass`. A failed test or a missing reference is a finding.
+   - If tester-results.json has a non-null `error` field, produce a single finding naming the error `kind` and `message` — don't flag individual behaviors when the test infrastructure itself failed.
+{{/if}}
    {{#if has_prior_reviews}}
    - For each finding in the prior reviews you read in Phase 1, mark `- [x]` if the Writer addressed it; `- [ ]` if not. For partial credit, mark `- [ ]` and add "(partial — what's still incomplete)" to the title.
    - Add any new finding you identified as `- [ ]`.
