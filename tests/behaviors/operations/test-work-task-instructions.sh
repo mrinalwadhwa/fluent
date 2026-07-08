@@ -154,7 +154,7 @@ test_attempt_copies_instructions_to_initial_write_task() {
   return $RESULT
 }
 
-test_task_run_uses_durable_instructions_and_keeps_extra_args_out_of_prompt() {
+test_task_run_keeps_extra_args_out_of_prompt() {
   setup_test_project
   create_work_item_with_instructions
   create_attempt
@@ -174,7 +174,7 @@ test_task_run_uses_durable_instructions_and_keeps_extra_args_out_of_prompt() {
   return $RESULT
 }
 
-test_attempt_run_uses_durable_instructions_and_keeps_extra_args_out_of_prompt() {
+test_attempt_run_keeps_extra_args_out_of_prompt() {
   setup_test_project
   create_work_item_with_instructions
   create_attempt
@@ -225,10 +225,10 @@ run_test "work create persists and shows instructions" \
   test_create_persists_instructions_and_show_displays_them
 run_test "attempt copies instructions to initial write Task" \
   test_attempt_copies_instructions_to_initial_write_task
-run_test "task run uses durable instructions and keeps extra args out of prompt" \
-  test_task_run_uses_durable_instructions_and_keeps_extra_args_out_of_prompt
-run_test "attempt run uses durable instructions and keeps extra args out of prompt" \
-  test_attempt_run_uses_durable_instructions_and_keeps_extra_args_out_of_prompt
+run_test "task run keeps extra args out of prompt" \
+  test_task_run_keeps_extra_args_out_of_prompt
+run_test "attempt run keeps extra args out of prompt" \
+  test_attempt_run_keeps_extra_args_out_of_prompt
 run_test "minimal Work Item keeps minimal prompt" \
   test_minimal_work_item_keeps_minimal_prompt
 
