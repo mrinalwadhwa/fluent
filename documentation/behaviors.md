@@ -3827,3 +3827,30 @@ transcript file SHALL be written by Tester (the existing reviewer
 and writer transcript paths are unaffected).
 Test: src/work_task_executor.rs (tester_task_does_not_spawn_coder_process)
 Test: src/work_task_executor.rs (tester_task_does_not_write_transcript)
+
+## Suite-health gate
+
+### B1
+
+WHEN the round's `tester-results.json` reports one or more Tester
+failures (tests with `status == "fail"`),
+THE SYSTEM SHALL NOT classify the round outcome as a Merge Candidate.
+Test: src/work_attempt_loop.rs (tester_failure_blocks_merge_candidate)
+
+### B2
+
+WHEN a round is blocked by a Tester failure and the write-round budget
+remains,
+THE SYSTEM SHALL schedule a follow-up write round with the failing
+Tester results as input; when the write-round budget is exhausted, it
+SHALL record `needs-user`.
+Test: src/work_attempt_loop.rs (tester_failure_routes_to_followup_within_budget)
+Test: src/work_attempt_loop.rs (tester_failure_records_needs_user_at_cap)
+
+### B3
+
+WHEN the round has no readable `tester-results.json` or it reports no
+Tester failures,
+THE SYSTEM SHALL leave the round outcome to the reviewer verdicts
+unchanged (the gate does not block).
+Test: src/work_attempt_loop.rs (passing_or_missing_tester_does_not_block)

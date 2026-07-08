@@ -166,9 +166,13 @@ reviewer set. After a follow-up write output completes it derives the
 next review roles from that Task's failed review input artifacts; when
 it cannot derive at least one role, it falls back to the full Work
 reviewer set. After a completed review round it interprets review
-artifacts with the review subsystem verdict parser. All pass marks the
-Attempt review state as passed, completes the Attempt, and creates or
-returns one durable Merge Candidate for later merge execution. The Merge
+artifacts with the review subsystem verdict parser and checks the
+round's `tester-results.json` for test failures — any test with
+`status == "fail"` blocks the Merge Candidate path (fail-open: a
+missing or unparseable results file does not block). All pass with no
+tester failures marks the Attempt review state as passed, completes
+the Attempt, and creates or returns one durable Merge Candidate for
+later merge execution. The Merge
 Candidate records the source candidate workspace, target workspace,
 source branch, target branch, candidate commit, and its own pending
 review state. When the same-invocation auto-continue budget permits
