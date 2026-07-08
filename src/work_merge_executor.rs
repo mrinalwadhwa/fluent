@@ -732,7 +732,7 @@ fn rebase_candidate(
             config.coder_kind,
             config.resolver,
             source_workspace,
-            &[common_git_dir],
+            &[common_git_dir, rebase_artifact_dir.clone()],
         )?
     };
 
