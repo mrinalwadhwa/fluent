@@ -1012,9 +1012,23 @@ fn cmd_cleanup(search_root: &Path, apply: bool) -> Result<()> {
     Ok(())
 }
 
+const FACTORY_GITIGNORE: &str = "\
+# Factory working state: everything here is ignored by default.
+# Durable content is re-included below.
+/*
+!/.gitignore
+!/expertise/
+!/observations/
+!/hooks/
+!/Dockerfile
+!/tester.yaml
+!/extract-tester-results
+";
+
 fn cmd_init(cwd: &Path) -> Result<()> {
     let factory_dir = cwd.join(".factory");
     if factory_dir.exists() {
+        write_gitignore_if_absent(&factory_dir)?;
         eprintln!(
             "  Already initialized: .factory/ exists in {}",
             cwd.display()
@@ -1022,7 +1036,16 @@ fn cmd_init(cwd: &Path) -> Result<()> {
         return Ok(());
     }
     fs::create_dir_all(factory_dir.join("expertise"))?;
+    write_gitignore_if_absent(&factory_dir)?;
     eprintln!("  Initialized .factory/ in {}", cwd.display());
+    Ok(())
+}
+
+fn write_gitignore_if_absent(factory_dir: &Path) -> Result<()> {
+    let gitignore = factory_dir.join(".gitignore");
+    if !gitignore.exists() {
+        fs::write(&gitignore, FACTORY_GITIGNORE)?;
+    }
     Ok(())
 }
 

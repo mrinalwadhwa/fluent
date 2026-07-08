@@ -881,6 +881,118 @@ fn init_is_idempotent() {
         .stderr(predicate::str::contains("Already initialized"));
 }
 
+#[test]
+fn init_writes_gitignore_when_absent() {
+    let tmp = TempDir::new().unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .arg("init")
+        .assert()
+        .success();
+
+    let gitignore = tmp.path().join(".factory/.gitignore");
+    assert!(gitignore.is_file(), ".factory/.gitignore should exist after init");
+}
+
+#[test]
+fn init_gitignore_excludes_working_state_and_tracks_durable() {
+    let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .arg("init")
+        .assert()
+        .success();
+
+    // Create directories so git can distinguish files from dirs
+    let factory = tmp.path().join(".factory");
+    for dir in &["work", "drafts", "expertise", "observations", "hooks"] {
+        fs::create_dir_all(factory.join(dir)).unwrap();
+    }
+
+    // Ephemeral paths must be ignored
+    for path in &["work", "drafts"] {
+        let full = format!(".factory/{}", path);
+        let output = std::process::Command::new("git")
+            .args(["check-ignore", &full])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            ".factory/{path} should be ignored by git"
+        );
+    }
+
+    // Durable paths must NOT be ignored
+    for path in &[
+        ".gitignore",
+        "expertise",
+        "observations",
+        "hooks",
+        "Dockerfile",
+        "tester.yaml",
+        "extract-tester-results",
+    ] {
+        let full = format!(".factory/{}", path);
+        let output = std::process::Command::new("git")
+            .args(["check-ignore", &full])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            ".factory/{path} should NOT be ignored by git"
+        );
+    }
+}
+
+#[test]
+fn init_preserves_existing_gitignore() {
+    let tmp = TempDir::new().unwrap();
+    let factory_dir = tmp.path().join(".factory");
+    fs::create_dir_all(&factory_dir).unwrap();
+    let gitignore = factory_dir.join(".gitignore");
+    fs::write(&gitignore, "# custom content\n").unwrap();
+
+    factory_cmd()
+        .current_dir(tmp.path())
+        .arg("init")
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(&gitignore).unwrap();
+    assert_eq!(content, "# custom content\n", "existing .gitignore should be preserved");
+}
+
+#[test]
+fn init_backfills_gitignore_on_existing_factory() {
+    let tmp = TempDir::new().unwrap();
+
+    // First init creates .factory/
+    factory_cmd()
+        .current_dir(tmp.path())
+        .arg("init")
+        .assert()
+        .success();
+
+    // Remove the .gitignore to simulate a pre-existing .factory/ without one
+    let gitignore = tmp.path().join(".factory/.gitignore");
+    fs::remove_file(&gitignore).unwrap();
+    assert!(!gitignore.exists());
+
+    // Second init should backfill the .gitignore
+    factory_cmd()
+        .current_dir(tmp.path())
+        .arg("init")
+        .assert()
+        .success();
+
+    assert!(gitignore.is_file(), ".gitignore should be backfilled on existing .factory/");
+}
+
 // -------------------------------------------------------------------------
 // Status
 // -------------------------------------------------------------------------
