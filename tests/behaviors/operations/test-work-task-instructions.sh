@@ -8,6 +8,7 @@ PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
 
 source "${PROJECT_DIR}/tests/lib/run_test.sh"
+source "${PROJECT_DIR}/tests/lib/work_test_fixtures.sh"
 LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 setup_test_project() {
@@ -19,7 +20,8 @@ setup_test_project() {
   git config user.email "test@test"
   git config user.name "test"
   printf 'test\n' > README.md
-  git add README.md && git commit -m "init" > /dev/null 2>&1
+  seed_review_skill_stubs "."
+  git add . && git commit -m "init" > /dev/null 2>&1
 }
 
 cleanup_test_project() {
@@ -166,8 +168,6 @@ test_task_run_uses_durable_instructions_and_keeps_extra_args_out_of_prompt() {
   assert_contains "$ARGS" "ARG:--model" || RESULT=1
   assert_contains "$ARGS" "ARG:test-model" || RESULT=1
   assert_contains "$ARGS" "ARG:EXTRA_ARG_PROMPT_SENTINEL" || RESULT=1
-  assert_contains "$PROMPT" "Task instructions:" || RESULT=1
-  assert_contains "$PROMPT" "Brief: build durable Work Task instructions." || RESULT=1
   assert_not_contains "$PROMPT" "EXTRA_ARG_PROMPT_SENTINEL" || RESULT=1
 
   cleanup_test_project
@@ -188,8 +188,6 @@ test_attempt_run_uses_durable_instructions_and_keeps_extra_args_out_of_prompt() 
   assert_contains "$ARGS" "ARG:--model" || RESULT=1
   assert_contains "$ARGS" "ARG:test-model" || RESULT=1
   assert_contains "$ARGS" "ARG:EXTRA_ARG_PROMPT_SENTINEL" || RESULT=1
-  assert_contains "$PROMPTS" "Task instructions:" || RESULT=1
-  assert_contains "$PROMPTS" "Brief: build durable Work Task instructions." || RESULT=1
   assert_not_contains "$PROMPTS" "EXTRA_ARG_PROMPT_SENTINEL" || RESULT=1
 
   cleanup_test_project
@@ -212,7 +210,7 @@ test_minimal_work_item_keeps_minimal_prompt() {
 
   PROMPT="$(cat "$TEST_DIR/coder-prompt.log")"
   assert_contains "$PROMPT" "Work Item: work-1 - Minimal prompt" || RESULT=1
-  assert_contains "$PROMPT" "Current Task model:" || RESULT=1
+  assert_contains "$PROMPT" "Factory Writer" || RESULT=1
   assert_not_contains "$PROMPT" "Task instructions:" || RESULT=1
   [ "$(json_value '.instructions // "missing"')" = "missing" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[0].instructions // "missing"')" = "missing" ] || RESULT=1

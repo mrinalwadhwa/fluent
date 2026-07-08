@@ -8,6 +8,7 @@ PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
 
 source "${PROJECT_DIR}/tests/lib/run_test.sh"
+source "${PROJECT_DIR}/tests/lib/work_test_fixtures.sh"
 LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 setup_test_project() {
@@ -19,7 +20,8 @@ setup_test_project() {
   git config user.email "test@test"
   git config user.name "test"
   printf 'test\n' > README.md
-  git add README.md && git commit -m "init" > /dev/null 2>&1
+  seed_review_skill_stubs "."
+  git add . && git commit -m "init" > /dev/null 2>&1
   "$FACTORY_BIN" work create work-1 --title "Review codebase" > /dev/null
 }
 
@@ -32,17 +34,27 @@ write_mock_claude() {
   local verdict="$1"
   cat > "${TEST_DIR}/bin/claude" <<MOCK_SCRIPT
 #!/usr/bin/env bash
-printf 'Verdict: ${verdict}\n\nReview-only result.\n' > review.md
+for arg in "\$@"; do
+  if [ "\$arg" = "-p" ]; then
+    printf 'Verdict: ${verdict}\n\nReview-only result.\n' > review.md
+    break
+  fi
+done
 exit 0
 MOCK_SCRIPT
   chmod +x "${TEST_DIR}/bin/claude"
 }
 
 write_dirty_mock_claude() {
-  cat > "${TEST_DIR}/bin/claude" <<MOCK_SCRIPT
+  cat > "${TEST_DIR}/bin/claude" <<'MOCK_SCRIPT'
 #!/usr/bin/env bash
-printf 'reviewer edit\n' >> ../../../../../README.md
-printf 'Verdict: pass\n\nReview-only result.\n' > review.md
+for arg in "$@"; do
+  if [ "$arg" = "-p" ]; then
+    printf 'reviewer edit\n' >> ../../../../../README.md
+    printf 'Verdict: pass\n\nReview-only result.\n' > review.md
+    break
+  fi
+done
 exit 0
 MOCK_SCRIPT
   chmod +x "${TEST_DIR}/bin/claude"

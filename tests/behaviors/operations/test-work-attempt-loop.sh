@@ -8,6 +8,7 @@ PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
 
 source "${PROJECT_DIR}/tests/lib/run_test.sh"
+source "${PROJECT_DIR}/tests/lib/work_test_fixtures.sh"
 LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 setup_test_project() {
@@ -19,7 +20,8 @@ setup_test_project() {
   git config user.email "test@test"
   git config user.name "test"
   printf 'test\n' > README.md
-  git add README.md && git commit -m "init" > /dev/null 2>&1
+  seed_review_skill_stubs "."
+  git add . && git commit -m "init" > /dev/null 2>&1
   "$FACTORY_BIN" work create work-1 --title "Attempt loop" > /dev/null
   "$FACTORY_BIN" work attempt work-1 attempt-1 > /dev/null
 }
@@ -43,6 +45,9 @@ write_mock_claude() {
   printf '0\n' > "$write_count_file"
   cat > "${TEST_DIR}/bin/claude" <<MOCK_SCRIPT
 #!/usr/bin/env bash
+if [ "\$1" = "--version" ]; then
+  exit 0
+fi
 case "\$PWD" in
   */work-6-work-1-attempt-1)
     if [ "${write_mode}" = "fail" ]; then
@@ -260,7 +265,7 @@ test_attempt_loop_plans_followup_with_mixed_failed_and_missing_reviews() {
   run_attempt_loop > "$TEST_DIR/stdout" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stdout")" "Planned write Task attempt-1-write-2" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stdout")" "Completed Task attempt-1-write-2" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/stdout")" "Planned 1 review Tasks for Attempt attempt-1" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stdout")" "Planned 2 review Tasks for Attempt attempt-1" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stdout")" "attempt-1-review-2-documentation" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stdout")" "Merge Candidate attempt-1-merge-candidate is ready" || RESULT=1
   [ "$(json_value '.attempts[0].status')" = "complete" ] || RESULT=1
@@ -283,7 +288,7 @@ test_attempt_loop_counts_preplanned_followup_against_budget() {
 
   run_attempt_loop > "$TEST_DIR/followup-stdout" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Completed Task attempt-1-write-2" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Planned 5 review Tasks for Attempt attempt-1" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Planned 6 review Tasks for Attempt attempt-1" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Planned write Task attempt-1-write-3" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Completed Task attempt-1-write-3" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/followup-stdout")" "needs user input" || RESULT=1

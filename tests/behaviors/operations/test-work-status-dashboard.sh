@@ -8,6 +8,7 @@ PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
 
 source "${PROJECT_DIR}/tests/lib/run_test.sh"
+source "${PROJECT_DIR}/tests/lib/work_test_fixtures.sh"
 LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 setup_test_project() {
@@ -19,7 +20,8 @@ setup_test_project() {
   git config user.email "test@test"
   git config user.name "test"
   printf 'test\n' > README.md
-  git add README.md && git commit -m "init" > /dev/null 2>&1
+  seed_review_skill_stubs "."
+  git add . && git commit -m "init" > /dev/null 2>&1
 }
 
 cleanup_test_project() {
@@ -233,7 +235,7 @@ attempt = json.loads(attempt_path.read_text())
 attempt["status"] = "needs-user"
 attempt_path.write_text(json.dumps(attempt, indent=2) + "\n")
 
-task_path = Path(".factory/work/tasks/work-abandoned/attempt-abandoned/attempt-abandoned-write.json")
+task_path = Path(".factory/work/tasks/work-abandoned/attempt-abandoned/attempt-abandoned-write-1.json")
 task = json.loads(task_path.read_text())
 task["status"] = "needs-user"
 task_path.write_text(json.dumps(task, indent=2) + "\n")

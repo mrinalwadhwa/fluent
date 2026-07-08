@@ -8,6 +8,7 @@ PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
 
 source "${PROJECT_DIR}/tests/lib/run_test.sh"
+source "${PROJECT_DIR}/tests/lib/work_test_fixtures.sh"
 LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 setup_test_project() {
@@ -20,7 +21,8 @@ setup_test_project() {
   git config user.email "test@test"
   git config user.name "test"
   printf 'test\n' > README.md
-  git add README.md && git commit -m "init" > /dev/null 2>&1
+  seed_review_skill_stubs "."
+  git add . && git commit -m "init" > /dev/null 2>&1
 }
 
 cleanup_test_project() {
@@ -80,7 +82,7 @@ run_write_task() {
     PATH="${TEST_DIR}/bin:$PATH" \
     CODER_CWD_LOG="${TEST_DIR}/coder-cwd.log" \
     "$FACTORY_BIN" work task run --no-sandbox --coder codex \
-      "$1" "$2" "$2-write"
+      "$1" "$2" "$2-write-1"
 }
 
 test_attempt_records_sibling_candidate_path() {
@@ -160,7 +162,7 @@ test_task_run_rejects_unmanaged_workspace_paths() {
   "$FACTORY_BIN" work create work-alpha --title "Reject paths" > /dev/null
   "$FACTORY_BIN" work attempt work-alpha attempt-one > /dev/null
 
-  TASK_RECORD=.factory/work/tasks/work-alpha/attempt-one/attempt-one-write.json
+  TASK_RECORD=.factory/work/tasks/work-alpha/attempt-one/attempt-one-write-1.json
 
   jq '.workspace_access.writes[0].path = ".factory/work/workspaces/attempt-one"' \
     "$TASK_RECORD" > "$TEST_DIR/task.json"

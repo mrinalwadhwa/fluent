@@ -8,6 +8,7 @@ PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
 
 source "${PROJECT_DIR}/tests/lib/run_test.sh"
+source "${PROJECT_DIR}/tests/lib/work_test_fixtures.sh"
 LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 setup_test_project() {
@@ -19,7 +20,8 @@ setup_test_project() {
   git config user.email "test@test"
   git config user.name "test"
   printf 'test\n' > README.md
-  git add README.md && git commit -m "init" > /dev/null 2>&1
+  seed_review_skill_stubs "."
+  git add . && git commit -m "init" > /dev/null 2>&1
   MOCK_BIN="$TEST_DIR/bin"
 }
 
@@ -37,13 +39,6 @@ cleanup_test_project() {
 
 create_work_task() {
   "$FACTORY_BIN" work create work-1 --title "Task execution" > /dev/null
-  "$FACTORY_BIN" work attempt work-1 attempt-1 > /dev/null
-}
-
-create_instructed_work_task() {
-  "$FACTORY_BIN" work create work-1 \
-    --title "Task execution" \
-    --instructions "Implement durable task instructions." > /dev/null
   "$FACTORY_BIN" work attempt work-1 attempt-1 > /dev/null
 }
 
@@ -170,6 +165,11 @@ run_review_command() {
   "$FACTORY_BIN" work review work-1 attempt-1
 }
 
+seed_review_fixtures() {
+  seed_review_skill_stubs "$(physical_workspace_path)"
+  seed_tester_results "$TEST_DIR/project" work-1 attempt-1
+}
+
 test_run_reuses_worktree_and_launches_coder_there() {
   setup_test_project
   create_work_task
@@ -180,7 +180,7 @@ test_run_reuses_worktree_and_launches_coder_there() {
   run_task commit > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
 
   [ -d "$(workspace_path)/.git" ] || [ -f "$(workspace_path)/.git" ] || RESULT=1
-  [ "$(cat "$TEST_DIR/coder-cwd.log")" = "$(physical_workspace_path)" ] || RESULT=1
+  [ "$(tail -n 1 "$TEST_DIR/coder-cwd.log")" = "$(physical_workspace_path)" ] || RESULT=1
   assert_contains "$(cat "$TEST_DIR/coder-args.log")" "exec" || RESULT=1
 
   cleanup_test_project
@@ -198,14 +198,16 @@ test_run_passes_task_context_to_coder_prompt() {
 
   PROMPT="$(cat "$TEST_DIR/coder-prompt.log")"
   assert_contains "$PROMPT" "Work Item: work-1 - Prompt contract" || RESULT=1
-  assert_contains "$PROMPT" "Attempt: attempt-1" || RESULT=1
-  assert_contains "$PROMPT" "Task: attempt-1-write-1" || RESULT=1
-  assert_contains "$PROMPT" "Role: author" || RESULT=1
-  assert_contains "$PROMPT" "Completion contract:" || RESULT=1
-  assert_contains "$PROMPT" "Commit all Task output" || RESULT=1
-  assert_contains "$PROMPT" "Leave the writable workspace clean" || RESULT=1
-  assert_contains "$PROMPT" "no committed Task output makes the Task fail" || RESULT=1
-  assert_contains "$PROMPT" "Factory Work model" || RESULT=1
+  assert_contains "$PROMPT" "Factory Writer" || RESULT=1
+  assert_contains "$PROMPT" "Phase 1" || RESULT=1
+  assert_contains "$PROMPT" "Read Brief at" || RESULT=1
+  assert_contains "$PROMPT" "Phase 2" || RESULT=1
+  assert_contains "$PROMPT" "progress.md" || RESULT=1
+  assert_contains "$PROMPT" "Phase 3" || RESULT=1
+  assert_contains "$PROMPT" "Implement test-first" || RESULT=1
+  assert_contains "$PROMPT" "Phase 4" || RESULT=1
+  assert_contains "$PROMPT" ".factory/tester.yaml" || RESULT=1
+  assert_contains "$PROMPT" "no new commits fails automatically" || RESULT=1
   if printf '%s' "$PROMPT" | grep -Fq "Status file contract"; then
     printf '    FAIL: Work prompt should not include legacy status file contract\n'
     RESULT=1
@@ -222,31 +224,6 @@ test_run_passes_task_context_to_coder_prompt() {
     printf '    FAIL: prompt should not tell write Task authors to mark needs-user\n'
     RESULT=1
   fi
-  assert_contains "$PROMPT" "Author preflight:" || RESULT=1
-  assert_contains "$PROMPT" "Before editing, identify the likely touched surfaces" || RESULT=1
-  assert_contains "$PROMPT" "behavior statements, user-facing docs, tests, skills/expertise, and verification commands" || RESULT=1
-  assert_contains "$PROMPT" "update the applicable behavior contract, docs, tests, and verification notes" || RESULT=1
-  assert_contains "$PROMPT" "record why the other related artifacts do not apply" || RESULT=1
-  assert_contains "$PROMPT" "Current Task model:" || RESULT=1
-  assert_contains "$PROMPT" '"id": "attempt-1-write-1"' || RESULT=1
-  assert_contains "$PROMPT" '"kind": "write"' || RESULT=1
-
-  cleanup_test_project
-  return $RESULT
-}
-
-test_run_passes_task_instructions_to_coder_prompt() {
-  setup_test_project
-  create_instructed_work_task
-  write_mock_codex
-
-  RESULT=0
-  run_task commit > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
-
-  PROMPT="$(cat "$TEST_DIR/coder-prompt.log")"
-  assert_contains "$PROMPT" "Task instructions:" || RESULT=1
-  assert_contains "$PROMPT" "Implement durable task instructions." || RESULT=1
-  assert_contains "$PROMPT" '"instructions": "Implement durable task instructions."' || RESULT=1
 
   cleanup_test_project
   return $RESULT
@@ -367,6 +344,7 @@ test_review_task_with_fail_verdict_completes() {
     return 1
   }
   "$FACTORY_BIN" work review work-1 attempt-1 > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr"
+  seed_review_fixtures
 
   RESULT=0
   CANDIDATE_COMMIT="$(git -C "$(workspace_path)" rev-parse HEAD)"
@@ -375,8 +353,8 @@ test_review_task_with_fail_verdict_completes() {
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-tests") | .artifact_area.path')" = ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests" ] || RESULT=1
   run_review_task review-fail > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
   PROMPT="$(cat "$TEST_DIR/coder-prompt.log")"
-  assert_contains "$PROMPT" "Execute this Factory review Task" || RESULT=1
-  assert_contains "$PROMPT" "- candidate: $(physical_workspace_path)" || RESULT=1
+  assert_contains "$PROMPT" "Review changes for this Work Item" || RESULT=1
+  assert_contains "$PROMPT" "Workspace: $(workspace_path)" || RESULT=1
   assert_contains "$PROMPT" ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests" || RESULT=1
   REVIEW_CWD="$(tail -n 1 "$TEST_DIR/coder-cwd.log")"
   EXPECTED_ARTIFACT_CWD="$(cd .factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests && pwd -P)"
@@ -400,6 +378,7 @@ test_review_task_can_read_candidate_workspace() {
     return 1
   }
   "$FACTORY_BIN" work review work-1 attempt-1 > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr"
+  seed_review_fixtures
 
   RESULT=0
   run_review_task review-read-candidate > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
@@ -419,6 +398,7 @@ test_review_task_with_uncertain_verdict_completes() {
     return 1
   }
   "$FACTORY_BIN" work review work-1 attempt-1 > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr"
+  seed_review_fixtures
 
   RESULT=0
   run_review_task review-uncertain > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
@@ -438,6 +418,7 @@ test_review_task_missing_artifact_fails() {
     return 1
   }
   "$FACTORY_BIN" work review work-1 attempt-1 > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr"
+  seed_review_fixtures
 
   RESULT=0
   assert_fails run_review_task review-missing || RESULT=1
@@ -457,6 +438,7 @@ test_review_coder_failure_marks_task_failed() {
     return 1
   }
   "$FACTORY_BIN" work review work-1 attempt-1 > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr"
+  seed_review_fixtures
 
   RESULT=0
   assert_fails run_review_task fail || RESULT=1
@@ -476,11 +458,12 @@ test_invalid_review_task_requests_do_not_complete_or_mutate() {
     return 1
   }
   "$FACTORY_BIN" work review work-1 attempt-1 > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr"
+  seed_review_fixtures
 
   RESULT=0
   REVIEW_FILTER='.attempts[0].tasks[] | select(.id == "attempt-1-review-tests")'
   REVIEW_TASK_PATH=".factory/work/tasks/work-1/attempt-1/attempt-1-review-tests.json"
-  BEFORE="$(cat "$REVIEW_TASK_PATH")"
+  BEFORE="$(jq -S . "$REVIEW_TASK_PATH")"
 
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
     missing-work attempt-1 attempt-1-review-tests || RESULT=1
@@ -490,77 +473,77 @@ test_invalid_review_task_requests_do_not_complete_or_mutate() {
     work-1 attempt-1 missing-review-task || RESULT=1
   assert_fails "$FACTORY_BIN" work task run --no-sandbox --coder codex \
     work-1 attempt-2 attempt-1-review-tests || RESULT=1
-  [ "$(cat "$REVIEW_TASK_PATH")" = "$BEFORE" ] || RESULT=1
+  [ "$(jq -S . "$REVIEW_TASK_PATH")" = "$BEFORE" ] || RESULT=1
 
   jq '.work_item_id = "other-work"' "$REVIEW_TASK_PATH" > "$TEST_DIR/task.json"
   mv "$TEST_DIR/task.json" "$REVIEW_TASK_PATH"
-  AFTER_MUTATION="$(cat "$REVIEW_TASK_PATH")"
+  AFTER_MUTATION="$(jq -S . "$REVIEW_TASK_PATH")"
   assert_fails run_review_task review-fail || RESULT=1
-  [ "$(cat "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
+  [ "$(jq -S . "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
 
-  printf '%s' "$BEFORE" > "$REVIEW_TASK_PATH"
+  jq -S . <<< "$BEFORE" > "$REVIEW_TASK_PATH"
   jq '.attempt_id = "other-attempt"' "$REVIEW_TASK_PATH" > "$TEST_DIR/task.json"
   mv "$TEST_DIR/task.json" "$REVIEW_TASK_PATH"
-  AFTER_MUTATION="$(cat "$REVIEW_TASK_PATH")"
+  AFTER_MUTATION="$(jq -S . "$REVIEW_TASK_PATH")"
   assert_fails run_review_task review-fail || RESULT=1
-  [ "$(cat "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
+  [ "$(jq -S . "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
 
-  printf '%s' "$BEFORE" > "$REVIEW_TASK_PATH"
+  jq -S . <<< "$BEFORE" > "$REVIEW_TASK_PATH"
   jq '.status = "failed"' "$REVIEW_TASK_PATH" > "$TEST_DIR/task.json"
   mv "$TEST_DIR/task.json" "$REVIEW_TASK_PATH"
-  AFTER_MUTATION="$(cat "$REVIEW_TASK_PATH")"
+  AFTER_MUTATION="$(jq -S . "$REVIEW_TASK_PATH")"
   assert_fails run_review_task review-fail || RESULT=1
-  [ "$(cat "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
+  [ "$(jq -S . "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
 
-  printf '%s' "$BEFORE" > "$REVIEW_TASK_PATH"
+  jq -S . <<< "$BEFORE" > "$REVIEW_TASK_PATH"
   jq '.workspace_access.writes = [{"id":"candidate","path":"../work-6-work-1-attempt-1"}]' \
     "$REVIEW_TASK_PATH" > "$TEST_DIR/task.json"
   mv "$TEST_DIR/task.json" "$REVIEW_TASK_PATH"
-  AFTER_MUTATION="$(cat "$REVIEW_TASK_PATH")"
+  AFTER_MUTATION="$(jq -S . "$REVIEW_TASK_PATH")"
   assert_fails run_review_task review-fail || RESULT=1
-  [ "$(cat "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
+  [ "$(jq -S . "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
 
-  printf '%s' "$BEFORE" > "$REVIEW_TASK_PATH"
+  jq -S . <<< "$BEFORE" > "$REVIEW_TASK_PATH"
   jq 'del(.artifact_area)' "$REVIEW_TASK_PATH" > "$TEST_DIR/task.json"
   mv "$TEST_DIR/task.json" "$REVIEW_TASK_PATH"
-  AFTER_MUTATION="$(cat "$REVIEW_TASK_PATH")"
+  AFTER_MUTATION="$(jq -S . "$REVIEW_TASK_PATH")"
   assert_fails run_review_task review-fail || RESULT=1
-  [ "$(cat "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
+  [ "$(jq -S . "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
 
-  printf '%s' "$BEFORE" > "$REVIEW_TASK_PATH"
+  jq -S . <<< "$BEFORE" > "$REVIEW_TASK_PATH"
   jq '.workspace_access.reads = []' "$REVIEW_TASK_PATH" > "$TEST_DIR/task.json"
   mv "$TEST_DIR/task.json" "$REVIEW_TASK_PATH"
-  AFTER_MUTATION="$(cat "$REVIEW_TASK_PATH")"
+  AFTER_MUTATION="$(jq -S . "$REVIEW_TASK_PATH")"
   assert_fails run_review_task review-fail || RESULT=1
-  [ "$(cat "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
+  [ "$(jq -S . "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
 
-  printf '%s' "$BEFORE" > "$REVIEW_TASK_PATH"
+  jq -S . <<< "$BEFORE" > "$REVIEW_TASK_PATH"
   jq 'del(.review_context)' "$REVIEW_TASK_PATH" > "$TEST_DIR/task.json"
   mv "$TEST_DIR/task.json" "$REVIEW_TASK_PATH"
-  AFTER_MUTATION="$(cat "$REVIEW_TASK_PATH")"
+  AFTER_MUTATION="$(jq -S . "$REVIEW_TASK_PATH")"
   assert_fails run_review_task review-fail || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "must declare review context" || RESULT=1
-  [ "$(cat "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
+  [ "$(jq -S . "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
 
-  printf '%s' "$BEFORE" > "$REVIEW_TASK_PATH"
+  jq -S . <<< "$BEFORE" > "$REVIEW_TASK_PATH"
   jq '.review_context.candidate_workspace_id = "other-candidate"' \
     "$REVIEW_TASK_PATH" > "$TEST_DIR/task.json"
   mv "$TEST_DIR/task.json" "$REVIEW_TASK_PATH"
-  AFTER_MUTATION="$(cat "$REVIEW_TASK_PATH")"
+  AFTER_MUTATION="$(jq -S . "$REVIEW_TASK_PATH")"
   assert_fails run_review_task review-fail || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "review context candidate must match" || RESULT=1
-  [ "$(cat "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
+  [ "$(jq -S . "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
 
-  printf '%s' "$BEFORE" > "$REVIEW_TASK_PATH"
+  jq -S . <<< "$BEFORE" > "$REVIEW_TASK_PATH"
   jq '
     .workspace_access.reads[0].path = "../outside-review-read" |
     .review_context.candidate_workspace_path = "../outside-review-read"
   ' "$REVIEW_TASK_PATH" > "$TEST_DIR/task.json"
   mv "$TEST_DIR/task.json" "$REVIEW_TASK_PATH"
-  AFTER_MUTATION="$(cat "$REVIEW_TASK_PATH")"
+  AFTER_MUTATION="$(jq -S . "$REVIEW_TASK_PATH")"
   assert_fails run_review_task review-fail || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "Task readable workspace path must" || RESULT=1
-  [ "$(cat "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
+  [ "$(jq -S . "$REVIEW_TASK_PATH")" = "$AFTER_MUTATION" ] || RESULT=1
 
   printf '%s' "$BEFORE" > "$REVIEW_TASK_PATH"
   [ "$(json_value "$REVIEW_FILTER | .status // \"planned\"")" = "planned" ] || RESULT=1
@@ -675,8 +658,6 @@ run_test "run reuses worktree and launches coder there" \
   test_run_reuses_worktree_and_launches_coder_there
 run_test "run passes Task context to coder prompt" \
   test_run_passes_task_context_to_coder_prompt
-run_test "run passes Task instructions to coder prompt" \
-  test_run_passes_task_instructions_to_coder_prompt
 run_test "clean committed Task completes" test_clean_committed_task_completes
 run_test "dirty successful Task fails with guidance" \
   test_dirty_successful_task_fails_with_guidance

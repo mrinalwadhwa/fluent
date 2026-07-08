@@ -599,8 +599,7 @@ assignment so every transition site uses the same format. Existing
 JSON files that lack the fields deserialize with `None` values; keys
 with `None` values are omitted on write.
 When `WorkModelStore` reads stored Work state, it normalizes older
-artifact references that still use
-`.factory/work/artifacts/<attempt-id>/...` into the current
+artifact references that omit the work-item-id prefix into the current
 `.factory/work/artifacts/<work-item-id>/<attempt-id>/...` form before it
 validates the assembled Work Item. If the older path exists on disk and
 the namespaced path does not, the store moves that artifact directory or

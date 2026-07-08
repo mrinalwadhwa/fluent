@@ -2095,7 +2095,7 @@ Test: tests/behaviors/operations/test-cleanup.sh (cleanup skips abandoned Work w
 ### B4
 
 WHEN Factory reads stored Work state with older artifact references
-under `.factory/work/artifacts/<attempt-id>/...`,
+that omit the work-item-id prefix,
 THE SYSTEM SHALL expose those references under
 `.factory/work/artifacts/<work-item-id>/<attempt-id>/...` and move
 existing older artifacts into that namespace when no namespaced artifact

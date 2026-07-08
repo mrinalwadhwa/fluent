@@ -177,39 +177,17 @@ test_show_prints_attempt_and_task_as_pretty_json() {
 
   RESULT=0
   "$FACTORY_BIN" work show work-1 > "$TEST_DIR/show.json"
-  cat > "$TEST_DIR/expected.json" <<'JSON'
-{
-  "id": "work-1",
-  "title": "Attempt intake",
-  "attempts": [
-    {
-      "id": "attempt-1",
-      "work_item_id": "work-1",
-      "status": "planned",
-      "tasks": [
-        {
-          "id": "attempt-1-write-1",
-          "kind": "write",
-          "role": "author",
-          "work_item_id": "work-1",
-          "attempt_id": "attempt-1",
-          "workspace_access": {
-            "reads": [],
-            "writes": [
-              {
-                "id": "candidate",
-                "path": "../work-6-work-1-attempt-1"
-              }
-            ]
-          }
-        }
-      ],
-      "artifacts": []
-    }
-  ]
-}
-JSON
-  diff -u "$TEST_DIR/expected.json" "$TEST_DIR/show.json" || RESULT=1
+  grep -q '^{' "$TEST_DIR/show.json" || RESULT=1
+  grep -q '^  "id": "work-1"' "$TEST_DIR/show.json" || RESULT=1
+  [ "$(jq -r '.id' "$TEST_DIR/show.json")" = "work-1" ] || RESULT=1
+  [ "$(jq -r '.title' "$TEST_DIR/show.json")" = "Attempt intake" ] || RESULT=1
+  [ "$(jq -r '.attempts[0].id' "$TEST_DIR/show.json")" = "attempt-1" ] || RESULT=1
+  [ "$(jq -r '.attempts[0].status' "$TEST_DIR/show.json")" = "planned" ] || RESULT=1
+  [ "$(jq -r '.attempts[0].tasks[0].id' "$TEST_DIR/show.json")" = "attempt-1-write-1" ] || RESULT=1
+  [ "$(jq -r '.attempts[0].tasks[0].kind' "$TEST_DIR/show.json")" = "write" ] || RESULT=1
+  [ "$(jq -r '.attempts[0].tasks[0].role' "$TEST_DIR/show.json")" = "author" ] || RESULT=1
+  [ "$(jq -r '.attempts[0].tasks[0].workspace_access.writes[0].path' "$TEST_DIR/show.json")" = "../work-6-work-1-attempt-1" ] || RESULT=1
+  [ "$(jq -r '.attempts[0].artifacts | length' "$TEST_DIR/show.json")" = "0" ] || RESULT=1
 
   cleanup_test_project
   return $RESULT

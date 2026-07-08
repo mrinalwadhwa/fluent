@@ -8,6 +8,7 @@ PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
 
 source "${PROJECT_DIR}/tests/lib/run_test.sh"
+source "${PROJECT_DIR}/tests/lib/work_test_fixtures.sh"
 LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 setup_test_project() {
@@ -20,7 +21,8 @@ setup_test_project() {
   git config user.email "test@test"
   git config user.name "test"
   printf 'test\n' > README.md
-  git add README.md && git commit -m "init" > /dev/null 2>&1
+  seed_review_skill_stubs "."
+  git add . && git commit -m "init" > /dev/null 2>&1
 }
 
 cleanup_test_project() {
@@ -38,6 +40,10 @@ cleanup_test_project() {
 write_mock_claude() {
   cat > "${TEST_DIR}/bin/claude" <<'MOCK_SCRIPT'
 #!/usr/bin/env bash
+# Skip side effects for --version probes from capture_coder_info()
+if [ "$1" = "--version" ]; then
+  exit 0
+fi
 # Detect rebase agent invocations via -p flag
 PROMPT=""
 for arg in "$@"; do
