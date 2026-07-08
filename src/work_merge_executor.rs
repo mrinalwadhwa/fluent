@@ -767,6 +767,21 @@ fn rebase_candidate(
         )?;
         Ok(RebaseOutcome::NeedsUser { diagnostic })
     } else if exit_code == 0 {
+        if let Err(reason) = verify_rebase_completed(source_workspace, target_branch) {
+            git::run_raw(source_workspace, &["rebase", "--abort"]).ok();
+            update_rebase_task_status(
+                config.store,
+                config.work_item_id,
+                &candidate.attempt_id,
+                &rebase_task_id,
+                TaskStatus::Failed,
+            )?;
+            bail!(
+                "Rebase coder exited 0 but verification failed: {reason} \
+                 while rebasing Merge Candidate {:?} against {target_branch}",
+                candidate.id
+            );
+        }
         let new_tip = head_commit(source_workspace)?;
         update_rebase_task_status(
             config.store,
@@ -1016,6 +1031,41 @@ fn worktree_status(workspace_path: &Path) -> Result<String> {
 
 fn head_commit(repo: &Path) -> Result<String> {
     git::run_stdout(repo, &["rev-parse", "HEAD"], "resolve HEAD")
+}
+
+fn verify_rebase_completed(workspace: &Path, target_branch: &str) -> Result<(), String> {
+    let rebase_merge = git::run_stdout(
+        workspace,
+        &["rev-parse", "--git-path", "rebase-merge"],
+        "check rebase-merge path",
+    )
+    .map_err(|e| format!("failed to resolve rebase-merge path: {e}"))?;
+    if workspace.join(&rebase_merge).exists() {
+        return Err("rebase still in progress (rebase-merge state present)".to_string());
+    }
+
+    let rebase_apply = git::run_stdout(
+        workspace,
+        &["rev-parse", "--git-path", "rebase-apply"],
+        "check rebase-apply path",
+    )
+    .map_err(|e| format!("failed to resolve rebase-apply path: {e}"))?;
+    if workspace.join(&rebase_apply).exists() {
+        return Err("rebase still in progress (rebase-apply state present)".to_string());
+    }
+
+    let output = git::run_raw(
+        workspace,
+        &["merge-base", "--is-ancestor", target_branch, "HEAD"],
+    )
+    .map_err(|e| format!("failed to check merge-base ancestry: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "target branch {target_branch} is not an ancestor of HEAD"
+        ));
+    }
+
+    Ok(())
 }
 
 fn path_for_model(project_root: &Path, path: &Path) -> String {
@@ -1478,5 +1528,92 @@ mod tests {
         assert_eq!(json, r#""rebase""#);
         let kind: TaskKind = serde_json::from_str(&json).unwrap();
         assert_eq!(kind, TaskKind::Rebase);
+    }
+
+    fn init_test_repo(dir: &Path) {
+        git::run(dir, &["init", "-b", "main"], "init").unwrap();
+        git::run(dir, &["config", "user.email", "test@test"], "config").unwrap();
+        git::run(dir, &["config", "user.name", "test"], "config").unwrap();
+        fs::write(dir.join("file.txt"), "initial").unwrap();
+        git::run(dir, &["add", "."], "stage").unwrap();
+        git::run(dir, &["commit", "-m", "initial"], "commit").unwrap();
+    }
+
+    #[test]
+    fn rebase_in_progress_after_exit_zero_is_failed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_test_repo(&repo);
+
+        // Create a branch with a conflicting change
+        git::run(&repo, &["checkout", "-b", "feature"], "branch").unwrap();
+        fs::write(repo.join("file.txt"), "feature change").unwrap();
+        git::run(&repo, &["add", "."], "stage").unwrap();
+        git::run(&repo, &["commit", "-m", "feature"], "commit").unwrap();
+
+        git::run(&repo, &["checkout", "main"], "checkout").unwrap();
+        fs::write(repo.join("file.txt"), "main change").unwrap();
+        git::run(&repo, &["add", "."], "stage").unwrap();
+        git::run(&repo, &["commit", "-m", "diverge"], "commit").unwrap();
+
+        git::run(&repo, &["checkout", "feature"], "checkout").unwrap();
+        // Start a rebase that will conflict
+        let _ = git::run_raw(&repo, &["rebase", "main"]);
+
+        let result = verify_rebase_completed(&repo, "main");
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("rebase still in progress"),
+            "should detect in-progress rebase"
+        );
+    }
+
+    #[test]
+    fn rebase_head_not_on_target_is_failed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_test_repo(&repo);
+
+        // Create a second branch with its own commit
+        git::run(&repo, &["checkout", "-b", "other"], "branch").unwrap();
+        fs::write(repo.join("other.txt"), "other branch").unwrap();
+        git::run(&repo, &["add", "."], "stage").unwrap();
+        git::run(&repo, &["commit", "-m", "other"], "commit").unwrap();
+
+        // Advance main past the fork point
+        git::run(&repo, &["checkout", "main"], "checkout").unwrap();
+        fs::write(repo.join("main.txt"), "main advance").unwrap();
+        git::run(&repo, &["add", "."], "stage").unwrap();
+        git::run(&repo, &["commit", "-m", "advance main"], "commit").unwrap();
+
+        // Switch to 'other' — HEAD is NOT descended from current main tip
+        git::run(&repo, &["checkout", "other"], "checkout").unwrap();
+
+        let result = verify_rebase_completed(&repo, "main");
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("not an ancestor of HEAD"),
+            "should detect target not ancestor of HEAD"
+        );
+    }
+
+    #[test]
+    fn verified_rebase_is_success() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_test_repo(&repo);
+
+        // Create a feature branch and rebase it onto main (no conflict)
+        git::run(&repo, &["checkout", "-b", "feature"], "branch").unwrap();
+        fs::write(repo.join("feature.txt"), "feature work").unwrap();
+        git::run(&repo, &["add", "."], "stage").unwrap();
+        git::run(&repo, &["commit", "-m", "feature"], "commit").unwrap();
+
+        // main is still an ancestor of feature HEAD (no divergence)
+        let result = verify_rebase_completed(&repo, "main");
+        assert!(result.is_ok(), "clean rebase should verify as success");
     }
 }
