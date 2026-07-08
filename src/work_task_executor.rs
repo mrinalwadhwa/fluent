@@ -2377,6 +2377,10 @@ mod tests {
     use std::process::Command;
 
     fn review_item() -> WorkItem {
+        review_item_with_role("tests")
+    }
+
+    fn review_item_with_role(role: &str) -> WorkItem {
         let mut item = WorkItem {
             id: "work-1".to_string(),
             title: "Review prompts".to_string(),
@@ -2397,7 +2401,7 @@ mod tests {
             source_branch: "main".to_string(),
             commit: "abc123".to_string(),
         });
-        item.add_review_tasks("attempt-1", &["tests"]).unwrap();
+        item.add_review_tasks("attempt-1", &[role]).unwrap();
         item
     }
 
@@ -2487,6 +2491,69 @@ mod tests {
         assert!(!prompts.system_prompt.contains("CARGO_TARGET_DIR"));
         assert!(!prompts.system_prompt.contains("pre-populated"));
         assert!(!prompts.system_prompt.contains(".factory/runs/"));
+    }
+
+    #[test]
+    fn work_review_prompt_renders_role_conditional_blocks() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path().join("work-6-work-1-attempt-1");
+        let skill_dir = workspace.join("skills/review-behaviors");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), "behaviors skill").unwrap();
+
+        let item = review_item_with_role("behaviors");
+        let prompts = build_work_review_prompts(WorkReviewPromptInput {
+            item: &item,
+            attempt_id: "attempt-1",
+            task_id: "attempt-1-review-behaviors",
+            project_root: Path::new("/tmp/project"),
+            artifact_dir: Path::new(
+                "/tmp/project/.factory/work/artifacts/work-1/attempt-1/attempt-1-review-behaviors",
+            ),
+            review_path: Path::new(
+                "/tmp/project/.factory/work/artifacts/work-1/attempt-1/attempt-1-review-behaviors/review.md",
+            ),
+            readable_workspaces: std::slice::from_ref(&workspace),
+            input_artifacts: &[],
+            review_only: false,
+        })
+        .unwrap();
+
+        // is_review_behaviors block bullets are present.
+        assert!(
+            prompts.review_prompt.contains("EARS statement"),
+            "behaviors reviewer should see the EARS marker check"
+        );
+        assert!(
+            prompts.review_prompt.contains("`Test:` reference"),
+            "behaviors reviewer should see the Test: reference verification"
+        );
+        assert!(
+            prompts.review_prompt.contains("tester-results.json"),
+            "behaviors reviewer should see tester-results.json instructions"
+        );
+
+        // Other role blocks are NOT rendered.
+        assert!(
+            !prompts
+                .review_prompt
+                .contains("Verify `Untestable:` justifications from progress.md"),
+            "behaviors reviewer should not see the tests-role Untestable check"
+        );
+        assert!(
+            !prompts
+                .review_prompt
+                .contains("Each behavior in behaviors.md should have at least one test"),
+            "behaviors reviewer should not see the tests-role behaviors-coverage check"
+        );
+        assert!(
+            !prompts.review_prompt.contains("Flag structural choices"),
+            "behaviors reviewer should not see the architecture-role checks"
+        );
+        assert!(
+            !prompts.review_prompt.contains("polished prose"),
+            "behaviors reviewer should not see the documentation-role checks"
+        );
     }
 
     #[test]
