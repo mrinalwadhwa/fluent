@@ -609,10 +609,8 @@ impl WorkItem {
                     work_artifact_path(&self.id, attempt_id, &tester_task_id)
                 ),
             });
-            let progress_md_path = format!(
-                "{WORK_PROGRESS_DIR}/{}/{}/progress.md",
-                self.id, attempt_id,
-            );
+            let progress_md_path =
+                format!("{WORK_PROGRESS_DIR}/{}/{}/progress.md", self.id, attempt_id,);
             task_input_artifacts.push(ArtifactRef {
                 producer_id: "writer".to_string(),
                 path: progress_md_path,
@@ -1174,7 +1172,9 @@ impl Attempt {
                     self.validate_review_only_source_checkout_shape(work_item_id)?;
                 }
             }
-            AttemptKind::PostMergeReview => self.validate_review_only_worktree_shape(work_item_id)?,
+            AttemptKind::PostMergeReview => {
+                self.validate_review_only_worktree_shape(work_item_id)?
+            }
             AttemptKind::Write => {}
         }
         for task in &self.tasks {
@@ -5188,8 +5188,7 @@ mod tests {
             item.attempts[0].tasks[1].depends_on.as_deref(),
             Some("attempt-1-tester")
         );
-        let worktree_path =
-            crate::review_only_worktree::review_only_worktree_path("main");
+        let worktree_path = crate::review_only_worktree::review_only_worktree_path("main");
         for task in &item.attempts[0].tasks {
             assert_eq!(task.workspace_access.reads[0].path, worktree_path);
         }

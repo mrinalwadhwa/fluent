@@ -1169,8 +1169,12 @@ fn run_task_coder(
     materialize_planning_files(item, project_root)?;
     materialize_general_expertise(project_root)?;
     let progress_dir = progress_md_dir(project_root, &item.id, attempt_id);
-    fs::create_dir_all(&progress_dir)
-        .with_context(|| format!("Failed to create progress dir at {}", progress_dir.display()))?;
+    fs::create_dir_all(&progress_dir).with_context(|| {
+        format!(
+            "Failed to create progress dir at {}",
+            progress_dir.display()
+        )
+    })?;
     let prompt = build_write_task_prompt_with_workspace(
         item,
         attempt_id,
@@ -1326,10 +1330,18 @@ fn build_write_task_prompt_with_workspace(
     let (bootstrap_yaml, bootstrap_extract) = tester_bootstrap_flags(workspace_path);
     let bootstrap_yaml_value = if bootstrap_yaml { "yes" } else { "" };
     let bootstrap_extract_value = if bootstrap_extract { "yes" } else { "" };
-    let bootstrap_anything_value = if bootstrap_yaml || bootstrap_extract { "yes" } else { "" };
+    let bootstrap_anything_value = if bootstrap_yaml || bootstrap_extract {
+        "yes"
+    } else {
+        ""
+    };
     let has_prior_reviews_value = if has_prior_reviews { "yes" } else { "" };
     let has_progress_md_value = if has_progress_md { "yes" } else { "" };
-    let has_project_expertise_index_value = if has_project_expertise_index { "yes" } else { "" };
+    let has_project_expertise_index_value = if has_project_expertise_index {
+        "yes"
+    } else {
+        ""
+    };
 
     let template = ContentResolver::new(workspace_path)
         .resolve_content("prompts/write-user.md")
@@ -1415,7 +1427,10 @@ fn general_expertise_dir(project_root: &Path) -> PathBuf {
 fn materialize_general_expertise(project_root: &Path) -> Result<PathBuf> {
     let dir = general_expertise_dir(project_root);
     fs::create_dir_all(&dir).with_context(|| {
-        format!("Failed to create general expertise dir at {}", dir.display())
+        format!(
+            "Failed to create general expertise dir at {}",
+            dir.display()
+        )
     })?;
     for name in crate::content::GENERAL_EXPERTISE_FILES {
         let relative = format!("expertise/{name}");
@@ -1435,9 +1450,8 @@ fn materialize_general_expertise(project_root: &Path) -> Result<PathBuf> {
                 final_path.display()
             )
         })?;
-        tmp.persist(&final_path).with_context(|| {
-            format!("Failed to persist expertise at {}", final_path.display())
-        })?;
+        tmp.persist(&final_path)
+            .with_context(|| format!("Failed to persist expertise at {}", final_path.display()))?;
     }
     Ok(dir)
 }
@@ -1522,8 +1536,12 @@ fn write_section_atomically(
             final_path.display()
         )
     })?;
-    tmp.persist(&final_path)
-        .with_context(|| format!("Failed to persist planning section at {}", final_path.display()))?;
+    tmp.persist(&final_path).with_context(|| {
+        format!(
+            "Failed to persist planning section at {}",
+            final_path.display()
+        )
+    })?;
     Ok(Some(final_path))
 }
 
@@ -1734,8 +1752,16 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
     };
     let is_review_tests_value = if task.role == "tests" { "yes" } else { "" };
     let is_review_behaviors_value = if task.role == "behaviors" { "yes" } else { "" };
-    let is_review_architecture_value = if task.role == "architecture" { "yes" } else { "" };
-    let is_review_documentation_value = if task.role == "documentation" { "yes" } else { "" };
+    let is_review_architecture_value = if task.role == "architecture" {
+        "yes"
+    } else {
+        ""
+    };
+    let is_review_documentation_value = if task.role == "documentation" {
+        "yes"
+    } else {
+        ""
+    };
 
     let review_path_display = input.review_path.display().to_string();
     let artifact_dir_display = input.artifact_dir.display().to_string();
@@ -1754,8 +1780,11 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
     let project_expertise_index_pathbuf =
         candidate_workspace_pathbuf.join(".factory/expertise/INDEX.md");
     let project_expertise_index = project_expertise_index_pathbuf.display().to_string();
-    let has_project_expertise_index_value =
-        if project_expertise_index_pathbuf.is_file() { "yes" } else { "" };
+    let has_project_expertise_index_value = if project_expertise_index_pathbuf.is_file() {
+        "yes"
+    } else {
+        ""
+    };
 
     let tester_results_path = task
         .depends_on
@@ -1834,11 +1863,8 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
     let system_template = resolver
         .resolve_content(system_template_name)
         .unwrap_or_else(|| panic!("bundled {system_template_name} must resolve"));
-    let system_prompt = crate::content::render_template(
-        &system_template,
-        &[("role", &task.role)],
-    )
-    .unwrap_or_else(|err| panic!("{system_template_name} template must render: {err}"));
+    let system_prompt = crate::content::render_template(&system_template, &[("role", &task.role)])
+        .unwrap_or_else(|err| panic!("{system_template_name} template must render: {err}"));
 
     Ok(WorkReviewPrompts {
         system_prompt,
@@ -2685,7 +2711,9 @@ mod tests {
         .unwrap();
 
         assert!(
-            !prompts.review_prompt.contains("Run the review diff command"),
+            !prompts
+                .review_prompt
+                .contains("Run the review diff command"),
             "review-only without base_commit should skip the diff step"
         );
     }
@@ -2974,9 +3002,7 @@ mod tests {
     fn write_task_prompt_uses_read_progress_md_when_file_exists() {
         let item = review_item();
         let tmp = tempfile::TempDir::new().unwrap();
-        let progress_dir = tmp
-            .path()
-            .join(".factory/work/progress/work-1/attempt-1");
+        let progress_dir = tmp.path().join(".factory/work/progress/work-1/attempt-1");
         std::fs::create_dir_all(&progress_dir).unwrap();
         std::fs::write(progress_dir.join("progress.md"), "## Checklist\n").unwrap();
 

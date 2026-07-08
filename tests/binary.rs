@@ -892,7 +892,10 @@ fn init_writes_gitignore_when_absent() {
         .success();
 
     let gitignore = tmp.path().join(".factory/.gitignore");
-    assert!(gitignore.is_file(), ".factory/.gitignore should exist after init");
+    assert!(
+        gitignore.is_file(),
+        ".factory/.gitignore should exist after init"
+    );
 }
 
 #[test]
@@ -964,7 +967,10 @@ fn init_preserves_existing_gitignore() {
         .success();
 
     let content = fs::read_to_string(&gitignore).unwrap();
-    assert_eq!(content, "# custom content\n", "existing .gitignore should be preserved");
+    assert_eq!(
+        content, "# custom content\n",
+        "existing .gitignore should be preserved"
+    );
 }
 
 #[test]
@@ -990,7 +996,10 @@ fn init_backfills_gitignore_on_existing_factory() {
         .assert()
         .success();
 
-    assert!(gitignore.is_file(), ".gitignore should be backfilled on existing .factory/");
+    assert!(
+        gitignore.is_file(),
+        ".gitignore should be backfilled on existing .factory/"
+    );
 }
 
 // -------------------------------------------------------------------------
@@ -2243,7 +2252,13 @@ fn work_review_codebase_creates_review_only_attempt() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
+        .args([
+            "work",
+            "review-codebase",
+            "work-1",
+            "attempt-review",
+            "--from-working-tree",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -2353,7 +2368,13 @@ fn work_review_codebase_missing_or_duplicate_leaves_state_unchanged() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
+        .args([
+            "work",
+            "review-codebase",
+            "work-1",
+            "attempt-review",
+            "--from-working-tree",
+        ])
         .assert()
         .success();
     let item_path = main_dir.join(".factory/work/items/work-1.json");
@@ -2369,7 +2390,13 @@ fn work_review_codebase_missing_or_duplicate_leaves_state_unchanged() {
         ));
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
+        .args([
+            "work",
+            "review-codebase",
+            "work-1",
+            "attempt-review",
+            "--from-working-tree",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -2403,7 +2430,13 @@ fn work_task_run_review_only_fails_when_skill_missing() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
+        .args([
+            "work",
+            "review-codebase",
+            "work-1",
+            "attempt-review",
+            "--from-working-tree",
+        ])
         .assert()
         .success();
 
@@ -2626,7 +2659,13 @@ fn work_attempt_run_review_only_passes_without_merge_candidate() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
+        .args([
+            "work",
+            "review-codebase",
+            "work-1",
+            "attempt-review",
+            "--from-working-tree",
+        ])
         .assert()
         .success();
 
@@ -2674,7 +2713,13 @@ fn work_attempt_run_review_only_rejects_source_changes() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
+        .args([
+            "work",
+            "review-codebase",
+            "work-1",
+            "attempt-review",
+            "--from-working-tree",
+        ])
         .assert()
         .success();
 
@@ -2727,7 +2772,13 @@ fn work_attempt_run_review_only_restores_changed_source_head() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
+        .args([
+            "work",
+            "review-codebase",
+            "work-1",
+            "attempt-review",
+            "--from-working-tree",
+        ])
         .assert()
         .success();
 
@@ -2780,7 +2831,13 @@ fn work_attempt_run_review_only_requires_recorded_source_commit() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
+        .args([
+            "work",
+            "review-codebase",
+            "work-1",
+            "attempt-review",
+            "--from-working-tree",
+        ])
         .assert()
         .success();
 
@@ -2851,7 +2908,13 @@ fn work_attempt_run_review_only_rejects_factory_state_changes() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
+        .args([
+            "work",
+            "review-codebase",
+            "work-1",
+            "attempt-review",
+            "--from-working-tree",
+        ])
         .assert()
         .success();
 
@@ -2902,7 +2965,13 @@ fn work_attempt_run_review_only_rejects_work_state_changes() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
+        .args([
+            "work",
+            "review-codebase",
+            "work-1",
+            "attempt-review",
+            "--from-working-tree",
+        ])
         .assert()
         .success();
 
@@ -2977,7 +3046,13 @@ fn work_attempt_run_review_only_restores_mixed_source_and_factory_changes() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
+        .args([
+            "work",
+            "review-codebase",
+            "work-1",
+            "attempt-review",
+            "--from-working-tree",
+        ])
         .assert()
         .success();
 
@@ -3039,7 +3114,13 @@ fn work_attempt_run_review_only_fails_without_followup() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
+        .args([
+            "work",
+            "review-codebase",
+            "work-1",
+            "attempt-review",
+            "--from-working-tree",
+        ])
         .assert()
         .success();
 
@@ -3085,7 +3166,13 @@ fn work_attempt_run_review_only_uncertain_needs_user() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review", "--from-working-tree"])
+        .args([
+            "work",
+            "review-codebase",
+            "work-1",
+            "attempt-review",
+            "--from-working-tree",
+        ])
         .assert()
         .success();
 
@@ -6672,7 +6759,13 @@ fn setup_git_project(tmp: &TempDir) -> std::path::PathBuf {
         ".factory/*\n!.factory/observations/\n!.factory/expertise/\n!.factory/hooks/\n!.factory/Dockerfile\n!.factory/tester.yaml\n!.factory/extract-tester-results\n",
     )
     .unwrap();
-    for role in ["documentation", "behaviors", "architecture", "skills", "tests"] {
+    for role in [
+        "documentation",
+        "behaviors",
+        "architecture",
+        "skills",
+        "tests",
+    ] {
         let skill_dir = main_dir.join(format!("skills/review-{role}"));
         fs::create_dir_all(&skill_dir).unwrap();
         fs::write(skill_dir.join("SKILL.md"), "stub skill for tests").unwrap();
@@ -7365,7 +7458,9 @@ fn post_merge_review_creates_worktree_and_runs_tester_then_reviewers() {
     assert_eq!(attempt["status"], "complete");
     assert_eq!(attempt["review_state"], "passed");
 
-    let tasks = attempt["tasks"].as_array().expect("attempt has tasks array");
+    let tasks = attempt["tasks"]
+        .as_array()
+        .expect("attempt has tasks array");
     assert_eq!(
         tasks.len(),
         1 + review::REVIEWERS.len(),
@@ -7550,7 +7645,12 @@ fn review_only_worktree_prune_default_removes_orphan_keeps_others() {
     let gone = create_review_only_worktree(&main_dir, &tmp, "gone");
     let busy = create_review_only_worktree(&main_dir, &tmp, "busy");
     seed_in_flight_review_only_attempt(&main_dir, "work-busy", "busy");
-    git::run(&main_dir, &["branch", "-D", "gone"], "delete orphaned branch").unwrap();
+    git::run(
+        &main_dir,
+        &["branch", "-D", "gone"],
+        "delete orphaned branch",
+    )
+    .unwrap();
     git::run(&main_dir, &["branch", "-D", "busy"], "delete in-use branch").unwrap();
 
     let output = factory_cmd()
@@ -7665,7 +7765,12 @@ fn review_only_worktree_prune_dry_run_changes_nothing() {
     let gone = create_review_only_worktree(&main_dir, &tmp, "gone");
     let busy = create_review_only_worktree(&main_dir, &tmp, "busy");
     seed_in_flight_review_only_attempt(&main_dir, "work-busy", "busy");
-    git::run(&main_dir, &["branch", "-D", "gone"], "delete orphaned branch").unwrap();
+    git::run(
+        &main_dir,
+        &["branch", "-D", "gone"],
+        "delete orphaned branch",
+    )
+    .unwrap();
     git::run(&main_dir, &["branch", "-D", "busy"], "delete in-use branch").unwrap();
 
     factory_cmd()

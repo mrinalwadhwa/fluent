@@ -86,9 +86,7 @@ pub fn bundled_content(relative: &str) -> Option<String> {
     match relative {
         "prompts/write-system.md" => Some(include_str!("../prompts/write-system.md").to_string()),
         "prompts/write-user.md" => Some(include_str!("../prompts/write-user.md").to_string()),
-        "prompts/review-system.md" => {
-            Some(include_str!("../prompts/review-system.md").to_string())
-        }
+        "prompts/review-system.md" => Some(include_str!("../prompts/review-system.md").to_string()),
         "prompts/review-user.md" => Some(include_str!("../prompts/review-user.md").to_string()),
         "prompts/review-only-system.md" => {
             Some(include_str!("../prompts/review-only-system.md").to_string())
@@ -96,9 +94,7 @@ pub fn bundled_content(relative: &str) -> Option<String> {
         "prompts/review-only-user.md" => {
             Some(include_str!("../prompts/review-only-user.md").to_string())
         }
-        "prompts/rebase-system.md" => {
-            Some(include_str!("../prompts/rebase-system.md").to_string())
-        }
+        "prompts/rebase-system.md" => Some(include_str!("../prompts/rebase-system.md").to_string()),
         "prompts/rebase-user.md" => Some(include_str!("../prompts/rebase-user.md").to_string()),
         // Sandbox profiles
         "sandbox/common.sb" => Some(include_str!("../sandboxes/common.sb").to_string()),
@@ -119,9 +115,7 @@ pub fn bundled_content(relative: &str) -> Option<String> {
             Some(include_str!("../expertise/shell-scripts.md").to_string())
         }
         "expertise/skills.md" => Some(include_str!("../expertise/skills.md").to_string()),
-        "expertise/terminal-ui.md" => {
-            Some(include_str!("../expertise/terminal-ui.md").to_string())
-        }
+        "expertise/terminal-ui.md" => Some(include_str!("../expertise/terminal-ui.md").to_string()),
         "expertise/tests.md" => Some(include_str!("../expertise/tests.md").to_string()),
         "expertise/youtube.md" => Some(include_str!("../expertise/youtube.md").to_string()),
         _ => None,
@@ -216,10 +210,9 @@ impl fmt::Display for TemplateError {
                 "template error at line {line}, col {col}: unknown variable {{{{{name}}}}}. Available: {}",
                 available.join(", ")
             ),
-            Self::EmptyTag { line, col } => write!(
-                f,
-                "template error at line {line}, col {col}: empty tag"
-            ),
+            Self::EmptyTag { line, col } => {
+                write!(f, "template error at line {line}, col {col}: empty tag")
+            }
             Self::NestedIf { line, col } => write!(
                 f,
                 "template error at line {line}, col {col}: nested {{{{#if}}}} blocks are not supported"
@@ -320,10 +313,7 @@ fn tokenize(template: &str) -> Result<Vec<Token<'_>>, TemplateError> {
             let prev_char_is_newline_or_start =
                 leading_ws_start == 0 || pending_literal.as_bytes()[leading_ws_start - 1] == b'\n';
             let trailing_is_standalone = trailing_consume.is_some();
-            if leading_is_standalone
-                && prev_char_is_newline_or_start
-                && trailing_is_standalone
-            {
+            if leading_is_standalone && prev_char_is_newline_or_start && trailing_is_standalone {
                 pending_literal.truncate(leading_ws_start);
                 consume_to = trailing_consume.unwrap();
             }
@@ -840,11 +830,7 @@ Check item {{ITEM_ID}}.
 
     #[test]
     fn render_brace_doubling_around_substitution() {
-        let out = render_template(
-            "literal {{{{ then {{name}}",
-            &[("name", "value")],
-        )
-        .unwrap();
+        let out = render_template("literal {{{{ then {{name}}", &[("name", "value")]).unwrap();
         assert_eq!(out, "literal {{ then value");
     }
 
@@ -898,11 +884,8 @@ Check item {{ITEM_ID}}.
 
     #[test]
     fn render_consecutive_substitutions_work() {
-        let out = render_template(
-            "{{a}}{{b}}{{c}}",
-            &[("a", "1"), ("b", "2"), ("c", "3")],
-        )
-        .unwrap();
+        let out =
+            render_template("{{a}}{{b}}{{c}}", &[("a", "1"), ("b", "2"), ("c", "3")]).unwrap();
         assert_eq!(out, "123");
     }
 
@@ -910,21 +893,14 @@ Check item {{ITEM_ID}}.
     fn render_value_containing_braces_is_not_re_parsed() {
         // If a substituted value contains `{{`, it must appear verbatim in output
         // and NOT trigger further tag parsing.
-        let out = render_template(
-            "value is {{x}}",
-            &[("x", "literal {{not_a_tag}}")],
-        )
-        .unwrap();
+        let out = render_template("value is {{x}}", &[("x", "literal {{not_a_tag}}")]).unwrap();
         assert_eq!(out, "value is literal {{not_a_tag}}");
     }
 
     #[test]
     fn render_if_with_dashes_in_name() {
-        let out = render_template(
-            "{{#if review_only}}A{{/if}}",
-            &[("review_only", "yes")],
-        )
-        .unwrap();
+        let out =
+            render_template("{{#if review_only}}A{{/if}}", &[("review_only", "yes")]).unwrap();
         assert_eq!(out, "A");
     }
 }

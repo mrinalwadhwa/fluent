@@ -299,10 +299,7 @@ fn auto_prune_orphan_review_only_worktrees(project_root: &Path) {
                             path.display()
                         );
                     }
-                    crate::review_only_worktree::PruneEntry::SkippedInUse {
-                        path,
-                        in_flight,
-                    } => {
+                    crate::review_only_worktree::PruneEntry::SkippedInUse { path, in_flight } => {
                         skipped_in_use += 1;
                         eprintln!(
                             "  Auto-prune skipped in-use review-only worktree {} (Work Item {:?} Attempt {:?})",
@@ -315,9 +312,7 @@ fn auto_prune_orphan_review_only_worktrees(project_root: &Path) {
                 }
             }
             if removed > 0 || skipped_in_use > 0 {
-                eprintln!(
-                    "  Auto-prune: removed {removed}, skipped in-use {skipped_in_use}"
-                );
+                eprintln!("  Auto-prune: removed {removed}, skipped in-use {skipped_in_use}");
             }
         }
         Err(error) => {
@@ -391,7 +386,10 @@ fn review_one(project_root: &Path, entry: &QueueEntry) -> Result<PerBranchOutcom
         extra_args: &[],
         no_sandbox: true,
     }) {
-        eprintln!("  Post-merge review for {} failed: {error:#}", entry.target_branch);
+        eprintln!(
+            "  Post-merge review for {} failed: {error:#}",
+            entry.target_branch
+        );
     }
 
     let item = store

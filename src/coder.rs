@@ -1287,13 +1287,14 @@ mod model_default_tests {
         apply_coder_env(&mut cmd, &[]);
         let envs: Vec<_> = cmd.get_envs().collect();
         assert!(
-            envs.iter().any(|(k, v)| *k == OsStr::new("GIT_EDITOR")
-                && *v == Some(OsStr::new("false"))),
+            envs.iter()
+                .any(|(k, v)| *k == OsStr::new("GIT_EDITOR") && *v == Some(OsStr::new("false"))),
             "GIT_EDITOR default missing"
         );
         assert!(
-            envs.iter().any(|(k, v)| *k == OsStr::new("GIT_SEQUENCE_EDITOR")
-                && *v == Some(OsStr::new("false"))),
+            envs.iter()
+                .any(|(k, v)| *k == OsStr::new("GIT_SEQUENCE_EDITOR")
+                    && *v == Some(OsStr::new("false"))),
             "GIT_SEQUENCE_EDITOR default missing"
         );
     }

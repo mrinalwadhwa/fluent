@@ -15,7 +15,7 @@ use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
 use crate::git;
-use crate::work_model::{AttemptStatus, WorkModelStore, WorkModelStorageError};
+use crate::work_model::{AttemptStatus, WorkModelStorageError, WorkModelStore};
 
 /// Workspace path stored on a review-only Attempt that targets the
 /// per-branch worktree. Sibling of `project_root` so it satisfies
@@ -270,9 +270,8 @@ pub fn prune(
             });
             continue;
         }
-        remove(project_root, &worktree_path).with_context(|| {
-            format!("remove review-only worktree {}", worktree_path.display())
-        })?;
+        remove(project_root, &worktree_path)
+            .with_context(|| format!("remove review-only worktree {}", worktree_path.display()))?;
         report.entries.push(PruneEntry::Removed {
             path: worktree_path,
         });
@@ -302,10 +301,7 @@ fn list_registered_review_only_worktrees(project_root: &Path) -> Result<Vec<Path
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let parent = project_root
-        .parent()
-        .unwrap_or(project_root)
-        .to_path_buf();
+    let parent = project_root.parent().unwrap_or(project_root).to_path_buf();
     let mut paths = Vec::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let Some(path_str) = line.strip_prefix("worktree ") else {
@@ -404,7 +400,9 @@ mod tests {
 
     #[test]
     fn workspace_path_recognizer_accepts_canonical_shape() {
-        assert!(is_review_only_worktree_workspace_path("../work-review-main"));
+        assert!(is_review_only_worktree_workspace_path(
+            "../work-review-main"
+        ));
         assert!(is_review_only_worktree_workspace_path(
             "../work-review-feature-widget"
         ));
@@ -415,6 +413,8 @@ mod tests {
         assert!(!is_review_only_worktree_workspace_path("."));
         assert!(!is_review_only_worktree_workspace_path("../work-1-wi-att"));
         assert!(!is_review_only_worktree_workspace_path("../work-review-"));
-        assert!(!is_review_only_worktree_workspace_path("../work-review-x/y"));
+        assert!(!is_review_only_worktree_workspace_path(
+            "../work-review-x/y"
+        ));
     }
 }
