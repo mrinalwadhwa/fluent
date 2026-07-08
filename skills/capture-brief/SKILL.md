@@ -77,7 +77,7 @@ Write to `.factory/drafts/<draft-id>/brief.md` in the format below.
 
 Show the brief and ask:
 
-> "Here's the brief. Does this capture the intent, or is something missing?"
+> "Confirm the brief and move to behaviors? Reply **yes**, or name what to revise: (a) Listen, (b) Sharpen, (c) Ground."
 
 If a part is fuzzy, name which part and re-enter the relevant step (Listen, Sharpen, or Ground). Do not start over.
 

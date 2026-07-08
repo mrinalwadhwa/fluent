@@ -63,7 +63,7 @@ Then handle the rest one at a time or in small groups. For each step, agree on f
 
 After discussing each step or group of steps, ask:
 
-> "Does the ordering feel right, or would you reorder or split any of these?"
+> "Ordering hold? Reply **yes**, or name a step to reorder or split."
 
 If a step reveals a gap in the approach or the behaviors — a missing decision, a case that wasn't specified — stop and return to `design-approach` or `define-behaviors` rather than papering over it here.
 
@@ -102,7 +102,7 @@ For multiple Work Items, write one plan per Work Item to `.factory/drafts/<draft
 
 Show the assembled plan(s) to the user:
 
-> "Here's the plan. Does the full sequence hold together, or does anything need to move?"
+> "Confirm the plan and move to Work Item creation? Reply **yes**, or name what to revise: (a) a step, (b) a Work Item's scope, (c) a sync point."
 
 Check that every behavior in the diff has a home, that verification is named for every step, and that the ordering respects the dependencies you found. When the plan splits, check that behaviors are partitioned across Work Items with no gaps or overlaps, and that pinned contracts match. If something needs changing, name which part — a specific step, a Work Item's scope, a sync point — and re-enter that step. Don't re-run the walkthrough.
 

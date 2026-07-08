@@ -89,7 +89,7 @@ Don't silently resolve unknowns. Don't make solution choices here.
 
 Once every area is agreed, write `behaviors.diff.md` to `.factory/drafts/<draft-id>/behaviors.diff.md` and show it to the user:
 
-> "Here's the assembled diff. Does the whole thing hold together, or does something feel off now that you see it side by side?"
+> "Confirm the behaviors diff and move to approach? Reply **yes**, or name what to revise: (a) vocabulary, (b) a statement, (c) an unknown."
 
 Check that terms are used consistently, no two statements contradict, and no two statements say the same thing in different words. If something needs changing, name which part — vocabulary, an area's statements, or an unresolved unknown — and re-enter that step. Don't re-run the whole area-by-area review.
 

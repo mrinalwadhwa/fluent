@@ -82,8 +82,7 @@ Leave internal structure to the executing agent unless a specific piece has to b
 
 Once every decision is agreed, write `approach.md` to `.factory/drafts/<draft-id>/approach.md` and show it to the user:
 
-> "Here's the approach. Does the whole shape hold together, or does something
-> feel off now that you see it side by side?"
+> "Confirm the approach and move to planning? Reply **yes**, or name what to revise: (a) a decision, (b) structure, (c) a risk."
 
 Check that the vocabulary matches the behaviors diff, that no decision quietly contradicts a recorded choice in `.factory/expertise/decisions.md`, and that each key decision names what it gave up. If something needs changing, name which part — a specific decision, the structure section, or a risk — and re-enter that step. Don't re-run the whole walk-through.
 
