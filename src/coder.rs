@@ -25,6 +25,19 @@ fn pi_model() -> String {
         .unwrap_or_else(|_| DEFAULT_PI_MODEL.to_string())
 }
 
+/// Apply Factory's env defaults plus caller-provided extras to a Coder command.
+/// `GIT_EDITOR` and `GIT_SEQUENCE_EDITOR` default to `false` so interactive editor
+/// prompts (commit messages, `rebase -i` reword, broken commit messages during
+/// `rebase --continue`) fail cleanly instead of hanging the non-interactive Coder.
+/// Callers can override either by including it in `extra_env`.
+fn apply_coder_env(cmd: &mut Command, extra_env: &[(String, String)]) {
+    cmd.env("GIT_EDITOR", "false");
+    cmd.env("GIT_SEQUENCE_EDITOR", "false");
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
+}
+
 fn codex_ca_bundle() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("FACTORY_CODEX_CA_BUNDLE") {
         let path = PathBuf::from(path);
@@ -175,9 +188,7 @@ impl Coder for SandboxedClaudeCode {
         run_with_transcript_retrying(
             || {
                 let mut cmd = self.build_command(working_dir);
-                for (key, value) in extra_env {
-                    cmd.env(key, value);
-                }
+                apply_coder_env(&mut cmd, extra_env);
                 if want_transcript {
                     cmd.args(["--verbose", "--output-format", "stream-json"]);
                 }
@@ -198,9 +209,7 @@ impl Coder for SandboxedClaudeCode {
         extra_env: &[(String, String)],
     ) -> Result<i32> {
         let mut cmd = self.build_command(working_dir);
-        for (key, value) in extra_env {
-            cmd.env(key, value);
-        }
+        apply_coder_env(&mut cmd, extra_env);
         cmd.args(["--append-system-prompt", system_prompt]);
         cmd.args(extra_args);
 
@@ -262,9 +271,7 @@ impl Coder for BareClaudeCode {
             || {
                 let mut cmd = Command::new("claude");
                 cmd.current_dir(working_dir);
-                for (key, value) in extra_env {
-                    cmd.env(key, value);
-                }
+                apply_coder_env(&mut cmd, extra_env);
                 cmd.args(["--dangerously-skip-permissions"]);
                 cmd.args(["--model", &model]);
                 if want_transcript {
@@ -288,9 +295,7 @@ impl Coder for BareClaudeCode {
     ) -> Result<i32> {
         let mut cmd = Command::new("claude");
         cmd.current_dir(working_dir);
-        for (key, value) in extra_env {
-            cmd.env(key, value);
-        }
+        apply_coder_env(&mut cmd, extra_env);
         cmd.args(["--dangerously-skip-permissions"]);
         cmd.args(["--append-system-prompt", system_prompt]);
         cmd.args(extra_args);
@@ -321,9 +326,7 @@ impl Coder for CodexCode {
         run_with_transcript_retrying(
             || {
                 let mut cmd = self.build_command(working_dir, true);
-                for (key, value) in extra_env {
-                    cmd.env(key, value);
-                }
+                apply_coder_env(&mut cmd, extra_env);
                 if want_transcript {
                     cmd.arg("--json");
                 }
@@ -343,9 +346,7 @@ impl Coder for CodexCode {
         extra_env: &[(String, String)],
     ) -> Result<i32> {
         let mut cmd = self.build_command(working_dir, false);
-        for (key, value) in extra_env {
-            cmd.env(key, value);
-        }
+        apply_coder_env(&mut cmd, extra_env);
         cmd.arg(system_prompt);
         cmd.args(extra_args);
 
@@ -435,9 +436,7 @@ impl Coder for PiCode {
         run_with_transcript_retrying(
             || {
                 let mut cmd = self.build_command(working_dir);
-                for (key, value) in extra_env {
-                    cmd.env(key, value);
-                }
+                apply_coder_env(&mut cmd, extra_env);
                 if want_transcript {
                     cmd.args(["--mode", "json"]);
                 }
@@ -459,9 +458,7 @@ impl Coder for PiCode {
         extra_env: &[(String, String)],
     ) -> Result<i32> {
         let mut cmd = self.build_command(working_dir);
-        for (key, value) in extra_env {
-            cmd.env(key, value);
-        }
+        apply_coder_env(&mut cmd, extra_env);
         cmd.args(["--thinking", "off"]);
         cmd.args(["--append-system-prompt", system_prompt]);
         cmd.args(extra_args);
@@ -1276,10 +1273,40 @@ mod coder_kind_tests {
 #[cfg(test)]
 mod model_default_tests {
     use super::*;
+    use std::ffi::OsStr;
 
     #[test]
     fn pi_default_matches_local_vllm() {
         // Pi's local vllm serves this exact name; drift silently 404s Pi launches.
         assert_eq!(DEFAULT_PI_MODEL, "qwen3.6-35b-a3b");
+    }
+
+    #[test]
+    fn apply_coder_env_sets_git_editor_defaults() {
+        let mut cmd = Command::new("/bin/true");
+        apply_coder_env(&mut cmd, &[]);
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert!(
+            envs.iter().any(|(k, v)| *k == OsStr::new("GIT_EDITOR")
+                && *v == Some(OsStr::new("false"))),
+            "GIT_EDITOR default missing"
+        );
+        assert!(
+            envs.iter().any(|(k, v)| *k == OsStr::new("GIT_SEQUENCE_EDITOR")
+                && *v == Some(OsStr::new("false"))),
+            "GIT_SEQUENCE_EDITOR default missing"
+        );
+    }
+
+    #[test]
+    fn apply_coder_env_lets_caller_override() {
+        let mut cmd = Command::new("/bin/true");
+        apply_coder_env(&mut cmd, &[("GIT_EDITOR".to_string(), "vim".to_string())]);
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert!(
+            envs.iter()
+                .any(|(k, v)| *k == OsStr::new("GIT_EDITOR") && *v == Some(OsStr::new("vim"))),
+            "caller override of GIT_EDITOR should win"
+        );
     }
 }
