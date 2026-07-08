@@ -5605,7 +5605,7 @@ mod tests {
         let mapping = CoderMapping {
             write: CoderModelPair {
                 coder: CoderKind::Pi,
-                model: "qwen3-30b-a3b".to_string(),
+                model: "qwen3.6-35b-a3b".to_string(),
             },
             review: CoderModelPair {
                 coder: CoderKind::Claude,
@@ -5641,7 +5641,7 @@ mod tests {
             coder_mapping: CoderMapping {
                 write: CoderModelPair {
                     coder: CoderKind::Pi,
-                    model: "qwen3-30b-a3b".to_string(),
+                    model: "qwen3.6-35b-a3b".to_string(),
                 },
                 review: CoderModelPair {
                     coder: CoderKind::Claude,

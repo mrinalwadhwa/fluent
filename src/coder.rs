@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-4-6";
-const DEFAULT_PI_MODEL: &str = "qwen3-30b-a3b";
+const DEFAULT_PI_MODEL: &str = "qwen3.6-35b-a3b";
 
 fn claude_model() -> String {
     std::env::var("FACTORY_CLAUDE_MODEL")
@@ -1270,5 +1270,16 @@ mod coder_kind_tests {
     #[test]
     fn pi_as_str_returns_pi() {
         assert_eq!(CoderKind::Pi.as_str(), "pi");
+    }
+}
+
+#[cfg(test)]
+mod model_default_tests {
+    use super::*;
+
+    #[test]
+    fn pi_default_matches_local_vllm() {
+        // Pi's local vllm serves this exact name; drift silently 404s Pi launches.
+        assert_eq!(DEFAULT_PI_MODEL, "qwen3.6-35b-a3b");
     }
 }
