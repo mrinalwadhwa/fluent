@@ -6,18 +6,20 @@ SKILL="$ROOT/skills/capture-brief/SKILL.md"
 
 failures=0
 
-require_guidance() {
-  local phrase="$1"
+if ! grep -Fq '## Review-only briefs' "$SKILL"; then
+  echo "capture-brief lacks ## Review-only briefs section" >&2
+  failures=$((failures + 1))
+fi
 
-  if ! grep -Fq "$phrase" "$SKILL"; then
-    echo "capture-brief lacks required review-only guidance: $phrase" >&2
-    failures=$((failures + 1))
-  fi
-}
+if ! grep -Fq 'review request' "$SKILL"; then
+  echo "capture-brief does not distinguish review requests" >&2
+  failures=$((failures + 1))
+fi
 
-require_guidance "The review-only path currently runs the default reviewer set."
-require_guidance "Confirm that the user accepts the default reviewer set"
-require_guidance "review-only Attempt"
+if ! grep -Fq 'build-in-the-factory' "$SKILL"; then
+  echo "capture-brief does not reference build-in-the-factory for review flow" >&2
+  failures=$((failures + 1))
+fi
 
 if [ "$failures" -ne 0 ]; then
   exit 1

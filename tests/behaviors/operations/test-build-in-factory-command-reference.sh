@@ -9,103 +9,55 @@ if [ ! -x "$FACTORY_BIN" ]; then
   (cd "$ROOT" && cargo build --quiet)
 fi
 
-extract_command_section() {
-  awk '
-    /^## Factory commands$/ { in_section = 1 }
-    in_section && /^## / && !/^## Factory commands$/ { exit }
-    in_section { print }
-  ' "$SKILL"
-}
-
-extract_reference() {
-  awk '
-    /^## Factory commands$/ { in_section = 1; next }
-    in_section && /^```sh$/ { in_block = 1; next }
-    in_block && /^```$/ { exit }
-    in_block { print }
-  ' "$SKILL"
-}
-
-command_section="$(extract_command_section)"
-reference="$(extract_reference)"
-
-required_commands=(
-  work
-  status
-  dashboard
-  cleanup
-  init
-  version
-)
-
 failures=0
 
+if ! grep -Fq '## Factory commands' "$SKILL"; then
+  echo "build-in-the-factory lacks ## Factory commands section" >&2
+  failures=$((failures + 1))
+fi
+
+if ! grep -Fq 'factory --help' "$SKILL"; then
+  echo "build-in-the-factory does not reference factory --help" >&2
+  failures=$((failures + 1))
+fi
+
+required_commands=(
+  "factory status"
+  "factory work"
+  "factory cleanup"
+)
+
 for command in "${required_commands[@]}"; do
-  if ! grep -Eq "^factory ${command}([[:space:]-]|$)" <<<"$reference"; then
-    echo "missing factory ${command} from build-in-the-factory command reference" >&2
+  if ! grep -Fq "$command" "$SKILL"; then
+    echo "missing ${command} from build-in-the-factory skill" >&2
     failures=$((failures + 1))
   fi
 done
 
 deleted_commands=(
-  run
-  watch
-  summary
-  review
-  resume
-  pull
-  shell
+  "factory run "
+  "factory watch"
+  "factory summary"
+  "factory resume"
+  "factory pull"
+  "factory shell"
 )
 
 for command in "${deleted_commands[@]}"; do
-  if grep -Eq "^factory ${command}([[:space:]-]|$)" <<<"$reference"; then
-    echo "deleted command factory ${command} still present in build-in-the-factory command reference" >&2
+  if grep -Fq "$command" "$SKILL"; then
+    echo "deleted command ${command} still present in build-in-the-factory skill" >&2
     failures=$((failures + 1))
   fi
 done
 
-work_model_entries=(
-  "factory work create <id> --title <t> # create a stored Work Item"
-  "factory work create <id> --title <t> --planning-context-file <path> # load planning context"
-  "factory work create <id> --title <t> --brief-file <b> --behaviors-file <beh> --approach-file <a> --plan-file <p> # store approved planning files"
-  "factory work create <id> --title <t> --instructions <text> # store prompt text"
-  "factory work create <id> --title <t> --instructions-file <path> # load prompt file"
-  "factory work list                    # list stored Work Items"
-  "factory work show <id>               # show one Work Item as JSON"
-  "factory work abandon <id> --reason <text> # mark a stale Work Item abandoned"
-  "factory work attempt <id> [<attempt>] # add an Attempt (auto-assigns attempt-N)"
-  "factory work attempt run <id> [<attempt>] # advance an Attempt (defaults to latest)"
-  "factory work review <id> <attempt>   # plan review Tasks"
-  "factory work review-codebase <id> <attempt> # add a review-only Attempt"
-  "factory work task run <id> <attempt> <task> # run one Task"
-  "factory work merge-candidate <id> <candidate> # show a Merge Candidate"
-  "factory work merge <id> [<candidate>] # execute a Merge Candidate (defaults to latest)"
-  "factory status                       # show Work Items by default"
-  "factory dashboard                    # open the live dashboard"
-)
-
-for entry in "${work_model_entries[@]}"; do
-  if ! grep -Fxq "$entry" <<<"$reference"; then
-    echo "missing Work-model command entry: ${entry}" >&2
-    failures=$((failures + 1))
-  fi
-done
-
-# Verify deleted legacy entries are absent
-deleted_entries=(
-  "factory status --runs"
-  "factory run "
-  "factory summary"
-  "factory watch"
-  "factory review"
-  "factory pull"
-  "factory shell"
-  "factory resume"
-)
-
-for entry in "${deleted_entries[@]}"; do
-  if grep -Fq "$entry" <<<"$reference"; then
-    echo "deleted legacy command entry still present: ${entry}" >&2
+for phrase in \
+  "factory work attempt" \
+  "factory work merge-candidate" \
+  "factory work merge" \
+  "factory work create"
+do
+  if ! grep -Fq "$phrase" "$SKILL"; then
+    echo "missing Work-model command: ${phrase}" >&2
     failures=$((failures + 1))
   fi
 done

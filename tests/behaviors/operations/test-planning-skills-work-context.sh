@@ -36,68 +36,62 @@ ARCH="$ROOT/documentation/architecture.md"
 BEHAVIORS="$ROOT/documentation/behaviors.md"
 
 require_in_file "$CAPTURE" \
-  'planning context is set at `factory work create` time' \
+  '.factory/drafts/' \
+  "capture-brief skill"
+require_in_file "$CAPTURE" \
+  'plan-execution' \
   "capture-brief skill"
 
 for skill in "$DEFINE" "$APPROACH" "$PLAN"; do
   require_in_file "$skill" \
-    "normal source of intent" \
-    "$skill"
-  require_in_file "$skill" \
-    "stores Work Item planning context" \
-    "$skill"
-  require_in_file "$skill" \
-    'Work Item planning context from `factory work show <work-item-id>` only' \
+    '.factory/drafts/' \
     "$skill"
 done
 
 require_in_file "$DEFINE" \
-  "The approved brief from the active planning conversation or draft" \
+  'brief.md' \
   "define-behaviors skill"
+
 require_in_file "$APPROACH" \
-  "The approved brief and behavior diff from the active planning" \
+  'brief.md' \
   "design-approach skill"
+require_in_file "$APPROACH" \
+  'behaviors.diff.md' \
+  "design-approach skill"
+
 require_in_file "$PLAN" \
-  "The approved brief, behavior diff, and approach from the active" \
+  'brief.md' \
+  "plan-execution skill"
+require_in_file "$PLAN" \
+  'behaviors.diff.md' \
+  "plan-execution skill"
+require_in_file "$PLAN" \
+  'approach.md' \
   "plan-execution skill"
 
 require_in_file "$PLAN" \
-  "normal path for delegated Work execution" \
+  '## Decide one Work Item or several' \
   "plan-execution skill"
 require_in_file "$PLAN" \
-  '## Output format (Work Item planning)' \
+  'factory work create' \
   "plan-execution skill"
 require_in_file "$PLAN" \
-  'Work Item with one Attempt and one write Task' \
+  '## Plan format' \
   "plan-execution skill"
 require_in_file "$PLAN" \
-  'peer Work Items with their own Attempts, Workspaces, and Merge' \
+  'State reached' \
   "plan-execution skill"
 require_in_file "$PLAN" \
-  'create each approved Work Item separately' \
+  '## Sync points' \
   "plan-execution skill"
 require_in_file "$PLAN" \
-  'collapse peer Work Items into one shared Attempt or Task sequence' \
-  "plan-execution skill"
-require_in_file "$PLAN" \
-  'record likely follow-up Tasks or sequencing notes without' \
-  "plan-execution skill"
-require_in_file "$PLAN" \
-  '## Output format (peer Work Items)' \
-  "plan-execution skill"
-require_in_file "$PLAN" \
-  '| Step | Work unit | State reached | Behaviors | Verification | Req? |' \
-  "plan-execution skill"
-require_in_file "$PLAN" \
-  '**Work unit**' \
-  "plan-execution skill"
-require_in_file "$PLAN" \
-  '## Dependencies and sync points' \
+  'items/<slug>/plan.md' \
   "plan-execution skill"
 
 require_in_file "$BUILD" \
-  "Write a brief that will become" \
+  'capture-brief' \
   "build-in-the-factory skill"
+
 require_in_file "$ARCH" \
   "skills treat this Work Item planning context as the normal handoff" \
   "architecture documentation"

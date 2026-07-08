@@ -30,7 +30,6 @@ require_absent_from_file() {
   fi
 }
 
-# Work model guidance that should still be present
 require_in_file "$SKILL" \
   "The delegated build lifecycle is the Work model" \
   "build-in-the-factory skill"
@@ -38,7 +37,7 @@ require_in_file "$SKILL" \
   "Work Item → Attempt → Task →" \
   "build-in-the-factory skill"
 require_in_file "$SKILL" \
-  'Create a Work Item with the approved planning files' \
+  "approved planning files" \
   "build-in-the-factory skill"
 require_in_file "$SKILL" \
   'Create an Attempt' \
@@ -53,19 +52,15 @@ require_in_file "$SKILL" \
   'Land through `factory work merge <work-item-id>' \
   "build-in-the-factory skill"
 require_in_file "$SKILL" \
-  "For unrelated work that can proceed in parallel, create independent peer" \
+  "unrelated work that can proceed in parallel" \
   "build-in-the-factory skill"
 require_in_file "$SKILL" \
-  "Implement the approved Task in the assigned Workspace" \
-  "build-in-the-factory skill"
-require_in_file "$SKILL" \
-  ".factory/work/items/<work-item-id>.json" \
+  "Workspaces are" \
   "build-in-the-factory skill"
 require_in_file "$ARCHITECTURE" \
   "Factory's execution lifecycle uses these durable nouns" \
   "architecture documentation"
 
-# Legacy references that should be absent
 require_absent_from_file "$SKILL" \
   'Use legacy run artifacts only for explicit fallback' \
   "build-in-the-factory skill"

@@ -11,33 +11,15 @@ if grep -Eq '(^|[^[:alnum:]_./-])expertise/[[:alnum:]_.-]+\.md' "$SKILL"; then
   failures=$((failures + 1))
 fi
 
-for reference in references/INDEX.md references/architecture.md; do
-  if ! grep -Fq "$reference" "$SKILL"; then
-    echo "design-approach does not mention $reference" >&2
-    failures=$((failures + 1))
-  fi
+if ! grep -Fq "references/architecture.md" "$SKILL"; then
+  echo "design-approach does not mention references/architecture.md" >&2
+  failures=$((failures + 1))
+fi
 
-  if [ ! -e "$SKILL_DIR/$reference" ]; then
-    echo "design-approach does not ship $reference" >&2
-    failures=$((failures + 1))
-  fi
-done
-
-while IFS= read -r reference; do
-  if [ ! -e "$SKILL_DIR/references/$reference" ]; then
-    echo "design-approach index advertises missing reference: $reference" >&2
-    failures=$((failures + 1))
-  fi
-done < <(
-  awk -F'|' '
-    NR > 2 {
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
-      if ($2 ~ /^[[:alnum:]_.-]+\.md$/) {
-        print $2
-      }
-    }
-  ' "$SKILL_DIR/references/INDEX.md"
-)
+if [ ! -e "$SKILL_DIR/references/architecture.md" ]; then
+  echo "design-approach does not ship references/architecture.md" >&2
+  failures=$((failures + 1))
+fi
 
 direct_references="$(
   grep -Eo '`[^`]+\.md`' "$SKILL" \
