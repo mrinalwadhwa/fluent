@@ -1,6 +1,6 @@
 ---
 name: build-in-the-factory
-description: Operate the factory workflow to build software autonomously over extended periods. Interactive stages (brief, behaviors, approach, plan) run with the user. Autonomous execution loops writer → tester → parallel reviewers, producing a Merge Candidate when all reviewers pass, or pausing to `needs-user` when a decision requires human input and resuming when the user resolves it.
+description: Operate the factory workflow to build software autonomously over extended periods. Interactive stages (brief, behaviors, approach, plan) run with the user. Autonomous execution loops writer → tester → parallel reviewers. When all reviewers pass, it produces a Merge Candidate. When a decision needs a human, it sets `needs-user` and pauses, then resumes once the user resolves it.
 ---
 
 # Build in the Factory
@@ -23,7 +23,7 @@ If nothing needs attention, ask the user what they want to build.
 
 ## Interactive stages (user present)
 
-Follow the four planning skills directly in your session. Each writes one file in `.factory/drafts/<draft-id>/` — don't create planning files anywhere else:
+Follow the four planning skills directly in your session. Each writes into `.factory/drafts/<draft-id>/` — don't create planning files outside that directory:
 
 - `capture-brief` writes `brief.md`.
 - `define-behaviors` writes `behaviors.diff.md`.
@@ -34,14 +34,13 @@ For a codebase, module, or area review (not building something new), capture eno
 
 ## Autonomous stages (user away)
 
-Once the plan is approved, use the Work model for delegated execution:
+`plan-execution` has already created the Work Item(s) with the approved planning files. From here, use the Work model for delegated execution:
 
-1. Create a Work Item with the approved planning files: `factory work create <work-item-id> --title <title> --brief-file <brief.md> --behaviors-file <behaviors.diff.md> --approach-file <approach.md> --plan-file <plan.md>`.
-2. Create an Attempt: `factory work attempt <work-item-id>`. (An `attempt-N` id is auto-assigned; pass an explicit id for scripted flows.)
-3. Run the Attempt: `factory work attempt run <work-item-id>`. (Defaults to the most recently created Attempt; pass an explicit id to target a specific one.)
-4. Inspect status with `factory status` or `factory work show <work-item-id>`.
-5. When the Attempt creates a Merge Candidate, inspect it with `factory work merge-candidate <work-item-id> <merge-candidate-id>`.
-6. Land through `factory work merge <work-item-id>`. (Defaults to the most recently created Merge Candidate; pass an explicit id to target a specific one.)
+1. Create an Attempt: `factory work attempt <work-item-id>`. (An `attempt-N` id is auto-assigned; pass an explicit id for scripted flows.)
+2. Run the Attempt: `factory work attempt run <work-item-id>`. (Defaults to the most recently created Attempt; pass an explicit id to target a specific one.)
+3. Inspect status with `factory status` or `factory work show <work-item-id>`.
+4. When the Attempt creates a Merge Candidate, inspect it with `factory work merge-candidate <work-item-id> <merge-candidate-id>`.
+5. Land through `factory work merge <work-item-id>`. (Defaults to the most recently created Merge Candidate; pass an explicit id to target a specific one.)
 
 Autonomous execution runs as a loop. Each round:
 
@@ -90,4 +89,4 @@ Don't pause for:
 
 Use `factory --help` for the top-level surface, `factory work --help` for the Work model commands, and `factory <command> --help` for a specific command's flags. Run `factory cleanup` after terminal Work Items land or fail; `--apply` removes the terminal state.
 
-For interactive stages, do not call these commands — follow the skills directly.
+During interactive stages, follow the skills directly rather than calling these commands ad hoc. `plan-execution` is the one exception — it ends by running `factory work create` as documented in its skill.

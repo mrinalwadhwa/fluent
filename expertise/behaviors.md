@@ -38,14 +38,14 @@ EARS (Easy Approach to Requirements Syntax) is a notation for specifying behavio
 
 | Pattern | Template | Use when |
 |---|---|---|
-| Ubiquitous | The system shall [behavior] | Always true |
-| Event-driven | WHEN [event], the system shall [behavior] | Triggered by an event |
-| State-driven | WHILE [state], the system shall [behavior] | True during a condition |
-| Unwanted | IF [condition], THEN the system shall [behavior] | Handling failures |
-| Optional | WHERE [feature], the system shall [behavior] | Configurable |
-| Complex | WHILE [state], WHEN [event], the system shall [behavior] | Compound |
+| Ubiquitous | THE SYSTEM SHALL [behavior] | Always true |
+| Event-driven | WHEN [event], THE SYSTEM SHALL [behavior] | Triggered by an event |
+| State-driven | WHILE [state], THE SYSTEM SHALL [behavior] | True during a condition |
+| Unwanted | IF [condition], THEN THE SYSTEM SHALL [behavior] | Handling failures |
+| Optional | WHERE [feature], THE SYSTEM SHALL [behavior] | Configurable |
+| Complex | WHILE [state], WHEN [event], THE SYSTEM SHALL [behavior] | Compound |
 
-The trigger word (WHEN, WHILE, IF, WHERE) tells the reader when the behavior applies. "The system shall" forces the statement to name what the system does — not how.
+The trigger word (WHEN, WHILE, IF, WHERE) tells the reader when the behavior applies. "THE SYSTEM SHALL" forces the statement to name what the system does — not how.
 
 ## Properties of a good behavior statement
 

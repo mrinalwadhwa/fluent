@@ -5,7 +5,7 @@ description: Interview the user to decide the technical approach for the defined
 
 # Design Approach
 
-Interview the user. Decide the technical direction that will deliver the behaviors — libraries, protocols, storage, structure, integration boundaries. The output is `approach.md` — direction, not a full architectural commitment.
+Interview the user. Decide the technical direction that will deliver the behaviors — libraries, protocols, storage, structure, integration boundaries. The output is `approach.md` — direction to guide execution.
 
 ## Read the inputs
 
@@ -34,7 +34,7 @@ If nothing meaningful surfaces, say so to the user:
 
 > "The behaviors map directly onto the existing status-line pattern. I don't see decisions worth walking through — I'll write a minimal approach that reuses `dashboard/status.rs`. Sound right?"
 
-Don't manufacture decisions to justify the skill.
+Don't invent decisions that aren't there. If the user agrees, go straight to Assemble and confirm.
 
 ## Research before proposing options
 

@@ -54,8 +54,9 @@ Handle one area per turn. For each area:
 Propose the two or three core behaviors — the ones the brief clearly asks for — in EARS notation, so the user is reading the actual statement:
 
 > "For the invalidation stream:
-> WHEN a cache entry is invalidated, the system shall emit an
-> `invalidated` event on the status feed carrying the entry key.
+> WHEN a cache entry is invalidated,
+> THE SYSTEM SHALL emit an `invalidated` event on the status feed
+> carrying the entry key.
 > Does that match what you had in mind?"
 
 Then ask about the gaps — one question per turn. Inversion surfaces what the system should NOT do, which usually matters more than the happy path:
@@ -115,6 +116,8 @@ THE SYSTEM SHALL [observable behavior]
 Test: [tests/status_feed.rs::emits_invalidated_event_on_write]
 Example: [concrete instance, when the statement could be misread]
 Derived: [what in the brief or codebase this follows from — present only when the brief didn't state it]
+Modifies: [prior Area:B<N>] — [what changes]
+Removes: [prior Area:B<N>] — [why the behavior no longer applies]
 
 ### B2
 
@@ -127,7 +130,7 @@ Untestable: [one-line reason it can't be verified from a test]
 - [Solution choice deferred to design-approach]
 ```
 
-Omit sections with no content. Reference existing statements when a new one depends on them. For statements that modify or remove existing behavior, quote the existing statement being changed and note whether it's a modification or removal.
+Omit sections with no content. Reference existing statements when a new one depends on them. When a statement changes existing behavior, add a `Modifies:` or `Removes:` marker naming the prior statement.
 
 ## Rules
 

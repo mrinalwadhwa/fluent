@@ -16,7 +16,7 @@ The invoking layer decides what's in scope. For a diff-scoped review, that's the
 1. Read `references/behaviors.md` for behavior-writing standards.
 
 2. For each in-scope behavior statement:
-   - Verify it uses one of the six EARS patterns from `references/behaviors.md`. Statements without a recognized trigger (WHEN, WHILE, IF, WHERE) or without "the system shall" are hard to verify.
+   - Verify it uses one of the six EARS patterns from `references/behaviors.md`. Statements without a recognized trigger (WHEN, WHILE, IF, WHERE) or without "THE SYSTEM SHALL" are hard to verify.
    - Evaluate against the "Properties of a good behavior statement" and "What not to specify" sections in `references/behaviors.md`.
    - Identify improvements.
 

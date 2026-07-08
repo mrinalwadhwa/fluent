@@ -42,7 +42,7 @@ Not every Work Item needs steps. A single mechanical change may need no steps at
 
 > "The approach is one edit to `dashboard/status.rs` — emit the event and wire the subscriber. I don't see steps worth walking through. I'll write a minimal plan and move to Work Item creation. Sound right?"
 
-Don't manufacture steps to justify the skill. If the user agrees, go straight to Assemble and confirm.
+Don't invent steps that aren't there. If the user agrees, go straight to Assemble and confirm.
 
 ## Walk through the steps
 
@@ -159,7 +159,7 @@ Brief: [one-line summary from the brief]
 - [Contract with another Work Item — event shape, endpoint, types, file paths]
 ```
 
-Omit sections with no content. A single-Work-Item plan has no Sync points or Interfaces. A minimal plan may be Steps only.
+Omit sections with no content. A single-Work-Item plan has no Sync points or Interfaces. A minimal plan may contain only the Steps table, but every EARS statement in the behaviors diff still needs a row or an explicit TBD. A TBD row leaves Behaviors, Verification, and Req? blank — those are pinned during execution once earlier steps reveal the shape.
 
 When the plan splits, each Work Item's plan opens with a header naming itself and the others:
 

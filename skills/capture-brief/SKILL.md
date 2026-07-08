@@ -11,7 +11,9 @@ Interview the user. Write a short brief in their own words that names what they 
 
 Let the user describe what they want. If they've already started, continue from where they are. Otherwise ask:
 
-> "What do you want to build?"
+> "Do you want to (a) build something new, or (b) review existing code?"
+
+If it's a review request, jump to `## Review-only briefs` — skip the sharpen / ground / steelman loop, which is for build requests.
 
 How they describe it tells you the stakes. Match your effort to what you hear — a hedged one-liner is a smaller thing than a considered paragraph. Don't ask "how detailed should this be?".
 
@@ -63,7 +65,7 @@ Wait for confirmation before writing.
 
 ## Set the draft-id
 
-After confirmation, generate a draft-id in the format `YYYYMMDD-HHMMSS-kebab-title` (example: `20260706-143022-cache-status`). If this planning conversation already has a draft-id, keep using it.
+After confirmation, generate a draft-id in the format `YYYYMMDD-HHMMSS-kebab-title` (example: `20260706-143022-cache-status`). If this planning conversation already has a draft-id, keep using it. On a resumed session, list `.factory/drafts/` — if a draft already exists and the user is continuing it, keep that draft-id instead of generating a new one.
 
 ## Write the brief
 
