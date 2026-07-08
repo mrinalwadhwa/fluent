@@ -1,8 +1,6 @@
 commands:
-  - command: cargo nextest run --no-fail-fast --message-format libtest-json 2>&1
+  - command: NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run --no-fail-fast --message-format libtest-json 2>&1
     test_harness: cargo-nextest
-  - command: cargo test --lib -- --format json -Z unstable-options 2>&1
-    test_harness: cargo-test
   - command: |
       exit_code=0
       for script in tests/behaviors/operations/*.sh; do
