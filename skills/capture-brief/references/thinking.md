@@ -1,0 +1,1 @@
+../../../expertise/thinking.md

@@ -1,1 +1,0 @@
-../../../expertise/shell-scripts.md

@@ -1,146 +1,121 @@
 ---
 name: design-approach
-description: >
-  Drive a conversation with the user to design a solution approach for
-  the defined behaviors. Research external systems, evaluate options,
-  make technical choices, and produce approach.md — direction for the
-  executing agent that can evolve during implementation.
+description: Interview the user to decide the technical approach for the defined behaviors and produce approach.md.
 ---
 
 # Design Approach
 
-Interview the user to design how the system should deliver the defined behaviors. Work through decisions one at a time. Research what's needed, surface options, discuss trade-offs. The document is assembled from the conversation.
+Interview the user. Decide the technical direction that will deliver the behaviors — libraries, protocols, storage, structure, integration boundaries. The output is `approach.md` — direction, not a full architectural commitment.
 
-The output is `approach.md` — direction, not a commitment. The executing agent has latitude to adapt. The real architecture gets captured in `documentation/architecture.md` after implementation, reflecting what was actually built.
+## Read the inputs
 
----
+Load these before starting the conversation:
 
-## How to run this skill
+- The confirmed brief at `.factory/drafts/<draft-id>/brief.md`. The `<draft-id>` is set by `capture-brief`.
+- The confirmed behaviors diff at `.factory/drafts/<draft-id>/behaviors.diff.md` — what the system must do. Its Open questions section lists the solution choices `define-behaviors` deferred to you.
+- Existing architecture at `documentation/architecture.md` (if it exists) — the shape of the system today.
+- `.factory/expertise/decisions.md` (if it exists) — recorded project choices. Any proposed direction must not contradict them; surface any conflict for the user to resolve.
+- The code the new behaviors touch — enough to see the existing boundaries, patterns, and dependencies the approach will fit into or change.
 
-### Phase 1 — Read the inputs
+Read `references/architecture.md` for the principles to evaluate structural choices against.
 
-Read:
-- The approved brief and behavior diff from the active planning conversation or draft artifacts — the normal source of intent before `factory work create` stores Work Item planning context
-- Work Item planning context from `factory work show <work-item-id>` only when the Work Item already exists
-- `behaviors.diff.md` from the active planning context — what the system must do
-- `documentation/architecture.md` — how the system is built today
-- `references/INDEX.md` — available expertise files and when to load them
-- `references/architecture.md` — architectural principles for evaluating structural decisions
-- Open questions deferred from define-behaviors
+## Identify the decisions
 
-Understand the gap between the current architecture and what the new behaviors require.
+Start with every Open questions item from the behaviors diff. Each one becomes a key decision here, moves to this approach's Open questions with a reason (research needed later), or gets dropped because research showed it's already settled.
 
-Use `references/INDEX.md` to decide which expertise files are relevant to this run. Load the ones that apply before evaluating options. Track which files informed the approach so the executing agent can load the same context without rediscovering it.
+Not every run needs deep design. A bug fix inside a settled area may have no real decisions. A new integration may have several. Before opening a conversation, list the choices the behaviors force:
 
-### Phase 2 — Identify decisions
+- New external systems, protocols, or libraries to pick.
+- Storage, transport, or serialization formats not already set.
+- Boundaries that shift — a new component, a moved responsibility, a broken-out module.
+- Places where the obvious pattern in the codebase doesn't obviously apply.
 
-Not every run requires deep design. A bug fix might need no design decisions. A new integration might need several.
+If nothing meaningful surfaces, say so to the user:
 
-Scan the behaviors and identify the decisions that need to be made before execution can begin:
+> "The behaviors map directly onto the existing status-line pattern. I don't see decisions worth walking through — I'll write a minimal approach that reuses `dashboard/status.rs`. Sound right?"
 
-- What components are involved?
-- Are there external systems to integrate with?
-- Are there multiple valid approaches?
-- Does this change the system's boundaries or structure?
-- What's new vs what's reusing existing patterns?
+Don't manufacture decisions to justify the skill.
 
-If there are no meaningful decisions — the behaviors clearly map to existing patterns — say so and write a minimal approach.md. Don't manufacture complexity.
+## Research before proposing options
 
-### Phase 3 — Research (when needed)
+For any decision that turns on information you don't have, research before you talk to the user. Half-informed options waste their time.
 
-For decisions that need information you don't have, research before discussing with the user. Use codebase research for internal patterns and internet research for external systems.
+Read the codebase for how similar concerns are handled today. When the choice touches an external system, look up its docs, auth model, data format, rate limits, and error responses. Stop once you can name the trade-offs. You don't need to become an expert in every dependency — you need enough to describe what each option gives and gives up.
 
-Research as needed:
-- External APIs, protocols, and libraries
-- Authentication and authorization models
-- Data formats, rate limits, error responses
-- How the existing codebase handles similar concerns
-- Evolution stage: is this component novel (build), established (use existing library), or commodity (use a managed service)?
+If a decision needs research the user cares to see, say so before disappearing into it:
 
-The goal is to know enough to present informed options, not to become an expert in every dependency. Stop when you can describe the trade-offs.
+> "I don't know how the notification API handles reconnection. Give me a minute to read their docs, then I'll come back with the trade-off."
 
-### Phase 4 — Walk through decisions with the user
+## Work decision by decision
 
-Take each decision one at a time. For each:
+Handle one decision per turn. For each, frame the choice, present the options with trade-offs, share your lean, and let the user pick:
 
-1. **Frame the decision:** > "For handling X, there are a couple of approaches. Let me walk > through them."
+> "For the status feed transport: (a) Server-Sent Events — one-way,
+> reconnects automatically, works over plain HTTP, but no client-to-server
+> messages; (b) WebSocket — bidirectional, but heavier and needs a fallback
+> for proxies; (c) long-poll — simplest, but the dashboard sees events up
+> to the poll interval late. I'd lean (a) since the dashboard only reads.
+> Which?"
 
-2. **Present options with trade-offs.** Not "option A is better" but "option A gives us X but costs Y; option B gives us Z but costs W." Name what each option gives up.
+Name what each option gives up. A choice described only by its benefits reads like marketing.
 
-3. **Share what you'd lean toward and why**, but let the user choose. Don't bury decisions in assumptions.
+If the user picks against your lean and you have a specific concern, name it before conceding.
 
-4. **Move on** when the decision is made. Don't revisit unless the user brings it up.
+When a decision feels off — too easy, too confident, stuck between two options — draw from the frameworks in `references/thinking.md`. Its *When to use which framework* table matches situations to tools. Describe the move, not the framework.
 
-Use these lenses selectively:
+If the user rejects an option, ask what's wrong before revising. Don't re-propose the same option in different words. Move on when the decision is made. Don't revisit unless the user reopens it.
 
-**First Principles** — when the obvious approach might be convention rather than the right choice. "Is this actually the best fit here, or just how it's usually done?"
+If a decision reveals a behavior is wrong or incomplete, stop and return to `define-behaviors` rather than designing around it.
 
-**Inversion** — when risks feel underweighted. "What would make this approach fail?" Work backwards from failure modes.
+## Discuss structure when it changes
 
-**WYSIATI** — when the decision feels too easy. "What are we not seeing that could change this choice?"
+A structural change — a new component, a moved responsibility, a shifted boundary — is a decision like any other, handled in the loop above. It differs only in how you present it: zoom out to the boundary first, and only zoom in where the choice depends on internal detail:
 
-**Boundary thinking** — where does core domain logic end and external adapters begin? What should the system own vs delegate? This affects how the system can evolve — things behind boundaries can change independently.
+> "The status feed sits alongside the existing cache — the cache emits an
+> invalidation event, the feed publishes it. That puts the transport on the
+> feed side of the boundary, not the cache side. Does that match how you see
+> it?"
 
-**Integration patterns** — when connecting to external systems, how should the boundary work? Adopt their model (conformist)? Translate at the boundary (anti-corruption layer)? Publish a shared format?
+Leave internal structure to the executing agent unless a specific piece has to be pinned down here. The approach names boundaries and interactions; it does not draw a class diagram.
 
-**Build vs use vs buy** — is this component novel enough to build, or is there an existing library or managed service? Novel components need investment; commodity components should be adopted, not reinvented.
+## Assemble and confirm
 
-### Phase 5 — Discuss system structure (when the run changes it)
+Once every decision is agreed, write `approach.md` to `.factory/drafts/<draft-id>/approach.md` and show it to the user:
 
-If the behaviors require new components, new boundaries, or changes to how existing components interact, walk through the structural changes with the user.
+> "Here's the approach. Does the whole shape hold together, or does something
+> feel off now that you see it side by side?"
 
-Use levels of abstraction — start zoomed out, zoom in where it matters:
+Check that the vocabulary matches the behaviors diff, that no decision quietly contradicts a recorded choice in `.factory/expertise/decisions.md`, and that each key decision names what it gave up. If something needs changing, name which part — a specific decision, the structure section, or a risk — and re-enter that step. Don't re-run the whole walk-through.
 
-- **Context** — what systems interact? What's external?
-- **Containers** — what runtime components? (APIs, databases, queues, services)
-- **Components** — how are things organized internally? (Only go here if the decision depends on internal structure.)
+Once the user confirms, stop. `plan-execution` picks up next.
 
-> "The new behavior means we need a separate service for X, talking to > Y through Z. Does that match your mental model?"
-
-Don't over-specify internal structure. The executing agent will make those decisions. Focus on the boundaries and interactions that the user needs to agree on.
-
-### Phase 6 — Assemble and confirm
-
-Once all decisions have been discussed, assemble `approach.md` and show it to the user:
-
-> "Here's the approach based on our discussion. Does it capture the > decisions we made? Anything feel off?"
-
-This is a coherence check. If something needs changing, fix it and confirm again.
-
-The approach must include an `Expertise` section listing the `references/...` expertise files that should guide execution. Include a short reason for each file. If no additional expertise beyond architecture applied, say so explicitly rather than omitting the section.
-
-After user approval, keep the approved approach with the active planning context that will be passed to `factory work create --approach-file` after the plan is approved.
-
----
-
-## Output format
+## Approach format
 
 ```markdown
 # Approach
 
-Work Item: [work-item-id]
-Brief: [one-line summary]
-
-## Expertise
-
-- `[references/file.md]` — [why this expertise applies]
-- `[references/architecture.md]` — [why architectural principles apply]
+Draft id: [draft-id]
+Brief: [one-line summary from the brief]
 
 ## Key decisions
 
-### [Decision 1]
+### [Decision]
 Choice: [what was chosen]
-Why: [rationale]
+Why: [the reason it fits]
 Alternatives: [what was considered and why not]
 Trade-offs: [what this choice gives up]
 
-### [Decision 2]
+### [Decision]
 ...
 
-## Solution outline
+## Structure
 
-[How the system delivers the new behaviors. Components, interactions,
-boundaries — enough to guide execution. Not a detailed design.]
+[The components involved, how they interact, and where the boundaries
+sit. Enough to guide execution, not a full internal design.]
+
+## Execution guidance
+
+- [Expertise files, docs, or code patterns execution should follow]
 
 ## Risks
 
@@ -148,21 +123,13 @@ boundaries — enough to guide execution. Not a detailed design.]
 
 ## Open questions
 
-- [Anything to resolve during execution]
+- [Anything left for execution to resolve]
 ```
 
----
+Omit sections with no content. A minimal approach for a mechanical change may be Key decisions only, or a single sentence under Structure pointing at the pattern being reused.
 
 ## Rules
 
-- **Interview, don't present.** Walk through decisions one at a time. Don't produce a document and ask for approval. This applies to the full conversation — decisions, solution outline, and risks each get their own discussion. Don't walk through decisions carefully and then dump the rest as one block.
-- **Make questions easy to answer.** Either label the options ((a), (b), (c)...) so the user types a single label, or ask yes/no when one option is the obvious default. Avoid unlabeled "Do you want X or Y?" forms — the user shouldn't have to re-type or paraphrase an option's description as the answer.
-- **Direction, not commitment.** approach.md is a hypothesis. The executing agent can adapt it. The real architecture lands in architecture.md after implementation.
-- **Renegotiation is expected.** If the executing agent discovers the approach doesn't work, they propose changes via `needs-user`. This is normal.
-- **Research before options.** Don't present options you haven't researched. Half-informed options waste the user's time.
-- **Name the trade-offs.** Every choice gives something up. Say what.
-- **Show what was rejected.** The rationale for a choice is incomplete without knowing what it was chosen over.
-- **Don't manufacture decisions.** If the behaviors clearly map to existing patterns, say so. A minimal approach is fine. Not every run needs deep design.
-- **Fit the existing architecture.** The approach should be consistent with `documentation/architecture.md`. If it changes the architecture, say so explicitly.
-- **Don't over-specify.** Describe boundaries and interactions. Leave internal structure to the executing agent.
-- **Vocabulary carries forward.** Use the terms established in behaviors.diff.md. The same nouns should appear in the approach.
+- Label options as (a), (b), (c), or ask a yes/no with an obvious default. Avoid unlabeled "X or Y?" forms.
+- Every choice names what it gives up. If nothing was given up, no real decision was made.
+- Fit the existing architecture. If the approach changes it, say so explicitly and name what changes.

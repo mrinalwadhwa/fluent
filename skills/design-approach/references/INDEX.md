@@ -1,1 +1,0 @@
-../../../expertise/INDEX.md

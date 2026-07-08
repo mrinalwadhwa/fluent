@@ -1,163 +1,136 @@
 ---
 name: define-behaviors
-description: >
-  Drive a conversation with the user to define the observable behaviors
-  for a piece of work. Establish the domain vocabulary, map the behavioral
-  space, and produce behaviors.diff.md — an incremental set of EARS-format
-  statements that extend the project's existing behaviors.
+description: Interview the user to elaborate the brief into EARS-format behavior statements and produce behaviors.diff.md.
 ---
 
 # Define Behaviors
 
-Interview the user to define what the system should do — observable outcomes, not implementation. Work in small pieces: one area at a time, one behavior at a time. The document is assembled from the conversation, not presented as a finished artifact.
+Interview the user. Write EARS statements that specify observable behaviors of the system. Design and implementation belong to later stages.
 
-The output is `behaviors.diff.md` — an increment over what already exists in `documentation/behaviors.md`, not a restatement.
+Your statements build on `documentation/behaviors.md` — an increment over what already exists, not a restatement — but the only file you write is the diff at `.factory/drafts/<draft-id>/behaviors.diff.md`. If `documentation/behaviors.md` doesn't exist yet, this is the first behaviors set: still write `behaviors.diff.md`, where every statement is an addition.
 
----
+## Read the inputs
 
-## How to run this skill
+Load these before starting the conversation:
 
-### Phase 1 — Read the inputs
+- The confirmed brief at `.factory/drafts/<draft-id>/brief.md`. The `<draft-id>` is set by `capture-brief`.
+- Existing behaviors at `documentation/behaviors.md` (if it exists) — what the system already guarantees.
+- Existing architecture at `documentation/architecture.md` (if it exists) — established naming conventions and system structure.
+- `.factory/expertise/decisions.md` (if it exists) — recorded project choices. New behaviors must not contradict them; surface any conflict for the user to resolve.
+- The code the brief touches — enough to see how it behaves today where the new statements apply, and any existing behavior they'd modify.
 
-Read:
-- The approved brief from the active planning conversation or draft artifact — the normal source of intent before `factory work create` stores Work Item planning context
-- Work Item planning context from `factory work show <work-item-id>` only when the Work Item already exists
-- `documentation/behaviors.md` — what the system already does
-- `.factory/expertise/decisions.md` (if it exists) — recorded project-accepted choices; behaviors declared here must not contradict them
-- Relevant code in the areas the brief describes
+Read `references/behaviors.md` for the EARS patterns and the qualities of a good statement.
 
-Understand the gap between what exists and what the brief asks for. Identify unknowns from the brief that need resolution.
+If part of the brief is too vague to elaborate, ask the user before proceeding. Don't invent intent.
 
-If anything in the brief is too vague to elaborate, ask the user before proceeding. Do not invent intent.
+## Establish vocabulary
 
-### Phase 2 — Establish vocabulary
+Pin down what things are called before writing any statement. The brief introduces terms loosely — this is where they get precise.
 
-Before defining behaviors, pin down what things are called. The brief introduces terms loosely — this is where they get precise.
+Where the brief is ambiguous or the existing system may already have a name for the concept, ask:
 
-Ask the user:
-- "When you say X, what exactly do you mean?"
-- "Is this the same thing as Y in the existing system, or different?"
-- "What does the user call this? What would they see in the UI?"
+> "You called it a 'status feed' in the brief. Is that (a) the same as the existing `event-log` in `dashboard/`, (b) a new stream layered on top of it, or (c) a replacement?"
 
-If the project already has a vocabulary (in `documentation/behaviors.md` or `documentation/architecture.md`), use it. Introduce new terms only when the brief describes something genuinely new. Note new vocabulary explicitly — it becomes part of the project's shared language.
+Prefer vocabulary already present in `documentation/behaviors.md` or `documentation/architecture.md`. When the brief introduces a term that isn't in either, note it explicitly in the diff's Vocabulary section so a future reader knows it isn't a synonym for something existing.
 
-Keep this short. A few key terms, not a glossary. Move on when the core nouns and verbs are clear enough to write behaviors.
+Keep this short — a few load-bearing terms, not a glossary. Move on when the core nouns and verbs are clear enough to write statements against.
 
-### Phase 3 — Map the behavioral space
+## Map the space
 
-Before writing individual statements, sketch the territory with the user. Identify:
+Walk the three dimensions — actors, events, states — one at a time with the user:
 
-- **Actors** — who or what interacts with the system? (user, admin, external service, scheduler, other system component)
-- **Events** — what happens? What triggers behavior? (user actions, API calls, time-based events, system events)
-- **States** — what ongoing conditions matter? (logged in, processing, offline, rate-limited)
+> "The actors I see are the dashboard client and the cache. Is there (a) an admin surface too, (b) an external subscriber, or (c) just those two?"
 
-Walk through this with the user one dimension at a time:
+> "The events I have are: a write invalidates a cache entry, and the dashboard subscribes to the feed. What am I missing?"
 
-> "The actors I see are the user and the external API. Are there others?"
+For small scoped work, walk only the dimensions that change.
 
-> "The main events seem to be: user submits, API responds, timeout > occurs. What am I missing?"
+Don't write EARS statements yet. Just agree on the map. Once the map is clear, group into areas — one area per cluster of related events. When the changes span several subsystems, group by subsystem instead.
 
-This maps naturally to EARS patterns — events become WHEN triggers, states become WHILE conditions, actors clarify who's involved. Don't write EARS statements yet. Just agree on the landscape.
+## Work area by area
 
-### Phase 4 — Define behaviors area by area
+Handle one area per turn. For each area:
 
-Work through one area at a time. For each area:
+Propose the two or three core behaviors — the ones the brief clearly asks for — in EARS notation, so the user is reading the actual statement:
 
-1. **Propose a few core behaviors** — the ones clearly stated or implied by the brief. Show them to the user immediately. Keep it short.
+> "For the invalidation stream:
+> WHEN a cache entry is invalidated, the system shall emit an
+> `invalidated` event on the status feed carrying the entry key.
+> Does that match what you had in mind?"
 
-2. **Ask about each one:** > "Does this capture what you mean? Is the wording right?"
+Then ask about the gaps — one question per turn. Inversion surfaces what the system should NOT do, which usually matters more than the happy path:
 
-3. **Ask about gaps — one at a time:** > "What should happen if X fails?" > "What about when Y is empty or invalid?"
+> "What should happen if the subscriber is disconnected when the event fires? (a) drop the event, (b) buffer up to N, (c) reject the write until reconnected."
 
-4. **Ask about implicit behavior:** Only surface things that might be ambiguous or where the project might depart from convention. Do not enumerate every obvious behavior. Most software conventions (error messages on invalid input, loading states during async operations) are implicit — the user expects them without stating them. Only call them out when:
-   - The convention is unclear for this specific case
-   - The project explicitly does something different
-   - The brief's context makes the default ambiguous
+Skip conventions the user expects by default — invalid input triggers an error message, slow work shows progress. Call a convention out only when the case is ambiguous or the project intentionally departs from it.
 
-5. **Move to the next area** when the user confirms this one is right.
+If you propose a behavior the brief didn't mention, flag it as derived so the user can accept or reject it.
 
-Use EARS notation for each statement:
+When a statement could be read more than one way, pin it down with an `Example:` line giving a concrete instance.
 
-| Pattern | Template | Use when |
-|---|---|---|
-| Ubiquitous | The system shall [behavior] | Always true |
-| Event-driven | WHEN [event], the system shall [behavior] | Triggered by an event |
-| State-driven | WHILE [state], the system shall [behavior] | True during a condition |
-| Unwanted | IF [condition], THEN the system shall [behavior] | Handling failures |
-| Optional | WHERE [feature], the system shall [behavior] | Configurable |
-| Complex | WHILE [state], WHEN [event], the system shall [behavior] | Compound |
+If the user rejects a proposed statement, ask what's wrong before revising. Drop it if the user says it's out of scope. Don't re-propose the same behavior reworded.
 
-Where it helps, include a concrete example alongside the EARS statement to make the behavior precise: "For example, when a user submits a form with an empty email field, the system displays 'Email is required'."
+Move to the next area only when the user has confirmed this one. Don't queue up remaining areas at the end.
 
-Use inversion to find unwanted behaviors: "What should the system definitely NOT do?" This naturally surfaces the IF/THEN failure-handling statements that are often more important than the happy path.
+## Resolve the brief's unknowns
 
-### Phase 5 — Resolve unknowns
+Walk each unknown recorded in the brief:
 
-For each unknown from the brief:
-- Resolve it if the codebase or conversation answered it
-- Ask the user if it requires a decision about intent
-- Flag it for design-approach if it's a solution choice (which API, which technology, which deployment model)
+- If the conversation or the codebase answered it, fold the answer into the relevant area's statements — or note it under Vocabulary if it resolved a naming question.
+- If it needs a decision about what the system should do, ask the user now.
+- If it's a solution choice — which library, which protocol, which storage — leave it for `design-approach` and record it under Open questions.
 
-Do not silently resolve unknowns. Do not make solution choices — those belong in design-approach.
+The brief may also record constraints and assumptions. Fold any that name observable behavior into the relevant area's statements; leave the rest for `design-approach`.
 
-### Phase 6 — Assemble and confirm
+Don't silently resolve unknowns. Don't make solution choices here.
 
-Once all areas have been discussed, assemble the full `behaviors.diff.md` and show it to the user:
+## Assemble and confirm
 
-> "Here's everything we discussed, assembled. Does the full picture > hold together? Anything feel wrong now that you see it all at once?"
+Once every area is agreed, write `behaviors.diff.md` to `.factory/drafts/<draft-id>/behaviors.diff.md` and show it to the user:
 
-This is a final coherence check, not a repeat of the area-by-area review. If something needs changing, fix it and confirm again.
+> "Here's the assembled diff. Does the whole thing hold together, or does something feel off now that you see it side by side?"
 
-After user approval, keep the approved behavior diff with the active planning context that will be passed to `factory work create --behaviors-file` after the plan is approved.
+Check that terms are used consistently, no two statements contradict, and no two statements say the same thing in different words. If something needs changing, name which part — vocabulary, an area's statements, or an unresolved unknown — and re-enter that step. Don't re-run the whole area-by-area review.
 
----
+Once the user confirms, stop. `design-approach` picks up next.
 
-## Output format
+## Behaviors diff format
 
 ```markdown
 # Behaviors (diff)
 
-Work Item: [work-item-id]
+Draft id: [draft-id]
 Brief: [one-line summary from the brief]
 
 ## Vocabulary
 
 - **[Term]** — [definition in the user's words]
-- **[Term]** — [definition]
 
-## [Area 1]
+## [Area]
 
-WHEN [event or condition]
+### B1
+
+WHEN [event]
 THE SYSTEM SHALL [observable behavior]
-Example: [concrete instance]
+Test: [tests/status_feed.rs::emits_invalidated_event_on_write]
+Example: [concrete instance, when the statement could be misread]
+Derived: [what in the brief or codebase this follows from — present only when the brief didn't state it]
 
-IF [unwanted condition]
+### B2
+
+IF [condition]
 THEN THE SYSTEM SHALL [recovery behavior]
-
-## [Area 2]
-
-WHILE [state]
-THE SYSTEM SHALL [observable behavior]
+Untestable: [one-line reason it can't be verified from a test]
 
 ## Open questions
 
-- [Decision deferred to design-approach]
+- [Solution choice deferred to design-approach]
 ```
 
----
+Omit sections with no content. Reference existing statements when a new one depends on them. For statements that modify or remove existing behavior, quote the existing statement being changed and note whether it's a modification or removal.
 
 ## Rules
 
-- **Interview, don't present.** Work through behaviors with the user in small pieces. Don't produce a complete document and ask for approval. This applies through the entire conversation — including review output, triggering mechanics, and final assembly. Don't start with small pieces and then dump the rest at the end.
-- **Make questions easy to answer.** Either label the options ((a), (b), (c)...) so the user types a single label, or ask yes/no when one option is the obvious default. Avoid unlabeled "Do you want X or Y?" forms — the user shouldn't have to re-type or paraphrase an option's description as the answer.
-- **One area at a time.** Don't overwhelm with the full picture until the pieces are agreed. Each area gets its own discussion turn.
-- **Observable, not internal.** Every behavior describes something a user or external system can observe.
-- **No implementation.** Do not specify technologies, libraries, or architecture. That belongs in design-approach.
-- **Incremental.** The behaviors extend `documentation/behaviors.md`. Do not restate what already exists. Reference existing behaviors when new ones depend on them.
-- **Don't contradict recorded decisions.** If a proposed behavior contradicts a recorded decision, revise the behavior or surface the conflict for the user to resolve. Do not silently declare contradicting behaviors.
-- **Don't over-specify implicit behavior.** Conventions are implicit. Only call them out when ambiguous or when the project departs from convention.
-- **Flag what you added.** If you derive a behavior not in the brief, say so. Let the user confirm or reject.
-- **Testable.** Each behavior should suggest how to verify it. If you can't imagine a test, the behavior is too vague. Each EARS statement in `documentation/behaviors.md` must have either a `Test:` reference naming the test that verifies it or an `Untestable:` marker with a one-line reason explaining why it genuinely cannot be tested.
-- **One behavior per statement.** Do not combine multiple behaviors. Split them.
-- **Vocabulary matters.** Use the terms the user uses. Pin them down early. New terms get recorded explicitly.
-- **Concrete examples help.** When an EARS statement could be read multiple ways, add an example.
+- Label options as (a), (b), (c), or ask a yes/no with an obvious default. Avoid unlabeled "X or Y?" forms.
+- Every new EARS statement carries either a `Test:` reference or an `Untestable:` marker with a one-line reason. The test usually doesn't exist yet — name the intended test path in the project's style (inspect nearby tests to match the naming convention); the writer creates it during execution. Use `Untestable:` only when the behavior genuinely can't be observed from a test.
+- Number each area's statements as `### B1`, `### B2`, ... in reading order. IDs restart at `B1` in each area, so a reference like `B2` is always relative to its area.

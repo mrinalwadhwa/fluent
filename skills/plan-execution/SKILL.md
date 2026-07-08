@@ -1,240 +1,180 @@
 ---
 name: plan-execution
-description: >
-  Break a designed approach into executable steps through discussion with
-  the user. Prefer vertical slices, define verification points, identify
-  scope trades, and produce plan.md — a living artifact that guides the
-  executing agent and evolves during implementation.
+description: Interview the user to plan how the approved work will run, produce plan.md, and create the Work Item(s) with the approved planning files.
 ---
 
 # Plan Execution
 
-Discuss the execution plan with the user step by step. Break the approach into verifiable states the system reaches — not activities to perform. Each step should deliver working behavior where possible. The plan guides the executing agent but is expected to evolve during implementation.
+Interview the user. Decide whether this is one Work Item or several Work Items, then break each Work Item into steps the writer can follow. Once the plan is approved, create the Work Item(s).
 
----
+## Read the inputs
 
-## How to run this skill
+Load these before starting the conversation:
 
-### Phase 1 — Read the inputs
+- The confirmed brief at `.factory/drafts/<draft-id>/brief.md`. The `<draft-id>` is set by `capture-brief`.
+- The confirmed behaviors diff at `.factory/drafts/<draft-id>/behaviors.diff.md`. Every EARS statement needs a home in a step of some Work Item's plan or an explicit TBD.
+- The confirmed approach at `.factory/drafts/<draft-id>/approach.md`. Its Open questions section lists anything execution must still resolve.
+- The code the plan will touch — enough to see where each step lands, what depends on what, and any obvious ordering constraint.
 
-Read:
-- The approved brief, behavior diff, and approach from the active planning conversation or draft artifacts — the normal source of intent before `factory work create` stores Work Item planning context
-- Work Item planning context from `factory work show <work-item-id>` only when the Work Item already exists
-- `behaviors.diff.md` from the active planning context — what the system must do
-- `approach.md` from the active planning context — how the system should do it
-- `references/architecture.md` — architectural principles, especially the sections on simplicity and viewpoints, to inform step ordering and verification
+If any of the three planning files is missing, stop and go back to the skill that produces it.
 
-Check: does this need a plan at all? A single-step bug fix or a straightforward change that maps directly to one behavior doesn't need a planning document. If the approach already describes a clear single action, tell the user:
+## Decide one Work Item or several
 
-> "This looks straightforward enough to execute directly. Any reason > to plan further, or should we proceed?"
+Inside a single Work Item, one writer produces the initial commit. Follow-up writes are that same writer responding to failed reviews, sequentially. There is no parallel implementation inside a Work Item. If two pieces should be built at the same time, they are two Work Items — each with its own Attempt, workspace, writer, reviewer, and Merge Candidate.
 
-If they agree, write a minimal plan. For Work-model planning, keep that minimal plan as planning context for `factory work create`.
+Splitting works when each piece is independently reviewable and shared interfaces can be pinned before another Work Item depends on them. A Work Item may block on a sync point, but the contract must be concrete enough that it knows when it can start or resume.
 
-### Phase 2 — Assess scope
+One Work Item is right when the pieces share vocabulary, iterate on each other's shape as writing proceeds, or must land together for a single reviewer pass.
 
-Determine whether the work can use one of these Work-model shapes:
+Share your read:
 
-- Work Item with one Attempt and one write Task
-- peer Work Items that can proceed independently
-- Work Item with one Attempt, plus likely follow-up Task notes for future execution
+> "One Work Item. The changes stay inside `dashboard/status.rs` — refactor the render loop and add the new invalidation handler in one pass. Does that match?"
 
-Indicators that decomposition is needed:
-- The work spans multiple independent areas of the codebase
-- The work would exceed a single session's context window
-- Parts can proceed in parallel without knowing each other's results
+Or when a split is on the table:
 
-Indicators that one Work Item with one write Task is fine:
-- The work is focused on one area
-- Everything depends on everything else
-- The approach fits in one session
+> "You raised two concerns today: (a) the SSE server that emits `invalidated` events, (b) the dashboard subscriber that consumes them. Different services, different reviewers, converge on the event schema. I'd lean two Work Items with the schema pinned first. Which?"
 
-Share your assessment with the user:
+If splitting, agree on each Work Item's slug now — short, kebab-case, unique within the draft. Handle each plan in the loop below.
 
-> "I think this can be done as one Work Item with one Attempt and one > write Task — the work is focused on [area]. Does that match your > sense, or do you see independent pieces?"
+## Check whether a plan is needed
 
-Or:
+Not every Work Item needs steps. A single mechanical change may need no steps at all:
 
-> "I see two independent areas here: [X] and [Y]. They could become peer > Work Items so each can have its own Attempt, Workspace, and Merge > Candidate. Does it make sense to split them?"
+> "The approach is one edit to `dashboard/status.rs` — emit the event and wire the subscriber. I don't see steps worth walking through. I'll write a minimal plan and move to Work Item creation. Sound right?"
 
-### Phase 3 — Identify the first step
+Don't manufacture steps to justify the skill. If the user agrees, go straight to Assemble and confirm.
 
-The first step matters most. Ideally it's a **walking skeleton** — the thinnest possible end-to-end slice that proves the approach works.
+## Walk through the steps
 
-> "The first thing I'd do is [thin slice]. It touches [layers/areas] > and would prove [what it validates]. Does that seem like the right > starting point?"
+Steps are scaffolding for the writer: explicit states, referenced behaviors, and concrete verification. A step like "implement the SSE transport" is too coarse; "emit an `invalidated` event on the SSE endpoint for a hard-coded key and confirm the dashboard subscriber receives it" is right-sized.
 
-A walking skeleton catches integration problems early. If the first step only builds one layer (just the database, just the API), problems hide until integration — which is when they're most expensive.
+The first step matters most: aim for a walking skeleton — the thinnest end-to-end slice that proves the approach works. Thin across every layer beats fat in one layer, because integration problems surface at the beginning rather than the end.
 
-### Phase 4 — Walk through remaining steps
+Propose the first step in the vocabulary of the approach, and describe what will be observably true when it's done:
 
-Present steps one at a time or in small groups. For each step, discuss:
+> "First step: emit an `invalidated` event over SSE for a single hard-coded key, and confirm the dashboard receives it. That proves the transport and the subscriber wiring end to end. Right starting point?"
 
-- **State reached** — what's true when this step is done? Phrase as an observable outcome, not an activity.
-  - Not: "Implement auth endpoint"
-  - Yes: "Users can log in via the API and receive a token"
+Then handle the rest one at a time or in small groups. For each step, agree on four things before moving on:
 
-- **Behaviors delivered** — which behaviors from behaviors.diff.md does this step satisfy?
+- The observable state the step reaches. "Users see cache-invalidation events on the status feed" is a state; "wire the subscriber" is an activity. Prefer the state form.
+- The behaviors from `behaviors.diff.md` it satisfies, qualified by area since IDs restart per area — write `Feed:B1`, not `B1`. Every EARS statement must land in a step of some Work Item's plan or an explicit TBD.
+- The verification — a test path, a curl command, a screen to check. Without this the writer doesn't know when to stop.
+- Required or optional. Optional steps are the ones you'd trade away if execution runs into trouble.
 
-- **Work unit** — does the state belong in the initial write Task, a likely follow-up Task note, or a peer Work Item? Treat Task sequencing as planning notes unless Factory can execute that dependency.
+After discussing each step or group of steps, ask:
 
-- **Verification** — how does the agent know the step is done? A test to run, an endpoint to hit, a file to check. Without this, the agent doesn't know when to move on.
+> "Does the ordering feel right, or would you reorder or split any of these?"
 
-- **Required or optional** — is this step essential, or could it be deferred if problems arise?
+If a step reveals a gap in the approach or the behaviors — a missing decision, a case that wasn't specified — stop and return to `design-approach` or `define-behaviors` rather than papering over it here.
 
-Present as a table for easy scanning:
+If later steps depend on what execution will reveal in earlier ones, don't force detail. Plan through the visible horizon and mark the rest TBD:
 
-> | Step | Work unit | State reached | Behaviors | Verification | Req? | > |------|-----------|---------------|-----------|--------------|------| > | 1 | Attempt: auth-work, Task: write | Users can log in via API | B1, B2 | `curl POST /login` returns 200 | Yes | > | 2 | Likely follow-up Task note | Invalid credentials rejected | B3 | `curl` with bad password returns 401 | Yes | > | 3 | Peer Work Item: login-hardening | Rate limiting on login | B4 | 10 rapid requests -> 429 | Optional |
+> "I can plan through step 3. Step 4 depends on how the buffer behaves under a real subscriber — I'd mark it TBD and name that dependency."
 
-Ask after each group:
+## Name trades and risks
 
-> "Does this sequence make sense? Would you reorder anything or split > any of these further?"
+Before finalizing each Work Item's plan, surface two things:
 
-### Phase 5 — Progressive elaboration
+- Scope trades — which optional steps get cut first if execution runs into trouble, in the order you'd cut them.
+- Risks — assumptions the approach makes that you haven't verified, or dependencies with known limitations.
 
-If the full sequence isn't clear yet, that's fine. Plan what's visible and mark the rest TBD:
+> "If things run tight, step 3 (buffer sizing) is the first thing I'd defer — the disconnected-subscriber case is rare. The risk I see: if SSE reconnection under load doesn't match the docs, we'd need to reconsider the transport."
 
-> "I can see clearly through step 4. After that, it depends on what > we learn from [X]. I'd leave the rest TBD and plan it when we get > there."
+## Pin the interfaces
 
-Don't force false precision. The plan fills in during execution.
+When the plan splits into multiple Work Items, name where they meet before writing starts. Skip this section for a single Work Item.
 
-### Phase 6 — Scope trades and risks
+Each meeting point produces two records: a sync point (when the Work Items converge) and an interface contract (what they exchange).
 
-Before finalizing, surface:
+For each sync point, name which Work Items converge, what must be true at that point, and whether either blocks on it. Record these in the plan's `Sync points` section.
 
-- **Scope trades** — which optional steps could be cut if the agent hits problems? Present in priority order (cut last to cut first).
+For each interface contract, name what's exchanged concretely — event schema, endpoint path, shared types, file paths. Record these in the plan's `Interfaces` section.
 
-- **Risks** — anything that might not work. If a step is risky, say so. The user can decide to proceed, investigate first, or adjust.
+Parallel work diverges when contracts stay implicit.
 
-> "If things get tight, step 3 (rate limiting) is the first thing I'd > defer — it's valuable but not blocking. The risk I see is [X] — if > that doesn't work, we'd need to reconsider [Y]."
+> "Work Item `feed-server` owns the `invalidated` event shape and the endpoint path. Work Item `dashboard-subscriber` consumes them. The event schema and endpoint URL must be pinned before `dashboard-subscriber` can wire its consumer — blocking sync point for the client, non-blocking for the server."
 
-### Phase 7 — Sync points (parallel Work only)
+## Assemble and confirm
 
-When the plan has peer Work Items, identify where they must converge:
+For a single Work Item, write `plan.md` to `.factory/drafts/<draft-id>/plan.md`.
 
-- Which Work Items, Attempts, Workspaces, or Merge Candidates are involved?
-- What must be true at the convergence point?
-- Is it blocking (one Work Item can't continue without it) or non-blocking?
+For multiple Work Items, write one plan per Work Item to `.factory/drafts/<draft-id>/items/<slug>/plan.md`. If a Work Item's scope would be muddied by unrelated content in the shared brief, behaviors, or approach, place a sliced version next to its plan under the same `items/<slug>/` directory. Otherwise, all Work Items share the top-level files.
 
-> "After the API Work Item publishes its contract and the UI Work Item > consumes it, they need to integrate. The API contract needs to be > locked before the UI Work Item starts integration work."
+Show the assembled plan(s) to the user:
 
-Define interface contracts between peer Work Items before execution. This prevents parallel work from diverging.
+> "Here's the plan. Does the full sequence hold together, or does anything need to move?"
 
-### Phase 8 — Assemble and confirm
+Check that every behavior in the diff has a home, that verification is named for every step, and that the ordering respects the dependencies you found. When the plan splits, check that behaviors are partitioned across Work Items with no gaps or overlaps, and that pinned contracts match. If something needs changing, name which part — a specific step, a Work Item's scope, a sync point — and re-enter that step. Don't re-run the walkthrough.
 
-Assemble `plan.md` and show the full plan:
+Once the user confirms, move to Work Item creation.
 
-> "Here's the complete plan. Does the full picture hold together?"
+## Create the Work Item(s)
 
-After the user approves the plan, create the Work Item or peer Work Items with planning context stored directly in Work state. This is the normal path for delegated Work execution. For a confirmed peer Work Item plan, create each approved Work Item separately with its own brief, behaviors, approach slice, plan slice, Attempt, Workspace, Merge Candidate expectations, verification, and sync notes. Keep shared sequencing as coordination notes outside the executable Work model; do not collapse peer Work Items into one shared Attempt or Task sequence.
+For a single Work Item, `<work-item-id>` equals `<draft-id>`. Run:
 
-Pass the approved planning files in this order:
+```sh
+factory work create <work-item-id> \
+  --title "<short title>" \
+  --brief-file .factory/drafts/<draft-id>/brief.md \
+  --behaviors-file .factory/drafts/<draft-id>/behaviors.diff.md \
+  --approach-file .factory/drafts/<draft-id>/approach.md \
+  --plan-file .factory/drafts/<draft-id>/plan.md
+```
 
-1. the approved brief
-2. the approved behaviors diff
-3. the approved approach
-4. the approved plan
+For multiple Work Items, run `factory work create` once per Work Item. Each Work Item's `<work-item-id>` is `<draft-id>-<slug>`. Use its plan file at `.factory/drafts/<draft-id>/items/<slug>/plan.md`. For brief, behaviors, and approach, use the Work-Item-specific file under `items/<slug>/` if it exists, otherwise the shared file at the draft root.
 
-Use `factory work create --brief-file --behaviors-file --approach-file --plan-file` so Factory stores the approved context on the Work Item and derives write Task instructions from durable Work state.
+Do not create the Attempt or run it. That belongs to the autonomous stage in `build-in-the-factory`. Stop here.
 
----
-
-## Output format (Work Item planning)
+## Plan format
 
 ```markdown
 # Plan
 
-Work Item: [work-item-id]
-Brief: [one-line summary]
-Attempt: [attempt-id or planned first attempt]
+Draft id: [draft-id]
+Brief: [one-line summary from the brief]
 
 ## Steps
 
-| Step | Work unit | State reached | Behaviors | Verification | Req? |
-|------|-----------|---------------|-----------|--------------|------|
-| 1 | Attempt: [attempt-id], Task: write | [observable state] | [B1, B2] | [how to verify] | Yes |
-| 2 | Likely follow-up Task note | [observable state] | [B3] | [how to verify] | Yes |
-| 3 | Peer Work Item: [id] | [observable state] | [B4] | [how to verify] | Optional |
-| 4+ | TBD — depends on [what] | | | | |
-
-## Dependencies and sync points
-
-- [Peer Work Item sync point, what must be true, blocking or not]
-- [Attempt/Task sequencing note, if useful; do not present as an
-  executable dependency unless Factory supports it]
+| # | State reached | Behaviors | Verification | Req? |
+|---|---------------|-----------|--------------|------|
+| 1 | [observable state] | [Feed:B1, Feed:B2] | [test path or command] | Yes |
+| 2 | [observable state] | [Feed:B3] | [test path or command] | Yes |
+| 3 | [observable state] | [Dashboard:B1] | [test path or command] | Optional |
+| 4+ | TBD — depends on [what step 3 reveals] | | | |
 
 ## Scope trades
 
-1. [Step N] — [why it's optional, what's lost if cut]
+1. [Step N] — [what's lost if cut]
 
 ## Risks
 
 - [Risk and what it affects]
-```
-
-## Output format (peer Work Items)
-
-When the work decomposes into independent efforts, treat these as the normal parallel planning vocabulary:
-
-- peer Work Items with their own Attempts, Workspaces, and Merge Candidates
-
-Use peer Work Items when each effort can be reviewed and merged separately. If several pieces must share one candidate, keep them in one Work Item and record likely follow-up Tasks or sequencing notes without claiming Factory can pre-schedule Task dependencies.
-
-Ask the user to confirm the split before writing the final plan.
-
-```markdown
-# Work Item planning
-
-## Peer Work Items
-
-### Work Item: [api-work-item-id]
-
-[Brief for this Work Item — scope, behaviors it delivers, what it
-produces.]
-
-Attempt: [attempt-id]
-Workspace: [workspace expectation]
-Merge Candidate: [candidate expectation and merging checks]
-
-- Initial write Task: [scope and output]
-- Likely follow-up Task note: [scope and output, if the first Task
-  reveals it is needed]
-
-### Work Item: [ui-work-item-id]
-
-[Brief for this Work Item.]
-
-Attempt: [attempt-id]
-Workspace: [workspace expectation]
-Merge Candidate: [candidate expectation and merging checks]
-
-- Initial write Task: [scope and output]
-- Likely follow-up Task note: [scope and output, if the first Task
-  reveals it is needed]
 
 ## Sync points
 
-- [Which peer Work Items converge, what must be true, blocking
-  or not]
+- [Which Work Items converge, what must be true, blocking or not]
 
 ## Interfaces
 
-- [Contract between parallel work — shared types, API shape, file paths]
+- [Contract with another Work Item — event shape, endpoint, types, file paths]
 ```
 
----
+Omit sections with no content. A single-Work-Item plan has no Sync points or Interfaces. A minimal plan may be Steps only.
+
+When the plan splits, each Work Item's plan opens with a header naming itself and the others:
+
+```markdown
+# Plan — [slug]
+
+Draft id: [draft-id]
+Work Item: [draft-id]-[slug]
+Other Work Items: [other-slug], [other-slug]
+Brief: [one-line summary from the brief]
+```
 
 ## Rules
 
-- **Interview, don't present.** Walk through steps with the user, one at a time or in small groups. Don't produce a finished plan and ask for approval.
-- **Make questions easy to answer.** Either label the options ((a), (b), (c)...) so the user types a single label, or ask yes/no when one option is the obvious default. Avoid unlabeled "Do you want X or Y?" forms — the user shouldn't have to re-type or paraphrase an option's description as the answer.
-- **States, not activities.** Each step describes a state the system reaches — observable, testable. Push activity phrasing ("work on X") into state phrasing ("X works").
-- **Vertical slices over horizontal layers.** Each step should deliver working end-to-end behavior where possible. Avoid building all of one layer before touching the next.
-- **Walking skeleton first.** The first step should prove the approach works end-to-end, even if the functionality is minimal.
-- **Every behavior must have a home.** Each behavior in behaviors.diff.md maps to a step, Attempt, Task note, or peer Work Item. If a behavior has no home, the plan is incomplete.
-- **Verification is required.** Every step needs a way for the agent to confirm it's done. No verification → the agent can't know when to move on.
-- **Progressive elaboration is correct.** Plan what you can see. Mark the rest TBD. The plan evolves during execution.
-- **Classify scope early.** Mark steps as required or optional from the start. This makes scope trading possible when problems arise.
-- **Decompose by scope, not by chore.** Use Work Items and Task notes to capture coherent areas of behavior, not checklist activities. "Auth system" is a good Work Item. "Write tests" is not.
-- **Interfaces before execution.** When peer Work Items produce code that must integrate, define the contract in the plan.
-- **Don't over-plan.** The plan breaks the approach into steps. It does not redesign the approach. If planning reveals the approach is wrong, go back to design-approach.
-- **The plan is a living artifact.** The executing agent may discover steps need adjustment. They can adapt within the approach, or propose changes via `needs-user` if significant.
-- **Trivial work needs trivial plans.** Don't force a planning document on a one-step fix.
+- Label options as (a), (b), (c), or ask a yes/no with an obvious default. Avoid unlabeled "X or Y?" forms.
+- Each step is a state the system reaches, not an activity to perform.
+- Behavior references are area-qualified — `Feed:B1`, not `B1` — because IDs restart per area.
+- When the plan splits, each Work Item's plan lives at `.factory/drafts/<draft-id>/items/<slug>/plan.md` and its `<work-item-id>` is `<draft-id>-<slug>`.
