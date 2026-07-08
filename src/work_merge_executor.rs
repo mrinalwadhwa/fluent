@@ -754,17 +754,7 @@ fn rebase_candidate(
 
     let give_up_path = rebase_artifact_dir.join("give-up.md");
 
-    if exit_code == 0 {
-        let new_tip = head_commit(source_workspace)?;
-        update_rebase_task_status(
-            config.store,
-            config.work_item_id,
-            &candidate.attempt_id,
-            &rebase_task_id,
-            TaskStatus::Complete,
-        )?;
-        Ok(RebaseOutcome::Success { new_tip })
-    } else if give_up_path.exists() {
+    if give_up_path.exists() {
         git::run_raw(source_workspace, &["rebase", "--abort"]).ok();
         let diagnostic = fs::read_to_string(&give_up_path)
             .unwrap_or_else(|_| "Rebase agent gave up (no diagnostic)".to_string());
@@ -776,6 +766,16 @@ fn rebase_candidate(
             TaskStatus::NeedsUser,
         )?;
         Ok(RebaseOutcome::NeedsUser { diagnostic })
+    } else if exit_code == 0 {
+        let new_tip = head_commit(source_workspace)?;
+        update_rebase_task_status(
+            config.store,
+            config.work_item_id,
+            &candidate.attempt_id,
+            &rebase_task_id,
+            TaskStatus::Complete,
+        )?;
+        Ok(RebaseOutcome::Success { new_tip })
     } else {
         git::run_raw(source_workspace, &["rebase", "--abort"]).ok();
         update_rebase_task_status(
