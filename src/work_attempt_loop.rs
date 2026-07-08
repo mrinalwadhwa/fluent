@@ -566,6 +566,36 @@ fn completed_review_tasks_after_latest_write(tasks: &[Task]) -> impl Iterator<It
         .filter(|task| task.kind == TaskKind::Review && task.status == TaskStatus::Complete)
 }
 
+fn tester_failures(tester_results_path: &Path) -> usize {
+    let content = match fs::read_to_string(tester_results_path) {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+    let results: crate::tester::TesterResults = match serde_json::from_str(&content) {
+        Ok(r) => r,
+        Err(_) => return 0,
+    };
+    results.tests.iter().filter(|t| t.status == "fail").count()
+}
+
+fn latest_tester_results_path(project_root: &Path, attempt: &Attempt) -> Option<PathBuf> {
+    let start = attempt
+        .tasks
+        .iter()
+        .rposition(|task| task.kind == TaskKind::Write)
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    attempt.tasks[start..]
+        .iter()
+        .rev()
+        .find(|task| task.kind == TaskKind::Tester && task.status == TaskStatus::Complete)
+        .and_then(|task| task.artifact_area.as_ref())
+        .and_then(|area| {
+            work_task_executor::resolve_managed_artifact_area_path(project_root, &area.path).ok()
+        })
+        .map(|dir| dir.join("tester-results.json"))
+}
+
 fn interpret_reviews(
     project_root: &Path,
     store: &WorkModelStore,
@@ -595,7 +625,27 @@ fn interpret_reviews(
         }
     }
 
-    if !failed.is_empty() {
+    let tester_result_path =
+        latest_tester_results_path(project_root, &item.attempts[attempt_index]);
+    let tester_fail_count = tester_result_path
+        .as_ref()
+        .map(|p| tester_failures(p))
+        .unwrap_or(0);
+
+    let has_failures = !failed.is_empty() || tester_fail_count > 0;
+
+    if has_failures {
+        if tester_fail_count > 0 {
+            if let Some(ref path) = tester_result_path {
+                if let Ok(relative) = path.strip_prefix(project_root) {
+                    failed.push(ArtifactRef {
+                        producer_id: "tester".to_string(),
+                        path: relative.to_string_lossy().to_string(),
+                    });
+                }
+            }
+        }
+
         item.attempts[attempt_index].review_state = Some(AttemptReviewState::Failed);
         if item.attempts[attempt_index].kind.is_review_only_like() {
             crate::work_model::set_attempt_terminal(
@@ -1296,5 +1346,252 @@ mod tests {
             started_at: None,
             completed_at: None,
         }
+    }
+
+    fn tester_task(id: &str, artifact_path: &str) -> Task {
+        Task {
+            id: id.to_string(),
+            kind: TaskKind::Tester,
+            status: TaskStatus::Complete,
+            role: "tester".to_string(),
+            instructions: None,
+            work_item_id: "work-1".to_string(),
+            attempt_id: Some("attempt-1".to_string()),
+            workspace_access: WorkspaceAccess {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            },
+            artifact_area: Some(TaskArtifactArea {
+                path: artifact_path.to_string(),
+            }),
+            review_context: None,
+            input_artifacts: Vec::new(),
+            depends_on: None,
+            output: None,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+        }
+    }
+
+    use crate::work_model::{ReviewContext, WorkspaceRef};
+
+    fn review_task_with_artifact(id: &str, role: &str, artifact_path: &str) -> Task {
+        Task {
+            artifact_area: Some(TaskArtifactArea {
+                path: artifact_path.to_string(),
+            }),
+            workspace_access: WorkspaceAccess {
+                reads: vec![WorkspaceRef {
+                    id: "candidate".to_string(),
+                    path: ".factory/work/workspaces/work-1/attempt-1/candidate".to_string(),
+                }],
+                writes: Vec::new(),
+            },
+            review_context: Some(ReviewContext {
+                candidate_workspace_id: "candidate".to_string(),
+                candidate_workspace_path: ".factory/work/workspaces/work-1/attempt-1/candidate"
+                    .to_string(),
+                source_branch: "work/attempt-1".to_string(),
+                candidate_commit: "abc123".to_string(),
+                base_commit: None,
+            }),
+            ..review_task(id, role)
+        }
+    }
+
+    use crate::work_model::TaskOutput;
+
+    fn make_interpret_reviews_fixture(
+        project_root: &Path,
+        review_verdict: &str,
+        tester_json: Option<&str>,
+    ) -> (WorkModelStore, WorkItem) {
+        let store = WorkModelStore::new(project_root);
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Test item".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+
+        let attempt = &mut item.attempts[0];
+        attempt.tasks[0].status = TaskStatus::Complete;
+        attempt.tasks[0].output = Some(TaskOutput {
+            workspace_id: "candidate".to_string(),
+            workspace_path: ".factory/work/workspaces/work-1/attempt-1/candidate".to_string(),
+            source_branch: "work/attempt-1".to_string(),
+            commit: "abc123".to_string(),
+        });
+
+        let tester_artifact_path =
+            work_artifact_path("work-1", "attempt-1", "attempt-1-tester");
+        attempt.tasks.push(tester_task(
+            "attempt-1-tester",
+            &tester_artifact_path,
+        ));
+
+        if let Some(json) = tester_json {
+            let tester_dir = project_root.join(&tester_artifact_path);
+            fs::create_dir_all(&tester_dir).unwrap();
+            fs::write(tester_dir.join("tester-results.json"), json).unwrap();
+        }
+
+        let review_artifact_path =
+            work_artifact_path("work-1", "attempt-1", "attempt-1-review-behaviors");
+        attempt.tasks.push(review_task_with_artifact(
+            "attempt-1-review-behaviors",
+            "behaviors",
+            &review_artifact_path,
+        ));
+
+        let review_dir = project_root.join(&review_artifact_path);
+        fs::create_dir_all(&review_dir).unwrap();
+        fs::write(
+            review_dir.join("review.md"),
+            format!("Verdict: {review_verdict}\n"),
+        )
+        .unwrap();
+
+        store.create_work_item(&item).unwrap();
+        (store, item)
+    }
+
+    fn passing_tester_json() -> &'static str {
+        r#"{
+            "commands": [],
+            "tests": [
+                {"id": "test_a", "test_harness": "cargo-nextest", "status": "pass", "duration_ms": 10, "failure_excerpt": null}
+            ],
+            "summary": {"total": 1, "pass": 1, "fail": 0, "skipped": 0},
+            "error": null
+        }"#
+    }
+
+    fn failing_tester_json() -> &'static str {
+        r#"{
+            "commands": [],
+            "tests": [
+                {"id": "test_a", "test_harness": "cargo-nextest", "status": "pass", "duration_ms": 10, "failure_excerpt": null},
+                {"id": "test_b", "test_harness": "cargo-nextest", "status": "fail", "duration_ms": 5, "failure_excerpt": "assertion failed"}
+            ],
+            "summary": {"total": 2, "pass": 1, "fail": 1, "skipped": 0},
+            "error": null
+        }"#
+    }
+
+    #[test]
+    fn tester_failures_counts_fail_status() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("tester-results.json");
+        fs::write(&path, failing_tester_json()).unwrap();
+        assert_eq!(tester_failures(&path), 1);
+    }
+
+    #[test]
+    fn tester_failures_returns_zero_for_all_passing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("tester-results.json");
+        fs::write(&path, passing_tester_json()).unwrap();
+        assert_eq!(tester_failures(&path), 0);
+    }
+
+    #[test]
+    fn tester_failures_returns_zero_for_missing_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("nonexistent.json");
+        assert_eq!(tester_failures(&path), 0);
+    }
+
+    #[test]
+    fn tester_failures_returns_zero_for_malformed_json() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("tester-results.json");
+        fs::write(&path, "not valid json {{{").unwrap();
+        assert_eq!(tester_failures(&path), 0);
+    }
+
+    #[test]
+    fn tester_failure_blocks_merge_candidate() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, _) =
+            make_interpret_reviews_fixture(tmp.path(), "PASS", Some(failing_tester_json()));
+
+        let item = store.read_work_item("work-1").unwrap();
+        let outcome =
+            interpret_reviews(tmp.path(), &store, item, "attempt-1", true).unwrap();
+
+        assert!(
+            !matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
+            "tester failure must block merge candidate; got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn tester_failure_routes_to_followup_within_budget() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, _) =
+            make_interpret_reviews_fixture(tmp.path(), "PASS", Some(failing_tester_json()));
+
+        let item = store.read_work_item("work-1").unwrap();
+        let outcome =
+            interpret_reviews(tmp.path(), &store, item, "attempt-1", true).unwrap();
+
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::PlannedWriteRound { .. }),
+            "tester failure with budget should schedule follow-up write; got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn tester_failure_records_needs_user_at_cap() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, _) =
+            make_interpret_reviews_fixture(tmp.path(), "PASS", Some(failing_tester_json()));
+
+        let item = store.read_work_item("work-1").unwrap();
+        let outcome =
+            interpret_reviews(tmp.path(), &store, item, "attempt-1", false).unwrap();
+
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::NeedsUser { .. }),
+            "tester failure at budget cap should record needs-user; got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn passing_or_missing_tester_does_not_block() {
+        let tmp_pass = tempfile::TempDir::new().unwrap();
+        let (store_pass, _) =
+            make_interpret_reviews_fixture(tmp_pass.path(), "PASS", Some(passing_tester_json()));
+        let item_pass = store_pass.read_work_item("work-1").unwrap();
+        let outcome_pass =
+            interpret_reviews(tmp_pass.path(), &store_pass, item_pass, "attempt-1", true)
+                .unwrap();
+        assert!(
+            matches!(outcome_pass, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
+            "passing tester should allow merge candidate; got {outcome_pass:?}"
+        );
+
+        let tmp_missing = tempfile::TempDir::new().unwrap();
+        let (store_missing, _) =
+            make_interpret_reviews_fixture(tmp_missing.path(), "PASS", None);
+        let item_missing = store_missing.read_work_item("work-1").unwrap();
+        let outcome_missing = interpret_reviews(
+            tmp_missing.path(),
+            &store_missing,
+            item_missing,
+            "attempt-1",
+            true,
+        )
+        .unwrap();
+        assert!(
+            matches!(outcome_missing, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
+            "missing tester results should allow merge candidate; got {outcome_missing:?}"
+        );
     }
 }
