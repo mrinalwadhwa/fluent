@@ -1428,12 +1428,10 @@ mod tests {
             commit: "abc123".to_string(),
         });
 
-        let tester_artifact_path =
-            work_artifact_path("work-1", "attempt-1", "attempt-1-tester");
-        attempt.tasks.push(tester_task(
-            "attempt-1-tester",
-            &tester_artifact_path,
-        ));
+        let tester_artifact_path = work_artifact_path("work-1", "attempt-1", "attempt-1-tester");
+        attempt
+            .tasks
+            .push(tester_task("attempt-1-tester", &tester_artifact_path));
 
         if let Some(json) = tester_json {
             let tester_dir = project_root.join(&tester_artifact_path);
@@ -1522,8 +1520,7 @@ mod tests {
             make_interpret_reviews_fixture(tmp.path(), "PASS", Some(failing_tester_json()));
 
         let item = store.read_work_item("work-1").unwrap();
-        let outcome =
-            interpret_reviews(tmp.path(), &store, item, "attempt-1", true).unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true).unwrap();
 
         assert!(
             !matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
@@ -1538,8 +1535,7 @@ mod tests {
             make_interpret_reviews_fixture(tmp.path(), "PASS", Some(failing_tester_json()));
 
         let item = store.read_work_item("work-1").unwrap();
-        let outcome =
-            interpret_reviews(tmp.path(), &store, item, "attempt-1", true).unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true).unwrap();
 
         assert!(
             matches!(outcome, WorkAttemptRunOutcome::PlannedWriteRound { .. }),
@@ -1554,8 +1550,7 @@ mod tests {
             make_interpret_reviews_fixture(tmp.path(), "PASS", Some(failing_tester_json()));
 
         let item = store.read_work_item("work-1").unwrap();
-        let outcome =
-            interpret_reviews(tmp.path(), &store, item, "attempt-1", false).unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", false).unwrap();
 
         assert!(
             matches!(outcome, WorkAttemptRunOutcome::NeedsUser { .. }),
@@ -1570,16 +1565,17 @@ mod tests {
             make_interpret_reviews_fixture(tmp_pass.path(), "PASS", Some(passing_tester_json()));
         let item_pass = store_pass.read_work_item("work-1").unwrap();
         let outcome_pass =
-            interpret_reviews(tmp_pass.path(), &store_pass, item_pass, "attempt-1", true)
-                .unwrap();
+            interpret_reviews(tmp_pass.path(), &store_pass, item_pass, "attempt-1", true).unwrap();
         assert!(
-            matches!(outcome_pass, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
+            matches!(
+                outcome_pass,
+                WorkAttemptRunOutcome::MergeCandidateReady { .. }
+            ),
             "passing tester should allow merge candidate; got {outcome_pass:?}"
         );
 
         let tmp_missing = tempfile::TempDir::new().unwrap();
-        let (store_missing, _) =
-            make_interpret_reviews_fixture(tmp_missing.path(), "PASS", None);
+        let (store_missing, _) = make_interpret_reviews_fixture(tmp_missing.path(), "PASS", None);
         let item_missing = store_missing.read_work_item("work-1").unwrap();
         let outcome_missing = interpret_reviews(
             tmp_missing.path(),
@@ -1590,7 +1586,10 @@ mod tests {
         )
         .unwrap();
         assert!(
-            matches!(outcome_missing, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
+            matches!(
+                outcome_missing,
+                WorkAttemptRunOutcome::MergeCandidateReady { .. }
+            ),
             "missing tester results should allow merge candidate; got {outcome_missing:?}"
         );
     }
