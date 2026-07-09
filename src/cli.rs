@@ -40,27 +40,115 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    // -- WORK MODEL entities --
+    /// Manage stored Work Items
+    WorkItem {
+        #[command(subcommand)]
+        command: WorkItemCommands,
+    },
+
+    /// Manage Attempts on a Work Item
+    Attempt {
+        #[command(subcommand)]
+        command: AttemptCommands,
+    },
+
+    /// Manage Merge Candidates for a Work Item
+    MergeCandidate {
+        #[command(subcommand)]
+        command: MergeCandidateCommands,
+    },
+
+    /// Manage Tasks within an Attempt
+    Task {
+        #[command(subcommand)]
+        command: TaskCommands,
+    },
+
+    /// Manage the Work Item queue
+    Queue {
+        #[command(subcommand)]
+        command: QueueCommands,
+    },
+
+    /// Run the deterministic Tester subcommand
+    Tester {
+        #[command(subcommand)]
+        command: TesterCommands,
+    },
+
+    /// Run the sequential scheduler
+    Scheduler {
+        #[command(subcommand)]
+        command: SchedulerCommands,
+    },
+
+    // -- ACTIONS --
+    /// Plan review Tasks or review the codebase
+    Review {
+        #[command(subcommand)]
+        command: Option<ReviewCommands>,
+
+        /// Work Item ID (for planning review Tasks)
+        work_item_id: Option<String>,
+
+        /// Attempt ID (for planning review Tasks)
+        attempt_id: Option<String>,
+    },
+
+    /// Watch for merge-ready candidates and merge them automatically
+    AutoMerge {
+        /// Work Item ID (watches a single Work Item)
+        work_item_id: Option<String>,
+
+        /// Watch all Work Items in the project
+        #[arg(long)]
+        all: bool,
+
+        /// Disable sandbox
+        #[arg(long)]
+        no_sandbox: bool,
+
+        /// Coding agent to launch: claude or codex
+        #[arg(long)]
+        coder: Option<String>,
+
+        /// Poll interval in seconds (default 30)
+        #[arg(long, hide = true)]
+        poll_seconds: Option<u64>,
+    },
+
+    /// Drain the pending post-merge review queue (debounced)
+    PostMergeReview {
+        /// Override debounce in seconds (default
+        /// FACTORY_POST_MERGE_DEBOUNCE_SECONDS env var or 60)
+        #[arg(long)]
+        debounce_seconds: Option<u64>,
+        /// Restrict to a single target branch
+        #[arg(long)]
+        target: Option<String>,
+    },
+
+    // -- PROJECT --
     /// Show Work Item state for a project
     Status {
         /// Path to check (default: current directory)
         path: Option<String>,
     },
 
-    /// Manage stored Work Items
-    Work {
-        #[command(subcommand)]
-        command: WorkCommands,
-    },
+    /// Initialize .factory/ directory
+    Init,
 
     /// Clean stale Work Item artifacts and registered worktrees
     Cleanup {
         /// Apply cleanup changes instead of printing a dry run
         #[arg(long)]
         apply: bool,
-    },
 
-    /// Initialize .factory/ directory
-    Init,
+        /// Prune all review-only worktrees, not just orphans
+        #[arg(long)]
+        prune_all_review_worktrees: bool,
+    },
 
     /// Live TUI showing Work Item activity
     Dashboard {
@@ -68,19 +156,13 @@ pub enum Commands {
         path: Option<String>,
     },
 
-    /// Manage Fargate infrastructure
-    Fargate {
-        #[command(subcommand)]
-        command: FargateCommands,
-    },
-
     /// Print Factory version and build commit
     Version,
 
     /// Manage per-file observations
-    Observations {
+    Observation {
         #[command(subcommand)]
-        command: ObservationsCommands,
+        command: ObservationCommands,
     },
 
     /// Prevent macOS idle sleep (caffeinate toggle)
@@ -88,76 +170,20 @@ pub enum Commands {
         #[command(subcommand)]
         command: KeepAwakeCommands,
     },
-}
 
-#[derive(Subcommand)]
-pub enum KeepAwakeCommands {
-    /// Enable keep-awake (start caffeinate, install LaunchAgent)
-    On,
-
-    /// Disable keep-awake (stop caffeinate, disable LaunchAgent)
-    Off,
-
-    /// Print current keep-awake state
-    Status,
-
-    /// Remove the LaunchAgent and stop caffeinate
-    Uninstall,
-}
-
-#[derive(Subcommand)]
-pub enum ObservationsCommands {
-    /// Record a new observation
-    Add {
-        /// Observation content (reads from stdin when absent)
-        content: Option<String>,
-    },
-
-    /// Resolve an open observation
-    Resolve {
-        /// Observation ID or unique prefix
-        id: String,
-
-        /// Resolution context (reads from stdin when absent)
-        resolution: Option<String>,
-    },
-
-    /// List open observations
-    List,
-
-    /// Print the body of one observation
-    Show {
-        /// Observation ID or unique prefix
-        id: String,
-    },
-
-    /// Migrate monolithic observation files to per-file layout
-    Migrate,
-}
-
-#[derive(Subcommand)]
-pub enum FargateCommands {
-    /// Deploy infrastructure and build images
-    EnsureSetup {
-        /// Force rebuild of all images
-        #[arg(long)]
-        force_rebuild: bool,
-    },
-
-    /// Tear down Fargate infrastructure
-    Teardown {
-        /// Keep the ECR repository intact
-        #[arg(long)]
-        keep_ecr: bool,
-
-        /// Keep the S3 bucket intact
-        #[arg(long)]
-        keep_s3: bool,
+    /// Manage Fargate infrastructure
+    Fargate {
+        #[command(subcommand)]
+        command: FargateCommands,
     },
 }
 
+// ---------------------------------------------------------------------------
+// Work Item
+// ---------------------------------------------------------------------------
+
 #[derive(Subcommand)]
-pub enum WorkCommands {
+pub enum WorkItemCommands {
     /// Create a stored Work Item
     Create {
         /// Work Item ID
@@ -218,21 +244,31 @@ pub enum WorkCommands {
         #[arg(long)]
         reason: Option<String>,
     },
+}
 
+// ---------------------------------------------------------------------------
+// Attempt
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+pub enum AttemptCommands {
     /// Create a planned Attempt with an initial write Task
-    Attempt {
-        #[command(subcommand)]
-        command: Option<WorkAttemptCommands>,
-
+    Create {
         /// Work Item ID
-        work_item_id: Option<String>,
+        work_item_id: String,
 
-        /// Attempt ID
+        /// Attempt ID (auto-assigned if omitted)
         attempt_id: Option<String>,
     },
 
-    /// Plan review Tasks for a completed Attempt
-    Review {
+    /// List Attempts for a Work Item
+    List {
+        /// Work Item ID
+        work_item_id: String,
+    },
+
+    /// Show one Attempt as JSON
+    Show {
         /// Work Item ID
         work_item_id: String,
 
@@ -240,176 +276,6 @@ pub enum WorkCommands {
         attempt_id: String,
     },
 
-    /// Create a review-only Attempt for the current codebase
-    ReviewCodebase {
-        /// Work Item ID
-        work_item_id: String,
-
-        /// Attempt ID
-        attempt_id: String,
-
-        /// Review the current working tree at `.` (with the source-checkout
-        /// restorative guard) instead of the per-branch review-only worktree.
-        #[arg(long)]
-        from_working_tree: bool,
-    },
-
-    /// Show one stored Merge Candidate as JSON
-    MergeCandidate {
-        /// Work Item ID
-        work_item_id: String,
-
-        /// Merge Candidate ID
-        merge_candidate_id: String,
-    },
-
-    /// Execute a stored Merge Candidate
-    Merge {
-        /// Work Item ID
-        work_item_id: String,
-
-        /// Merge Candidate ID (default: most recently created Merge Candidate)
-        merge_candidate_id: Option<String>,
-
-        /// Disable sandbox
-        #[arg(long)]
-        no_sandbox: bool,
-
-        /// Coding agent to launch: claude or codex
-        #[arg(long)]
-        coder: Option<String>,
-
-        /// Execution runtime: local (default) or fargate
-        #[arg(long)]
-        runtime: Option<String>,
-
-        /// Extra args passed through to the agent
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        extra_args: Vec<String>,
-    },
-
-    /// Download a Fargate-executed Merge Candidate's workspace +
-    /// Work state from S3 back into the project workspace.
-    MergePull {
-        /// Work Item ID
-        work_item_id: String,
-        /// Merge Candidate ID
-        merge_candidate_id: String,
-    },
-
-    /// Stop a Fargate-executed Merge Candidate's ECS task
-    /// (best-effort, idempotent).
-    MergeStop {
-        /// Work Item ID
-        work_item_id: String,
-        /// Merge Candidate ID
-        merge_candidate_id: String,
-    },
-
-    /// Watch a Fargate-executed Merge Candidate's ECS task until it stops.
-    MergeWatch {
-        /// Work Item ID
-        work_item_id: String,
-        /// Merge Candidate ID
-        merge_candidate_id: String,
-        /// Poll interval in seconds (default 15)
-        #[arg(long, default_value_t = 15)]
-        interval: u64,
-    },
-
-    /// Execute stored Work Item Tasks
-    Task {
-        #[command(subcommand)]
-        command: WorkTaskCommands,
-    },
-
-    /// Run the deterministic Tester subcommand
-    Tester {
-        #[command(subcommand)]
-        command: WorkTesterCommands,
-    },
-
-    /// Watch for merge-ready candidates and merge them automatically
-    AutoMerge {
-        /// Work Item ID (watches a single Work Item)
-        work_item_id: Option<String>,
-
-        /// Watch all Work Items in the project
-        #[arg(long)]
-        all: bool,
-
-        /// Disable sandbox
-        #[arg(long)]
-        no_sandbox: bool,
-
-        /// Coding agent to launch: claude or codex
-        #[arg(long)]
-        coder: Option<String>,
-
-        /// Poll interval in seconds (default 30)
-        #[arg(long, hide = true)]
-        poll_seconds: Option<u64>,
-    },
-
-    /// Drain the pending post-merge review queue (debounced)
-    PostMergeReview {
-        #[command(subcommand)]
-        command: WorkPostMergeReviewCommands,
-    },
-
-    /// Manage per-branch review-only worktrees
-    ReviewOnlyWorktree {
-        #[command(subcommand)]
-        command: WorkReviewOnlyWorktreeCommands,
-    },
-
-    /// Manage the Work Item queue
-    Queue {
-        #[command(subcommand)]
-        command: WorkQueueCommands,
-    },
-
-    /// Run the sequential scheduler
-    Scheduler {
-        #[command(subcommand)]
-        command: WorkSchedulerCommands,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum WorkReviewOnlyWorktreeCommands {
-    /// Remove review-only worktrees whose branch no longer exists
-    Prune {
-        /// Remove every review-only worktree, regardless of whether its
-        /// corresponding branch still exists. In-use worktrees are still
-        /// skipped.
-        #[arg(long)]
-        all: bool,
-
-        /// Report what would be removed without actually removing
-        /// anything. Exits 0 either way.
-        #[arg(long)]
-        dry_run: bool,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum WorkPostMergeReviewCommands {
-    /// Sleep the debounce window, then review each target branch with
-    /// pending merges. Findings auto-create a forward-fix Work Item.
-    Run {
-        /// Override debounce in seconds (default
-        /// FACTORY_POST_MERGE_DEBOUNCE_SECONDS env var or 60)
-        #[arg(long)]
-        debounce_seconds: Option<u64>,
-        /// Restrict to a single target branch
-        #[arg(long)]
-        target: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum WorkAttemptCommands {
     /// Advance an Attempt through the next safe transitions
     Run {
         /// Work Item ID
@@ -458,6 +324,7 @@ pub enum WorkAttemptCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
     },
+
     /// Download a Fargate-executed Attempt's workspace + Work state
     /// from S3 back into the project workspace.
     Pull {
@@ -466,6 +333,7 @@ pub enum WorkAttemptCommands {
         /// Attempt ID
         attempt_id: String,
     },
+
     /// Stop a Fargate-executed Attempt's ECS task (best-effort, idempotent).
     Stop {
         /// Work Item ID
@@ -473,6 +341,7 @@ pub enum WorkAttemptCommands {
         /// Attempt ID
         attempt_id: String,
     },
+
     /// Watch a Fargate-executed Attempt's ECS task until it stops.
     Watch {
         /// Work Item ID
@@ -485,8 +354,109 @@ pub enum WorkAttemptCommands {
     },
 }
 
+// ---------------------------------------------------------------------------
+// Merge Candidate
+// ---------------------------------------------------------------------------
+
 #[derive(Subcommand)]
-pub enum WorkTaskCommands {
+pub enum MergeCandidateCommands {
+    /// List Merge Candidates for a Work Item
+    List {
+        /// Work Item ID
+        work_item_id: String,
+    },
+
+    /// Show one stored Merge Candidate as JSON
+    Show {
+        /// Work Item ID
+        work_item_id: String,
+
+        /// Merge Candidate ID
+        merge_candidate_id: String,
+    },
+
+    /// Execute a stored Merge Candidate
+    Land {
+        /// Work Item ID
+        work_item_id: String,
+
+        /// Merge Candidate ID (default: most recently created Merge Candidate)
+        merge_candidate_id: Option<String>,
+
+        /// Disable sandbox
+        #[arg(long)]
+        no_sandbox: bool,
+
+        /// Coding agent to launch: claude or codex
+        #[arg(long)]
+        coder: Option<String>,
+
+        /// Execution runtime: local (default) or fargate
+        #[arg(long)]
+        runtime: Option<String>,
+
+        /// Extra args passed through to the agent
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra_args: Vec<String>,
+    },
+
+    /// Download a Fargate-executed Merge Candidate's workspace +
+    /// Work state from S3 back into the project workspace.
+    Pull {
+        /// Work Item ID
+        work_item_id: String,
+        /// Merge Candidate ID
+        merge_candidate_id: String,
+    },
+
+    /// Stop a Fargate-executed Merge Candidate's ECS task
+    /// (best-effort, idempotent).
+    Stop {
+        /// Work Item ID
+        work_item_id: String,
+        /// Merge Candidate ID
+        merge_candidate_id: String,
+    },
+
+    /// Watch a Fargate-executed Merge Candidate's ECS task until it stops.
+    Watch {
+        /// Work Item ID
+        work_item_id: String,
+        /// Merge Candidate ID
+        merge_candidate_id: String,
+        /// Poll interval in seconds (default 15)
+        #[arg(long, default_value_t = 15)]
+        interval: u64,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Task
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+pub enum TaskCommands {
+    /// List Tasks for an Attempt
+    List {
+        /// Work Item ID
+        work_item_id: String,
+
+        /// Attempt ID
+        attempt_id: String,
+    },
+
+    /// Show one Task as JSON
+    Show {
+        /// Work Item ID
+        work_item_id: String,
+
+        /// Attempt ID
+        attempt_id: String,
+
+        /// Task ID
+        task_id: String,
+    },
+
     /// Run an existing Task
     Run {
         /// Work Item ID
@@ -536,27 +506,12 @@ pub enum WorkTaskCommands {
     },
 }
 
-#[derive(Subcommand)]
-pub enum WorkTesterCommands {
-    /// Run the Tester subcommand for a specific Task
-    Run {
-        /// Work Item ID
-        work_item_id: String,
-
-        /// Attempt ID
-        attempt_id: String,
-
-        /// Task ID
-        task_id: String,
-
-        /// Disable sandbox
-        #[arg(long)]
-        no_sandbox: bool,
-    },
-}
+// ---------------------------------------------------------------------------
+// Queue
+// ---------------------------------------------------------------------------
 
 #[derive(Subcommand)]
-pub enum WorkQueueCommands {
+pub enum QueueCommands {
     /// Add a Work Item to the queue
     Add {
         /// Work Item ID
@@ -577,12 +532,138 @@ pub enum WorkQueueCommands {
     },
 }
 
+// ---------------------------------------------------------------------------
+// Tester
+// ---------------------------------------------------------------------------
+
 #[derive(Subcommand)]
-pub enum WorkSchedulerCommands {
+pub enum TesterCommands {
+    /// Run the Tester subcommand for a specific Task
+    Run {
+        /// Work Item ID
+        work_item_id: String,
+
+        /// Attempt ID
+        attempt_id: String,
+
+        /// Task ID
+        task_id: String,
+
+        /// Disable sandbox
+        #[arg(long)]
+        no_sandbox: bool,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Scheduler
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+pub enum SchedulerCommands {
     /// Poll the queue and run Work Items sequentially
     Run {
         /// Seconds between queue polls when idle (default 30)
         #[arg(long)]
         poll_seconds: Option<u64>,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Review
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+pub enum ReviewCommands {
+    /// Create a review-only Attempt for the current codebase
+    Codebase {
+        /// Work Item ID
+        work_item_id: String,
+
+        /// Attempt ID
+        attempt_id: String,
+
+        /// Review the current working tree at `.` (with the source-checkout
+        /// restorative guard) instead of the per-branch review-only worktree.
+        #[arg(long)]
+        from_working_tree: bool,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Observation
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+pub enum ObservationCommands {
+    /// Record a new observation
+    Create {
+        /// Observation content (reads from stdin when absent)
+        content: Option<String>,
+    },
+
+    /// Resolve an open observation
+    Resolve {
+        /// Observation ID or unique prefix
+        id: String,
+
+        /// Resolution context (reads from stdin when absent)
+        resolution: Option<String>,
+    },
+
+    /// List open observations
+    List,
+
+    /// Print the body of one observation
+    Show {
+        /// Observation ID or unique prefix
+        id: String,
+    },
+
+    /// Migrate monolithic observation files to per-file layout
+    Migrate,
+}
+
+// ---------------------------------------------------------------------------
+// Keep Awake
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+pub enum KeepAwakeCommands {
+    /// Enable keep-awake (start caffeinate, install LaunchAgent)
+    On,
+
+    /// Disable keep-awake (stop caffeinate, disable LaunchAgent)
+    Off,
+
+    /// Print current keep-awake state
+    Status,
+
+    /// Remove the LaunchAgent and stop caffeinate
+    Uninstall,
+}
+
+// ---------------------------------------------------------------------------
+// Fargate
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+pub enum FargateCommands {
+    /// Deploy infrastructure and build images
+    EnsureSetup {
+        /// Force rebuild of all images
+        #[arg(long)]
+        force_rebuild: bool,
+    },
+
+    /// Tear down Fargate infrastructure
+    Teardown {
+        /// Keep the ECR repository intact
+        #[arg(long)]
+        keep_ecr: bool,
+
+        /// Keep the S3 bucket intact
+        #[arg(long)]
+        keep_s3: bool,
     },
 }

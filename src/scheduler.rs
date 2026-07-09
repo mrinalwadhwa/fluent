@@ -27,7 +27,7 @@ impl AttemptInvoker for CliAttemptInvoker {
 
         let create_status = Command::new(&factory_bin)
             .current_dir(project_root)
-            .args(["work", "attempt", work_item_id])
+            .args(["attempt", "create", work_item_id])
             .status()?;
 
         if !create_status.success() {
@@ -36,7 +36,7 @@ impl AttemptInvoker for CliAttemptInvoker {
 
         let run_status = Command::new(&factory_bin)
             .current_dir(project_root)
-            .args(["work", "attempt", "run", work_item_id, "--no-sandbox"])
+            .args(["attempt", "run", work_item_id, "--no-sandbox"])
             .status()?;
 
         if run_status.success() {

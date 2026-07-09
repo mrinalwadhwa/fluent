@@ -10,10 +10,10 @@ use std::time::Duration;
 use factory::cleanup::{
     self, CleanupOptions, WorkBranchCleanup, WorkCleanupResult, WorktreeCleanup,
 };
-use factory::cli;
 use factory::cli::{
-    Cli, Commands, FargateCommands, KeepAwakeCommands, ObservationsCommands, WorkAttemptCommands,
-    WorkCommands, WorkQueueCommands, WorkSchedulerCommands, WorkTaskCommands, WorkTesterCommands,
+    AttemptCommands, Cli, Commands, FargateCommands, KeepAwakeCommands, MergeCandidateCommands,
+    ObservationCommands, QueueCommands, ReviewCommands, SchedulerCommands, TaskCommands,
+    TesterCommands, WorkItemCommands,
 };
 use factory::coder::CoderKind;
 use factory::content::ContentResolver;
@@ -90,8 +90,11 @@ fn main() -> Result<()> {
             let search_root = path.map(PathBuf::from).unwrap_or(cwd);
             cmd_status(&search_root)?;
         }
-        Some(Commands::Work { command }) => {
-            cmd_work(
+        Some(Commands::WorkItem { command }) => {
+            cmd_work_item(&cwd, command)?;
+        }
+        Some(Commands::Attempt { command }) => {
+            cmd_attempt(
                 &cwd,
                 command,
                 cli.coder.as_deref(),
@@ -99,8 +102,67 @@ fn main() -> Result<()> {
                 &resolver,
             )?;
         }
-        Some(Commands::Cleanup { apply }) => {
-            cmd_cleanup(&cwd, apply)?;
+        Some(Commands::MergeCandidate { command }) => {
+            cmd_merge_candidate(
+                &cwd,
+                command,
+                cli.coder.as_deref(),
+                cli.no_sandbox,
+                &resolver,
+            )?;
+        }
+        Some(Commands::Task { command }) => {
+            cmd_task(
+                &cwd,
+                command,
+                cli.coder.as_deref(),
+                cli.no_sandbox,
+                &resolver,
+            )?;
+        }
+        Some(Commands::Queue { command }) => {
+            cmd_queue(&cwd, command)?;
+        }
+        Some(Commands::Tester { command }) => {
+            cmd_tester(&cwd, command, cli.no_sandbox)?;
+        }
+        Some(Commands::Scheduler { command }) => {
+            cmd_scheduler(&cwd, command)?;
+        }
+        Some(Commands::Review {
+            command,
+            work_item_id,
+            attempt_id,
+        }) => {
+            cmd_review(&cwd, command, work_item_id, attempt_id)?;
+        }
+        Some(Commands::AutoMerge {
+            work_item_id,
+            all,
+            no_sandbox,
+            coder,
+            poll_seconds,
+        }) => {
+            cmd_auto_merge(
+                &cwd,
+                work_item_id,
+                all,
+                no_sandbox || cli.no_sandbox,
+                coder.as_deref().or(cli.coder.as_deref()),
+                poll_seconds,
+            )?;
+        }
+        Some(Commands::PostMergeReview {
+            debounce_seconds,
+            target,
+        }) => {
+            cmd_post_merge_review(&cwd, debounce_seconds, target)?;
+        }
+        Some(Commands::Cleanup {
+            apply,
+            prune_all_review_worktrees,
+        }) => {
+            cmd_cleanup(&cwd, apply, prune_all_review_worktrees)?;
         }
         Some(Commands::Init) => {
             cmd_init(&cwd)?;
@@ -131,8 +193,8 @@ fn main() -> Result<()> {
         Some(Commands::Version) => {
             println!("{}", version::version_string());
         }
-        Some(Commands::Observations { command }) => {
-            cmd_observations(&cwd, command)?;
+        Some(Commands::Observation { command }) => {
+            cmd_observation(&cwd, command)?;
         }
         Some(Commands::KeepAwake { command }) => {
             cmd_keep_awake(command)?;
@@ -146,16 +208,14 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn cmd_work(
-    project_root: &Path,
-    command: WorkCommands,
-    global_coder: Option<&str>,
-    global_no_sandbox: bool,
-    resolver: &ContentResolver,
-) -> Result<()> {
+// -------------------------------------------------------------------------
+// Work Item
+// -------------------------------------------------------------------------
+
+fn cmd_work_item(project_root: &Path, command: WorkItemCommands) -> Result<()> {
     let store = WorkModelStore::new(project_root);
     match command {
-        WorkCommands::Create {
+        WorkItemCommands::Create {
             id,
             title,
             instructions,
@@ -193,7 +253,7 @@ fn cmd_work(
             store.create_work_item(&item)?;
             println!("Created Work Item {}", item.id);
         }
-        WorkCommands::List => {
+        WorkItemCommands::List => {
             let items = store.list_work_items()?;
             if items.is_empty() {
                 println!("No Work Items found");
@@ -204,7 +264,7 @@ fn cmd_work(
                 }
             }
         }
-        WorkCommands::Show { id } => match store.read_work_item(&id) {
+        WorkItemCommands::Show { id } => match store.read_work_item(&id) {
             Ok(item) => {
                 print!("{}", to_json_pretty(&item)?);
             }
@@ -215,7 +275,7 @@ fn cmd_work(
             }
             Err(error) => return Err(error.into()),
         },
-        WorkCommands::Abandon { id, reason } => {
+        WorkItemCommands::Abandon { id, reason } => {
             let mut item = match store.read_work_item(&id) {
                 Ok(item) => item,
                 Err(WorkModelStorageError::ReadFile { source, .. })
@@ -229,174 +289,24 @@ fn cmd_work(
             store.write_work_item(&item)?;
             println!("Abandoned Work Item {}", item.id);
         }
-        WorkCommands::Attempt {
-            command,
-            work_item_id,
-            attempt_id,
-        } => match command {
-            Some(WorkAttemptCommands::Run {
-                work_item_id,
-                attempt_id,
-                no_sandbox,
-                coder,
-                write_coder,
-                write_model,
-                review_coder,
-                review_model,
-                behavior_tests_coder,
-                behavior_tests_model,
-                runtime,
-                extra_args,
-            }) => {
-                let attempt_id = match attempt_id {
-                    Some(id) => id,
-                    None => {
-                        let item = match store.read_work_item(&work_item_id) {
-                            Ok(item) => item,
-                            Err(WorkModelStorageError::ReadFile { source, .. })
-                                if source.kind() == ErrorKind::NotFound =>
-                            {
-                                bail!("Work Item {work_item_id:?} not found");
-                            }
-                            Err(error) => return Err(error.into()),
-                        };
-                        item.latest_attempt_id()
-                            .ok_or_else(|| anyhow::anyhow!(
-                                "Work Item {work_item_id:?} has no Attempts; create one first with: factory work attempt {work_item_id}"
-                            ))?
-                            .to_string()
-                    }
-                };
-                let coder_mapping = work_model::resolve_coder_mapping(
-                    &work_model::CoderMappingInputs::from_env().merge_cli(
-                        write_coder,
-                        write_model,
-                        review_coder,
-                        review_model,
-                        behavior_tests_coder,
-                        behavior_tests_model,
-                        coder.or_else(|| global_coder.map(str::to_string)),
-                    ),
-                )?;
-                let runtime = runtime.unwrap_or_else(|| "local".to_string());
-                match runtime.as_str() {
-                    "fargate" => {
-                        let coder_kind =
-                            CoderKind::resolve(coder_mapping.write.coder.as_str().into())?;
-                        fargate::launch_work_attempt(
-                            project_root,
-                            &work_item_id,
-                            &attempt_id,
-                            coder_kind,
-                        )?;
-                        println!(
-                            "Launched Attempt {attempt_id} for Work Item {work_item_id} on Fargate"
-                        );
-                        return Ok(());
-                    }
-                    "local" => {}
-                    other => bail!("Unknown runtime '{other}'. Available: local, fargate."),
-                }
+    }
+    Ok(())
+}
 
-                // Store the resolved mapping on the Attempt before running.
-                {
-                    let mut item = store.read_work_item(&work_item_id)?;
-                    if let Some(attempt) = item.attempts.iter_mut().find(|a| a.id == attempt_id) {
-                        attempt.coder_mapping = coder_mapping.clone();
-                    }
-                    store.write_work_item(&item)?;
-                }
+// -------------------------------------------------------------------------
+// Attempt
+// -------------------------------------------------------------------------
 
-                let result = work_attempt_loop::run_attempt(WorkAttemptRunConfig {
-                    project_root,
-                    store: &store,
-                    work_item_id: &work_item_id,
-                    attempt_id: &attempt_id,
-                    resolver,
-                    extra_args: &extra_args,
-                    no_sandbox: no_sandbox || global_no_sandbox,
-                })?;
-                for outcome in result.outcomes {
-                    match outcome {
-                        WorkAttemptRunOutcome::RanTask { task_id, output } => {
-                            println!("Completed Task {task_id} at {output}");
-                        }
-                        WorkAttemptRunOutcome::PlannedReviews { task_ids } => {
-                            println!(
-                                "Planned {} review Tasks for Attempt {attempt_id}",
-                                task_ids.len()
-                            );
-                            for task_id in task_ids {
-                                println!("{task_id}");
-                            }
-                        }
-                        WorkAttemptRunOutcome::MergeCandidateReady { candidate_id } => {
-                            println!(
-                                "Attempt {attempt_id} reviews passed; Merge Candidate {candidate_id} is ready"
-                            );
-                        }
-                        WorkAttemptRunOutcome::PlannedWriteRound { task_id } => {
-                            println!("Planned write Task {task_id}");
-                        }
-                        WorkAttemptRunOutcome::NeedsUser { handoff_path } => {
-                            println!("Attempt {attempt_id} needs user input: {handoff_path}");
-                        }
-                        WorkAttemptRunOutcome::ReviewOnlyComplete => {
-                            println!("Review-only Attempt {attempt_id} passed");
-                        }
-                        WorkAttemptRunOutcome::ReviewOnlyFailed => {
-                            println!("Review-only Attempt {attempt_id} failed");
-                        }
-                    }
-                }
-            }
-            Some(WorkAttemptCommands::Pull {
-                work_item_id,
-                attempt_id,
-            }) => {
-                fargate::pull_work_attempt(project_root, &work_item_id, &attempt_id)?;
-                println!(
-                    "Pulled Attempt {attempt_id} workspace for Work Item {work_item_id} from Fargate"
-                );
-            }
-            Some(WorkAttemptCommands::Stop {
-                work_item_id,
-                attempt_id,
-            }) => {
-                fargate::stop_work_attempt(project_root, &work_item_id, &attempt_id)?;
-                println!(
-                    "Stop requested for Attempt {attempt_id} of Work Item {work_item_id} (Fargate)"
-                );
-            }
-            Some(WorkAttemptCommands::Watch {
-                work_item_id,
-                attempt_id,
-                interval,
-            }) => {
-                fargate::watch_work_attempt(project_root, &work_item_id, &attempt_id, interval)?;
-                println!(
-                    "Fargate task for Attempt {attempt_id} of Work Item {work_item_id} reached STOPPED"
-                );
-            }
-            None => {
-                let work_item_id =
-                    work_item_id.ok_or_else(|| anyhow::anyhow!("work item id is required"))?;
-                let mut item = match store.read_work_item(&work_item_id) {
-                    Ok(item) => item,
-                    Err(WorkModelStorageError::ReadFile { source, .. })
-                        if source.kind() == ErrorKind::NotFound =>
-                    {
-                        bail!("Work Item {work_item_id:?} not found");
-                    }
-                    Err(error) => return Err(error.into()),
-                };
-                let attempt_id = attempt_id.unwrap_or_else(|| item.next_attempt_id());
-                item.add_initial_attempt(attempt_id.clone())?;
-                store.write_work_item(&item)?;
-                println!("Created Attempt {attempt_id} for Work Item {work_item_id}");
-            }
-        },
-        WorkCommands::Review {
+fn cmd_attempt(
+    project_root: &Path,
+    command: AttemptCommands,
+    global_coder: Option<&str>,
+    global_no_sandbox: bool,
+    resolver: &ContentResolver,
+) -> Result<()> {
+    let store = WorkModelStore::new(project_root);
+    match command {
+        AttemptCommands::Create {
             work_item_id,
             attempt_id,
         } => {
@@ -409,22 +319,13 @@ fn cmd_work(
                 }
                 Err(error) => return Err(error.into()),
             };
-            let task_ids = item.add_review_tasks(&attempt_id, review::REVIEWERS)?;
+            let attempt_id = attempt_id.unwrap_or_else(|| item.next_attempt_id());
+            item.add_initial_attempt(attempt_id.clone())?;
             store.write_work_item(&item)?;
-            println!(
-                "Planned {} review Tasks for Attempt {attempt_id}",
-                task_ids.len()
-            );
-            for task_id in task_ids {
-                println!("{task_id}");
-            }
+            println!("Created Attempt {attempt_id} for Work Item {work_item_id}");
         }
-        WorkCommands::ReviewCodebase {
-            work_item_id,
-            attempt_id,
-            from_working_tree,
-        } => {
-            let mut item = match store.read_work_item(&work_item_id) {
+        AttemptCommands::List { work_item_id } => {
+            let item = match store.read_work_item(&work_item_id) {
                 Ok(item) => item,
                 Err(WorkModelStorageError::ReadFile { source, .. })
                     if source.kind() == ErrorKind::NotFound =>
@@ -433,43 +334,238 @@ fn cmd_work(
                 }
                 Err(error) => return Err(error.into()),
             };
-            let source_ref = current_ref(project_root)?;
-            let source_commit = head_commit(project_root)?;
-            let task_ids = item.add_review_only_attempt(
-                attempt_id.clone(),
-                review::REVIEWERS,
-                source_ref,
-                source_commit,
-                from_working_tree,
-            )?;
-            store.write_work_item(&item)?;
-            let variant = if from_working_tree {
-                "source checkout"
+            if item.attempts.is_empty() {
+                println!("No Attempts found");
             } else {
-                "per-branch worktree"
-            };
-            println!(
-                "Created review-only Attempt {attempt_id} against {variant} with {} task(s)",
-                task_ids.len()
-            );
-            for task_id in task_ids {
-                println!("{task_id}");
+                println!("{:<24} STATUS", "ID");
+                for attempt in &item.attempts {
+                    println!("{:<24} {}", attempt.id, attempt.status.as_str());
+                }
             }
         }
-        WorkCommands::MergeCandidate {
+        AttemptCommands::Show {
+            work_item_id,
+            attempt_id,
+        } => {
+            let item = match store.read_work_item(&work_item_id) {
+                Ok(item) => item,
+                Err(WorkModelStorageError::ReadFile { source, .. })
+                    if source.kind() == ErrorKind::NotFound =>
+                {
+                    bail!("Work Item {work_item_id:?} not found");
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let attempt = item
+                .attempts
+                .iter()
+                .find(|a| a.id == attempt_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Attempt {attempt_id:?} not found in Work Item {work_item_id:?}"
+                    )
+                })?;
+            print!("{}", to_json_pretty(attempt)?);
+        }
+        AttemptCommands::Run {
+            work_item_id,
+            attempt_id,
+            no_sandbox,
+            coder,
+            write_coder,
+            write_model,
+            review_coder,
+            review_model,
+            behavior_tests_coder,
+            behavior_tests_model,
+            runtime,
+            extra_args,
+        } => {
+            let attempt_id = match attempt_id {
+                Some(id) => id,
+                None => {
+                    let item = match store.read_work_item(&work_item_id) {
+                        Ok(item) => item,
+                        Err(WorkModelStorageError::ReadFile { source, .. })
+                            if source.kind() == ErrorKind::NotFound =>
+                        {
+                            bail!("Work Item {work_item_id:?} not found");
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
+                    item.latest_attempt_id()
+                        .ok_or_else(|| anyhow::anyhow!(
+                            "Work Item {work_item_id:?} has no Attempts; create one first with: factory attempt create {work_item_id}"
+                        ))?
+                        .to_string()
+                }
+            };
+            let coder_mapping = work_model::resolve_coder_mapping(
+                &work_model::CoderMappingInputs::from_env().merge_cli(
+                    write_coder,
+                    write_model,
+                    review_coder,
+                    review_model,
+                    behavior_tests_coder,
+                    behavior_tests_model,
+                    coder.or_else(|| global_coder.map(str::to_string)),
+                ),
+            )?;
+            let runtime = runtime.unwrap_or_else(|| "local".to_string());
+            match runtime.as_str() {
+                "fargate" => {
+                    let coder_kind =
+                        CoderKind::resolve(coder_mapping.write.coder.as_str().into())?;
+                    fargate::launch_work_attempt(
+                        project_root,
+                        &work_item_id,
+                        &attempt_id,
+                        coder_kind,
+                    )?;
+                    println!(
+                        "Launched Attempt {attempt_id} for Work Item {work_item_id} on Fargate"
+                    );
+                    return Ok(());
+                }
+                "local" => {}
+                other => bail!("Unknown runtime '{other}'. Available: local, fargate."),
+            }
+
+            // Store the resolved mapping on the Attempt before running.
+            {
+                let mut item = store.read_work_item(&work_item_id)?;
+                if let Some(attempt) = item.attempts.iter_mut().find(|a| a.id == attempt_id) {
+                    attempt.coder_mapping = coder_mapping.clone();
+                }
+                store.write_work_item(&item)?;
+            }
+
+            let result = work_attempt_loop::run_attempt(WorkAttemptRunConfig {
+                project_root,
+                store: &store,
+                work_item_id: &work_item_id,
+                attempt_id: &attempt_id,
+                resolver,
+                extra_args: &extra_args,
+                no_sandbox: no_sandbox || global_no_sandbox,
+            })?;
+            for outcome in result.outcomes {
+                match outcome {
+                    WorkAttemptRunOutcome::RanTask { task_id, output } => {
+                        println!("Completed Task {task_id} at {output}");
+                    }
+                    WorkAttemptRunOutcome::PlannedReviews { task_ids } => {
+                        println!(
+                            "Planned {} review Tasks for Attempt {attempt_id}",
+                            task_ids.len()
+                        );
+                        for task_id in task_ids {
+                            println!("{task_id}");
+                        }
+                    }
+                    WorkAttemptRunOutcome::MergeCandidateReady { candidate_id } => {
+                        println!(
+                            "Attempt {attempt_id} reviews passed; Merge Candidate {candidate_id} is ready"
+                        );
+                    }
+                    WorkAttemptRunOutcome::PlannedWriteRound { task_id } => {
+                        println!("Planned write Task {task_id}");
+                    }
+                    WorkAttemptRunOutcome::NeedsUser { handoff_path } => {
+                        println!("Attempt {attempt_id} needs user input: {handoff_path}");
+                    }
+                    WorkAttemptRunOutcome::ReviewOnlyComplete => {
+                        println!("Review-only Attempt {attempt_id} passed");
+                    }
+                    WorkAttemptRunOutcome::ReviewOnlyFailed => {
+                        println!("Review-only Attempt {attempt_id} failed");
+                    }
+                }
+            }
+        }
+        AttemptCommands::Pull {
+            work_item_id,
+            attempt_id,
+        } => {
+            fargate::pull_work_attempt(project_root, &work_item_id, &attempt_id)?;
+            println!(
+                "Pulled Attempt {attempt_id} workspace for Work Item {work_item_id} from Fargate"
+            );
+        }
+        AttemptCommands::Stop {
+            work_item_id,
+            attempt_id,
+        } => {
+            fargate::stop_work_attempt(project_root, &work_item_id, &attempt_id)?;
+            println!(
+                "Stop requested for Attempt {attempt_id} of Work Item {work_item_id} (Fargate)"
+            );
+        }
+        AttemptCommands::Watch {
+            work_item_id,
+            attempt_id,
+            interval,
+        } => {
+            fargate::watch_work_attempt(project_root, &work_item_id, &attempt_id, interval)?;
+            println!(
+                "Fargate task for Attempt {attempt_id} of Work Item {work_item_id} reached STOPPED"
+            );
+        }
+    }
+    Ok(())
+}
+
+// -------------------------------------------------------------------------
+// Merge Candidate
+// -------------------------------------------------------------------------
+
+fn cmd_merge_candidate(
+    project_root: &Path,
+    command: MergeCandidateCommands,
+    global_coder: Option<&str>,
+    global_no_sandbox: bool,
+    resolver: &ContentResolver,
+) -> Result<()> {
+    let store = WorkModelStore::new(project_root);
+    match command {
+        MergeCandidateCommands::List { work_item_id } => {
+            let item = match store.read_work_item(&work_item_id) {
+                Ok(item) => item,
+                Err(WorkModelStorageError::ReadFile { source, .. })
+                    if source.kind() == ErrorKind::NotFound =>
+                {
+                    bail!("Work Item {work_item_id:?} not found");
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if item.merge_candidates.is_empty() {
+                println!("No Merge Candidates found");
+            } else {
+                println!("{:<24} {:<12} MERGE", "ID", "REVIEW");
+                for candidate in &item.merge_candidates {
+                    let review = format!("{:?}", candidate.review_state).to_lowercase();
+                    let merge = format!("{:?}", candidate.merge_state.status).to_lowercase();
+                    println!(
+                        "{:<24} {:<12} {}",
+                        candidate.id, review, merge
+                    );
+                }
+            }
+        }
+        MergeCandidateCommands::Show {
             work_item_id,
             merge_candidate_id,
         } => match store.read_work_item(&work_item_id) {
             Ok(item) => {
-                let Some(candidate) = item
+                let candidate = item
                     .merge_candidates
                     .iter()
-                    .find(|candidate| candidate.id == merge_candidate_id)
-                else {
-                    bail!(
-                        "Merge Candidate {merge_candidate_id:?} not found in Work Item {work_item_id:?}"
-                    );
-                };
+                    .find(|c| c.id == merge_candidate_id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Merge Candidate {merge_candidate_id:?} not found in Work Item {work_item_id:?}"
+                        )
+                    })?;
                 print!("{}", to_json_pretty(candidate)?);
             }
             Err(WorkModelStorageError::ReadFile { source, .. })
@@ -479,7 +575,7 @@ fn cmd_work(
             }
             Err(error) => return Err(error.into()),
         },
-        WorkCommands::Merge {
+        MergeCandidateCommands::Land {
             work_item_id,
             merge_candidate_id,
             no_sandbox,
@@ -539,7 +635,7 @@ fn cmd_work(
                 result.merge_candidate_id, result.merged_commit
             );
         }
-        WorkCommands::MergePull {
+        MergeCandidateCommands::Pull {
             work_item_id,
             merge_candidate_id,
         } => {
@@ -548,7 +644,7 @@ fn cmd_work(
                 "Pulled Merge Candidate {merge_candidate_id} workspace for Work Item {work_item_id} from Fargate"
             );
         }
-        WorkCommands::MergeStop {
+        MergeCandidateCommands::Stop {
             work_item_id,
             merge_candidate_id,
         } => {
@@ -557,7 +653,7 @@ fn cmd_work(
                 "Stop requested for Merge Candidate {merge_candidate_id} of Work Item {work_item_id} (Fargate)"
             );
         }
-        WorkCommands::MergeWatch {
+        MergeCandidateCommands::Watch {
             work_item_id,
             merge_candidate_id,
             interval,
@@ -567,293 +663,377 @@ fn cmd_work(
                 "Fargate task for Merge Candidate {merge_candidate_id} of Work Item {work_item_id} reached STOPPED"
             );
         }
-        WorkCommands::Task { command } => match command {
-            WorkTaskCommands::Run {
-                work_item_id,
-                attempt_id,
-                task_id,
-                no_sandbox,
-                coder,
-                write_coder,
-                write_model,
-                review_coder,
-                review_model,
-                behavior_tests_coder,
-                behavior_tests_model,
-                extra_args,
-            } => {
-                let coder_mapping = work_model::resolve_coder_mapping(
-                    &work_model::CoderMappingInputs::from_env().merge_cli(
-                        write_coder,
-                        write_model,
-                        review_coder,
-                        review_model,
-                        behavior_tests_coder,
-                        behavior_tests_model,
-                        coder.or_else(|| global_coder.map(str::to_string)),
-                    ),
-                )?;
-
-                // Store the resolved mapping on the Attempt before running.
-                {
-                    let mut item = store.read_work_item(&work_item_id)?;
-                    if let Some(attempt) = item.attempts.iter_mut().find(|a| a.id == attempt_id) {
-                        attempt.coder_mapping = coder_mapping;
-                    }
-                    store.write_work_item(&item)?;
-                }
-
-                let result = work_task_executor::run_task(WorkTaskRunConfig {
-                    project_root,
-                    store: &store,
-                    work_item_id: &work_item_id,
-                    attempt_id: &attempt_id,
-                    task_id: &task_id,
-                    resolver,
-                    extra_args: &extra_args,
-                    no_sandbox: no_sandbox || global_no_sandbox,
-                    store_lock: None,
-                })?;
-                println!("Completed Task {} at {}", result.task_id, result.output);
-            }
-        },
-        WorkCommands::Tester { command } => match command {
-            WorkTesterCommands::Run {
-                work_item_id,
-                attempt_id,
-                task_id,
-                no_sandbox,
-            } => {
-                let result = work_task_executor::run_task(WorkTaskRunConfig {
-                    project_root,
-                    store: &store,
-                    work_item_id: &work_item_id,
-                    attempt_id: &attempt_id,
-                    task_id: &task_id,
-                    resolver,
-                    extra_args: &[],
-                    no_sandbox: no_sandbox || global_no_sandbox,
-                    store_lock: None,
-                })?;
-                println!(
-                    "Completed Tester Task {} at {}",
-                    result.task_id, result.output
-                );
-            }
-        },
-        WorkCommands::AutoMerge {
-            work_item_id,
-            all,
-            no_sandbox,
-            coder,
-            poll_seconds,
-        } => {
-            let mode = match (work_item_id, all) {
-                (Some(id), false) => factory::auto_merge::AutoMergeMode::Single(id),
-                (None, true) => factory::auto_merge::AutoMergeMode::All,
-                (Some(_), true) => {
-                    bail!(
-                        "Cannot specify both a Work Item ID and --all; the two modes are mutually exclusive"
-                    );
-                }
-                (None, false) => {
-                    bail!("Specify either a Work Item ID or --all");
-                }
-            };
-            let coder_kind = CoderKind::resolve(coder.as_deref().or(global_coder))?;
-            let poll = poll_seconds.unwrap_or(30);
-            factory::auto_merge::run(
-                project_root,
-                mode,
-                poll,
-                coder_kind,
-                no_sandbox || global_no_sandbox,
-            )?;
-        }
-        WorkCommands::PostMergeReview { command } => match command {
-            cli::WorkPostMergeReviewCommands::Run {
-                debounce_seconds,
-                target,
-            } => {
-                let secs = debounce_seconds.unwrap_or_else(post_merge_review::debounce_seconds);
-                let outcome = post_merge_review::run(project_root, secs, target.as_deref())?;
-                println!(
-                    "Post-merge review: reviewed {} branch(es), {} errors",
-                    outcome.reviewed.len(),
-                    outcome.errors.len()
-                );
-                for per in &outcome.reviewed {
-                    println!("  {} @ {}", per.target_branch, per.merged_commit);
-                    if let Some(work_item) = &per.post_merge_review_fix_work_item {
-                        println!("    post-merge-review-fix Work Item: {work_item}");
-                    }
-                }
-                for error in &outcome.errors {
-                    eprintln!("  error: {error}");
-                }
-            }
-        },
-        WorkCommands::ReviewOnlyWorktree { command } => match command {
-            cli::WorkReviewOnlyWorktreeCommands::Prune { all, dry_run } => {
-                let store = WorkModelStore::new(project_root);
-                let report = factory::review_only_worktree::prune(
-                    &store,
-                    project_root,
-                    factory::review_only_worktree::PruneOptions { all, dry_run },
-                )?;
-                let mut removed = 0_usize;
-                let mut skipped_in_use = 0_usize;
-                let mut would_remove = 0_usize;
-                let mut would_skip_in_use = 0_usize;
-                let mut skipped_not_orphan = 0_usize;
-                for entry in &report.entries {
-                    match entry {
-                        factory::review_only_worktree::PruneEntry::Removed { path } => {
-                            removed += 1;
-                            println!("  removed   {}", path.display());
-                        }
-                        factory::review_only_worktree::PruneEntry::SkippedInUse {
-                            path,
-                            in_flight,
-                        } => {
-                            skipped_in_use += 1;
-                            println!(
-                                "  in-use    {} (Work Item {:?} Attempt {:?})",
-                                path.display(),
-                                in_flight.work_item_id,
-                                in_flight.attempt_id
-                            );
-                        }
-                        factory::review_only_worktree::PruneEntry::SkippedNotOrphan { path } => {
-                            skipped_not_orphan += 1;
-                            println!("  keep      {}", path.display());
-                        }
-                        factory::review_only_worktree::PruneEntry::WouldRemove { path } => {
-                            would_remove += 1;
-                            println!("  would-remove   {}", path.display());
-                        }
-                        factory::review_only_worktree::PruneEntry::WouldSkipInUse {
-                            path,
-                            in_flight,
-                        } => {
-                            would_skip_in_use += 1;
-                            println!(
-                                "  would-skip-in-use   {} (Work Item {:?} Attempt {:?})",
-                                path.display(),
-                                in_flight.work_item_id,
-                                in_flight.attempt_id
-                            );
-                        }
-                    }
-                }
-                if dry_run {
-                    println!(
-                        "Summary: would remove {would_remove}, would skip in-use {would_skip_in_use}, keep {skipped_not_orphan}"
-                    );
-                } else {
-                    println!(
-                        "Summary: removed {removed}, skipped in-use {skipped_in_use}, kept {skipped_not_orphan}"
-                    );
-                }
-            }
-        },
-        WorkCommands::Queue { command } => match command {
-            WorkQueueCommands::Add {
-                work_item_id,
-                priority,
-            } => {
-                factory::queue::add(project_root, &work_item_id, priority)?;
-                println!("Queued Work Item {work_item_id}");
-            }
-            WorkQueueCommands::List => {
-                let entries = factory::queue::list(project_root)?;
-                if entries.is_empty() {
-                    println!("Queue is empty");
-                } else {
-                    for entry in entries {
-                        println!(
-                            "{} {} {} {}",
-                            entry.priority, entry.queued_at, entry.status, entry.work_item_id
-                        );
-                    }
-                }
-            }
-            WorkQueueCommands::Remove { work_item_id } => {
-                factory::queue::remove(project_root, &work_item_id)?;
-                println!("Removed {work_item_id} from queue");
-            }
-        },
-        WorkCommands::Scheduler { command } => match command {
-            WorkSchedulerCommands::Run { poll_seconds } => {
-                let poll = poll_seconds.unwrap_or(30);
-                let invoker = factory::scheduler::CliAttemptInvoker;
-                factory::scheduler::run(project_root, poll, &invoker)?;
-            }
-        },
     }
     Ok(())
 }
 
-fn read_planning_context(
-    planning_context: Option<String>,
-    planning_context_file: Option<String>,
-    brief_file: Option<String>,
-    behaviors_file: Option<String>,
-    approach_file: Option<String>,
-    plan_file: Option<String>,
-) -> Result<Option<PlanningContext>> {
-    let context = PlanningContext {
-        brief: read_optional_file(brief_file)?,
-        behaviors: read_optional_file(behaviors_file)?,
-        approach: read_optional_file(approach_file)?,
-        plan: read_optional_file(plan_file)?,
-        combined: match (planning_context, planning_context_file) {
-            (Some(context), None) => Some(context),
-            (None, Some(path)) => Some(fs::read_to_string(path)?),
-            (None, None) => None,
-            (Some(_), Some(_)) => unreachable!("clap rejects conflicting planning context inputs"),
-        },
-    };
+// -------------------------------------------------------------------------
+// Task
+// -------------------------------------------------------------------------
 
-    Ok((!context.is_empty()).then_some(context))
-}
-
-fn read_optional_file(path: Option<String>) -> Result<Option<String>> {
-    path.map(fs::read_to_string).transpose().map_err(Into::into)
-}
-
-fn head_commit(project_root: &Path) -> Result<String> {
-    git::run_stdout(
-        project_root,
-        &["rev-parse", "HEAD"],
-        "resolve source checkout HEAD",
-    )
-}
-
-fn current_ref(project_root: &Path) -> Result<String> {
-    let branch = git::run_stdout(
-        project_root,
-        &["rev-parse", "--abbrev-ref", "HEAD"],
-        "resolve source checkout ref",
-    )?;
-    if branch == "HEAD" {
-        head_commit(project_root)
-    } else {
-        Ok(branch)
-    }
-}
-
-fn cmd_observations(project_root: &Path, command: ObservationsCommands) -> Result<()> {
+fn cmd_task(
+    project_root: &Path,
+    command: TaskCommands,
+    global_coder: Option<&str>,
+    global_no_sandbox: bool,
+    resolver: &ContentResolver,
+) -> Result<()> {
+    let store = WorkModelStore::new(project_root);
     match command {
-        ObservationsCommands::Add { content } => observations::add(project_root, content),
-        ObservationsCommands::Resolve { id, resolution } => {
+        TaskCommands::List {
+            work_item_id,
+            attempt_id,
+        } => {
+            let item = match store.read_work_item(&work_item_id) {
+                Ok(item) => item,
+                Err(WorkModelStorageError::ReadFile { source, .. })
+                    if source.kind() == ErrorKind::NotFound =>
+                {
+                    bail!("Work Item {work_item_id:?} not found");
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let attempt = item
+                .attempts
+                .iter()
+                .find(|a| a.id == attempt_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Attempt {attempt_id:?} not found in Work Item {work_item_id:?}"
+                    )
+                })?;
+            if attempt.tasks.is_empty() {
+                println!("No Tasks found");
+            } else {
+                println!("{:<24} {:<12} STATUS", "ID", "KIND");
+                for task in &attempt.tasks {
+                    println!("{:<24} {:<12} {}", task.id, task.kind, task.status);
+                }
+            }
+        }
+        TaskCommands::Show {
+            work_item_id,
+            attempt_id,
+            task_id,
+        } => {
+            let item = match store.read_work_item(&work_item_id) {
+                Ok(item) => item,
+                Err(WorkModelStorageError::ReadFile { source, .. })
+                    if source.kind() == ErrorKind::NotFound =>
+                {
+                    bail!("Work Item {work_item_id:?} not found");
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let attempt = item
+                .attempts
+                .iter()
+                .find(|a| a.id == attempt_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Attempt {attempt_id:?} not found in Work Item {work_item_id:?}"
+                    )
+                })?;
+            let task = attempt
+                .tasks
+                .iter()
+                .find(|t| t.id == task_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Task {task_id:?} not found in Attempt {attempt_id:?}"
+                    )
+                })?;
+            print!("{}", to_json_pretty(task)?);
+        }
+        TaskCommands::Run {
+            work_item_id,
+            attempt_id,
+            task_id,
+            no_sandbox,
+            coder,
+            write_coder,
+            write_model,
+            review_coder,
+            review_model,
+            behavior_tests_coder,
+            behavior_tests_model,
+            extra_args,
+        } => {
+            let coder_mapping = work_model::resolve_coder_mapping(
+                &work_model::CoderMappingInputs::from_env().merge_cli(
+                    write_coder,
+                    write_model,
+                    review_coder,
+                    review_model,
+                    behavior_tests_coder,
+                    behavior_tests_model,
+                    coder.or_else(|| global_coder.map(str::to_string)),
+                ),
+            )?;
+
+            // Store the resolved mapping on the Attempt before running.
+            {
+                let mut item = store.read_work_item(&work_item_id)?;
+                if let Some(attempt) = item.attempts.iter_mut().find(|a| a.id == attempt_id) {
+                    attempt.coder_mapping = coder_mapping;
+                }
+                store.write_work_item(&item)?;
+            }
+
+            let result = work_task_executor::run_task(WorkTaskRunConfig {
+                project_root,
+                store: &store,
+                work_item_id: &work_item_id,
+                attempt_id: &attempt_id,
+                task_id: &task_id,
+                resolver,
+                extra_args: &extra_args,
+                no_sandbox: no_sandbox || global_no_sandbox,
+                store_lock: None,
+            })?;
+            println!("Completed Task {} at {}", result.task_id, result.output);
+        }
+    }
+    Ok(())
+}
+
+// -------------------------------------------------------------------------
+// Queue
+// -------------------------------------------------------------------------
+
+fn cmd_queue(project_root: &Path, command: QueueCommands) -> Result<()> {
+    match command {
+        QueueCommands::Add {
+            work_item_id,
+            priority,
+        } => {
+            factory::queue::add(project_root, &work_item_id, priority)?;
+            println!("Queued Work Item {work_item_id}");
+        }
+        QueueCommands::List => {
+            let entries = factory::queue::list(project_root)?;
+            if entries.is_empty() {
+                println!("Queue is empty");
+            } else {
+                for entry in entries {
+                    println!(
+                        "{} {} {} {}",
+                        entry.priority, entry.queued_at, entry.status, entry.work_item_id
+                    );
+                }
+            }
+        }
+        QueueCommands::Remove { work_item_id } => {
+            factory::queue::remove(project_root, &work_item_id)?;
+            println!("Removed {work_item_id} from queue");
+        }
+    }
+    Ok(())
+}
+
+// -------------------------------------------------------------------------
+// Tester
+// -------------------------------------------------------------------------
+
+fn cmd_tester(project_root: &Path, command: TesterCommands, global_no_sandbox: bool) -> Result<()> {
+    let store = WorkModelStore::new(project_root);
+    let resolver = ContentResolver::new(Some(project_root));
+    match command {
+        TesterCommands::Run {
+            work_item_id,
+            attempt_id,
+            task_id,
+            no_sandbox,
+        } => {
+            let result = work_task_executor::run_task(WorkTaskRunConfig {
+                project_root,
+                store: &store,
+                work_item_id: &work_item_id,
+                attempt_id: &attempt_id,
+                task_id: &task_id,
+                resolver: &resolver,
+                extra_args: &[],
+                no_sandbox: no_sandbox || global_no_sandbox,
+                store_lock: None,
+            })?;
+            println!(
+                "Completed Tester Task {} at {}",
+                result.task_id, result.output
+            );
+        }
+    }
+    Ok(())
+}
+
+// -------------------------------------------------------------------------
+// Scheduler
+// -------------------------------------------------------------------------
+
+fn cmd_scheduler(project_root: &Path, command: SchedulerCommands) -> Result<()> {
+    match command {
+        SchedulerCommands::Run { poll_seconds } => {
+            let poll = poll_seconds.unwrap_or(30);
+            let invoker = factory::scheduler::CliAttemptInvoker;
+            factory::scheduler::run(project_root, poll, &invoker)?;
+        }
+    }
+    Ok(())
+}
+
+// -------------------------------------------------------------------------
+// Review
+// -------------------------------------------------------------------------
+
+fn cmd_review(
+    project_root: &Path,
+    command: Option<ReviewCommands>,
+    work_item_id: Option<String>,
+    attempt_id: Option<String>,
+) -> Result<()> {
+    let store = WorkModelStore::new(project_root);
+    match command {
+        Some(ReviewCommands::Codebase {
+            work_item_id,
+            attempt_id,
+            from_working_tree,
+        }) => {
+            let mut item = match store.read_work_item(&work_item_id) {
+                Ok(item) => item,
+                Err(WorkModelStorageError::ReadFile { source, .. })
+                    if source.kind() == ErrorKind::NotFound =>
+                {
+                    bail!("Work Item {work_item_id:?} not found");
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let source_ref = current_ref(project_root)?;
+            let source_commit = head_commit(project_root)?;
+            let task_ids = item.add_review_only_attempt(
+                attempt_id.clone(),
+                review::REVIEWERS,
+                source_ref,
+                source_commit,
+                from_working_tree,
+            )?;
+            store.write_work_item(&item)?;
+            let variant = if from_working_tree {
+                "source checkout"
+            } else {
+                "per-branch worktree"
+            };
+            println!(
+                "Created review-only Attempt {attempt_id} against {variant} with {} task(s)",
+                task_ids.len()
+            );
+            for task_id in task_ids {
+                println!("{task_id}");
+            }
+        }
+        None => {
+            let work_item_id =
+                work_item_id.ok_or_else(|| anyhow::anyhow!("work item id is required"))?;
+            let attempt_id =
+                attempt_id.ok_or_else(|| anyhow::anyhow!("attempt id is required"))?;
+            let mut item = match store.read_work_item(&work_item_id) {
+                Ok(item) => item,
+                Err(WorkModelStorageError::ReadFile { source, .. })
+                    if source.kind() == ErrorKind::NotFound =>
+                {
+                    bail!("Work Item {work_item_id:?} not found");
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let task_ids = item.add_review_tasks(&attempt_id, review::REVIEWERS)?;
+            store.write_work_item(&item)?;
+            println!(
+                "Planned {} review Tasks for Attempt {attempt_id}",
+                task_ids.len()
+            );
+            for task_id in task_ids {
+                println!("{task_id}");
+            }
+        }
+    }
+    Ok(())
+}
+
+// -------------------------------------------------------------------------
+// Auto-Merge
+// -------------------------------------------------------------------------
+
+fn cmd_auto_merge(
+    project_root: &Path,
+    work_item_id: Option<String>,
+    all: bool,
+    no_sandbox: bool,
+    coder: Option<&str>,
+    poll_seconds: Option<u64>,
+) -> Result<()> {
+    let mode = match (work_item_id, all) {
+        (Some(id), false) => factory::auto_merge::AutoMergeMode::Single(id),
+        (None, true) => factory::auto_merge::AutoMergeMode::All,
+        (Some(_), true) => {
+            bail!(
+                "Cannot specify both a Work Item ID and --all; the two modes are mutually exclusive"
+            );
+        }
+        (None, false) => {
+            bail!("Specify either a Work Item ID or --all");
+        }
+    };
+    let coder_kind = CoderKind::resolve(coder)?;
+    let poll = poll_seconds.unwrap_or(30);
+    factory::auto_merge::run(project_root, mode, poll, coder_kind, no_sandbox)?;
+    Ok(())
+}
+
+// -------------------------------------------------------------------------
+// Post-Merge Review
+// -------------------------------------------------------------------------
+
+fn cmd_post_merge_review(
+    project_root: &Path,
+    debounce_seconds: Option<u64>,
+    target: Option<String>,
+) -> Result<()> {
+    let secs = debounce_seconds.unwrap_or_else(post_merge_review::debounce_seconds);
+    let outcome = post_merge_review::run(project_root, secs, target.as_deref())?;
+    println!(
+        "Post-merge review: reviewed {} branch(es), {} errors",
+        outcome.reviewed.len(),
+        outcome.errors.len()
+    );
+    for per in &outcome.reviewed {
+        println!("  {} @ {}", per.target_branch, per.merged_commit);
+        if let Some(work_item) = &per.post_merge_review_fix_work_item {
+            println!("    post-merge-review-fix Work Item: {work_item}");
+        }
+    }
+    for error in &outcome.errors {
+        eprintln!("  error: {error}");
+    }
+    Ok(())
+}
+
+// -------------------------------------------------------------------------
+// Observation
+// -------------------------------------------------------------------------
+
+fn cmd_observation(project_root: &Path, command: ObservationCommands) -> Result<()> {
+    match command {
+        ObservationCommands::Create { content } => observations::add(project_root, content),
+        ObservationCommands::Resolve { id, resolution } => {
             observations::resolve(project_root, &id, resolution)
         }
-        ObservationsCommands::List => observations::list(project_root),
-        ObservationsCommands::Show { id } => observations::show(project_root, &id),
-        ObservationsCommands::Migrate => observations::migrate(project_root),
+        ObservationCommands::List => observations::list(project_root),
+        ObservationCommands::Show { id } => observations::show(project_root, &id),
+        ObservationCommands::Migrate => observations::migrate(project_root),
     }
 }
+
+// -------------------------------------------------------------------------
+// Keep Awake
+// -------------------------------------------------------------------------
 
 fn cmd_keep_awake(command: KeepAwakeCommands) -> Result<()> {
     let sub = match command {
@@ -865,43 +1045,29 @@ fn cmd_keep_awake(command: KeepAwakeCommands) -> Result<()> {
     keep_awake::run(sub)
 }
 
-fn cmd_interactive(
-    sandbox_root: &Path,
-    resolver: &ContentResolver,
-    extra_args: &[String],
-    coder_kind: CoderKind,
-) -> Result<()> {
-    use factory::coder::CoderSandbox;
+// -------------------------------------------------------------------------
+// Cleanup (includes review-only worktree pruning)
+// -------------------------------------------------------------------------
 
-    os::check_prerequisites_for(coder_kind)?;
-    credential::inject_credentials()?;
-    credential::setup_git_signing();
-
-    let home = std::env::var("HOME").unwrap_or_default();
-    let roots = vec![sandbox_root.to_path_buf()];
-    let profile = os::render_profile_for_roots_for_coder(resolver, &home, &roots, coder_kind)?;
-    let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
-
-    eprintln!("  Factory           interactive session");
-    eprintln!("  Sandbox root      {}", sandbox_root.display());
-
-    let author = coder_kind.boxed(sandbox);
-    author.run_interactive("", sandbox_root, extra_args, &[])?;
-    Ok(())
-}
-
-fn cmd_status(search_root: &Path) -> Result<()> {
-    let work_status = work_status::load_work_status(search_root)?;
-    print!("{}", work_status::format_work_status(&work_status));
-    Ok(())
-}
-
-fn cmd_cleanup(search_root: &Path, apply: bool) -> Result<()> {
+fn cmd_cleanup(search_root: &Path, apply: bool, prune_all_review_worktrees: bool) -> Result<()> {
     let options = CleanupOptions { apply };
     let work_results = cleanup::cleanup_work_items(search_root, &options)?;
     let reviewer_results = cleanup::cleanup_stranded_reviewer_worktrees(search_root, &options)?;
 
-    if work_results.is_empty() && reviewer_results.is_empty() {
+    // Review-only worktree pruning (folded from the old review-only-worktree prune command)
+    let prune_store = WorkModelStore::new(search_root);
+    let prune_options = factory::review_only_worktree::PruneOptions {
+        all: prune_all_review_worktrees,
+        dry_run: !apply,
+    };
+    let prune_report =
+        factory::review_only_worktree::prune(&prune_store, search_root, prune_options)?;
+
+    let has_work = !work_results.is_empty();
+    let has_reviewers = !reviewer_results.is_empty();
+    let has_prune = !prune_report.entries.is_empty();
+
+    if !has_work && !has_reviewers && !has_prune {
         println!("No cleanup candidates found.");
         return Ok(());
     }
@@ -1009,21 +1175,74 @@ fn cmd_cleanup(search_root: &Path, apply: bool) -> Result<()> {
         }
     }
 
+    // Print review-only worktree prune results
+    for entry in &prune_report.entries {
+        match entry {
+            factory::review_only_worktree::PruneEntry::Removed { path } => {
+                println!("  removed review-only worktree {}", path.display());
+            }
+            factory::review_only_worktree::PruneEntry::SkippedInUse { path, in_flight } => {
+                println!(
+                    "  in-use review-only worktree {} (Work Item {:?} Attempt {:?})",
+                    path.display(),
+                    in_flight.work_item_id,
+                    in_flight.attempt_id
+                );
+            }
+            factory::review_only_worktree::PruneEntry::SkippedNotOrphan { path } => {
+                println!("  kept review-only worktree {}", path.display());
+            }
+            factory::review_only_worktree::PruneEntry::WouldRemove { path } => {
+                println!("  would remove review-only worktree {}", path.display());
+            }
+            factory::review_only_worktree::PruneEntry::WouldSkipInUse { path, in_flight } => {
+                println!(
+                    "  would skip in-use review-only worktree {} (Work Item {:?} Attempt {:?})",
+                    path.display(),
+                    in_flight.work_item_id,
+                    in_flight.attempt_id
+                );
+            }
+        }
+    }
+
     Ok(())
 }
 
-const FACTORY_GITIGNORE: &str = "\
-# Factory working state: everything here is ignored by default.
-# Durable content is re-included below.
-/*
-!/.gitignore
-!/expertise/
-!/observations/
-!/hooks/
-!/Dockerfile
-!/tester.yaml
-!/extract-tester-results
-";
+// -------------------------------------------------------------------------
+// Other commands
+// -------------------------------------------------------------------------
+
+fn cmd_interactive(
+    sandbox_root: &Path,
+    resolver: &ContentResolver,
+    extra_args: &[String],
+    coder_kind: CoderKind,
+) -> Result<()> {
+    use factory::coder::CoderSandbox;
+
+    os::check_prerequisites_for(coder_kind)?;
+    credential::inject_credentials()?;
+    credential::setup_git_signing();
+
+    let home = std::env::var("HOME").unwrap_or_default();
+    let roots = vec![sandbox_root.to_path_buf()];
+    let profile = os::render_profile_for_roots_for_coder(resolver, &home, &roots, coder_kind)?;
+    let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
+
+    eprintln!("  Factory           interactive session");
+    eprintln!("  Sandbox root      {}", sandbox_root.display());
+
+    let author = coder_kind.boxed(sandbox);
+    author.run_interactive("", sandbox_root, extra_args, &[])?;
+    Ok(())
+}
+
+fn cmd_status(search_root: &Path) -> Result<()> {
+    let work_status = work_status::load_work_status(search_root)?;
+    print!("{}", work_status::format_work_status(&work_status));
+    Ok(())
+}
 
 fn cmd_init(cwd: &Path) -> Result<()> {
     let factory_dir = cwd.join(".factory");
@@ -1041,6 +1260,72 @@ fn cmd_init(cwd: &Path) -> Result<()> {
     Ok(())
 }
 
+// -------------------------------------------------------------------------
+// Helpers
+// -------------------------------------------------------------------------
+
+fn read_planning_context(
+    planning_context: Option<String>,
+    planning_context_file: Option<String>,
+    brief_file: Option<String>,
+    behaviors_file: Option<String>,
+    approach_file: Option<String>,
+    plan_file: Option<String>,
+) -> Result<Option<PlanningContext>> {
+    let context = PlanningContext {
+        brief: read_optional_file(brief_file)?,
+        behaviors: read_optional_file(behaviors_file)?,
+        approach: read_optional_file(approach_file)?,
+        plan: read_optional_file(plan_file)?,
+        combined: match (planning_context, planning_context_file) {
+            (Some(context), None) => Some(context),
+            (None, Some(path)) => Some(fs::read_to_string(path)?),
+            (None, None) => None,
+            (Some(_), Some(_)) => unreachable!("clap rejects conflicting planning context inputs"),
+        },
+    };
+
+    Ok((!context.is_empty()).then_some(context))
+}
+
+fn read_optional_file(path: Option<String>) -> Result<Option<String>> {
+    path.map(fs::read_to_string).transpose().map_err(Into::into)
+}
+
+fn head_commit(project_root: &Path) -> Result<String> {
+    git::run_stdout(
+        project_root,
+        &["rev-parse", "HEAD"],
+        "resolve source checkout HEAD",
+    )
+}
+
+fn current_ref(project_root: &Path) -> Result<String> {
+    let branch = git::run_stdout(
+        project_root,
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+        "resolve source checkout ref",
+    )?;
+    if branch == "HEAD" {
+        head_commit(project_root)
+    } else {
+        Ok(branch)
+    }
+}
+
+const FACTORY_GITIGNORE: &str = "\
+# Factory working state: everything here is ignored by default.
+# Durable content is re-included below.
+/*
+!/.gitignore
+!/expertise/
+!/observations/
+!/hooks/
+!/Dockerfile
+!/tester.yaml
+!/extract-tester-results
+";
+
 fn write_gitignore_if_absent(factory_dir: &Path) -> Result<()> {
     let gitignore = factory_dir.join(".gitignore");
     if !gitignore.exists() {
@@ -1048,10 +1333,6 @@ fn write_gitignore_if_absent(factory_dir: &Path) -> Result<()> {
     }
     Ok(())
 }
-
-// -------------------------------------------------------------------------
-// Helpers
-// -------------------------------------------------------------------------
 
 fn dirs_log_file() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());

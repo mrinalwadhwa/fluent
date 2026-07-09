@@ -19,12 +19,12 @@ fn factory_cmd() -> LoggedCommand {
 fn work_item_value(project_root: &Path, id: &str) -> serde_json::Value {
     let output = factory_cmd()
         .current_dir(project_root)
-        .args(["work", "show", id])
+        .args(["work-item", "show", id])
         .output()
         .unwrap();
     assert!(
         output.status.success(),
-        "work show failed: stdout={} stderr={}",
+        "show failed: stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -44,13 +44,13 @@ fn factory_help_lists_tester_subcommand() {
     let tmp = TempDir::new().unwrap();
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "--help"])
+        .args(["--help"])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("tester"),
-        "factory work --help should list the tester subcommand; got:\n{stdout}"
+        "factory --help should list the tester command; got:\n{stdout}"
     );
 }
 
@@ -1024,12 +1024,12 @@ fn status_shows_work_items_without_runs() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "create", "work-1", "--title", "Build status view"])
+        .args(["work-item", "create", "work-1", "--title", "Build status view"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -1058,7 +1058,7 @@ fn work_create_writes_minimal_work_item() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "create", "work-intake", "--title", "Intake title"])
+        .args(["work-item", "create", "work-intake", "--title", "Intake title"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Created Work Item work-intake"));
@@ -1080,7 +1080,7 @@ fn work_create_refuses_existing_work_item() {
     factory_cmd()
         .current_dir(tmp.path())
         .args([
-            "work",
+            "work-item",
             "create",
             "work-existing",
             "--title",
@@ -1104,7 +1104,7 @@ fn work_create_rejects_invalid_work_item_id() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "create", "../escape", "--title", "Invalid item"])
+        .args(["work-item", "create", "../escape", "--title", "Invalid item"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -1120,13 +1120,13 @@ fn work_create_item_is_visible_through_list_and_show() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "create", "work-visible", "--title", "Visible title"])
+        .args(["work-item", "create", "work-visible", "--title", "Visible title"])
         .assert()
         .success();
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "list"])
+        .args(["work-item", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("work-visible"))
@@ -1134,7 +1134,7 @@ fn work_create_item_is_visible_through_list_and_show() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "show", "work-visible"])
+        .args(["work-item", "show", "work-visible"])
         .assert()
         .success()
         .stdout(predicate::str::contains("  \"id\": \"work-visible\""))
@@ -1149,7 +1149,7 @@ fn work_attempt_adds_planned_attempt_with_initial_write_task() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -1158,13 +1158,13 @@ fn work_attempt_adds_planned_attempt_with_initial_write_task() {
 
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "show", "work-1"])
+        .args(["work-item", "show", "work-1"])
         .output()
         .unwrap();
 
     assert!(
         output.status.success(),
-        "work show failed: stdout={} stderr={}",
+        "work-item show failed: stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -1204,12 +1204,12 @@ fn work_attempt_paths_disambiguate_hyphenated_ids() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "attempt", "work-a", "b-c"])
+        .args(["attempt", "create", "work-a", "b-c"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "attempt", "work-a-b", "c"])
+        .args(["attempt", "create", "work-a-b", "c"])
         .assert()
         .success();
 
@@ -1230,13 +1230,13 @@ fn work_attempt_appends_to_existing_attempts() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "attempt", "work-1", "attempt-2"])
+        .args(["attempt", "create", "work-1", "attempt-2"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -1245,13 +1245,13 @@ fn work_attempt_appends_to_existing_attempts() {
 
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "show", "work-1"])
+        .args(["work-item", "show", "work-1"])
         .output()
         .unwrap();
 
     assert!(
         output.status.success(),
-        "work show failed: stdout={} stderr={}",
+        "work-item show failed: stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -1276,7 +1276,7 @@ fn work_attempt_missing_work_item_reports_not_found() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "attempt", "missing-work", "attempt-1"])
+        .args(["attempt", "create", "missing-work", "attempt-1"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -1293,14 +1293,14 @@ fn work_attempt_duplicate_attempt_id_fails_without_changes() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
     let before = fs::read_to_string(tmp.path().join(".factory/work/items/work-1.json")).unwrap();
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -1319,7 +1319,7 @@ fn work_attempt_rejects_invalid_attempt_id_without_changes() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "attempt", "work-1", "../escape"])
+        .args(["attempt", "create", "work-1", "../escape"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -1337,7 +1337,7 @@ fn work_attempt_auto_id_creates_attempt_1() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "attempt", "work-1"])
+        .args(["attempt", "create", "work-1"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -1355,13 +1355,13 @@ fn work_attempt_auto_id_sequential_creates_attempt_2() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "attempt", "work-1"])
+        .args(["attempt", "create", "work-1"])
         .assert()
         .success();
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "attempt", "work-1"])
+        .args(["attempt", "create", "work-1"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -1382,19 +1382,19 @@ fn work_attempt_auto_id_fills_gap() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "attempt", "work-1", "attempt-3"])
+        .args(["attempt", "create", "work-1", "attempt-3"])
         .assert()
         .success();
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "attempt", "work-1"])
+        .args(["attempt", "create", "work-1"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -1409,7 +1409,7 @@ fn work_attempt_explicit_id_still_works() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "attempt", "work-1", "my-custom-attempt"])
+        .args(["attempt", "create", "work-1", "my-custom-attempt"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -1427,7 +1427,7 @@ fn work_attempt_run_no_attempts_reports_error() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "attempt", "run", "work-1", "--no-sandbox"])
+        .args(["attempt", "run", "work-1", "--no-sandbox"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("has no Attempts"));
@@ -1440,7 +1440,7 @@ fn work_merge_no_candidates_reports_error() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "merge", "work-1", "--no-sandbox"])
+        .args(["merge-candidate", "land", "work-1", "--no-sandbox"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("has no Merge Candidates"));
@@ -1463,19 +1463,18 @@ exit 0
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Run task"])
+        .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
     let output = factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -1533,18 +1532,17 @@ exit 0
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Transcript test"])
+        .args(["work-item", "create", "work-1", "--title", "Transcript test"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -1592,18 +1590,17 @@ exit 1
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Fail transcript"])
+        .args(["work-item", "create", "work-1", "--title", "Fail transcript"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -1659,18 +1656,17 @@ exec "$@"
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Sandbox test"])
+        .args(["work-item", "create", "work-1", "--title", "Sandbox test"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -1704,7 +1700,7 @@ fn reviewer_sandbox_does_not_include_writer_artifact_dir() {
     create_completed_work_attempt(&tmp, &main_dir);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review", "work-1", "attempt-1"])
+        .args(["review", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -1732,7 +1728,6 @@ fn reviewer_sandbox_does_not_include_writer_artifact_dir() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -1772,7 +1767,7 @@ fn review_task_transcript_persists_after_completion() {
     create_completed_work_attempt(&tmp, &main_dir);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review", "work-1", "attempt-1"])
+        .args(["review", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -1789,7 +1784,6 @@ exit 0
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -1829,7 +1823,7 @@ fn review_task_transcript_persists_on_failure() {
     create_completed_work_attempt(&tmp, &main_dir);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review", "work-1", "attempt-1"])
+        .args(["review", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -1845,7 +1839,6 @@ exit 1
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -1878,7 +1871,7 @@ fn reviewer_sandbox_does_not_include_other_reviewer_artifact_dirs() {
     create_completed_work_attempt(&tmp, &main_dir);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review", "work-1", "attempt-1"])
+        .args(["review", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -1930,7 +1923,6 @@ fn reviewer_sandbox_does_not_include_other_reviewer_artifact_dirs() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -1979,7 +1971,7 @@ fn work_create_persists_instructions_and_attempt_copies_them_to_write_task() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
+            "work-item",
             "create",
             "work-1",
             "--title",
@@ -1991,18 +1983,18 @@ fn work_create_persists_instructions_and_attempt_copies_them_to_write_task() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
     let output = factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "show", "work-1"])
+        .args(["work-item", "show", "work-1"])
         .output()
         .unwrap();
     assert!(
         output.status.success(),
-        "work show failed: stdout={} stderr={}",
+        "work-item show failed: stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -2033,7 +2025,7 @@ fn work_create_persists_planning_context_and_attempt_copies_it_to_write_task() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
+            "work-item",
             "create",
             "work-1",
             "--title",
@@ -2051,18 +2043,18 @@ fn work_create_persists_planning_context_and_attempt_copies_it_to_write_task() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
     let output = factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "show", "work-1"])
+        .args(["work-item", "show", "work-1"])
         .output()
         .unwrap();
     assert!(
         output.status.success(),
-        "work show failed: stdout={} stderr={}",
+        "work-item show failed: stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -2101,7 +2093,7 @@ fn work_create_prefers_instructions_over_planning_context_for_write_task() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
+            "work-item",
             "create",
             "work-1",
             "--title",
@@ -2115,13 +2107,13 @@ fn work_create_prefers_instructions_over_planning_context_for_write_task() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
     let output = factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "show", "work-1"])
+        .args(["work-item", "show", "work-1"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -2144,7 +2136,7 @@ fn work_review_plans_review_tasks_for_completed_attempt() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review", "work-1", "attempt-1"])
+        .args(["review", "work-1", "attempt-1"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -2205,12 +2197,12 @@ fn work_review_requires_completed_write_output() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Review too early"])
+        .args(["work-item", "create", "work-1", "--title", "Review too early"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
     let item_path = main_dir.join(".factory/work/items/work-1.json");
@@ -2218,7 +2210,7 @@ fn work_review_requires_completed_write_output() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review", "work-1", "attempt-1"])
+        .args(["review", "work-1", "attempt-1"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("completed write Task"));
@@ -2239,7 +2231,7 @@ fn work_review_codebase_creates_review_only_attempt() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
+            "work-item",
             "create",
             "work-1",
             "--title",
@@ -2253,8 +2245,8 @@ fn work_review_codebase_creates_review_only_attempt() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
-            "review-codebase",
+            "review",
+            "codebase",
             "work-1",
             "attempt-review",
             "--from-working-tree",
@@ -2321,13 +2313,13 @@ fn work_review_codebase_default_creates_worktree_attempt_with_tester() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Review codebase"])
+        .args(["work-item", "create", "work-1", "--title", "Review codebase"])
         .assert()
         .success();
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .args(["review", "codebase", "work-1", "attempt-review"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -2362,15 +2354,15 @@ fn work_review_codebase_missing_or_duplicate_leaves_state_unchanged() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Review codebase"])
+        .args(["work-item", "create", "work-1", "--title", "Review codebase"])
         .assert()
         .success();
 
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
-            "review-codebase",
+            "review",
+            "codebase",
             "work-1",
             "attempt-review",
             "--from-working-tree",
@@ -2382,7 +2374,7 @@ fn work_review_codebase_missing_or_duplicate_leaves_state_unchanged() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "missing-work", "attempt-review"])
+        .args(["review", "codebase", "missing-work", "attempt-review"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -2391,8 +2383,8 @@ fn work_review_codebase_missing_or_duplicate_leaves_state_unchanged() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
-            "review-codebase",
+            "review",
+            "codebase",
             "work-1",
             "attempt-review",
             "--from-working-tree",
@@ -2425,14 +2417,14 @@ fn work_task_run_review_only_fails_when_skill_missing() {
     .unwrap();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Review codebase"])
+        .args(["work-item", "create", "work-1", "--title", "Review codebase"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
-            "review-codebase",
+            "review",
+            "codebase",
             "work-1",
             "attempt-review",
             "--from-working-tree",
@@ -2446,7 +2438,6 @@ fn work_task_run_review_only_fails_when_skill_missing() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -2469,7 +2460,7 @@ fn work_task_run_completes_attempt_after_all_review_tasks_complete() {
     create_completed_work_attempt(&tmp, &main_dir);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review", "work-1", "attempt-1"])
+        .args(["review", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -2485,7 +2476,6 @@ fn work_task_run_completes_attempt_after_all_review_tasks_complete() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -2507,7 +2497,6 @@ fn work_task_run_completes_attempt_after_all_review_tasks_complete() {
         factory_cmd()
             .current_dir(&main_dir)
             .args([
-                "work",
                 "task",
                 "run",
                 "work-1",
@@ -2549,12 +2538,12 @@ fn work_attempt_run_drives_write_reviews_and_passes() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Attempt loop"])
+        .args(["work-item", "create", "work-1", "--title", "Attempt loop"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -2564,7 +2553,6 @@ fn work_attempt_run_drives_write_reviews_and_passes() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -2610,8 +2598,8 @@ fn work_attempt_run_drives_write_reviews_and_passes() {
     let inspection = factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "merge-candidate",
+            "show",
             "work-1",
             "attempt-1-merge-candidate",
         ])
@@ -2631,7 +2619,6 @@ fn work_attempt_run_drives_write_reviews_and_passes() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -2654,14 +2641,14 @@ fn work_attempt_run_review_only_passes_without_merge_candidate() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Review codebase"])
+        .args(["work-item", "create", "work-1", "--title", "Review codebase"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
-            "review-codebase",
+            "review",
+            "codebase",
             "work-1",
             "attempt-review",
             "--from-working-tree",
@@ -2676,7 +2663,6 @@ fn work_attempt_run_review_only_passes_without_merge_candidate() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -2708,14 +2694,14 @@ fn work_attempt_run_review_only_rejects_source_changes() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Review codebase"])
+        .args(["work-item", "create", "work-1", "--title", "Review codebase"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
-            "review-codebase",
+            "review",
+            "codebase",
             "work-1",
             "attempt-review",
             "--from-working-tree",
@@ -2730,7 +2716,6 @@ fn work_attempt_run_review_only_rejects_source_changes() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -2767,14 +2752,14 @@ fn work_attempt_run_review_only_restores_changed_source_head() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Review codebase"])
+        .args(["work-item", "create", "work-1", "--title", "Review codebase"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
-            "review-codebase",
+            "review",
+            "codebase",
             "work-1",
             "attempt-review",
             "--from-working-tree",
@@ -2789,7 +2774,6 @@ fn work_attempt_run_review_only_restores_changed_source_head() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -2826,14 +2810,14 @@ fn work_attempt_run_review_only_requires_recorded_source_commit() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Review codebase"])
+        .args(["work-item", "create", "work-1", "--title", "Review codebase"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
-            "review-codebase",
+            "review",
+            "codebase",
             "work-1",
             "attempt-review",
             "--from-working-tree",
@@ -2856,7 +2840,6 @@ fn work_attempt_run_review_only_requires_recorded_source_commit() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -2903,14 +2886,14 @@ fn work_attempt_run_review_only_rejects_factory_state_changes() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Review codebase"])
+        .args(["work-item", "create", "work-1", "--title", "Review codebase"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
-            "review-codebase",
+            "review",
+            "codebase",
             "work-1",
             "attempt-review",
             "--from-working-tree",
@@ -2924,7 +2907,6 @@ fn work_attempt_run_review_only_rejects_factory_state_changes() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -2960,14 +2942,14 @@ fn work_attempt_run_review_only_rejects_work_state_changes() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Review codebase"])
+        .args(["work-item", "create", "work-1", "--title", "Review codebase"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
-            "review-codebase",
+            "review",
+            "codebase",
             "work-1",
             "attempt-review",
             "--from-working-tree",
@@ -2981,7 +2963,6 @@ fn work_attempt_run_review_only_rejects_work_state_changes() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -3041,14 +3022,14 @@ fn work_attempt_run_review_only_restores_mixed_source_and_factory_changes() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Review codebase"])
+        .args(["work-item", "create", "work-1", "--title", "Review codebase"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
-            "review-codebase",
+            "review",
+            "codebase",
             "work-1",
             "attempt-review",
             "--from-working-tree",
@@ -3065,7 +3046,6 @@ fn work_attempt_run_review_only_restores_mixed_source_and_factory_changes() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -3109,14 +3089,14 @@ fn work_attempt_run_review_only_fails_without_followup() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Review codebase"])
+        .args(["work-item", "create", "work-1", "--title", "Review codebase"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
-            "review-codebase",
+            "review",
+            "codebase",
             "work-1",
             "attempt-review",
             "--from-working-tree",
@@ -3130,7 +3110,6 @@ fn work_attempt_run_review_only_fails_without_followup() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -3161,14 +3140,14 @@ fn work_attempt_run_review_only_uncertain_needs_user() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Review codebase"])
+        .args(["work-item", "create", "work-1", "--title", "Review codebase"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
-            "review-codebase",
+            "review",
+            "codebase",
             "work-1",
             "attempt-review",
             "--from-working-tree",
@@ -3182,7 +3161,6 @@ fn work_attempt_run_review_only_uncertain_needs_user() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -3227,12 +3205,12 @@ fn work_merge_candidate_failed_check_leaves_target_unchanged() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Merge check failure"])
+        .args(["work-item", "create", "work-1", "--title", "Merge check failure"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -3241,7 +3219,6 @@ fn work_merge_candidate_failed_check_leaves_target_unchanged() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -3261,8 +3238,8 @@ fn work_merge_candidate_failed_check_leaves_target_unchanged() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
-            "merge",
+            "merge-candidate",
+            "land",
             "work-1",
             "attempt-1-merge-candidate",
             "--no-sandbox",
@@ -3300,12 +3277,12 @@ fn work_merge_candidate_warns_when_cleanup_fails_after_landing() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Cleanup warning"])
+        .args(["work-item", "create", "work-1", "--title", "Cleanup warning"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -3314,7 +3291,6 @@ fn work_merge_candidate_warns_when_cleanup_fails_after_landing() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -3337,8 +3313,8 @@ fn work_merge_candidate_warns_when_cleanup_fails_after_landing() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
-            "merge",
+            "merge-candidate",
+            "land",
             "work-1",
             "attempt-1-merge-candidate",
             "--no-sandbox",
@@ -3363,12 +3339,12 @@ fn work_merge_candidate_rerun_after_cleanup_preserves_landed_state() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Cleanup rerun"])
+        .args(["work-item", "create", "work-1", "--title", "Cleanup rerun"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -3377,7 +3353,6 @@ fn work_merge_candidate_rerun_after_cleanup_preserves_landed_state() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -3393,8 +3368,8 @@ fn work_merge_candidate_rerun_after_cleanup_preserves_landed_state() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
-            "merge",
+            "merge-candidate",
+            "land",
             "work-1",
             "attempt-1-merge-candidate",
             "--no-sandbox",
@@ -3427,8 +3402,8 @@ fn work_merge_candidate_rerun_after_cleanup_preserves_landed_state() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
-            "merge",
+            "merge-candidate",
+            "land",
             "work-1",
             "attempt-1-merge-candidate",
             "--no-sandbox",
@@ -3455,12 +3430,12 @@ fn work_merge_candidate_rejects_stale_stored_provenance_without_rewrite() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Stale candidate"])
+        .args(["work-item", "create", "work-1", "--title", "Stale candidate"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -3469,7 +3444,6 @@ fn work_merge_candidate_rejects_stale_stored_provenance_without_rewrite() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -3496,8 +3470,8 @@ fn work_merge_candidate_rejects_stale_stored_provenance_without_rewrite() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
-            "merge",
+            "merge-candidate",
+            "land",
             "work-1",
             "attempt-1-merge-candidate",
             "--no-sandbox",
@@ -3520,12 +3494,12 @@ fn work_merge_candidate_rebases_when_target_advanced() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Rebase candidate"])
+        .args(["work-item", "create", "work-1", "--title", "Rebase candidate"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -3534,7 +3508,6 @@ fn work_merge_candidate_rebases_when_target_advanced() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -3558,8 +3531,8 @@ fn work_merge_candidate_rebases_when_target_advanced() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
-            "merge",
+            "merge-candidate",
+            "land",
             "work-1",
             "attempt-1-merge-candidate",
             "--no-sandbox",
@@ -3597,12 +3570,12 @@ fn work_merge_candidate_rebase_failure_leaves_target_unchanged() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Rebase conflict"])
+        .args(["work-item", "create", "work-1", "--title", "Rebase conflict"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -3611,7 +3584,6 @@ fn work_merge_candidate_rebase_failure_leaves_target_unchanged() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -3635,8 +3607,8 @@ fn work_merge_candidate_rebase_failure_leaves_target_unchanged() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
-            "merge",
+            "merge-candidate",
+            "land",
             "work-1",
             "attempt-1-merge-candidate",
             "--no-sandbox",
@@ -3665,12 +3637,12 @@ fn work_merge_rebase_resolves_trivial_conflict() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Trivial conflict"])
+        .args(["work-item", "create", "work-1", "--title", "Trivial conflict"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -3679,7 +3651,6 @@ fn work_merge_rebase_resolves_trivial_conflict() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -3701,8 +3672,8 @@ fn work_merge_rebase_resolves_trivial_conflict() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
-            "merge",
+            "merge-candidate",
+            "land",
             "work-1",
             "attempt-1-merge-candidate",
             "--no-sandbox",
@@ -3726,12 +3697,12 @@ fn work_merge_rebase_gives_up_transitions_to_needs_user() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Give up"])
+        .args(["work-item", "create", "work-1", "--title", "Give up"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -3740,7 +3711,6 @@ fn work_merge_rebase_gives_up_transitions_to_needs_user() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -3763,8 +3733,8 @@ fn work_merge_rebase_gives_up_transitions_to_needs_user() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
-            "merge",
+            "merge-candidate",
+            "land",
             "work-1",
             "attempt-1-merge-candidate",
             "--no-sandbox",
@@ -3802,12 +3772,12 @@ fn work_merge_rebase_agent_crash_without_give_up_fails() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Agent crash"])
+        .args(["work-item", "create", "work-1", "--title", "Agent crash"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -3816,7 +3786,6 @@ fn work_merge_rebase_agent_crash_without_give_up_fails() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -3838,8 +3807,8 @@ fn work_merge_rebase_agent_crash_without_give_up_fails() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
-            "merge",
+            "merge-candidate",
+            "land",
             "work-1",
             "attempt-1-merge-candidate",
             "--no-sandbox",
@@ -3874,12 +3843,12 @@ fn work_merge_rebase_provenance_updated_after_rebase() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Provenance update"])
+        .args(["work-item", "create", "work-1", "--title", "Provenance update"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -3888,7 +3857,6 @@ fn work_merge_rebase_provenance_updated_after_rebase() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -3910,8 +3878,8 @@ fn work_merge_rebase_provenance_updated_after_rebase() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
-            "merge",
+            "merge-candidate",
+            "land",
             "work-1",
             "attempt-1-merge-candidate",
             "--no-sandbox",
@@ -3962,7 +3930,6 @@ fn work_attempt_run_plans_followup_for_failed_reviews() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -4078,7 +4045,7 @@ fn work_create_planning_context_feeds_followup_for_failed_reviews() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
+            "work-item",
             "create",
             "work-1",
             "--title",
@@ -4096,13 +4063,12 @@ fn work_create_planning_context_feeds_followup_for_failed_reviews() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -4145,7 +4111,6 @@ fn work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -4244,7 +4209,6 @@ fn work_attempt_run_counts_already_planned_followup_against_budget() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -4313,7 +4277,7 @@ fn work_attempt_run_rejects_unmanaged_completed_review_artifact_area_path() {
     create_completed_work_attempt(&tmp, &main_dir);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review", "work-1", "attempt-1"])
+        .args(["review", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -4332,7 +4296,6 @@ fn work_attempt_run_rejects_unmanaged_completed_review_artifact_area_path() {
         factory_cmd()
             .current_dir(&main_dir)
             .args([
-                "work",
                 "task",
                 "run",
                 "work-1",
@@ -4360,7 +4323,6 @@ fn work_attempt_run_rejects_unmanaged_completed_review_artifact_area_path() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -4386,7 +4348,6 @@ fn work_attempt_run_marks_uncertain_reviews_needs_user() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -4422,7 +4383,6 @@ fn work_attempt_run_marks_missing_verdict_needs_user() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -4453,12 +4413,12 @@ fn work_attempt_run_stops_when_task_executor_fails() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Attempt loop"])
+        .args(["work-item", "create", "work-1", "--title", "Attempt loop"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -4468,7 +4428,6 @@ fn work_attempt_run_stops_when_task_executor_fails() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-1",
@@ -4494,7 +4453,7 @@ fn work_task_run_rejects_unmanaged_review_read_workspace_path() {
     create_completed_work_attempt(&tmp, &main_dir);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review", "work-1", "attempt-1"])
+        .args(["review", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -4518,7 +4477,6 @@ fn work_task_run_rejects_unmanaged_review_read_workspace_path() {
         factory_cmd()
             .current_dir(&main_dir)
             .args([
-                "work",
                 "task",
                 "run",
                 "work-1",
@@ -4548,7 +4506,7 @@ fn work_task_run_rejects_malformed_review_context() {
     create_completed_work_attempt(&tmp, &main_dir);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review", "work-1", "attempt-1"])
+        .args(["review", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -4593,7 +4551,6 @@ fn work_task_run_rejects_malformed_review_context() {
         factory_cmd()
             .current_dir(&main_dir)
             .args([
-                "work",
                 "task",
                 "run",
                 "work-1",
@@ -4621,7 +4578,7 @@ fn work_task_run_fails_review_task_without_artifact() {
     create_completed_work_attempt(&tmp, &main_dir);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review", "work-1", "attempt-1"])
+        .args(["review", "work-1", "attempt-1"])
         .assert()
         .success();
     let bin_dir = tmp.path().join("bin-review");
@@ -4630,7 +4587,6 @@ fn work_task_run_fails_review_task_without_artifact() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -4661,7 +4617,7 @@ fn work_task_run_ignores_stale_review_artifact() {
     create_completed_work_attempt(&tmp, &main_dir);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review", "work-1", "attempt-1"])
+        .args(["review", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -4677,7 +4633,6 @@ fn work_task_run_ignores_stale_review_artifact() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -4709,7 +4664,7 @@ fn work_task_run_rejects_unmanaged_review_artifact_area_path() {
     create_completed_work_attempt(&tmp, &main_dir);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review", "work-1", "attempt-1"])
+        .args(["review", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -4732,7 +4687,6 @@ fn work_task_run_rejects_unmanaged_review_artifact_area_path() {
         factory_cmd()
             .current_dir(&main_dir)
             .args([
-                "work",
                 "task",
                 "run",
                 "work-1",
@@ -4763,7 +4717,7 @@ fn work_task_run_marks_review_task_failed_when_coder_exits_nonzero() {
     create_completed_work_attempt(&tmp, &main_dir);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review", "work-1", "attempt-1"])
+        .args(["review", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -4773,7 +4727,6 @@ fn work_task_run_marks_review_task_failed_when_coder_exits_nonzero() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -4804,7 +4757,7 @@ fn work_task_run_fails_review_task_that_dirties_candidate_workspace() {
     create_completed_work_attempt(&tmp, &main_dir);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review", "work-1", "attempt-1"])
+        .args(["review", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -4822,7 +4775,6 @@ exit 0
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -4854,7 +4806,7 @@ fn work_task_run_fails_review_task_that_dirties_candidate_workspace_and_exits_no
     create_completed_work_attempt(&tmp, &main_dir);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review", "work-1", "attempt-1"])
+        .args(["review", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -4871,7 +4823,6 @@ exit 7
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -4903,7 +4854,7 @@ fn work_task_run_fails_review_task_that_commits_to_candidate_workspace() {
     create_completed_work_attempt(&tmp, &main_dir);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review", "work-1", "attempt-1"])
+        .args(["review", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -4924,7 +4875,6 @@ exit 0
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -4959,7 +4909,7 @@ fn work_task_run_restores_committed_review_mutation_before_dirty_failure() {
     create_completed_work_attempt(&tmp, &main_dir);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review", "work-1", "attempt-1"])
+        .args(["review", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -4981,7 +4931,6 @@ exit 0
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -5016,7 +4965,7 @@ fn work_task_run_sandboxes_review_with_read_only_candidate() {
     create_completed_work_attempt(&tmp, &main_dir);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review", "work-1", "attempt-1"])
+        .args(["review", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -5035,7 +4984,6 @@ fn work_task_run_sandboxes_review_with_read_only_candidate() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -5101,12 +5049,12 @@ exit 0
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Run task"])
+        .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -5129,7 +5077,6 @@ exit 0
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -5162,19 +5109,18 @@ exit 0
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Run task"])
+        .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -5212,19 +5158,18 @@ exit 7
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Run task"])
+        .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -5254,19 +5199,18 @@ fn work_task_run_rejects_success_without_commits() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Run task"])
+        .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -5294,12 +5238,12 @@ fn work_task_run_rejects_reused_workspace_without_new_commit() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Run task"])
+        .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -5334,7 +5278,6 @@ fn work_task_run_rejects_reused_workspace_without_new_commit() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -5362,12 +5305,12 @@ fn work_task_run_rejects_existing_directory_that_is_not_worktree() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Run task"])
+        .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -5379,7 +5322,6 @@ fn work_task_run_rejects_existing_directory_that_is_not_worktree() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -5406,12 +5348,12 @@ fn work_task_run_rejects_existing_task_branch_without_workspace() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Run task"])
+        .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -5425,7 +5367,6 @@ fn work_task_run_rejects_existing_task_branch_without_workspace() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -5451,12 +5392,12 @@ fn work_task_run_rejects_task_that_is_not_planned() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Run task"])
+        .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -5469,7 +5410,6 @@ fn work_task_run_rejects_task_that_is_not_planned() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -5492,12 +5432,12 @@ fn work_task_run_rejects_non_write_task() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Run task"])
+        .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -5510,7 +5450,6 @@ fn work_task_run_rejects_non_write_task() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -5533,12 +5472,12 @@ fn work_task_run_requires_one_writable_workspace() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Run task"])
+        .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -5551,7 +5490,6 @@ fn work_task_run_requires_one_writable_workspace() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -5579,7 +5517,6 @@ fn work_task_run_requires_one_writable_workspace() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -5601,12 +5538,12 @@ fn work_task_run_rejects_unmanaged_writable_workspace_path() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Run task"])
+        .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
@@ -5628,7 +5565,6 @@ fn work_task_run_rejects_unmanaged_writable_workspace_path() {
         factory_cmd()
             .current_dir(&main_dir)
             .args([
-                "work",
                 "task",
                 "run",
                 "work-1",
@@ -5658,17 +5594,17 @@ fn work_task_run_missing_ids_leave_work_item_unchanged() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Run task"])
+        .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-2"])
+        .args(["attempt", "create", "work-1", "attempt-2"])
         .assert()
         .success();
 
@@ -5677,7 +5613,6 @@ fn work_task_run_missing_ids_leave_work_item_unchanged() {
 
     for args in [
         [
-            "work",
             "task",
             "run",
             "missing-work",
@@ -5686,7 +5621,6 @@ fn work_task_run_missing_ids_leave_work_item_unchanged() {
             "--no-sandbox",
         ],
         [
-            "work",
             "task",
             "run",
             "work-1",
@@ -5695,7 +5629,6 @@ fn work_task_run_missing_ids_leave_work_item_unchanged() {
             "--no-sandbox",
         ],
         [
-            "work",
             "task",
             "run",
             "work-1",
@@ -5704,7 +5637,6 @@ fn work_task_run_missing_ids_leave_work_item_unchanged() {
             "--no-sandbox",
         ],
         [
-            "work",
             "task",
             "run",
             "work-1",
@@ -5733,7 +5665,7 @@ fn work_list_outputs_stored_work_items() {
 
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "list"])
+        .args(["work-item", "list"])
         .output()
         .unwrap();
 
@@ -5770,7 +5702,7 @@ fn work_list_empty_state_succeeds_without_work_items() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "list"])
+        .args(["work-item", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("No Work Items found"));
@@ -5791,13 +5723,13 @@ fn work_show_outputs_pretty_json_for_one_work_item() {
 
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "show", "work-1"])
+        .args(["work-item", "show", "work-1"])
         .output()
         .unwrap();
 
     assert!(
         output.status.success(),
-        "work show failed: stdout={} stderr={}",
+        "work-item show failed: stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -5816,7 +5748,7 @@ fn work_show_missing_item_reports_not_found() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "show", "missing-work"])
+        .args(["work-item", "show", "missing-work"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -5830,7 +5762,7 @@ fn work_show_rejects_invalid_work_item_id() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "show", "../escape"])
+        .args(["work-item", "show", "../escape"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -5846,7 +5778,7 @@ fn work_merge_candidate_missing_item_or_candidate_reports_error() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "merge-candidate", "missing-work", "candidate-1"])
+        .args(["merge-candidate", "show", "missing-work", "candidate-1"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -5855,7 +5787,7 @@ fn work_merge_candidate_missing_item_or_candidate_reports_error() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "merge-candidate", "work-1", "candidate-1"])
+        .args(["merge-candidate", "show", "work-1", "candidate-1"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -5875,7 +5807,7 @@ fn work_list_reports_invalid_stored_json_path() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "list"])
+        .args(["work-item", "list"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(".factory/work/items/bad.json"))
@@ -5899,7 +5831,7 @@ fn work_list_reports_stored_work_item_id_mismatch() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "list"])
+        .args(["work-item", "list"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(".factory/work/items/work-1.json"))
@@ -5924,7 +5856,7 @@ fn work_list_reports_invalid_stored_work_item_id() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "list"])
+        .args(["work-item", "list"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("bad\\\\id"))
@@ -5961,7 +5893,7 @@ fn work_list_reports_invalid_stored_model() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "list"])
+        .args(["work-item", "list"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -5990,12 +5922,12 @@ fn write_work_item_json(project_root: &Path, id: &str, title: &str) {
 fn read_work_show_json(project_root: &Path, work_item_id: &str) -> serde_json::Value {
     let output = factory_cmd()
         .current_dir(project_root)
-        .args(["work", "show", work_item_id])
+        .args(["work-item", "show", work_item_id])
         .output()
         .unwrap();
     assert!(
         output.status.success(),
-        "work show failed: stdout={} stderr={}",
+        "work-item show failed: stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -6086,22 +6018,22 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Cleanup work"])
+        .args(["work-item", "create", "work-1", "--title", "Cleanup work"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-active", "--title", "Active work"])
+        .args(["work-item", "create", "work-active", "--title", "Active work"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-active", "attempt-1"])
+        .args(["attempt", "create", "work-active", "attempt-1"])
         .assert()
         .success();
 
@@ -6263,7 +6195,7 @@ fn cleanup_work_items_reports_and_removes_orphan_artifact_roots() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-active", "--title", "Active work"])
+        .args(["work-item", "create", "work-active", "--title", "Active work"])
         .assert()
         .success();
 
@@ -6325,7 +6257,7 @@ fn cleanup_work_items_apply_skips_unregistered_managed_worktree() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
+            "work-item",
             "create",
             "work-unregistered",
             "--title",
@@ -6335,7 +6267,7 @@ fn cleanup_work_items_apply_skips_unregistered_managed_worktree() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-unregistered", "attempt-1"])
+        .args(["attempt", "create", "work-unregistered", "attempt-1"])
         .assert()
         .success();
 
@@ -6387,18 +6319,18 @@ fn cleanup_work_items_selects_failed_terminal_and_skips_pending_merge_candidate(
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-failed", "--title", "Failed work"])
+        .args(["work-item", "create", "work-failed", "--title", "Failed work"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-failed", "attempt-1"])
+        .args(["attempt", "create", "work-failed", "attempt-1"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
+            "work-item",
             "create",
             "work-pending-merge",
             "--title",
@@ -6408,7 +6340,7 @@ fn cleanup_work_items_selects_failed_terminal_and_skips_pending_merge_candidate(
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-pending-merge", "attempt-1"])
+        .args(["attempt", "create", "work-pending-merge", "attempt-1"])
         .assert()
         .success();
 
@@ -6503,7 +6435,7 @@ fn cleanup_work_items_skips_failed_attempt_with_active_task() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
+            "work-item",
             "create",
             "work-active-task",
             "--title",
@@ -6513,7 +6445,7 @@ fn cleanup_work_items_skips_failed_attempt_with_active_task() {
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-active-task", "attempt-1"])
+        .args(["attempt", "create", "work-active-task", "attempt-1"])
         .assert()
         .success();
 
@@ -6567,7 +6499,7 @@ fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() 
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
+            "work-item",
             "create",
             "work-merge-cleanup",
             "--title",
@@ -6577,7 +6509,7 @@ fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() 
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "attempt", "work-merge-cleanup", "attempt-1"])
+        .args(["attempt", "create", "work-merge-cleanup", "attempt-1"])
         .assert()
         .success();
 
@@ -6796,7 +6728,7 @@ exit 0
 "##,
     );
 
-    let mut create_args = vec!["work", "create", "work-1", "--title", "Run review"];
+    let mut create_args = vec!["work-item", "create", "work-1", "--title", "Run review"];
     if let Some(instructions) = instructions {
         create_args.extend(["--instructions", instructions]);
     }
@@ -6807,13 +6739,12 @@ exit 0
         .success();
     factory_cmd()
         .current_dir(main_dir)
-        .args(["work", "attempt", "work-1", "attempt-1"])
+        .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(main_dir)
         .args([
-            "work",
             "task",
             "run",
             "work-1",
@@ -7430,9 +7361,7 @@ fn post_merge_review_creates_worktree_and_runs_tester_then_reviewers() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "post-merge-review",
-            "run",
             "--debounce-seconds",
             "0",
         ])
@@ -7494,9 +7423,7 @@ fn post_merge_review_creates_worktree_and_runs_tester_then_reviewers() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "post-merge-review",
-            "run",
             "--debounce-seconds",
             "0",
         ])
@@ -7526,12 +7453,12 @@ fn work_attempt_run_rejects_review_only_worktree_already_in_flight() {
     for wi in ["work-1", "work-2"] {
         factory_cmd()
             .current_dir(&main_dir)
-            .args(["work", "create", wi, "--title", "Review codebase"])
+            .args(["work-item", "create", wi, "--title", "Review codebase"])
             .assert()
             .success();
         factory_cmd()
             .current_dir(&main_dir)
-            .args(["work", "review-codebase", wi, "attempt-review"])
+            .args(["review", "codebase", wi, "attempt-review"])
             .assert()
             .success();
     }
@@ -7539,7 +7466,6 @@ fn work_attempt_run_rejects_review_only_worktree_already_in_flight() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "attempt",
             "run",
             "work-2",
@@ -7558,12 +7484,12 @@ fn post_merge_review_defers_queue_entry_when_worktree_in_flight() {
     let main_dir = setup_git_project(&tmp);
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "create", "work-1", "--title", "Review codebase"])
+        .args(["work-item", "create", "work-1", "--title", "Review codebase"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-codebase", "work-1", "attempt-review"])
+        .args(["review", "codebase", "work-1", "attempt-review"])
         .assert()
         .success();
 
@@ -7573,9 +7499,7 @@ fn post_merge_review_defers_queue_entry_when_worktree_in_flight() {
     factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "post-merge-review",
-            "run",
             "--debounce-seconds",
             "0",
         ])
@@ -7626,12 +7550,12 @@ fn seed_in_flight_review_only_attempt(main_dir: &Path, work_item_id: &str, branc
     git::run(main_dir, &["checkout", branch], "checkout branch for seed").unwrap();
     factory_cmd()
         .current_dir(main_dir)
-        .args(["work", "create", work_item_id, "--title", "Seed in-flight"])
+        .args(["work-item", "create", work_item_id, "--title", "Seed in-flight"])
         .assert()
         .success();
     factory_cmd()
         .current_dir(main_dir)
-        .args(["work", "review-codebase", work_item_id, "attempt-review"])
+        .args(["review", "codebase", work_item_id, "attempt-review"])
         .assert()
         .success();
     git::run(main_dir, &["checkout", "main"], "checkout main").unwrap();
@@ -7655,19 +7579,18 @@ fn review_only_worktree_prune_default_removes_orphan_keeps_others() {
 
     let output = factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-only-worktree", "prune"])
+        .args(["cleanup", "--apply"])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "prune failed: stdout={stdout} stderr={stderr}"
+        "cleanup failed: stdout={stdout} stderr={stderr}"
     );
-    assert!(stdout.contains("removed   ") && stdout.contains("work-review-gone"));
-    assert!(stdout.contains("in-use    ") && stdout.contains("work-review-busy"));
+    assert!(stdout.contains("removed review-only worktree") && stdout.contains("work-review-gone"));
+    assert!(stdout.contains("in-use review-only worktree") && stdout.contains("work-review-busy"));
     assert!(stdout.contains("\"work-busy\""));
-    assert!(stdout.contains("Summary: removed 1, skipped in-use 1, kept 1"));
     assert!(!gone.exists(), "orphan worktree should be removed");
     assert!(busy.exists(), "in-use worktree must remain");
     assert!(keep.exists(), "live worktree must remain");
@@ -7683,18 +7606,15 @@ fn review_only_worktree_prune_all_removes_everything_but_in_use() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-only-worktree", "prune", "--all"])
+        .args(["cleanup", "--apply", "--prune-all-review-worktrees"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("removed   "))
+        .stdout(predicate::str::contains("removed review-only worktree"))
         .stdout(predicate::str::contains("work-review-keep-me"))
-        .stdout(predicate::str::contains("in-use    "))
-        .stdout(predicate::str::contains("work-review-busy"))
-        .stdout(predicate::str::contains(
-            "Summary: removed 1, skipped in-use 1, kept 0",
-        ));
-    assert!(!keep.exists(), "live worktree should be removed by --all");
-    assert!(busy.exists(), "in-use worktree must remain even with --all");
+        .stdout(predicate::str::contains("in-use review-only worktree"))
+        .stdout(predicate::str::contains("work-review-busy"));
+    assert!(!keep.exists(), "live worktree should be removed by --prune-all-review-worktrees");
+    assert!(busy.exists(), "in-use worktree must remain even with --prune-all-review-worktrees");
 }
 
 #[test]
@@ -7713,9 +7633,7 @@ fn post_merge_review_auto_prunes_orphan_worktree_before_processing_queue() {
     let output = factory_cmd()
         .current_dir(&main_dir)
         .args([
-            "work",
             "post-merge-review",
-            "run",
             "--debounce-seconds",
             "0",
         ])
@@ -7775,16 +7693,13 @@ fn review_only_worktree_prune_dry_run_changes_nothing() {
 
     factory_cmd()
         .current_dir(&main_dir)
-        .args(["work", "review-only-worktree", "prune", "--dry-run"])
+        .args(["cleanup"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("would-remove"))
+        .stdout(predicate::str::contains("would remove review-only worktree"))
         .stdout(predicate::str::contains("work-review-gone"))
-        .stdout(predicate::str::contains("would-skip-in-use"))
-        .stdout(predicate::str::contains("work-review-busy"))
-        .stdout(predicate::str::contains(
-            "Summary: would remove 1, would skip in-use 1, keep 0",
-        ));
+        .stdout(predicate::str::contains("would skip in-use review-only worktree"))
+        .stdout(predicate::str::contains("work-review-busy"));
     assert!(gone.exists(), "dry-run must not remove anything");
     assert!(busy.exists(), "dry-run must not remove anything");
 }
@@ -7797,7 +7712,7 @@ fn observations_add_with_inline_content() {
 
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .args(["observations", "add", "Test observation content"])
+        .args(["observation", "create", "Test observation content"])
         .output()
         .unwrap();
 
@@ -7828,7 +7743,7 @@ fn observations_add_from_stdin() {
 
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .args(["observations", "add"])
+        .args(["observation", "create"])
         .write_stdin("Observation from stdin")
         .output()
         .unwrap();
@@ -7855,7 +7770,7 @@ fn observations_add_empty_stdin_errors() {
 
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .args(["observations", "add"])
+        .args(["observation", "create"])
         .write_stdin("")
         .output()
         .unwrap();
@@ -7882,7 +7797,7 @@ fn observations_resolve_inline() {
     let output = factory_cmd()
         .current_dir(tmp.path())
         .args([
-            "observations",
+            "observation",
             "resolve",
             "20260612-000000-test-obs",
             "Fixed it",
@@ -7914,7 +7829,7 @@ fn observations_resolve_unknown_id_errors() {
 
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .args(["observations", "resolve", "nonexistent-id", "whatever"])
+        .args(["observation", "resolve", "nonexistent-id", "whatever"])
         .output()
         .unwrap();
 
@@ -7939,7 +7854,7 @@ fn observations_resolve_prefix_unique_match() {
 
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .args(["observations", "resolve", "20260612-143", "Done"])
+        .args(["observation", "resolve", "20260612-143", "Done"])
         .output()
         .unwrap();
 
@@ -7970,7 +7885,7 @@ fn observations_resolve_prefix_ambiguous_errors() {
 
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .args(["observations", "resolve", "20260612", "Done"])
+        .args(["observation", "resolve", "20260612", "Done"])
         .output()
         .unwrap();
 
@@ -7997,7 +7912,7 @@ fn observations_list_orders_chronologically() {
 
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .args(["observations", "list"])
+        .args(["observation", "list"])
         .output()
         .unwrap();
 
@@ -8032,7 +7947,7 @@ fn observations_show_open_and_resolved() {
     // Show open observation
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .args(["observations", "show", "20260612-open"])
+        .args(["observation", "show", "20260612-open"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -8042,7 +7957,7 @@ fn observations_show_open_and_resolved() {
     // Show resolved observation (falls back to resolved dir)
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .args(["observations", "show", "20260611-resolved"])
+        .args(["observation", "show", "20260611-resolved"])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -8052,7 +7967,7 @@ fn observations_show_open_and_resolved() {
     // Show unknown observation
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .args(["observations", "show", "nonexistent"])
+        .args(["observation", "show", "nonexistent"])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -8081,7 +7996,7 @@ fn observations_migrate_splits_monolithic_files() {
 
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .args(["observations", "migrate"])
+        .args(["observation", "migrate"])
         .output()
         .unwrap();
 
@@ -8153,7 +8068,7 @@ fn observations_migrate_splits_monolithic_files() {
     // Idempotent: second run is a no-op
     let output2 = factory_cmd()
         .current_dir(tmp.path())
-        .args(["observations", "migrate"])
+        .args(["observation", "migrate"])
         .output()
         .unwrap();
     assert!(output2.status.success());
@@ -8295,7 +8210,7 @@ fn log_command_failed_command_appends_to_failed_sentinel() {
     let tmp = TempDir::new().unwrap();
     let output = LoggedCommand::cargo_bin("factory")
         .current_dir(tmp.path())
-        .args(["work", "show", "nonexistent-work-item-for-test"])
+        .args(["work-item", "show", "nonexistent-work-item-for-test"])
         .output()
         .unwrap();
 
@@ -8319,7 +8234,7 @@ fn auto_merge_with_both_flags_set_errors() {
     let tmp = TempDir::new().unwrap();
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "auto-merge", "some-work-item", "--all"])
+        .args(["auto-merge", "some-work-item", "--all"])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -8335,7 +8250,7 @@ fn auto_merge_with_neither_flag_set_errors() {
     let tmp = TempDir::new().unwrap();
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "auto-merge"])
+        .args(["auto-merge"])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -8351,7 +8266,7 @@ fn auto_merge_single_mode_rejects_unknown_work_item_id() {
     let tmp = TempDir::new().unwrap();
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "auto-merge", "nonexistent-work-item"])
+        .args(["auto-merge", "nonexistent-work-item"])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -8374,7 +8289,7 @@ fn auto_merge_skips_candidate_already_marked_skipped() {
     .unwrap();
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "create", "wi-skip", "--title", "Test skip"])
+        .args(["work-item", "create", "wi-skip", "--title", "Test skip"])
         .output()
         .unwrap();
 
@@ -8418,7 +8333,7 @@ fn auto_merge_skips_candidate_already_marked_skipped() {
 
     let child = std::process::Command::new(assert_cmd::cargo::cargo_bin("factory"))
         .current_dir(tmp.path())
-        .args(["work", "auto-merge", "wi-skip", "--poll-seconds", "1"])
+        .args(["auto-merge", "wi-skip", "--poll-seconds", "1"])
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -8447,13 +8362,13 @@ fn auto_merge_exits_clean_on_sigterm() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "create", "wi-sig", "--title", "Test signal"])
+        .args(["work-item", "create", "wi-sig", "--title", "Test signal"])
         .output()
         .unwrap();
 
     let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("factory"))
         .current_dir(tmp.path())
-        .args(["work", "auto-merge", "wi-sig", "--poll-seconds", "1"])
+        .args(["auto-merge", "wi-sig", "--poll-seconds", "1"])
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -8819,21 +8734,27 @@ fn deleted_subcommands_absent_from_help() {
         .take_while(|line| !line.is_empty() || line.contains("Commands:"))
         .collect::<Vec<_>>()
         .join("\n");
-    for cmd in [
-        "run", "resume", "watch", "summary", "pull", "shell", "merge", "review",
-    ] {
+    for cmd in ["run", "resume", "watch", "summary", "pull", "shell"] {
         assert!(
             !in_commands.lines().any(|line| line.trim().starts_with(cmd)),
             "Deleted subcommand {cmd:?} should not appear in Commands section:\n{in_commands}"
         );
     }
     assert!(
-        in_commands.contains("work"),
-        "Work subcommand should appear"
+        in_commands.contains("work-item"),
+        "work-item subcommand should appear"
     );
     assert!(
         in_commands.contains("status"),
-        "Status subcommand should appear"
+        "status subcommand should appear"
+    );
+    assert!(
+        in_commands.contains("review"),
+        "review subcommand should appear"
+    );
+    assert!(
+        in_commands.contains("merge-candidate"),
+        "merge-candidate subcommand should appear"
     );
 }
 
@@ -8848,14 +8769,14 @@ fn work_queue_add_and_list_round_trip() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "queue", "add", "wi-q1", "--priority", "5"])
+        .args(["queue", "add", "wi-q1", "--priority", "5"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Queued Work Item wi-q1"));
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "queue", "list"])
+        .args(["queue", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("5"))
@@ -8870,7 +8791,7 @@ fn work_queue_add_unknown_work_item_errors() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "queue", "add", "nonexistent"])
+        .args(["queue", "add", "nonexistent"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("not found"));
@@ -8883,19 +8804,19 @@ fn work_queue_add_existing_with_priority_updates_only_priority() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "queue", "add", "wi-q2", "--priority", "3"])
+        .args(["queue", "add", "wi-q2", "--priority", "3"])
         .assert()
         .success();
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "queue", "add", "wi-q2", "--priority", "10"])
+        .args(["queue", "add", "wi-q2", "--priority", "10"])
         .assert()
         .success();
 
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "queue", "list"])
+        .args(["queue", "list"])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -8913,13 +8834,13 @@ fn work_queue_list_format_includes_priority_queued_at_status_id() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "queue", "add", "wi-fmt"])
+        .args(["queue", "add", "wi-fmt"])
         .assert()
         .success();
 
     let output = factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "queue", "list"])
+        .args(["queue", "list"])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -8939,20 +8860,20 @@ fn work_queue_remove_after_add_removes_entry() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "queue", "add", "wi-rm"])
+        .args(["queue", "add", "wi-rm"])
         .assert()
         .success();
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "queue", "remove", "wi-rm"])
+        .args(["queue", "remove", "wi-rm"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Removed wi-rm"));
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "queue", "list"])
+        .args(["queue", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("empty"));
@@ -8965,7 +8886,7 @@ fn work_queue_remove_unknown_errors() {
 
     factory_cmd()
         .current_dir(tmp.path())
-        .args(["work", "queue", "remove", "nonexistent"])
+        .args(["queue", "remove", "nonexistent"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("not queued"));
@@ -8982,7 +8903,7 @@ fn work_scheduler_run_exits_clean_on_sigterm_when_idle() {
 
     let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("factory"))
         .current_dir(tmp.path())
-        .args(["work", "scheduler", "run", "--poll-seconds", "1"])
+        .args(["scheduler", "run", "--poll-seconds", "1"])
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -9016,7 +8937,7 @@ exit 0
 
     factory_cmd()
         .current_dir(project)
-        .args(["work", "queue", "add", "wi-sched", "--priority", "1"])
+        .args(["queue", "add", "wi-sched", "--priority", "1"])
         .assert()
         .success();
 
@@ -9036,7 +8957,7 @@ exit 0
                 std::env::var("PATH").unwrap_or_default()
             ),
         )
-        .args(["work", "scheduler", "run", "--poll-seconds", "1"])
+        .args(["scheduler", "run", "--poll-seconds", "1"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -9072,4 +8993,182 @@ exit 0
         status == "done" || status == "failed",
         "queue entry should be terminal after scheduler runs, got: {status}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// B1–B5: Read commands for attempts, merge candidates, and tasks
+// ---------------------------------------------------------------------------
+
+fn write_rich_work_item(project_root: &Path) {
+    let base = project_root.join(".factory/work");
+
+    let items_dir = base.join("items");
+    fs::create_dir_all(&items_dir).unwrap();
+    fs::write(
+        items_dir.join("wi-read.json"),
+        r#"{"id": "wi-read", "title": "Read test"}"#,
+    )
+    .unwrap();
+
+    let attempts_dir = base.join("attempts/wi-read");
+    fs::create_dir_all(&attempts_dir).unwrap();
+    fs::write(
+        attempts_dir.join("attempt-1.json"),
+        r#"{"id": "attempt-1", "work_item_id": "wi-read", "order": 0, "status": "complete", "review_state": "passed"}"#,
+    )
+    .unwrap();
+    fs::write(
+        attempts_dir.join("attempt-2.json"),
+        r#"{"id": "attempt-2", "work_item_id": "wi-read", "order": 1, "status": "executing"}"#,
+    )
+    .unwrap();
+
+    let tasks_dir = base.join("tasks/wi-read/attempt-1");
+    fs::create_dir_all(&tasks_dir).unwrap();
+    fs::write(
+        tasks_dir.join("attempt-1-write-1.json"),
+        r#"{
+  "order": 0,
+  "id": "attempt-1-write-1",
+  "kind": "write",
+  "status": "complete",
+  "role": "writer",
+  "work_item_id": "wi-read",
+  "attempt_id": "attempt-1",
+  "workspace_access": { "reads": [], "writes": [{"id": "ws-1", "path": "/tmp/ws"}] },
+  "output": {
+    "workspace_id": "ws-1",
+    "workspace_path": "/tmp/ws",
+    "source_branch": "work/wi-read/attempt-1",
+    "commit": "abc123"
+  }
+}"#,
+    )
+    .unwrap();
+    fs::write(
+        tasks_dir.join("attempt-1-review-1.json"),
+        r#"{
+  "order": 1,
+  "id": "attempt-1-review-1",
+  "kind": "review",
+  "status": "complete",
+  "role": "reviewer",
+  "work_item_id": "wi-read",
+  "attempt_id": "attempt-1",
+  "workspace_access": { "reads": [{"id": "ws-1", "path": "/tmp/ws"}], "writes": [] },
+  "artifact_area": { "path": ".factory/work/artifacts/wi-read/attempt-1/attempt-1-review-1" },
+  "review_context": {
+    "candidate_workspace_id": "ws-1",
+    "candidate_workspace_path": "/tmp/ws",
+    "source_branch": "work/wi-read/attempt-1",
+    "candidate_commit": "abc123"
+  }
+}"#,
+    )
+    .unwrap();
+
+    let mc_dir = base.join("merge-candidates/wi-read");
+    fs::create_dir_all(&mc_dir).unwrap();
+    fs::write(
+        mc_dir.join("mc-1.json"),
+        r#"{
+  "id": "mc-1",
+  "attempt_id": "attempt-1",
+  "source_workspace": {"id": "ws-1", "path": "/tmp/ws"},
+  "target_workspace": {"id": "target", "path": "."},
+  "source_branch": "work/wi-read/attempt-1",
+  "target_branch": "work/wi-read/attempt-1",
+  "candidate_commit": "abc123",
+  "review_state": "passed",
+  "merge_state": {"status": "pending"}
+}"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn attempt_list_prints_attempts() {
+    let tmp = TempDir::new().unwrap();
+    write_rich_work_item(tmp.path());
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["attempt", "list", "wi-read"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("attempt-1"), "should list attempt-1: {stdout}");
+    assert!(stdout.contains("complete"), "should show complete status: {stdout}");
+    assert!(stdout.contains("attempt-2"), "should list attempt-2: {stdout}");
+    assert!(stdout.contains("executing"), "should show executing status: {stdout}");
+}
+
+#[test]
+fn attempt_show_prints_attempt_json() {
+    let tmp = TempDir::new().unwrap();
+    write_rich_work_item(tmp.path());
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["attempt", "show", "wi-read", "attempt-1"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["id"], "attempt-1");
+    assert_eq!(value["status"], "complete");
+    assert!(value["tasks"].as_array().unwrap().len() == 2);
+}
+
+#[test]
+fn merge_candidate_list_prints_candidates() {
+    let tmp = TempDir::new().unwrap();
+    write_rich_work_item(tmp.path());
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["merge-candidate", "list", "wi-read"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("mc-1"), "should list mc-1: {stdout}");
+    assert!(stdout.contains("passed"), "should show review state: {stdout}");
+    assert!(stdout.contains("pending"), "should show merge status: {stdout}");
+}
+
+#[test]
+fn task_list_prints_tasks() {
+    let tmp = TempDir::new().unwrap();
+    write_rich_work_item(tmp.path());
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["task", "list", "wi-read", "attempt-1"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("attempt-1-write-1"), "should list write task: {stdout}");
+    assert!(stdout.contains("write"), "should show write kind: {stdout}");
+    assert!(stdout.contains("attempt-1-review-1"), "should list review task: {stdout}");
+    assert!(stdout.contains("review"), "should show review kind: {stdout}");
+}
+
+#[test]
+fn task_show_prints_task_json() {
+    let tmp = TempDir::new().unwrap();
+    write_rich_work_item(tmp.path());
+
+    let output = factory_cmd()
+        .current_dir(tmp.path())
+        .args(["task", "show", "wi-read", "attempt-1", "attempt-1-write-1"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["id"], "attempt-1-write-1");
+    assert_eq!(value["kind"], "write");
+    assert_eq!(value["status"], "complete");
 }

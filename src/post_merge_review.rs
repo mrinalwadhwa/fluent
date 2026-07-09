@@ -133,9 +133,7 @@ pub fn spawn_detached_runner(project_root: &Path, debounce_secs: u64) -> Result<
     let mut cmd = Command::new(&factory_bin);
     cmd.current_dir(project_root)
         .args([
-            "work",
             "post-merge-review",
-            "run",
             "--debounce-seconds",
             &debounce_secs.to_string(),
         ])
