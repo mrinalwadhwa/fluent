@@ -1,11 +1,9 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+include!(concat!(env!("OUT_DIR"), "/bundled_skills.rs"));
+
 /// Resolve runtime content the Fluent binary reads directly.
-///
-/// The implemented bundled categories are prompts and sandbox profiles.
-/// Skills and expertise stay in repository or installed skill layouts
-/// and are read by agents, not by this resolver.
 ///
 /// The resolution chain:
 /// 1. Project-local: `<project_root>/.fluent/<relative_path>`
@@ -79,6 +77,34 @@ pub const GENERAL_EXPERTISE_FILES: &[&str] = &[
     "tests.md",
     "youtube.md",
 ];
+
+/// Return the content of a bundled skill file.
+/// `relative` is the path within the skills tree (e.g. `review-tests/SKILL.md`).
+pub fn bundled_skill_content(relative: &str) -> Option<&'static str> {
+    BUNDLED_SKILL_FILES
+        .iter()
+        .find(|(path, _)| *path == relative)
+        .map(|(_, content)| *content)
+}
+
+/// Return all bundled skill file entries whose path starts with `prefix`.
+pub fn bundled_skill_files_under(prefix: &str) -> Vec<(&'static str, &'static str)> {
+    BUNDLED_SKILL_FILES
+        .iter()
+        .filter(|(path, _)| path.starts_with(prefix))
+        .copied()
+        .collect()
+}
+
+/// Return the list of skill directory names embedded in the binary.
+pub fn bundled_skill_names() -> Vec<&'static str> {
+    let mut names: Vec<&str> = BUNDLED_SKILL_FILES
+        .iter()
+        .filter_map(|(path, _)| path.split('/').next())
+        .collect();
+    names.dedup();
+    names
+}
 
 /// Bundled runtime content compiled into the binary.
 pub fn bundled_content(relative: &str) -> Option<String> {
@@ -673,8 +699,66 @@ Check item {{ITEM_ID}}.
 
     #[test]
     fn test_bundled_content_does_not_include_agent_managed_content() {
+        // Skills are bundled through BUNDLED_SKILL_FILES, not through bundled_content.
         assert!(bundled_content("skills/build-in-the-fluent/SKILL.md").is_none());
         assert!(bundled_content(".fluent/expertise/testing.md").is_none());
+    }
+
+    #[test]
+    fn bundled_skill_files_include_review_skills() {
+        for role in &[
+            "architecture",
+            "behaviors",
+            "documentation",
+            "skills",
+            "tests",
+        ] {
+            let skill_path = format!("review-{role}/SKILL.md");
+            assert!(
+                bundled_skill_content(&skill_path).is_some(),
+                "expected bundled skill content for {skill_path}"
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_skill_files_dereference_symlinks() {
+        let content = bundled_skill_content("review-architecture/references/architecture.md");
+        assert!(
+            content.is_some(),
+            "review-architecture/references/architecture.md should be bundled"
+        );
+        let body = content.unwrap();
+        assert!(
+            !body.is_empty(),
+            "dereferenced reference should have content"
+        );
+    }
+
+    #[test]
+    fn bundled_skill_names_lists_all_skills() {
+        let names = bundled_skill_names();
+        assert!(
+            names.contains(&"review-tests"),
+            "should contain review-tests"
+        );
+        assert!(
+            names.contains(&"build-in-the-fluent"),
+            "should contain build-in-the-fluent"
+        );
+    }
+
+    #[test]
+    fn bundled_skill_files_under_returns_matching_entries() {
+        let entries = bundled_skill_files_under("review-tests/");
+        assert!(
+            entries.len() >= 2,
+            "review-tests should have SKILL.md and at least one reference"
+        );
+        assert!(
+            entries.iter().any(|(p, _)| *p == "review-tests/SKILL.md"),
+            "should contain SKILL.md"
+        );
     }
 
     #[test]

@@ -30,5 +30,5 @@ node_modules/
 tests/output/
 
 # Added by cargo
-
 /target
+/.cargo-home

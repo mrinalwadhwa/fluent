@@ -1456,6 +1456,50 @@ fn materialize_general_expertise(project_root: &Path) -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Materialize a single bundled skill into `dest_dir/<skill_name>/`.
+/// Writes all files carried in the binary for the named skill, with
+/// references dereferenced (symlinks followed at build time). Returns
+/// the path to the skill directory.
+///
+/// Fails if a referenced expertise file is absent from the bundle.
+pub(crate) fn materialize_skill(skill_name: &str, dest_dir: &Path) -> Result<PathBuf> {
+    let prefix = format!("{skill_name}/");
+    let files = crate::content::bundled_skill_files_under(&prefix);
+    if files.is_empty() {
+        bail!("No bundled skill named {skill_name:?}");
+    }
+
+    let skill_dir = dest_dir.join(skill_name);
+    for (rel_path, content) in &files {
+        let file_path = dest_dir.join(rel_path);
+        if let Some(parent) = file_path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create directory for skill file {}",
+                    file_path.display()
+                )
+            })?;
+        }
+        let dir_for_tmp = file_path.parent().unwrap_or(dest_dir);
+        let mut tmp = tempfile::NamedTempFile::new_in(dir_for_tmp).with_context(|| {
+            format!(
+                "Failed to create temp file while writing skill {}",
+                file_path.display()
+            )
+        })?;
+        use std::io::Write;
+        tmp.write_all(content.as_bytes()).with_context(|| {
+            format!(
+                "Failed to write skill content for {}",
+                file_path.display()
+            )
+        })?;
+        tmp.persist(&file_path)
+            .with_context(|| format!("Failed to persist skill at {}", file_path.display()))?;
+    }
+    Ok(skill_dir)
+}
+
 fn progress_md_dir(project_root: &Path, work_item_id: &str, attempt_id: &str) -> PathBuf {
     project_root
         .join(crate::work_model::WORK_PROGRESS_DIR)
@@ -3211,6 +3255,51 @@ mod tests {
         assert!(
             result.is_err(),
             "should error on missing non-progress artifact"
+        );
+    }
+
+    #[test]
+    fn materialize_skill_writes_without_project_skills_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dest = tmp.path().join("output");
+        // dest does not contain a skills/ directory — materialize works from the binary alone
+        let skill_dir = materialize_skill("review-tests", &dest).unwrap();
+        assert!(
+            skill_dir.join("SKILL.md").is_file(),
+            "should write SKILL.md from bundled content"
+        );
+    }
+
+    #[test]
+    fn materialize_skill_dereferences_references() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dest = tmp.path().join("skills");
+        materialize_skill("review-architecture", &dest).unwrap();
+        let ref_path = dest.join("review-architecture/references/architecture.md");
+        assert!(
+            ref_path.is_file(),
+            "references/architecture.md should be a real file"
+        );
+        assert!(
+            !ref_path.is_symlink(),
+            "references/architecture.md should not be a symlink"
+        );
+        let content = std::fs::read_to_string(&ref_path).unwrap();
+        assert!(
+            !content.is_empty(),
+            "dereferenced reference should have real content"
+        );
+    }
+
+    #[test]
+    fn materialize_skill_errors_on_missing_bundled_reference() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let result = materialize_skill("nonexistent-skill", tmp.path());
+        assert!(result.is_err(), "should error on unknown skill name");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("No bundled skill"),
+            "error should name the problem: {err}"
         );
     }
 }
