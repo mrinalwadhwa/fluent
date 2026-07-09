@@ -1,42 +1,42 @@
 #!/usr/bin/env bash
-# entrypoint.sh — Single-container Fargate entrypoint for Factory.
+# entrypoint.sh — Single-container Fargate entrypoint for Fluent.
 # Supports two dispatch modes:
 #
-#   Work Attempt mode (FACTORY_WORK_ITEM_ID + FACTORY_WORK_ATTEMPT_ID):
-#     Pull tar into /worktrees, run `factory attempt run`, upload
+#   Work Attempt mode (FLUENT_WORK_ITEM_ID + FLUENT_WORK_ATTEMPT_ID):
+#     Pull tar into /worktrees, run `fluent attempt run`, upload
 #     /worktrees back to S3.
 #
-#   Work Merge mode (FACTORY_WORK_ITEM_ID +
-#   FACTORY_WORK_MERGE_CANDIDATE_ID): same shape, runs
-#   `factory merge-candidate land` instead.
+#   Work Merge mode (FLUENT_WORK_ITEM_ID +
+#   FLUENT_WORK_MERGE_CANDIDATE_ID): same shape, runs
+#   `fluent merge-candidate land` instead.
 #
 # Environment variables (passed as task overrides):
-#   FACTORY_S3_BUCKET                 S3 bucket for workspace transfer
-#   FACTORY_REGION                    AWS region
-#   FACTORY_CODER                     coder to use: "claude" (default)
+#   FLUENT_S3_BUCKET                 S3 bucket for workspace transfer
+#   FLUENT_REGION                    AWS region
+#   FLUENT_CODER                     coder to use: "claude" (default)
 #                                     or "codex"
 #   CLAUDE_CODE_OAUTH_TOKEN           Claude auth token (claude coder)
 #   CODEX_AUTH_JSON                   Codex auth.json content (codex coder)
-#   FACTORY_WORK_ITEM_ID              Work Item ID
-#   FACTORY_WORK_ATTEMPT_ID           Attempt ID  (Attempt mode)
-#   FACTORY_WORK_MERGE_CANDIDATE_ID   Merge Candidate ID (Merge mode)
-#   FACTORY_PROJECT_NAME              basename of the project root
+#   FLUENT_WORK_ITEM_ID              Work Item ID
+#   FLUENT_WORK_ATTEMPT_ID           Attempt ID  (Attempt mode)
+#   FLUENT_WORK_MERGE_CANDIDATE_ID   Merge Candidate ID (Merge mode)
+#   FLUENT_PROJECT_NAME              basename of the project root
 #                                     (e.g. "main")
 
 set -euo pipefail
 
-die() { printf 'factory-run: %s\n' "$1" >&2; exit 1; }
+die() { printf 'fluent-run: %s\n' "$1" >&2; exit 1; }
 
-[ -n "${FACTORY_S3_BUCKET:-}" ] || die "FACTORY_S3_BUCKET not set"
+[ -n "${FLUENT_S3_BUCKET:-}" ] || die "FLUENT_S3_BUCKET not set"
 
-CODER="${FACTORY_CODER:-claude}"
+CODER="${FLUENT_CODER:-claude}"
 
 case "$CODER" in
   claude)
-    [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || die "FACTORY_CODER=claude but CLAUDE_CODE_OAUTH_TOKEN is not set"
+    [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || die "FLUENT_CODER=claude but CLAUDE_CODE_OAUTH_TOKEN is not set"
     ;;
   codex)
-    [ -n "${CODEX_AUTH_JSON:-}" ] || die "FACTORY_CODER=codex but CODEX_AUTH_JSON is not set"
+    [ -n "${CODEX_AUTH_JSON:-}" ] || die "FLUENT_CODER=codex but CODEX_AUTH_JSON is not set"
     command -v codex >/dev/null 2>&1 || die "codex binary not found on PATH"
 
     auth_mode=$(printf '%s' "$CODEX_AUTH_JSON" | jq -r '.auth_mode // empty')
@@ -55,7 +55,7 @@ case "$CODER" in
     chmod 0600 "${HOME}/.codex/auth.json"
     ;;
   *)
-    die "Unsupported FACTORY_CODER: '$CODER'. Expected 'claude' or 'codex'."
+    die "Unsupported FLUENT_CODER: '$CODER'. Expected 'claude' or 'codex'."
     ;;
 esac
 
@@ -63,31 +63,31 @@ esac
 # Dispatch: Work Attempt or Work Merge
 # --------------------------------------------------------------------------
 
-WORKTREES_ROOT="${FACTORY_WORKTREES_ROOT:-/worktrees}"
+WORKTREES_ROOT="${FLUENT_WORKTREES_ROOT:-/worktrees}"
 
-[ -n "${FACTORY_WORK_ITEM_ID:-}" ] || die "FACTORY_WORK_ITEM_ID not set"
-[ -n "${FACTORY_PROJECT_NAME:-}" ] || die "FACTORY_PROJECT_NAME not set"
+[ -n "${FLUENT_WORK_ITEM_ID:-}" ] || die "FLUENT_WORK_ITEM_ID not set"
+[ -n "${FLUENT_PROJECT_NAME:-}" ] || die "FLUENT_PROJECT_NAME not set"
 
 MODE=""
-if [ -n "${FACTORY_WORK_MERGE_CANDIDATE_ID:-}" ]; then
+if [ -n "${FLUENT_WORK_MERGE_CANDIDATE_ID:-}" ]; then
   MODE="work-merge"
-elif [ -n "${FACTORY_WORK_ATTEMPT_ID:-}" ]; then
+elif [ -n "${FLUENT_WORK_ATTEMPT_ID:-}" ]; then
   MODE="work-attempt"
 else
-  die "Set FACTORY_WORK_ATTEMPT_ID (Work Attempt mode) or FACTORY_WORK_MERGE_CANDIDATE_ID (Work Merge mode)"
+  die "Set FLUENT_WORK_ATTEMPT_ID (Work Attempt mode) or FLUENT_WORK_MERGE_CANDIDATE_ID (Work Merge mode)"
 fi
 
-S3_REGION="${FACTORY_REGION:-us-west-1}"
-WORKSPACE="${WORKTREES_ROOT}/${FACTORY_PROJECT_NAME}"
+S3_REGION="${FLUENT_REGION:-us-west-1}"
+WORKSPACE="${WORKTREES_ROOT}/${FLUENT_PROJECT_NAME}"
 
 case "$MODE" in
   work-attempt)
-    S3_IN_KEY="work/${FACTORY_WORK_ITEM_ID}/${FACTORY_WORK_ATTEMPT_ID}/workspace-in.tar"
-    S3_OUT_KEY="work/${FACTORY_WORK_ITEM_ID}/${FACTORY_WORK_ATTEMPT_ID}/workspace-out.tar"
+    S3_IN_KEY="work/${FLUENT_WORK_ITEM_ID}/${FLUENT_WORK_ATTEMPT_ID}/workspace-in.tar"
+    S3_OUT_KEY="work/${FLUENT_WORK_ITEM_ID}/${FLUENT_WORK_ATTEMPT_ID}/workspace-out.tar"
     ;;
   work-merge)
-    S3_IN_KEY="work-merge/${FACTORY_WORK_ITEM_ID}/${FACTORY_WORK_MERGE_CANDIDATE_ID}/workspace-in.tar"
-    S3_OUT_KEY="work-merge/${FACTORY_WORK_ITEM_ID}/${FACTORY_WORK_MERGE_CANDIDATE_ID}/workspace-out.tar"
+    S3_IN_KEY="work-merge/${FLUENT_WORK_ITEM_ID}/${FLUENT_WORK_MERGE_CANDIDATE_ID}/workspace-in.tar"
+    S3_OUT_KEY="work-merge/${FLUENT_WORK_ITEM_ID}/${FLUENT_WORK_MERGE_CANDIDATE_ID}/workspace-out.tar"
     ;;
 esac
 
@@ -97,7 +97,7 @@ mkdir -p "$WORKTREES_ROOT"
 # Pull workspace from S3 into /worktrees
 # --------------------------------------------------------------------------
 
-printf 'factory-run: pulling workspace from s3://%s/%s\n' "$FACTORY_S3_BUCKET" "$S3_IN_KEY"
+printf 'fluent-run: pulling workspace from s3://%s/%s\n' "$FLUENT_S3_BUCKET" "$S3_IN_KEY"
 
 # Download to a local file first, then extract. Streaming `aws s3 cp -`
 # directly into tar has produced "tar: short read" on the chainguard
@@ -108,7 +108,7 @@ while true; do
   if aws s3 cp \
     --region "$S3_REGION" \
     --no-progress \
-    "s3://${FACTORY_S3_BUCKET}/${S3_IN_KEY}" \
+    "s3://${FLUENT_S3_BUCKET}/${S3_IN_KEY}" \
     "$INPUT_TAR" 2>/dev/null; then
     break
   fi
@@ -121,7 +121,7 @@ done
 
 tar xf "$INPUT_TAR" -C "$WORKTREES_ROOT" || die "Failed to extract input tarball"
 rm -f "$INPUT_TAR"
-printf 'factory-run: workspace received\n'
+printf 'fluent-run: workspace received\n'
 
 [ -d "$WORKSPACE" ] || die "Expected project root at $WORKSPACE after extracting tarball"
 
@@ -138,38 +138,38 @@ if [ -d .git ] || [ -f .git ]; then
   done
 fi
 
-if [ -n "${FACTORY_BIN:-}" ]; then
-  [ -x "$FACTORY_BIN" ] || die "FACTORY_BIN is not executable: $FACTORY_BIN"
-elif [ -x "/usr/local/bin/factory" ]; then
-  FACTORY_BIN="/usr/local/bin/factory"
-elif [ -x "${WORKSPACE}/target/release/factory" ]; then
-  FACTORY_BIN="${WORKSPACE}/target/release/factory"
-elif command -v factory >/dev/null 2>&1; then
-  FACTORY_BIN="$(command -v factory)"
+if [ -n "${FLUENT_BIN:-}" ]; then
+  [ -x "$FLUENT_BIN" ] || die "FLUENT_BIN is not executable: $FLUENT_BIN"
+elif [ -x "/usr/local/bin/fluent" ]; then
+  FLUENT_BIN="/usr/local/bin/fluent"
+elif [ -x "${WORKSPACE}/target/release/fluent" ]; then
+  FLUENT_BIN="${WORKSPACE}/target/release/fluent"
+elif command -v fluent >/dev/null 2>&1; then
+  FLUENT_BIN="$(command -v fluent)"
 else
-  die "no factory binary available"
+  die "no fluent binary available"
 fi
 
 case "$MODE" in
   work-attempt)
-    printf 'factory-run: running factory attempt run %s %s (coder=%s)\n' \
-      "$FACTORY_WORK_ITEM_ID" "$FACTORY_WORK_ATTEMPT_ID" "$CODER"
+    printf 'fluent-run: running fluent attempt run %s %s (coder=%s)\n' \
+      "$FLUENT_WORK_ITEM_ID" "$FLUENT_WORK_ATTEMPT_ID" "$CODER"
 
-    "$FACTORY_BIN" attempt run \
+    "$FLUENT_BIN" attempt run \
       --no-sandbox \
       --coder "$CODER" \
-      "$FACTORY_WORK_ITEM_ID" \
-      "$FACTORY_WORK_ATTEMPT_ID"
+      "$FLUENT_WORK_ITEM_ID" \
+      "$FLUENT_WORK_ATTEMPT_ID"
     ;;
   work-merge)
-    printf 'factory-run: running factory merge-candidate land %s %s (coder=%s)\n' \
-      "$FACTORY_WORK_ITEM_ID" "$FACTORY_WORK_MERGE_CANDIDATE_ID" "$CODER"
+    printf 'fluent-run: running fluent merge-candidate land %s %s (coder=%s)\n' \
+      "$FLUENT_WORK_ITEM_ID" "$FLUENT_WORK_MERGE_CANDIDATE_ID" "$CODER"
 
-    "$FACTORY_BIN" merge-candidate land \
+    "$FLUENT_BIN" merge-candidate land \
       --no-sandbox \
       --coder "$CODER" \
-      "$FACTORY_WORK_ITEM_ID" \
-      "$FACTORY_WORK_MERGE_CANDIDATE_ID"
+      "$FLUENT_WORK_ITEM_ID" \
+      "$FLUENT_WORK_MERGE_CANDIDATE_ID"
     ;;
 esac
 
@@ -177,7 +177,7 @@ esac
 # Upload /worktrees back to S3
 # --------------------------------------------------------------------------
 
-printf 'factory-run: uploading worktrees to s3://%s/%s\n' "$FACTORY_S3_BUCKET" "$S3_OUT_KEY"
+printf 'fluent-run: uploading worktrees to s3://%s/%s\n' "$FLUENT_S3_BUCKET" "$S3_OUT_KEY"
 
 # Tar to a file first, then upload, for the same robustness reason
 # as the input download.
@@ -187,8 +187,8 @@ aws s3 cp \
     --region "$S3_REGION" \
     --no-progress \
     "$OUTPUT_TAR" \
-    "s3://${FACTORY_S3_BUCKET}/${S3_OUT_KEY}" || die "Failed to upload worktrees to S3"
+    "s3://${FLUENT_S3_BUCKET}/${S3_OUT_KEY}" || die "Failed to upload worktrees to S3"
 rm -f "$OUTPUT_TAR"
 
-printf 'factory-run: uploaded to s3://%s/%s\n' "$FACTORY_S3_BUCKET" "$S3_OUT_KEY"
-printf 'factory-run: done\n'
+printf 'fluent-run: uploaded to s3://%s/%s\n' "$FLUENT_S3_BUCKET" "$S3_OUT_KEY"
+printf 'fluent-run: done\n'

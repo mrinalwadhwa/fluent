@@ -23,6 +23,6 @@
     ]
   },
   "artifact_area": {
-    "path": ".factory/tasks/write-fixes"
+    "path": ".fluent/tasks/write-fixes"
   }
 }

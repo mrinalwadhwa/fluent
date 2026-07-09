@@ -22,20 +22,20 @@ fi
 flat_section="$(printf '%s\n' "$section" | tr '\n' ' ' | tr -s ' ')"
 
 for phrase in \
-  'Durable work model state lives under `.factory/work/`' \
-  'Managed candidate worktrees do not live under `.factory/work/`' \
+  'Durable work model state lives under `.fluent/work/`' \
+  'Managed candidate worktrees do not live under `.fluent/work/`' \
   'sibling directories beside the source checkout' \
   '../work-6-work-1-attempt-1' \
   'include a Work Item ID byte-length prefix, Work Item ID, and Attempt ID' \
-  '.factory/work/ items/ <work-item-id>.json' \
+  '.fluent/work/ items/ <work-item-id>.json' \
   'attempts/ <work-item-id>/ <attempt-id>.json' \
   'tasks/ <work-item-id>/ <attempt-id>/ <task-id>.json' \
   'merge-candidates/ <work-item-id>/ <merge-candidate-id>.json' \
   'stores Work Item metadata and planning context' \
   '`WorkModelStore` assembles those split records into the public `WorkItem` shape' \
   'If an item file contains nested Attempts, Tasks, or Merge Candidates' \
-  'Factory ignores those nested operational collections' \
-  'Factory writes Work Item metadata to `items/` and operational records to the split Attempt, Task, and Merge Candidate collections' \
+  'Fluent ignores those nested operational collections' \
+  'Fluent writes Work Item metadata to `items/` and operational records to the split Attempt, Task, and Merge Candidate collections' \
   'Workspace references stay inside task `workspace_access.reads` and `workspace_access.writes`' \
   'managed sibling worktrees for candidate execution' \
   'does not keep a standalone workspace registry' \

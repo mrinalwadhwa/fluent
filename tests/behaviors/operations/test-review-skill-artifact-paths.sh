@@ -8,8 +8,8 @@ failures=0
 for reviewer in documentation architecture skills tests; do
   skill="$ROOT/skills/review-${reviewer}/SKILL.md"
 
-  if grep -Fq ".factory/runs/" "$skill"; then
-    echo "review-${reviewer} still contains legacy .factory/runs/ path" >&2
+  if grep -Fq ".fluent/runs/" "$skill"; then
+    echo "review-${reviewer} still contains legacy .fluent/runs/ path" >&2
     failures=$((failures + 1))
   fi
 

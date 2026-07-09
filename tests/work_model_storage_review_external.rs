@@ -1,4 +1,4 @@
-use factory::work_model::{
+use fluent::work_model::{
     Attempt, AttemptKind, AttemptReviewState, AttemptStatus, CoderMapping, Task, TaskArtifactArea,
     TaskKind, TaskOutput, TaskStatus, WorkItem, WorkModelError, WorkModelStorageError,
     WorkModelStore, WorkspaceAccess, WorkspaceRef,
@@ -38,7 +38,7 @@ fn documented_work_item() -> WorkItem {
                     writes: vec![workspace("candidate")],
                 },
                 artifact_area: Some(TaskArtifactArea {
-                    path: ".factory/work/artifacts/write-review".to_string(),
+                    path: ".fluent/work/artifacts/write-review".to_string(),
                 }),
                 review_context: None,
                 input_artifacts: Vec::new(),
@@ -65,7 +65,7 @@ fn documented_work_item() -> WorkItem {
 #[test]
 fn reviewer_storage_reads_documented_layout() {
     let temp = tempfile::tempdir().unwrap();
-    let items = temp.path().join(".factory/work/items");
+    let items = temp.path().join(".fluent/work/items");
     fs::create_dir_all(&items).unwrap();
     fs::write(
         items.join("work-review.json"),
@@ -76,10 +76,10 @@ fn reviewer_storage_reads_documented_layout() {
 "#,
     )
     .unwrap();
-    fs::create_dir_all(temp.path().join(".factory/work/attempts/work-review")).unwrap();
+    fs::create_dir_all(temp.path().join(".fluent/work/attempts/work-review")).unwrap();
     fs::write(
         temp.path()
-            .join(".factory/work/attempts/work-review/attempt-review.json"),
+            .join(".fluent/work/attempts/work-review/attempt-review.json"),
         r#"{
   "id": "attempt-review",
   "work_item_id": "work-review",
@@ -93,12 +93,12 @@ fn reviewer_storage_reads_documented_layout() {
     .unwrap();
     fs::create_dir_all(
         temp.path()
-            .join(".factory/work/tasks/work-review/attempt-review"),
+            .join(".fluent/work/tasks/work-review/attempt-review"),
     )
     .unwrap();
     fs::write(
         temp.path()
-            .join(".factory/work/tasks/work-review/attempt-review/write-review.json"),
+            .join(".fluent/work/tasks/work-review/attempt-review/write-review.json"),
         r#"{
   "order": 0,
   "id": "write-review",
@@ -122,7 +122,7 @@ fn reviewer_storage_reads_documented_layout() {
     ]
   },
   "artifact_area": {
-    "path": ".factory/work/artifacts/write-review"
+    "path": ".fluent/work/artifacts/write-review"
   },
   "output": {
     "workspace_id": "candidate",
@@ -150,7 +150,7 @@ fn reviewer_storage_reads_documented_layout() {
 #[test]
 fn reviewer_storage_reports_invalid_files() {
     let temp = tempfile::tempdir().unwrap();
-    let items = temp.path().join(".factory/work/items");
+    let items = temp.path().join(".fluent/work/items");
     fs::create_dir_all(&items).unwrap();
     let invalid_json = items.join("broken-json.json");
     fs::write(&invalid_json, "{").unwrap();
@@ -167,7 +167,7 @@ fn reviewer_storage_reports_invalid_files() {
     store.write_work_item(&documented_work_item()).unwrap();
     let invalid_model = temp
         .path()
-        .join(".factory/work/tasks/work-review/attempt-review/write-review.json");
+        .join(".fluent/work/tasks/work-review/attempt-review/write-review.json");
     let content = fs::read_to_string(&invalid_model)
         .unwrap()
         .replace(r#""kind": "write""#, r#""kind": "review""#);
@@ -194,7 +194,7 @@ fn reviewer_storage_writes_documented_deterministic_json() {
 
     store.write_work_item(&documented_work_item()).unwrap();
 
-    let path = temp.path().join(".factory/work/items/work-review.json");
+    let path = temp.path().join(".fluent/work/items/work-review.json");
     assert_eq!(
         fs::read_to_string(path).unwrap(),
         r#"{
@@ -205,7 +205,7 @@ fn reviewer_storage_writes_documented_deterministic_json() {
     );
     let attempt = fs::read_to_string(
         temp.path()
-            .join(".factory/work/attempts/work-review/attempt-review.json"),
+            .join(".fluent/work/attempts/work-review/attempt-review.json"),
     )
     .unwrap();
     assert!(attempt.contains(r#""id": "attempt-review""#));
@@ -214,7 +214,7 @@ fn reviewer_storage_writes_documented_deterministic_json() {
 
     let task = fs::read_to_string(
         temp.path()
-            .join(".factory/work/tasks/work-review/attempt-review/write-review.json"),
+            .join(".fluent/work/tasks/work-review/attempt-review/write-review.json"),
     )
     .unwrap();
     assert!(task.contains(r#""id": "write-review""#));
@@ -227,10 +227,10 @@ fn reviewer_storage_keeps_run_artifacts_separate() {
     let temp = tempfile::tempdir().unwrap();
     let run_dir = temp
         .path()
-        .join(".factory/runs/run-legacy/sessions/session-1");
+        .join(".fluent/runs/run-legacy/sessions/session-1");
     fs::create_dir_all(&run_dir).unwrap();
     fs::write(
-        temp.path().join(".factory/runs/run-legacy/status"),
+        temp.path().join(".fluent/runs/run-legacy/status"),
         "complete",
     )
     .unwrap();
@@ -240,7 +240,7 @@ fn reviewer_storage_keeps_run_artifacts_separate() {
     store.write_work_item(&documented_work_item()).unwrap();
 
     assert_eq!(
-        fs::read_to_string(temp.path().join(".factory/runs/run-legacy/status")).unwrap(),
+        fs::read_to_string(temp.path().join(".fluent/runs/run-legacy/status")).unwrap(),
         "complete"
     );
     assert_eq!(
@@ -249,7 +249,7 @@ fn reviewer_storage_keeps_run_artifacts_separate() {
     );
     assert!(
         temp.path()
-            .join(".factory/work/items/work-review.json")
+            .join(".fluent/work/items/work-review.json")
             .exists()
     );
 }

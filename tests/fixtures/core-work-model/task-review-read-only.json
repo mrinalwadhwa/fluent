@@ -18,7 +18,7 @@
     "writes": []
   },
   "artifact_area": {
-    "path": ".factory/tasks/review-architecture"
+    "path": ".fluent/tasks/review-architecture"
   },
   "review_context": {
     "candidate_workspace_id": "candidate",

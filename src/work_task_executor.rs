@@ -356,7 +356,7 @@ fn run_review_task(
 
     // Materialize planning artifacts and bundled expertise BEFORE the source
     // checkout review guard snapshots the workspace. Otherwise the guard
-    // treats these Factory-managed files as reviewer-induced changes when
+    // treats these Fluent-managed files as reviewer-induced changes when
     // diffing against its baseline.
     materialize_planning_files(&item, config.project_root)?;
     materialize_general_expertise(config.project_root)?;
@@ -545,7 +545,7 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         &review_context.candidate_workspace_path,
     );
 
-    eprintln!("  Factory           work task run");
+    eprintln!("  Fluent           work task run");
     eprintln!("  Work Item         {}", item.id);
     eprintln!("  Attempt           {}", config.attempt_id);
     eprintln!("  Task              {} (tester)", config.task_id);
@@ -654,7 +654,7 @@ impl ReviewReadableWorkspaces {
             ensure_same_git_repository(project_root, &workspace_path)?;
             if *attempt_kind == AttemptKind::ReviewOnly && workspace_path == project_root {
                 ensure_head_matches_review_context(&workspace_path, expected_source_head)?;
-                ensure_no_non_factory_worktree_changes(&workspace_path)?;
+                ensure_no_non_fluent_worktree_changes(&workspace_path)?;
             } else {
                 ensure_registered_worktree(project_root, &workspace_path)?;
                 ensure_clean_worktree(&workspace_path)?;
@@ -754,18 +754,18 @@ struct SourceCheckoutReviewGuard {
     path: PathBuf,
     head: String,
     status: Vec<String>,
-    protected_factory_files: BTreeMap<PathBuf, Vec<u8>>,
+    protected_fluent_files: BTreeMap<PathBuf, Vec<u8>>,
     allowed_artifact_dir: PathBuf,
 }
 
 impl SourceCheckoutReviewGuard {
     fn begin(path: PathBuf, expected_head: &str, allowed_artifact_dir: &Path) -> Result<Self> {
         ensure_head_matches_review_context(&path, expected_head)?;
-        ensure_no_non_factory_worktree_changes(&path)?;
+        ensure_no_non_fluent_worktree_changes(&path)?;
         Ok(Self {
             head: head_commit(&path)?,
             status: worktree_status(&path)?,
-            protected_factory_files: protected_factory_file_snapshot(&path, allowed_artifact_dir)?,
+            protected_fluent_files: protected_fluent_file_snapshot(&path, allowed_artifact_dir)?,
             path,
             allowed_artifact_dir: allowed_artifact_dir.to_path_buf(),
         })
@@ -773,9 +773,9 @@ impl SourceCheckoutReviewGuard {
 
     fn finish(&self) -> Result<()> {
         ensure_source_head_unchanged(&self.path, &self.head)?;
-        let non_factory_error =
-            if let Err(error) = ensure_no_non_factory_worktree_changes(&self.path) {
-                restore_non_factory_worktree_changes(&self.path)?;
+        let non_fluent_error =
+            if let Err(error) = ensure_no_non_fluent_worktree_changes(&self.path) {
+                restore_non_fluent_worktree_changes(&self.path)?;
                 Some(error)
             } else {
                 None
@@ -784,7 +784,7 @@ impl SourceCheckoutReviewGuard {
             restore_source_changes_outside_artifact_area(self)?;
             return Err(error);
         }
-        if let Some(error) = non_factory_error {
+        if let Some(error) = non_fluent_error {
             return Err(error);
         }
         Ok(())
@@ -937,12 +937,12 @@ pub(crate) fn resolve_managed_artifact_area_path(
     for component in relative_path.components() {
         match component {
             Component::Normal(part) => components.push(part.to_owned()),
-            _ => bail!("Task artifact area path must stay under .factory/work/artifacts: {path}"),
+            _ => bail!("Task artifact area path must stay under .fluent/work/artifacts: {path}"),
         }
     }
 
     let managed_prefix = [
-        std::ffi::OsStr::new(".factory"),
+        std::ffi::OsStr::new(".fluent"),
         std::ffi::OsStr::new("work"),
         std::ffi::OsStr::new("artifacts"),
     ];
@@ -952,7 +952,7 @@ pub(crate) fn resolve_managed_artifact_area_path(
             .zip(managed_prefix.iter())
             .all(|(actual, expected)| actual == expected)
     {
-        bail!("Task artifact area path must stay under .factory/work/artifacts: {path}");
+        bail!("Task artifact area path must stay under .fluent/work/artifacts: {path}");
     }
 
     Ok(resolve_workspace_path(project_root, path))
@@ -968,18 +968,18 @@ fn resolve_input_artifact_path(project_root: &Path, path: &str) -> Result<PathBu
         match component {
             Component::Normal(part) => components.push(part.to_owned()),
             _ => bail!(
-                "Input artifact path must stay under .factory/work/artifacts/ or .factory/work/progress/: {path}"
+                "Input artifact path must stay under .fluent/work/artifacts/ or .fluent/work/progress/: {path}"
             ),
         }
     }
     let valid = components.len() >= 3
-        && components[0] == std::ffi::OsStr::new(".factory")
+        && components[0] == std::ffi::OsStr::new(".fluent")
         && components[1] == std::ffi::OsStr::new("work")
         && (components[2] == std::ffi::OsStr::new("artifacts")
             || components[2] == std::ffi::OsStr::new("progress"));
     if !valid {
         bail!(
-            "Input artifact path must be under .factory/work/artifacts/ or .factory/work/progress/: {path}"
+            "Input artifact path must be under .fluent/work/artifacts/ or .fluent/work/progress/: {path}"
         );
     }
     Ok(resolve_workspace_path(project_root, path))
@@ -1222,7 +1222,7 @@ fn run_task_coder(
         .map(str::to_string)
         .unwrap_or_else(|| coder_kind.default_model());
 
-    eprintln!("  Factory           work task run");
+    eprintln!("  Fluent           work task run");
     eprintln!("  Work Item         {}", item.id);
     eprintln!("  Attempt           {attempt_id}");
     eprintln!("  Task              {task_id}");
@@ -1318,7 +1318,7 @@ fn build_write_task_prompt_with_workspace(
         })
         .unwrap_or_default();
     let project_expertise_index_pathbuf =
-        workspace_path.map(|ws| ws.join(".factory/expertise/INDEX.md"));
+        workspace_path.map(|ws| ws.join(".fluent/expertise/INDEX.md"));
     let project_expertise_index = project_expertise_index_pathbuf
         .as_ref()
         .map(|p| p.display().to_string())
@@ -1413,15 +1413,15 @@ impl PlanningFilePaths {
 }
 
 fn planning_files_dir(project_root: &Path, work_item_id: &str) -> PathBuf {
-    project_root.join(".factory/work/items").join(work_item_id)
+    project_root.join(".fluent/work/items").join(work_item_id)
 }
 
 fn general_expertise_dir(project_root: &Path) -> PathBuf {
-    project_root.join(".factory/work/expertise")
+    project_root.join(".fluent/work/expertise")
 }
 
 /// Materialize the bundled general-expertise files at
-/// `<project_root>/.factory/work/expertise/<name>`. Writes are atomic
+/// `<project_root>/.fluent/work/expertise/<name>`. Writes are atomic
 /// (write-to-temp + rename) so concurrent calls from parallel writer/reviewer
 /// Tasks cannot tear a file.
 fn materialize_general_expertise(project_root: &Path) -> Result<PathBuf> {
@@ -1490,7 +1490,7 @@ fn section_path(dir: &Path, name: &str, content: &Option<String>) -> Option<Path
 }
 
 /// Materialize planning sections as files at
-/// `<project_root>/.factory/work/items/<work-item-id>/<section>.md`. Writes are
+/// `<project_root>/.fluent/work/items/<work-item-id>/<section>.md`. Writes are
 /// atomic (write-to-temp + rename) so concurrent calls from parallel review
 /// Tasks cannot tear a file. Returns the same paths as `compute_planning_paths`.
 fn materialize_planning_files(item: &WorkItem, project_root: &Path) -> Result<PlanningFilePaths> {
@@ -1549,8 +1549,8 @@ fn tester_bootstrap_flags(workspace_path: Option<&Path>) -> (bool, bool) {
     let Some(workspace) = workspace_path else {
         return (false, false);
     };
-    let yaml_missing = !workspace.join(".factory/tester.yaml").exists();
-    let extract_missing = !workspace.join(".factory/extract-tester-results").exists();
+    let yaml_missing = !workspace.join(".fluent/tester.yaml").exists();
+    let extract_missing = !workspace.join(".fluent/extract-tester-results").exists();
     (yaml_missing, extract_missing)
 }
 
@@ -1645,7 +1645,7 @@ fn run_review_coder(
         .map(str::to_string)
         .unwrap_or_else(|| coder_kind.default_model());
 
-    eprintln!("  Factory           work task run");
+    eprintln!("  Fluent           work task run");
     eprintln!("  Work Item         {}", item.id);
     eprintln!("  Attempt           {attempt_id}");
     eprintln!("  Task              {task_id}");
@@ -1778,7 +1778,7 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
         .to_string();
     let candidate_workspace_pathbuf = Path::new(&review_context.candidate_workspace_path);
     let project_expertise_index_pathbuf =
-        candidate_workspace_pathbuf.join(".factory/expertise/INDEX.md");
+        candidate_workspace_pathbuf.join(".fluent/expertise/INDEX.md");
     let project_expertise_index = project_expertise_index_pathbuf.display().to_string();
     let has_project_expertise_index_value = if project_expertise_index_pathbuf.is_file() {
         "yes"
@@ -1792,7 +1792,7 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
         .map(|dep_id| {
             input
                 .project_root
-                .join(".factory/work/artifacts")
+                .join(".fluent/work/artifacts")
                 .join(&input.item.id)
                 .join(input.attempt_id)
                 .join(dep_id)
@@ -1892,7 +1892,7 @@ fn review_skill_path(role: &str, readable_workspaces: &[PathBuf]) -> Result<Stri
 }
 
 fn decisions_path(readable_workspaces: &[PathBuf]) -> String {
-    let relative = Path::new(".factory/expertise/decisions.md");
+    let relative = Path::new(".fluent/expertise/decisions.md");
     readable_workspaces
         .iter()
         .map(|workspace| workspace.join(relative))
@@ -2031,7 +2031,7 @@ fn ensure_clean_worktree(workspace_path: &Path) -> Result<()> {
     }
 }
 
-fn ensure_no_non_factory_worktree_changes(workspace_path: &Path) -> Result<()> {
+fn ensure_no_non_fluent_worktree_changes(workspace_path: &Path) -> Result<()> {
     let output = git_status_output(
         workspace_path,
         &[
@@ -2039,7 +2039,7 @@ fn ensure_no_non_factory_worktree_changes(workspace_path: &Path) -> Result<()> {
             "--untracked-files=all",
             "--",
             ".",
-            ":(exclude).factory",
+            ":(exclude).fluent",
         ],
     )?;
     if !output.status.success() {
@@ -2052,7 +2052,7 @@ fn ensure_no_non_factory_worktree_changes(workspace_path: &Path) -> Result<()> {
         Ok(())
     } else {
         bail!(
-            "Review Task changed non-Factory source files; source checkout must remain read-only:\n{}",
+            "Review Task changed non-Fluent source files; source checkout must remain read-only:\n{}",
             String::from_utf8_lossy(&output.stdout)
         )
     }
@@ -2076,14 +2076,14 @@ fn ensure_source_changed_only_artifact_area(baseline: &SourceCheckoutReviewGuard
     let baseline_status = filtered_status_entries(&baseline.status, &allowed);
     let current = filtered_status_entries(&current_status, &allowed);
     let current_protected =
-        protected_factory_file_snapshot(&baseline.path, &baseline.allowed_artifact_dir)?;
-    if current == baseline_status && current_protected == baseline.protected_factory_files {
+        protected_fluent_file_snapshot(&baseline.path, &baseline.allowed_artifact_dir)?;
+    if current == baseline_status && current_protected == baseline.protected_fluent_files {
         Ok(())
     } else {
         let status_delta = status_diff(&baseline_status, &current);
-        let factory_delta =
-            factory_file_snapshot_diff(&baseline.protected_factory_files, &current_protected);
-        let mut delta = [status_delta, factory_delta]
+        let fluent_delta =
+            fluent_file_snapshot_diff(&baseline.protected_fluent_files, &current_protected);
+        let mut delta = [status_delta, fluent_delta]
             .into_iter()
             .filter(|section| !section.is_empty())
             .collect::<Vec<_>>()
@@ -2174,21 +2174,21 @@ fn status_diff(baseline: &[String], current: &[String]) -> String {
     lines.join("\n")
 }
 
-fn protected_factory_file_snapshot(
+fn protected_fluent_file_snapshot(
     workspace_path: &Path,
     allowed_artifact_dir: &Path,
 ) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
     let mut snapshot = BTreeMap::new();
-    let factory_dir = workspace_path.join(".factory");
-    if !factory_dir.exists() {
+    let fluent_dir = workspace_path.join(".fluent");
+    if !fluent_dir.exists() {
         return Ok(snapshot);
     }
     let allowed = allowed_status_prefix(workspace_path, allowed_artifact_dir)?;
-    collect_protected_factory_files(workspace_path, &factory_dir, &allowed, &mut snapshot)?;
+    collect_protected_fluent_files(workspace_path, &fluent_dir, &allowed, &mut snapshot)?;
     Ok(snapshot)
 }
 
-fn collect_protected_factory_files(
+fn collect_protected_fluent_files(
     workspace_path: &Path,
     dir: &Path,
     allowed: &Path,
@@ -2203,7 +2203,7 @@ fn collect_protected_factory_files(
         }
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
-            collect_protected_factory_files(workspace_path, &path, allowed, snapshot)?;
+            collect_protected_fluent_files(workspace_path, &path, allowed, snapshot)?;
         } else if file_type.is_file() {
             snapshot.insert(relative, fs::read(&path)?);
         }
@@ -2211,7 +2211,7 @@ fn collect_protected_factory_files(
     Ok(())
 }
 
-fn factory_file_snapshot_diff(
+fn fluent_file_snapshot_diff(
     baseline: &BTreeMap<PathBuf, Vec<u8>>,
     current: &BTreeMap<PathBuf, Vec<u8>>,
 ) -> String {
@@ -2231,7 +2231,7 @@ fn factory_file_snapshot_diff(
     lines.join("\n")
 }
 
-fn restore_non_factory_worktree_changes(workspace_path: &Path) -> Result<()> {
+fn restore_non_fluent_worktree_changes(workspace_path: &Path) -> Result<()> {
     let restore = git::run_raw(
         workspace_path,
         &[
@@ -2240,25 +2240,25 @@ fn restore_non_factory_worktree_changes(workspace_path: &Path) -> Result<()> {
             "--worktree",
             "--",
             ".",
-            ":(exclude).factory",
+            ":(exclude).fluent",
         ],
     )?;
     if !restore.status.success() {
         bail!(
-            "Failed to restore non-Factory source changes: {}",
+            "Failed to restore non-Fluent source changes: {}",
             String::from_utf8_lossy(&restore.stderr)
         );
     }
 
     let clean = git::run_raw(
         workspace_path,
-        &["clean", "-fd", "--", ".", ":(exclude).factory"],
+        &["clean", "-fd", "--", ".", ":(exclude).fluent"],
     )?;
     if clean.status.success() {
         Ok(())
     } else {
         bail!(
-            "Failed to remove untracked non-Factory source changes: {}",
+            "Failed to remove untracked non-Fluent source changes: {}",
             String::from_utf8_lossy(&clean.stderr)
         )
     }
@@ -2298,16 +2298,16 @@ fn restore_source_changes_outside_artifact_area(
         )
     }
 
-    let current = protected_factory_file_snapshot(&baseline.path, &baseline.allowed_artifact_dir)?;
+    let current = protected_fluent_file_snapshot(&baseline.path, &baseline.allowed_artifact_dir)?;
     for path in current.keys() {
-        if !baseline.protected_factory_files.contains_key(path) {
+        if !baseline.protected_fluent_files.contains_key(path) {
             let absolute = baseline.path.join(path);
             if absolute.is_file() {
                 fs::remove_file(&absolute)?;
             }
         }
     }
-    for (path, content) in &baseline.protected_factory_files {
+    for (path, content) in &baseline.protected_fluent_files {
         let absolute = baseline.path.join(path);
         if let Some(parent) = absolute.parent() {
             fs::create_dir_all(parent)?;
@@ -2487,8 +2487,8 @@ mod tests {
             attempt_id: "attempt-1",
             task_id: "attempt-1-review-tests",
             project_root: Path::new("/tmp/project"),
-            artifact_dir: Path::new("/tmp/project/.factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests"),
-            review_path: Path::new("/tmp/project/.factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"),
+            artifact_dir: Path::new("/tmp/project/.fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests"),
+            review_path: Path::new("/tmp/project/.fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"),
             readable_workspaces: std::slice::from_ref(&workspace),
             input_artifacts: &[],
             review_only: false,
@@ -2496,7 +2496,7 @@ mod tests {
         .unwrap();
 
         assert!(prompts.review_prompt.contains(
-            "/tmp/project/.factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
+            "/tmp/project/.fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
         ));
         assert!(prompts.review_prompt.contains("CARGO_TARGET_DIR"));
         assert!(prompts.review_prompt.contains("cargo build"));
@@ -2512,11 +2512,11 @@ mod tests {
             prompts.review_prompt.contains("pre-populated"),
             "prompt should mention pre-populated warm cache"
         );
-        assert!(!prompts.review_prompt.contains(".factory/runs/"));
+        assert!(!prompts.review_prompt.contains(".fluent/runs/"));
         // System prompt is now thin (identity + lifecycle); build cache + artifact details live in the user message.
         assert!(!prompts.system_prompt.contains("CARGO_TARGET_DIR"));
         assert!(!prompts.system_prompt.contains("pre-populated"));
-        assert!(!prompts.system_prompt.contains(".factory/runs/"));
+        assert!(!prompts.system_prompt.contains(".fluent/runs/"));
     }
 
     #[test]
@@ -2534,10 +2534,10 @@ mod tests {
             task_id: "attempt-1-review-behaviors",
             project_root: Path::new("/tmp/project"),
             artifact_dir: Path::new(
-                "/tmp/project/.factory/work/artifacts/work-1/attempt-1/attempt-1-review-behaviors",
+                "/tmp/project/.fluent/work/artifacts/work-1/attempt-1/attempt-1-review-behaviors",
             ),
             review_path: Path::new(
-                "/tmp/project/.factory/work/artifacts/work-1/attempt-1/attempt-1-review-behaviors/review.md",
+                "/tmp/project/.fluent/work/artifacts/work-1/attempt-1/attempt-1-review-behaviors/review.md",
             ),
             readable_workspaces: std::slice::from_ref(&workspace),
             input_artifacts: &[],
@@ -2766,7 +2766,7 @@ mod tests {
         let artifact_area = review_task.artifact_area.as_ref().unwrap();
         assert_eq!(
             artifact_area.path,
-            ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests"
+            ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests"
         );
 
         let tmp = tempfile::TempDir::new().unwrap();
@@ -2778,7 +2778,7 @@ mod tests {
         assert_eq!(
             transcript_path,
             project_root.join(
-                ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/transcript.jsonl"
+                ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests/transcript.jsonl"
             )
         );
     }
@@ -2795,7 +2795,7 @@ mod tests {
         let artifact_area = tester_task.artifact_area.as_ref().unwrap();
         assert_eq!(
             artifact_area.path,
-            ".factory/work/artifacts/work-1/attempt-1/attempt-1-tester"
+            ".fluent/work/artifacts/work-1/attempt-1/attempt-1-tester"
         );
 
         let tmp = tempfile::TempDir::new().unwrap();
@@ -2807,7 +2807,7 @@ mod tests {
         assert_eq!(
             results_path,
             project_root.join(
-                ".factory/work/artifacts/work-1/attempt-1/attempt-1-tester/tester-results.json"
+                ".fluent/work/artifacts/work-1/attempt-1/attempt-1-tester/tester-results.json"
             )
         );
     }
@@ -2897,7 +2897,7 @@ mod tests {
             let body = std::fs::read_to_string(&path).unwrap();
             assert!(!body.is_empty(), "{} should not be empty", path.display());
         }
-        assert_eq!(dir, tmp.path().join(".factory/work/expertise"));
+        assert_eq!(dir, tmp.path().join(".fluent/work/expertise"));
     }
 
     #[test]
@@ -2914,7 +2914,7 @@ mod tests {
         );
         let expected = tmp
             .path()
-            .join(".factory/work/expertise/INDEX.md")
+            .join(".fluent/work/expertise/INDEX.md")
             .display()
             .to_string();
         assert!(
@@ -2945,7 +2945,7 @@ mod tests {
     fn write_task_prompt_includes_project_expertise_index_when_present() {
         let item = review_item();
         let tmp_workspace = tempfile::TempDir::new().unwrap();
-        let project_expertise_dir = tmp_workspace.path().join(".factory/expertise");
+        let project_expertise_dir = tmp_workspace.path().join(".fluent/expertise");
         std::fs::create_dir_all(&project_expertise_dir).unwrap();
         std::fs::write(project_expertise_dir.join("INDEX.md"), "# Project").unwrap();
 
@@ -2981,7 +2981,7 @@ mod tests {
             Some(tmp.path()),
         );
         let expected_path = format!(
-            "{}/.factory/work/progress/work-1/attempt-1/progress.md",
+            "{}/.fluent/work/progress/work-1/attempt-1/progress.md",
             tmp.path().display()
         );
         assert!(
@@ -3002,7 +3002,7 @@ mod tests {
     fn write_task_prompt_uses_read_progress_md_when_file_exists() {
         let item = review_item();
         let tmp = tempfile::TempDir::new().unwrap();
-        let progress_dir = tmp.path().join(".factory/work/progress/work-1/attempt-1");
+        let progress_dir = tmp.path().join(".fluent/work/progress/work-1/attempt-1");
         std::fs::create_dir_all(&progress_dir).unwrap();
         std::fs::write(progress_dir.join("progress.md"), "## Checklist\n").unwrap();
 
@@ -3094,7 +3094,7 @@ mod tests {
         let item = review_item();
         let tmp = tempfile::TempDir::new().unwrap();
         let workspace = tmp.path();
-        std::fs::create_dir_all(workspace.join(".factory")).unwrap();
+        std::fs::create_dir_all(workspace.join(".fluent")).unwrap();
 
         let prompt = build_write_task_prompt_with_workspace(
             &item,
@@ -3105,7 +3105,7 @@ mod tests {
             None,
         );
         assert!(
-            prompt.contains("`.factory/tester.yaml` is missing"),
+            prompt.contains("`.fluent/tester.yaml` is missing"),
             "prompt should include tester.yaml bootstrap when missing"
         );
     }
@@ -3115,7 +3115,7 @@ mod tests {
         let item = review_item();
         let tmp = tempfile::TempDir::new().unwrap();
         let workspace = tmp.path();
-        std::fs::create_dir_all(workspace.join(".factory")).unwrap();
+        std::fs::create_dir_all(workspace.join(".fluent")).unwrap();
 
         let prompt = build_write_task_prompt_with_workspace(
             &item,
@@ -3126,7 +3126,7 @@ mod tests {
             None,
         );
         assert!(
-            prompt.contains("`.factory/extract-tester-results` is missing"),
+            prompt.contains("`.fluent/extract-tester-results` is missing"),
             "prompt should include extract-tester-results bootstrap when missing"
         );
     }
@@ -3136,10 +3136,10 @@ mod tests {
         let item = review_item();
         let tmp = tempfile::TempDir::new().unwrap();
         let workspace = tmp.path();
-        let factory_dir = workspace.join(".factory");
-        std::fs::create_dir_all(&factory_dir).unwrap();
-        std::fs::write(factory_dir.join("tester.yaml"), "commands: []").unwrap();
-        let extractor = factory_dir.join("extract-tester-results");
+        let fluent_dir = workspace.join(".fluent");
+        std::fs::create_dir_all(&fluent_dir).unwrap();
+        std::fs::write(fluent_dir.join("tester.yaml"), "commands: []").unwrap();
+        let extractor = fluent_dir.join("extract-tester-results");
         std::fs::write(&extractor, "#!/bin/sh\necho '[]'\n").unwrap();
         #[cfg(unix)]
         {
@@ -3158,11 +3158,11 @@ mod tests {
             None,
         );
         assert!(
-            !prompt.contains("`.factory/tester.yaml` is missing"),
+            !prompt.contains("`.fluent/tester.yaml` is missing"),
             "prompt should NOT include tester.yaml bootstrap when present"
         );
         assert!(
-            !prompt.contains("`.factory/extract-tester-results` is missing"),
+            !prompt.contains("`.fluent/extract-tester-results` is missing"),
             "prompt should NOT include extract-tester-results bootstrap when present"
         );
     }
@@ -3174,7 +3174,7 @@ mod tests {
         let project_root = tmp.path();
         // Create a non-progress artifact so the test has something to resolve
         let artifact_dir =
-            project_root.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-docs");
+            project_root.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-docs");
         std::fs::create_dir_all(&artifact_dir).unwrap();
         let other_artifact = artifact_dir.join("review.md");
         std::fs::write(&other_artifact, "review content").unwrap();
@@ -3183,11 +3183,11 @@ mod tests {
         let refs = vec![
             ArtifactRef {
                 producer_id: "writer".to_string(),
-                path: ".factory/work/artifacts/work-1/attempt-1/progress.md".to_string(),
+                path: ".fluent/work/artifacts/work-1/attempt-1/progress.md".to_string(),
             },
             ArtifactRef {
                 producer_id: "attempt-1-review-docs".to_string(),
-                path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-docs/review.md"
+                path: ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-docs/review.md"
                     .to_string(),
             },
         ];
@@ -3205,7 +3205,7 @@ mod tests {
 
         let refs = vec![ArtifactRef {
             producer_id: "some-other-task".to_string(),
-            path: ".factory/work/artifacts/work-1/attempt-1/some-artifact.md".to_string(),
+            path: ".fluent/work/artifacts/work-1/attempt-1/some-artifact.md".to_string(),
         }];
         let result = resolve_input_artifact_paths(project_root, &refs);
         assert!(

@@ -33,7 +33,7 @@ fn load_config() -> Result<FargateConfig> {
                 .task_def_arn
                 .as_deref()
                 .map(task_def_family)
-                .unwrap_or_else(|| "factory-run".to_string());
+                .unwrap_or_else(|| "fluent-run".to_string());
             return Ok(FargateConfig {
                 cluster: state.cluster_arn.unwrap(),
                 run_task,
@@ -45,7 +45,7 @@ fn load_config() -> Result<FargateConfig> {
         }
     }
 
-    let cfg_path = format!("{home}/.config/factory/fargate.env");
+    let cfg_path = format!("{home}/.config/fluent/fargate.env");
     if Path::new(&cfg_path).exists() {
         let content = fs::read_to_string(&cfg_path)?;
         for line in content.lines() {
@@ -57,34 +57,34 @@ fn load_config() -> Result<FargateConfig> {
     }
 
     Ok(FargateConfig {
-        cluster: env_required("FACTORY_CLUSTER")?,
-        run_task: std::env::var("FACTORY_RUN_TASK").unwrap_or_else(|_| "factory-run".into()),
-        s3_bucket: env_required("FACTORY_S3_BUCKET")?,
-        subnets: env_required("FACTORY_SUBNETS")?,
-        security_group: env_required("FACTORY_SECURITY_GROUP")?,
-        region: std::env::var("FACTORY_REGION")
+        cluster: env_required("FLUENT_CLUSTER")?,
+        run_task: std::env::var("FLUENT_RUN_TASK").unwrap_or_else(|_| "fluent-run".into()),
+        s3_bucket: env_required("FLUENT_S3_BUCKET")?,
+        subnets: env_required("FLUENT_SUBNETS")?,
+        security_group: env_required("FLUENT_SECURITY_GROUP")?,
+        region: std::env::var("FLUENT_REGION")
             .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
             .unwrap_or_else(|_| "us-west-1".into()),
     })
 }
 
-/// Resolve the Factory source root used by the JIT bootstrap to build
+/// Resolve the Fluent source root used by the JIT bootstrap to build
 /// images. Order:
-///   1. `FACTORY_SOURCE_ROOT` env var if set
+///   1. `FLUENT_SOURCE_ROOT` env var if set
 ///   2. Walk up from the project root looking for a directory that
 ///      contains both `Cargo.toml` and `infrastructure/run/Dockerfile`
-///   3. Use the project root itself if it looks like the Factory
+///   3. Use the project root itself if it looks like the Fluent
 ///      source tree.
-pub fn resolve_factory_source_root_from(project_root: &Path) -> Result<std::path::PathBuf> {
-    resolve_factory_source_root(project_root)
+pub fn resolve_fluent_source_root_from(project_root: &Path) -> Result<std::path::PathBuf> {
+    resolve_fluent_source_root(project_root)
 }
 
-fn resolve_factory_source_root(project_root: &Path) -> Result<std::path::PathBuf> {
-    if let Ok(env_path) = std::env::var("FACTORY_SOURCE_ROOT") {
+fn resolve_fluent_source_root(project_root: &Path) -> Result<std::path::PathBuf> {
+    if let Ok(env_path) = std::env::var("FLUENT_SOURCE_ROOT") {
         let path = std::path::PathBuf::from(&env_path);
         if !path.join("infrastructure/run/Dockerfile").exists() {
             anyhow::bail!(
-                "FACTORY_SOURCE_ROOT={} does not contain infrastructure/run/Dockerfile",
+                "FLUENT_SOURCE_ROOT={} does not contain infrastructure/run/Dockerfile",
                 env_path
             );
         }
@@ -102,7 +102,7 @@ fn resolve_factory_source_root(project_root: &Path) -> Result<std::path::PathBuf
         }
     }
     anyhow::bail!(
-        "Could not locate the Factory source tree. Set FACTORY_SOURCE_ROOT to the directory containing infrastructure/run/Dockerfile and Cargo.toml."
+        "Could not locate the Fluent source tree. Set FLUENT_SOURCE_ROOT to the directory containing infrastructure/run/Dockerfile and Cargo.toml."
     )
 }
 
@@ -110,17 +110,17 @@ fn resolve_factory_source_root(project_root: &Path) -> Result<std::path::PathBuf
 /// return the resulting FargateConfig. Called by Work-model launches
 /// before each Fargate task.
 fn bootstrap_and_load_config(project_root: &Path) -> Result<FargateConfig> {
-    let factory_source_root = resolve_factory_source_root(project_root)?;
-    let region = std::env::var("FACTORY_REGION")
+    let fluent_source_root = resolve_fluent_source_root(project_root)?;
+    let region = std::env::var("FLUENT_REGION")
         .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
         .unwrap_or_else(|_| "us-west-1".to_string());
-    let force_rebuild = std::env::var("FACTORY_FARGATE_FORCE_REBUILD")
+    let force_rebuild = std::env::var("FLUENT_FARGATE_FORCE_REBUILD")
         .ok()
         .map(|v| !matches!(v.as_str(), "" | "0" | "false" | "no"))
         .unwrap_or(false);
     crate::fargate_bootstrap::ensure_setup(&crate::fargate_bootstrap::BootstrapConfig {
         project_root: project_root.to_path_buf(),
-        factory_source_root,
+        fluent_source_root,
         region,
         force_rebuild,
     })?;
@@ -140,18 +140,18 @@ fn task_def_family(arn: &str) -> String {
 fn env_required(name: &str) -> Result<String> {
     std::env::var(name).map_err(|_| {
         anyhow::anyhow!(
-            "{name} not set. Run infrastructure/setup.sh or set in ~/.config/factory/fargate.env"
+            "{name} not set. Run infrastructure/setup.sh or set in ~/.config/fluent/fargate.env"
         )
     })
 }
 
-/// Path where Factory records the ECS task ARN for a running
+/// Path where Fluent records the ECS task ARN for a running
 /// Fargate-executed Work Attempt. Lives outside of the durable
 /// Work model JSON so it can be cleaned up freely after the task
 /// finishes.
 fn work_attempt_runtime_dir(project_root: &Path, work_item_id: &str, attempt_id: &str) -> PathBuf {
     project_root
-        .join(".factory/work/runtime/attempts")
+        .join(".fluent/work/runtime/attempts")
         .join(work_item_id)
         .join(attempt_id)
 }
@@ -162,7 +162,7 @@ fn work_merge_runtime_dir(
     merge_candidate_id: &str,
 ) -> PathBuf {
     project_root
-        .join(".factory/work/runtime/merges")
+        .join(".fluent/work/runtime/merges")
         .join(work_item_id)
         .join(merge_candidate_id)
 }
@@ -188,7 +188,7 @@ fn stop_ecs_task(config: &FargateConfig, task_arn: &str) -> Result<()> {
         .args(["--task", task_arn])
         .args([
             "--reason",
-            "factory work attempt/merge stop requested by operator",
+            "fluent work attempt/merge stop requested by operator",
         ])
         .output()?;
     if !output.status.success() {
@@ -343,7 +343,7 @@ pub fn stop_work_attempt(project_root: &Path, work_item_id: &str, attempt_id: &s
     stop_ecs_task(&config, &task_arn)?;
     // Leave the recorded ARN in place so a follow-up pull can correlate
     // S3 keys; cleanup of the runtime dir is the user's call via
-    // `factory cleanup --apply`.
+    // `fluent cleanup --apply`.
     Ok(())
 }
 
@@ -454,7 +454,7 @@ fn upload_worktrees(
         format!("{name}/target"),
         format!("{name}/node_modules"),
         format!("{name}/.scratch"),
-        format!("{name}/.factory/work/runtime"),
+        format!("{name}/.fluent/work/runtime"),
         format!("{name}/.git/lfs"),
     ];
     let parent_str = parent.to_string_lossy().into_owned();
@@ -505,7 +505,7 @@ fn upload_worktrees(
     Ok(())
 }
 
-/// Download a Factory worktrees tarball at `<bucket>/<key>` into
+/// Download a Fluent worktrees tarball at `<bucket>/<key>` into
 /// `project_root`'s parent — restoring the project worktree plus any
 /// sibling candidate/review worktrees the remote produced. Runs
 /// `git worktree repair` afterwards so the sibling `.git` gitfiles
@@ -578,11 +578,11 @@ fn repair_sibling_worktrees(project_root: &Path) -> Result<()> {
 }
 
 /// Build the coder-specific environment overrides for an ECS task.
-/// Always includes `FACTORY_CODER`. For Claude, reads the OAuth token
+/// Always includes `FLUENT_CODER`. For Claude, reads the OAuth token
 /// from the environment. For Codex, reads `~/.codex/auth.json` from
 /// the host and validates `auth_mode == "chatgpt"` before returning.
 pub fn coder_task_overrides(coder: CoderKind) -> Result<Vec<(String, String)>> {
-    let mut env = vec![("FACTORY_CODER".to_string(), coder.as_str().to_string())];
+    let mut env = vec![("FLUENT_CODER".to_string(), coder.as_str().to_string())];
     match coder {
         CoderKind::Claude => {
             let oauth = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
@@ -661,7 +661,7 @@ fn run_ecs_task(config: &FargateConfig, environment: serde_json::Value) -> Resul
 }
 
 /// Upload the project workspace to S3 and launch a Fargate task that
-/// runs `factory work attempt run` for the given Work Item / Attempt.
+/// runs `fluent work attempt run` for the given Work Item / Attempt.
 pub fn launch_work_attempt(
     project_root: &Path,
     work_item_id: &str,
@@ -676,16 +676,16 @@ pub fn launch_work_attempt(
     let (_parent, project_name) = project_root_components(project_root)?;
 
     let upload_key = format!("work/{work_item_id}/{attempt_id}/workspace-in.tar");
-    eprintln!("  Factory           fargate work attempt run ({work_item_id} {attempt_id})");
+    eprintln!("  Fluent           fargate work attempt run ({work_item_id} {attempt_id})");
     upload_project_workspace(&config, project_root, &upload_key)?;
 
     eprintln!("  Starting Fargate task...");
     let mut env_overrides: Vec<serde_json::Value> = vec![
-        serde_json::json!({"name": "FACTORY_WORK_ITEM_ID", "value": work_item_id}),
-        serde_json::json!({"name": "FACTORY_WORK_ATTEMPT_ID", "value": attempt_id}),
-        serde_json::json!({"name": "FACTORY_PROJECT_NAME", "value": project_name}),
-        serde_json::json!({"name": "FACTORY_S3_BUCKET", "value": config.s3_bucket}),
-        serde_json::json!({"name": "FACTORY_REGION", "value": config.region}),
+        serde_json::json!({"name": "FLUENT_WORK_ITEM_ID", "value": work_item_id}),
+        serde_json::json!({"name": "FLUENT_WORK_ATTEMPT_ID", "value": attempt_id}),
+        serde_json::json!({"name": "FLUENT_PROJECT_NAME", "value": project_name}),
+        serde_json::json!({"name": "FLUENT_S3_BUCKET", "value": config.s3_bucket}),
+        serde_json::json!({"name": "FLUENT_REGION", "value": config.region}),
     ];
     for (k, v) in &coder_env {
         env_overrides.push(serde_json::json!({"name": k, "value": v}));
@@ -697,11 +697,11 @@ pub fn launch_work_attempt(
     record_task_arn(&runtime_dir, &task_arn)?;
 
     eprintln!("  Attempt is executing on Fargate.");
-    eprintln!("  Use \"factory work attempt watch {work_item_id} {attempt_id}\" to follow status.");
+    eprintln!("  Use \"fluent work attempt watch {work_item_id} {attempt_id}\" to follow status.");
     eprintln!(
-        "  Use \"factory work attempt pull {work_item_id} {attempt_id}\" to retrieve results when the task finishes."
+        "  Use \"fluent work attempt pull {work_item_id} {attempt_id}\" to retrieve results when the task finishes."
     );
-    eprintln!("  Use \"factory work attempt stop {work_item_id} {attempt_id}\" to stop the task.");
+    eprintln!("  Use \"fluent work attempt stop {work_item_id} {attempt_id}\" to stop the task.");
 
     Ok(())
 }
@@ -717,7 +717,7 @@ pub fn pull_work_attempt(project_root: &Path, work_item_id: &str, attempt_id: &s
 
 /// Upload the project workspace plus the Merge Candidate's source
 /// worktree to S3 and launch a Fargate task that runs
-/// `factory work merge`.
+/// `fluent work merge`.
 pub fn launch_work_merge(
     project_root: &Path,
     work_item_id: &str,
@@ -734,16 +734,16 @@ pub fn launch_work_merge(
     let sibling_worktrees =
         merge_candidate_sibling_worktrees(project_root, work_item_id, merge_candidate_id)?;
     let upload_key = format!("work-merge/{work_item_id}/{merge_candidate_id}/workspace-in.tar");
-    eprintln!("  Factory           fargate work merge ({work_item_id} {merge_candidate_id})");
+    eprintln!("  Fluent           fargate work merge ({work_item_id} {merge_candidate_id})");
     upload_worktrees(&config, project_root, &upload_key, &sibling_worktrees)?;
 
     eprintln!("  Starting Fargate task...");
     let mut env_overrides: Vec<serde_json::Value> = vec![
-        serde_json::json!({"name": "FACTORY_WORK_ITEM_ID", "value": work_item_id}),
-        serde_json::json!({"name": "FACTORY_WORK_MERGE_CANDIDATE_ID", "value": merge_candidate_id}),
-        serde_json::json!({"name": "FACTORY_PROJECT_NAME", "value": project_name}),
-        serde_json::json!({"name": "FACTORY_S3_BUCKET", "value": config.s3_bucket}),
-        serde_json::json!({"name": "FACTORY_REGION", "value": config.region}),
+        serde_json::json!({"name": "FLUENT_WORK_ITEM_ID", "value": work_item_id}),
+        serde_json::json!({"name": "FLUENT_WORK_MERGE_CANDIDATE_ID", "value": merge_candidate_id}),
+        serde_json::json!({"name": "FLUENT_PROJECT_NAME", "value": project_name}),
+        serde_json::json!({"name": "FLUENT_S3_BUCKET", "value": config.s3_bucket}),
+        serde_json::json!({"name": "FLUENT_REGION", "value": config.region}),
     ];
     for (k, v) in &coder_env {
         env_overrides.push(serde_json::json!({"name": k, "value": v}));
@@ -756,13 +756,13 @@ pub fn launch_work_merge(
 
     eprintln!("  Merge is executing on Fargate.");
     eprintln!(
-        "  Use \"factory work merge-watch {work_item_id} {merge_candidate_id}\" to follow status."
+        "  Use \"fluent work merge-watch {work_item_id} {merge_candidate_id}\" to follow status."
     );
     eprintln!(
-        "  Use \"factory work merge-pull {work_item_id} {merge_candidate_id}\" to retrieve results."
+        "  Use \"fluent work merge-pull {work_item_id} {merge_candidate_id}\" to retrieve results."
     );
     eprintln!(
-        "  Use \"factory work merge-stop {work_item_id} {merge_candidate_id}\" to stop the task."
+        "  Use \"fluent work merge-stop {work_item_id} {merge_candidate_id}\" to stop the task."
     );
 
     Ok(())
@@ -786,15 +786,15 @@ mod tests {
 
     #[test]
     #[serial]
-    fn claude_overrides_include_oauth_token_and_factory_coder() {
+    fn claude_overrides_include_oauth_token_and_fluent_coder() {
         unsafe { std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", "test-token-123") };
         let result = coder_task_overrides(CoderKind::Claude).unwrap();
         unsafe { std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN") };
         assert!(
             result
                 .iter()
-                .any(|(k, v)| k == "FACTORY_CODER" && v == "claude"),
-            "must include FACTORY_CODER=claude"
+                .any(|(k, v)| k == "FLUENT_CODER" && v == "claude"),
+            "must include FLUENT_CODER=claude"
         );
         assert!(
             result
@@ -806,7 +806,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn codex_overrides_include_auth_json_and_factory_coder() {
+    fn codex_overrides_include_auth_json_and_fluent_coder() {
         let tmp = tempfile::tempdir().unwrap();
         let codex_dir = tmp.path().join(".codex");
         fs::create_dir_all(&codex_dir).unwrap();
@@ -818,8 +818,8 @@ mod tests {
         assert!(
             result
                 .iter()
-                .any(|(k, v)| k == "FACTORY_CODER" && v == "codex"),
-            "must include FACTORY_CODER=codex"
+                .any(|(k, v)| k == "FLUENT_CODER" && v == "codex"),
+            "must include FLUENT_CODER=codex"
         );
         assert!(
             result

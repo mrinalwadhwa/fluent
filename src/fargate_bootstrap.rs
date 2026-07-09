@@ -1,9 +1,9 @@
 //! Just-in-time Fargate setup. The first time `--runtime fargate` is
 //! used, this module deploys the CloudFormation stack, builds and
-//! pushes the Factory base image, builds and pushes the project image
-//! (when the project provides `.factory/Dockerfile`), and writes
-//! everything Factory's launch code needs into
-//! `~/.config/factory/fargate.state.json`. Subsequent invocations
+//! pushes the Fluent base image, builds and pushes the project image
+//! (when the project provides `.fluent/Dockerfile`), and writes
+//! everything Fluent's launch code needs into
+//! `~/.config/fluent/fargate.state.json`. Subsequent invocations
 //! short-circuit when nothing has changed.
 
 use anyhow::{Context, Result, bail};
@@ -15,8 +15,8 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const STACK_NAME: &str = "factory";
-const FACTORY_VERSION: &str = env!("CARGO_PKG_VERSION");
+const STACK_NAME: &str = "fluent";
+const FLUENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Durable state file recording what's been deployed. One file per
 /// user, cross-project.
@@ -40,7 +40,7 @@ pub struct FargateState {
 impl FargateState {
     pub fn state_path() -> Result<PathBuf> {
         let home = std::env::var("HOME").context("HOME not set")?;
-        Ok(PathBuf::from(home).join(".config/factory/fargate.state.json"))
+        Ok(PathBuf::from(home).join(".config/fluent/fargate.state.json"))
     }
 
     pub fn load() -> Result<Self> {
@@ -70,11 +70,11 @@ impl FargateState {
 #[derive(Debug, Clone)]
 pub struct BootstrapConfig {
     pub project_root: PathBuf,
-    /// Root of the Factory source tree (contains `infrastructure/`,
+    /// Root of the Fluent source tree (contains `infrastructure/`,
     /// `sandboxes/`, `Cargo.toml`, `src/`, etc.). Required because the
-    /// base image build needs the full Factory source as build
+    /// base image build needs the full Fluent source as build
     /// context.
-    pub factory_source_root: PathBuf,
+    pub fluent_source_root: PathBuf,
     pub region: String,
     pub force_rebuild: bool,
 }
@@ -82,8 +82,8 @@ pub struct BootstrapConfig {
 /// Top-level entry point. Idempotent. Call this before every Fargate
 /// launch (`launch_work_attempt`, `launch_work_merge`). Returns the
 /// resolved Fargate state so the caller can fill in
-/// `~/.config/factory/fargate.env` equivalents (`FACTORY_CLUSTER`,
-/// `FACTORY_S3_BUCKET`, etc.).
+/// `~/.config/fluent/fargate.env` equivalents (`FLUENT_CLUSTER`,
+/// `FLUENT_S3_BUCKET`, etc.).
 pub fn ensure_setup(config: &BootstrapConfig) -> Result<FargateState> {
     let mut state = FargateState::load()?;
     let region = config.region.clone();
@@ -105,7 +105,7 @@ pub fn ensure_setup(config: &BootstrapConfig) -> Result<FargateState> {
     let region = config.region.as_str();
 
     let base_tag = base_image_tag();
-    let base_hash = compute_base_image_hash(&config.factory_source_root)?;
+    let base_hash = compute_base_image_hash(&config.fluent_source_root)?;
     let base_changed = state.base_image_hash.as_deref() != Some(&base_hash);
     if base_changed || config.force_rebuild {
         let ecr_has_base = ecr_image_tag_exists(region, &repo_uri, &base_tag)?;
@@ -125,11 +125,11 @@ pub fn ensure_setup(config: &BootstrapConfig) -> Result<FargateState> {
     let stub_created = ensure_project_dockerfile_stub(&config.project_root)?;
     if stub_created {
         eprintln!(
-            "  Created .factory/Dockerfile stub. Customize it with project-specific toolchains."
+            "  Created .fluent/Dockerfile stub. Customize it with project-specific toolchains."
         );
     }
 
-    let project_dockerfile = config.project_root.join(".factory/Dockerfile");
+    let project_dockerfile = config.project_root.join(".fluent/Dockerfile");
     if project_dockerfile.exists() {
         let project_name = project_basename(&config.project_root)?;
         let dockerfile_sha = sha256_file(&project_dockerfile)?;
@@ -205,7 +205,7 @@ fn deploy_stack(config: &BootstrapConfig, state: &mut FargateState) -> Result<()
     eprintln!("  Subnets: {subnets}");
 
     let template = config
-        .factory_source_root
+        .fluent_source_root
         .join("infrastructure/cloudformation.yaml");
     if !template.exists() {
         bail!(
@@ -276,9 +276,9 @@ fn build_and_push_base_image(
 
     let tag = base_image_tag();
     let dockerfile = config
-        .factory_source_root
+        .fluent_source_root
         .join("infrastructure/run/Dockerfile");
-    let context_dir = &config.factory_source_root;
+    let context_dir = &config.fluent_source_root;
     let remote_tag = format!("{repo_uri}:{tag}");
     eprintln!("  Building base image (hash {base_hash})...");
     run_docker(&[
@@ -319,7 +319,7 @@ fn build_and_push_project_image(
     ])?;
     docker_login_ecr(&account_id, region)?;
 
-    let dockerfile = config.project_root.join(".factory/Dockerfile");
+    let dockerfile = config.project_root.join(".fluent/Dockerfile");
     let remote_tag = format!("{repo_uri}:{image_tag}");
     eprintln!("  Building project image ({image_tag})...");
     run_docker(&[
@@ -330,7 +330,7 @@ fn build_and_push_project_image(
         "-f",
         &dockerfile.to_string_lossy(),
         "--build-arg",
-        &format!("FACTORY_BASE_URI={base_image_uri}"),
+        &format!("FLUENT_BASE_URI={base_image_uri}"),
         "-t",
         &remote_tag,
         &config.project_root.to_string_lossy(),
@@ -341,20 +341,20 @@ fn build_and_push_project_image(
     Ok(())
 }
 
-fn compute_base_image_hash(factory_source_root: &Path) -> Result<String> {
+fn compute_base_image_hash(fluent_source_root: &Path) -> Result<String> {
     let mut hasher = DefaultHasher::new();
     for relative in [
         "infrastructure/run/Dockerfile",
         "infrastructure/run/entrypoint.sh",
     ] {
-        let path = factory_source_root.join(relative);
+        let path = fluent_source_root.join(relative);
         if path.exists() {
             fs::read(&path)
                 .with_context(|| format!("Failed to read {}", path.display()))?
                 .hash(&mut hasher);
         }
     }
-    option_env!("FACTORY_BUILD_COMMIT")
+    option_env!("FLUENT_BUILD_COMMIT")
         .unwrap_or("unknown")
         .hash(&mut hasher);
     Ok(format!("{:x}", hasher.finish()))
@@ -369,7 +369,7 @@ fn hash_file(path: &Path) -> Result<String> {
 }
 
 pub fn base_image_tag() -> String {
-    format!("factory-base-{FACTORY_VERSION}")
+    format!("fluent-base-{FLUENT_VERSION}")
 }
 
 pub fn project_image_tag(dockerfile_sha256: &str) -> String {
@@ -385,9 +385,9 @@ pub fn sha256_file(path: &Path) -> Result<String> {
 }
 
 pub fn project_image_tag_for_dockerfile(project_root: &Path) -> Result<String> {
-    let dockerfile = project_root.join(".factory/Dockerfile");
+    let dockerfile = project_root.join(".fluent/Dockerfile");
     if !dockerfile.exists() {
-        bail!("No .factory/Dockerfile found at {}", dockerfile.display());
+        bail!("No .fluent/Dockerfile found at {}", dockerfile.display());
     }
     let sha = sha256_file(&dockerfile)?;
     Ok(project_image_tag(&sha))
@@ -444,20 +444,20 @@ fn repo_name_from_uri(repo_uri: &str) -> Result<String> {
 }
 
 fn ensure_project_dockerfile_stub(project_root: &Path) -> Result<bool> {
-    let dockerfile = project_root.join(".factory/Dockerfile");
+    let dockerfile = project_root.join(".fluent/Dockerfile");
     if dockerfile.exists() {
         return Ok(false);
     }
     let parent = dockerfile
         .parent()
-        .context("Cannot determine parent of .factory/Dockerfile")?;
+        .context("Cannot determine parent of .fluent/Dockerfile")?;
     fs::create_dir_all(parent).with_context(|| format!("Failed to create {}", parent.display()))?;
     let stub = format!(
-        "# Project-specific Factory runtime image.\n\
-         # Extend the Factory base with any toolchains your merge checks\n\
+        "# Project-specific Fluent runtime image.\n\
+         # Extend the Fluent base with any toolchains your merge checks\n\
          # need (rustc, go, mvn, etc.).\n\
-         ARG FACTORY_BASE_URI\n\
-         FROM ${{FACTORY_BASE_URI}}\n",
+         ARG FLUENT_BASE_URI\n\
+         FROM ${{FLUENT_BASE_URI}}\n",
     );
     fs::write(&dockerfile, &stub)
         .with_context(|| format!("Failed to write {}", dockerfile.display()))?;
@@ -707,7 +707,7 @@ pub fn teardown(keep_ecr: bool, keep_s3: bool) -> Result<TeardownOutcome> {
 
     if !keep_ecr {
         eprintln!(
-            "  ECR repository contains base image tags (factory-base-*) and project image tags (project-*)."
+            "  ECR repository contains base image tags (fluent-base-*) and project image tags (project-*)."
         );
         ecr_deleted = delete_ecr_repository(region)?;
     }
@@ -781,7 +781,7 @@ fn delete_ecr_repository(region: &str) -> Result<bool> {
             "--region",
             region,
             "--repository-names",
-            "factory/run",
+            "fluent/run",
             "--query",
             "repositories[0].repositoryName",
             "--output",
@@ -803,7 +803,7 @@ fn delete_ecr_repository(region: &str) -> Result<bool> {
         "--region",
         region,
         "--repository-name",
-        "factory/run",
+        "fluent/run",
         "--force",
     ])?;
     eprintln!("  ECR repository deleted.");
@@ -885,7 +885,7 @@ mod tests {
         let mut state = FargateState::default();
         state.stack_deployed = true;
         state.region = Some("us-west-1".into());
-        state.repo_uri = Some("123.dkr.ecr.us-west-1.amazonaws.com/factory/run".into());
+        state.repo_uri = Some("123.dkr.ecr.us-west-1.amazonaws.com/fluent/run".into());
         state
             .project_image_hashes
             .insert("main".into(), "abc123".into());
@@ -977,8 +977,8 @@ mod tests {
     #[test]
     fn base_image_tag_includes_version() {
         let tag = base_image_tag();
-        assert!(tag.starts_with("factory-base-"));
-        assert!(tag.contains(FACTORY_VERSION));
+        assert!(tag.starts_with("fluent-base-"));
+        assert!(tag.contains(FLUENT_VERSION));
     }
 
     #[test]
@@ -1022,41 +1022,41 @@ mod tests {
         fs::create_dir_all(&project).unwrap();
         let result = ensure_project_dockerfile_stub(&project).unwrap();
         assert!(result);
-        let content = fs::read_to_string(project.join(".factory/Dockerfile")).unwrap();
-        assert!(content.contains("ARG FACTORY_BASE_URI"));
-        assert!(content.contains("FROM ${FACTORY_BASE_URI}"));
-        assert!(content.contains("# Project-specific Factory runtime image."));
+        let content = fs::read_to_string(project.join(".fluent/Dockerfile")).unwrap();
+        assert!(content.contains("ARG FLUENT_BASE_URI"));
+        assert!(content.contains("FROM ${FLUENT_BASE_URI}"));
+        assert!(content.contains("# Project-specific Fluent runtime image."));
     }
 
     #[test]
     fn ensure_project_dockerfile_stub_skips_when_exists() {
         let tmp = TempDir::new().unwrap();
         let project = tmp.path().join("my-project");
-        fs::create_dir_all(project.join(".factory")).unwrap();
-        fs::write(project.join(".factory/Dockerfile"), "FROM custom:image\n").unwrap();
+        fs::create_dir_all(project.join(".fluent")).unwrap();
+        fs::write(project.join(".fluent/Dockerfile"), "FROM custom:image\n").unwrap();
         let result = ensure_project_dockerfile_stub(&project).unwrap();
         assert!(!result);
-        let content = fs::read_to_string(project.join(".factory/Dockerfile")).unwrap();
+        let content = fs::read_to_string(project.join(".fluent/Dockerfile")).unwrap();
         assert_eq!(content, "FROM custom:image\n");
     }
 
     #[test]
     fn repo_name_from_uri_extracts_name() {
         let name =
-            repo_name_from_uri("123456789012.dkr.ecr.us-west-2.amazonaws.com/factory/run").unwrap();
-        assert_eq!(name, "factory/run");
+            repo_name_from_uri("123456789012.dkr.ecr.us-west-2.amazonaws.com/fluent/run").unwrap();
+        assert_eq!(name, "fluent/run");
     }
 
     #[test]
     fn task_def_family_extracts_from_arn() {
         assert_eq!(
-            task_def_family("arn:aws:ecs:us-west-2:123:task-definition/factory-run:5"),
-            "factory-run"
+            task_def_family("arn:aws:ecs:us-west-2:123:task-definition/fluent-run:5"),
+            "fluent-run"
         );
     }
 
     #[test]
     fn task_def_family_handles_plain_name() {
-        assert_eq!(task_def_family("factory-run"), "factory-run");
+        assert_eq!(task_def_family("fluent-run"), "fluent-run");
     }
 }

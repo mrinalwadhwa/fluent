@@ -24,7 +24,7 @@ if ! grep -Fq 'Skills and expertise are outside this resolver boundary.' <<<"$se
   exit 1
 fi
 
-if ! grep -Eq 'Factory does not currently bundle or resolve[[:space:]]+skills and expertise through `ContentResolver`' <<<"$flat_section"; then
+if ! grep -Eq 'Fluent does not currently bundle or resolve[[:space:]]+skills and expertise through `ContentResolver`' <<<"$flat_section"; then
   echo "architecture documentation implies or fails to rule out ContentResolver resolution for skills and expertise" >&2
   exit 1
 fi

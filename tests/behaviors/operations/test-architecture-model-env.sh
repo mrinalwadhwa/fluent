@@ -21,11 +21,11 @@ if [ -z "$section" ]; then
 fi
 
 for env_var in \
-  'FACTORY_CLAUDE_MODEL' \
-  'FACTORY_MODEL' \
-  'FACTORY_CODEX_MODEL' \
-  'FACTORY_CODER' \
-  'FACTORY_CODEX_CA_BUNDLE'
+  'FLUENT_CLAUDE_MODEL' \
+  'FLUENT_MODEL' \
+  'FLUENT_CODEX_MODEL' \
+  'FLUENT_CODER' \
+  'FLUENT_CODEX_CA_BUNDLE'
 do
   if ! grep -Fq "$env_var" <<<"$section"; then
     echo "model environment section does not mention $env_var" >&2

@@ -8,8 +8,8 @@ use std::time::Instant;
 use crate::content::ContentResolver;
 use crate::os;
 
-const TESTER_YAML_PATH: &str = ".factory/tester.yaml";
-const EXTRACTOR_PATH: &str = ".factory/extract-tester-results";
+const TESTER_YAML_PATH: &str = ".fluent/tester.yaml";
+const EXTRACTOR_PATH: &str = ".fluent/extract-tester-results";
 const FAILURE_EXCERPT_MAX: usize = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -403,8 +403,8 @@ mod tests {
     use tempfile::TempDir;
 
     fn make_workspace(dir: &Path) {
-        let factory_dir = dir.join(".factory");
-        fs::create_dir_all(&factory_dir).unwrap();
+        let fluent_dir = dir.join(".fluent");
+        fs::create_dir_all(&fluent_dir).unwrap();
     }
 
     fn write_tester_yaml(dir: &Path, content: &str) {

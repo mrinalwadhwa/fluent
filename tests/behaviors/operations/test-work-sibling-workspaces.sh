@@ -5,14 +5,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
-FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
+FLUENT_BIN="${FLUENT_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/fluent}"
 
 source "${PROJECT_DIR}/tests/lib/run_test.sh"
 source "${PROJECT_DIR}/tests/lib/work_test_fixtures.sh"
 LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 setup_test_project() {
-  TEST_DIR="$(mktemp -d -t factory-work-sibling-workspaces-XXXXXX)"
+  TEST_DIR="$(mktemp -d -t fluent-work-sibling-workspaces-XXXXXX)"
   mkdir -p "$TEST_DIR/project" "$TEST_DIR/bin"
   cd "$TEST_DIR/project"
   TEST_PROJECT_PWD="$(pwd -P)"
@@ -42,7 +42,7 @@ write_mock_codex() {
 #!/usr/bin/env bash
 printf '%s\n' "$PWD" > "$CODER_CWD_LOG"
 case "$PWD" in
-  */.factory/work/artifacts/*)
+  */.fluent/work/artifacts/*)
     printf 'Verdict: pass\n\nReview passed.\n' > review.md
     printf '%s\n' '{"type":"result","subtype":"success","result":"done","session_id":"mock"}'
     exit 0
@@ -74,14 +74,14 @@ assert_fails() {
 }
 
 work_json_value() {
-  "$FACTORY_BIN" work-item show "$1" | jq -r "$2"
+  "$FLUENT_BIN" work-item show "$1" | jq -r "$2"
 }
 
 run_write_task() {
   TASK_RUN_MOCK_MODE=commit \
     PATH="${TEST_DIR}/bin:$PATH" \
     CODER_CWD_LOG="${TEST_DIR}/coder-cwd.log" \
-    "$FACTORY_BIN" task run --no-sandbox --coder codex \
+    "$FLUENT_BIN" task run --no-sandbox --coder codex \
       "$1" "$2" "$2-write-1"
 }
 
@@ -90,15 +90,15 @@ test_attempt_records_sibling_candidate_path() {
   trap cleanup_test_project RETURN
 
   RESULT=0
-  "$FACTORY_BIN" work-item create work-alpha --title "Sibling path" > /dev/null
-  "$FACTORY_BIN" attempt create work-alpha attempt-one > /dev/null
+  "$FLUENT_BIN" work-item create work-alpha --title "Sibling path" > /dev/null
+  "$FLUENT_BIN" attempt create work-alpha attempt-one > /dev/null
 
   PATH_VALUE="$(work_json_value work-alpha '.attempts[0].tasks[0].workspace_access.writes[0].path')"
   [ "$PATH_VALUE" = "../work-10-work-alpha-attempt-one" ] || RESULT=1
   case "$(cd "$PATH_VALUE/.." 2>/dev/null || cd ..; pwd -P)/$(basename "$PATH_VALUE")" in
     "$TEST_PROJECT_PWD"/*) RESULT=1 ;;
   esac
-  [ ! -e .factory/work/workspaces/attempt-one ] || RESULT=1
+  [ ! -e .fluent/work/workspaces/attempt-one ] || RESULT=1
 
   return $RESULT
 }
@@ -108,10 +108,10 @@ test_attempt_paths_include_work_item_to_avoid_collisions() {
   trap cleanup_test_project RETURN
 
   RESULT=0
-  "$FACTORY_BIN" work-item create work-alpha --title "First item" > /dev/null
-  "$FACTORY_BIN" work-item create work-beta --title "Second item" > /dev/null
-  "$FACTORY_BIN" attempt create work-alpha shared-attempt > /dev/null
-  "$FACTORY_BIN" attempt create work-beta shared-attempt > /dev/null
+  "$FLUENT_BIN" work-item create work-alpha --title "First item" > /dev/null
+  "$FLUENT_BIN" work-item create work-beta --title "Second item" > /dev/null
+  "$FLUENT_BIN" attempt create work-alpha shared-attempt > /dev/null
+  "$FLUENT_BIN" attempt create work-beta shared-attempt > /dev/null
 
   ALPHA_PATH="$(work_json_value work-alpha '.attempts[0].tasks[0].workspace_access.writes[0].path')"
   BETA_PATH="$(work_json_value work-beta '.attempts[0].tasks[0].workspace_access.writes[0].path')"
@@ -119,10 +119,10 @@ test_attempt_paths_include_work_item_to_avoid_collisions() {
   [ "$BETA_PATH" = "../work-9-work-beta-shared-attempt" ] || RESULT=1
   [ "$ALPHA_PATH" != "$BETA_PATH" ] || RESULT=1
 
-  "$FACTORY_BIN" work-item create work-a --title "Hyphen first" > /dev/null
-  "$FACTORY_BIN" work-item create work-a-b --title "Hyphen second" > /dev/null
-  "$FACTORY_BIN" attempt create work-a b-c > /dev/null
-  "$FACTORY_BIN" attempt create work-a-b c > /dev/null
+  "$FLUENT_BIN" work-item create work-a --title "Hyphen first" > /dev/null
+  "$FLUENT_BIN" work-item create work-a-b --title "Hyphen second" > /dev/null
+  "$FLUENT_BIN" attempt create work-a b-c > /dev/null
+  "$FLUENT_BIN" attempt create work-a-b c > /dev/null
 
   HYPHEN_FIRST_PATH="$(work_json_value work-a '.attempts[0].tasks[0].workspace_access.writes[0].path')"
   HYPHEN_SECOND_PATH="$(work_json_value work-a-b '.attempts[0].tasks[0].workspace_access.writes[0].path')"
@@ -139,8 +139,8 @@ test_task_run_creates_registered_sibling_worktree() {
   write_mock_codex
 
   RESULT=0
-  "$FACTORY_BIN" work-item create work-alpha --title "Run task" > /dev/null
-  "$FACTORY_BIN" attempt create work-alpha attempt-one > /dev/null
+  "$FLUENT_BIN" work-item create work-alpha --title "Run task" > /dev/null
+  "$FLUENT_BIN" attempt create work-alpha attempt-one > /dev/null
   run_write_task work-alpha attempt-one > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
 
   WORKSPACE_PATH="../work-10-work-alpha-attempt-one"
@@ -148,7 +148,7 @@ test_task_run_creates_registered_sibling_worktree() {
   [ -f "$WORKSPACE_PATH/.git" ] || [ -d "$WORKSPACE_PATH/.git" ] || RESULT=1
   [ "$(cat "$TEST_DIR/coder-cwd.log")" = "$WORKSPACE_PWD" ] || RESULT=1
   git worktree list --porcelain | grep -F "worktree $WORKSPACE_PWD" > /dev/null || RESULT=1
-  [ ! -e .factory/work/workspaces/attempt-one ] || RESULT=1
+  [ ! -e .fluent/work/workspaces/attempt-one ] || RESULT=1
 
   return $RESULT
 }
@@ -159,12 +159,12 @@ test_task_run_rejects_unmanaged_workspace_paths() {
   write_mock_codex
 
   RESULT=0
-  "$FACTORY_BIN" work-item create work-alpha --title "Reject paths" > /dev/null
-  "$FACTORY_BIN" attempt create work-alpha attempt-one > /dev/null
+  "$FLUENT_BIN" work-item create work-alpha --title "Reject paths" > /dev/null
+  "$FLUENT_BIN" attempt create work-alpha attempt-one > /dev/null
 
-  TASK_RECORD=.factory/work/tasks/work-alpha/attempt-one/attempt-one-write-1.json
+  TASK_RECORD=.fluent/work/tasks/work-alpha/attempt-one/attempt-one-write-1.json
 
-  jq '.workspace_access.writes[0].path = ".factory/work/workspaces/attempt-one"' \
+  jq '.workspace_access.writes[0].path = ".fluent/work/workspaces/attempt-one"' \
     "$TASK_RECORD" > "$TEST_DIR/task.json"
   mv "$TEST_DIR/task.json" "$TASK_RECORD"
   assert_fails run_write_task work-alpha attempt-one || RESULT=1
@@ -180,7 +180,7 @@ test_task_run_rejects_unmanaged_workspace_paths() {
   mv "$TEST_DIR/task.json" "$TASK_RECORD"
   assert_fails run_write_task work-alpha attempt-one || RESULT=1
 
-  [ ! -e .factory/work/workspaces/attempt-one ] || RESULT=1
+  [ ! -e .fluent/work/workspaces/attempt-one ] || RESULT=1
   [ ! -e "$TEST_DIR/absolute-workspace" ] || RESULT=1
   [ ! -e ../work-10-work-alpha-other-attempt ] || RESULT=1
 
@@ -193,19 +193,19 @@ test_attempt_run_keeps_state_and_artifacts_in_source_checkout() {
   write_mock_codex
 
   RESULT=0
-  "$FACTORY_BIN" work-item create work-alpha --title "Attempt run" > /dev/null
-  "$FACTORY_BIN" attempt create work-alpha attempt-one > /dev/null
+  "$FLUENT_BIN" work-item create work-alpha --title "Attempt run" > /dev/null
+  "$FLUENT_BIN" attempt create work-alpha attempt-one > /dev/null
   TASK_RUN_MOCK_MODE=commit \
     PATH="${TEST_DIR}/bin:$PATH" \
     CODER_CWD_LOG="${TEST_DIR}/coder-cwd.log" \
-    "$FACTORY_BIN" attempt run --no-sandbox --coder codex \
+    "$FLUENT_BIN" attempt run --no-sandbox --coder codex \
       work-alpha attempt-one > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
 
-  [ -f .factory/work/items/work-alpha.json ] || RESULT=1
-  [ -d .factory/work/artifacts/work-alpha/attempt-one ] || RESULT=1
+  [ -f .fluent/work/items/work-alpha.json ] || RESULT=1
+  [ -d .fluent/work/artifacts/work-alpha/attempt-one ] || RESULT=1
   [ "$(work_json_value work-alpha '.merge_candidates[0].source_workspace.path')" = "../work-10-work-alpha-attempt-one" ] || RESULT=1
   [ -d ../work-10-work-alpha-attempt-one ] || RESULT=1
-  [ ! -d ../work-10-work-alpha-attempt-one/.factory/work/artifacts ] || RESULT=1
+  [ ! -d ../work-10-work-alpha-attempt-one/.fluent/work/artifacts ] || RESULT=1
 
   return $RESULT
 }
@@ -213,25 +213,25 @@ test_attempt_run_keeps_state_and_artifacts_in_source_checkout() {
 test_documentation_describes_sibling_workspace_layout() {
   RESULT=0
 
-  rg -n '\.factory/work/workspaces/<attempt-id>|\.factory/work/workspaces/' \
+  rg -n '\.fluent/work/workspaces/<attempt-id>|\.fluent/work/workspaces/' \
     "$PROJECT_DIR/documentation" \
-    "$PROJECT_DIR/skills/build-in-the-factory/SKILL.md" \
+    "$PROJECT_DIR/skills/build-in-the-fluent/SKILL.md" \
     "$PROJECT_DIR/tests/behaviors/README.md" && RESULT=1
 
   rg -n '\.\./work-<work-item-id-byte-len>-<work-item-id>-<attempt-id>|\.\./work-6-work-1-attempt-1' \
     "$PROJECT_DIR/documentation" \
-    "$PROJECT_DIR/skills/build-in-the-factory/SKILL.md" \
+    "$PROJECT_DIR/skills/build-in-the-fluent/SKILL.md" \
     "$PROJECT_DIR/tests/behaviors/README.md" > /dev/null || RESULT=1
 
-  rg -n '\.factory/work/artifacts/<attempt-id>|\.factory/work/artifacts/attempt-1|\.factory/work/artifacts/attempt-one' \
+  rg -n '\.fluent/work/artifacts/<attempt-id>|\.fluent/work/artifacts/attempt-1|\.fluent/work/artifacts/attempt-one' \
     "$PROJECT_DIR/documentation" \
-    "$PROJECT_DIR/skills/build-in-the-factory/SKILL.md" \
+    "$PROJECT_DIR/skills/build-in-the-fluent/SKILL.md" \
     "$PROJECT_DIR/tests/behaviors/README.md" \
     | grep -Fv '<attempt-id>/...' && RESULT=1
 
-  rg -n '\.factory/work/artifacts/<work-item-id>/<attempt-id>|\.factory/work/artifacts/work-1/attempt-1|\.factory/work/artifacts/work-alpha/attempt-one' \
+  rg -n '\.fluent/work/artifacts/<work-item-id>/<attempt-id>|\.fluent/work/artifacts/work-1/attempt-1|\.fluent/work/artifacts/work-alpha/attempt-one' \
     "$PROJECT_DIR/documentation" \
-    "$PROJECT_DIR/skills/build-in-the-factory/SKILL.md" \
+    "$PROJECT_DIR/skills/build-in-the-fluent/SKILL.md" \
     "$PROJECT_DIR/tests/behaviors/README.md" > /dev/null || RESULT=1
 
   return $RESULT

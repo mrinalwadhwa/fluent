@@ -1,7 +1,7 @@
 # Scenario: Add a code reviewer
 
 ## Opening statement
-I want to add a code reviewer to the factory.
+I want to add a code reviewer to the fluent.
 
 ## Hidden context
 - Has a general sense that the author's code should be reviewed before a run completes

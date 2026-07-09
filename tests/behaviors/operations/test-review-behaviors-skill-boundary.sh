@@ -10,8 +10,8 @@ if grep -Eq 'may (inspect|read|open|load).*plan\.md|read.*plan\.md' "$SKILL"; th
   failures=$((failures + 1))
 fi
 
-if grep -Fq '.factory/runs/' "$SKILL"; then
-  echo "review-behaviors still references legacy .factory/runs/ paths" >&2
+if grep -Fq '.fluent/runs/' "$SKILL"; then
+  echo "review-behaviors still references legacy .fluent/runs/ paths" >&2
   failures=$((failures + 1))
 fi
 

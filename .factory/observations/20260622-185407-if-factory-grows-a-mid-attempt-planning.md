@@ -1,5 +1,0 @@
-The Writer prompt assumes the planning artifacts (Brief, Behaviors, Approach, Plan) are stable across rounds within an Attempt. This holds in the current design: a Work Item's `planning_context` is set at creation and there is no CLI command or normal API path that mutates it mid-attempt. Each Attempt also has its own `progress.md` at `.factory/work/progress/<wi>/<attempt>/progress.md`, so a new Attempt starts fresh and cannot inherit drift.
-
-If Factory grows a feature that mutates `planning_context` mid-attempt (or if conversation-agent direct edits to Work Item state files become a supported flow), the Writer prompt's progress.md handling needs reconciliation guidance. Specifically, the step where the Writer reads `progress.md` should compare its to-do list against the current `plan.md` and update the to-do list to match (preserving completed `- [x]` items). Without that, the Writer's progress.md can carry steps no longer in the plan, or miss steps newly added.
-
-Revisit when mid-attempt planning mutation becomes a supported flow.

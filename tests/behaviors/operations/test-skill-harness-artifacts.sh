@@ -10,7 +10,7 @@ source "${PROJECT_DIR}/tests/lib/run_test.sh"
 LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 write_fake_claude() {
-  FAKE_BIN="$(mktemp -d -t factory-test-skill-bin-XXXXXX)"
+  FAKE_BIN="$(mktemp -d -t fluent-test-skill-bin-XXXXXX)"
 
   cat > "${FAKE_BIN}/claude" <<'FAKE_CLAUDE'
 #!/usr/bin/env bash
@@ -20,7 +20,7 @@ args="$*"
 
 if printf '%s' "$args" | grep -q 'You are a judge evaluating'; then
   printf 'Overall verdict: PASS\n'
-elif [ "${FACTORY_FAKE_CLAUDE_ARTIFACT:-1}" = 0 ]; then
+elif [ "${FLUENT_FAKE_CLAUDE_ARTIFACT:-1}" = 0 ]; then
   printf 'The skill is complete.\n'
 else
   cat <<'RESPONSE'
@@ -45,7 +45,7 @@ run_skill_harness() {
 
   write_fake_claude
   OUTPUT="$(
-    FACTORY_FAKE_CLAUDE_ARTIFACT="$artifact_mode" \
+    FLUENT_FAKE_CLAUDE_ARTIFACT="$artifact_mode" \
       PATH="${FAKE_BIN}:$PATH" \
       tests/test-skill tests/behaviors/skills/timeout-flag.md \
         "$skill_path" "$@" 2>&1

@@ -1,7 +1,7 @@
 # Scenario: Add timeout flag
 
 ## Opening statement
-Add a --timeout flag to factory run that stops execution after N hours.
+Add a --timeout flag to fluent run that stops execution after N hours.
 
 ## Hidden context
 - Motivated by a run that burned rate limit for 8 hours on a stuck task

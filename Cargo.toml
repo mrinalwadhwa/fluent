@@ -1,5 +1,5 @@
 [package]
-name = "factory"
+name = "fluent"
 version = "0.1.0"
 edition = "2024"
 description = "Run coding agents inside a macOS Seatbelt sandbox with session continuity"

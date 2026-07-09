@@ -11,7 +11,7 @@ The session snapshots aren't really useful to me yet. I want to be able to actua
 - Hasn't thought about who generates the summary — the agent itself, a reviewer, or a post-processing step
 - Would say "the agent should probably write it before exiting" if asked
 - Open to the summary being part of the handoff or a separate file
-- Cares about this for learning and improving the factory's skills over time
+- Cares about this for learning and improving the fluent's skills over time
 
 ## Evaluation criteria
 - Did the agent recognize this as a vague/exploratory request and probe deeper?

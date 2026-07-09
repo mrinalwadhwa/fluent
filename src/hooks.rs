@@ -31,7 +31,7 @@ pub struct HookOutcome {
     pub passed: bool,
 }
 
-/// Context Factory passes to every hook as environment variables.
+/// Context Fluent passes to every hook as environment variables.
 /// Fields are optional because different lifecycle events have
 /// different ids available.
 #[derive(Debug, Clone, Default)]
@@ -47,10 +47,10 @@ pub struct HookContext {
     pub log_dir: PathBuf,
 }
 
-/// Locate the hook script. Returns `None` if `<project_root>/.factory/hooks/<name>`
+/// Locate the hook script. Returns `None` if `<project_root>/.fluent/hooks/<name>`
 /// does not exist or is not executable.
 pub fn find_hook(project_root: &Path, name: &str) -> Option<PathBuf> {
-    let path = project_root.join(".factory/hooks").join(name);
+    let path = project_root.join(".fluent/hooks").join(name);
     if !path.is_file() {
         return None;
     }
@@ -102,28 +102,28 @@ pub fn run_hook(
 
     let mut cmd = Command::new(&script_path);
     cmd.current_dir(working_dir);
-    cmd.env("FACTORY_HOOK", name);
+    cmd.env("FLUENT_HOOK", name);
     if let Some(id) = &context.work_item_id {
-        cmd.env("FACTORY_WORK_ITEM_ID", id);
+        cmd.env("FLUENT_WORK_ITEM_ID", id);
     }
     if let Some(id) = &context.attempt_id {
-        cmd.env("FACTORY_ATTEMPT_ID", id);
+        cmd.env("FLUENT_ATTEMPT_ID", id);
     }
     if let Some(id) = &context.task_id {
-        cmd.env("FACTORY_TASK_ID", id);
+        cmd.env("FLUENT_TASK_ID", id);
     }
     if let Some(id) = &context.merge_candidate_id {
-        cmd.env("FACTORY_MERGE_CANDIDATE_ID", id);
+        cmd.env("FLUENT_MERGE_CANDIDATE_ID", id);
     }
     if let Some(commit) = &context.candidate_commit {
-        cmd.env("FACTORY_CANDIDATE_COMMIT", commit);
+        cmd.env("FLUENT_CANDIDATE_COMMIT", commit);
     }
     if let Some(dir) = &context.artifact_dir {
-        cmd.env("FACTORY_ARTIFACT_DIR", dir.to_string_lossy().to_string());
+        cmd.env("FLUENT_ARTIFACT_DIR", dir.to_string_lossy().to_string());
     }
     if let Some(dir) = &context.reviewer_artifact_dir {
         cmd.env(
-            "FACTORY_REVIEWER_ARTIFACT_DIR",
+            "FLUENT_REVIEWER_ARTIFACT_DIR",
             dir.to_string_lossy().to_string(),
         );
     }
@@ -153,7 +153,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn write_hook(project_root: &Path, name: &str, script: &str) -> PathBuf {
-        let hooks_dir = project_root.join(".factory/hooks");
+        let hooks_dir = project_root.join(".fluent/hooks");
         fs::create_dir_all(&hooks_dir).unwrap();
         let path = hooks_dir.join(name);
         let mut opts = fs::OpenOptions::new();
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn returns_none_when_hook_is_not_executable() {
         let tmp = TempDir::new().unwrap();
-        let hooks_dir = tmp.path().join(".factory/hooks");
+        let hooks_dir = tmp.path().join(".fluent/hooks");
         fs::create_dir_all(&hooks_dir).unwrap();
         fs::write(hooks_dir.join("check-pre-merge"), "#!/bin/sh\nexit 0\n").unwrap();
         let result = find_hook(tmp.path(), "check-pre-merge");
@@ -241,8 +241,8 @@ mod tests {
             tmp.path(),
             "check-pre-merge",
             "#!/bin/sh\nprintf 'work=%s attempt=%s task=%s candidate=%s commit=%s\\n' \
-                \"$FACTORY_WORK_ITEM_ID\" \"$FACTORY_ATTEMPT_ID\" \"$FACTORY_TASK_ID\" \
-                \"$FACTORY_MERGE_CANDIDATE_ID\" \"$FACTORY_CANDIDATE_COMMIT\"\nexit 0\n",
+                \"$FLUENT_WORK_ITEM_ID\" \"$FLUENT_ATTEMPT_ID\" \"$FLUENT_TASK_ID\" \
+                \"$FLUENT_MERGE_CANDIDATE_ID\" \"$FLUENT_CANDIDATE_COMMIT\"\nexit 0\n",
         );
         let log_dir = tmp.path().join("logs");
         let context = HookContext {
@@ -270,7 +270,7 @@ mod tests {
         write_hook(
             tmp.path(),
             "prepare-pre-review",
-            "#!/bin/sh\nprintf 'reviewer_dir=%s\\n' \"$FACTORY_REVIEWER_ARTIFACT_DIR\"\nexit 0\n",
+            "#!/bin/sh\nprintf 'reviewer_dir=%s\\n' \"$FLUENT_REVIEWER_ARTIFACT_DIR\"\nexit 0\n",
         );
         let log_dir = tmp.path().join("logs");
         let context = HookContext {

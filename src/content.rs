@@ -1,15 +1,15 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// Resolve runtime content the Factory binary reads directly.
+/// Resolve runtime content the Fluent binary reads directly.
 ///
 /// The implemented bundled categories are prompts and sandbox profiles.
 /// Skills and expertise stay in repository or installed skill layouts
 /// and are read by agents, not by this resolver.
 ///
 /// The resolution chain:
-/// 1. Project-local: `<project_root>/.factory/<relative_path>`
-/// 2. User config: `~/.config/factory/<relative_path>`
+/// 1. Project-local: `<project_root>/.fluent/<relative_path>`
+/// 2. User config: `~/.config/fluent/<relative_path>`
 /// 3. Bundled defaults (compiled into the binary)
 pub struct ContentResolver {
     project_root: Option<PathBuf>,
@@ -30,7 +30,7 @@ impl ContentResolver {
     pub fn resolve_path(&self, relative: &str) -> Option<PathBuf> {
         // 1. Project-local
         if let Some(ref root) = self.project_root {
-            let path = root.join(".factory").join(relative);
+            let path = root.join(".fluent").join(relative);
             if path.exists() {
                 return Some(path);
             }
@@ -60,9 +60,9 @@ impl ContentResolver {
 
 fn dirs_config_path() -> PathBuf {
     if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".config/factory")
+        PathBuf::from(home).join(".config/fluent")
     } else {
-        PathBuf::from("/tmp/factory-config")
+        PathBuf::from("/tmp/fluent-config")
     }
 }
 
@@ -584,9 +584,9 @@ Check item {{ITEM_ID}}.
     #[test]
     fn test_content_resolver_project_local() {
         let tmp = TempDir::new().unwrap();
-        let factory_dir = tmp.path().join(".factory/prompts");
-        std::fs::create_dir_all(&factory_dir).unwrap();
-        std::fs::write(factory_dir.join("write-system.md"), "custom prompt").unwrap();
+        let fluent_dir = tmp.path().join(".fluent/prompts");
+        std::fs::create_dir_all(&fluent_dir).unwrap();
+        std::fs::write(fluent_dir.join("write-system.md"), "custom prompt").unwrap();
 
         let resolver = ContentResolver::new(Some(tmp.path()));
         let path = resolver.resolve_path("prompts/write-system.md");
@@ -619,9 +619,9 @@ Check item {{ITEM_ID}}.
         let user_config = tmp.path().join("config");
 
         // Set up both project-local and user-config files
-        std::fs::create_dir_all(project.join(".factory/prompts")).unwrap();
+        std::fs::create_dir_all(project.join(".fluent/prompts")).unwrap();
         std::fs::write(
-            project.join(".factory/prompts/write-system.md"),
+            project.join(".fluent/prompts/write-system.md"),
             "project prompt",
         )
         .unwrap();
@@ -641,7 +641,7 @@ Check item {{ITEM_ID}}.
         let resolver = ContentResolver::new(None);
         let content = resolver.resolve_content("prompts/write-system.md");
         assert!(content.is_some());
-        assert!(content.unwrap().contains("Factory Writer"));
+        assert!(content.unwrap().contains("Fluent Writer"));
     }
 
     #[test]
@@ -658,9 +658,9 @@ Check item {{ITEM_ID}}.
     fn bundled_write_system_prompt_avoids_legacy_run_state_contract() {
         let content = bundled_content("prompts/write-system.md").unwrap();
 
-        assert!(content.contains("Factory Writer"));
+        assert!(content.contains("Fluent Writer"));
         assert!(!content.contains("Status file contract"));
-        assert!(!content.contains(".factory/runs/"));
+        assert!(!content.contains(".fluent/runs/"));
         assert!(!content.contains("handoff.md"));
     }
 
@@ -673,8 +673,8 @@ Check item {{ITEM_ID}}.
 
     #[test]
     fn test_bundled_content_does_not_include_agent_managed_content() {
-        assert!(bundled_content("skills/build-in-the-factory/SKILL.md").is_none());
-        assert!(bundled_content(".factory/expertise/testing.md").is_none());
+        assert!(bundled_content("skills/build-in-the-fluent/SKILL.md").is_none());
+        assert!(bundled_content(".fluent/expertise/testing.md").is_none());
     }
 
     #[test]

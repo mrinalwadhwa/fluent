@@ -5,14 +5,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
-FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
+FLUENT_BIN="${FLUENT_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/fluent}"
 
 source "${PROJECT_DIR}/tests/lib/run_test.sh"
 source "${PROJECT_DIR}/tests/lib/work_test_fixtures.sh"
 LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 setup_test_project() {
-  TEST_DIR="$(mktemp -d -t factory-work-attempt-loop-XXXXXX)"
+  TEST_DIR="$(mktemp -d -t fluent-work-attempt-loop-XXXXXX)"
   mkdir -p "$TEST_DIR/project" "$TEST_DIR/bin"
   cd "$TEST_DIR/project"
   git init -b main > /dev/null 2>&1
@@ -22,8 +22,8 @@ setup_test_project() {
   printf 'test\n' > README.md
   seed_review_skill_stubs "."
   git add . && git commit -m "init" > /dev/null 2>&1
-  "$FACTORY_BIN" work-item create work-1 --title "Attempt loop" > /dev/null
-  "$FACTORY_BIN" attempt create work-1 attempt-1 > /dev/null
+  "$FLUENT_BIN" work-item create work-1 --title "Attempt loop" > /dev/null
+  "$FLUENT_BIN" attempt create work-1 attempt-1 > /dev/null
 }
 
 cleanup_test_project() {
@@ -87,7 +87,7 @@ MOCK_SCRIPT
 }
 
 json_value() {
-  "$FACTORY_BIN" work-item show work-1 | jq -r "$1"
+  "$FLUENT_BIN" work-item show work-1 | jq -r "$1"
 }
 
 assert_contains() {
@@ -109,12 +109,12 @@ assert_fails() {
 
 run_attempt_loop() {
   PATH="${TEST_DIR}/bin:$PATH" \
-    FACTORY_MAX_TOTAL_WRITE_ROUNDS="${FACTORY_MAX_TOTAL_WRITE_ROUNDS:-3}" \
-    "$FACTORY_BIN" attempt run work-1 attempt-1 --no-sandbox
+    FLUENT_MAX_TOTAL_WRITE_ROUNDS="${FLUENT_MAX_TOTAL_WRITE_ROUNDS:-3}" \
+    "$FLUENT_BIN" attempt run work-1 attempt-1 --no-sandbox
 }
 
 run_write_task() {
-  PATH="${TEST_DIR}/bin:$PATH" "$FACTORY_BIN" task run \
+  PATH="${TEST_DIR}/bin:$PATH" "$FLUENT_BIN" task run \
     work-1 attempt-1 attempt-1-write-1 --no-sandbox
 }
 
@@ -123,7 +123,7 @@ write_planned_followup_task() {
   workspace_id="$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-write-1") | .output.workspace_id')"
   workspace_path="$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-write-1") | .output.workspace_path')"
   task_count="$(json_value '.attempts[0].tasks | length')"
-  mkdir -p .factory/work/tasks/work-1/attempt-1
+  mkdir -p .fluent/work/tasks/work-1/attempt-1
   jq -n \
     --argjson order "$task_count" \
     --arg workspace_id "$workspace_id" \
@@ -140,10 +140,10 @@ write_planned_followup_task() {
         writes: [{id: $workspace_id, path: $workspace_path}]
       },
       input_artifacts: []
-    }' > .factory/work/tasks/work-1/attempt-1/attempt-1-write-2.json
+    }' > .fluent/work/tasks/work-1/attempt-1/attempt-1-write-2.json
   jq '.status = "planned" | .review_state = "failed"' \
-    .factory/work/attempts/work-1/attempt-1.json > "$TEST_DIR/attempt.json"
-  mv "$TEST_DIR/attempt.json" .factory/work/attempts/work-1/attempt-1.json
+    .fluent/work/attempts/work-1/attempt-1.json > "$TEST_DIR/attempt.json"
+  mv "$TEST_DIR/attempt.json" .fluent/work/attempts/work-1/attempt-1.json
 }
 
 test_attempt_loop_passes_review_round() {
@@ -166,7 +166,7 @@ test_attempt_loop_passes_review_round() {
   [ "$(json_value '.merge_candidates[0].target_branch')" = "main" ] || return 1
   [ "$(json_value '.merge_candidates[0].review_state')" = "pending" ] || return 1
   [ "$(json_value '.merge_candidates[0].candidate_commit')" = "$(git -C ../work-6-work-1-attempt-1 rev-parse HEAD)" ] || return 1
-  "$FACTORY_BIN" merge-candidate show work-1 attempt-1-merge-candidate > "$TEST_DIR/candidate"
+  "$FLUENT_BIN" merge-candidate show work-1 attempt-1-merge-candidate > "$TEST_DIR/candidate"
   [ "$(jq -r '.candidate_commit' "$TEST_DIR/candidate")" = "$(json_value '.merge_candidates[0].candidate_commit')" ] || return 1
   [ "$(jq -r '.target_workspace.path' "$TEST_DIR/candidate")" = "." ] || return 1
   [ "$(jq -r '.source_branch' "$TEST_DIR/candidate")" = "main" ] || return 1
@@ -180,7 +180,7 @@ test_work_show_includes_merge_candidate() {
   write_mock_claude pass
 
   run_attempt_loop > "$TEST_DIR/stdout"
-  "$FACTORY_BIN" work-item show work-1 > "$TEST_DIR/show"
+  "$FLUENT_BIN" work-item show work-1 > "$TEST_DIR/show"
 
   [ "$(jq -r '.merge_candidates | length' "$TEST_DIR/show")" = "1" ] || return 1
   [ "$(jq -r '.merge_candidates[0].id' "$TEST_DIR/show")" = "attempt-1-merge-candidate" ] || return 1
@@ -193,7 +193,7 @@ test_work_merge_candidate_prints_pretty_json() {
   write_mock_claude pass
 
   run_attempt_loop > "$TEST_DIR/stdout"
-  "$FACTORY_BIN" merge-candidate show work-1 attempt-1-merge-candidate > "$TEST_DIR/candidate"
+  "$FLUENT_BIN" merge-candidate show work-1 attempt-1-merge-candidate > "$TEST_DIR/candidate"
 
   jq -e '.id == "attempt-1-merge-candidate"' "$TEST_DIR/candidate" > /dev/null || return 1
   grep -q '^{' "$TEST_DIR/candidate" || return 1
@@ -206,12 +206,12 @@ test_work_merge_candidate_missing_requests_leave_state_unchanged() {
   write_mock_claude pass
 
   run_attempt_loop > "$TEST_DIR/stdout"
-  BEFORE="$(cat .factory/work/items/work-1.json)"
+  BEFORE="$(cat .fluent/work/items/work-1.json)"
 
   RESULT=0
-  assert_fails "$FACTORY_BIN" merge-candidate show missing-work attempt-1-merge-candidate || RESULT=1
-  assert_fails "$FACTORY_BIN" merge-candidate show work-1 missing-candidate || RESULT=1
-  [ "$(cat .factory/work/items/work-1.json)" = "$BEFORE" ] || RESULT=1
+  assert_fails "$FLUENT_BIN" merge-candidate show missing-work attempt-1-merge-candidate || RESULT=1
+  assert_fails "$FLUENT_BIN" merge-candidate show work-1 missing-candidate || RESULT=1
+  [ "$(cat .fluent/work/items/work-1.json)" = "$BEFORE" ] || RESULT=1
   return $RESULT
 }
 
@@ -221,7 +221,7 @@ test_attempt_loop_runs_planned_review_tasks() {
   write_mock_claude pass
 
   run_write_task > "$TEST_DIR/write-stdout" 2> "$TEST_DIR/write-stderr"
-  "$FACTORY_BIN" review work-1 attempt-1 > "$TEST_DIR/review-stdout"
+  "$FLUENT_BIN" review work-1 attempt-1 > "$TEST_DIR/review-stdout"
 
   RESULT=0
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review" and (.status // "planned") == "planned")] | length')" = "5" ] || RESULT=1
@@ -252,7 +252,7 @@ test_attempt_loop_plans_followup() {
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review" and (.id | startswith("attempt-1-review-2-")))] | length')" = "5" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-tests") | .review_context.candidate_commit')" = "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-write-2") | .output.commit')" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-tests") | .review_context.candidate_workspace_path')" = "../work-6-work-1-attempt-1" ] || RESULT=1
-  assert_contains "$(cat .factory/work/artifacts/work-1/attempt-1/needs-user.md)" "write-round ceiling" || RESULT=1
+  assert_contains "$(cat .fluent/work/artifacts/work-1/attempt-1/needs-user.md)" "write-round ceiling" || RESULT=1
   return $RESULT
 }
 
@@ -271,7 +271,7 @@ test_attempt_loop_plans_followup_with_mixed_failed_and_missing_reviews() {
   [ "$(json_value '.attempts[0].status')" = "complete" ] || RESULT=1
   [ "$(json_value '.attempts[0].review_state')" = "passed" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-write-2") | .input_artifacts | length')" = "1" ] || RESULT=1
-  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-write-2") | .input_artifacts[0].path')" = ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-documentation/review.md" ] || RESULT=1
+  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-write-2") | .input_artifacts[0].path')" = ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-documentation/review.md" ] || RESULT=1
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review" and (.id | startswith("attempt-1-review-2-")))] | length')" = "1" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-documentation") | .role')" = "documentation" ] || RESULT=1
   return $RESULT
@@ -297,7 +297,7 @@ test_attempt_loop_counts_preplanned_followup_against_budget() {
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review" and (.id | startswith("attempt-1-review-2-")))] | length')" = "5" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-documentation") | .role')" = "documentation" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-tests") | .role')" = "tests" ] || RESULT=1
-  assert_contains "$(cat .factory/work/artifacts/work-1/attempt-1/needs-user.md)" "write-round ceiling" || RESULT=1
+  assert_contains "$(cat .fluent/work/artifacts/work-1/attempt-1/needs-user.md)" "write-round ceiling" || RESULT=1
   return $RESULT
 }
 
@@ -311,8 +311,8 @@ test_attempt_loop_marks_uncertain_reviews_needs_user() {
   assert_contains "$(cat "$TEST_DIR/stdout")" "Attempt attempt-1 needs user input" || RESULT=1
   [ "$(json_value '.attempts[0].status')" = "needs-user" ] || RESULT=1
   [ "$(json_value '.attempts[0].review_state')" = "uncertain" ] || RESULT=1
-  [ -f .factory/work/artifacts/work-1/attempt-1/needs-user.md ] || RESULT=1
-  assert_contains "$(cat .factory/work/artifacts/work-1/attempt-1/needs-user.md)" "attempt-1-review-tests/review.md" || RESULT=1
+  [ -f .fluent/work/artifacts/work-1/attempt-1/needs-user.md ] || RESULT=1
+  assert_contains "$(cat .fluent/work/artifacts/work-1/attempt-1/needs-user.md)" "attempt-1-review-tests/review.md" || RESULT=1
   return $RESULT
 }
 
@@ -325,8 +325,8 @@ test_attempt_loop_marks_missing_verdict_needs_user() {
   run_attempt_loop > "$TEST_DIR/stdout" || RESULT=1
   [ "$(json_value '.attempts[0].status')" = "needs-user" ] || RESULT=1
   [ "$(json_value '.attempts[0].review_state')" = "uncertain" ] || RESULT=1
-  [ -f .factory/work/artifacts/work-1/attempt-1/needs-user.md ] || RESULT=1
-  assert_contains "$(cat .factory/work/artifacts/work-1/attempt-1/needs-user.md)" "uncertain or missing review verdicts" || RESULT=1
+  [ -f .fluent/work/artifacts/work-1/attempt-1/needs-user.md ] || RESULT=1
+  assert_contains "$(cat .fluent/work/artifacts/work-1/attempt-1/needs-user.md)" "uncertain or missing review verdicts" || RESULT=1
   return $RESULT
 }
 
@@ -350,18 +350,18 @@ test_attempt_loop_invalid_or_terminal_request_leaves_state_unchanged() {
   write_mock_claude pass
 
   RESULT=0
-  BEFORE="$(cat .factory/work/items/work-1.json)"
-  assert_fails "$FACTORY_BIN" attempt run missing-work attempt-1 --no-sandbox || RESULT=1
-  assert_fails "$FACTORY_BIN" attempt run ../escape attempt-1 --no-sandbox || RESULT=1
-  assert_fails "$FACTORY_BIN" attempt run work-1 missing-attempt --no-sandbox || RESULT=1
-  assert_fails "$FACTORY_BIN" attempt run work-1 ../escape --no-sandbox || RESULT=1
-  [ "$(cat .factory/work/items/work-1.json)" = "$BEFORE" ] || RESULT=1
+  BEFORE="$(cat .fluent/work/items/work-1.json)"
+  assert_fails "$FLUENT_BIN" attempt run missing-work attempt-1 --no-sandbox || RESULT=1
+  assert_fails "$FLUENT_BIN" attempt run ../escape attempt-1 --no-sandbox || RESULT=1
+  assert_fails "$FLUENT_BIN" attempt run work-1 missing-attempt --no-sandbox || RESULT=1
+  assert_fails "$FLUENT_BIN" attempt run work-1 ../escape --no-sandbox || RESULT=1
+  [ "$(cat .fluent/work/items/work-1.json)" = "$BEFORE" ] || RESULT=1
 
   run_attempt_loop > "$TEST_DIR/stdout" || RESULT=1
-  TERMINAL="$(cat .factory/work/items/work-1.json)"
+  TERMINAL="$(cat .fluent/work/items/work-1.json)"
   run_attempt_loop > "$TEST_DIR/rerun-stdout" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/rerun-stdout")" "Merge Candidate attempt-1-merge-candidate is ready" || RESULT=1
-  [ "$(cat .factory/work/items/work-1.json)" = "$TERMINAL" ] || RESULT=1
+  [ "$(cat .fluent/work/items/work-1.json)" = "$TERMINAL" ] || RESULT=1
   return $RESULT
 }
 

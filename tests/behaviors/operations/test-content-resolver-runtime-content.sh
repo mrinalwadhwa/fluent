@@ -17,7 +17,7 @@ if [ -z "$section" ]; then
   exit 1
 fi
 
-if ! grep -Eq '`ContentResolver` resolves runtime content that the Factory binary reads' <<<"$section"; then
-  echo "architecture documentation does not identify ContentResolver as resolving runtime content read by the Factory binary" >&2
+if ! grep -Eq '`ContentResolver` resolves runtime content that the Fluent binary reads' <<<"$section"; then
+  echo "architecture documentation does not identify ContentResolver as resolving runtime content read by the Fluent binary" >&2
   exit 1
 fi

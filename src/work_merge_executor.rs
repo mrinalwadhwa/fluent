@@ -413,7 +413,7 @@ fn worktree_is_dirty(worktree_dir: &Path) -> Result<bool> {
             "--untracked-files=normal",
             "--",
             ".",
-            ":(exclude).factory",
+            ":(exclude).fluent",
         ],
     )?;
     Ok(!output.stdout.is_empty())
@@ -422,7 +422,7 @@ fn worktree_is_dirty(worktree_dir: &Path) -> Result<bool> {
 fn commit_autofix(worktree_dir: &Path) -> Result<()> {
     git::run(
         worktree_dir,
-        &["add", "--", ".", ":(exclude).factory"],
+        &["add", "--", ".", ":(exclude).fluent"],
         "stage fix-pre-merge changes",
     )?;
     git::run(
@@ -736,7 +736,7 @@ fn rebase_candidate(
         )?
     };
 
-    eprintln!("  Factory           work rebase");
+    eprintln!("  Fluent           work rebase");
     eprintln!("  Work Item         {}", config.work_item_id);
     eprintln!("  Attempt           {}", candidate.attempt_id);
     eprintln!("  Target            {target_branch}");
@@ -1022,7 +1022,7 @@ fn worktree_status(workspace_path: &Path) -> Result<String> {
             "--untracked-files=normal",
             "--",
             ".",
-            ":(exclude).factory",
+            ":(exclude).fluent",
         ],
         "check worktree status",
     )?;
@@ -1158,11 +1158,11 @@ mod tests {
             "abc123",
             vec![ArtifactRef {
                 producer_id: "checks".to_string(),
-                path: ".factory/work/artifacts/checks.json".to_string(),
+                path: ".fluent/work/artifacts/checks.json".to_string(),
             }],
             vec![ArtifactRef {
                 producer_id: "reviewer".to_string(),
-                path: ".factory/work/artifacts/review.md".to_string(),
+                path: ".fluent/work/artifacts/review.md".to_string(),
             }],
         )
         .unwrap();

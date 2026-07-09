@@ -5,14 +5,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
-FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
+FLUENT_BIN="${FLUENT_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/fluent}"
 
 source "${PROJECT_DIR}/tests/lib/run_test.sh"
 source "${PROJECT_DIR}/tests/lib/work_test_fixtures.sh"
 LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 setup_test_project() {
-  TEST_DIR="$(mktemp -d -t factory-work-status-dashboard-XXXXXX)"
+  TEST_DIR="$(mktemp -d -t fluent-work-status-dashboard-XXXXXX)"
   mkdir -p "$TEST_DIR/project" "$TEST_DIR/bin"
   cd "$TEST_DIR/project"
   git init -b main > /dev/null 2>&1
@@ -57,7 +57,7 @@ clean_dashboard_output() {
 }
 
 clean_dashboard_output_tail() {
-  clean_dashboard_output | perl -0777 -ne '$i = rindex($_, "FactoryDashboard"); print $i >= 0 ? substr($_, $i) : $_'
+  clean_dashboard_output | perl -0777 -ne '$i = rindex($_, "FluentDashboard"); print $i >= 0 ? substr($_, $i) : $_'
 }
 
 wait_for_dashboard_capture() {
@@ -79,7 +79,7 @@ wait_for_dashboard_capture() {
 capture_dashboard_default() {
   PROJECT_PATH="$1"
   KEYS="${2:-}"
-  OUTPUT_FILE="$(mktemp -t factory-work-dashboard-output-XXXXXX)"
+  OUTPUT_FILE="$(mktemp -t fluent-work-dashboard-output-XXXXXX)"
 
   (
     sleep 1
@@ -88,10 +88,10 @@ capture_dashboard_default() {
       sleep 1
     fi
     printf 'q'
-  ) | FACTORY_DASH_BIN="$FACTORY_BIN" \
-      FACTORY_DASH_PROJECT="$PROJECT_PATH" \
+  ) | FLUENT_DASH_BIN="$FLUENT_BIN" \
+      FLUENT_DASH_PROJECT="$PROJECT_PATH" \
       TERM=xterm \
-      script -q "$OUTPUT_FILE" sh -c 'stty rows 30 cols 120; "$FACTORY_DASH_BIN" dashboard "$FACTORY_DASH_PROJECT"' >/dev/null 2>&1 || true
+      script -q "$OUTPUT_FILE" sh -c 'stty rows 30 cols 120; "$FLUENT_DASH_BIN" dashboard "$FLUENT_DASH_PROJECT"' >/dev/null 2>&1 || true
 
   cat "$OUTPUT_FILE"
   rm -f "$OUTPUT_FILE"
@@ -102,7 +102,7 @@ capture_dashboard_after_poll_mutation() {
   MUTATION="$2"
   INITIAL_NEEDLE="$3"
   POLLED_NEEDLE="$4"
-  OUTPUT_FILE="$(mktemp -t factory-work-dashboard-output-XXXXXX)"
+  OUTPUT_FILE="$(mktemp -t fluent-work-dashboard-output-XXXXXX)"
 
   (
     if wait_for_dashboard_capture "$OUTPUT_FILE" "$INITIAL_NEEDLE" 200; then
@@ -110,18 +110,18 @@ capture_dashboard_after_poll_mutation() {
       wait_for_dashboard_capture "$OUTPUT_FILE" "$POLLED_NEEDLE" 120 || true
     fi
     printf 'q'
-  ) | FACTORY_DASH_BIN="$FACTORY_BIN" \
-      FACTORY_DASH_PROJECT="$PROJECT_PATH" \
+  ) | FLUENT_DASH_BIN="$FLUENT_BIN" \
+      FLUENT_DASH_PROJECT="$PROJECT_PATH" \
       TERM=xterm \
-      script -q "$OUTPUT_FILE" sh -c 'stty rows 30 cols 120; "$FACTORY_DASH_BIN" dashboard "$FACTORY_DASH_PROJECT"' >/dev/null 2>&1 || true
+      script -q "$OUTPUT_FILE" sh -c 'stty rows 30 cols 120; "$FLUENT_DASH_BIN" dashboard "$FLUENT_DASH_PROJECT"' >/dev/null 2>&1 || true
 
   cat "$OUTPUT_FILE"
   rm -f "$OUTPUT_FILE"
 }
 
 create_planned_work_item() {
-  "$FACTORY_BIN" work-item create work-visible --title "Visible Work" > /dev/null
-  "$FACTORY_BIN" attempt create work-visible attempt-visible > /dev/null
+  "$FLUENT_BIN" work-item create work-visible --title "Visible Work" > /dev/null
+  "$FLUENT_BIN" attempt create work-visible attempt-visible > /dev/null
 }
 
 write_mock_claude() {
@@ -162,19 +162,19 @@ MOCK_SCRIPT
 
 create_merge_ready_work_item() {
   write_mock_claude
-  "$FACTORY_BIN" work-item create work-action --title "Actionable Work" > /dev/null
-  "$FACTORY_BIN" attempt create work-action attempt-action > /dev/null
+  "$FLUENT_BIN" work-item create work-action --title "Actionable Work" > /dev/null
+  "$FLUENT_BIN" attempt create work-action attempt-action > /dev/null
   PATH="${TEST_DIR}/bin:$PATH" \
-    "$FACTORY_BIN" attempt run work-action attempt-action --no-sandbox \
+    "$FLUENT_BIN" attempt run work-action attempt-action --no-sandbox \
       > "$TEST_DIR/attempt-run-stdout" 2> "$TEST_DIR/attempt-run-stderr"
 }
 
 create_needs_user_work_item() {
   write_uncertain_mock_claude
-  "$FACTORY_BIN" work-item create work-needs-user --title "Needs User Work" > /dev/null
-  "$FACTORY_BIN" attempt create work-needs-user attempt-needs-user > /dev/null
+  "$FLUENT_BIN" work-item create work-needs-user --title "Needs User Work" > /dev/null
+  "$FLUENT_BIN" attempt create work-needs-user attempt-needs-user > /dev/null
   PATH="${TEST_DIR}/bin:$PATH" \
-    "$FACTORY_BIN" attempt run work-needs-user attempt-needs-user --no-sandbox \
+    "$FLUENT_BIN" attempt run work-needs-user attempt-needs-user --no-sandbox \
       > "$TEST_DIR/needs-user-stdout" 2> "$TEST_DIR/needs-user-stderr"
 }
 
@@ -184,7 +184,7 @@ test_status_prints_work_items() {
   create_planned_work_item
 
   RESULT=0
-  OUTPUT="$("$FACTORY_BIN" status 2>&1)"
+  OUTPUT="$("$FLUENT_BIN" status 2>&1)"
   assert_contains "$OUTPUT" "Work Items" || RESULT=1
   assert_contains "$OUTPUT" "work-visible" || RESULT=1
   assert_contains "$OUTPUT" "attempt-visible" || RESULT=1
@@ -197,7 +197,7 @@ test_status_summarizes_work_model_vocabulary() {
   create_merge_ready_work_item
 
   RESULT=0
-  OUTPUT="$("$FACTORY_BIN" status 2>&1)"
+  OUTPUT="$("$FLUENT_BIN" status 2>&1)"
   assert_contains "$OUTPUT" "WORK" || RESULT=1
   assert_contains "$OUTPUT" "ATTEMPT" || RESULT=1
   assert_contains "$OUTPUT" "TASK" || RESULT=1
@@ -214,7 +214,7 @@ test_status_surfaces_needs_user_state() {
   create_needs_user_work_item
 
   RESULT=0
-  OUTPUT="$("$FACTORY_BIN" status 2>&1)"
+  OUTPUT="$("$FLUENT_BIN" status 2>&1)"
   assert_contains "$OUTPUT" "work-needs-user" || RESULT=1
   assert_contains "$OUTPUT" "attempt-needs-user" || RESULT=1
   assert_contains "$OUTPUT" "needs-user" || RESULT=1
@@ -224,26 +224,26 @@ test_status_surfaces_needs_user_state() {
 test_status_surfaces_abandoned_work_as_terminal() {
   setup_test_project
   trap cleanup_test_project RETURN
-  "$FACTORY_BIN" work-item create work-abandoned --title "Abandoned Work" > /dev/null
-  "$FACTORY_BIN" attempt create work-abandoned attempt-abandoned > /dev/null
+  "$FLUENT_BIN" work-item create work-abandoned --title "Abandoned Work" > /dev/null
+  "$FLUENT_BIN" attempt create work-abandoned attempt-abandoned > /dev/null
   python3 - <<'PY'
 import json
 from pathlib import Path
 
-attempt_path = Path(".factory/work/attempts/work-abandoned/attempt-abandoned.json")
+attempt_path = Path(".fluent/work/attempts/work-abandoned/attempt-abandoned.json")
 attempt = json.loads(attempt_path.read_text())
 attempt["status"] = "needs-user"
 attempt_path.write_text(json.dumps(attempt, indent=2) + "\n")
 
-task_path = Path(".factory/work/tasks/work-abandoned/attempt-abandoned/attempt-abandoned-write-1.json")
+task_path = Path(".fluent/work/tasks/work-abandoned/attempt-abandoned/attempt-abandoned-write-1.json")
 task = json.loads(task_path.read_text())
 task["status"] = "needs-user"
 task_path.write_text(json.dumps(task, indent=2) + "\n")
 PY
-  "$FACTORY_BIN" work-item abandon work-abandoned --reason "replacement landed" > /dev/null
+  "$FLUENT_BIN" work-item abandon work-abandoned --reason "replacement landed" > /dev/null
 
   RESULT=0
-  OUTPUT="$("$FACTORY_BIN" status 2>&1)"
+  OUTPUT="$("$FLUENT_BIN" status 2>&1)"
   assert_contains "$OUTPUT" "work-abandoned" || RESULT=1
   assert_contains "$OUTPUT" "attempt-abandoned" || RESULT=1
   assert_contains "$OUTPUT" "abandoned" || RESULT=1
@@ -253,15 +253,15 @@ PY
 test_status_reports_invalid_work_without_hiding_valid_state() {
   setup_test_project
   trap cleanup_test_project RETURN
-  mkdir -p .factory/work/items
+  mkdir -p .fluent/work/items
   create_planned_work_item
-  printf '{ invalid json\n' > .factory/work/items/broken-work.json
+  printf '{ invalid json\n' > .fluent/work/items/broken-work.json
 
   RESULT=0
-  OUTPUT="$("$FACTORY_BIN" status 2>&1 || true)"
+  OUTPUT="$("$FLUENT_BIN" status 2>&1 || true)"
   assert_contains "$OUTPUT" "work-visible" || RESULT=1
   assert_contains "$OUTPUT" "Work Item read errors" || RESULT=1
-  assert_contains "$OUTPUT" ".factory/work/items/broken-work.json" || RESULT=1
+  assert_contains "$OUTPUT" ".fluent/work/items/broken-work.json" || RESULT=1
   return $RESULT
 }
 
@@ -290,7 +290,7 @@ test_dashboard_refreshes_work_items_on_poll() {
   RESULT=0
   OUTPUT="$(capture_dashboard_after_poll_mutation \
     "$TEST_DIR/project" \
-    "'$FACTORY_BIN' work-item create work-polled --title 'Polled Work' > /dev/null" \
+    "'$FLUENT_BIN' work-item create work-polled --title 'Polled Work' > /dev/null" \
     "work-visible - Visible Work" \
     "work-polled - Polled Work")"
   FINAL_OUTPUT="$(printf '%s' "$OUTPUT" | clean_dashboard_output_tail)"
@@ -332,7 +332,7 @@ test_dashboard_reports_work_read_errors() {
   setup_test_project
   trap cleanup_test_project RETURN
   create_planned_work_item
-  printf '{ invalid json\n' > .factory/work/items/broken-work.json
+  printf '{ invalid json\n' > .fluent/work/items/broken-work.json
 
   RESULT=0
   OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)"

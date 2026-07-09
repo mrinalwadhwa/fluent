@@ -7,7 +7,7 @@
 # At the end, call summarize_and_exit to print the failed-case summary
 # and exit with the appropriate code.
 #
-# Honors FACTORY_TESTS_SKIP_LOG=1 to bypass per-case log-writing.
+# Honors FLUENT_TESTS_SKIP_LOG=1 to bypass per-case log-writing.
 
 PASS=0
 FAIL=0
@@ -33,7 +33,7 @@ run_test() {
 
   printf '  %s ... ' "$case_label"
 
-  if [ "${FACTORY_TESTS_SKIP_LOG:-0}" = "1" ] || [ -z "${LOG_DIR:-}" ]; then
+  if [ "${FLUENT_TESTS_SKIP_LOG:-0}" = "1" ] || [ -z "${LOG_DIR:-}" ]; then
     local rc=0
     ( eval "$case_fn" ) 2>&1 || rc=$?
     _record_result "$case_label" "$rc"

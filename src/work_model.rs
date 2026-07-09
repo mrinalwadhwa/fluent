@@ -13,13 +13,13 @@ pub fn now_iso8601() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-pub const WORK_MODEL_DIR: &str = ".factory/work";
+pub const WORK_MODEL_DIR: &str = ".fluent/work";
 pub const WORK_ITEMS_DIR: &str = "items";
 pub const WORK_ATTEMPTS_DIR: &str = "attempts";
 pub const WORK_TASKS_DIR: &str = "tasks";
 pub const WORK_MERGE_CANDIDATES_DIR: &str = "merge-candidates";
-pub const WORK_ARTIFACTS_DIR: &str = ".factory/work/artifacts";
-pub const WORK_PROGRESS_DIR: &str = ".factory/work/progress";
+pub const WORK_ARTIFACTS_DIR: &str = ".fluent/work/artifacts";
+pub const WORK_PROGRESS_DIR: &str = ".fluent/work/progress";
 
 pub fn work_artifact_path(work_item_id: &str, attempt_id: &str, artifact: &str) -> String {
     format!("{WORK_ARTIFACTS_DIR}/{work_item_id}/{attempt_id}/{artifact}")
@@ -157,7 +157,7 @@ impl fmt::Display for ManagedWorkspacePathError {
 
 impl Error for ManagedWorkspacePathError {}
 
-/// Durable unit of planned Factory work.
+/// Durable unit of planned Fluent work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkItem {
     pub id: String,
@@ -1041,13 +1041,13 @@ pub struct CoderMappingInputs {
 impl CoderMappingInputs {
     pub fn from_env() -> Self {
         Self {
-            write_coder: std::env::var("FACTORY_WRITE_CODER").ok(),
-            write_model: std::env::var("FACTORY_WRITE_MODEL").ok(),
-            review_coder: std::env::var("FACTORY_REVIEW_CODER").ok(),
-            review_model: std::env::var("FACTORY_REVIEW_MODEL").ok(),
-            behavior_tests_coder: std::env::var("FACTORY_BEHAVIOR_TESTS_CODER").ok(),
-            behavior_tests_model: std::env::var("FACTORY_BEHAVIOR_TESTS_MODEL").ok(),
-            global_coder: std::env::var("FACTORY_CODER").ok(),
+            write_coder: std::env::var("FLUENT_WRITE_CODER").ok(),
+            write_model: std::env::var("FLUENT_WRITE_MODEL").ok(),
+            review_coder: std::env::var("FLUENT_REVIEW_CODER").ok(),
+            review_model: std::env::var("FLUENT_REVIEW_MODEL").ok(),
+            behavior_tests_coder: std::env::var("FLUENT_BEHAVIOR_TESTS_CODER").ok(),
+            behavior_tests_model: std::env::var("FLUENT_BEHAVIOR_TESTS_MODEL").ok(),
+            global_coder: std::env::var("FLUENT_CODER").ok(),
         }
     }
 
@@ -1090,7 +1090,7 @@ impl CoderMappingInputs {
 ///
 /// Precedence per Task kind:
 /// 1. Per-Task-kind CLI flag / env var
-/// 2. Global `FACTORY_CODER` / per-Coder model env var
+/// 2. Global `FLUENT_CODER` / per-Coder model env var
 /// 3. Coder's built-in default
 pub fn resolve_coder_mapping(inputs: &CoderMappingInputs) -> Result<CoderMapping, anyhow::Error> {
     let global_kind = inputs
@@ -1599,7 +1599,7 @@ impl WorkspaceAccess {
     }
 }
 
-/// Factory-managed filesystem/git context.
+/// Fluent-managed filesystem/git context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceRef {
     pub id: String,
@@ -3259,7 +3259,7 @@ mod tests {
                 writes,
             },
             artifact_area: Some(TaskArtifactArea {
-                path: ".factory/tasks/task-1".to_string(),
+                path: ".fluent/tasks/task-1".to_string(),
             }),
             review_context,
             input_artifacts: Vec::new(),
@@ -3513,7 +3513,7 @@ mod tests {
                 assert!(
                     review_task.input_artifacts.iter().any(|ref_| {
                         ref_.producer_id == "writer"
-                            && ref_.path == ".factory/work/progress/work-1/attempt-1/progress.md"
+                            && ref_.path == ".fluent/work/progress/work-1/attempt-1/progress.md"
                     }),
                     "review task {} should have progress.md in input_artifacts",
                     task_id
@@ -3594,7 +3594,7 @@ mod tests {
                 writes: Vec::new(),
             },
             artifact_area: Some(TaskArtifactArea {
-                path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-behaviors"
+                path: ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-behaviors"
                     .to_string(),
             }),
             review_context: Some(ReviewContext {
@@ -3887,7 +3887,7 @@ mod tests {
         assert_eq!(write_task.kind, TaskKind::Write);
         assert_eq!(
             write_task.artifact_area.as_ref().unwrap().path,
-            ".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1"
+            ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1"
         );
     }
 
@@ -3904,7 +3904,7 @@ mod tests {
                 vec![ArtifactRef {
                     producer_id: "attempt-1-review-tests".to_string(),
                     path:
-                        ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
+                        ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
                             .to_string(),
                 }],
             )
@@ -3918,7 +3918,7 @@ mod tests {
         assert_eq!(followup_task.kind, TaskKind::Write);
         assert_eq!(
             followup_task.artifact_area.as_ref().unwrap().path,
-            ".factory/work/artifacts/work-1/attempt-1/attempt-1-write-2"
+            ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-2"
         );
     }
 
@@ -4101,7 +4101,7 @@ mod tests {
             .artifact_area
             .as_mut()
             .unwrap()
-            .path = ".factory/work/artifacts/other-attempt/attempt-review-review-tests".to_string();
+            .path = ".fluent/work/artifacts/other-attempt/attempt-review-review-tests".to_string();
 
         assert_eq!(
             work_item.validate().unwrap_err(),
@@ -4186,11 +4186,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             first_review.artifact_area.as_ref().unwrap().path,
-            ".factory/work/artifacts/work-alpha/attempt-1/attempt-1-review-tests"
+            ".fluent/work/artifacts/work-alpha/attempt-1/attempt-1-review-tests"
         );
         assert_eq!(
             second_review.artifact_area.as_ref().unwrap().path,
-            ".factory/work/artifacts/work-beta/attempt-1/attempt-1-review-tests"
+            ".fluent/work/artifacts/work-beta/attempt-1/attempt-1-review-tests"
         );
         assert_ne!(
             first_review.artifact_area.as_ref().unwrap().path,
@@ -4216,14 +4216,14 @@ mod tests {
                 vec![ArtifactRef {
                     producer_id: "attempt-1-review-tests".to_string(),
                     path:
-                        ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
+                        ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
                             .to_string(),
                 }],
             )
             .unwrap();
         work_item.attempts[0].artifacts.push(ArtifactRef {
             producer_id: "attempt-1-review-tests".to_string(),
-            path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
+            path: ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
                 .to_string(),
         });
         work_item.merge_candidates.push(MergeCandidate {
@@ -4247,12 +4247,12 @@ mod tests {
                 failure_reason: Some("Review failed".to_string()),
                 check_artifacts: vec![ArtifactRef {
                     producer_id: "merge-check".to_string(),
-                    path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/checks/checks.json"
+                    path: ".fluent/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/checks/checks.json"
                         .to_string(),
                 }],
                 review_artifacts: vec![ArtifactRef {
                     producer_id: "merge-review-tests".to_string(),
-                    path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/tests/review.md"
+                    path: ".fluent/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/tests/review.md"
                         .to_string(),
                 }],
                 auto_merge_skipped: None,
@@ -4269,7 +4269,7 @@ mod tests {
         let mut task_record: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&task_path).unwrap()).unwrap();
         task_record["artifact_area"]["path"] = serde_json::Value::String(
-            ".factory/work/artifacts/attempt-1/attempt-1-review-tests".to_string(),
+            ".fluent/work/artifacts/attempt-1/attempt-1-review-tests".to_string(),
         );
         fs::write(&task_path, to_json_pretty(&task_record).unwrap()).unwrap();
 
@@ -4277,7 +4277,7 @@ mod tests {
         let mut attempt_record: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&attempt_path).unwrap()).unwrap();
         attempt_record["artifacts"][0]["path"] = serde_json::Value::String(
-            ".factory/work/artifacts/attempt-1/attempt-1-review-tests/review.md".to_string(),
+            ".fluent/work/artifacts/attempt-1/attempt-1-review-tests/review.md".to_string(),
         );
         fs::write(&attempt_path, to_json_pretty(&attempt_record).unwrap()).unwrap();
 
@@ -4287,7 +4287,7 @@ mod tests {
         let mut followup_record: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&followup_path).unwrap()).unwrap();
         followup_record["input_artifacts"][0]["path"] = serde_json::Value::String(
-            ".factory/work/artifacts/attempt-1/attempt-1-review-tests/review.md".to_string(),
+            ".fluent/work/artifacts/attempt-1/attempt-1-review-tests/review.md".to_string(),
         );
         fs::write(&followup_path, to_json_pretty(&followup_record).unwrap()).unwrap();
 
@@ -4297,19 +4297,19 @@ mod tests {
         let mut candidate_record: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&candidate_path).unwrap()).unwrap();
         candidate_record["merge_state"]["check_artifacts"][0]["path"] = serde_json::Value::String(
-            ".factory/work/artifacts/attempt-1/attempt-1-merge-candidate/merge/checks/checks.json"
+            ".fluent/work/artifacts/attempt-1/attempt-1-merge-candidate/merge/checks/checks.json"
                 .to_string(),
         );
         candidate_record["merge_state"]["review_artifacts"][0]["path"] =
             serde_json::Value::String(
-                ".factory/work/artifacts/attempt-1/attempt-1-merge-candidate/merge/reviews/tests/review.md"
+                ".fluent/work/artifacts/attempt-1/attempt-1-merge-candidate/merge/reviews/tests/review.md"
                     .to_string(),
             );
         fs::write(&candidate_path, to_json_pretty(&candidate_record).unwrap()).unwrap();
 
         let legacy_dir = tmp
             .path()
-            .join(".factory/work/artifacts/attempt-1/attempt-1-review-tests");
+            .join(".fluent/work/artifacts/attempt-1/attempt-1-review-tests");
         fs::create_dir_all(&legacy_dir).unwrap();
         fs::write(legacy_dir.join("review.md"), "Verdict: pass\n").unwrap();
 
@@ -4322,11 +4322,11 @@ mod tests {
             .expect("review-tests task");
         assert_eq!(
             review_tests_task.artifact_area.as_ref().unwrap().path,
-            ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests"
+            ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests"
         );
         assert_eq!(
             read.attempts[0].artifacts[0].path,
-            ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
+            ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
         );
         let write_2_task = read.attempts[0]
             .tasks
@@ -4335,19 +4335,19 @@ mod tests {
             .expect("write-2 task");
         assert_eq!(
             write_2_task.input_artifacts[0].path,
-            ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
+            ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
         );
         assert_eq!(
             read.merge_candidates[0].merge_state.check_artifacts[0].path,
-            ".factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/checks/checks.json"
+            ".fluent/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/checks/checks.json"
         );
         assert_eq!(
             read.merge_candidates[0].merge_state.review_artifacts[0].path,
-            ".factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/tests/review.md"
+            ".fluent/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/tests/review.md"
         );
         assert!(
             tmp.path()
-                .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md")
+                .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md")
                 .is_file()
         );
         assert!(!legacy_dir.exists());
@@ -4380,7 +4380,7 @@ mod tests {
                         workspace_access: WorkspaceAccess::read_only(vec![workspace("candidate")]),
                         artifact_area: Some(TaskArtifactArea {
                             path:
-                                ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-documentation"
+                                ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-documentation"
                                     .to_string(),
                         }),
                         review_context: Some(ReviewContext {
@@ -4407,7 +4407,7 @@ mod tests {
                         attempt_id: Some("attempt-1".to_string()),
                         workspace_access: WorkspaceAccess::read_only(vec![workspace("candidate")]),
                         artifact_area: Some(TaskArtifactArea {
-                            path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-behaviors"
+                            path: ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-behaviors"
                                 .to_string(),
                         }),
                         review_context: Some(ReviewContext {
@@ -4462,7 +4462,7 @@ mod tests {
                 review_state: Some(AttemptReviewState::Passed),
                 artifacts: vec![ArtifactRef {
                     producer_id: "task-1".to_string(),
-                    path: ".factory/tasks/task-1/report.md".to_string(),
+                    path: ".fluent/tasks/task-1/report.md".to_string(),
                 }],
                 created_at: None,
                 completed_at: None,
@@ -4476,7 +4476,7 @@ mod tests {
         assert_eq!(decoded, work_item);
         assert_eq!(
             decoded.attempts[0].artifacts[0].path,
-            ".factory/tasks/task-1/report.md"
+            ".fluent/tasks/task-1/report.md"
         );
     }
 
@@ -4873,7 +4873,7 @@ mod tests {
             .expect_err("orphan task collection should be invalid");
         let message = error.to_string();
         assert!(
-            message.contains(".factory/work/tasks/work-1/attempt-1"),
+            message.contains(".fluent/work/tasks/work-1/attempt-1"),
             "{message}"
         );
         assert!(
@@ -4910,7 +4910,7 @@ mod tests {
                         attempt_id: Some("attempt-1".to_string()),
                         workspace_access: WorkspaceAccess::read_only(vec![workspace("candidate")]),
                         artifact_area: Some(TaskArtifactArea {
-                            path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests"
+                            path: ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests"
                                 .to_string(),
                         }),
                         review_context: Some(ReviewContext {
@@ -5701,7 +5701,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_coder_mapping_factory_coder_sets_all_task_kinds() {
+    fn resolve_coder_mapping_fluent_coder_sets_all_task_kinds() {
         let inputs = CoderMappingInputs {
             global_coder: Some("pi".to_string()),
             ..Default::default()

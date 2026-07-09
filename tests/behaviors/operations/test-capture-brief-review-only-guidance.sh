@@ -16,8 +16,8 @@ if ! grep -Fq 'review request' "$SKILL"; then
   failures=$((failures + 1))
 fi
 
-if ! grep -Fq 'build-in-the-factory' "$SKILL"; then
-  echo "capture-brief does not reference build-in-the-factory for review flow" >&2
+if ! grep -Fq 'build-in-the-fluent' "$SKILL"; then
+  echo "capture-brief does not reference build-in-the-fluent for review flow" >&2
   failures=$((failures + 1))
 fi
 

@@ -11,10 +11,10 @@ Interview the user. Decide the technical direction that will deliver the behavio
 
 Load these before starting the conversation:
 
-- The confirmed brief at `.factory/drafts/<draft-id>/brief.md`. The `<draft-id>` is set by `capture-brief`.
-- The confirmed behaviors diff at `.factory/drafts/<draft-id>/behaviors.diff.md` — what the system must do. Its Open questions section lists the solution choices `define-behaviors` deferred to you.
+- The confirmed brief at `.fluent/drafts/<draft-id>/brief.md`. The `<draft-id>` is set by `capture-brief`.
+- The confirmed behaviors diff at `.fluent/drafts/<draft-id>/behaviors.diff.md` — what the system must do. Its Open questions section lists the solution choices `define-behaviors` deferred to you.
 - Existing architecture at `documentation/architecture.md` (if it exists) — the shape of the system today.
-- `.factory/expertise/decisions.md` (if it exists) — recorded project choices. Any proposed direction must not contradict them; surface any conflict for the user to resolve.
+- `.fluent/expertise/decisions.md` (if it exists) — recorded project choices. Any proposed direction must not contradict them; surface any conflict for the user to resolve.
 - The code the new behaviors touch — enough to see the existing boundaries, patterns, and dependencies the approach will fit into or change.
 
 Read `references/architecture.md` for the principles to evaluate structural choices against.
@@ -80,11 +80,11 @@ Leave internal structure to the executing agent unless a specific piece has to b
 
 ## Assemble and confirm
 
-Once every decision is agreed, write `approach.md` to `.factory/drafts/<draft-id>/approach.md` and show it to the user:
+Once every decision is agreed, write `approach.md` to `.fluent/drafts/<draft-id>/approach.md` and show it to the user:
 
 > "Confirm the approach and move to planning? Reply **yes**, or name what to revise: (a) a decision, (b) structure, (c) a risk."
 
-Check that the vocabulary matches the behaviors diff, that no decision quietly contradicts a recorded choice in `.factory/expertise/decisions.md`, and that each key decision names what it gave up. If something needs changing, name which part — a specific decision, the structure section, or a risk — and re-enter that step. Don't re-run the whole walk-through.
+Check that the vocabulary matches the behaviors diff, that no decision quietly contradicts a recorded choice in `.fluent/expertise/decisions.md`, and that each key decision names what it gave up. If something needs changing, name which part — a specific decision, the structure section, or a risk — and re-enter that step. Don't re-run the whole walk-through.
 
 Once the user confirms, stop. `plan-execution` picks up next.
 

@@ -11,9 +11,9 @@ Interview the user. Decide whether this is one Work Item or several Work Items, 
 
 Load these before starting the conversation:
 
-- The confirmed brief at `.factory/drafts/<draft-id>/brief.md`. The `<draft-id>` is set by `capture-brief`.
-- The confirmed behaviors diff at `.factory/drafts/<draft-id>/behaviors.diff.md`. Every EARS statement needs a home in a step of some Work Item's plan or an explicit TBD.
-- The confirmed approach at `.factory/drafts/<draft-id>/approach.md`. Its Open questions section lists anything execution must still resolve.
+- The confirmed brief at `.fluent/drafts/<draft-id>/brief.md`. The `<draft-id>` is set by `capture-brief`.
+- The confirmed behaviors diff at `.fluent/drafts/<draft-id>/behaviors.diff.md`. Every EARS statement needs a home in a step of some Work Item's plan or an explicit TBD.
+- The confirmed approach at `.fluent/drafts/<draft-id>/approach.md`. Its Open questions section lists anything execution must still resolve.
 - The code the plan will touch — enough to see where each step lands, what depends on what, and any obvious ordering constraint.
 
 If any of the three planning files is missing, stop and go back to the skill that produces it.
@@ -96,9 +96,9 @@ Parallel work diverges when contracts stay implicit.
 
 ## Assemble and confirm
 
-For a single Work Item, write `plan.md` to `.factory/drafts/<draft-id>/plan.md`.
+For a single Work Item, write `plan.md` to `.fluent/drafts/<draft-id>/plan.md`.
 
-For multiple Work Items, write one plan per Work Item to `.factory/drafts/<draft-id>/items/<slug>/plan.md`. If a Work Item's scope would be muddied by unrelated content in the shared brief, behaviors, or approach, place a sliced version next to its plan under the same `items/<slug>/` directory. Otherwise, all Work Items share the top-level files.
+For multiple Work Items, write one plan per Work Item to `.fluent/drafts/<draft-id>/items/<slug>/plan.md`. If a Work Item's scope would be muddied by unrelated content in the shared brief, behaviors, or approach, place a sliced version next to its plan under the same `items/<slug>/` directory. Otherwise, all Work Items share the top-level files.
 
 Show the assembled plan(s) to the user:
 
@@ -113,17 +113,17 @@ Once the user confirms, move to Work Item creation.
 For a single Work Item, `<work-item-id>` equals `<draft-id>`. Run:
 
 ```sh
-factory work-item create <work-item-id> \
+fluent work-item create <work-item-id> \
   --title "<short title>" \
-  --brief-file .factory/drafts/<draft-id>/brief.md \
-  --behaviors-file .factory/drafts/<draft-id>/behaviors.diff.md \
-  --approach-file .factory/drafts/<draft-id>/approach.md \
-  --plan-file .factory/drafts/<draft-id>/plan.md
+  --brief-file .fluent/drafts/<draft-id>/brief.md \
+  --behaviors-file .fluent/drafts/<draft-id>/behaviors.diff.md \
+  --approach-file .fluent/drafts/<draft-id>/approach.md \
+  --plan-file .fluent/drafts/<draft-id>/plan.md
 ```
 
-For multiple Work Items, run `factory work-item create` once per Work Item. Each Work Item's `<work-item-id>` is `<draft-id>-<slug>`. Use its plan file at `.factory/drafts/<draft-id>/items/<slug>/plan.md`. For brief, behaviors, and approach, use the Work-Item-specific file under `items/<slug>/` if it exists, otherwise the shared file at the draft root.
+For multiple Work Items, run `fluent work-item create` once per Work Item. Each Work Item's `<work-item-id>` is `<draft-id>-<slug>`. Use its plan file at `.fluent/drafts/<draft-id>/items/<slug>/plan.md`. For brief, behaviors, and approach, use the Work-Item-specific file under `items/<slug>/` if it exists, otherwise the shared file at the draft root.
 
-Do not create the Attempt or run it. That belongs to the autonomous stage in `build-in-the-factory`. Stop here.
+Do not create the Attempt or run it. That belongs to the autonomous stage in `build-in-the-fluent`. Stop here.
 
 ## Plan format
 
@@ -177,4 +177,4 @@ Brief: [one-line summary from the brief]
 - Label options as (a), (b), (c), or ask a yes/no with an obvious default. Avoid unlabeled "X or Y?" forms.
 - Each step is a state the system reaches, not an activity to perform.
 - Behavior references are area-qualified — `Feed:B1`, not `B1` — because IDs restart per area.
-- When the plan splits, each Work Item's plan lives at `.factory/drafts/<draft-id>/items/<slug>/plan.md` and its `<work-item-id>` is `<draft-id>-<slug>`.
+- When the plan splits, each Work Item's plan lives at `.fluent/drafts/<draft-id>/items/<slug>/plan.md` and its `<work-item-id>` is `<draft-id>-<slug>`.

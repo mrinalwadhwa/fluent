@@ -80,7 +80,7 @@ impl LoggedCommand {
 }
 
 fn write_log(cmd_args: &[String], output: &Output) {
-    if std::env::var("FACTORY_TESTS_SKIP_LOG").as_deref() == Ok("1") {
+    if std::env::var("FLUENT_TESTS_SKIP_LOG").as_deref() == Ok("1") {
         return;
     }
 

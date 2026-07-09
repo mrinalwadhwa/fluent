@@ -3,11 +3,11 @@ Work on this Work Item: {{work_item_id}} - {{work_item_title}}.
 {{#if bootstrap_anything}}
 ## Phase 0 — Bootstrap
 
-The workspace is missing files Factory needs. Create them first.
+The workspace is missing files Fluent needs. Create them first.
 
 {{/if}}
 {{#if bootstrap_tester_yaml}}
-### `.factory/tester.yaml` is missing
+### `.fluent/tester.yaml` is missing
 
 Create this file and commit it. It declares which commands the Tester will run after you're done.
 
@@ -22,7 +22,7 @@ Each entry's `command` is a shell string the Tester runs sequentially in the wor
 
 {{/if}}
 {{#if bootstrap_extract_script}}
-### `.factory/extract-tester-results` is missing
+### `.fluent/extract-tester-results` is missing
 
 Create this executable script and commit it.
 
@@ -99,7 +99,7 @@ Follow test-driven development: write failing tests first, then the code that ma
 3. Implement the code changes.
 4. Run the step's tests and any plan-specified verification. Fix and re-run until everything passes.
 
-Skip TDD only when the step has no new behavior to test. Skip-eligible examples: doc-only changes, mechanical renames, compiler-enforced type updates, dead-code removal, pure refactors covered by existing tests. Hard-to-test code (async, integration surfaces) does not qualify — write tests for it. If the step has new behavior but the Factory's environment cannot exercise it, see the `Untestable:` rule below. For any skip, record why in progress.md.
+Skip TDD only when the step has no new behavior to test. Skip-eligible examples: doc-only changes, mechanical renames, compiler-enforced type updates, dead-code removal, pure refactors covered by existing tests. Hard-to-test code (async, integration surfaces) does not qualify — write tests for it. If the step has new behavior but the Fluent's environment cannot exercise it, see the `Untestable:` rule below. For any skip, record why in progress.md.
 
 ### C. Verify and document
 
@@ -117,12 +117,12 @@ Skip TDD only when the step has no new behavior to test. Skip-eligible examples:
 
 ## Phase 4 — Final verification
 
-Run all the test commands in `.factory/tester.yaml`. Fix and re-run until everything passes.
+Run all the test commands in `.fluent/tester.yaml`. Fix and re-run until everything passes.
 
 ### Task is done when
 
 - Every step is committed.
-- All test commands in `.factory/tester.yaml` succeed.
+- All test commands in `.fluent/tester.yaml` succeed.
 - The workspace has no unstaged, staged, or untracked changes — commit meaningful files; add generated ones to `.gitignore`.
 
 A Write Task with no new commits fails automatically.
@@ -131,7 +131,7 @@ A Write Task with no new commits fails automatically.
 
 ### When you add a new test file
 
-1. Read `.factory/tester.yaml`. Check whether any declared `command` entry would discover your new tests.
+1. Read `.fluent/tester.yaml`. Check whether any declared `command` entry would discover your new tests.
 2. If not, add a new `commands:` entry. Model it on existing entries:
 
    ```yaml
@@ -147,12 +147,12 @@ A Write Task with no new commits fails automatically.
 
 Capture an approach as a pattern when ALL three apply: (1) it would apply to future situations in this codebase, (2) a Writer working from scratch wouldn't naturally arrive at it, (3) you can describe its shape concretely. Examples: test fixtures, code-organization techniques, error-handling conventions.
 
-1. Create the pattern file at `.factory/expertise/<topic>/patterns/<pattern-name>.md`, where `<topic>` is the narrowest topic that fits (e.g., `tests` for a general testing pattern, or `tests/running-tests` for one specific to test execution). Create intermediate `patterns/` directories if they don't exist. Pattern file structure:
+1. Create the pattern file at `.fluent/expertise/<topic>/patterns/<pattern-name>.md`, where `<topic>` is the narrowest topic that fits (e.g., `tests` for a general testing pattern, or `tests/running-tests` for one specific to test execution). Create intermediate `patterns/` directories if they don't exist. Pattern file structure:
    - Title — what the pattern is
    - Context — when to use it
    - Mechanism — how it works
    - Example — concrete usage
-2. Add an index entry under the `## Patterns` section of `.factory/expertise/<topic>.md`. Use a relative link and a single-line load trigger that says when to read the pattern: `- [pattern-name](patterns/<pattern-name>.md) — read when <trigger>`. Create the `## Patterns` section if it doesn't exist.
+2. Add an index entry under the `## Patterns` section of `.fluent/expertise/<topic>.md`. Use a relative link and a single-line load trigger that says when to read the pattern: `- [pattern-name](patterns/<pattern-name>.md) — read when <trigger>`. Create the `## Patterns` section if it doesn't exist.
 3. Include the pattern file and the index update in the same commit as this step's other changes.
 
 ### When you can't test a planned behavior
@@ -160,7 +160,7 @@ Capture an approach as a pattern when ALL three apply: (1) it would apply to fut
 `Untestable:` is a last resort.
 
 1. Consult testing expertise and any patterns it indexes — the obstacle may have a known solution.
-2. If you still need to mark `Untestable:`, record it in progress.md as a nested bullet under the step, prefixed `Untestable:`, followed by a three-sentence justification naming a real obstacle the Factory's execution environment cannot overcome. Example:
+2. If you still need to mark `Untestable:`, record it in progress.md as a nested bullet under the step, prefixed `Untestable:`, followed by a three-sentence justification naming a real obstacle the Fluent's execution environment cannot overcome. Example:
 
    ```
    - [x] Implement chunk dispatch

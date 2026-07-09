@@ -35,6 +35,6 @@ If you cannot confidently resolve a conflict — for example, semantic conflicts
 ## Rules during rebase
 
 - You may use `git rebase -i {{target_branch}}` to clean up history during the rebase — squash fixups, reorder for clarity, or drop commits that became empty. Avoid `reword` — it opens the commit-message editor mid-rebase, which will hang. If you need to rewrite the top commit's message after the rebase, use `git commit --amend -m "<new message>"`. Every content change present in the pre-rebase candidate must be present in the post-rebase result.
-- Do not run project format, lint, or test commands. Factory runs those after and needs the workspace clean when you finish.
+- Do not run project format, lint, or test commands. Fluent runs those after and needs the workspace clean when you finish.
 - Only make edits necessary to resolve conflicts. Unrelated cleanup, refactoring, or fixes belong in a separate change, not this rebase.
 - Do not create new branches or tags.

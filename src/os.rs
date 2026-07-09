@@ -109,7 +109,7 @@ fn render_profile_for_access(
         .replace("_HOME_", home)
         .replace("_SANDBOX_ROOT_", &primary_root);
 
-    let temp_file = NamedTempFile::with_prefix("factory-sandbox-")?;
+    let temp_file = NamedTempFile::with_prefix("fluent-sandbox-")?;
     std::fs::write(temp_file.path(), &rendered)?;
 
     let path = temp_file.path().to_path_buf();
@@ -331,7 +331,7 @@ mod tests {
     fn rendered_profile_grants_workspace_and_artifact_writable() {
         let resolver = ContentResolver::new(None);
         let workspace = PathBuf::from("/Users/test/workspace/candidate");
-        let artifact = PathBuf::from("/Users/test/.factory/artifacts/tester");
+        let artifact = PathBuf::from("/Users/test/.fluent/artifacts/tester");
         let profile = render_profile_common_only(
             &resolver,
             "/Users/test",
@@ -347,7 +347,7 @@ mod tests {
         );
         assert!(
             content.contains(
-                "(allow file-write* (subpath \"/Users/test/.factory/artifacts/tester\"))"
+                "(allow file-write* (subpath \"/Users/test/.fluent/artifacts/tester\"))"
             ),
             "artifact dir should be writable: {content}"
         );

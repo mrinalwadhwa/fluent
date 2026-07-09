@@ -7,16 +7,16 @@ description: Interview the user to elaborate the brief into EARS-format behavior
 
 Interview the user. Write EARS statements that specify observable behaviors of the system. Design and implementation belong to later stages.
 
-Your statements build on `documentation/behaviors.md` — an increment over what already exists, not a restatement — but the only file you write is the diff at `.factory/drafts/<draft-id>/behaviors.diff.md`. If `documentation/behaviors.md` doesn't exist yet, this is the first behaviors set: still write `behaviors.diff.md`, where every statement is an addition.
+Your statements build on `documentation/behaviors.md` — an increment over what already exists, not a restatement — but the only file you write is the diff at `.fluent/drafts/<draft-id>/behaviors.diff.md`. If `documentation/behaviors.md` doesn't exist yet, this is the first behaviors set: still write `behaviors.diff.md`, where every statement is an addition.
 
 ## Read the inputs
 
 Load these before starting the conversation:
 
-- The confirmed brief at `.factory/drafts/<draft-id>/brief.md`. The `<draft-id>` is set by `capture-brief`.
+- The confirmed brief at `.fluent/drafts/<draft-id>/brief.md`. The `<draft-id>` is set by `capture-brief`.
 - Existing behaviors at `documentation/behaviors.md` (if it exists) — what the system already guarantees.
 - Existing architecture at `documentation/architecture.md` (if it exists) — established naming conventions and system structure.
-- `.factory/expertise/decisions.md` (if it exists) — recorded project choices. New behaviors must not contradict them; surface any conflict for the user to resolve.
+- `.fluent/expertise/decisions.md` (if it exists) — recorded project choices. New behaviors must not contradict them; surface any conflict for the user to resolve.
 - The code the brief touches — enough to see how it behaves today where the new statements apply, and any existing behavior they'd modify.
 
 Read `references/behaviors.md` for the EARS patterns and the qualities of a good statement.
@@ -87,7 +87,7 @@ Don't silently resolve unknowns. Don't make solution choices here.
 
 ## Assemble and confirm
 
-Once every area is agreed, write `behaviors.diff.md` to `.factory/drafts/<draft-id>/behaviors.diff.md` and show it to the user:
+Once every area is agreed, write `behaviors.diff.md` to `.fluent/drafts/<draft-id>/behaviors.diff.md` and show it to the user:
 
 > "Confirm the behaviors diff and move to approach? Reply **yes**, or name what to revise: (a) vocabulary, (b) a statement, (c) an unknown."
 

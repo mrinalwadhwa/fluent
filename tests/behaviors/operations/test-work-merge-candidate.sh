@@ -5,14 +5,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
-FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
+FLUENT_BIN="${FLUENT_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/fluent}"
 
 source "${PROJECT_DIR}/tests/lib/run_test.sh"
 source "${PROJECT_DIR}/tests/lib/work_test_fixtures.sh"
 LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 setup_test_project() {
-  TEST_DIR="$(mktemp -d -t factory-work-merge-candidate-XXXXXX)"
+  TEST_DIR="$(mktemp -d -t fluent-work-merge-candidate-XXXXXX)"
   mkdir -p "$TEST_DIR/project" "$TEST_DIR/bin"
   cd "$TEST_DIR/project"
   TEST_PROJECT_PWD="$(pwd -P)"
@@ -115,11 +115,11 @@ case "$PWD" in
     elif [ "$REVIEWER" = "behaviors" ] && [ "${MERGE_MOCK_MODE:-pass}" = "dirty-merge-review" ]; then
       printf 'Verdict: pass\n\nMerge behavior review dirtied the candidate.\n' > review.md
       printf 'dirty merge review\n' > "${REVIEW_WORKSPACE}/dirty-merge-review.txt"
-    elif [ "$REVIEWER" = "behaviors" ] && [ "${MERGE_MOCK_MODE:-pass}" = "dirty-merge-review-factory" ]; then
-      printf 'Verdict: pass\n\nMerge behavior review dirtied Factory state.\n' > review.md
-      mkdir -p "${REVIEW_WORKSPACE}/.factory/review-scratch"
+    elif [ "$REVIEWER" = "behaviors" ] && [ "${MERGE_MOCK_MODE:-pass}" = "dirty-merge-review-fluent" ]; then
+      printf 'Verdict: pass\n\nMerge behavior review dirtied Fluent state.\n' > review.md
+      mkdir -p "${REVIEW_WORKSPACE}/.fluent/review-scratch"
       printf 'dirty merge review\n' \
-        > "${REVIEW_WORKSPACE}/.factory/review-scratch/dirty.txt"
+        > "${REVIEW_WORKSPACE}/.fluent/review-scratch/dirty.txt"
     elif [ "$REVIEWER" = "behaviors" ]; then
       printf 'Verdict: pass\n\nMerge behavior review passed.\n' > review.md
     else
@@ -137,19 +137,19 @@ MOCK_SCRIPT
 }
 
 json_value() {
-  "$FACTORY_BIN" work-item show work-1 | jq -r "$1"
+  "$FLUENT_BIN" work-item show work-1 | jq -r "$1"
 }
 
 attempt_record_path() {
-  printf '.factory/work/attempts/work-1/attempt-1.json'
+  printf '.fluent/work/attempts/work-1/attempt-1.json'
 }
 
 task_record_path() {
-  printf '.factory/work/tasks/work-1/attempt-1/attempt-1-write-1.json'
+  printf '.fluent/work/tasks/work-1/attempt-1/attempt-1-write-1.json'
 }
 
 merge_candidate_record_path() {
-  printf '.factory/work/merge-candidates/work-1/attempt-1-merge-candidate.json'
+  printf '.fluent/work/merge-candidates/work-1/attempt-1-merge-candidate.json'
 }
 
 merge_candidate_record_value() {
@@ -174,10 +174,10 @@ assert_fails() {
 }
 
 create_passed_merge_candidate() {
-  "$FACTORY_BIN" work-item create work-1 --title "Merge candidate" > /dev/null
-  "$FACTORY_BIN" attempt create work-1 attempt-1 > /dev/null
+  "$FLUENT_BIN" work-item create work-1 --title "Merge candidate" > /dev/null
+  "$FLUENT_BIN" attempt create work-1 attempt-1 > /dev/null
   PATH="${TEST_DIR}/bin:$PATH" \
-    "$FACTORY_BIN" attempt run work-1 attempt-1 --no-sandbox \
+    "$FLUENT_BIN" attempt run work-1 attempt-1 --no-sandbox \
       > "$TEST_DIR/attempt-stdout" 2> "$TEST_DIR/attempt-stderr"
 }
 
@@ -189,7 +189,7 @@ run_merge() {
     MERGE_REVIEW_TIMING_LOG="${MERGE_REVIEW_TIMING_LOG:-}" \
     CANDIDATE_WORKSPACE="${TEST_DIR}/work-6-work-1-attempt-1" \
     PATH="${TEST_DIR}/bin:$PATH" \
-    "$FACTORY_BIN" merge-candidate land --no-sandbox work-1 attempt-1-merge-candidate
+    "$FLUENT_BIN" merge-candidate land --no-sandbox work-1 attempt-1-merge-candidate
 }
 
 assert_no_merge_reviewer_worktrees() {
@@ -210,12 +210,12 @@ assert_merge_review_artifacts_in_reviewer_order() {
   EXPECTED="$TEST_DIR/expected-review-artifacts"
   ACTUAL="$TEST_DIR/actual-review-artifacts"
   cat > "$EXPECTED" <<'EOF'
-merge-review-documentation:.factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/documentation/review.md
-merge-review-behaviors:.factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/behaviors/review.md
-merge-review-architecture:.factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/architecture/review.md
-merge-review-skills:.factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/skills/review.md
-merge-review-tests:.factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/tests/review.md
-merge-review-state:.factory/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/review-state.json
+merge-review-documentation:.fluent/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/documentation/review.md
+merge-review-behaviors:.fluent/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/behaviors/review.md
+merge-review-architecture:.fluent/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/architecture/review.md
+merge-review-skills:.fluent/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/skills/review.md
+merge-review-tests:.fluent/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/reviews/tests/review.md
+merge-review-state:.fluent/work/artifacts/work-1/attempt-1/attempt-1-merge-candidate/merge/review-state.json
 EOF
   json_value '.merge_candidates[0].merge_state.review_artifacts[] | "\(.producer_id):\(.path)"' \
     > "$ACTUAL"
@@ -237,17 +237,17 @@ test_work_merge_lands_after_update_and_checks() {
   git add target.txt && git commit -m "Add target update" > /dev/null 2>&1
   TARGET_BEFORE="$(git rev-parse main)"
 
-  mkdir -p .factory/hooks
-  cat > .factory/hooks/check-pre-merge <<EOF
+  mkdir -p .fluent/hooks
+  cat > .fluent/hooks/check-pre-merge <<EOF
 #!/usr/bin/env bash
 test -f merge-output.txt && test -f target.txt && printf '%s' "\$PWD" > '${TEST_DIR}/check-pwd'
 EOF
-  chmod +x .factory/hooks/check-pre-merge
+  chmod +x .fluent/hooks/check-pre-merge
 
   RESULT=0
   # Use a long debounce so the detached post-merge child does not race
   # the test cleanup.
-  FACTORY_POST_MERGE_DEBOUNCE_SECONDS=3600 \
+  FLUENT_POST_MERGE_DEBOUNCE_SECONDS=3600 \
     run_merge pass > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
   LANDED_COMMIT="$(json_value '.merge_candidates[0].merge_state.merged_commit')"
 
@@ -263,7 +263,7 @@ EOF
   # candidate, the post-merge review fires asynchronously instead.
   [ "$(json_value '.merge_candidates[0].merge_state.review_artifacts | length')" = "0" ] || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stdout")" "Merged Merge Candidate attempt-1-merge-candidate" || RESULT=1
-  "$FACTORY_BIN" merge-candidate show work-1 attempt-1-merge-candidate \
+  "$FLUENT_BIN" merge-candidate show work-1 attempt-1-merge-candidate \
     > "$TEST_DIR/landed-candidate" 2> "$TEST_DIR/stderr" || RESULT=1
   [ "$(jq -r '.merge_state.status' "$TEST_DIR/landed-candidate")" = "merged" ] || RESULT=1
   [ "$(jq -r '.merge_state.merged_commit' "$TEST_DIR/landed-candidate")" = "$LANDED_COMMIT" ] || RESULT=1
@@ -272,7 +272,7 @@ EOF
     RESULT=1
   fi
   # Verify a post-merge review queue entry was appended.
-  [ -f .factory/work/post-merge-review-queue.json ] || RESULT=1
+  [ -f .fluent/work/post-merge-review-queue.json ] || RESULT=1
   return $RESULT
 }
 
@@ -285,7 +285,7 @@ test_work_merge_rejects_missing_work_item() {
   MAIN_BEFORE="$(git rev-parse main)"
 
   RESULT=0
-  if "$FACTORY_BIN" merge-candidate land --no-sandbox missing-work attempt-1-merge-candidate \
+  if "$FLUENT_BIN" merge-candidate land --no-sandbox missing-work attempt-1-merge-candidate \
     > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr"; then
     printf '    FAIL: command unexpectedly succeeded for missing Work Item\n'
     RESULT=1
@@ -302,16 +302,16 @@ test_work_merge_rejects_missing_merge_candidate() {
   create_passed_merge_candidate
 
   MAIN_BEFORE="$(git rev-parse main)"
-  STATE_BEFORE="$("$FACTORY_BIN" work-item show work-1)"
+  STATE_BEFORE="$("$FLUENT_BIN" work-item show work-1)"
 
   RESULT=0
-  if "$FACTORY_BIN" merge-candidate land --no-sandbox work-1 missing-candidate \
+  if "$FLUENT_BIN" merge-candidate land --no-sandbox work-1 missing-candidate \
     > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr"; then
     printf '    FAIL: command unexpectedly succeeded for missing Merge Candidate\n'
     RESULT=1
   fi
   [ "$(git rev-parse main)" = "$MAIN_BEFORE" ] || RESULT=1
-  [ "$("$FACTORY_BIN" work-item show work-1)" = "$STATE_BEFORE" ] || RESULT=1
+  [ "$("$FLUENT_BIN" work-item show work-1)" = "$STATE_BEFORE" ] || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "missing-candidate" || RESULT=1
   return $RESULT
 }
@@ -361,7 +361,7 @@ test_work_merge_rejects_source_workspace_mismatch() {
   create_passed_merge_candidate
   MAIN_BEFORE="$(git rev-parse main)"
 
-  jq '.source_workspace.path = "/tmp/not-factory-source"' \
+  jq '.source_workspace.path = "/tmp/not-fluent-source"' \
     "$(merge_candidate_record_path)" > "$TEST_DIR/candidate.json"
   mv "$TEST_DIR/candidate.json" "$(merge_candidate_record_path)"
 
@@ -404,7 +404,7 @@ test_work_merge_rejects_target_workspace_mismatch() {
   create_passed_merge_candidate
   MAIN_BEFORE="$(git rev-parse main)"
 
-  jq '.target_workspace.path = "/tmp/not-factory-target"' \
+  jq '.target_workspace.path = "/tmp/not-fluent-target"' \
     "$(merge_candidate_record_path)" > "$TEST_DIR/candidate.json"
   mv "$TEST_DIR/candidate.json" "$(merge_candidate_record_path)"
 
@@ -423,14 +423,14 @@ test_work_merge_failed_check_leaves_target_unchanged() {
   create_passed_merge_candidate
   MAIN_BEFORE="$(git rev-parse main)"
 
-  mkdir -p .factory/hooks
-  cat > .factory/hooks/check-pre-merge <<EOF
+  mkdir -p .fluent/hooks
+  cat > .fluent/hooks/check-pre-merge <<EOF
 #!/usr/bin/env bash
 printf check-ran > '${TEST_DIR}/check-marker'
 printf 'failing-check-output\n' >&2
 exit 3
 EOF
-  chmod +x .factory/hooks/check-pre-merge
+  chmod +x .fluent/hooks/check-pre-merge
 
   RESULT=0
   assert_fails run_merge pass || RESULT=1
@@ -478,14 +478,14 @@ test_work_merge_candidate_inspection_read_only() {
   write_mock_claude
   create_passed_merge_candidate
   MAIN_BEFORE="$(git rev-parse main)"
-  STATE_BEFORE="$("$FACTORY_BIN" work-item show work-1)"
+  STATE_BEFORE="$("$FLUENT_BIN" work-item show work-1)"
 
   RESULT=0
-  "$FACTORY_BIN" merge-candidate show work-1 attempt-1-merge-candidate \
+  "$FLUENT_BIN" merge-candidate show work-1 attempt-1-merge-candidate \
     > "$TEST_DIR/candidate" 2> "$TEST_DIR/stderr" || RESULT=1
   jq -e '.id == "attempt-1-merge-candidate"' "$TEST_DIR/candidate" > /dev/null || RESULT=1
   [ "$(git rev-parse main)" = "$MAIN_BEFORE" ] || RESULT=1
-  [ "$("$FACTORY_BIN" work-item show work-1)" = "$STATE_BEFORE" ] || RESULT=1
+  [ "$("$FLUENT_BIN" work-item show work-1)" = "$STATE_BEFORE" ] || RESULT=1
   [ "$(json_value '.merge_candidates[0].merge_state.status')" = "pending" ] || RESULT=1
   return $RESULT
 }

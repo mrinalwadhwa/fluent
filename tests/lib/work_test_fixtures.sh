@@ -19,7 +19,7 @@ seed_tester_results() {
   local work_item_id="$2"
   local attempt_id="$3"
   local tester_id="${attempt_id}-tester"
-  local dir="${project_root}/.factory/work/artifacts/${work_item_id}/${attempt_id}/${tester_id}"
+  local dir="${project_root}/.fluent/work/artifacts/${work_item_id}/${attempt_id}/${tester_id}"
   mkdir -p "$dir"
   printf '[]\n' > "${dir}/tester-results.json"
 }

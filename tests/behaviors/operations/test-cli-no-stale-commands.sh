@@ -6,28 +6,28 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 failures=0
 
 stale_patterns=(
-  "factory work list"
-  "factory work show"
-  "factory work create"
-  "factory work attempt"
-  "factory work merge"
-  "factory work review"
-  "factory work task"
-  "factory work tester"
-  "factory work queue"
-  "factory work scheduler"
-  "factory work auto-merge"
-  "factory work post-merge-review"
-  "factory work status"
-  "factory work cleanup"
-  "factory work abandon"
-  "factory work review-codebase"
-  "factory work review-only-worktree"
-  "factory observations add"
-  "factory observations resolve"
-  "factory observations list"
-  "factory observations show"
-  "factory observations migrate"
+  "fluent work list"
+  "fluent work show"
+  "fluent work create"
+  "fluent work attempt"
+  "fluent work merge"
+  "fluent work review"
+  "fluent work task"
+  "fluent work tester"
+  "fluent work queue"
+  "fluent work scheduler"
+  "fluent work auto-merge"
+  "fluent work post-merge-review"
+  "fluent work status"
+  "fluent work cleanup"
+  "fluent work abandon"
+  "fluent work review-codebase"
+  "fluent work review-only-worktree"
+  "fluent observations add"
+  "fluent observations resolve"
+  "fluent observations list"
+  "fluent observations show"
+  "fluent observations migrate"
 )
 
 scan_dirs=(
@@ -43,7 +43,7 @@ for pattern in "${stale_patterns[@]}"; do
       matches=$(grep -rn --include='*.md' --include='*.sh' --include='*.yaml' \
         -F "$pattern" "$dir" 2>/dev/null \
         | grep -v 'test-cli-no-stale-commands\.sh' \
-        | grep -v 'test-build-in-factory-command-reference\.sh' || true)
+        | grep -v 'test-build-in-fluent-command-reference\.sh' || true)
       if [ -n "$matches" ]; then
         echo "stale command pattern '${pattern}' found:" >&2
         echo "$matches" | head -5 >&2

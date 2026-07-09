@@ -13,7 +13,7 @@ fn main() {
         .filter(|commit| !commit.is_empty())
         .unwrap_or_else(|| "unknown".to_string());
 
-    println!("cargo:rustc-env=FACTORY_BUILD_COMMIT={commit}");
+    println!("cargo:rustc-env=FLUENT_BUILD_COMMIT={commit}");
 }
 
 fn print_git_rerun_paths() {

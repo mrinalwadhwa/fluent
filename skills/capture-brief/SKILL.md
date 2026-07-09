@@ -45,7 +45,7 @@ Look for:
 - Patterns and conventions already established.
 - Dependencies and integration points that will matter.
 - Anything that contradicts or complicates the user's description.
-- Recorded project choices in `.factory/expertise/decisions.md` (if it exists) that the request may conflict with — flag any conflict for the user rather than resolving it here.
+- Recorded project choices in `.fluent/expertise/decisions.md` (if it exists) that the request may conflict with — flag any conflict for the user rather than resolving it here.
 
 Then come back with follow-ups:
 
@@ -65,11 +65,11 @@ Wait for confirmation before writing.
 
 ## Set the draft-id
 
-After confirmation, generate a draft-id in the format `YYYYMMDD-HHMMSS-kebab-title` (example: `20260706-143022-cache-status`). If this planning conversation already has a draft-id, keep using it. On a resumed session, list `.factory/drafts/` — if a draft already exists and the user is continuing it, keep that draft-id instead of generating a new one.
+After confirmation, generate a draft-id in the format `YYYYMMDD-HHMMSS-kebab-title` (example: `20260706-143022-cache-status`). If this planning conversation already has a draft-id, keep using it. On a resumed session, list `.fluent/drafts/` — if a draft already exists and the user is continuing it, keep that draft-id instead of generating a new one.
 
 ## Write the brief
 
-Write to `.factory/drafts/<draft-id>/brief.md` in the format below.
+Write to `.fluent/drafts/<draft-id>/brief.md` in the format below.
 
 **Do not create the Work Item now.** `plan-execution` creates it after brief, behaviors, approach, and plan are all approved.
 
@@ -85,7 +85,7 @@ Once the user confirms, stop here. `define-behaviors` picks up next.
 
 ## Review-only briefs
 
-For a review request rather than a build request: set the draft-id as above, then write to `.factory/drafts/<draft-id>/brief.md` using this format:
+For a review request rather than a build request: set the draft-id as above, then write to `.fluent/drafts/<draft-id>/brief.md` using this format:
 
 ```markdown
 # Brief
@@ -103,7 +103,7 @@ For a review request rather than a build request: set the draft-id as above, the
 - [Role or expertise needed, if the user specified]
 ```
 
-Omit empty sections. Run the same Confirm step. Once confirmed, stop here. `build-in-the-factory` handles Work Item creation and the review-only flow after confirmation.
+Omit empty sections. Run the same Confirm step. Once confirmed, stop here. `build-in-the-fluent` handles Work Item creation and the review-only flow after confirmation.
 
 ## Brief format
 

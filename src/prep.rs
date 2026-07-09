@@ -161,7 +161,7 @@ mod tests {
 
         let target_dir = candidate.join("target");
         std::fs::create_dir_all(target_dir.join("debug")).unwrap();
-        std::fs::write(target_dir.join("debug/factory"), "binary").unwrap();
+        std::fs::write(target_dir.join("debug/fluent"), "binary").unwrap();
 
         let tc = Toolchain {
             name: "rust",
@@ -171,9 +171,9 @@ mod tests {
 
         populate_reviewer_cache(&candidate, &artifact, &tc).unwrap();
 
-        assert!(artifact.join("target/debug/factory").is_file());
+        assert!(artifact.join("target/debug/fluent").is_file());
         assert_eq!(
-            std::fs::read_to_string(artifact.join("target/debug/factory")).unwrap(),
+            std::fs::read_to_string(artifact.join("target/debug/fluent")).unwrap(),
             "binary"
         );
         assert!(!artifact.join("nonexistent").exists());

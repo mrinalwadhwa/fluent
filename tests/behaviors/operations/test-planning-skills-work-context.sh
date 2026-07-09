@@ -31,12 +31,12 @@ CAPTURE="$ROOT/skills/capture-brief/SKILL.md"
 DEFINE="$ROOT/skills/define-behaviors/SKILL.md"
 APPROACH="$ROOT/skills/design-approach/SKILL.md"
 PLAN="$ROOT/skills/plan-execution/SKILL.md"
-BUILD="$ROOT/skills/build-in-the-factory/SKILL.md"
+BUILD="$ROOT/skills/build-in-the-fluent/SKILL.md"
 ARCH="$ROOT/documentation/architecture.md"
 BEHAVIORS="$ROOT/documentation/behaviors.md"
 
 require_in_file "$CAPTURE" \
-  '.factory/drafts/' \
+  '.fluent/drafts/' \
   "capture-brief skill"
 require_in_file "$CAPTURE" \
   'plan-execution' \
@@ -44,7 +44,7 @@ require_in_file "$CAPTURE" \
 
 for skill in "$DEFINE" "$APPROACH" "$PLAN"; do
   require_in_file "$skill" \
-    '.factory/drafts/' \
+    '.fluent/drafts/' \
     "$skill"
 done
 
@@ -73,7 +73,7 @@ require_in_file "$PLAN" \
   '## Decide one Work Item or several' \
   "plan-execution skill"
 require_in_file "$PLAN" \
-  'factory work-item create' \
+  'fluent work-item create' \
   "plan-execution skill"
 require_in_file "$PLAN" \
   '## Plan format' \
@@ -90,7 +90,7 @@ require_in_file "$PLAN" \
 
 require_in_file "$BUILD" \
   'capture-brief' \
-  "build-in-the-factory skill"
+  "build-in-the-fluent skill"
 
 require_in_file "$ARCH" \
   "skills treat this Work Item planning context as the normal handoff" \

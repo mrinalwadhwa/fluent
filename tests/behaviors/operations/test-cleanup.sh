@@ -8,7 +8,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
-FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
+FLUENT_BIN="${FLUENT_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/fluent}"
 
 source "${PROJECT_DIR}/tests/lib/run_test.sh"
 LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
@@ -28,11 +28,11 @@ assert_output_not_contains() {
 }
 
 create_project() {
-  TEST_DIR="$(mktemp -d -t factory-test-cleanup-XXXXXX)"
+  TEST_DIR="$(mktemp -d -t fluent-test-cleanup-XXXXXX)"
   cd "$TEST_DIR"
   git init -q
-  git config user.email "factory@example.com"
-  git config user.name "Factory Test"
+  git config user.email "fluent@example.com"
+  git config user.name "Fluent Test"
   git config commit.gpgsign false
   touch README.md
   git add README.md
@@ -40,13 +40,13 @@ create_project() {
 }
 
 create_project_with_unique_sibling_parent() {
-  TEST_PARENT_DIR="$(mktemp -d -t factory-test-cleanup-parent-XXXXXX)"
+  TEST_PARENT_DIR="$(mktemp -d -t fluent-test-cleanup-parent-XXXXXX)"
   TEST_DIR="${TEST_PARENT_DIR}/source"
   mkdir -p "$TEST_DIR"
   cd "$TEST_DIR"
   git init -q
-  git config user.email "factory@example.com"
-  git config user.name "Factory Test"
+  git config user.email "fluent@example.com"
+  git config user.name "Fluent Test"
   git config commit.gpgsign false
   touch README.md
   git add README.md
@@ -55,25 +55,25 @@ create_project_with_unique_sibling_parent() {
 
 test_cleanup_work_items_dry_run_and_apply() {
   create_project_with_unique_sibling_parent
-  "$FACTORY_BIN" work-item create work-1 --title "Cleanup work" >/dev/null
-  "$FACTORY_BIN" attempt create work-1 attempt-1 >/dev/null
-  "$FACTORY_BIN" work-item create work-active --title "Active work" >/dev/null
-  "$FACTORY_BIN" attempt create work-active attempt-1 >/dev/null
+  "$FLUENT_BIN" work-item create work-1 --title "Cleanup work" >/dev/null
+  "$FLUENT_BIN" attempt create work-1 attempt-1 >/dev/null
+  "$FLUENT_BIN" work-item create work-active --title "Active work" >/dev/null
+  "$FLUENT_BIN" attempt create work-active attempt-1 >/dev/null
 
   python3 - <<'PY'
 import json
 from pathlib import Path
 
-path = Path(".factory/work/attempts/work-1/attempt-1.json")
+path = Path(".fluent/work/attempts/work-1/attempt-1.json")
 attempt = json.loads(path.read_text())
 attempt["status"] = "complete"
 path.write_text(json.dumps(attempt, indent=2) + "\n")
 
-path = Path(".factory/work/tasks/work-1/attempt-1/attempt-1-write-1.json")
+path = Path(".fluent/work/tasks/work-1/attempt-1/attempt-1-write-1.json")
 task = json.loads(path.read_text())
 task["status"] = "complete"
 task["artifact_area"] = {
-    "path": ".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1"
+    "path": ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1"
 }
 task["output"] = {
     "workspace_id": "candidate",
@@ -83,24 +83,24 @@ task["output"] = {
 }
 path.write_text(json.dumps(task, indent=2) + "\n")
 
-path = Path(".factory/work/attempts/work-active/attempt-1.json")
+path = Path(".fluent/work/attempts/work-active/attempt-1.json")
 attempt = json.loads(path.read_text())
 attempt["status"] = "executing"
 path.write_text(json.dumps(attempt, indent=2) + "\n")
 
-path = Path(".factory/work/tasks/work-active/attempt-1/attempt-1-write-1.json")
+path = Path(".fluent/work/tasks/work-active/attempt-1/attempt-1-write-1.json")
 task = json.loads(path.read_text())
 task["status"] = "executing"
 task["artifact_area"] = {
-    "path": ".factory/work/artifacts/work-active/attempt-1/attempt-1-active"
+    "path": ".fluent/work/artifacts/work-active/attempt-1/attempt-1-active"
 }
 path.write_text(json.dumps(task, indent=2) + "\n")
 PY
 
-  ARTIFACT_DIR=".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1"
+  ARTIFACT_DIR=".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1"
   mkdir -p "$ARTIFACT_DIR"
   printf 'artifact' > "$ARTIFACT_DIR/result.md"
-  ACTIVE_ARTIFACT_DIR=".factory/work/artifacts/work-active/attempt-1/attempt-1-active"
+  ACTIVE_ARTIFACT_DIR=".fluent/work/artifacts/work-active/attempt-1/attempt-1-active"
   mkdir -p "$ACTIVE_ARTIFACT_DIR"
   printf 'active artifact' > "$ACTIVE_ARTIFACT_DIR/result.md"
 
@@ -111,7 +111,7 @@ PY
   ACTIVE_BRANCH_NAME="work/work-active/attempt-1/attempt-1-write-1"
   git worktree add -q -b "$ACTIVE_BRANCH_NAME" "$ACTIVE_WORKTREE_DIR" HEAD
 
-  OUTPUT="$("$FACTORY_BIN" cleanup 2>&1)"
+  OUTPUT="$("$FLUENT_BIN" cleanup 2>&1)"
 
   RESULT=0
   assert_output_contains "$OUTPUT" "would clean Work Item work-1" || RESULT=1
@@ -119,7 +119,7 @@ PY
   assert_output_contains "$OUTPUT" "would remove Work branch" || RESULT=1
   assert_output_contains "$OUTPUT" "would remove Work artifact" || RESULT=1
   assert_output_not_contains "$OUTPUT" "work-active" || RESULT=1
-  if [ ! -f ".factory/work/items/work-1.json" ]; then
+  if [ ! -f ".fluent/work/items/work-1.json" ]; then
     printf '    FAIL: dry run removed Work Item state\n'
     RESULT=1
   fi
@@ -131,7 +131,7 @@ PY
     printf '    FAIL: dry run removed Work artifact\n'
     RESULT=1
   fi
-  if [ ! -f ".factory/work/items/work-active.json" ]; then
+  if [ ! -f ".fluent/work/items/work-active.json" ]; then
     printf '    FAIL: dry run removed active Work Item state\n'
     RESULT=1
   fi
@@ -144,15 +144,15 @@ PY
     RESULT=1
   fi
 
-  APPLY_OUTPUT="$("$FACTORY_BIN" cleanup --apply 2>&1)"
+  APPLY_OUTPUT="$("$FLUENT_BIN" cleanup --apply 2>&1)"
   assert_output_contains "$APPLY_OUTPUT" "cleaned Work Item work-1" || RESULT=1
   assert_output_contains "$APPLY_OUTPUT" "removed registered worktree" || RESULT=1
   assert_output_contains "$APPLY_OUTPUT" "removed Work branch" || RESULT=1
-  if [ -f ".factory/work/items/work-1.json" ]; then
+  if [ -f ".fluent/work/items/work-1.json" ]; then
     printf '    FAIL: apply kept Work Item state\n'
     RESULT=1
   fi
-  if [ ! -f ".factory/work/items/work-active.json" ]; then
+  if [ ! -f ".fluent/work/items/work-active.json" ]; then
     printf '    FAIL: apply removed active Work Item state\n'
     RESULT=1
   fi
@@ -190,18 +190,18 @@ PY
 
 test_cleanup_work_items_remove_orphan_artifact_roots() {
   create_project
-  "$FACTORY_BIN" work-item create work-active --title "Active work" >/dev/null
+  "$FLUENT_BIN" work-item create work-active --title "Active work" >/dev/null
 
-  ORPHAN_ROOT=".factory/work/artifacts/work-orphan"
-  ACTIVE_ROOT=".factory/work/artifacts/work-active"
-  FILE_ENTRY=".factory/work/artifacts/not-a-directory"
+  ORPHAN_ROOT=".fluent/work/artifacts/work-orphan"
+  ACTIVE_ROOT=".fluent/work/artifacts/work-active"
+  FILE_ENTRY=".fluent/work/artifacts/not-a-directory"
   mkdir -p "$ORPHAN_ROOT/attempt-1/task-1"
   printf 'orphan artifact' > "$ORPHAN_ROOT/attempt-1/task-1/result.md"
   mkdir -p "$ACTIVE_ROOT/attempt-1/task-1"
   printf 'active artifact' > "$ACTIVE_ROOT/attempt-1/task-1/result.md"
   printf 'keep file entries' > "$FILE_ENTRY"
 
-  OUTPUT="$("$FACTORY_BIN" cleanup 2>&1)"
+  OUTPUT="$("$FLUENT_BIN" cleanup 2>&1)"
 
   RESULT=0
   assert_output_contains "$OUTPUT" "would remove orphan Work artifact root" || RESULT=1
@@ -221,7 +221,7 @@ test_cleanup_work_items_remove_orphan_artifact_roots() {
     RESULT=1
   fi
 
-  APPLY_OUTPUT="$("$FACTORY_BIN" cleanup --apply 2>&1)"
+  APPLY_OUTPUT="$("$FLUENT_BIN" cleanup --apply 2>&1)"
   assert_output_contains "$APPLY_OUTPUT" "removed orphan Work artifact root" || RESULT=1
   assert_output_contains "$APPLY_OUTPUT" "work-orphan" || RESULT=1
   assert_output_not_contains "$APPLY_OUTPUT" "work-active" || RESULT=1
@@ -245,10 +245,10 @@ test_cleanup_work_items_remove_orphan_artifact_roots() {
 
 test_cleanup_work_items_ignore_unmanaged_artifacts() {
   create_project
-  "$FACTORY_BIN" work-item create work-1 --title "Cleanup work" >/dev/null
-  "$FACTORY_BIN" attempt create work-1 attempt-1 >/dev/null
+  "$FLUENT_BIN" work-item create work-1 --title "Cleanup work" >/dev/null
+  "$FLUENT_BIN" attempt create work-1 attempt-1 >/dev/null
 
-  OUTSIDE_DIR="$(mktemp -d -t factory-test-cleanup-outside-XXXXXX)"
+  OUTSIDE_DIR="$(mktemp -d -t fluent-test-cleanup-outside-XXXXXX)"
   OUTSIDE_FILE="${OUTSIDE_DIR}/outside.md"
   PARENT_ESCAPE_FILE="../outside-artifact.md"
 
@@ -260,7 +260,7 @@ from pathlib import Path
 absolute_path = sys.argv[1]
 parent_escape_path = sys.argv[2]
 
-path = Path(".factory/work/attempts/work-1/attempt-1.json")
+path = Path(".fluent/work/attempts/work-1/attempt-1.json")
 attempt = json.loads(path.read_text())
 attempt["status"] = "complete"
 attempt["artifacts"] = [
@@ -268,16 +268,16 @@ attempt["artifacts"] = [
     {"producer_id": "outside-parent", "path": parent_escape_path},
     {
         "producer_id": "managed",
-        "path": ".factory/work/artifacts/work-1/attempt-1/attempt-1-review/review.md",
+        "path": ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review/review.md",
     },
 ]
 path.write_text(json.dumps(attempt, indent=2) + "\n")
 
-path = Path(".factory/work/tasks/work-1/attempt-1/attempt-1-write-1.json")
+path = Path(".fluent/work/tasks/work-1/attempt-1/attempt-1-write-1.json")
 task = json.loads(path.read_text())
 task["status"] = "complete"
 task["artifact_area"] = {
-    "path": ".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1"
+    "path": ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1"
 }
 task["output"] = {
     "workspace_id": "candidate",
@@ -288,15 +288,15 @@ task["output"] = {
 path.write_text(json.dumps(task, indent=2) + "\n")
 PY
 
-  ARTIFACT_DIR=".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1"
-  MANAGED_REVIEW_ARTIFACT=".factory/work/artifacts/work-1/attempt-1/attempt-1-review/review.md"
+  ARTIFACT_DIR=".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1"
+  MANAGED_REVIEW_ARTIFACT=".fluent/work/artifacts/work-1/attempt-1/attempt-1-review/review.md"
   mkdir -p "$ARTIFACT_DIR" "$(dirname "$MANAGED_REVIEW_ARTIFACT")"
   printf 'artifact' > "$ARTIFACT_DIR/result.md"
   printf 'review' > "$MANAGED_REVIEW_ARTIFACT"
   printf 'outside' > "$OUTSIDE_FILE"
   printf 'parent escape' > "$PARENT_ESCAPE_FILE"
 
-  OUTPUT="$("$FACTORY_BIN" cleanup --apply 2>&1)"
+  OUTPUT="$("$FLUENT_BIN" cleanup --apply 2>&1)"
 
   RESULT=0
   assert_output_contains "$OUTPUT" "cleaned Work Item work-1" || RESULT=1
@@ -327,45 +327,45 @@ PY
 
 test_cleanup_selects_abandoned_needs_user_work_item() {
   create_project_with_unique_sibling_parent
-  "$FACTORY_BIN" work-item create work-stale --title "Stale needs-user work" >/dev/null
-  "$FACTORY_BIN" attempt create work-stale attempt-1 >/dev/null
+  "$FLUENT_BIN" work-item create work-stale --title "Stale needs-user work" >/dev/null
+  "$FLUENT_BIN" attempt create work-stale attempt-1 >/dev/null
 
   python3 - <<'PY'
 import json
 from pathlib import Path
 
-attempt_path = Path(".factory/work/attempts/work-stale/attempt-1.json")
+attempt_path = Path(".fluent/work/attempts/work-stale/attempt-1.json")
 attempt = json.loads(attempt_path.read_text())
 attempt["status"] = "needs-user"
 attempt_path.write_text(json.dumps(attempt, indent=2) + "\n")
 
-task_path = Path(".factory/work/tasks/work-stale/attempt-1/attempt-1-write-1.json")
+task_path = Path(".fluent/work/tasks/work-stale/attempt-1/attempt-1-write-1.json")
 task = json.loads(task_path.read_text())
 task["status"] = "needs-user"
 task_path.write_text(json.dumps(task, indent=2) + "\n")
 PY
 
-  "$FACTORY_BIN" work-item abandon work-stale --reason "replacement landed" >/dev/null
+  "$FLUENT_BIN" work-item abandon work-stale --reason "replacement landed" >/dev/null
 
   WORKTREE_DIR="$(cd .. && pwd)/work-10-work-stale-attempt-1"
   BRANCH_NAME="work/work-stale/attempt-1/attempt-1-write-1"
   git worktree add -q -b "$BRANCH_NAME" "$WORKTREE_DIR" HEAD
 
-  OUTPUT="$("$FACTORY_BIN" cleanup 2>&1)"
+  OUTPUT="$("$FLUENT_BIN" cleanup 2>&1)"
 
   RESULT=0
   assert_output_contains "$OUTPUT" "would clean Work Item work-stale" || RESULT=1
   assert_output_contains "$OUTPUT" "would remove registered worktree" || RESULT=1
   assert_output_contains "$OUTPUT" "would remove Work branch" || RESULT=1
-  if [ ! -f ".factory/work/items/work-stale.json" ]; then
+  if [ ! -f ".fluent/work/items/work-stale.json" ]; then
     printf '    FAIL: dry run removed abandoned Work Item state\n'
     RESULT=1
   fi
 
-  APPLY_OUTPUT="$("$FACTORY_BIN" cleanup --apply 2>&1)"
+  APPLY_OUTPUT="$("$FLUENT_BIN" cleanup --apply 2>&1)"
   assert_output_contains "$APPLY_OUTPUT" "cleaned Work Item work-stale" || RESULT=1
   assert_output_contains "$APPLY_OUTPUT" "removed registered worktree" || RESULT=1
-  if [ -f ".factory/work/items/work-stale.json" ]; then
+  if [ -f ".fluent/work/items/work-stale.json" ]; then
     printf '    FAIL: apply kept abandoned Work Item state\n'
     RESULT=1
   fi
@@ -386,21 +386,21 @@ PY
 
 test_cleanup_skips_abandoned_work_item_with_reviewing_attempt() {
   create_project
-  "$FACTORY_BIN" work-item create work-active --title "Active review work" >/dev/null
-  "$FACTORY_BIN" attempt create work-active attempt-1 >/dev/null
-  "$FACTORY_BIN" work-item abandon work-active --reason "replacement landed" >/dev/null
+  "$FLUENT_BIN" work-item create work-active --title "Active review work" >/dev/null
+  "$FLUENT_BIN" attempt create work-active attempt-1 >/dev/null
+  "$FLUENT_BIN" work-item abandon work-active --reason "replacement landed" >/dev/null
 
   python3 - <<'PY'
 import json
 from pathlib import Path
 
-attempt_path = Path(".factory/work/attempts/work-active/attempt-1.json")
+attempt_path = Path(".fluent/work/attempts/work-active/attempt-1.json")
 attempt = json.loads(attempt_path.read_text())
 attempt["status"] = "reviewing"
 attempt_path.write_text(json.dumps(attempt, indent=2) + "\n")
 PY
 
-  OUTPUT="$("$FACTORY_BIN" cleanup 2>&1)"
+  OUTPUT="$("$FLUENT_BIN" cleanup 2>&1)"
 
   RESULT=0
   assert_output_not_contains "$OUTPUT" "work-active" || RESULT=1
@@ -411,19 +411,19 @@ PY
 
 test_cleanup_skips_abandoned_work_item_with_active_merge_candidate() {
   create_project
-  "$FACTORY_BIN" work-item create work-active --title "Active candidate work" >/dev/null
-  "$FACTORY_BIN" attempt create work-active attempt-1 >/dev/null
+  "$FLUENT_BIN" work-item create work-active --title "Active candidate work" >/dev/null
+  "$FLUENT_BIN" attempt create work-active attempt-1 >/dev/null
   python3 - <<'PY'
 import json
 from pathlib import Path
 
-attempt_path = Path(".factory/work/attempts/work-active/attempt-1.json")
+attempt_path = Path(".fluent/work/attempts/work-active/attempt-1.json")
 attempt = json.loads(attempt_path.read_text())
 attempt["status"] = "complete"
 attempt["review_state"] = "passed"
 attempt_path.write_text(json.dumps(attempt, indent=2) + "\n")
 
-task_path = Path(".factory/work/tasks/work-active/attempt-1/attempt-1-write-1.json")
+task_path = Path(".fluent/work/tasks/work-active/attempt-1/attempt-1-write-1.json")
 task = json.loads(task_path.read_text())
 task["status"] = "complete"
 task["output"] = {
@@ -434,8 +434,8 @@ task["output"] = {
 }
 task_path.write_text(json.dumps(task, indent=2) + "\n")
 PY
-  "$FACTORY_BIN" work-item abandon work-active --reason "replacement landed" >/dev/null
-  mkdir -p .factory/work/merge-candidates/work-active
+  "$FLUENT_BIN" work-item abandon work-active --reason "replacement landed" >/dev/null
+  mkdir -p .fluent/work/merge-candidates/work-active
   printf '%s\n' \
     '{' \
     '  "id": "candidate-1",' \
@@ -455,9 +455,9 @@ PY
     '  "merge_state": {' \
     '    "status": "pending"' \
     '  }' \
-    '}' > .factory/work/merge-candidates/work-active/candidate-1.json
+    '}' > .fluent/work/merge-candidates/work-active/candidate-1.json
 
-  REVIEW_OUTPUT="$("$FACTORY_BIN" cleanup 2>&1)"
+  REVIEW_OUTPUT="$("$FLUENT_BIN" cleanup 2>&1)"
 
   RESULT=0
   assert_output_not_contains "$REVIEW_OUTPUT" "work-active" || RESULT=1
@@ -466,14 +466,14 @@ PY
 import json
 from pathlib import Path
 
-candidate_path = Path(".factory/work/merge-candidates/work-active/candidate-1.json")
+candidate_path = Path(".fluent/work/merge-candidates/work-active/candidate-1.json")
 candidate = json.loads(candidate_path.read_text())
 candidate["review_state"] = "pending"
 candidate["merge_state"]["status"] = "executing"
 candidate_path.write_text(json.dumps(candidate, indent=2) + "\n")
 PY
 
-  MERGE_OUTPUT="$("$FACTORY_BIN" cleanup 2>&1)"
+  MERGE_OUTPUT="$("$FLUENT_BIN" cleanup 2>&1)"
   assert_output_not_contains "$MERGE_OUTPUT" "work-active" || RESULT=1
 
   rm -rf "$TEST_DIR"

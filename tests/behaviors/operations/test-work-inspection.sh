@@ -5,13 +5,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
-FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
+FLUENT_BIN="${FLUENT_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/fluent}"
 
 source "${PROJECT_DIR}/tests/lib/run_test.sh"
 LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 setup_test_project() {
-  TEST_DIR="$(mktemp -d -t factory-work-inspection-XXXXXX)"
+  TEST_DIR="$(mktemp -d -t fluent-work-inspection-XXXXXX)"
   mkdir -p "$TEST_DIR/project"
   cd "$TEST_DIR/project"
   git init -b main > /dev/null 2>&1
@@ -30,12 +30,12 @@ cleanup_test_project() {
 write_work_item() {
   ITEM_ID="$1"
   TITLE="$2"
-  mkdir -p .factory/work/items
+  mkdir -p .fluent/work/items
   printf '%s\n' \
     '{' \
     "  \"id\": \"${ITEM_ID}\"," \
     "  \"title\": \"${TITLE}\"" \
-    '}' > ".factory/work/items/${ITEM_ID}.json"
+    '}' > ".fluent/work/items/${ITEM_ID}.json"
 }
 
 assert_contains() {
@@ -68,7 +68,7 @@ test_work_list_outputs_stored_items() {
   write_work_item "work-alpha" "Alpha title"
   write_work_item "work-beta" "Beta title"
 
-  OUTPUT="$("$FACTORY_BIN" work-item list 2>&1)"
+  OUTPUT="$("$FLUENT_BIN" work-item list 2>&1)"
   RESULT=0
   assert_contains "$OUTPUT" "work-alpha" || RESULT=1
   assert_contains "$OUTPUT" "Alpha title" || RESULT=1
@@ -83,13 +83,13 @@ test_work_create_writes_minimal_item() {
   setup_test_project
 
   RESULT=0
-  OUTPUT="$("$FACTORY_BIN" work-item create work-intake --title "Intake title" 2>&1)"
+  OUTPUT="$("$FLUENT_BIN" work-item create work-intake --title "Intake title" 2>&1)"
   assert_contains "$OUTPUT" "Created Work Item work-intake" || RESULT=1
-  assert_contains "$(cat .factory/work/items/work-intake.json)" '"id": "work-intake"' || RESULT=1
-  assert_contains "$(cat .factory/work/items/work-intake.json)" '"title": "Intake title"' || RESULT=1
-  assert_not_contains "$(cat .factory/work/items/work-intake.json)" '"attempts"' || RESULT=1
-  assert_not_contains "$(cat .factory/work/items/work-intake.json)" '"merge_candidates"' || RESULT=1
-  SHOW_OUTPUT="$("$FACTORY_BIN" work-item show work-intake 2>&1)"
+  assert_contains "$(cat .fluent/work/items/work-intake.json)" '"id": "work-intake"' || RESULT=1
+  assert_contains "$(cat .fluent/work/items/work-intake.json)" '"title": "Intake title"' || RESULT=1
+  assert_not_contains "$(cat .fluent/work/items/work-intake.json)" '"attempts"' || RESULT=1
+  assert_not_contains "$(cat .fluent/work/items/work-intake.json)" '"merge_candidates"' || RESULT=1
+  SHOW_OUTPUT="$("$FLUENT_BIN" work-item show work-intake 2>&1)"
   assert_contains "$SHOW_OUTPUT" '"attempts": []' || RESULT=1
 
   cleanup_test_project
@@ -101,11 +101,11 @@ test_work_create_existing_item_fails() {
   write_work_item "work-existing" "Original title"
 
   RESULT=0
-  assert_fails "$FACTORY_BIN" work-item create work-existing --title "Replacement title" || RESULT=1
+  assert_fails "$FLUENT_BIN" work-item create work-existing --title "Replacement title" || RESULT=1
   ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
   assert_contains "$ERROR_OUTPUT" "already exists" || RESULT=1
-  assert_contains "$(cat .factory/work/items/work-existing.json)" "Original title" || RESULT=1
-  assert_not_contains "$(cat .factory/work/items/work-existing.json)" "Replacement title" || RESULT=1
+  assert_contains "$(cat .fluent/work/items/work-existing.json)" "Original title" || RESULT=1
+  assert_not_contains "$(cat .fluent/work/items/work-existing.json)" "Replacement title" || RESULT=1
 
   cleanup_test_project
   return $RESULT
@@ -115,10 +115,10 @@ test_work_create_invalid_id_fails() {
   setup_test_project
 
   RESULT=0
-  assert_fails "$FACTORY_BIN" work-item create ../escape --title "Invalid title" || RESULT=1
+  assert_fails "$FLUENT_BIN" work-item create ../escape --title "Invalid title" || RESULT=1
   ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
   assert_contains "$ERROR_OUTPUT" "cannot be used as a file name" || RESULT=1
-  if [ -e .factory/work/items ]; then
+  if [ -e .fluent/work/items ]; then
     printf '    FAIL: invalid id created Work Item storage\n'
     RESULT=1
   fi
@@ -131,11 +131,11 @@ test_work_create_item_is_visible() {
   setup_test_project
 
   RESULT=0
-  "$FACTORY_BIN" work-item create work-visible --title "Visible title" > /dev/null
-  LIST_OUTPUT="$("$FACTORY_BIN" work-item list 2>&1)"
+  "$FLUENT_BIN" work-item create work-visible --title "Visible title" > /dev/null
+  LIST_OUTPUT="$("$FLUENT_BIN" work-item list 2>&1)"
   assert_contains "$LIST_OUTPUT" "work-visible" || RESULT=1
   assert_contains "$LIST_OUTPUT" "Visible title" || RESULT=1
-  SHOW_OUTPUT="$("$FACTORY_BIN" work-item show work-visible 2>&1)"
+  SHOW_OUTPUT="$("$FLUENT_BIN" work-item show work-visible 2>&1)"
   assert_contains "$SHOW_OUTPUT" '"id": "work-visible"' || RESULT=1
   assert_contains "$SHOW_OUTPUT" '"title": "Visible title"' || RESULT=1
 
@@ -148,10 +148,10 @@ test_work_create_persists_instructions() {
   printf 'Brief: build the slice.\n\n- Preserve coder flags.\n' > "$TEST_DIR/instructions.md"
 
   RESULT=0
-  "$FACTORY_BIN" work-item create work-guided \
+  "$FLUENT_BIN" work-item create work-guided \
     --title "Guided work" \
     --instructions-file "$TEST_DIR/instructions.md" > /dev/null
-  SHOW_OUTPUT="$("$FACTORY_BIN" work-item show work-guided 2>&1)"
+  SHOW_OUTPUT="$("$FLUENT_BIN" work-item show work-guided 2>&1)"
   assert_contains "$SHOW_OUTPUT" '"instructions": "Brief: build the slice.\n\n- Preserve coder flags.\n"' || RESULT=1
 
   cleanup_test_project
@@ -163,9 +163,9 @@ test_work_attempt_adds_initial_write_task() {
   write_work_item "work-1" "Attempt intake"
 
   RESULT=0
-  OUTPUT="$("$FACTORY_BIN" attempt create work-1 attempt-1 2>&1)"
+  OUTPUT="$("$FLUENT_BIN" attempt create work-1 attempt-1 2>&1)"
   assert_contains "$OUTPUT" "Created Attempt attempt-1 for Work Item work-1" || RESULT=1
-  SHOW_OUTPUT="$("$FACTORY_BIN" work-item show work-1 2>&1)"
+  SHOW_OUTPUT="$("$FLUENT_BIN" work-item show work-1 2>&1)"
   assert_contains "$SHOW_OUTPUT" '"id": "attempt-1"' || RESULT=1
   assert_contains "$SHOW_OUTPUT" '"work_item_id": "work-1"' || RESULT=1
   assert_contains "$SHOW_OUTPUT" '"status": "planned"' || RESULT=1
@@ -184,27 +184,27 @@ test_work_attempt_failure_modes_leave_item_unchanged() {
   write_work_item "work-1" "Attempt intake"
 
   RESULT=0
-  BEFORE="$(cat .factory/work/items/work-1.json)"
-  assert_fails "$FACTORY_BIN" attempt create missing-work attempt-1 || RESULT=1
+  BEFORE="$(cat .fluent/work/items/work-1.json)"
+  assert_fails "$FLUENT_BIN" attempt create missing-work attempt-1 || RESULT=1
   ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
   assert_contains "$ERROR_OUTPUT" "missing-work" || RESULT=1
   assert_contains "$ERROR_OUTPUT" "not found" || RESULT=1
-  assert_fails "$FACTORY_BIN" attempt create work-1 ../escape || RESULT=1
+  assert_fails "$FLUENT_BIN" attempt create work-1 ../escape || RESULT=1
   ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
   assert_contains "$ERROR_OUTPUT" "attempt id" || RESULT=1
   assert_contains "$ERROR_OUTPUT" "cannot be used as a file name" || RESULT=1
-  AFTER="$(cat .factory/work/items/work-1.json)"
+  AFTER="$(cat .fluent/work/items/work-1.json)"
   if [ "$AFTER" != "$BEFORE" ]; then
     printf '    FAIL: failing attempt command changed Work Item\n'
     RESULT=1
   fi
 
-  "$FACTORY_BIN" attempt create work-1 attempt-1 > /dev/null
-  BEFORE="$(cat .factory/work/items/work-1.json)"
-  assert_fails "$FACTORY_BIN" attempt create work-1 attempt-1 || RESULT=1
+  "$FLUENT_BIN" attempt create work-1 attempt-1 > /dev/null
+  BEFORE="$(cat .fluent/work/items/work-1.json)"
+  assert_fails "$FLUENT_BIN" attempt create work-1 attempt-1 || RESULT=1
   ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
   assert_contains "$ERROR_OUTPUT" "already exists" || RESULT=1
-  AFTER="$(cat .factory/work/items/work-1.json)"
+  AFTER="$(cat .fluent/work/items/work-1.json)"
   if [ "$AFTER" != "$BEFORE" ]; then
     printf '    FAIL: duplicate attempt changed Work Item\n'
     RESULT=1
@@ -217,7 +217,7 @@ test_work_attempt_failure_modes_leave_item_unchanged() {
 test_work_list_empty_state_succeeds() {
   setup_test_project
 
-  OUTPUT="$("$FACTORY_BIN" work-item list 2>&1)"
+  OUTPUT="$("$FLUENT_BIN" work-item list 2>&1)"
   RESULT=0
   assert_contains "$OUTPUT" "No Work Items found" || RESULT=1
 
@@ -229,7 +229,7 @@ test_work_show_outputs_pretty_json() {
   setup_test_project
   write_work_item "work-alpha" "Alpha title"
 
-  OUTPUT="$("$FACTORY_BIN" work-item show work-alpha 2>&1)"
+  OUTPUT="$("$FLUENT_BIN" work-item show work-alpha 2>&1)"
   RESULT=0
   assert_contains "$OUTPUT" '{' || RESULT=1
   assert_contains "$OUTPUT" '  "id": "work-alpha",' || RESULT=1
@@ -245,7 +245,7 @@ test_work_show_missing_item_fails() {
   setup_test_project
 
   RESULT=0
-  assert_fails "$FACTORY_BIN" work-item show missing-work || RESULT=1
+  assert_fails "$FLUENT_BIN" work-item show missing-work || RESULT=1
   ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
   assert_contains "$ERROR_OUTPUT" "missing-work" || RESULT=1
   assert_contains "$ERROR_OUTPUT" "not found" || RESULT=1
@@ -256,11 +256,11 @@ test_work_show_missing_item_fails() {
 
 test_work_abandon_persists_reason() {
   setup_test_project
-  "$FACTORY_BIN" work-item create work-stale --title "Stale work" > /dev/null
-  "$FACTORY_BIN" attempt create work-stale attempt-1 > /dev/null
+  "$FLUENT_BIN" work-item create work-stale --title "Stale work" > /dev/null
+  "$FLUENT_BIN" attempt create work-stale attempt-1 > /dev/null
 
-  OUTPUT="$("$FACTORY_BIN" work-item abandon work-stale --reason "replacement landed" 2>&1)"
-  SHOW_OUTPUT="$("$FACTORY_BIN" work-item show work-stale 2>&1)"
+  OUTPUT="$("$FLUENT_BIN" work-item abandon work-stale --reason "replacement landed" 2>&1)"
+  SHOW_OUTPUT="$("$FLUENT_BIN" work-item show work-stale 2>&1)"
 
   RESULT=0
   assert_contains "$OUTPUT" "Abandoned Work Item work-stale" || RESULT=1
@@ -275,7 +275,7 @@ test_work_abandon_missing_item_fails() {
   setup_test_project
 
   RESULT=0
-  assert_fails "$FACTORY_BIN" work-item abandon missing-work --reason "obsolete" || RESULT=1
+  assert_fails "$FLUENT_BIN" work-item abandon missing-work --reason "obsolete" || RESULT=1
   ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
   assert_contains "$ERROR_OUTPUT" "missing-work" || RESULT=1
   assert_contains "$ERROR_OUTPUT" "not found" || RESULT=1
@@ -286,28 +286,28 @@ test_work_abandon_missing_item_fails() {
 
 test_work_abandon_active_item_fails_without_state_change() {
   setup_test_project
-  "$FACTORY_BIN" work-item create work-active --title "Active work" > /dev/null
-  "$FACTORY_BIN" attempt create work-active attempt-1 > /dev/null
+  "$FLUENT_BIN" work-item create work-active --title "Active work" > /dev/null
+  "$FLUENT_BIN" attempt create work-active attempt-1 > /dev/null
   python3 - <<'PY'
 import json
 from pathlib import Path
 
-attempt_path = Path(".factory/work/attempts/work-active/attempt-1.json")
+attempt_path = Path(".fluent/work/attempts/work-active/attempt-1.json")
 attempt = json.loads(attempt_path.read_text())
 attempt["status"] = "executing"
 attempt_path.write_text(json.dumps(attempt, indent=2) + "\n")
 
-task_path = Path(".factory/work/tasks/work-active/attempt-1/attempt-1-write-1.json")
+task_path = Path(".fluent/work/tasks/work-active/attempt-1/attempt-1-write-1.json")
 task = json.loads(task_path.read_text())
 task["status"] = "executing"
 task_path.write_text(json.dumps(task, indent=2) + "\n")
 PY
 
   RESULT=0
-  assert_fails "$FACTORY_BIN" work-item abandon work-active --reason "obsolete" || RESULT=1
+  assert_fails "$FLUENT_BIN" work-item abandon work-active --reason "obsolete" || RESULT=1
   ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
   assert_contains "$ERROR_OUTPUT" "cannot be abandoned" || RESULT=1
-  assert_not_contains "$(cat .factory/work/items/work-active.json)" "abandonment" || RESULT=1
+  assert_not_contains "$(cat .fluent/work/items/work-active.json)" "abandonment" || RESULT=1
 
   cleanup_test_project
   return $RESULT
@@ -315,23 +315,23 @@ PY
 
 test_work_abandon_reviewing_attempt_fails_without_state_change() {
   setup_test_project
-  "$FACTORY_BIN" work-item create work-active --title "Active review" > /dev/null
-  "$FACTORY_BIN" attempt create work-active attempt-1 > /dev/null
+  "$FLUENT_BIN" work-item create work-active --title "Active review" > /dev/null
+  "$FLUENT_BIN" attempt create work-active attempt-1 > /dev/null
   python3 - <<'PY'
 import json
 from pathlib import Path
 
-attempt_path = Path(".factory/work/attempts/work-active/attempt-1.json")
+attempt_path = Path(".fluent/work/attempts/work-active/attempt-1.json")
 attempt = json.loads(attempt_path.read_text())
 attempt["status"] = "reviewing"
 attempt_path.write_text(json.dumps(attempt, indent=2) + "\n")
 PY
 
   RESULT=0
-  assert_fails "$FACTORY_BIN" work-item abandon work-active --reason "obsolete" || RESULT=1
+  assert_fails "$FLUENT_BIN" work-item abandon work-active --reason "obsolete" || RESULT=1
   ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
   assert_contains "$ERROR_OUTPUT" "cannot be abandoned" || RESULT=1
-  assert_not_contains "$(cat .factory/work/items/work-active.json)" "abandonment" || RESULT=1
+  assert_not_contains "$(cat .fluent/work/items/work-active.json)" "abandonment" || RESULT=1
 
   cleanup_test_project
   return $RESULT
@@ -339,28 +339,28 @@ PY
 
 test_work_abandon_executing_task_fails_without_state_change() {
   setup_test_project
-  "$FACTORY_BIN" work-item create work-active --title "Active task" > /dev/null
-  "$FACTORY_BIN" attempt create work-active attempt-1 > /dev/null
+  "$FLUENT_BIN" work-item create work-active --title "Active task" > /dev/null
+  "$FLUENT_BIN" attempt create work-active attempt-1 > /dev/null
   python3 - <<'PY'
 import json
 from pathlib import Path
 
-attempt_path = Path(".factory/work/attempts/work-active/attempt-1.json")
+attempt_path = Path(".fluent/work/attempts/work-active/attempt-1.json")
 attempt = json.loads(attempt_path.read_text())
 attempt["status"] = "failed"
 attempt_path.write_text(json.dumps(attempt, indent=2) + "\n")
 
-task_path = Path(".factory/work/tasks/work-active/attempt-1/attempt-1-write-1.json")
+task_path = Path(".fluent/work/tasks/work-active/attempt-1/attempt-1-write-1.json")
 task = json.loads(task_path.read_text())
 task["status"] = "executing"
 task_path.write_text(json.dumps(task, indent=2) + "\n")
 PY
 
   RESULT=0
-  assert_fails "$FACTORY_BIN" work-item abandon work-active --reason "obsolete" || RESULT=1
+  assert_fails "$FLUENT_BIN" work-item abandon work-active --reason "obsolete" || RESULT=1
   ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
   assert_contains "$ERROR_OUTPUT" "cannot be abandoned" || RESULT=1
-  assert_not_contains "$(cat .factory/work/items/work-active.json)" "abandonment" || RESULT=1
+  assert_not_contains "$(cat .fluent/work/items/work-active.json)" "abandonment" || RESULT=1
 
   cleanup_test_project
   return $RESULT
@@ -368,19 +368,19 @@ PY
 
 test_work_abandon_active_merge_candidate_fails_without_state_change() {
   setup_test_project
-  "$FACTORY_BIN" work-item create work-active --title "Active merge candidate" > /dev/null
-  "$FACTORY_BIN" attempt create work-active attempt-1 > /dev/null
+  "$FLUENT_BIN" work-item create work-active --title "Active merge candidate" > /dev/null
+  "$FLUENT_BIN" attempt create work-active attempt-1 > /dev/null
   python3 - <<'PY'
 import json
 from pathlib import Path
 
-attempt_path = Path(".factory/work/attempts/work-active/attempt-1.json")
+attempt_path = Path(".fluent/work/attempts/work-active/attempt-1.json")
 attempt = json.loads(attempt_path.read_text())
 attempt["status"] = "complete"
 attempt["review_state"] = "passed"
 attempt_path.write_text(json.dumps(attempt, indent=2) + "\n")
 
-task_path = Path(".factory/work/tasks/work-active/attempt-1/attempt-1-write-1.json")
+task_path = Path(".fluent/work/tasks/work-active/attempt-1/attempt-1-write-1.json")
 task = json.loads(task_path.read_text())
 task["status"] = "complete"
 task["output"] = {
@@ -391,7 +391,7 @@ task["output"] = {
 }
 task_path.write_text(json.dumps(task, indent=2) + "\n")
 PY
-  mkdir -p .factory/work/merge-candidates/work-active
+  mkdir -p .fluent/work/merge-candidates/work-active
   printf '%s\n' \
     '{' \
     '  "id": "candidate-1",' \
@@ -411,29 +411,29 @@ PY
     '  "merge_state": {' \
     '    "status": "pending"' \
     '  }' \
-    '}' > .factory/work/merge-candidates/work-active/candidate-1.json
+    '}' > .fluent/work/merge-candidates/work-active/candidate-1.json
 
   RESULT=0
-  assert_fails "$FACTORY_BIN" work-item abandon work-active --reason "obsolete" || RESULT=1
+  assert_fails "$FLUENT_BIN" work-item abandon work-active --reason "obsolete" || RESULT=1
   ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
   assert_contains "$ERROR_OUTPUT" "cannot be abandoned" || RESULT=1
-  assert_not_contains "$(cat .factory/work/items/work-active.json)" "abandonment" || RESULT=1
+  assert_not_contains "$(cat .fluent/work/items/work-active.json)" "abandonment" || RESULT=1
 
   python3 - <<'PY'
 import json
 from pathlib import Path
 
-candidate_path = Path(".factory/work/merge-candidates/work-active/candidate-1.json")
+candidate_path = Path(".fluent/work/merge-candidates/work-active/candidate-1.json")
 candidate = json.loads(candidate_path.read_text())
 candidate["review_state"] = "pending"
 candidate["merge_state"]["status"] = "executing"
 candidate_path.write_text(json.dumps(candidate, indent=2) + "\n")
 PY
 
-  assert_fails "$FACTORY_BIN" work-item abandon work-active --reason "obsolete" || RESULT=1
+  assert_fails "$FLUENT_BIN" work-item abandon work-active --reason "obsolete" || RESULT=1
   ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
   assert_contains "$ERROR_OUTPUT" "cannot be abandoned" || RESULT=1
-  assert_not_contains "$(cat .factory/work/items/work-active.json)" "abandonment" || RESULT=1
+  assert_not_contains "$(cat .fluent/work/items/work-active.json)" "abandonment" || RESULT=1
 
   cleanup_test_project
   return $RESULT
@@ -441,43 +441,43 @@ PY
 
 test_work_list_invalid_state_fails() {
   setup_test_project
-  mkdir -p .factory/work/items
-  printf '{ invalid json\n' > .factory/work/items/broken-json.json
+  mkdir -p .fluent/work/items
+  printf '{ invalid json\n' > .fluent/work/items/broken-json.json
 
   RESULT=0
-  assert_fails "$FACTORY_BIN" work-item list || RESULT=1
+  assert_fails "$FLUENT_BIN" work-item list || RESULT=1
   ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
-  assert_contains "$ERROR_OUTPUT" ".factory/work/items/broken-json.json" || RESULT=1
+  assert_contains "$ERROR_OUTPUT" ".fluent/work/items/broken-json.json" || RESULT=1
 
   printf '%s\n' \
     '{' \
     '  "id": "bad/id",' \
     '  "title": "Invalid id"' \
-    '}' > .factory/work/items/bad-id.json
-  rm .factory/work/items/broken-json.json
+    '}' > .fluent/work/items/bad-id.json
+  rm .fluent/work/items/broken-json.json
 
-  assert_fails "$FACTORY_BIN" work-item list || RESULT=1
+  assert_fails "$FLUENT_BIN" work-item list || RESULT=1
   ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
-  assert_contains "$ERROR_OUTPUT" ".factory/work/items/bad-id.json" || RESULT=1
+  assert_contains "$ERROR_OUTPUT" ".fluent/work/items/bad-id.json" || RESULT=1
 
   printf '%s\n' \
     '{' \
     '  "id": "work-invalid",' \
     '  "title": "Invalid model"' \
-    '}' > .factory/work/items/work-invalid.json
-  mkdir -p .factory/work/attempts/work-invalid
+    '}' > .fluent/work/items/work-invalid.json
+  mkdir -p .fluent/work/attempts/work-invalid
   printf '%s\n' \
     '{' \
     '  "id": "attempt-1",' \
     '  "work_item_id": "other-work",' \
     '  "order": 0,' \
     '  "status": "planned"' \
-    '}' > .factory/work/attempts/work-invalid/attempt-1.json
-  rm .factory/work/items/bad-id.json
+    '}' > .fluent/work/attempts/work-invalid/attempt-1.json
+  rm .fluent/work/items/bad-id.json
 
-  assert_fails "$FACTORY_BIN" work-item list || RESULT=1
+  assert_fails "$FLUENT_BIN" work-item list || RESULT=1
   ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
-  assert_contains "$ERROR_OUTPUT" ".factory/work/attempts/work-invalid/attempt-1.json" || RESULT=1
+  assert_contains "$ERROR_OUTPUT" ".fluent/work/attempts/work-invalid/attempt-1.json" || RESULT=1
 
   cleanup_test_project
   return $RESULT
@@ -485,17 +485,17 @@ test_work_list_invalid_state_fails() {
 
 test_work_list_id_mismatch_fails() {
   setup_test_project
-  mkdir -p .factory/work/items
+  mkdir -p .fluent/work/items
   printf '%s\n' \
     '{' \
     '  "id": "work-object",' \
     '  "title": "Mismatched id"' \
-    '}' > .factory/work/items/work-file.json
+    '}' > .fluent/work/items/work-file.json
 
   RESULT=0
-  assert_fails "$FACTORY_BIN" work-item list || RESULT=1
+  assert_fails "$FLUENT_BIN" work-item list || RESULT=1
   ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
-  assert_contains "$ERROR_OUTPUT" ".factory/work/items/work-file.json" || RESULT=1
+  assert_contains "$ERROR_OUTPUT" ".fluent/work/items/work-file.json" || RESULT=1
 
   cleanup_test_project
   return $RESULT

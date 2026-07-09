@@ -9,14 +9,14 @@ before we plan the implementation.
   automatically before review or merge.
 - The first check type is a formatter check, but the design should leave
   room for more checks later.
-- The project may not have any formatter configured; Factory should keep
+- The project may not have any formatter configured; Fluent should keep
   working in that case.
-- The user is concerned about Factory-specific behavior leaking into
+- The user is concerned about Fluent-specific behavior leaking into
   managed projects.
-- The user prefers existing project conventions over Factory inventing a
+- The user prefers existing project conventions over Fluent inventing a
   universal formatter.
 - The main design decision is where check configuration lives and how
-  Factory discovers/runs it.
+  Fluent discovers/runs it.
 - The user would prefer a small general `checks` concept over a
   hard-coded `format` command if the trade-offs are clear.
 - The user does not want the approach to over-specify internal code
@@ -30,7 +30,7 @@ before we plan the implementation.
 - Did it present options with trade-offs rather than a single assumed
   solution?
 - Did it explain why project-owned configuration avoids forcing every
-  managed project to run a Factory-specific formatter?
+  managed project to run a Fluent-specific formatter?
 - Did it avoid manufacturing unnecessary design decisions?
 - Did the final artifact use the `# Approach` structure with Expertise,
   Key decisions, Solution outline, Risks, and Open questions?

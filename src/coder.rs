@@ -10,22 +10,22 @@ const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-4-6";
 const DEFAULT_PI_MODEL: &str = "qwen3.6-35b-a3b";
 
 fn claude_model() -> String {
-    std::env::var("FACTORY_CLAUDE_MODEL")
-        .or_else(|_| std::env::var("FACTORY_MODEL"))
+    std::env::var("FLUENT_CLAUDE_MODEL")
+        .or_else(|_| std::env::var("FLUENT_MODEL"))
         .unwrap_or_else(|_| DEFAULT_CLAUDE_MODEL.to_string())
 }
 
 fn codex_model() -> Option<String> {
-    std::env::var("FACTORY_CODEX_MODEL").ok()
+    std::env::var("FLUENT_CODEX_MODEL").ok()
 }
 
 fn pi_model() -> String {
-    std::env::var("FACTORY_PI_MODEL")
-        .or_else(|_| std::env::var("FACTORY_MODEL"))
+    std::env::var("FLUENT_PI_MODEL")
+        .or_else(|_| std::env::var("FLUENT_MODEL"))
         .unwrap_or_else(|_| DEFAULT_PI_MODEL.to_string())
 }
 
-/// Apply Factory's env defaults plus caller-provided extras to a Coder command.
+/// Apply Fluent's env defaults plus caller-provided extras to a Coder command.
 /// `GIT_EDITOR` and `GIT_SEQUENCE_EDITOR` default to `false` so interactive editor
 /// prompts (commit messages, `rebase -i` reword, broken commit messages during
 /// `rebase --continue`) fail cleanly instead of hanging the non-interactive Coder.
@@ -39,7 +39,7 @@ fn apply_coder_env(cmd: &mut Command, extra_env: &[(String, String)]) {
 }
 
 fn codex_ca_bundle() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("FACTORY_CODEX_CA_BUNDLE") {
+    if let Ok(path) = std::env::var("FLUENT_CODEX_CA_BUNDLE") {
         let path = PathBuf::from(path);
         if path.is_file() {
             return Some(path);
@@ -58,7 +58,7 @@ fn codex_ca_bundle() -> Option<PathBuf> {
     .find(|path| path.is_file())
 }
 
-/// Which coding agent the factory should launch.
+/// Which coding agent the fluent should launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CoderKind {
@@ -79,7 +79,7 @@ impl CoderKind {
     pub fn resolve(value: Option<&str>) -> Result<Self> {
         let value = value
             .map(str::to_string)
-            .or_else(|| std::env::var("FACTORY_CODER").ok())
+            .or_else(|| std::env::var("FLUENT_CODER").ok())
             .unwrap_or_else(|| "claude".to_string());
 
         match value.trim().to_lowercase().as_str() {
@@ -517,7 +517,7 @@ enum RateLimitState {
 }
 
 fn rate_limit_retry_after() -> Duration {
-    let secs = std::env::var("FACTORY_RATE_LIMIT_RETRY_AFTER_SECS")
+    let secs = std::env::var("FLUENT_RATE_LIMIT_RETRY_AFTER_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_RATE_LIMIT_RETRY_AFTER_SECS);
@@ -525,13 +525,13 @@ fn rate_limit_retry_after() -> Duration {
 }
 
 fn jitter_max_secs() -> u64 {
-    std::env::var("FACTORY_RATE_LIMIT_JITTER_MAX_SECONDS")
+    std::env::var("FLUENT_RATE_LIMIT_JITTER_MAX_SECONDS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_JITTER_MAX_SECS)
 }
 
-/// Per-process randomized jitter to stagger concurrent Factory runs.
+/// Per-process randomized jitter to stagger concurrent Fluent runs.
 pub fn rate_limit_jitter() -> Duration {
     rate_limit_jitter_with_max(jitter_max_secs())
 }
@@ -666,8 +666,8 @@ fn transition_rate_limit_state(
         RateLimitState::Normal => {
             let retry_time = format_retry_time(retry_at);
             notify(
-                "Factory",
-                &format!("Factory paused: {reason}. Will retry at {retry_time}."),
+                "Fluent",
+                &format!("Fluent paused: {reason}. Will retry at {retry_time}."),
             );
             RateLimitState::RateLimited
         }
@@ -708,7 +708,7 @@ where
         let exit = run_with_transcript(build_cmd(), transcript_file)?;
         if exit == 0 {
             if matches!(rl_state, RateLimitState::RateLimited) {
-                crate::notify::notify("Factory", "Factory resumed after rate-limit pause.");
+                crate::notify::notify("Fluent", "Fluent resumed after rate-limit pause.");
                 eprintln!("  Rate-limit cleared — resuming.");
             }
             return Ok(exit);
@@ -1155,8 +1155,8 @@ mod rate_limit_state_tests {
         assert!(matches!(new_state, RateLimitState::RateLimited));
         let notifications = calls.lock().unwrap();
         assert_eq!(notifications.len(), 1);
-        assert_eq!(notifications[0].0, "Factory");
-        assert!(notifications[0].1.contains("Factory paused: Rate limited"));
+        assert_eq!(notifications[0].0, "Fluent");
+        assert!(notifications[0].1.contains("Fluent paused: Rate limited"));
     }
 
     #[test]

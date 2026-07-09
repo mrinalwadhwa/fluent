@@ -7,34 +7,34 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-use factory::cleanup::{
+use fluent::cleanup::{
     self, CleanupOptions, WorkBranchCleanup, WorkCleanupResult, WorktreeCleanup,
 };
-use factory::cli::{
+use fluent::cli::{
     AttemptCommands, Cli, Commands, FargateCommands, KeepAwakeCommands, MergeCandidateCommands,
     ObservationCommands, QueueCommands, ReviewCommands, SchedulerCommands, TaskCommands,
     TesterCommands, WorkItemCommands,
 };
-use factory::coder::CoderKind;
-use factory::content::ContentResolver;
-use factory::credential;
-use factory::dashboard;
-use factory::fargate;
-use factory::fargate_bootstrap;
-use factory::git;
-use factory::keep_awake;
-use factory::observations;
-use factory::os;
-use factory::post_merge_review;
-use factory::review;
-use factory::version;
-use factory::work_attempt_loop::{self, WorkAttemptRunConfig, WorkAttemptRunOutcome};
-use factory::work_merge_executor::{self, WorkMergeConfig};
-use factory::work_model::{
+use fluent::coder::CoderKind;
+use fluent::content::ContentResolver;
+use fluent::credential;
+use fluent::dashboard;
+use fluent::fargate;
+use fluent::fargate_bootstrap;
+use fluent::git;
+use fluent::keep_awake;
+use fluent::observations;
+use fluent::os;
+use fluent::post_merge_review;
+use fluent::review;
+use fluent::version;
+use fluent::work_attempt_loop::{self, WorkAttemptRunConfig, WorkAttemptRunOutcome};
+use fluent::work_merge_executor::{self, WorkMergeConfig};
+use fluent::work_model::{
     self, PlanningContext, WorkItem, WorkModelStorageError, WorkModelStore, to_json_pretty,
 };
-use factory::work_status;
-use factory::work_task_executor::{self, WorkTaskRunConfig};
+use fluent::work_status;
+use fluent::work_task_executor::{self, WorkTaskRunConfig};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -51,7 +51,7 @@ fn main() -> Result<()> {
     if cli.logs {
         let log_file = dirs_log_file();
         if !log_file.exists() {
-            bail!("No log file yet — run factory first");
+            bail!("No log file yet — run fluent first");
         }
         let status = Command::new("tail")
             .args(["-f", &log_file.to_string_lossy()])
@@ -173,13 +173,13 @@ fn main() -> Result<()> {
         }
         Some(Commands::Fargate { command }) => match command {
             FargateCommands::EnsureSetup { force_rebuild } => {
-                let region = std::env::var("FACTORY_REGION")
+                let region = std::env::var("FLUENT_REGION")
                     .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
                     .unwrap_or_else(|_| "us-west-1".to_string());
-                let factory_source_root = fargate::resolve_factory_source_root_from(&cwd)?;
+                let fluent_source_root = fargate::resolve_fluent_source_root_from(&cwd)?;
                 fargate_bootstrap::ensure_setup(&fargate_bootstrap::BootstrapConfig {
                     project_root: cwd.clone(),
-                    factory_source_root,
+                    fluent_source_root,
                     region,
                     force_rebuild,
                 })?;
@@ -395,7 +395,7 @@ fn cmd_attempt(
                     };
                     item.latest_attempt_id()
                         .ok_or_else(|| anyhow::anyhow!(
-                            "Work Item {work_item_id:?} has no Attempts; create one first with: factory attempt create {work_item_id}"
+                            "Work Item {work_item_id:?} has no Attempts; create one first with: fluent attempt create {work_item_id}"
                         ))?
                         .to_string()
                 }
@@ -801,11 +801,11 @@ fn cmd_queue(project_root: &Path, command: QueueCommands) -> Result<()> {
             work_item_id,
             priority,
         } => {
-            factory::queue::add(project_root, &work_item_id, priority)?;
+            fluent::queue::add(project_root, &work_item_id, priority)?;
             println!("Queued Work Item {work_item_id}");
         }
         QueueCommands::List => {
-            let entries = factory::queue::list(project_root)?;
+            let entries = fluent::queue::list(project_root)?;
             if entries.is_empty() {
                 println!("Queue is empty");
             } else {
@@ -818,7 +818,7 @@ fn cmd_queue(project_root: &Path, command: QueueCommands) -> Result<()> {
             }
         }
         QueueCommands::Remove { work_item_id } => {
-            factory::queue::remove(project_root, &work_item_id)?;
+            fluent::queue::remove(project_root, &work_item_id)?;
             println!("Removed {work_item_id} from queue");
         }
     }
@@ -867,8 +867,8 @@ fn cmd_scheduler(project_root: &Path, command: SchedulerCommands) -> Result<()> 
     match command {
         SchedulerCommands::Run { poll_seconds } => {
             let poll = poll_seconds.unwrap_or(30);
-            let invoker = factory::scheduler::CliAttemptInvoker;
-            factory::scheduler::run(project_root, poll, &invoker)?;
+            let invoker = fluent::scheduler::CliAttemptInvoker;
+            fluent::scheduler::run(project_root, poll, &invoker)?;
         }
     }
     Ok(())
@@ -963,8 +963,8 @@ fn cmd_auto_merge(
     poll_seconds: Option<u64>,
 ) -> Result<()> {
     let mode = match (work_item_id, all) {
-        (Some(id), false) => factory::auto_merge::AutoMergeMode::Single(id),
-        (None, true) => factory::auto_merge::AutoMergeMode::All,
+        (Some(id), false) => fluent::auto_merge::AutoMergeMode::Single(id),
+        (None, true) => fluent::auto_merge::AutoMergeMode::All,
         (Some(_), true) => {
             bail!(
                 "Cannot specify both a Work Item ID and --all; the two modes are mutually exclusive"
@@ -976,7 +976,7 @@ fn cmd_auto_merge(
     };
     let coder_kind = CoderKind::resolve(coder)?;
     let poll = poll_seconds.unwrap_or(30);
-    factory::auto_merge::run(project_root, mode, poll, coder_kind, no_sandbox)?;
+    fluent::auto_merge::run(project_root, mode, poll, coder_kind, no_sandbox)?;
     Ok(())
 }
 
@@ -1049,12 +1049,12 @@ fn cmd_cleanup(search_root: &Path, apply: bool, prune_all_review_worktrees: bool
 
     // Review-only worktree pruning (folded from the old review-only-worktree prune command)
     let prune_store = WorkModelStore::new(search_root);
-    let prune_options = factory::review_only_worktree::PruneOptions {
+    let prune_options = fluent::review_only_worktree::PruneOptions {
         all: prune_all_review_worktrees,
         dry_run: !apply,
     };
     let prune_report =
-        factory::review_only_worktree::prune(&prune_store, search_root, prune_options)?;
+        fluent::review_only_worktree::prune(&prune_store, search_root, prune_options)?;
 
     let has_work = !work_results.is_empty();
     let has_reviewers = !reviewer_results.is_empty();
@@ -1171,10 +1171,10 @@ fn cmd_cleanup(search_root: &Path, apply: bool, prune_all_review_worktrees: bool
     // Print review-only worktree prune results
     for entry in &prune_report.entries {
         match entry {
-            factory::review_only_worktree::PruneEntry::Removed { path } => {
+            fluent::review_only_worktree::PruneEntry::Removed { path } => {
                 println!("  removed review-only worktree {}", path.display());
             }
-            factory::review_only_worktree::PruneEntry::SkippedInUse { path, in_flight } => {
+            fluent::review_only_worktree::PruneEntry::SkippedInUse { path, in_flight } => {
                 println!(
                     "  in-use review-only worktree {} (Work Item {:?} Attempt {:?})",
                     path.display(),
@@ -1182,13 +1182,13 @@ fn cmd_cleanup(search_root: &Path, apply: bool, prune_all_review_worktrees: bool
                     in_flight.attempt_id
                 );
             }
-            factory::review_only_worktree::PruneEntry::SkippedNotOrphan { path } => {
+            fluent::review_only_worktree::PruneEntry::SkippedNotOrphan { path } => {
                 println!("  kept review-only worktree {}", path.display());
             }
-            factory::review_only_worktree::PruneEntry::WouldRemove { path } => {
+            fluent::review_only_worktree::PruneEntry::WouldRemove { path } => {
                 println!("  would remove review-only worktree {}", path.display());
             }
-            factory::review_only_worktree::PruneEntry::WouldSkipInUse { path, in_flight } => {
+            fluent::review_only_worktree::PruneEntry::WouldSkipInUse { path, in_flight } => {
                 println!(
                     "  would skip in-use review-only worktree {} (Work Item {:?} Attempt {:?})",
                     path.display(),
@@ -1212,7 +1212,7 @@ fn cmd_interactive(
     extra_args: &[String],
     coder_kind: CoderKind,
 ) -> Result<()> {
-    use factory::coder::CoderSandbox;
+    use fluent::coder::CoderSandbox;
 
     os::check_prerequisites_for(coder_kind)?;
     credential::inject_credentials()?;
@@ -1223,7 +1223,7 @@ fn cmd_interactive(
     let profile = os::render_profile_for_roots_for_coder(resolver, &home, &roots, coder_kind)?;
     let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
 
-    eprintln!("  Factory           interactive session");
+    eprintln!("  Fluent           interactive session");
     eprintln!("  Sandbox root      {}", sandbox_root.display());
 
     let author = coder_kind.boxed(sandbox);
@@ -1238,18 +1238,18 @@ fn cmd_status(search_root: &Path) -> Result<()> {
 }
 
 fn cmd_init(cwd: &Path) -> Result<()> {
-    let factory_dir = cwd.join(".factory");
-    if factory_dir.exists() {
-        write_gitignore_if_absent(&factory_dir)?;
+    let fluent_dir = cwd.join(".fluent");
+    if fluent_dir.exists() {
+        write_gitignore_if_absent(&fluent_dir)?;
         eprintln!(
-            "  Already initialized: .factory/ exists in {}",
+            "  Already initialized: .fluent/ exists in {}",
             cwd.display()
         );
         return Ok(());
     }
-    fs::create_dir_all(factory_dir.join("expertise"))?;
-    write_gitignore_if_absent(&factory_dir)?;
-    eprintln!("  Initialized .factory/ in {}", cwd.display());
+    fs::create_dir_all(fluent_dir.join("expertise"))?;
+    write_gitignore_if_absent(&fluent_dir)?;
+    eprintln!("  Initialized .fluent/ in {}", cwd.display());
     Ok(())
 }
 
@@ -1306,8 +1306,8 @@ fn current_ref(project_root: &Path) -> Result<String> {
     }
 }
 
-const FACTORY_GITIGNORE: &str = "\
-# Factory working state: everything here is ignored by default.
+const FLUENT_GITIGNORE: &str = "\
+# Fluent working state: everything here is ignored by default.
 # Durable content is re-included below.
 /*
 !/.gitignore
@@ -1319,17 +1319,17 @@ const FACTORY_GITIGNORE: &str = "\
 !/extract-tester-results
 ";
 
-fn write_gitignore_if_absent(factory_dir: &Path) -> Result<()> {
-    let gitignore = factory_dir.join(".gitignore");
+fn write_gitignore_if_absent(fluent_dir: &Path) -> Result<()> {
+    let gitignore = fluent_dir.join(".gitignore");
     if !gitignore.exists() {
-        fs::write(&gitignore, FACTORY_GITIGNORE)?;
+        fs::write(&gitignore, FLUENT_GITIGNORE)?;
     }
     Ok(())
 }
 
 fn dirs_log_file() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    PathBuf::from(home).join(".local/state/factory/factory.log")
+    PathBuf::from(home).join(".local/state/fluent/fluent.log")
 }
 
 fn kill_existing_claude() -> Result<()> {

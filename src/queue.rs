@@ -34,7 +34,7 @@ impl std::fmt::Display for QueueStatus {
 }
 
 fn queue_dir(project_root: &Path) -> PathBuf {
-    project_root.join(".factory").join("work").join("queue")
+    project_root.join(".fluent").join("work").join("queue")
 }
 
 fn queue_file(project_root: &Path, work_item_id: &str) -> PathBuf {
@@ -43,7 +43,7 @@ fn queue_file(project_root: &Path, work_item_id: &str) -> PathBuf {
 
 fn work_item_exists(project_root: &Path, id: &str) -> bool {
     project_root
-        .join(".factory")
+        .join(".fluent")
         .join("work")
         .join("items")
         .join(format!("{id}.json"))
@@ -141,12 +141,12 @@ mod tests {
     use super::*;
 
     fn setup_project(tmp: &Path) {
-        fs::create_dir_all(tmp.join(".factory/work/items")).unwrap();
+        fs::create_dir_all(tmp.join(".fluent/work/items")).unwrap();
     }
 
     fn write_work_item(tmp: &Path, id: &str) {
         fs::write(
-            tmp.join(format!(".factory/work/items/{id}.json")),
+            tmp.join(format!(".fluent/work/items/{id}.json")),
             format!(r#"{{"id": "{id}", "title": "Test"}}"#),
         )
         .unwrap();

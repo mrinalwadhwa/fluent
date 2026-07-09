@@ -2,19 +2,19 @@
 
 These instructions define how Coding Agents should assist with this project.
 
-## Factory workflow
+## Fluent workflow
 
-Use the factory to build the factory. For non-trivial code,
+Use the fluent to build the fluent. For non-trivial code,
 documentation, skill, expertise, or behavior changes, follow the
-`build-in-the-factory` skill and go through the Factory lifecycle:
+`build-in-the-fluent` skill and go through the Fluent lifecycle:
 brief, behaviors, approach, plan, execution, review, and land.
 
 Do not implement substantial product/code changes directly on `main`.
-Use Factory Work Items and Attempts for delegated build work that needs
+Use Fluent Work Items and Attempts for delegated build work that needs
 isolation, reviewers, and merging. The Work model path is: Work Item,
 Attempt, Task, Workspace, and Merge Candidate.
 
-Conversation agents may edit Factory planning and memory state directly
+Conversation agents may edit Fluent planning and memory state directly
 when they are collaborating with the user in the discussion loop:
 observations, briefs, behavior drafts, approaches, plans, lightweight
 curation, and similar durable notes. These edits are part of shaping
@@ -28,11 +28,11 @@ Keep `main` available as a stable integration branch for Work to rebase
 from and merge into. If conversation-state edits could overlap with
 active Work or merging, make them on a lightweight discussion branch
 or worktree and land them separately instead of dirtying `main`.
-Use `factory observations add` to record future work and lessons.
+Use `fluent observations add` to record future work and lessons.
 Open observations live as one file per entry under
-`.factory/observations/`; resolved ones move to
-`.factory/observations/resolved/`. Inspect with `factory
-observations list` and `factory observations show <id>`.
+`.fluent/observations/`; resolved ones move to
+`.fluent/observations/resolved/`. Inspect with `fluent
+observations list` and `fluent observations show <id>`.
 
 ## Commit messages
 
@@ -59,7 +59,7 @@ observations list` and `factory observations show <id>`.
 
 ### Prohibited
 - Do not add Co-Authored-By trailers
-- Do not reference run IDs, review artifacts, or factory internals
+- Do not reference run IDs, review artifacts, or fluent internals
 - Do not include counts or statistics: "fix 12 issues," "remove
   3,000 lines," "update 47 files." The diff shows the numbers.
   The message describes the change.
@@ -72,20 +72,20 @@ Maintain a linear commit history — never create merge commits.
 - Fast-forward merge only: `git merge --ff-only <branch>`
 - If the fast-forward fails, rebase the branch again and retry
 
-## Installing Factory
+## Installing Fluent
 
-When asked to install the local Factory binary, build the release binary
+When asked to install the local Fluent binary, build the release binary
 and install it to the PATH-preferred user location:
 
 ```bash
 cargo build --release
-install -m 0755 target/release/factory /Users/mrinal/.local/bin/factory
-factory version
+install -m 0755 target/release/fluent /Users/mrinal/.local/bin/fluent
+fluent version
 ```
 
 Do not use `cargo install --path .` for this repository unless the user
 explicitly asks for it; that installs to Cargo's bin directory, while
-this environment resolves `/Users/mrinal/.local/bin/factory` first.
+this environment resolves `/Users/mrinal/.local/bin/fluent` first.
 
 ## Documentation
 

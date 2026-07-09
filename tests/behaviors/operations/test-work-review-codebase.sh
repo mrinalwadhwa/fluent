@@ -5,14 +5,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
-FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
+FLUENT_BIN="${FLUENT_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/fluent}"
 
 source "${PROJECT_DIR}/tests/lib/run_test.sh"
 source "${PROJECT_DIR}/tests/lib/work_test_fixtures.sh"
 LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 setup_test_project() {
-  TEST_DIR="$(mktemp -d -t factory-work-review-codebase-XXXXXX)"
+  TEST_DIR="$(mktemp -d -t fluent-work-review-codebase-XXXXXX)"
   mkdir -p "$TEST_DIR/project" "$TEST_DIR/bin"
   cd "$TEST_DIR/project"
   git init -b main > /dev/null 2>&1
@@ -22,7 +22,7 @@ setup_test_project() {
   printf 'test\n' > README.md
   seed_review_skill_stubs "."
   git add . && git commit -m "init" > /dev/null 2>&1
-  "$FACTORY_BIN" work-item create work-1 --title "Review codebase" > /dev/null
+  "$FLUENT_BIN" work-item create work-1 --title "Review codebase" > /dev/null
 }
 
 cleanup_test_project() {
@@ -61,7 +61,7 @@ MOCK_SCRIPT
 }
 
 json_value() {
-  "$FACTORY_BIN" work-item show work-1 | jq -r "$1"
+  "$FLUENT_BIN" work-item show work-1 | jq -r "$1"
 }
 
 assert_contains() {
@@ -82,11 +82,11 @@ assert_fails() {
 }
 
 run_review_codebase() {
-  "$FACTORY_BIN" review codebase work-1 attempt-review --from-working-tree
+  "$FLUENT_BIN" review codebase work-1 attempt-review --from-working-tree
 }
 
 run_attempt_loop() {
-  PATH="${TEST_DIR}/bin:$PATH" "$FACTORY_BIN" attempt run \
+  PATH="${TEST_DIR}/bin:$PATH" "$FLUENT_BIN" attempt run \
     work-1 attempt-review --no-sandbox
 }
 
@@ -102,7 +102,7 @@ test_review_codebase_intake() {
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review")] | length')" = "5" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-review-review-tests") | .workspace_access.reads[0].id')" = "source" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-review-review-tests") | .workspace_access.reads[0].path')" = "." ] || RESULT=1
-  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-review-review-tests") | .artifact_area.path')" = ".factory/work/artifacts/work-1/attempt-review/attempt-review-review-tests" ] || RESULT=1
+  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-review-review-tests") | .artifact_area.path')" = ".fluent/work/artifacts/work-1/attempt-review/attempt-review-review-tests" ] || RESULT=1
 
   return $RESULT
 }
@@ -113,10 +113,10 @@ test_review_codebase_rejects_missing_and_duplicate() {
 
   RESULT=0
   run_review_codebase > /dev/null || RESULT=1
-  BEFORE="$(find .factory/work -type f -print0 | sort -z | xargs -0 shasum)"
-  assert_fails "$FACTORY_BIN" review codebase missing-work attempt-other || RESULT=1
-  assert_fails "$FACTORY_BIN" review codebase work-1 attempt-review || RESULT=1
-  AFTER="$(find .factory/work -type f -print0 | sort -z | xargs -0 shasum)"
+  BEFORE="$(find .fluent/work -type f -print0 | sort -z | xargs -0 shasum)"
+  assert_fails "$FLUENT_BIN" review codebase missing-work attempt-other || RESULT=1
+  assert_fails "$FLUENT_BIN" review codebase work-1 attempt-review || RESULT=1
+  AFTER="$(find .fluent/work -type f -print0 | sort -z | xargs -0 shasum)"
   [ "$AFTER" = "$BEFORE" ] || RESULT=1
 
   return $RESULT
@@ -135,8 +135,8 @@ test_review_codebase_pass_completes_without_merge_candidate() {
   [ "$(json_value '.attempts[0].review_state')" = "passed" ] || RESULT=1
   [ "$(json_value '(.merge_candidates // []) | length')" = "0" ] || RESULT=1
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "write")] | length')" = "0" ] || RESULT=1
-  git status --porcelain | grep -v '^?? .factory/' > "$TEST_DIR/non-factory-status" || true
-  [ ! -s "$TEST_DIR/non-factory-status" ] || RESULT=1
+  git status --porcelain | grep -v '^?? .fluent/' > "$TEST_DIR/non-fluent-status" || true
+  [ ! -s "$TEST_DIR/non-fluent-status" ] || RESULT=1
 
   return $RESULT
 }
@@ -165,15 +165,15 @@ test_review_codebase_rejects_source_changes() {
   run_review_codebase > /dev/null
 
   RESULT=0
-  assert_fails env PATH="${TEST_DIR}/bin:$PATH" "$FACTORY_BIN" attempt run \
+  assert_fails env PATH="${TEST_DIR}/bin:$PATH" "$FLUENT_BIN" attempt run \
     work-1 attempt-review --no-sandbox || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "changed source checkout outside managed artifact area" || RESULT=1
   [ "$(json_value '(.merge_candidates // []) | length')" = "0" ] || RESULT=1
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "write")] | length')" = "0" ] || RESULT=1
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review" and .status == "failed")] | length')" = "1" ] || RESULT=1
   [ "$(cat README.md)" = "test" ] || RESULT=1
-  git status --porcelain --untracked-files=all -- . ':(exclude).factory' > "$TEST_DIR/non-factory-status"
-  [ ! -s "$TEST_DIR/non-factory-status" ] || RESULT=1
+  git status --porcelain --untracked-files=all -- . ':(exclude).fluent' > "$TEST_DIR/non-fluent-status"
+  [ ! -s "$TEST_DIR/non-fluent-status" ] || RESULT=1
 
   return $RESULT
 }
@@ -189,8 +189,8 @@ test_review_codebase_uncertain_needs_user() {
   assert_contains "$(cat "$TEST_DIR/stdout")" "Attempt attempt-review needs user input" || RESULT=1
   [ "$(json_value '.attempts[0].status')" = "needs-user" ] || RESULT=1
   [ "$(json_value '.attempts[0].review_state')" = "uncertain" ] || RESULT=1
-  [ -f .factory/work/artifacts/work-1/attempt-review/needs-user.md ] || RESULT=1
-  assert_contains "$(cat .factory/work/artifacts/work-1/attempt-review/needs-user.md)" "attempt-review-review-tests/review.md" || RESULT=1
+  [ -f .fluent/work/artifacts/work-1/attempt-review/needs-user.md ] || RESULT=1
+  assert_contains "$(cat .fluent/work/artifacts/work-1/attempt-review/needs-user.md)" "attempt-review-review-tests/review.md" || RESULT=1
   [ "$(json_value '(.merge_candidates // []) | length')" = "0" ] || RESULT=1
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "write")] | length')" = "0" ] || RESULT=1
 

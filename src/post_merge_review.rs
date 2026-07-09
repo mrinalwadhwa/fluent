@@ -27,17 +27,17 @@ use crate::work_model::{
 
 const DEFAULT_DEBOUNCE_SECONDS: u64 = 60;
 const DEFAULT_MAX_POST_MERGE_REVIEW_FIX_DEPTH: u64 = 5;
-const POST_MERGE_REVIEW_FIX_DEPTH_ENV: &str = "FACTORY_POST_MERGE_REVIEW_FIX_DEPTH";
+const POST_MERGE_REVIEW_FIX_DEPTH_ENV: &str = "FLUENT_POST_MERGE_REVIEW_FIX_DEPTH";
 
 pub fn debounce_seconds() -> u64 {
-    std::env::var("FACTORY_POST_MERGE_DEBOUNCE_SECONDS")
+    std::env::var("FLUENT_POST_MERGE_DEBOUNCE_SECONDS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_DEBOUNCE_SECONDS)
 }
 
 pub fn max_post_merge_review_fix_depth() -> u64 {
-    std::env::var("FACTORY_MAX_POST_MERGE_REVIEW_FIX_DEPTH")
+    std::env::var("FLUENT_MAX_POST_MERGE_REVIEW_FIX_DEPTH")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_MAX_POST_MERGE_REVIEW_FIX_DEPTH)
@@ -68,7 +68,7 @@ pub struct Queue {
 }
 
 pub fn queue_path(project_root: &Path) -> PathBuf {
-    project_root.join(".factory/work/post-merge-review-queue.json")
+    project_root.join(".fluent/work/post-merge-review-queue.json")
 }
 
 pub fn append_entry(project_root: &Path, entry: QueueEntry) -> Result<()> {
@@ -106,7 +106,7 @@ pub fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// Spawn a detached Factory subprocess that will run the post-merge
+/// Spawn a detached Fluent subprocess that will run the post-merge
 /// review after the debounce window. Standard streams are redirected
 /// to a log file so the parent merge command can return immediately.
 pub fn spawn_detached_runner(project_root: &Path, debounce_secs: u64) -> Result<()> {
@@ -118,7 +118,7 @@ pub fn spawn_detached_runner(project_root: &Path, debounce_secs: u64) -> Result<
         );
         return Ok(());
     }
-    let log_dir = project_root.join(".factory/work");
+    let log_dir = project_root.join(".fluent/work");
     fs::create_dir_all(&log_dir).context("create work dir for post-merge log")?;
     let log_path = log_dir.join("post-merge-review.log");
     let log_file = fs::OpenOptions::new()
@@ -129,8 +129,8 @@ pub fn spawn_detached_runner(project_root: &Path, debounce_secs: u64) -> Result<
     let log_clone = log_file
         .try_clone()
         .context("clone log handle for stderr")?;
-    let factory_bin = std::env::current_exe().context("locate factory binary")?;
-    let mut cmd = Command::new(&factory_bin);
+    let fluent_bin = std::env::current_exe().context("locate fluent binary")?;
+    let mut cmd = Command::new(&fluent_bin);
     cmd.current_dir(project_root)
         .args([
             "post-merge-review",
@@ -142,7 +142,7 @@ pub fn spawn_detached_runner(project_root: &Path, debounce_secs: u64) -> Result<
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(log_clone));
     cmd.spawn()
-        .with_context(|| format!("spawn detached {factory_bin:?} for post-merge review"))?;
+        .with_context(|| format!("spawn detached {fluent_bin:?} for post-merge review"))?;
     Ok(())
 }
 
@@ -468,7 +468,7 @@ fn review_one(project_root: &Path, entry: &QueueEntry) -> Result<PerBranchOutcom
 
 /// Create a post-merge-review-fix Work Item from review findings, run its first
 /// Attempt, and (on Merge Candidate ready) auto-merge it. Recursion is
-/// bounded by `FACTORY_MAX_POST_MERGE_REVIEW_FIX_DEPTH`: the spawned post-merge
+/// bounded by `FLUENT_MAX_POST_MERGE_REVIEW_FIX_DEPTH`: the spawned post-merge
 /// review for the auto-merge runs with depth+1 in its environment.
 fn auto_run_post_merge_review_fix(
     project_root: &Path,

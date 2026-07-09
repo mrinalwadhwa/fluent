@@ -1,4 +1,4 @@
-use factory::work_model::{
+use fluent::work_model::{
     Attempt, AttemptKind, AttemptReviewState, AttemptStatus, CoderMapping, MergeCandidate,
     MergeCandidateMergeState, MergeCandidateReviewState, ReviewContext, Task, TaskArtifactArea,
     TaskKind, TaskOutput, TaskStatus, WorkItem, WorkModelError, WorkModelStorageError,
@@ -27,7 +27,7 @@ fn task(kind: TaskKind) -> Task {
             writes: vec![workspace("candidate")],
         },
         artifact_area: Some(TaskArtifactArea {
-            path: ".factory/work/artifacts/write-code".to_string(),
+            path: ".fluent/work/artifacts/write-code".to_string(),
         }),
         review_context: None,
         input_artifacts: Vec::new(),
@@ -180,18 +180,18 @@ fn work_model_store_writes_and_lists_documented_layout() {
 
     store.write_work_item(&work_item).unwrap();
 
-    assert!(temp.path().join(".factory/work/items/work-1.json").exists());
+    assert!(temp.path().join(".fluent/work/items/work-1.json").exists());
     assert!(
         temp.path()
-            .join(".factory/work/attempts/work-1/attempt-1.json")
+            .join(".fluent/work/attempts/work-1/attempt-1.json")
             .exists()
     );
     assert!(
         temp.path()
-            .join(".factory/work/tasks/work-1/attempt-1/write-code.json")
+            .join(".fluent/work/tasks/work-1/attempt-1/write-code.json")
             .exists()
     );
-    assert!(!temp.path().join(".factory/runs").exists());
+    assert!(!temp.path().join(".fluent/runs").exists());
     assert_eq!(store.read_work_item("work-1").unwrap(), work_item);
     assert_eq!(store.list_work_items().unwrap(), vec![work_item]);
 }
@@ -216,7 +216,7 @@ fn work_model_store_preserves_attempt_append_order() {
 
     let stored_attempt = fs::read_to_string(
         temp.path()
-            .join(".factory/work/attempts/work-1/attempt-10.json"),
+            .join(".fluent/work/attempts/work-1/attempt-10.json"),
     )
     .unwrap();
     let read = store.read_work_item("work-1").unwrap();
@@ -255,7 +255,7 @@ fn work_model_store_preserves_task_append_order() {
 
     let stored_task = fs::read_to_string(
         temp.path()
-            .join(".factory/work/tasks/work-1/attempt-1/custom-review.json"),
+            .join(".fluent/work/tasks/work-1/attempt-1/custom-review.json"),
     )
     .unwrap();
     let read = store.read_work_item("work-1").unwrap();
@@ -282,7 +282,7 @@ fn work_model_store_rejects_duplicate_task_order() {
 
     let duplicate_path = temp
         .path()
-        .join(".factory/work/tasks/work-1/attempt-1/write-followup.json");
+        .join(".fluent/work/tasks/work-1/attempt-1/write-followup.json");
     let mut duplicate: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&duplicate_path).unwrap()).unwrap();
     duplicate["order"] = serde_json::json!(0);
@@ -327,7 +327,7 @@ fn work_model_store_ignores_nested_operational_collections() {
         ..merge_candidate()
     });
     fs::write(
-        temp.path().join(".factory/work/items/work-1.json"),
+        temp.path().join(".fluent/work/items/work-1.json"),
         serde_json::to_string_pretty(&nested_item).unwrap(),
     )
     .unwrap();
@@ -349,7 +349,7 @@ fn work_model_store_create_refuses_existing_work_item() {
 
     match error {
         WorkModelStorageError::WorkItemAlreadyExists { path, id } => {
-            assert_eq!(path, temp.path().join(".factory/work/items/work-1.json"));
+            assert_eq!(path, temp.path().join(".fluent/work/items/work-1.json"));
             assert_eq!(id, "work-1");
         }
         other => panic!("unexpected error: {other}"),
@@ -360,7 +360,7 @@ fn work_model_store_create_refuses_existing_work_item() {
 #[test]
 fn work_model_store_keeps_existing_run_state_separate() {
     let temp = tempfile::tempdir().unwrap();
-    let run_dir = temp.path().join(".factory/runs/run-legacy");
+    let run_dir = temp.path().join(".fluent/runs/run-legacy");
     fs::create_dir_all(&run_dir).unwrap();
     fs::write(run_dir.join("status"), "complete").unwrap();
     fs::write(run_dir.join("sessions.log"), "legacy session\n").unwrap();
@@ -378,7 +378,7 @@ fn work_model_store_keeps_existing_run_state_separate() {
         fs::read_to_string(run_dir.join("sessions.log")).unwrap(),
         "legacy session\n"
     );
-    assert!(temp.path().join(".factory/work/items/work-1.json").exists());
+    assert!(temp.path().join(".fluent/work/items/work-1.json").exists());
     assert_eq!(store.read_work_item("work-1").unwrap(), work_item);
 }
 
@@ -388,7 +388,7 @@ fn work_model_store_rejects_file_name_id_mismatch() {
     let store = WorkModelStore::new(temp.path());
     store.write_work_item(&work_item()).unwrap();
 
-    let path = temp.path().join(".factory/work/items/work-1.json");
+    let path = temp.path().join(".fluent/work/items/work-1.json");
     let invalid = fs::read_to_string(&path)
         .unwrap()
         .replace(r#""id": "work-1""#, r#""id": "work-2""#);
@@ -447,7 +447,7 @@ fn work_model_store_rejects_ids_that_cannot_name_files() {
 fn work_model_store_rejects_invalid_stored_file_stems() {
     let temp = tempfile::tempdir().unwrap();
     let store = WorkModelStore::new(temp.path());
-    let items_dir = temp.path().join(".factory/work/items");
+    let items_dir = temp.path().join(".fluent/work/items");
     fs::create_dir_all(&items_dir).unwrap();
     fs::write(
         items_dir.join(r"nested\work.json"),
@@ -473,7 +473,7 @@ fn work_model_store_writes_deterministic_pretty_json() {
 
     store.write_work_item(&work_item()).unwrap();
 
-    let path = temp.path().join(".factory/work/items/work-1.json");
+    let path = temp.path().join(".fluent/work/items/work-1.json");
     let content = fs::read_to_string(path).unwrap();
     assert_eq!(
         content,
@@ -485,7 +485,7 @@ fn work_model_store_writes_deterministic_pretty_json() {
     );
     let attempt = fs::read_to_string(
         temp.path()
-            .join(".factory/work/attempts/work-1/attempt-1.json"),
+            .join(".fluent/work/attempts/work-1/attempt-1.json"),
     )
     .unwrap();
     assert!(attempt.contains(r#""id": "attempt-1""#));
@@ -494,7 +494,7 @@ fn work_model_store_writes_deterministic_pretty_json() {
 
     let task = fs::read_to_string(
         temp.path()
-            .join(".factory/work/tasks/work-1/attempt-1/write-code.json"),
+            .join(".fluent/work/tasks/work-1/attempt-1/write-code.json"),
     )
     .unwrap();
     assert!(task.contains(r#""order": 0"#));
@@ -513,11 +513,11 @@ fn work_model_store_writes_merge_candidates_as_records() {
     store.write_work_item(&item).unwrap();
 
     let item_content =
-        fs::read_to_string(temp.path().join(".factory/work/items/work-1.json")).unwrap();
+        fs::read_to_string(temp.path().join(".fluent/work/items/work-1.json")).unwrap();
     assert!(!item_content.contains(r#""merge_candidates""#));
     let content = fs::read_to_string(
         temp.path()
-            .join(".factory/work/merge-candidates/work-1/attempt-1-merge-candidate.json"),
+            .join(".fluent/work/merge-candidates/work-1/attempt-1-merge-candidate.json"),
     )
     .unwrap();
     assert!(content.contains(r#""id": "attempt-1-merge-candidate""#));
@@ -538,14 +538,14 @@ fn work_model_store_prunes_stale_split_records() {
 
     let task_path = temp
         .path()
-        .join(".factory/work/tasks/work-1/attempt-1/write-code.json");
+        .join(".fluent/work/tasks/work-1/attempt-1/write-code.json");
     let attempt_path = temp
         .path()
-        .join(".factory/work/attempts/work-1/attempt-1.json");
-    let task_attempt_dir = temp.path().join(".factory/work/tasks/work-1/attempt-1");
+        .join(".fluent/work/attempts/work-1/attempt-1.json");
+    let task_attempt_dir = temp.path().join(".fluent/work/tasks/work-1/attempt-1");
     let candidate_path = temp
         .path()
-        .join(".factory/work/merge-candidates/work-1/attempt-1-merge-candidate.json");
+        .join(".fluent/work/merge-candidates/work-1/attempt-1-merge-candidate.json");
     assert!(task_path.exists());
     assert!(attempt_path.exists());
     assert!(candidate_path.exists());
@@ -582,7 +582,7 @@ fn work_model_store_returns_empty_list_without_work_state() {
 #[test]
 fn work_model_store_reports_file_for_invalid_json() {
     let temp = tempfile::tempdir().unwrap();
-    let items = temp.path().join(".factory/work/items");
+    let items = temp.path().join(".fluent/work/items");
     fs::create_dir_all(&items).unwrap();
     let path = items.join("work-1.json");
     fs::write(&path, "{").unwrap();
@@ -608,7 +608,7 @@ fn work_model_store_reports_file_for_invalid_task_model() {
 
     match error {
         WorkModelStorageError::InvalidModel { path, source } => {
-            assert_eq!(path, temp.path().join(".factory/work/items/work-1.json"));
+            assert_eq!(path, temp.path().join(".fluent/work/items/work-1.json"));
             assert_eq!(
                 source,
                 WorkModelError::ReviewTaskWritesWorkspace {
@@ -631,7 +631,7 @@ fn work_model_store_rejects_complete_write_task_without_output() {
 
     match error {
         WorkModelStorageError::InvalidModel { path, source } => {
-            assert_eq!(path, temp.path().join(".factory/work/items/work-1.json"));
+            assert_eq!(path, temp.path().join(".fluent/work/items/work-1.json"));
             assert_eq!(
                 source,
                 WorkModelError::CompleteWriteTaskMissingOutput {
@@ -655,7 +655,7 @@ fn work_model_store_rejects_output_on_incomplete_task() {
 
     match error {
         WorkModelStorageError::InvalidModel { path, source } => {
-            assert_eq!(path, temp.path().join(".factory/work/items/work-1.json"));
+            assert_eq!(path, temp.path().join(".fluent/work/items/work-1.json"));
             assert_eq!(
                 source,
                 WorkModelError::IncompleteTaskHasOutput {
@@ -680,7 +680,7 @@ fn work_model_store_rejects_complete_attempt_with_incomplete_task() {
 
     match error {
         WorkModelStorageError::InvalidModel { path, source } => {
-            assert_eq!(path, temp.path().join(".factory/work/items/work-1.json"));
+            assert_eq!(path, temp.path().join(".fluent/work/items/work-1.json"));
             assert_eq!(
                 source,
                 WorkModelError::CompleteAttemptHasIncompleteTask {
@@ -734,7 +734,7 @@ fn work_item_add_initial_attempt_creates_scheduler_facing_write_task() {
     assert_eq!(
         task.artifact_area,
         Some(TaskArtifactArea {
-            path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1".to_string(),
+            path: ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1".to_string(),
         })
     );
     work_item.validate().unwrap();
@@ -878,7 +878,7 @@ fn work_model_store_reports_file_for_invalid_model_read_from_disk() {
 
     let path = temp
         .path()
-        .join(".factory/work/tasks/work-1/attempt-1/write-code.json");
+        .join(".fluent/work/tasks/work-1/attempt-1/write-code.json");
     let invalid = fs::read_to_string(&path)
         .unwrap()
         .replace(r#""kind": "write""#, r#""kind": "review""#);
@@ -911,7 +911,7 @@ fn work_model_store_reports_file_for_split_attempt_id_mismatch() {
 
     let path = temp
         .path()
-        .join(".factory/work/attempts/work-1/attempt-1.json");
+        .join(".fluent/work/attempts/work-1/attempt-1.json");
     let invalid = fs::read_to_string(&path)
         .unwrap()
         .replace(r#""id": "attempt-1""#, r#""id": "attempt-2""#);
@@ -942,7 +942,7 @@ fn work_model_store_reports_file_for_split_attempt_work_item_mismatch() {
 
     let path = temp
         .path()
-        .join(".factory/work/attempts/work-1/attempt-1.json");
+        .join(".fluent/work/attempts/work-1/attempt-1.json");
     let invalid = fs::read_to_string(&path)
         .unwrap()
         .replace(r#""work_item_id": "work-1""#, r#""work_item_id": "work-2""#);
@@ -975,7 +975,7 @@ fn work_model_store_reports_file_for_split_task_id_mismatch() {
 
     let path = temp
         .path()
-        .join(".factory/work/tasks/work-1/attempt-1/write-code.json");
+        .join(".fluent/work/tasks/work-1/attempt-1/write-code.json");
     let invalid = fs::read_to_string(&path)
         .unwrap()
         .replace(r#""id": "write-code""#, r#""id": "review-code""#);
@@ -1006,7 +1006,7 @@ fn work_model_store_reports_file_for_split_task_work_item_mismatch() {
 
     let path = temp
         .path()
-        .join(".factory/work/tasks/work-1/attempt-1/write-code.json");
+        .join(".fluent/work/tasks/work-1/attempt-1/write-code.json");
     let invalid = fs::read_to_string(&path)
         .unwrap()
         .replace(r#""work_item_id": "work-1""#, r#""work_item_id": "work-2""#);
@@ -1039,7 +1039,7 @@ fn work_model_store_reports_file_for_split_task_attempt_mismatch() {
 
     let path = temp
         .path()
-        .join(".factory/work/tasks/work-1/attempt-1/write-code.json");
+        .join(".fluent/work/tasks/work-1/attempt-1/write-code.json");
     let invalid = fs::read_to_string(&path).unwrap().replace(
         r#""attempt_id": "attempt-1""#,
         r#""attempt_id": "attempt-2""#,
@@ -1075,7 +1075,7 @@ fn work_model_store_reports_file_for_split_merge_candidate_id_mismatch() {
 
     let path = temp
         .path()
-        .join(".factory/work/merge-candidates/work-1/attempt-1-merge-candidate.json");
+        .join(".fluent/work/merge-candidates/work-1/attempt-1-merge-candidate.json");
     let invalid = fs::read_to_string(&path).unwrap().replace(
         r#""id": "attempt-1-merge-candidate""#,
         r#""id": "attempt-1-other-candidate""#,
@@ -1109,7 +1109,7 @@ fn work_model_store_reports_file_for_split_merge_candidate_attempt_mismatch() {
 
     let path = temp
         .path()
-        .join(".factory/work/merge-candidates/work-1/attempt-1-merge-candidate.json");
+        .join(".fluent/work/merge-candidates/work-1/attempt-1-merge-candidate.json");
     let invalid = fs::read_to_string(&path).unwrap().replace(
         r#""attempt_id": "attempt-1""#,
         r#""attempt_id": "attempt-2""#,

@@ -19,6 +19,6 @@
     ]
   },
   "artifact_area": {
-    "path": ".factory/tasks/review-architecture"
+    "path": ".fluent/tasks/review-architecture"
   }
 }

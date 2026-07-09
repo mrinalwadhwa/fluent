@@ -5,17 +5,17 @@ We already have a brief for project checks. Help me define the behaviors
 for a formatter check that runs automatically before merge.
 
 ## Hidden context
-- The brief says Factory should support project-defined checks, starting
+- The brief says Fluent should support project-defined checks, starting
   with a formatter check.
-- The user wants this to work for any project Factory manages, not just
-  Factory itself.
+- The user wants this to work for any project Fluent manages, not just
+  Fluent itself.
 - "Formatter check" means a configured command that may modify files and
   must leave the run worktree formatted before review or merge.
 - The user wants opt-in automation: once the project configures a check,
-  Factory should run it without stopping for manual input.
+  Fluent should run it without stopping for manual input.
 - If the check changes files, the author work should include those
   changes and review should see the formatted diff.
-- If the check fails after running, Factory should capture the command
+- If the check fails after running, Fluent should capture the command
   output and let the author or a follow-up run fix it.
 - The user does not want behavior statements to name a specific config
   file, Rust module, or formatter implementation.

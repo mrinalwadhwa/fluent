@@ -107,7 +107,7 @@ test_empty_email_shows_error
 test_expired_token_returns_401
 ```
 
-Follow arrange-act-assert: set up the preconditions, perform the action, verify the outcome. When setup gets long, extract it into a helper so the test body stays focused on the action and assertion. When tests build similar objects with small variations, use a builder or factory: it returns a fully-formed object from sensible defaults, and each test overrides only the fields it cares about.
+Follow arrange-act-assert: set up the preconditions, perform the action, verify the outcome. When setup gets long, extract it into a helper so the test body stays focused on the action and assertion. When tests build similar objects with small variations, use a builder or fluent: it returns a fully-formed object from sensible defaults, and each test overrides only the fields it cares about.
 
 Each test should verify one behavior. If the name needs "and," split it into two tests. When a multi-assertion test fails, you have to read the body to figure out what broke. With one behavior per test, the name tells you.
 

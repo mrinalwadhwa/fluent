@@ -20,7 +20,7 @@ const DEFAULT_MAX_TOTAL_WRITE_ROUNDS: usize = 10;
 const DEFAULT_MAX_NO_PROGRESS_ROUNDS: usize = 2;
 
 fn max_parallel_reviewers() -> usize {
-    std::env::var("FACTORY_MAX_PARALLEL_REVIEWERS")
+    std::env::var("FLUENT_MAX_PARALLEL_REVIEWERS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(DEFAULT_MAX_PARALLEL_REVIEWERS)
@@ -28,7 +28,7 @@ fn max_parallel_reviewers() -> usize {
 }
 
 fn max_total_write_rounds() -> usize {
-    std::env::var("FACTORY_MAX_TOTAL_WRITE_ROUNDS")
+    std::env::var("FLUENT_MAX_TOTAL_WRITE_ROUNDS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(DEFAULT_MAX_TOTAL_WRITE_ROUNDS)
@@ -36,7 +36,7 @@ fn max_total_write_rounds() -> usize {
 }
 
 fn max_no_progress_rounds() -> usize {
-    std::env::var("FACTORY_MAX_NO_PROGRESS_ROUNDS")
+    std::env::var("FLUENT_MAX_NO_PROGRESS_ROUNDS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(DEFAULT_MAX_NO_PROGRESS_ROUNDS)
@@ -310,7 +310,7 @@ fn run_parallel_reviews(
 /// PostMergeReview today, and for ReviewCodebase once step 2 lands.
 /// Review-only Attempts whose workspace is the source checkout (`.`)
 /// must run serially: parallel reviewers would collide on the project
-/// root's `.factory/work/artifacts/` tree and trip the source-checkout
+/// root's `.fluent/work/artifacts/` tree and trip the source-checkout
 /// review guard.
 fn supports_parallel_review_phase(attempt: &Attempt) -> bool {
     if !attempt.kind.is_review_only_like() {
@@ -404,10 +404,10 @@ fn reject_terminal_attempt(status: AttemptStatus) -> Result<()> {
 ///
 /// Two backstops, both attempt-wide and env-tunable:
 /// - Hard ceiling: total completed write rounds must be below
-///   `FACTORY_MAX_TOTAL_WRITE_ROUNDS` (default 10).
+///   `FLUENT_MAX_TOTAL_WRITE_ROUNDS` (default 10).
 /// - No-progress streak: consecutive trailing review rounds where ALL
 ///   completed reviewers reported `Progress: no` must be below
-///   `FACTORY_MAX_NO_PROGRESS_ROUNDS` (default 2). A reviewer that
+///   `FLUENT_MAX_NO_PROGRESS_ROUNDS` (default 2). A reviewer that
 ///   reports `yes`, `partial`, `first-pass`, or is missing the field
 ///   does NOT contribute to the no-progress streak — the rule is
 ///   lenient on purpose.
@@ -974,7 +974,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("Task artifact area path must stay under .factory/work/artifacts")
+                .contains("Task artifact area path must stay under .fluent/work/artifacts")
         );
     }
 
@@ -995,7 +995,7 @@ mod tests {
                 vec![ArtifactRef {
                     producer_id: "attempt-1-review-tests".to_string(),
                     path:
-                        ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
+                        ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
                             .to_string(),
                 }],
             ),
@@ -1015,12 +1015,12 @@ mod tests {
                 vec![
                     ArtifactRef {
                         producer_id: "attempt-1-review-tests".to_string(),
-                        path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
+                        path: ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
                             .to_string(),
                     },
                     ArtifactRef {
                         producer_id: "attempt-1-review-documentation".to_string(),
-                        path: ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-documentation/review.md"
+                        path: ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-documentation/review.md"
                             .to_string(),
                     },
                 ],
@@ -1039,7 +1039,7 @@ mod tests {
                 "attempt-1-write-2",
                 vec![ArtifactRef {
                     producer_id: "missing-review-task".to_string(),
-                    path: ".factory/work/artifacts/work-1/attempt-1/missing-review-task/review.md"
+                    path: ".fluent/work/artifacts/work-1/attempt-1/missing-review-task/review.md"
                         .to_string(),
                 }],
             ),
@@ -1384,13 +1384,13 @@ mod tests {
             workspace_access: WorkspaceAccess {
                 reads: vec![WorkspaceRef {
                     id: "candidate".to_string(),
-                    path: ".factory/work/workspaces/work-1/attempt-1/candidate".to_string(),
+                    path: ".fluent/work/workspaces/work-1/attempt-1/candidate".to_string(),
                 }],
                 writes: Vec::new(),
             },
             review_context: Some(ReviewContext {
                 candidate_workspace_id: "candidate".to_string(),
-                candidate_workspace_path: ".factory/work/workspaces/work-1/attempt-1/candidate"
+                candidate_workspace_path: ".fluent/work/workspaces/work-1/attempt-1/candidate"
                     .to_string(),
                 source_branch: "work/attempt-1".to_string(),
                 candidate_commit: "abc123".to_string(),
@@ -1423,7 +1423,7 @@ mod tests {
         attempt.tasks[0].status = TaskStatus::Complete;
         attempt.tasks[0].output = Some(TaskOutput {
             workspace_id: "candidate".to_string(),
-            workspace_path: ".factory/work/workspaces/work-1/attempt-1/candidate".to_string(),
+            workspace_path: ".fluent/work/workspaces/work-1/attempt-1/candidate".to_string(),
             source_branch: "work/attempt-1".to_string(),
             commit: "abc123".to_string(),
         });

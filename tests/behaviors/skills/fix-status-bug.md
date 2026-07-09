@@ -1,11 +1,11 @@
 # Scenario: Fix status display bug
 
 ## Opening statement
-factory status shows "plan-approved" for old runs. It should show "planned" now that we renamed the status values.
+fluent status shows "plan-approved" for old runs. It should show "planned" now that we renamed the status values.
 
 ## Hidden context
 - This is a straightforward bug from the recent rename
-- The old test run in .factory/runs/ still has the old status value in its file
+- The old test run in .fluent/runs/ still has the old status value in its file
 - The user just wants it fixed, no deep discussion needed
 - Would be annoyed if the agent asks too many questions about this
 - Would say "just fix it" if the agent over-probes

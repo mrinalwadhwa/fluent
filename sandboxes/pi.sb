@@ -1,7 +1,7 @@
 ;; ==========================================================================
 ;; Pi (pi.dev) -- profile-specific Seatbelt rules
 ;; ==========================================================================
-;; Concatenated after common.sb by Factory when launching Pi.
+;; Concatenated after common.sb by Fluent when launching Pi.
 ;;
 ;; NOTE: No (allow iokit*) -- Pi is a CLI tool, not a GUI app.
 ;; It does not need Metal GPU enumeration or any IOKit services.

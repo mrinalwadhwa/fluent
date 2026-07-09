@@ -109,7 +109,7 @@ fn read_content_or_stdin(content: Option<String>) -> Result<String> {
 
 pub fn add(project_root: &Path, content: Option<String>) -> Result<()> {
     let content = read_content_or_stdin(content)?;
-    let obs_dir = project_root.join(".factory/observations");
+    let obs_dir = project_root.join(".fluent/observations");
     fs::create_dir_all(&obs_dir)?;
 
     let base_id = generate_id(&content);
@@ -126,7 +126,7 @@ pub fn add(project_root: &Path, content: Option<String>) -> Result<()> {
 }
 
 pub fn resolve(project_root: &Path, id_prefix: &str, resolution: Option<String>) -> Result<()> {
-    let obs_dir = project_root.join(".factory/observations");
+    let obs_dir = project_root.join(".fluent/observations");
     let resolved_dir = obs_dir.join("resolved");
 
     let id = match expand_prefix(id_prefix, &obs_dir)? {
@@ -160,7 +160,7 @@ pub fn resolve(project_root: &Path, id_prefix: &str, resolution: Option<String>)
 }
 
 pub fn list(project_root: &Path) -> Result<()> {
-    let obs_dir = project_root.join(".factory/observations");
+    let obs_dir = project_root.join(".fluent/observations");
     if !obs_dir.is_dir() {
         return Ok(());
     }
@@ -194,7 +194,7 @@ pub fn list(project_root: &Path) -> Result<()> {
 }
 
 pub fn show(project_root: &Path, id_prefix: &str) -> Result<()> {
-    let obs_dir = project_root.join(".factory/observations");
+    let obs_dir = project_root.join(".fluent/observations");
     let resolved_dir = obs_dir.join("resolved");
 
     match expand_prefix(id_prefix, &obs_dir)? {
@@ -300,15 +300,15 @@ fn parse_observation_blocks(content: &str) -> Vec<ObservationBlock> {
 }
 
 pub fn migrate(project_root: &Path) -> Result<()> {
-    let obs_file = project_root.join(".factory/observations.md");
-    let resolved_file = project_root.join(".factory/observations-resolved.md");
+    let obs_file = project_root.join(".fluent/observations.md");
+    let resolved_file = project_root.join(".fluent/observations-resolved.md");
 
     if !obs_file.exists() && !resolved_file.exists() {
         println!("Nothing to migrate (no monolithic observation files found)");
         return Ok(());
     }
 
-    let obs_dir = project_root.join(".factory/observations");
+    let obs_dir = project_root.join(".fluent/observations");
     let resolved_dir = obs_dir.join("resolved");
     fs::create_dir_all(&obs_dir)?;
     fs::create_dir_all(&resolved_dir)?;
@@ -501,17 +501,17 @@ mod tests {
     #[test]
     fn migrate_splits_and_removes_monolithic() {
         let tmp = TempDir::new().unwrap();
-        let factory = tmp.path().join(".factory");
-        fs::create_dir_all(&factory).unwrap();
+        let fluent = tmp.path().join(".fluent");
+        fs::create_dir_all(&fluent).unwrap();
 
         fs::write(
-            factory.join("observations.md"),
+            fluent.join("observations.md"),
             "# Observations\n\n---\n\n\
              2026-06-12 \u{2014} Test entry\nContent here.\n",
         )
         .unwrap();
         fs::write(
-            factory.join("observations-resolved.md"),
+            fluent.join("observations-resolved.md"),
             "# Resolved\n\n---\n\n\
              2026-06-11 \u{2014} Old entry\n\u{2192} Resolved: done.\n",
         )
@@ -519,18 +519,18 @@ mod tests {
 
         migrate(tmp.path()).unwrap();
 
-        assert!(!factory.join("observations.md").exists());
-        assert!(!factory.join("observations-resolved.md").exists());
-        assert!(factory.join("observations").is_dir());
-        assert!(factory.join("observations/resolved").is_dir());
+        assert!(!fluent.join("observations.md").exists());
+        assert!(!fluent.join("observations-resolved.md").exists());
+        assert!(fluent.join("observations").is_dir());
+        assert!(fluent.join("observations/resolved").is_dir());
 
-        let open_count = fs::read_dir(factory.join("observations"))
+        let open_count = fs::read_dir(fluent.join("observations"))
             .unwrap()
             .filter(|e| e.as_ref().unwrap().file_type().unwrap().is_file())
             .count();
         assert_eq!(open_count, 1);
 
-        let resolved_count = fs::read_dir(factory.join("observations/resolved"))
+        let resolved_count = fs::read_dir(fluent.join("observations/resolved"))
             .unwrap()
             .filter(|e| e.as_ref().unwrap().file_type().unwrap().is_file())
             .count();
@@ -540,11 +540,11 @@ mod tests {
     #[test]
     fn migrate_idempotent() {
         let tmp = TempDir::new().unwrap();
-        let factory = tmp.path().join(".factory");
-        fs::create_dir_all(&factory).unwrap();
+        let fluent = tmp.path().join(".fluent");
+        fs::create_dir_all(&fluent).unwrap();
 
         fs::write(
-            factory.join("observations.md"),
+            fluent.join("observations.md"),
             "# Observations\n\n---\n\n\
              2026-06-12 \u{2014} Test entry\nContent here.\n",
         )
@@ -553,7 +553,7 @@ mod tests {
         migrate(tmp.path()).unwrap();
         migrate(tmp.path()).unwrap();
 
-        let open_count = fs::read_dir(factory.join("observations"))
+        let open_count = fs::read_dir(fluent.join("observations"))
             .unwrap()
             .filter(|e| e.as_ref().unwrap().file_type().unwrap().is_file())
             .count();
@@ -563,11 +563,11 @@ mod tests {
     #[test]
     fn migrate_collision_suffixes() {
         let tmp = TempDir::new().unwrap();
-        let factory = tmp.path().join(".factory");
-        fs::create_dir_all(&factory).unwrap();
+        let fluent = tmp.path().join(".fluent");
+        fs::create_dir_all(&fluent).unwrap();
 
         fs::write(
-            factory.join("observations.md"),
+            fluent.join("observations.md"),
             "# Observations\n\n---\n\n\
              2026-06-12 \u{2014} Same title\nFirst body.\n\n\
              2026-06-12 \u{2014} Same title\nSecond body.\n",
@@ -576,7 +576,7 @@ mod tests {
 
         migrate(tmp.path()).unwrap();
 
-        let obs_dir = factory.join("observations");
+        let obs_dir = fluent.join("observations");
         let mut files: Vec<String> = fs::read_dir(&obs_dir)
             .unwrap()
             .filter_map(|e| {

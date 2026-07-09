@@ -1,8 +1,8 @@
 #[path = "lib/log.rs"]
 mod log;
 
-use factory::git;
-use factory::review;
+use fluent::git;
+use fluent::review;
 use log::LoggedCommand;
 use predicates::prelude::*;
 use serial_test::serial;
@@ -10,14 +10,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
-fn factory_cmd() -> LoggedCommand {
-    let mut cmd = LoggedCommand::cargo_bin("factory");
-    cmd.env_remove("FACTORY_TASK_KIND");
+fn fluent_cmd() -> LoggedCommand {
+    let mut cmd = LoggedCommand::cargo_bin("fluent");
+    cmd.env_remove("FLUENT_TASK_KIND");
     cmd
 }
 
 fn work_item_value(project_root: &Path, id: &str) -> serde_json::Value {
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(project_root)
         .args(["work-item", "show", id])
         .output()
@@ -40,9 +40,9 @@ fn write_json_path(path: &Path, value: &serde_json::Value) {
 }
 
 #[test]
-fn factory_help_lists_tester_subcommand() {
+fn fluent_help_lists_tester_subcommand() {
     let tmp = TempDir::new().unwrap();
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["--help"])
         .output()
@@ -50,7 +50,7 @@ fn factory_help_lists_tester_subcommand() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("tester"),
-        "factory --help should list the tester command; got:\n{stdout}"
+        "fluent --help should list the tester command; got:\n{stdout}"
     );
 }
 
@@ -58,7 +58,7 @@ fn factory_help_lists_tester_subcommand() {
 fn version_prints_package_version_and_commit() {
     let tmp = TempDir::new().unwrap();
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .arg("version")
         .output()
@@ -75,7 +75,7 @@ fn version_prints_package_version_and_commit() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let fields = stdout.trim_end().split(' ').collect::<Vec<_>>();
     assert_eq!(fields.len(), 3, "version output should have three fields");
-    assert_eq!(fields[0], "factory");
+    assert_eq!(fields[0], "fluent");
     assert_eq!(fields[1], env!("CARGO_PKG_VERSION"));
     let commit = fields[2];
     assert!(
@@ -88,7 +88,7 @@ fn version_prints_package_version_and_commit() {
 fn fargate_teardown_nothing_to_teardown() {
     let tmp = TempDir::new().unwrap();
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .env("HOME", tmp.path().to_string_lossy().to_string())
         .env_remove("AWS_DEFAULT_REGION")
@@ -112,7 +112,7 @@ fn fargate_teardown_nothing_to_teardown() {
 fn fargate_teardown_help_shows_keep_flags() {
     let tmp = TempDir::new().unwrap();
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["fargate", "teardown", "--help"])
         .output()
@@ -129,7 +129,7 @@ fn fargate_teardown_deletes_stack_ecr_s3_and_removes_state() {
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
 
-    let state_dir = tmp.path().join(".config/factory");
+    let state_dir = tmp.path().join(".config/fluent");
     fs::create_dir_all(&state_dir).unwrap();
     let state_path = state_dir.join("fargate.state.json");
     fs::write(
@@ -137,8 +137,8 @@ fn fargate_teardown_deletes_stack_ecr_s3_and_removes_state() {
         r#"{
   "stack_deployed": true,
   "region": "us-west-2",
-  "repo_uri": "123.dkr.ecr.us-west-2.amazonaws.com/factory/run",
-  "s3_bucket": "factory-workspace-123"
+  "repo_uri": "123.dkr.ecr.us-west-2.amazonaws.com/fluent/run",
+  "s3_bucket": "fluent-workspace-123"
 }"#,
     )
     .unwrap();
@@ -156,7 +156,7 @@ case "$1 $2" in
     printf 'CREATE_COMPLETE\n'
     ;;
   "ecr describe-repositories")
-    printf 'factory/run\n'
+    printf 'fluent/run\n'
     ;;
   "ecr delete-repository")
     ;;
@@ -176,7 +176,7 @@ esac
 "##,
     );
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .env("HOME", tmp.path())
         .env("PATH", mock_path(&bin_dir))
@@ -237,7 +237,7 @@ fn fargate_teardown_keep_ecr_skips_ecr_delete() {
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
 
-    let state_dir = tmp.path().join(".config/factory");
+    let state_dir = tmp.path().join(".config/fluent");
     fs::create_dir_all(&state_dir).unwrap();
     let state_path = state_dir.join("fargate.state.json");
     fs::write(
@@ -245,8 +245,8 @@ fn fargate_teardown_keep_ecr_skips_ecr_delete() {
         r#"{
   "stack_deployed": true,
   "region": "us-west-2",
-  "repo_uri": "123.dkr.ecr.us-west-2.amazonaws.com/factory/run",
-  "s3_bucket": "factory-workspace-123"
+  "repo_uri": "123.dkr.ecr.us-west-2.amazonaws.com/fluent/run",
+  "s3_bucket": "fluent-workspace-123"
 }"#,
     )
     .unwrap();
@@ -279,7 +279,7 @@ esac
 "##,
     );
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .env("HOME", tmp.path())
         .env("PATH", mock_path(&bin_dir))
@@ -326,7 +326,7 @@ fn fargate_teardown_keep_s3_skips_s3_delete() {
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
 
-    let state_dir = tmp.path().join(".config/factory");
+    let state_dir = tmp.path().join(".config/fluent");
     fs::create_dir_all(&state_dir).unwrap();
     let state_path = state_dir.join("fargate.state.json");
     fs::write(
@@ -334,8 +334,8 @@ fn fargate_teardown_keep_s3_skips_s3_delete() {
         r#"{
   "stack_deployed": true,
   "region": "us-west-2",
-  "repo_uri": "123.dkr.ecr.us-west-2.amazonaws.com/factory/run",
-  "s3_bucket": "factory-workspace-123"
+  "repo_uri": "123.dkr.ecr.us-west-2.amazonaws.com/fluent/run",
+  "s3_bucket": "fluent-workspace-123"
 }"#,
     )
     .unwrap();
@@ -353,7 +353,7 @@ case "$1 $2" in
     printf 'CREATE_COMPLETE\n'
     ;;
   "ecr describe-repositories")
-    printf 'factory/run\n'
+    printf 'fluent/run\n'
     ;;
   "ecr delete-repository")
     ;;
@@ -369,7 +369,7 @@ esac
 "##,
     );
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .env("HOME", tmp.path())
         .env("PATH", mock_path(&bin_dir))
@@ -414,7 +414,7 @@ fn fargate_teardown_error_preserves_state_file() {
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
 
-    let state_dir = tmp.path().join(".config/factory");
+    let state_dir = tmp.path().join(".config/fluent");
     fs::create_dir_all(&state_dir).unwrap();
     let state_path = state_dir.join("fargate.state.json");
     fs::write(
@@ -422,8 +422,8 @@ fn fargate_teardown_error_preserves_state_file() {
         r#"{
   "stack_deployed": true,
   "region": "us-west-2",
-  "repo_uri": "123.dkr.ecr.us-west-2.amazonaws.com/factory/run",
-  "s3_bucket": "factory-workspace-123"
+  "repo_uri": "123.dkr.ecr.us-west-2.amazonaws.com/fluent/run",
+  "s3_bucket": "fluent-workspace-123"
 }"#,
     )
     .unwrap();
@@ -441,7 +441,7 @@ case "$1 $2" in
     printf 'CREATE_COMPLETE\n'
     ;;
   "ecr describe-repositories")
-    printf 'factory/run\n'
+    printf 'fluent/run\n'
     ;;
   "ecr delete-repository")
     printf 'RepositoryNotEmptyException: cannot delete\n' >&2
@@ -455,7 +455,7 @@ esac
 "##,
     );
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .env("HOME", tmp.path())
         .env("PATH", mock_path(&bin_dir))
@@ -480,36 +480,36 @@ fn fargate_ensure_setup_creates_dockerfile_stub_when_missing() {
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
     let project_dir = tmp.path().join("my-project");
-    let factory_src = tmp.path().join("factory-src");
-    fs::create_dir_all(project_dir.join(".factory")).unwrap();
-    fs::create_dir_all(factory_src.join("infrastructure/run")).unwrap();
+    let fluent_src = tmp.path().join("fluent-src");
+    fs::create_dir_all(project_dir.join(".fluent")).unwrap();
+    fs::create_dir_all(fluent_src.join("infrastructure/run")).unwrap();
     fs::write(
-        factory_src.join("Cargo.toml"),
-        "[package]\nname = \"factory\"\n",
+        fluent_src.join("Cargo.toml"),
+        "[package]\nname = \"fluent\"\n",
     )
     .unwrap();
     fs::write(
-        factory_src.join("infrastructure/run/Dockerfile"),
+        fluent_src.join("infrastructure/run/Dockerfile"),
         "FROM node:latest\n",
     )
     .unwrap();
     fs::write(
-        factory_src.join("infrastructure/run/entrypoint.sh"),
+        fluent_src.join("infrastructure/run/entrypoint.sh"),
         "#!/bin/sh\n",
     )
     .unwrap();
 
-    let state_dir = tmp.path().join(".config/factory");
+    let state_dir = tmp.path().join(".config/fluent");
     fs::create_dir_all(&state_dir).unwrap();
     fs::write(
         state_dir.join("fargate.state.json"),
         r#"{
   "stack_deployed": true,
   "region": "us-west-2",
-  "cluster_arn": "arn:aws:ecs:us-west-2:123:cluster/factory",
-  "task_def_arn": "arn:aws:ecs:us-west-2:123:task-definition/factory-run:1",
-  "repo_uri": "123456789012.dkr.ecr.us-west-2.amazonaws.com/factory/run",
-  "s3_bucket": "factory-workspace-123",
+  "cluster_arn": "arn:aws:ecs:us-west-2:123:cluster/fluent",
+  "task_def_arn": "arn:aws:ecs:us-west-2:123:task-definition/fluent-run:1",
+  "repo_uri": "123456789012.dkr.ecr.us-west-2.amazonaws.com/fluent/run",
+  "s3_bucket": "fluent-workspace-123",
   "subnets": "subnet-a,subnet-b",
   "security_group_id": "sg-abc"
 }"#,
@@ -533,11 +533,11 @@ case "$1 $2" in
     if echo "$*" | grep -q 'containerDefinitions\[0\].image'; then
       printf 'placeholder\n'
     else
-      printf '{"family":"factory-run","containerDefinitions":[{"name":"run","image":"placeholder","essential":true}],"requiresCompatibilities":["FARGATE"],"networkMode":"awsvpc","cpu":"1024","memory":"2048"}\n'
+      printf '{"family":"fluent-run","containerDefinitions":[{"name":"run","image":"placeholder","essential":true}],"requiresCompatibilities":["FARGATE"],"networkMode":"awsvpc","cpu":"1024","memory":"2048"}\n'
     fi
     ;;
   "ecs register-task-definition")
-    printf 'arn:aws:ecs:us-west-2:123:task-definition/factory-run:2\n'
+    printf 'arn:aws:ecs:us-west-2:123:task-definition/fluent-run:2\n'
     ;;
   *)
     ;;
@@ -554,12 +554,12 @@ exit 0
 "##,
     );
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(&project_dir)
         .env("HOME", tmp.path())
         .env("PATH", mock_path(&bin_dir))
         .env("AWS_LOG", &aws_log)
-        .env("FACTORY_SOURCE_ROOT", &factory_src)
+        .env("FLUENT_SOURCE_ROOT", &fluent_src)
         .args(["fargate", "ensure-setup"])
         .output()
         .unwrap();
@@ -571,19 +571,19 @@ exit 0
         String::from_utf8_lossy(&output.stdout)
     );
 
-    let dockerfile = project_dir.join(".factory/Dockerfile");
+    let dockerfile = project_dir.join(".fluent/Dockerfile");
     assert!(dockerfile.exists(), "Dockerfile stub should be created");
     let content = fs::read_to_string(&dockerfile).unwrap();
     assert!(
-        content.contains("ARG FACTORY_BASE_URI"),
+        content.contains("ARG FLUENT_BASE_URI"),
         "stub should contain ARG: {content}"
     );
     assert!(
-        content.contains("FROM ${FACTORY_BASE_URI}"),
+        content.contains("FROM ${FLUENT_BASE_URI}"),
         "stub should contain FROM: {content}"
     );
     assert!(
-        stderr.contains("Created .factory/Dockerfile stub"),
+        stderr.contains("Created .fluent/Dockerfile stub"),
         "should report stub creation: {stderr}"
     );
 }
@@ -593,36 +593,36 @@ fn fargate_ensure_setup_skips_base_build_when_ecr_tag_exists() {
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
     let project_dir = tmp.path().join("my-project");
-    let factory_src = tmp.path().join("factory-src");
-    fs::create_dir_all(project_dir.join(".factory")).unwrap();
-    fs::create_dir_all(factory_src.join("infrastructure/run")).unwrap();
+    let fluent_src = tmp.path().join("fluent-src");
+    fs::create_dir_all(project_dir.join(".fluent")).unwrap();
+    fs::create_dir_all(fluent_src.join("infrastructure/run")).unwrap();
     fs::write(
-        factory_src.join("Cargo.toml"),
-        "[package]\nname = \"factory\"\n",
+        fluent_src.join("Cargo.toml"),
+        "[package]\nname = \"fluent\"\n",
     )
     .unwrap();
     fs::write(
-        factory_src.join("infrastructure/run/Dockerfile"),
+        fluent_src.join("infrastructure/run/Dockerfile"),
         "FROM node:latest\n",
     )
     .unwrap();
     fs::write(
-        factory_src.join("infrastructure/run/entrypoint.sh"),
+        fluent_src.join("infrastructure/run/entrypoint.sh"),
         "#!/bin/sh\n",
     )
     .unwrap();
 
-    let state_dir = tmp.path().join(".config/factory");
+    let state_dir = tmp.path().join(".config/fluent");
     fs::create_dir_all(&state_dir).unwrap();
     fs::write(
         state_dir.join("fargate.state.json"),
         r#"{
   "stack_deployed": true,
   "region": "us-west-2",
-  "cluster_arn": "arn:aws:ecs:us-west-2:123:cluster/factory",
-  "task_def_arn": "arn:aws:ecs:us-west-2:123:task-definition/factory-run:1",
-  "repo_uri": "123456789012.dkr.ecr.us-west-2.amazonaws.com/factory/run",
-  "s3_bucket": "factory-workspace-123",
+  "cluster_arn": "arn:aws:ecs:us-west-2:123:cluster/fluent",
+  "task_def_arn": "arn:aws:ecs:us-west-2:123:task-definition/fluent-run:1",
+  "repo_uri": "123456789012.dkr.ecr.us-west-2.amazonaws.com/fluent/run",
+  "s3_bucket": "fluent-workspace-123",
   "subnets": "subnet-a,subnet-b",
   "security_group_id": "sg-abc"
 }"#,
@@ -646,11 +646,11 @@ case "$1 $2" in
     if echo "$*" | grep -q 'containerDefinitions\[0\].image'; then
       printf 'placeholder\n'
     else
-      printf '{"family":"factory-run","containerDefinitions":[{"name":"run","image":"placeholder","essential":true}],"requiresCompatibilities":["FARGATE"],"networkMode":"awsvpc","cpu":"1024","memory":"2048"}\n'
+      printf '{"family":"fluent-run","containerDefinitions":[{"name":"run","image":"placeholder","essential":true}],"requiresCompatibilities":["FARGATE"],"networkMode":"awsvpc","cpu":"1024","memory":"2048"}\n'
     fi
     ;;
   "ecs register-task-definition")
-    printf 'arn:aws:ecs:us-west-2:123:task-definition/factory-run:2\n'
+    printf 'arn:aws:ecs:us-west-2:123:task-definition/fluent-run:2\n'
     ;;
   *)
     ;;
@@ -667,12 +667,12 @@ exit 0
 "##,
     );
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(&project_dir)
         .env("HOME", tmp.path())
         .env("PATH", mock_path(&bin_dir))
         .env("AWS_LOG", &aws_log)
-        .env("FACTORY_SOURCE_ROOT", &factory_src)
+        .env("FLUENT_SOURCE_ROOT", &fluent_src)
         .args(["fargate", "ensure-setup"])
         .output()
         .unwrap();
@@ -701,41 +701,41 @@ fn fargate_ensure_setup_skips_project_build_when_ecr_tag_exists() {
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
     let project_dir = tmp.path().join("my-project");
-    let factory_src = tmp.path().join("factory-src");
-    fs::create_dir_all(project_dir.join(".factory")).unwrap();
-    fs::create_dir_all(factory_src.join("infrastructure/run")).unwrap();
+    let fluent_src = tmp.path().join("fluent-src");
+    fs::create_dir_all(project_dir.join(".fluent")).unwrap();
+    fs::create_dir_all(fluent_src.join("infrastructure/run")).unwrap();
     fs::write(
-        factory_src.join("Cargo.toml"),
-        "[package]\nname = \"factory\"\n",
+        fluent_src.join("Cargo.toml"),
+        "[package]\nname = \"fluent\"\n",
     )
     .unwrap();
     fs::write(
-        factory_src.join("infrastructure/run/Dockerfile"),
+        fluent_src.join("infrastructure/run/Dockerfile"),
         "FROM node:latest\n",
     )
     .unwrap();
     fs::write(
-        factory_src.join("infrastructure/run/entrypoint.sh"),
+        fluent_src.join("infrastructure/run/entrypoint.sh"),
         "#!/bin/sh\n",
     )
     .unwrap();
     fs::write(
-        project_dir.join(".factory/Dockerfile"),
-        "ARG FACTORY_BASE_URI\nFROM ${FACTORY_BASE_URI}\nRUN echo hello\n",
+        project_dir.join(".fluent/Dockerfile"),
+        "ARG FLUENT_BASE_URI\nFROM ${FLUENT_BASE_URI}\nRUN echo hello\n",
     )
     .unwrap();
 
-    let state_dir = tmp.path().join(".config/factory");
+    let state_dir = tmp.path().join(".config/fluent");
     fs::create_dir_all(&state_dir).unwrap();
     fs::write(
         state_dir.join("fargate.state.json"),
         r#"{
   "stack_deployed": true,
   "region": "us-west-2",
-  "cluster_arn": "arn:aws:ecs:us-west-2:123:cluster/factory",
-  "task_def_arn": "arn:aws:ecs:us-west-2:123:task-definition/factory-run:1",
-  "repo_uri": "123456789012.dkr.ecr.us-west-2.amazonaws.com/factory/run",
-  "s3_bucket": "factory-workspace-123",
+  "cluster_arn": "arn:aws:ecs:us-west-2:123:cluster/fluent",
+  "task_def_arn": "arn:aws:ecs:us-west-2:123:task-definition/fluent-run:1",
+  "repo_uri": "123456789012.dkr.ecr.us-west-2.amazonaws.com/fluent/run",
+  "s3_bucket": "fluent-workspace-123",
   "subnets": "subnet-a,subnet-b",
   "security_group_id": "sg-abc"
 }"#,
@@ -757,13 +757,13 @@ case "$1 $2" in
     ;;
   "ecs describe-task-definition")
     if echo "$*" | grep -q 'containerDefinitions\[0\].image'; then
-      printf '123456789012.dkr.ecr.us-west-2.amazonaws.com/factory/run:project-existing\n'
+      printf '123456789012.dkr.ecr.us-west-2.amazonaws.com/fluent/run:project-existing\n'
     else
-      printf '{"family":"factory-run","containerDefinitions":[{"name":"run","image":"123456789012.dkr.ecr.us-west-2.amazonaws.com/factory/run:project-existing","essential":true}],"requiresCompatibilities":["FARGATE"],"networkMode":"awsvpc","cpu":"1024","memory":"2048"}\n'
+      printf '{"family":"fluent-run","containerDefinitions":[{"name":"run","image":"123456789012.dkr.ecr.us-west-2.amazonaws.com/fluent/run:project-existing","essential":true}],"requiresCompatibilities":["FARGATE"],"networkMode":"awsvpc","cpu":"1024","memory":"2048"}\n'
     fi
     ;;
   "ecs register-task-definition")
-    printf 'arn:aws:ecs:us-west-2:123:task-definition/factory-run:2\n'
+    printf 'arn:aws:ecs:us-west-2:123:task-definition/fluent-run:2\n'
     ;;
   *)
     ;;
@@ -780,12 +780,12 @@ exit 0
 "##,
     );
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(&project_dir)
         .env("HOME", tmp.path())
         .env("PATH", mock_path(&bin_dir))
         .env("AWS_LOG", &aws_log)
-        .env("FACTORY_SOURCE_ROOT", &factory_src)
+        .env("FLUENT_SOURCE_ROOT", &fluent_src)
         .args(["fargate", "ensure-setup"])
         .output()
         .unwrap();
@@ -813,7 +813,7 @@ fn dry_run_with_codex_uses_codex_profile_layer() {
     write_mock_codex(&bin_dir, "#!/bin/bash\nexit 0\n");
     write_mock_sandbox_exec(&bin_dir);
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["--dry-run", "--coder", "codex"])
         .env("PATH", mock_path(&bin_dir))
@@ -844,30 +844,30 @@ fn dry_run_with_codex_uses_codex_profile_layer() {
 // -------------------------------------------------------------------------
 
 #[test]
-fn init_creates_factory_structure() {
+fn init_creates_fluent_structure() {
     let tmp = TempDir::new().unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .arg("init")
         .assert()
         .success()
-        .stderr(predicate::str::contains("Initialized .factory/"));
+        .stderr(predicate::str::contains("Initialized .fluent/"));
 
-    assert!(tmp.path().join(".factory/expertise").is_dir());
+    assert!(tmp.path().join(".fluent/expertise").is_dir());
 }
 
 #[test]
 fn init_is_idempotent() {
     let tmp = TempDir::new().unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .arg("init")
         .assert()
         .success();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .arg("init")
         .assert()
@@ -879,16 +879,16 @@ fn init_is_idempotent() {
 fn init_writes_gitignore_when_absent() {
     let tmp = TempDir::new().unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .arg("init")
         .assert()
         .success();
 
-    let gitignore = tmp.path().join(".factory/.gitignore");
+    let gitignore = tmp.path().join(".fluent/.gitignore");
     assert!(
         gitignore.is_file(),
-        ".factory/.gitignore should exist after init"
+        ".fluent/.gitignore should exist after init"
     );
 }
 
@@ -897,21 +897,21 @@ fn init_gitignore_excludes_working_state_and_tracks_durable() {
     let tmp = TempDir::new().unwrap();
     init_git_repo(tmp.path());
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .arg("init")
         .assert()
         .success();
 
     // Create directories so git can distinguish files from dirs
-    let factory = tmp.path().join(".factory");
+    let fluent = tmp.path().join(".fluent");
     for dir in &["work", "drafts", "expertise", "observations", "hooks"] {
-        fs::create_dir_all(factory.join(dir)).unwrap();
+        fs::create_dir_all(fluent.join(dir)).unwrap();
     }
 
     // Ephemeral paths must be ignored
     for path in &["work", "drafts"] {
-        let full = format!(".factory/{}", path);
+        let full = format!(".fluent/{}", path);
         let output = std::process::Command::new("git")
             .args(["check-ignore", &full])
             .current_dir(tmp.path())
@@ -919,7 +919,7 @@ fn init_gitignore_excludes_working_state_and_tracks_durable() {
             .unwrap();
         assert!(
             output.status.success(),
-            ".factory/{path} should be ignored by git"
+            ".fluent/{path} should be ignored by git"
         );
     }
 
@@ -933,7 +933,7 @@ fn init_gitignore_excludes_working_state_and_tracks_durable() {
         "tester.yaml",
         "extract-tester-results",
     ] {
-        let full = format!(".factory/{}", path);
+        let full = format!(".fluent/{}", path);
         let output = std::process::Command::new("git")
             .args(["check-ignore", &full])
             .current_dir(tmp.path())
@@ -941,7 +941,7 @@ fn init_gitignore_excludes_working_state_and_tracks_durable() {
             .unwrap();
         assert!(
             !output.status.success(),
-            ".factory/{path} should NOT be ignored by git"
+            ".fluent/{path} should NOT be ignored by git"
         );
     }
 }
@@ -949,12 +949,12 @@ fn init_gitignore_excludes_working_state_and_tracks_durable() {
 #[test]
 fn init_preserves_existing_gitignore() {
     let tmp = TempDir::new().unwrap();
-    let factory_dir = tmp.path().join(".factory");
-    fs::create_dir_all(&factory_dir).unwrap();
-    let gitignore = factory_dir.join(".gitignore");
+    let fluent_dir = tmp.path().join(".fluent");
+    fs::create_dir_all(&fluent_dir).unwrap();
+    let gitignore = fluent_dir.join(".gitignore");
     fs::write(&gitignore, "# custom content\n").unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .arg("init")
         .assert()
@@ -968,23 +968,23 @@ fn init_preserves_existing_gitignore() {
 }
 
 #[test]
-fn init_backfills_gitignore_on_existing_factory() {
+fn init_backfills_gitignore_on_existing_fluent() {
     let tmp = TempDir::new().unwrap();
 
-    // First init creates .factory/
-    factory_cmd()
+    // First init creates .fluent/
+    fluent_cmd()
         .current_dir(tmp.path())
         .arg("init")
         .assert()
         .success();
 
-    // Remove the .gitignore to simulate a pre-existing .factory/ without one
-    let gitignore = tmp.path().join(".factory/.gitignore");
+    // Remove the .gitignore to simulate a pre-existing .fluent/ without one
+    let gitignore = tmp.path().join(".fluent/.gitignore");
     fs::remove_file(&gitignore).unwrap();
     assert!(!gitignore.exists());
 
     // Second init should backfill the .gitignore
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .arg("init")
         .assert()
@@ -992,7 +992,7 @@ fn init_backfills_gitignore_on_existing_factory() {
 
     assert!(
         gitignore.is_file(),
-        ".gitignore should be backfilled on existing .factory/"
+        ".gitignore should be backfilled on existing .fluent/"
     );
 }
 
@@ -1001,10 +1001,10 @@ fn init_backfills_gitignore_on_existing_factory() {
 // -------------------------------------------------------------------------
 
 #[test]
-fn status_no_factory_dir() {
+fn status_no_fluent_dir() {
     let tmp = TempDir::new().unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .arg("status")
         .assert()
@@ -1016,7 +1016,7 @@ fn status_no_factory_dir() {
 fn status_shows_work_items_without_runs() {
     let tmp = TempDir::new().unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args([
             "work-item",
@@ -1027,13 +1027,13 @@ fn status_shows_work_items_without_runs() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .arg("status")
         .assert()
@@ -1056,7 +1056,7 @@ fn status_shows_work_items_without_runs() {
 fn work_create_writes_minimal_work_item() {
     let tmp = TempDir::new().unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args([
             "work-item",
@@ -1069,7 +1069,7 @@ fn work_create_writes_minimal_work_item() {
         .success()
         .stdout(predicate::str::contains("Created Work Item work-intake"));
 
-    let path = tmp.path().join(".factory/work/items/work-intake.json");
+    let path = tmp.path().join(".fluent/work/items/work-intake.json");
     let json = fs::read_to_string(path).unwrap();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(value["id"], "work-intake");
@@ -1083,7 +1083,7 @@ fn work_create_refuses_existing_work_item() {
     let tmp = TempDir::new().unwrap();
     write_work_item_json(tmp.path(), "work-existing", "Original title");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args([
             "work-item",
@@ -1099,7 +1099,7 @@ fn work_create_refuses_existing_work_item() {
         ));
 
     let json =
-        fs::read_to_string(tmp.path().join(".factory/work/items/work-existing.json")).unwrap();
+        fs::read_to_string(tmp.path().join(".fluent/work/items/work-existing.json")).unwrap();
     assert!(json.contains("Original title"));
     assert!(!json.contains("Replacement title"));
 }
@@ -1108,7 +1108,7 @@ fn work_create_refuses_existing_work_item() {
 fn work_create_rejects_invalid_work_item_id() {
     let tmp = TempDir::new().unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args([
             "work-item",
@@ -1123,14 +1123,14 @@ fn work_create_rejects_invalid_work_item_id() {
             "work item id \"../escape\" cannot be used as a file name",
         ));
 
-    assert!(!tmp.path().join(".factory/work/items").exists());
+    assert!(!tmp.path().join(".fluent/work/items").exists());
 }
 
 #[test]
 fn work_create_item_is_visible_through_list_and_show() {
     let tmp = TempDir::new().unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args([
             "work-item",
@@ -1142,7 +1142,7 @@ fn work_create_item_is_visible_through_list_and_show() {
         .assert()
         .success();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["work-item", "list"])
         .assert()
@@ -1150,7 +1150,7 @@ fn work_create_item_is_visible_through_list_and_show() {
         .stdout(predicate::str::contains("work-visible"))
         .stdout(predicate::str::contains("Visible title"));
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["work-item", "show", "work-visible"])
         .assert()
@@ -1165,7 +1165,7 @@ fn work_attempt_adds_planned_attempt_with_initial_write_task() {
     let tmp = TempDir::new().unwrap();
     write_work_item_json(tmp.path(), "work-1", "Attempt intake");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
@@ -1174,7 +1174,7 @@ fn work_attempt_adds_planned_attempt_with_initial_write_task() {
             "Created Attempt attempt-1 for Work Item work-1",
         ));
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["work-item", "show", "work-1"])
         .output()
@@ -1220,12 +1220,12 @@ fn work_attempt_paths_disambiguate_hyphenated_ids() {
     write_work_item_json(tmp.path(), "work-a", "First work");
     write_work_item_json(tmp.path(), "work-a-b", "Second work");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["attempt", "create", "work-a", "b-c"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["attempt", "create", "work-a-b", "c"])
         .assert()
@@ -1246,13 +1246,13 @@ fn work_attempt_appends_to_existing_attempts() {
     let tmp = TempDir::new().unwrap();
     write_work_item_json(tmp.path(), "work-1", "Attempt intake");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["attempt", "create", "work-1", "attempt-2"])
         .assert()
@@ -1261,7 +1261,7 @@ fn work_attempt_appends_to_existing_attempts() {
             "Created Attempt attempt-2 for Work Item work-1",
         ));
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["work-item", "show", "work-1"])
         .output()
@@ -1292,7 +1292,7 @@ fn work_attempt_appends_to_existing_attempts() {
 fn work_attempt_missing_work_item_reports_not_found() {
     let tmp = TempDir::new().unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["attempt", "create", "missing-work", "attempt-1"])
         .assert()
@@ -1301,7 +1301,7 @@ fn work_attempt_missing_work_item_reports_not_found() {
             "Work Item \"missing-work\" not found",
         ));
 
-    assert!(!tmp.path().join(".factory/work/items").exists());
+    assert!(!tmp.path().join(".fluent/work/items").exists());
 }
 
 #[test]
@@ -1309,14 +1309,14 @@ fn work_attempt_duplicate_attempt_id_fails_without_changes() {
     let tmp = TempDir::new().unwrap();
     write_work_item_json(tmp.path(), "work-1", "Attempt intake");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
-    let before = fs::read_to_string(tmp.path().join(".factory/work/items/work-1.json")).unwrap();
+    let before = fs::read_to_string(tmp.path().join(".fluent/work/items/work-1.json")).unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
@@ -1325,7 +1325,7 @@ fn work_attempt_duplicate_attempt_id_fails_without_changes() {
             "Attempt \"attempt-1\" already exists",
         ));
 
-    let after = fs::read_to_string(tmp.path().join(".factory/work/items/work-1.json")).unwrap();
+    let after = fs::read_to_string(tmp.path().join(".fluent/work/items/work-1.json")).unwrap();
     assert_eq!(after, before);
 }
 
@@ -1333,9 +1333,9 @@ fn work_attempt_duplicate_attempt_id_fails_without_changes() {
 fn work_attempt_rejects_invalid_attempt_id_without_changes() {
     let tmp = TempDir::new().unwrap();
     write_work_item_json(tmp.path(), "work-1", "Attempt intake");
-    let before = fs::read_to_string(tmp.path().join(".factory/work/items/work-1.json")).unwrap();
+    let before = fs::read_to_string(tmp.path().join(".fluent/work/items/work-1.json")).unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["attempt", "create", "work-1", "../escape"])
         .assert()
@@ -1344,7 +1344,7 @@ fn work_attempt_rejects_invalid_attempt_id_without_changes() {
             "attempt id \"../escape\" cannot be used as a file name",
         ));
 
-    let after = fs::read_to_string(tmp.path().join(".factory/work/items/work-1.json")).unwrap();
+    let after = fs::read_to_string(tmp.path().join(".fluent/work/items/work-1.json")).unwrap();
     assert_eq!(after, before);
 }
 
@@ -1353,7 +1353,7 @@ fn work_attempt_auto_id_creates_attempt_1() {
     let tmp = TempDir::new().unwrap();
     write_work_item_json(tmp.path(), "work-1", "Auto attempt");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["attempt", "create", "work-1"])
         .assert()
@@ -1371,13 +1371,13 @@ fn work_attempt_auto_id_sequential_creates_attempt_2() {
     let tmp = TempDir::new().unwrap();
     write_work_item_json(tmp.path(), "work-1", "Auto attempt seq");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["attempt", "create", "work-1"])
         .assert()
         .success();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["attempt", "create", "work-1"])
         .assert()
@@ -1398,19 +1398,19 @@ fn work_attempt_auto_id_fills_gap() {
     let tmp = TempDir::new().unwrap();
     write_work_item_json(tmp.path(), "work-1", "Auto attempt gap");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["attempt", "create", "work-1", "attempt-3"])
         .assert()
         .success();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["attempt", "create", "work-1"])
         .assert()
@@ -1425,7 +1425,7 @@ fn work_attempt_explicit_id_still_works() {
     let tmp = TempDir::new().unwrap();
     write_work_item_json(tmp.path(), "work-1", "Explicit attempt");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["attempt", "create", "work-1", "my-custom-attempt"])
         .assert()
@@ -1443,7 +1443,7 @@ fn work_attempt_run_no_attempts_reports_error() {
     let tmp = TempDir::new().unwrap();
     write_work_item_json(tmp.path(), "work-1", "No attempts");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["attempt", "run", "work-1", "--no-sandbox"])
         .assert()
@@ -1456,7 +1456,7 @@ fn work_merge_no_candidates_reports_error() {
     let tmp = TempDir::new().unwrap();
     write_work_item_json(tmp.path(), "work-1", "No candidates");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["merge-candidate", "land", "work-1", "--no-sandbox"])
         .assert()
@@ -1479,18 +1479,18 @@ exit 0
 "##,
     );
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -1548,7 +1548,7 @@ exit 0
 "##,
     );
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -1559,12 +1559,12 @@ exit 0
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -1579,7 +1579,7 @@ exit 0
         .success();
 
     let transcript = main_dir
-        .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1/transcript.jsonl");
+        .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/transcript.jsonl");
     assert!(
         transcript.is_file(),
         "transcript.jsonl should exist at {}",
@@ -1595,7 +1595,7 @@ exit 0
     let task = &value["attempts"][0]["tasks"][0];
     assert_eq!(
         task["artifact_area"]["path"],
-        ".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1"
+        ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1"
     );
 }
 
@@ -1612,7 +1612,7 @@ exit 1
 "##,
     );
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -1623,12 +1623,12 @@ exit 1
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -1643,7 +1643,7 @@ exit 1
         .unwrap();
 
     let transcript = main_dir
-        .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1/transcript.jsonl");
+        .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/transcript.jsonl");
     assert!(
         transcript.is_file(),
         "transcript.jsonl should persist even on failure at {}",
@@ -1684,17 +1684,17 @@ exec "$@"
 "##,
     );
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["work-item", "create", "work-1", "--title", "Sandbox test"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["task", "run", "work-1", "attempt-1", "attempt-1-write-1"])
         .env("PATH", mock_path(&bin_dir))
@@ -1704,7 +1704,7 @@ exec "$@"
         .success();
 
     let artifact_dir = fs::canonicalize(
-        main_dir.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1"),
+        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1"),
     )
     .unwrap();
     let sandbox_profile = fs::read_to_string(&sandbox_profile_log).unwrap();
@@ -1722,14 +1722,14 @@ fn reviewer_sandbox_does_not_include_writer_artifact_dir() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     create_completed_work_attempt(&tmp, &main_dir);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["review", "work-1", "attempt-1"])
         .assert()
         .success();
 
     let writer_artifact_dir =
-        main_dir.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1");
+        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1");
     fs::create_dir_all(&writer_artifact_dir).unwrap();
     fs::write(
         writer_artifact_dir.join("transcript.jsonl"),
@@ -1749,7 +1749,7 @@ fn reviewer_sandbox_does_not_include_writer_artifact_dir() {
         "#!/bin/bash\ncp \"$2\" \"${SANDBOX_PROFILE_LOG:?}\"\nshift 2\nexec \"$@\"\n",
     );
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -1789,7 +1789,7 @@ fn review_task_transcript_persists_after_completion() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     create_completed_work_attempt(&tmp, &main_dir);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["review", "work-1", "attempt-1"])
         .assert()
@@ -1805,7 +1805,7 @@ exit 0
 "##,
     );
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -1820,7 +1820,7 @@ exit 0
         .success();
 
     let transcript = main_dir
-        .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/transcript.jsonl");
+        .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests/transcript.jsonl");
     assert!(
         transcript.is_file(),
         "transcript.jsonl should exist at {}",
@@ -1833,7 +1833,7 @@ exit 0
     );
 
     let review =
-        main_dir.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md");
+        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md");
     assert!(
         review.is_file(),
         "review.md should exist alongside transcript"
@@ -1845,7 +1845,7 @@ fn review_task_transcript_persists_on_failure() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     create_completed_work_attempt(&tmp, &main_dir);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["review", "work-1", "attempt-1"])
         .assert()
@@ -1860,7 +1860,7 @@ exit 1
 "##,
     );
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -1875,7 +1875,7 @@ exit 1
         .unwrap();
 
     let transcript = main_dir
-        .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/transcript.jsonl");
+        .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests/transcript.jsonl");
     assert!(
         transcript.is_file(),
         "transcript.jsonl should persist even on reviewer failure at {}",
@@ -1893,7 +1893,7 @@ fn reviewer_sandbox_does_not_include_other_reviewer_artifact_dirs() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     create_completed_work_attempt(&tmp, &main_dir);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["review", "work-1", "attempt-1"])
         .assert()
@@ -1901,9 +1901,9 @@ fn reviewer_sandbox_does_not_include_other_reviewer_artifact_dirs() {
 
     // Complete two review tasks so their artifact dirs exist with transcripts
     let review_tests_artifact =
-        main_dir.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests");
+        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests");
     let review_documentation_artifact =
-        main_dir.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-documentation");
+        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-documentation");
     fs::create_dir_all(&review_tests_artifact).unwrap();
     fs::create_dir_all(&review_documentation_artifact).unwrap();
     fs::write(
@@ -1944,7 +1944,7 @@ fn reviewer_sandbox_does_not_include_other_reviewer_artifact_dirs() {
         "#!/bin/bash\ncp \"$2\" \"${SANDBOX_PROFILE_LOG:?}\"\nshift 2\nexec \"$@\"\n",
     );
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -1992,7 +1992,7 @@ fn work_create_persists_instructions_and_attempt_copies_them_to_write_task() {
     )
     .unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -2005,13 +2005,13 @@ fn work_create_persists_instructions_and_attempt_copies_them_to_write_task() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(&main_dir)
         .args(["work-item", "show", "work-1"])
         .output()
@@ -2046,7 +2046,7 @@ fn work_create_persists_planning_context_and_attempt_copies_it_to_write_task() {
     fs::write(&approach_path, "Add first-class Work state.\n").unwrap();
     fs::write(&plan_path, "1. Implement the model change.\n").unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -2065,13 +2065,13 @@ fn work_create_persists_planning_context_and_attempt_copies_it_to_write_task() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(&main_dir)
         .args(["work-item", "show", "work-1"])
         .output()
@@ -2114,7 +2114,7 @@ fn work_create_prefers_instructions_over_planning_context_for_write_task() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -2129,13 +2129,13 @@ fn work_create_prefers_instructions_over_planning_context_for_write_task() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(&main_dir)
         .args(["work-item", "show", "work-1"])
         .output()
@@ -2158,7 +2158,7 @@ fn work_review_plans_review_tasks_for_completed_attempt() {
     let main_dir = setup_git_project(&tmp);
     create_completed_work_attempt(&tmp, &main_dir);
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["review", "work-1", "attempt-1"])
         .assert()
@@ -2198,7 +2198,7 @@ fn work_review_plans_review_tasks_for_completed_attempt() {
     );
     assert_eq!(
         review_task["artifact_area"]["path"],
-        ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests"
+        ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests"
     );
     assert_eq!(
         review_task["review_context"]["candidate_workspace_id"],
@@ -2219,7 +2219,7 @@ fn work_review_plans_review_tasks_for_completed_attempt() {
 fn work_review_requires_completed_write_output() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -2230,15 +2230,15 @@ fn work_review_requires_completed_write_output() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
-    let item_path = main_dir.join(".factory/work/items/work-1.json");
+    let item_path = main_dir.join(".fluent/work/items/work-1.json");
     let before = fs::read_to_string(&item_path).unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["review", "work-1", "attempt-1"])
         .assert()
@@ -2258,7 +2258,7 @@ fn work_review_codebase_creates_review_only_attempt() {
         "Review only skills/ and focus on review-only prompt context.\n",
     )
     .unwrap();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -2272,7 +2272,7 @@ fn work_review_codebase_creates_review_only_attempt() {
         .assert()
         .success();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "review",
@@ -2320,7 +2320,7 @@ fn work_review_codebase_creates_review_only_attempt() {
     );
     assert_eq!(
         review_task["artifact_area"]["path"],
-        ".factory/work/artifacts/work-1/attempt-review/attempt-review-review-tests"
+        ".fluent/work/artifacts/work-1/attempt-review/attempt-review-review-tests"
     );
     assert_eq!(
         review_task["review_context"]["candidate_workspace_id"],
@@ -2341,7 +2341,7 @@ fn work_review_codebase_creates_review_only_attempt() {
 fn work_review_codebase_default_creates_worktree_attempt_with_tester() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -2353,7 +2353,7 @@ fn work_review_codebase_default_creates_worktree_attempt_with_tester() {
         .assert()
         .success();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["review", "codebase", "work-1", "attempt-review"])
         .assert()
@@ -2388,7 +2388,7 @@ fn work_review_codebase_default_creates_worktree_attempt_with_tester() {
 fn work_review_codebase_missing_or_duplicate_leaves_state_unchanged() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -2400,7 +2400,7 @@ fn work_review_codebase_missing_or_duplicate_leaves_state_unchanged() {
         .assert()
         .success();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "review",
@@ -2411,10 +2411,10 @@ fn work_review_codebase_missing_or_duplicate_leaves_state_unchanged() {
         ])
         .assert()
         .success();
-    let item_path = main_dir.join(".factory/work/items/work-1.json");
+    let item_path = main_dir.join(".fluent/work/items/work-1.json");
     let before = fs::read_to_string(&item_path).unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["review", "codebase", "missing-work", "attempt-review"])
         .assert()
@@ -2422,7 +2422,7 @@ fn work_review_codebase_missing_or_duplicate_leaves_state_unchanged() {
         .stderr(predicate::str::contains(
             "Work Item \"missing-work\" not found",
         ));
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "review",
@@ -2440,7 +2440,7 @@ fn work_review_codebase_missing_or_duplicate_leaves_state_unchanged() {
     assert_eq!(fs::read_to_string(item_path).unwrap(), before);
     assert!(
         !main_dir
-            .join(".factory/work/items/missing-work.json")
+            .join(".fluent/work/items/missing-work.json")
             .exists()
     );
 }
@@ -2457,7 +2457,7 @@ fn work_task_run_review_only_fails_when_skill_missing() {
         "commit skill removal",
     )
     .unwrap();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -2468,7 +2468,7 @@ fn work_task_run_review_only_fails_when_skill_missing() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "review",
@@ -2483,7 +2483,7 @@ fn work_task_run_review_only_fails_when_skill_missing() {
     let bin_dir = tmp.path().join("bin-review-only-no-skill");
     write_mock_claude(&bin_dir, "#!/bin/bash\nexit 0\n");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -2506,7 +2506,7 @@ fn work_task_run_completes_attempt_after_all_review_tasks_complete() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     create_completed_work_attempt(&tmp, &main_dir);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["review", "work-1", "attempt-1"])
         .assert()
@@ -2521,7 +2521,7 @@ fn work_task_run_completes_attempt_after_all_review_tasks_complete() {
     // The tester task must run before reviewers to complete the lifecycle.
     // Without tester.yaml it produces an error-result file but still marks
     // the task complete, which is enough to satisfy the attempt loop.
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -2542,7 +2542,7 @@ fn work_task_run_completes_attempt_after_all_review_tasks_complete() {
         "skills",
         "tests",
     ] {
-        factory_cmd()
+        fluent_cmd()
             .current_dir(&main_dir)
             .args([
                 "task",
@@ -2573,7 +2573,7 @@ fn work_task_run_completes_attempt_after_all_review_tasks_complete() {
         assert!(
             main_dir
                 .join(format!(
-                    ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-{role}/review.md"
+                    ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-{role}/review.md"
                 ))
                 .exists()
         );
@@ -2584,12 +2584,12 @@ fn work_task_run_completes_attempt_after_all_review_tasks_complete() {
 fn work_attempt_run_drives_write_reviews_and_passes() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["work-item", "create", "work-1", "--title", "Attempt loop"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
@@ -2598,7 +2598,7 @@ fn work_attempt_run_drives_write_reviews_and_passes() {
     let bin_dir = tmp.path().join("bin-loop-pass");
     write_mock_claude(&bin_dir, &loop_mock_script("pass"));
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
@@ -2633,11 +2633,11 @@ fn work_attempt_run_drives_write_reviews_and_passes() {
     assert_eq!(candidate["review_state"], "pending");
     assert!(
         main_dir
-            .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md")
+            .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md")
             .exists()
     );
 
-    let inspection = factory_cmd()
+    let inspection = fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "merge-candidate",
@@ -2658,7 +2658,7 @@ fn work_attempt_run_drives_write_reviews_and_passes() {
     assert_eq!(inspected, *candidate);
 
     let before = read_work_show_json(&main_dir, "work-1");
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
@@ -2675,7 +2675,7 @@ fn work_attempt_run_drives_write_reviews_and_passes() {
 fn work_attempt_run_review_only_passes_without_merge_candidate() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -2686,7 +2686,7 @@ fn work_attempt_run_review_only_passes_without_merge_candidate() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "review",
@@ -2702,7 +2702,7 @@ fn work_attempt_run_review_only_passes_without_merge_candidate() {
     let bin_dir = tmp.path().join("bin-review-only-pass");
     write_mock_claude(&bin_dir, &review_only_mock_script("pass"));
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-review", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
@@ -2721,14 +2721,14 @@ fn work_attempt_run_review_only_passes_without_merge_candidate() {
     assert_eq!(review_only_write_task_count(attempt), 0);
     assert!(merge_candidates_are_empty(&value));
     assert_eq!(git_head(&main_dir), main_head);
-    assert_no_non_factory_changes(&main_dir);
+    assert_no_non_fluent_changes(&main_dir);
 }
 
 #[test]
 fn work_attempt_run_review_only_rejects_source_changes() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -2739,7 +2739,7 @@ fn work_attempt_run_review_only_rejects_source_changes() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "review",
@@ -2755,14 +2755,14 @@ fn work_attempt_run_review_only_rejects_source_changes() {
     let bin_dir = tmp.path().join("bin-review-only-dirty");
     write_mock_claude(&bin_dir, &review_only_dirty_source_mock_script());
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-review", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "Review Task changed non-Factory source files",
+            "Review Task changed non-Fluent source files",
         ))
         .stdout(predicate::str::contains("Merge Candidate").not())
         .stdout(predicate::str::contains("follow-up").not());
@@ -2779,14 +2779,14 @@ fn work_attempt_run_review_only_rejects_source_changes() {
             .any(|task| task["kind"] == "review" && task["status"] == "failed")
     );
     assert_eq!(git_head(&main_dir), main_head);
-    assert_no_non_factory_changes(&main_dir);
+    assert_no_non_fluent_changes(&main_dir);
 }
 
 #[test]
 fn work_attempt_run_review_only_restores_changed_source_head() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -2797,7 +2797,7 @@ fn work_attempt_run_review_only_restores_changed_source_head() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "review",
@@ -2813,7 +2813,7 @@ fn work_attempt_run_review_only_restores_changed_source_head() {
     let bin_dir = tmp.path().join("bin-review-only-head");
     write_mock_claude(&bin_dir, &review_only_changed_head_mock_script());
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-review", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
@@ -2837,14 +2837,14 @@ fn work_attempt_run_review_only_restores_changed_source_head() {
             .any(|task| task["kind"] == "review" && task["status"] == "failed")
     );
     assert_eq!(git_head(&main_dir), main_head);
-    assert_no_non_factory_changes(&main_dir);
+    assert_no_non_fluent_changes(&main_dir);
 }
 
 #[test]
 fn work_attempt_run_review_only_requires_recorded_source_commit() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -2855,7 +2855,7 @@ fn work_attempt_run_review_only_requires_recorded_source_commit() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "review",
@@ -2879,7 +2879,7 @@ fn work_attempt_run_review_only_requires_recorded_source_commit() {
     let bin_dir = tmp.path().join("bin-review-only-stale");
     write_mock_claude(&bin_dir, &review_only_mock_script("pass"));
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-review", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
@@ -2898,18 +2898,18 @@ fn work_attempt_run_review_only_requires_recorded_source_commit() {
 }
 
 #[test]
-fn work_attempt_run_review_only_rejects_factory_state_changes() {
+fn work_attempt_run_review_only_rejects_fluent_state_changes() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    fs::create_dir_all(main_dir.join(".factory/expertise")).unwrap();
+    fs::create_dir_all(main_dir.join(".fluent/expertise")).unwrap();
     fs::write(
-        main_dir.join(".factory/expertise/decisions.md"),
+        main_dir.join(".fluent/expertise/decisions.md"),
         "# Decisions\n\n",
     )
     .unwrap();
     git::run(
         &main_dir,
-        &["add", ".factory/expertise/decisions.md"],
+        &["add", ".fluent/expertise/decisions.md"],
         "stage decisions",
     )
     .unwrap();
@@ -2920,7 +2920,7 @@ fn work_attempt_run_review_only_rejects_factory_state_changes() {
     )
     .unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -2931,7 +2931,7 @@ fn work_attempt_run_review_only_rejects_factory_state_changes() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "review",
@@ -2943,10 +2943,10 @@ fn work_attempt_run_review_only_rejects_factory_state_changes() {
         .assert()
         .success();
 
-    let bin_dir = tmp.path().join("bin-review-only-factory-dirty");
-    write_mock_claude(&bin_dir, &review_only_dirty_factory_mock_script());
+    let bin_dir = tmp.path().join("bin-review-only-fluent-dirty");
+    write_mock_claude(&bin_dir, &review_only_dirty_fluent_mock_script());
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-review", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
@@ -2955,7 +2955,7 @@ fn work_attempt_run_review_only_rejects_factory_state_changes() {
         .stderr(predicate::str::contains(
             "changed source checkout outside managed artifact area",
         ))
-        .stderr(predicate::str::contains(".factory/expertise/decisions.md"))
+        .stderr(predicate::str::contains(".fluent/expertise/decisions.md"))
         .stdout(predicate::str::contains("Merge Candidate").not())
         .stdout(predicate::str::contains("follow-up").not());
 
@@ -2976,7 +2976,7 @@ fn work_attempt_run_review_only_rejects_factory_state_changes() {
 fn work_attempt_run_review_only_rejects_work_state_changes() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -2987,7 +2987,7 @@ fn work_attempt_run_review_only_rejects_work_state_changes() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "review",
@@ -3002,7 +3002,7 @@ fn work_attempt_run_review_only_rejects_work_state_changes() {
     let bin_dir = tmp.path().join("bin-review-only-work-state-dirty");
     write_mock_claude(&bin_dir, &review_only_dirty_work_state_mock_script());
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-review", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
@@ -3011,7 +3011,7 @@ fn work_attempt_run_review_only_rejects_work_state_changes() {
         .stderr(predicate::str::contains(
             "changed source checkout outside managed artifact area",
         ))
-        .stderr(predicate::str::contains(".factory/work/items/work-1.json"))
+        .stderr(predicate::str::contains(".fluent/work/items/work-1.json"))
         .stdout(predicate::str::contains("Merge Candidate").not())
         .stdout(predicate::str::contains("follow-up").not());
 
@@ -3027,25 +3027,25 @@ fn work_attempt_run_review_only_rejects_work_state_changes() {
             .any(|task| task["kind"] == "review" && task["status"] == "failed")
     );
     assert!(
-        !fs::read_to_string(main_dir.join(".factory/work/items/work-1.json"))
+        !fs::read_to_string(main_dir.join(".fluent/work/items/work-1.json"))
             .unwrap()
             .contains("reviewer edit")
     );
 }
 
 #[test]
-fn work_attempt_run_review_only_restores_mixed_source_and_factory_changes() {
+fn work_attempt_run_review_only_restores_mixed_source_and_fluent_changes() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    fs::create_dir_all(main_dir.join(".factory/expertise")).unwrap();
+    fs::create_dir_all(main_dir.join(".fluent/expertise")).unwrap();
     fs::write(
-        main_dir.join(".factory/expertise/decisions.md"),
+        main_dir.join(".fluent/expertise/decisions.md"),
         "# Decisions\n\n",
     )
     .unwrap();
     git::run(
         &main_dir,
-        &["add", ".factory/expertise/decisions.md"],
+        &["add", ".fluent/expertise/decisions.md"],
         "stage decisions",
     )
     .unwrap();
@@ -3056,7 +3056,7 @@ fn work_attempt_run_review_only_restores_mixed_source_and_factory_changes() {
     )
     .unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -3067,7 +3067,7 @@ fn work_attempt_run_review_only_restores_mixed_source_and_factory_changes() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "review",
@@ -3082,10 +3082,10 @@ fn work_attempt_run_review_only_restores_mixed_source_and_factory_changes() {
     let bin_dir = tmp.path().join("bin-review-only-mixed-dirty");
     write_mock_claude(
         &bin_dir,
-        &review_only_dirty_source_and_factory_mock_script(),
+        &review_only_dirty_source_and_fluent_mock_script(),
     );
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-review", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
@@ -3094,7 +3094,7 @@ fn work_attempt_run_review_only_restores_mixed_source_and_factory_changes() {
         .stderr(predicate::str::contains(
             "changed source checkout outside managed artifact area",
         ))
-        .stderr(predicate::str::contains(".factory/expertise/decisions.md"))
+        .stderr(predicate::str::contains(".fluent/expertise/decisions.md"))
         .stdout(predicate::str::contains("Merge Candidate").not())
         .stdout(predicate::str::contains("follow-up").not());
 
@@ -3103,7 +3103,7 @@ fn work_attempt_run_review_only_restores_mixed_source_and_factory_changes() {
         "test"
     );
     assert_eq!(
-        fs::read_to_string(main_dir.join(".factory/expertise/decisions.md")).unwrap(),
+        fs::read_to_string(main_dir.join(".fluent/expertise/decisions.md")).unwrap(),
         "# Decisions\n\n"
     );
     let value = read_work_show_json(&main_dir, "work-1");
@@ -3123,7 +3123,7 @@ fn work_attempt_run_review_only_restores_mixed_source_and_factory_changes() {
 fn work_attempt_run_review_only_fails_without_followup() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -3134,7 +3134,7 @@ fn work_attempt_run_review_only_fails_without_followup() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "review",
@@ -3149,7 +3149,7 @@ fn work_attempt_run_review_only_fails_without_followup() {
     let bin_dir = tmp.path().join("bin-review-only-fail");
     write_mock_claude(&bin_dir, &review_only_mock_script("fail"));
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-review", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
@@ -3167,14 +3167,14 @@ fn work_attempt_run_review_only_fails_without_followup() {
     assert_eq!(attempt["review_state"], "failed");
     assert_eq!(review_only_write_task_count(attempt), 0);
     assert!(merge_candidates_are_empty(&value));
-    assert_no_non_factory_changes(&main_dir);
+    assert_no_non_fluent_changes(&main_dir);
 }
 
 #[test]
 fn work_attempt_run_review_only_uncertain_needs_user() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -3185,7 +3185,7 @@ fn work_attempt_run_review_only_uncertain_needs_user() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "review",
@@ -3200,7 +3200,7 @@ fn work_attempt_run_review_only_uncertain_needs_user() {
     let bin_dir = tmp.path().join("bin-review-only-uncertain");
     write_mock_claude(&bin_dir, &review_only_mock_script("uncertain"));
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-review", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
@@ -3222,24 +3222,24 @@ fn work_attempt_run_review_only_uncertain_needs_user() {
             .unwrap()
             .iter()
             .any(|artifact| {
-                artifact["path"] == ".factory/work/artifacts/work-1/attempt-review/needs-user.md"
+                artifact["path"] == ".fluent/work/artifacts/work-1/attempt-review/needs-user.md"
             })
     );
     assert_eq!(review_only_write_task_count(attempt), 0);
     assert!(merge_candidates_are_empty(&value));
     assert!(
         main_dir
-            .join(".factory/work/artifacts/work-1/attempt-review/needs-user.md")
+            .join(".fluent/work/artifacts/work-1/attempt-review/needs-user.md")
             .is_file()
     );
-    assert_no_non_factory_changes(&main_dir);
+    assert_no_non_fluent_changes(&main_dir);
 }
 
 #[test]
 fn work_merge_candidate_failed_check_leaves_target_unchanged() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -3250,7 +3250,7 @@ fn work_merge_candidate_failed_check_leaves_target_unchanged() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
@@ -3258,7 +3258,7 @@ fn work_merge_candidate_failed_check_leaves_target_unchanged() {
 
     let bin_dir = tmp.path().join("bin-check-fail");
     write_mock_claude(&bin_dir, &rebase_mock_script("pass"));
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
@@ -3271,7 +3271,7 @@ fn work_merge_candidate_failed_check_leaves_target_unchanged() {
     );
 
     let main_before = git_head(&main_dir);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "merge-candidate",
@@ -3311,7 +3311,7 @@ fn work_merge_candidate_failed_check_leaves_target_unchanged() {
 fn work_merge_candidate_warns_when_cleanup_fails_after_landing() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -3322,7 +3322,7 @@ fn work_merge_candidate_warns_when_cleanup_fails_after_landing() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
@@ -3330,7 +3330,7 @@ fn work_merge_candidate_warns_when_cleanup_fails_after_landing() {
 
     let bin_dir = tmp.path().join("bin-cleanup-warning-pass");
     write_mock_claude(&bin_dir, &rebase_mock_script("pass"));
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
@@ -3346,7 +3346,7 @@ fn work_merge_candidate_warns_when_cleanup_fails_after_landing() {
     )
     .unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "merge-candidate",
@@ -3373,12 +3373,12 @@ fn work_merge_candidate_warns_when_cleanup_fails_after_landing() {
 fn work_merge_candidate_rerun_after_cleanup_preserves_landed_state() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["work-item", "create", "work-1", "--title", "Cleanup rerun"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
@@ -3386,7 +3386,7 @@ fn work_merge_candidate_rerun_after_cleanup_preserves_landed_state() {
 
     let bin_dir = tmp.path().join("bin-cleanup-rerun-pass");
     write_mock_claude(&bin_dir, &rebase_mock_script("pass"));
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
@@ -3395,7 +3395,7 @@ fn work_merge_candidate_rerun_after_cleanup_preserves_landed_state() {
 
     let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "merge-candidate",
@@ -3429,7 +3429,7 @@ fn work_merge_candidate_rerun_after_cleanup_preserves_landed_state() {
         "#!/bin/bash\nprintf 'reviewer should not rerun' >&2\nexit 42\n",
     );
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "merge-candidate",
@@ -3458,7 +3458,7 @@ fn work_merge_candidate_rerun_after_cleanup_preserves_landed_state() {
 fn work_merge_candidate_rejects_stale_stored_provenance_without_rewrite() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -3469,7 +3469,7 @@ fn work_merge_candidate_rejects_stale_stored_provenance_without_rewrite() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
@@ -3477,7 +3477,7 @@ fn work_merge_candidate_rejects_stale_stored_provenance_without_rewrite() {
 
     let bin_dir = tmp.path().join("bin-stale-provenance");
     write_mock_claude(&bin_dir, &rebase_mock_script("pass"));
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
@@ -3485,7 +3485,7 @@ fn work_merge_candidate_rejects_stale_stored_provenance_without_rewrite() {
         .success();
 
     let candidate_path =
-        main_dir.join(".factory/work/merge-candidates/work-1/attempt-1-merge-candidate.json");
+        main_dir.join(".fluent/work/merge-candidates/work-1/attempt-1-merge-candidate.json");
     let mut value: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&candidate_path).unwrap()).unwrap();
     value["candidate_commit"] =
@@ -3497,7 +3497,7 @@ fn work_merge_candidate_rejects_stale_stored_provenance_without_rewrite() {
     .unwrap();
     let main_before = git_head(&main_dir);
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "merge-candidate",
@@ -3522,7 +3522,7 @@ fn work_merge_candidate_rejects_stale_stored_provenance_without_rewrite() {
 fn work_merge_candidate_rebases_when_target_advanced() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -3533,7 +3533,7 @@ fn work_merge_candidate_rebases_when_target_advanced() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
@@ -3541,7 +3541,7 @@ fn work_merge_candidate_rebases_when_target_advanced() {
 
     let bin_dir = tmp.path().join("bin-rebase-pass");
     write_mock_claude(&bin_dir, &rebase_mock_script("pass"));
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
@@ -3558,7 +3558,7 @@ fn work_merge_candidate_rebases_when_target_advanced() {
     );
     let main_before_merge = git_head(&main_dir);
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "merge-candidate",
@@ -3598,7 +3598,7 @@ fn work_merge_candidate_rebases_when_target_advanced() {
 fn work_merge_candidate_rebase_failure_leaves_target_unchanged() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -3609,7 +3609,7 @@ fn work_merge_candidate_rebase_failure_leaves_target_unchanged() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
@@ -3617,7 +3617,7 @@ fn work_merge_candidate_rebase_failure_leaves_target_unchanged() {
 
     let bin_dir = tmp.path().join("bin-rebase-conflict");
     write_mock_claude(&bin_dir, &rebase_give_up_mock_script());
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
@@ -3634,7 +3634,7 @@ fn work_merge_candidate_rebase_failure_leaves_target_unchanged() {
     );
     let main_before_merge = git_head(&main_dir);
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "merge-candidate",
@@ -3665,7 +3665,7 @@ fn work_merge_candidate_rebase_failure_leaves_target_unchanged() {
 fn work_merge_rebase_resolves_trivial_conflict() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -3676,7 +3676,7 @@ fn work_merge_rebase_resolves_trivial_conflict() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
@@ -3684,7 +3684,7 @@ fn work_merge_rebase_resolves_trivial_conflict() {
 
     let bin_dir = tmp.path().join("bin-rebase-resolve");
     write_mock_claude(&bin_dir, &rebase_conflict_resolve_mock_script());
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
@@ -3699,7 +3699,7 @@ fn work_merge_rebase_resolves_trivial_conflict() {
         "Add shared from target",
     );
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "merge-candidate",
@@ -3725,12 +3725,12 @@ fn work_merge_rebase_resolves_trivial_conflict() {
 fn work_merge_rebase_gives_up_transitions_to_needs_user() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["work-item", "create", "work-1", "--title", "Give up"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
@@ -3738,7 +3738,7 @@ fn work_merge_rebase_gives_up_transitions_to_needs_user() {
 
     let bin_dir = tmp.path().join("bin-rebase-giveup");
     write_mock_claude(&bin_dir, &rebase_give_up_mock_script());
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
@@ -3754,7 +3754,7 @@ fn work_merge_rebase_gives_up_transitions_to_needs_user() {
     );
     let main_before_merge = git_head(&main_dir);
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "merge-candidate",
@@ -3794,12 +3794,12 @@ fn work_merge_rebase_gives_up_transitions_to_needs_user() {
 fn work_merge_rebase_agent_crash_without_give_up_fails() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["work-item", "create", "work-1", "--title", "Agent crash"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
@@ -3807,7 +3807,7 @@ fn work_merge_rebase_agent_crash_without_give_up_fails() {
 
     let bin_dir = tmp.path().join("bin-rebase-crash");
     write_mock_claude(&bin_dir, &rebase_crash_mock_script());
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
@@ -3822,7 +3822,7 @@ fn work_merge_rebase_agent_crash_without_give_up_fails() {
     );
     let main_before_merge = git_head(&main_dir);
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "merge-candidate",
@@ -3859,7 +3859,7 @@ fn work_merge_rebase_agent_crash_without_give_up_fails() {
 fn work_merge_rebase_provenance_updated_after_rebase() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -3870,7 +3870,7 @@ fn work_merge_rebase_provenance_updated_after_rebase() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
@@ -3878,7 +3878,7 @@ fn work_merge_rebase_provenance_updated_after_rebase() {
 
     let bin_dir = tmp.path().join("bin-rebase-prov");
     write_mock_claude(&bin_dir, &rebase_mock_script("pass"));
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
@@ -3893,7 +3893,7 @@ fn work_merge_rebase_provenance_updated_after_rebase() {
         "Advance target",
     );
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "merge-candidate",
@@ -3945,11 +3945,11 @@ fn work_attempt_run_plans_followup_for_failed_reviews() {
     let bin_dir = tmp.path().join("bin-loop-fail");
     write_mock_claude(&bin_dir, &stateful_loop_mock_script("fail"));
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
-        .env("FACTORY_MAX_TOTAL_WRITE_ROUNDS", "3")
+        .env("FLUENT_MAX_TOTAL_WRITE_ROUNDS", "3")
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -3985,7 +3985,7 @@ fn work_attempt_run_plans_followup_for_failed_reviews() {
     assert_eq!(followup["input_artifacts"].as_array().unwrap().len(), 5);
     assert_eq!(
         followup["input_artifacts"][0]["path"],
-        ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-documentation/review.md"
+        ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-documentation/review.md"
     );
     assert_eq!(
         followup["instructions"],
@@ -4032,7 +4032,7 @@ fn work_attempt_run_plans_followup_for_failed_reviews() {
         "../work-6-work-1-attempt-1"
     );
     let handoff =
-        fs::read_to_string(main_dir.join(".factory/work/artifacts/work-1/attempt-1/needs-user.md"))
+        fs::read_to_string(main_dir.join(".fluent/work/artifacts/work-1/attempt-1/needs-user.md"))
             .unwrap();
     assert!(handoff.contains("write-round ceiling"));
     assert!(handoff.contains("attempt-1-review-3-tests/review.md"));
@@ -4054,7 +4054,7 @@ fn work_create_planning_context_feeds_followup_for_failed_reviews() {
     let bin_dir = tmp.path().join("bin-planning-followup");
     write_mock_claude(&bin_dir, &stateful_loop_mock_script("fail"));
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -4073,12 +4073,12 @@ fn work_create_planning_context_feeds_followup_for_failed_reviews() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
@@ -4114,7 +4114,7 @@ fn work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews() {
     let bin_dir = tmp.path().join("bin-loop-mixed-fail-uncertain");
     write_mock_claude(&bin_dir, &loop_mock_script_with_mixed_verdicts());
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
@@ -4140,7 +4140,7 @@ fn work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews() {
     assert_eq!(attempt["review_state"], "passed");
     assert!(
         !main_dir
-            .join(".factory/work/artifacts/work-1/attempt-1/needs-user.md")
+            .join(".fluent/work/artifacts/work-1/attempt-1/needs-user.md")
             .exists()
     );
     let followup = attempt["tasks"]
@@ -4153,7 +4153,7 @@ fn work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews() {
     assert_eq!(input_artifacts.len(), 1);
     assert_eq!(
         input_artifacts[0]["path"],
-        ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-documentation/review.md"
+        ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-documentation/review.md"
     );
 
     let second_round_reviews: Vec<_> = attempt["tasks"]
@@ -4178,7 +4178,7 @@ fn work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews() {
     assert_eq!(second_round_inputs.len(), 3);
     assert_eq!(
         second_round_inputs[0]["path"],
-        ".factory/work/artifacts/work-1/attempt-1/attempt-1-review-documentation/review.md"
+        ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-documentation/review.md"
     );
     assert_eq!(
         second_round_inputs[0]["producer_id"],
@@ -4186,12 +4186,12 @@ fn work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews() {
     );
     assert_eq!(
         second_round_inputs[1]["path"],
-        ".factory/work/artifacts/work-1/attempt-1/attempt-1-tester-2/tester-results.json"
+        ".fluent/work/artifacts/work-1/attempt-1/attempt-1-tester-2/tester-results.json"
     );
     assert_eq!(second_round_inputs[1]["producer_id"], "attempt-1-tester-2");
     assert_eq!(
         second_round_inputs[2]["path"],
-        ".factory/work/progress/work-1/attempt-1/progress.md"
+        ".fluent/work/progress/work-1/attempt-1/progress.md"
     );
     assert_eq!(second_round_inputs[2]["producer_id"], "writer");
 }
@@ -4206,11 +4206,11 @@ fn work_attempt_run_counts_already_planned_followup_against_budget() {
 
     let bin_dir = tmp.path().join("bin-loop-preplanned-followup");
     write_mock_claude(&bin_dir, &stateful_loop_mock_script("fail"));
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
-        .env("FACTORY_MAX_TOTAL_WRITE_ROUNDS", "3")
+        .env("FLUENT_MAX_TOTAL_WRITE_ROUNDS", "3")
         .assert()
         .success()
         .stdout(predicate::str::contains("Completed Task attempt-1-write-2"))
@@ -4258,7 +4258,7 @@ fn work_attempt_run_counts_already_planned_followup_against_budget() {
             .any(|task| task["role"] == "documentation")
     );
     let handoff =
-        fs::read_to_string(main_dir.join(".factory/work/artifacts/work-1/attempt-1/needs-user.md"))
+        fs::read_to_string(main_dir.join(".fluent/work/artifacts/work-1/attempt-1/needs-user.md"))
             .unwrap();
     assert!(handoff.contains("write-round ceiling"));
     assert!(handoff.contains("attempt-1-review-2-tests/review.md"));
@@ -4269,7 +4269,7 @@ fn work_attempt_run_rejects_unmanaged_completed_review_artifact_area_path() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     create_completed_work_attempt(&tmp, &main_dir);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["review", "work-1", "attempt-1"])
         .assert()
@@ -4287,7 +4287,7 @@ fn work_attempt_run_rejects_unmanaged_completed_review_artifact_area_path() {
         "skills",
         "tests",
     ] {
-        factory_cmd()
+        fluent_cmd()
             .current_dir(&main_dir)
             .args([
                 "task",
@@ -4314,7 +4314,7 @@ fn work_attempt_run_rejects_unmanaged_completed_review_artifact_area_path() {
     write_json_value(&task_path, &value);
     let before = fs::read_to_string(&task_path).unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .assert()
@@ -4333,7 +4333,7 @@ fn work_attempt_run_marks_uncertain_reviews_needs_user() {
     let bin_dir = tmp.path().join("bin-loop-uncertain");
     write_mock_claude(&bin_dir, &loop_mock_script("uncertain"));
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "attempt",
@@ -4346,7 +4346,7 @@ fn work_attempt_run_marks_uncertain_reviews_needs_user() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Attempt attempt-1 needs user input: .factory/work/artifacts/work-1/attempt-1/needs-user.md",
+            "Attempt attempt-1 needs user input: .fluent/work/artifacts/work-1/attempt-1/needs-user.md",
         ));
 
     let value = read_work_show_json(&main_dir, "work-1");
@@ -4354,7 +4354,7 @@ fn work_attempt_run_marks_uncertain_reviews_needs_user() {
     assert_eq!(attempt["status"], "needs-user");
     assert_eq!(attempt["review_state"], "uncertain");
     let handoff =
-        fs::read_to_string(main_dir.join(".factory/work/artifacts/work-1/attempt-1/needs-user.md"))
+        fs::read_to_string(main_dir.join(".fluent/work/artifacts/work-1/attempt-1/needs-user.md"))
             .unwrap();
     assert!(handoff.contains("attempt-1-review-tests/review.md"));
 }
@@ -4368,7 +4368,7 @@ fn work_attempt_run_marks_missing_verdict_needs_user() {
     let bin_dir = tmp.path().join("bin-loop-missing-verdict");
     write_mock_claude(&bin_dir, &loop_mock_script_without_verdict());
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "attempt",
@@ -4381,7 +4381,7 @@ fn work_attempt_run_marks_missing_verdict_needs_user() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Attempt attempt-1 needs user input: .factory/work/artifacts/work-1/attempt-1/needs-user.md",
+            "Attempt attempt-1 needs user input: .fluent/work/artifacts/work-1/attempt-1/needs-user.md",
         ));
 
     let value = read_work_show_json(&main_dir, "work-1");
@@ -4389,7 +4389,7 @@ fn work_attempt_run_marks_missing_verdict_needs_user() {
     assert_eq!(attempt["status"], "needs-user");
     assert_eq!(attempt["review_state"], "uncertain");
     let handoff =
-        fs::read_to_string(main_dir.join(".factory/work/artifacts/work-1/attempt-1/needs-user.md"))
+        fs::read_to_string(main_dir.join(".fluent/work/artifacts/work-1/attempt-1/needs-user.md"))
             .unwrap();
     assert!(handoff.contains("uncertain or missing review verdicts"));
     assert!(handoff.contains("attempt-1-review-tests/review.md"));
@@ -4399,12 +4399,12 @@ fn work_attempt_run_marks_missing_verdict_needs_user() {
 fn work_attempt_run_stops_when_task_executor_fails() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["work-item", "create", "work-1", "--title", "Attempt loop"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
@@ -4413,7 +4413,7 @@ fn work_attempt_run_stops_when_task_executor_fails() {
     let bin_dir = tmp.path().join("bin-loop-failure");
     write_mock_claude(&bin_dir, "#!/bin/bash\nexit 7\n");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
@@ -4433,7 +4433,7 @@ fn work_task_run_rejects_unmanaged_review_read_workspace_path() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     create_completed_work_attempt(&tmp, &main_dir);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["review", "work-1", "attempt-1"])
         .assert()
@@ -4456,7 +4456,7 @@ fn work_task_run_rejects_unmanaged_review_read_workspace_path() {
         write_json_value(&task_path, &value);
         let before = fs::read_to_string(&task_path).unwrap();
 
-        factory_cmd()
+        fluent_cmd()
             .current_dir(&main_dir)
             .args([
                 "task",
@@ -4476,7 +4476,7 @@ fn work_task_run_rejects_unmanaged_review_read_workspace_path() {
     }
     assert!(
         !main_dir
-            .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests")
+            .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests")
             .exists()
     );
 }
@@ -4486,7 +4486,7 @@ fn work_task_run_rejects_malformed_review_context() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     create_completed_work_attempt(&tmp, &main_dir);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["review", "work-1", "attempt-1"])
         .assert()
@@ -4530,7 +4530,7 @@ fn work_task_run_rejects_malformed_review_context() {
         write_json_value(&task_path, &review_task);
         let before = fs::read_to_string(&task_path).unwrap();
 
-        factory_cmd()
+        fluent_cmd()
             .current_dir(&main_dir)
             .args([
                 "task",
@@ -4548,7 +4548,7 @@ fn work_task_run_rejects_malformed_review_context() {
     }
     assert!(
         !main_dir
-            .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests")
+            .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests")
             .exists()
     );
 }
@@ -4558,7 +4558,7 @@ fn work_task_run_fails_review_task_without_artifact() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     create_completed_work_attempt(&tmp, &main_dir);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["review", "work-1", "attempt-1"])
         .assert()
@@ -4566,7 +4566,7 @@ fn work_task_run_fails_review_task_without_artifact() {
     let bin_dir = tmp.path().join("bin-review");
     write_mock_claude(&bin_dir, "#!/bin/bash\nexit 0\n");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -4597,14 +4597,14 @@ fn work_task_run_ignores_stale_review_artifact() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     create_completed_work_attempt(&tmp, &main_dir);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["review", "work-1", "attempt-1"])
         .assert()
         .success();
 
     let review_dir =
-        main_dir.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests");
+        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests");
     let review_path = review_dir.join("review.md");
     fs::create_dir_all(&review_dir).unwrap();
     fs::write(&review_path, "Verdict: pass\n\nstale\n").unwrap();
@@ -4612,7 +4612,7 @@ fn work_task_run_ignores_stale_review_artifact() {
     let bin_dir = tmp.path().join("bin-review");
     write_mock_claude(&bin_dir, "#!/bin/bash\nexit 0\n");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -4644,7 +4644,7 @@ fn work_task_run_rejects_unmanaged_review_artifact_area_path() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     create_completed_work_attempt(&tmp, &main_dir);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["review", "work-1", "attempt-1"])
         .assert()
@@ -4657,8 +4657,8 @@ fn work_task_run_rejects_unmanaged_review_artifact_area_path() {
     let outside_absolute = outside_absolute.to_string_lossy().to_string();
     for path in [
         "../outside-review-artifacts",
-        ".factory/work/artifacts",
-        ".factory/work/artifacts/../outside-review-artifacts",
+        ".fluent/work/artifacts",
+        ".fluent/work/artifacts/../outside-review-artifacts",
         outside_absolute.as_str(),
     ] {
         let mut value: serde_json::Value = serde_json::from_str(&planned).unwrap();
@@ -4666,7 +4666,7 @@ fn work_task_run_rejects_unmanaged_review_artifact_area_path() {
         write_json_value(&task_path, &value);
         let before = fs::read_to_string(&task_path).unwrap();
 
-        factory_cmd()
+        fluent_cmd()
             .current_dir(&main_dir)
             .args([
                 "task",
@@ -4686,7 +4686,7 @@ fn work_task_run_rejects_unmanaged_review_artifact_area_path() {
     assert!(!main_dir.join("../outside-review-artifacts").exists());
     assert!(
         !main_dir
-            .join(".factory/work/outside-review-artifacts")
+            .join(".fluent/work/outside-review-artifacts")
             .exists()
     );
     assert!(!Path::new(&outside_absolute).exists());
@@ -4697,7 +4697,7 @@ fn work_task_run_marks_review_task_failed_when_coder_exits_nonzero() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     create_completed_work_attempt(&tmp, &main_dir);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["review", "work-1", "attempt-1"])
         .assert()
@@ -4706,7 +4706,7 @@ fn work_task_run_marks_review_task_failed_when_coder_exits_nonzero() {
     let bin_dir = tmp.path().join("bin-review");
     write_mock_claude(&bin_dir, "#!/bin/bash\nexit 7\n");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -4737,7 +4737,7 @@ fn work_task_run_fails_review_task_that_dirties_candidate_workspace() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     create_completed_work_attempt(&tmp, &main_dir);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["review", "work-1", "attempt-1"])
         .assert()
@@ -4754,7 +4754,7 @@ exit 0
 "##,
     );
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -4786,7 +4786,7 @@ fn work_task_run_fails_review_task_that_dirties_candidate_workspace_and_exits_no
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     create_completed_work_attempt(&tmp, &main_dir);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["review", "work-1", "attempt-1"])
         .assert()
@@ -4802,7 +4802,7 @@ exit 7
 "##,
     );
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -4834,7 +4834,7 @@ fn work_task_run_fails_review_task_that_commits_to_candidate_workspace() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     create_completed_work_attempt(&tmp, &main_dir);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["review", "work-1", "attempt-1"])
         .assert()
@@ -4854,7 +4854,7 @@ exit 0
 "##,
     );
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -4889,7 +4889,7 @@ fn work_task_run_restores_committed_review_mutation_before_dirty_failure() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     create_completed_work_attempt(&tmp, &main_dir);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["review", "work-1", "attempt-1"])
         .assert()
@@ -4910,7 +4910,7 @@ exit 0
 "##,
     );
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -4945,7 +4945,7 @@ fn work_task_run_sandboxes_review_with_read_only_candidate() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     create_completed_work_attempt(&tmp, &main_dir);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["review", "work-1", "attempt-1"])
         .assert()
@@ -4963,7 +4963,7 @@ fn work_task_run_sandboxes_review_with_read_only_candidate() {
         "#!/bin/bash\ncp \"$2\" \"${SANDBOX_PROFILE_COPY:?}\"\nshift 2\nexec \"$@\"\n",
     );
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -4981,7 +4981,7 @@ fn work_task_run_sandboxes_review_with_read_only_candidate() {
     let candidate = fs::canonicalize(main_dir.join("../work-6-work-1-attempt-1")).unwrap();
     let common_git_dir = fs::canonicalize(git_common_dir(&candidate)).unwrap();
     let artifact_dir = fs::canonicalize(
-        main_dir.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-review-tests"),
+        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests"),
     )
     .unwrap();
     assert!(
@@ -5029,12 +5029,12 @@ exit 0
 "##,
     );
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
@@ -5056,7 +5056,7 @@ exit 0
         }),
     );
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -5089,18 +5089,18 @@ exit 0
 "##,
     );
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -5138,18 +5138,18 @@ exit 7
 "##,
     );
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -5179,18 +5179,18 @@ fn work_task_run_rejects_success_without_commits() {
     let bin_dir = tmp.path().join("bin");
     write_mock_claude(&bin_dir, "#!/bin/bash\nexit 0\n");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -5218,12 +5218,12 @@ fn work_task_run_rejects_reused_workspace_without_new_commit() {
     let bin_dir = tmp.path().join("bin");
     write_mock_claude(&bin_dir, "#!/bin/bash\nexit 0\n");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
@@ -5257,7 +5257,7 @@ fn work_task_run_rejects_reused_workspace_without_new_commit() {
     )
     .unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -5285,12 +5285,12 @@ fn work_task_run_rejects_existing_directory_that_is_not_worktree() {
     let bin_dir = tmp.path().join("bin");
     write_mock_claude(&bin_dir, "#!/bin/bash\nexit 0\n");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
@@ -5298,10 +5298,10 @@ fn work_task_run_rejects_existing_directory_that_is_not_worktree() {
 
     let workspace = main_dir.join("../work-6-work-1-attempt-1");
     fs::create_dir_all(&workspace).unwrap();
-    let item_path = main_dir.join(".factory/work/items/work-1.json");
+    let item_path = main_dir.join(".fluent/work/items/work-1.json");
     let before = fs::read_to_string(&item_path).unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -5328,12 +5328,12 @@ fn work_task_run_rejects_existing_task_branch_without_workspace() {
     let bin_dir = tmp.path().join("bin");
     write_mock_claude(&bin_dir, "#!/bin/bash\nexit 0\n");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
@@ -5346,7 +5346,7 @@ fn work_task_run_rejects_existing_task_branch_without_workspace() {
     )
     .unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -5372,12 +5372,12 @@ fn work_task_run_rejects_task_that_is_not_planned() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
@@ -5389,7 +5389,7 @@ fn work_task_run_rejects_task_that_is_not_planned() {
     write_json_value(&task_path, &value);
     let before = fs::read_to_string(&task_path).unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -5412,12 +5412,12 @@ fn work_task_run_rejects_non_write_task() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
@@ -5429,7 +5429,7 @@ fn work_task_run_rejects_non_write_task() {
     write_json_value(&task_path, &value);
     let before = fs::read_to_string(&task_path).unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -5452,12 +5452,12 @@ fn work_task_run_requires_one_writable_workspace() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
@@ -5469,7 +5469,7 @@ fn work_task_run_requires_one_writable_workspace() {
     write_json_value(&task_path, &value);
     let before = fs::read_to_string(&task_path).unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -5496,7 +5496,7 @@ fn work_task_run_requires_one_writable_workspace() {
     write_json_value(&task_path, &value);
     let before = fs::read_to_string(&task_path).unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "task",
@@ -5518,12 +5518,12 @@ fn work_task_run_rejects_unmanaged_writable_workspace_path() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
@@ -5544,7 +5544,7 @@ fn work_task_run_rejects_unmanaged_writable_workspace_path() {
         write_json_value(&task_path, &value);
         let before = fs::read_to_string(&task_path).unwrap();
 
-        factory_cmd()
+        fluent_cmd()
             .current_dir(&main_dir)
             .args([
                 "task",
@@ -5565,7 +5565,7 @@ fn work_task_run_rejects_unmanaged_writable_workspace_path() {
 
     assert!(!main_dir.join("../outside-workspace").exists());
     assert!(!main_dir.join("../work-6-work-1-other-attempt").exists());
-    assert!(!main_dir.join(".factory/work/outside").exists());
+    assert!(!main_dir.join(".fluent/work/outside").exists());
     assert!(!Path::new(&outside_absolute).exists());
 }
 
@@ -5574,23 +5574,23 @@ fn work_task_run_missing_ids_leave_work_item_unchanged() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["work-item", "create", "work-1", "--title", "Run task"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-2"])
         .assert()
         .success();
 
-    let item_path = main_dir.join(".factory/work/items/work-1.json");
+    let item_path = main_dir.join(".fluent/work/items/work-1.json");
     let before = fs::read_to_string(&item_path).unwrap();
 
     for args in [
@@ -5627,7 +5627,7 @@ fn work_task_run_missing_ids_leave_work_item_unchanged() {
             "--no-sandbox",
         ],
     ] {
-        factory_cmd()
+        fluent_cmd()
             .current_dir(&main_dir)
             .args(args)
             .assert()
@@ -5645,7 +5645,7 @@ fn work_list_outputs_stored_work_items() {
     write_work_item_json(tmp.path(), "work-beta", "Second work item");
     write_work_item_json(tmp.path(), "work-alpha", "First work item");
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["work-item", "list"])
         .output()
@@ -5675,21 +5675,21 @@ fn work_list_outputs_stored_work_items() {
 #[test]
 fn work_list_empty_state_succeeds_without_work_items() {
     let tmp = TempDir::new().unwrap();
-    fs::create_dir_all(tmp.path().join(".factory/runs/legacy-run")).unwrap();
+    fs::create_dir_all(tmp.path().join(".fluent/runs/legacy-run")).unwrap();
     fs::write(
-        tmp.path().join(".factory/runs/legacy-run/status"),
+        tmp.path().join(".fluent/runs/legacy-run/status"),
         "complete",
     )
     .unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["work-item", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("No Work Items found"));
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .arg("status")
         .assert()
@@ -5703,7 +5703,7 @@ fn work_show_outputs_pretty_json_for_one_work_item() {
     let tmp = TempDir::new().unwrap();
     write_work_item_json(tmp.path(), "work-1", "Inspect work item");
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["work-item", "show", "work-1"])
         .output()
@@ -5728,7 +5728,7 @@ fn work_show_outputs_pretty_json_for_one_work_item() {
 fn work_show_missing_item_reports_not_found() {
     let tmp = TempDir::new().unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["work-item", "show", "missing-work"])
         .assert()
@@ -5742,7 +5742,7 @@ fn work_show_missing_item_reports_not_found() {
 fn work_show_rejects_invalid_work_item_id() {
     let tmp = TempDir::new().unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["work-item", "show", "../escape"])
         .assert()
@@ -5756,9 +5756,9 @@ fn work_show_rejects_invalid_work_item_id() {
 fn work_merge_candidate_missing_item_or_candidate_reports_error() {
     let tmp = TempDir::new().unwrap();
     write_work_item_json(tmp.path(), "work-1", "Inspect candidate");
-    let before = fs::read_to_string(tmp.path().join(".factory/work/items/work-1.json")).unwrap();
+    let before = fs::read_to_string(tmp.path().join(".fluent/work/items/work-1.json")).unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["merge-candidate", "show", "missing-work", "candidate-1"])
         .assert()
@@ -5767,7 +5767,7 @@ fn work_merge_candidate_missing_item_or_candidate_reports_error() {
             "Work Item \"missing-work\" not found",
         ));
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["merge-candidate", "show", "work-1", "candidate-1"])
         .assert()
@@ -5776,30 +5776,30 @@ fn work_merge_candidate_missing_item_or_candidate_reports_error() {
             "Merge Candidate \"candidate-1\" not found in Work Item \"work-1\"",
         ));
 
-    let after = fs::read_to_string(tmp.path().join(".factory/work/items/work-1.json")).unwrap();
+    let after = fs::read_to_string(tmp.path().join(".fluent/work/items/work-1.json")).unwrap();
     assert_eq!(after, before);
 }
 
 #[test]
 fn work_list_reports_invalid_stored_json_path() {
     let tmp = TempDir::new().unwrap();
-    let items_dir = tmp.path().join(".factory/work/items");
+    let items_dir = tmp.path().join(".fluent/work/items");
     fs::create_dir_all(&items_dir).unwrap();
     fs::write(items_dir.join("bad.json"), "{").unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["work-item", "list"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(".factory/work/items/bad.json"))
+        .stderr(predicate::str::contains(".fluent/work/items/bad.json"))
         .stderr(predicate::str::contains("failed to parse"));
 }
 
 #[test]
 fn work_list_reports_stored_work_item_id_mismatch() {
     let tmp = TempDir::new().unwrap();
-    let items_dir = tmp.path().join(".factory/work/items");
+    let items_dir = tmp.path().join(".fluent/work/items");
     fs::create_dir_all(&items_dir).unwrap();
     fs::write(
         items_dir.join("work-1.json"),
@@ -5811,12 +5811,12 @@ fn work_list_reports_stored_work_item_id_mismatch() {
     )
     .unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["work-item", "list"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(".factory/work/items/work-1.json"))
+        .stderr(predicate::str::contains(".fluent/work/items/work-1.json"))
         .stderr(predicate::str::contains("contains id work-2"))
         .stderr(predicate::str::contains("expected work-1"));
 }
@@ -5824,7 +5824,7 @@ fn work_list_reports_stored_work_item_id_mismatch() {
 #[test]
 fn work_list_reports_invalid_stored_work_item_id() {
     let tmp = TempDir::new().unwrap();
-    let items_dir = tmp.path().join(".factory/work/items");
+    let items_dir = tmp.path().join(".fluent/work/items");
     fs::create_dir_all(&items_dir).unwrap();
     fs::write(
         items_dir.join(r"bad\id.json"),
@@ -5836,7 +5836,7 @@ fn work_list_reports_invalid_stored_work_item_id() {
     )
     .unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["work-item", "list"])
         .assert()
@@ -5848,7 +5848,7 @@ fn work_list_reports_invalid_stored_work_item_id() {
 #[test]
 fn work_list_reports_invalid_stored_model() {
     let tmp = TempDir::new().unwrap();
-    let items_dir = tmp.path().join(".factory/work/items");
+    let items_dir = tmp.path().join(".fluent/work/items");
     fs::create_dir_all(&items_dir).unwrap();
     fs::write(
         items_dir.join("work-invalid.json"),
@@ -5859,7 +5859,7 @@ fn work_list_reports_invalid_stored_model() {
 "#,
     )
     .unwrap();
-    let attempts_dir = tmp.path().join(".factory/work/attempts/work-invalid");
+    let attempts_dir = tmp.path().join(".fluent/work/attempts/work-invalid");
     fs::create_dir_all(&attempts_dir).unwrap();
     fs::write(
         attempts_dir.join("attempt-1.json"),
@@ -5873,20 +5873,20 @@ fn work_list_reports_invalid_stored_model() {
     )
     .unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["work-item", "list"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            ".factory/work/attempts/work-invalid/attempt-1.json",
+            ".fluent/work/attempts/work-invalid/attempt-1.json",
         ))
         .stderr(predicate::str::contains("invalid work model"))
         .stderr(predicate::str::contains("expected work-invalid"));
 }
 
 fn write_work_item_json(project_root: &Path, id: &str, title: &str) {
-    let items_dir = project_root.join(".factory/work/items");
+    let items_dir = project_root.join(".fluent/work/items");
     fs::create_dir_all(&items_dir).unwrap();
     fs::write(
         items_dir.join(format!("{id}.json")),
@@ -5902,7 +5902,7 @@ fn write_work_item_json(project_root: &Path, id: &str, title: &str) {
 }
 
 fn read_work_show_json(project_root: &Path, work_item_id: &str) -> serde_json::Value {
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(project_root)
         .args(["work-item", "show", work_item_id])
         .output()
@@ -5923,7 +5923,7 @@ fn work_task_record_path(
     task_id: &str,
 ) -> PathBuf {
     project_root
-        .join(".factory/work/tasks")
+        .join(".fluent/work/tasks")
         .join(work_item_id)
         .join(attempt_id)
         .join(format!("{task_id}.json"))
@@ -5938,8 +5938,8 @@ fn write_json_value(path: &Path, value: &serde_json::Value) {
 }
 
 /// Compare two JSON-serialized texts semantically (ignore field order).
-/// Use this when a test asserts a JSON file was not modified by Factory:
-/// Factory's struct-order serde output and the test helper's alphabetical
+/// Use this when a test asserts a JSON file was not modified by Fluent:
+/// Fluent's struct-order serde output and the test helper's alphabetical
 /// serde_json::Value output produce equal Values but unequal text.
 fn assert_json_unchanged(path: &Path, before: &str) {
     let current: serde_json::Value =
@@ -5981,7 +5981,7 @@ fn write_planned_followup_task(main_dir: &Path, input_artifacts: Vec<serde_json:
     write_json_value(&task_path, &task);
 
     let attempt_path = main_dir
-        .join(".factory/work/attempts")
+        .join(".fluent/work/attempts")
         .join("work-1")
         .join("attempt-1.json");
     let mut attempt_record = read_json_value(&attempt_path);
@@ -5998,17 +5998,17 @@ fn write_planned_followup_task(main_dir: &Path, input_artifacts: Vec<serde_json:
 fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["work-item", "create", "work-1", "--title", "Cleanup work"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -6019,22 +6019,22 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-active", "attempt-1"])
         .assert()
         .success();
 
-    let item_path = main_dir.join(".factory/work/items/work-1.json");
-    let attempt_path = main_dir.join(".factory/work/attempts/work-1/attempt-1.json");
-    let task_path = main_dir.join(".factory/work/tasks/work-1/attempt-1/attempt-1-write-1.json");
+    let item_path = main_dir.join(".fluent/work/items/work-1.json");
+    let attempt_path = main_dir.join(".fluent/work/attempts/work-1/attempt-1.json");
+    let task_path = main_dir.join(".fluent/work/tasks/work-1/attempt-1/attempt-1-write-1.json");
     let mut attempt = read_json_path(&attempt_path);
     attempt["status"] = serde_json::Value::String("complete".to_string());
     write_json_path(&attempt_path, &attempt);
     let mut task = read_json_path(&task_path);
     task["status"] = serde_json::Value::String("complete".to_string());
     task["artifact_area"] = serde_json::json!({
-        "path": ".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1"
+        "path": ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1"
     });
     task["output"] = serde_json::json!({
         "workspace_id": "candidate",
@@ -6044,8 +6044,8 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
     });
     write_json_path(&task_path, &task);
 
-    let artifact_dir = main_dir.join(".factory/work/artifacts/work-1/attempt-1/attempt-1-write-1");
-    let artifact_parent = main_dir.join(".factory/work/artifacts/work-1/attempt-1");
+    let artifact_dir = main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1");
+    let artifact_parent = main_dir.join(".fluent/work/artifacts/work-1/attempt-1");
     fs::create_dir_all(&artifact_dir).unwrap();
     fs::write(artifact_dir.join("result.md"), "artifact").unwrap();
 
@@ -6065,22 +6065,22 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
     )
     .unwrap();
 
-    let active_item_path = main_dir.join(".factory/work/items/work-active.json");
-    let active_attempt_path = main_dir.join(".factory/work/attempts/work-active/attempt-1.json");
+    let active_item_path = main_dir.join(".fluent/work/items/work-active.json");
+    let active_attempt_path = main_dir.join(".fluent/work/attempts/work-active/attempt-1.json");
     let active_task_path =
-        main_dir.join(".factory/work/tasks/work-active/attempt-1/attempt-1-write-1.json");
+        main_dir.join(".fluent/work/tasks/work-active/attempt-1/attempt-1-write-1.json");
     let mut active_attempt = read_json_path(&active_attempt_path);
     active_attempt["status"] = serde_json::Value::String("executing".to_string());
     write_json_path(&active_attempt_path, &active_attempt);
     let mut active_task = read_json_path(&active_task_path);
     active_task["status"] = serde_json::Value::String("executing".to_string());
     active_task["artifact_area"] = serde_json::json!({
-        "path": ".factory/work/artifacts/work-active/attempt-1/attempt-1-active"
+        "path": ".fluent/work/artifacts/work-active/attempt-1/attempt-1-active"
     });
     write_json_path(&active_task_path, &active_task);
 
     let active_artifact_dir =
-        main_dir.join(".factory/work/artifacts/work-active/attempt-1/attempt-1-active");
+        main_dir.join(".fluent/work/artifacts/work-active/attempt-1/attempt-1-active");
     fs::create_dir_all(&active_artifact_dir).unwrap();
     fs::write(active_artifact_dir.join("result.md"), "active artifact").unwrap();
 
@@ -6100,7 +6100,7 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
     )
     .unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .arg("cleanup")
         .assert()
@@ -6119,7 +6119,7 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
     assert!(active_worktree_dir.is_dir());
     assert!(active_artifact_dir.is_dir());
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["cleanup", "--apply"])
         .assert()
@@ -6181,7 +6181,7 @@ fn cleanup_work_items_dry_run_and_apply_manage_state_worktree_and_branch() {
 fn cleanup_work_items_reports_and_removes_orphan_artifact_roots() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -6193,7 +6193,7 @@ fn cleanup_work_items_reports_and_removes_orphan_artifact_roots() {
         .assert()
         .success();
 
-    let artifacts_dir = main_dir.join(".factory/work/artifacts");
+    let artifacts_dir = main_dir.join(".fluent/work/artifacts");
     let orphan_artifact_root = artifacts_dir.join("work-orphan");
     let active_artifact_root = artifacts_dir.join("work-active");
     let file_entry = artifacts_dir.join("not-a-directory");
@@ -6211,7 +6211,7 @@ fn cleanup_work_items_reports_and_removes_orphan_artifact_roots() {
     .unwrap();
     fs::write(&file_entry, "keep file entries").unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .arg("cleanup")
         .assert()
@@ -6227,7 +6227,7 @@ fn cleanup_work_items_reports_and_removes_orphan_artifact_roots() {
     assert!(active_artifact_root.is_dir());
     assert!(file_entry.is_file());
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["cleanup", "--apply"])
         .assert()
@@ -6248,7 +6248,7 @@ fn cleanup_work_items_reports_and_removes_orphan_artifact_roots() {
 fn cleanup_work_items_apply_skips_unregistered_managed_worktree() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -6259,21 +6259,21 @@ fn cleanup_work_items_apply_skips_unregistered_managed_worktree() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-unregistered", "attempt-1"])
         .assert()
         .success();
 
-    let item_path = main_dir.join(".factory/work/items/work-unregistered.json");
+    let item_path = main_dir.join(".fluent/work/items/work-unregistered.json");
     let workspace_path = "../work-17-work-unregistered-attempt-1";
     let workspace_dir = main_dir.join(workspace_path);
     fs::create_dir_all(&workspace_dir).unwrap();
     fs::write(workspace_dir.join("user-file.txt"), "keep me").unwrap();
 
-    let attempt_path = main_dir.join(".factory/work/attempts/work-unregistered/attempt-1.json");
+    let attempt_path = main_dir.join(".fluent/work/attempts/work-unregistered/attempt-1.json");
     let task_path =
-        main_dir.join(".factory/work/tasks/work-unregistered/attempt-1/attempt-1-write-1.json");
+        main_dir.join(".fluent/work/tasks/work-unregistered/attempt-1/attempt-1-write-1.json");
     let mut attempt = read_json_path(&attempt_path);
     attempt["status"] = serde_json::Value::String("complete".to_string());
     write_json_path(&attempt_path, &attempt);
@@ -6287,7 +6287,7 @@ fn cleanup_work_items_apply_skips_unregistered_managed_worktree() {
     });
     write_json_path(&task_path, &task);
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["cleanup", "--apply"])
         .assert()
@@ -6311,7 +6311,7 @@ fn cleanup_work_items_apply_skips_unregistered_managed_worktree() {
 fn cleanup_work_items_selects_failed_terminal_and_skips_pending_merge_candidate() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -6322,12 +6322,12 @@ fn cleanup_work_items_selects_failed_terminal_and_skips_pending_merge_candidate(
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-failed", "attempt-1"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -6338,16 +6338,16 @@ fn cleanup_work_items_selects_failed_terminal_and_skips_pending_merge_candidate(
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-pending-merge", "attempt-1"])
         .assert()
         .success();
 
-    let failed_item_path = main_dir.join(".factory/work/items/work-failed.json");
-    let failed_attempt_path = main_dir.join(".factory/work/attempts/work-failed/attempt-1.json");
+    let failed_item_path = main_dir.join(".fluent/work/items/work-failed.json");
+    let failed_attempt_path = main_dir.join(".fluent/work/attempts/work-failed/attempt-1.json");
     let failed_task_path =
-        main_dir.join(".factory/work/tasks/work-failed/attempt-1/attempt-1-write-1.json");
+        main_dir.join(".fluent/work/tasks/work-failed/attempt-1/attempt-1-write-1.json");
     let mut failed_attempt = read_json_path(&failed_attempt_path);
     failed_attempt["status"] = serde_json::Value::String("failed".to_string());
     write_json_path(&failed_attempt_path, &failed_attempt);
@@ -6355,13 +6355,13 @@ fn cleanup_work_items_selects_failed_terminal_and_skips_pending_merge_candidate(
     failed_task["status"] = serde_json::Value::String("failed".to_string());
     write_json_path(&failed_task_path, &failed_task);
 
-    let pending_item_path = main_dir.join(".factory/work/items/work-pending-merge.json");
+    let pending_item_path = main_dir.join(".fluent/work/items/work-pending-merge.json");
     let pending_workspace = "../work-18-work-pending-merge-attempt-1";
     let head = git_head(&main_dir);
     let pending_attempt_path =
-        main_dir.join(".factory/work/attempts/work-pending-merge/attempt-1.json");
+        main_dir.join(".fluent/work/attempts/work-pending-merge/attempt-1.json");
     let pending_task_path =
-        main_dir.join(".factory/work/tasks/work-pending-merge/attempt-1/attempt-1-write-1.json");
+        main_dir.join(".fluent/work/tasks/work-pending-merge/attempt-1/attempt-1-write-1.json");
     let mut pending_attempt = read_json_path(&pending_attempt_path);
     pending_attempt["status"] = serde_json::Value::String("complete".to_string());
     pending_attempt["review_state"] = serde_json::Value::String("passed".to_string());
@@ -6376,7 +6376,7 @@ fn cleanup_work_items_selects_failed_terminal_and_skips_pending_merge_candidate(
     });
     write_json_path(&pending_task_path, &pending_task);
     let pending_candidate_path =
-        main_dir.join(".factory/work/merge-candidates/work-pending-merge/candidate-1.json");
+        main_dir.join(".fluent/work/merge-candidates/work-pending-merge/candidate-1.json");
     fs::create_dir_all(pending_candidate_path.parent().unwrap()).unwrap();
     write_json_path(
         &pending_candidate_path,
@@ -6401,7 +6401,7 @@ fn cleanup_work_items_selects_failed_terminal_and_skips_pending_merge_candidate(
         }),
     );
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .arg("cleanup")
         .assert()
@@ -6411,7 +6411,7 @@ fn cleanup_work_items_selects_failed_terminal_and_skips_pending_merge_candidate(
         ))
         .stdout(predicate::str::contains("work-pending-merge").not());
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["cleanup", "--apply"])
         .assert()
@@ -6432,7 +6432,7 @@ fn cleanup_work_items_selects_failed_terminal_and_skips_pending_merge_candidate(
 fn cleanup_work_items_skips_failed_attempt_with_active_task() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -6443,39 +6443,39 @@ fn cleanup_work_items_skips_failed_attempt_with_active_task() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-active-task", "attempt-1"])
         .assert()
         .success();
 
-    let item_path = main_dir.join(".factory/work/items/work-active-task.json");
-    let attempt_path = main_dir.join(".factory/work/attempts/work-active-task/attempt-1.json");
+    let item_path = main_dir.join(".fluent/work/items/work-active-task.json");
+    let attempt_path = main_dir.join(".fluent/work/attempts/work-active-task/attempt-1.json");
     let task_path =
-        main_dir.join(".factory/work/tasks/work-active-task/attempt-1/attempt-1-write-1.json");
+        main_dir.join(".fluent/work/tasks/work-active-task/attempt-1/attempt-1-write-1.json");
     let mut attempt = read_json_path(&attempt_path);
     attempt["status"] = serde_json::Value::String("failed".to_string());
     write_json_path(&attempt_path, &attempt);
     let mut task = read_json_path(&task_path);
     task["status"] = serde_json::Value::String("executing".to_string());
     task["artifact_area"] = serde_json::json!({
-        "path": ".factory/work/artifacts/work-active-task/attempt-1/attempt-1-write-1"
+        "path": ".fluent/work/artifacts/work-active-task/attempt-1/attempt-1-write-1"
     });
     write_json_path(&task_path, &task);
 
     let artifact_dir =
-        main_dir.join(".factory/work/artifacts/work-active-task/attempt-1/attempt-1-write-1");
+        main_dir.join(".fluent/work/artifacts/work-active-task/attempt-1/attempt-1-write-1");
     fs::create_dir_all(&artifact_dir).unwrap();
     fs::write(artifact_dir.join("result.md"), "active task artifact").unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .arg("cleanup")
         .assert()
         .success()
         .stdout(predicate::str::contains("work-active-task").not());
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["cleanup", "--apply"])
         .assert()
@@ -6496,7 +6496,7 @@ fn cleanup_work_items_skips_failed_attempt_with_active_task() {
 fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -6507,13 +6507,13 @@ fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() 
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "create", "work-merge-cleanup", "attempt-1"])
         .assert()
         .success();
 
-    let item_path = main_dir.join(".factory/work/items/work-merge-cleanup.json");
+    let item_path = main_dir.join(".fluent/work/items/work-merge-cleanup.json");
     let workspace_path = "../work-18-work-merge-cleanup-attempt-1";
     let worktree_dir = main_dir.join(workspace_path);
     let branch_name = "work/work-merge-cleanup/attempt-1/attempt-1-write-1";
@@ -6532,9 +6532,9 @@ fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() 
     .unwrap();
 
     let candidate_head = git_head(&worktree_dir);
-    let attempt_path = main_dir.join(".factory/work/attempts/work-merge-cleanup/attempt-1.json");
+    let attempt_path = main_dir.join(".fluent/work/attempts/work-merge-cleanup/attempt-1.json");
     let task_path =
-        main_dir.join(".factory/work/tasks/work-merge-cleanup/attempt-1/attempt-1-write-1.json");
+        main_dir.join(".fluent/work/tasks/work-merge-cleanup/attempt-1/attempt-1-write-1.json");
     let mut attempt = read_json_path(&attempt_path);
     attempt["status"] = serde_json::Value::String("complete".to_string());
     attempt["review_state"] = serde_json::Value::String("passed".to_string());
@@ -6549,7 +6549,7 @@ fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() 
     });
     write_json_path(&task_path, &task);
     let candidate_path =
-        main_dir.join(".factory/work/merge-candidates/work-merge-cleanup/candidate-1.json");
+        main_dir.join(".fluent/work/merge-candidates/work-merge-cleanup/candidate-1.json");
     fs::create_dir_all(candidate_path.parent().unwrap()).unwrap();
     write_json_path(
         &candidate_path,
@@ -6574,13 +6574,13 @@ fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() 
                 "check_artifacts": [
                     {
                         "producer_id": "merge-check",
-                        "path": ".factory/work/artifacts/work-merge-cleanup/attempt-1/candidate-1/merge/checks/checks.json"
+                        "path": ".fluent/work/artifacts/work-merge-cleanup/attempt-1/candidate-1/merge/checks/checks.json"
                     }
                 ],
                 "review_artifacts": [
                     {
                         "producer_id": "merge-review-tests",
-                        "path": ".factory/work/artifacts/work-merge-cleanup/attempt-1/candidate-1/merge/reviews/tests/review.md"
+                        "path": ".fluent/work/artifacts/work-merge-cleanup/attempt-1/candidate-1/merge/reviews/tests/review.md"
                     }
                 ]
             }
@@ -6588,19 +6588,19 @@ fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() 
     );
 
     let check_artifact = main_dir.join(
-        ".factory/work/artifacts/work-merge-cleanup/attempt-1/candidate-1/merge/checks/checks.json",
+        ".fluent/work/artifacts/work-merge-cleanup/attempt-1/candidate-1/merge/checks/checks.json",
     );
     let attempt_artifact_dir =
-        main_dir.join(".factory/work/artifacts/work-merge-cleanup/attempt-1");
+        main_dir.join(".fluent/work/artifacts/work-merge-cleanup/attempt-1");
     let candidate_artifact_dir = attempt_artifact_dir.join("candidate-1");
     let review_artifact = main_dir
-        .join(".factory/work/artifacts/work-merge-cleanup/attempt-1/candidate-1/merge/reviews/tests/review.md");
+        .join(".fluent/work/artifacts/work-merge-cleanup/attempt-1/candidate-1/merge/reviews/tests/review.md");
     fs::create_dir_all(check_artifact.parent().unwrap()).unwrap();
     fs::create_dir_all(review_artifact.parent().unwrap()).unwrap();
     fs::write(&check_artifact, "{}").unwrap();
     fs::write(&review_artifact, "Verdict: pass\n").unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .arg("cleanup")
         .assert()
@@ -6624,7 +6624,7 @@ fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() 
     assert!(candidate_artifact_dir.is_dir());
     assert!(attempt_artifact_dir.is_dir());
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["cleanup", "--apply"])
         .assert()
@@ -6669,7 +6669,7 @@ fn setup_git_project(tmp: &TempDir) -> std::path::PathBuf {
 
     git::run(&main_dir, &["init", "-b", "main"], "init repo").unwrap();
     // Persistent config needed because external coder processes (spawned
-    // by factory work task run) make commits outside our wrapper.
+    // by fluent work task run) make commits outside our wrapper.
     git::run(
         &main_dir,
         &["config", "commit.gpgsign", "false"],
@@ -6684,11 +6684,11 @@ fn setup_git_project(tmp: &TempDir) -> std::path::PathBuf {
     .unwrap();
     git::run(&main_dir, &["config", "user.name", "test"], "set user.name").unwrap();
     fs::write(main_dir.join("README.md"), "test").unwrap();
-    // Mirror the real project's gitignore so Factory-managed runtime state
-    // under .factory/work/ doesn't appear as uncommitted changes.
+    // Mirror the real project's gitignore so Fluent-managed runtime state
+    // under .fluent/work/ doesn't appear as uncommitted changes.
     fs::write(
         main_dir.join(".gitignore"),
-        ".factory/*\n!.factory/observations/\n!.factory/expertise/\n!.factory/hooks/\n!.factory/Dockerfile\n!.factory/tester.yaml\n!.factory/extract-tester-results\n",
+        ".fluent/*\n!.fluent/observations/\n!.fluent/expertise/\n!.fluent/hooks/\n!.fluent/Dockerfile\n!.fluent/tester.yaml\n!.fluent/extract-tester-results\n",
     )
     .unwrap();
     for role in [
@@ -6732,17 +6732,17 @@ exit 0
     if let Some(instructions) = instructions {
         create_args.extend(["--instructions", instructions]);
     }
-    factory_cmd()
+    fluent_cmd()
         .current_dir(main_dir)
         .args(create_args)
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(main_dir)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(main_dir)
         .args([
             "task",
@@ -6760,7 +6760,7 @@ exit 0
     // and then run a review task directly, skipping the tester. The reviewer
     // requires its input artifacts to exist, so we satisfy that here.
     let tester_results = main_dir
-        .join(".factory/work/artifacts/work-1/attempt-1/attempt-1-tester/tester-results.json");
+        .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-tester/tester-results.json");
     fs::create_dir_all(tester_results.parent().unwrap()).unwrap();
     fs::write(
         &tester_results,
@@ -7027,10 +7027,10 @@ exit 0
     )
 }
 
-fn review_only_dirty_factory_mock_script() -> String {
+fn review_only_dirty_fluent_mock_script() -> String {
     format!(
         r##"#!/bin/bash
-{guard}printf 'reviewer edit\n' >> ../../../../../../.factory/expertise/decisions.md
+{guard}printf 'reviewer edit\n' >> ../../../../../../.fluent/expertise/decisions.md
 printf 'Verdict: pass\n\nReview-only result.\n' > review.md
 exit 0
 "##,
@@ -7049,11 +7049,11 @@ exit 0
     )
 }
 
-fn review_only_dirty_source_and_factory_mock_script() -> String {
+fn review_only_dirty_source_and_fluent_mock_script() -> String {
     format!(
         r##"#!/bin/bash
 {guard}printf 'reviewer source edit\n' >> ../../../../../../README.md
-printf 'reviewer factory edit\n' >> ../../../../../../.factory/expertise/decisions.md
+printf 'reviewer fluent edit\n' >> ../../../../../../.fluent/expertise/decisions.md
 printf 'Verdict: pass\n\nReview-only result.\n' > review.md
 exit 0
 "##,
@@ -7077,7 +7077,7 @@ fn merge_candidates_are_empty(value: &serde_json::Value) -> bool {
         .is_none_or(Vec::is_empty)
 }
 
-fn assert_no_non_factory_changes(path: &Path) {
+fn assert_no_non_fluent_changes(path: &Path) {
     let status = git::run_stdout(
         path,
         &[
@@ -7086,9 +7086,9 @@ fn assert_no_non_factory_changes(path: &Path) {
             "--untracked-files=all",
             "--",
             ".",
-            ":(exclude).factory",
+            ":(exclude).fluent",
         ],
-        "check for non-factory changes",
+        "check for non-fluent changes",
     )
     .unwrap();
     assert!(
@@ -7107,7 +7107,7 @@ done
 if [ "$HAS_PROMPT" = 0 ]; then exit 0; fi
 case "$PWD" in
   */work-6-work-1-attempt-1)
-    count_file="$PWD/.factory-loop-write-count"
+    count_file="$PWD/.fluent-loop-write-count"
     if [ -f "$count_file" ]; then
       count="$(cat "$count_file")"
     else
@@ -7205,7 +7205,7 @@ fn commit_file(repo: &Path, path: &str, content: &str, message: &str) {
 
 const BEHAVIOR_TESTS_MOCK_PRELUDE: &str = r##"#!/bin/bash
 
-if [ "${FACTORY_TASK_KIND:-}" = "behavior-tests" ]; then
+if [ "${FLUENT_TASK_KIND:-}" = "behavior-tests" ]; then
     args_blob=""
     for arg in "$@"; do
         args_blob="$args_blob $arg"
@@ -7267,7 +7267,7 @@ fn write_mock_claude(bin_dir: &Path, script: &str) {
 }
 
 fn write_executable_hook(project_root: &Path, name: &str, script: &str) {
-    let hooks_dir = project_root.join(".factory/hooks");
+    let hooks_dir = project_root.join(".fluent/hooks");
     fs::create_dir_all(&hooks_dir).unwrap();
     let path = hooks_dir.join(name);
     fs::write(&path, script).unwrap();
@@ -7276,9 +7276,9 @@ fn write_executable_hook(project_root: &Path, name: &str, script: &str) {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     }
-    // The test gitignore exempts .factory/hooks/, so commit the hook so it
+    // The test gitignore exempts .fluent/hooks/, so commit the hook so it
     // doesn't appear as uncommitted in later merge prechecks.
-    let relative = format!(".factory/hooks/{name}");
+    let relative = format!(".fluent/hooks/{name}");
     git::run(project_root, &["add", &relative], "stage hook").unwrap();
     git::run(
         project_root,
@@ -7338,7 +7338,7 @@ fn write_post_merge_review_queue_entry(
     merged_commit: &str,
     source_work_item_id: &str,
 ) {
-    let queue_path = project_root.join(".factory/work/post-merge-review-queue.json");
+    let queue_path = project_root.join(".fluent/work/post-merge-review-queue.json");
     fs::create_dir_all(queue_path.parent().unwrap()).unwrap();
     let body = format!(
         "{{\"entries\":[{{\"target_branch\":\"{target_branch}\",\"merged_commit\":\"{merged_commit}\",\"merged_at_unix\":0,\"source_work_item_id\":\"{source_work_item_id}\",\"source_merge_candidate_id\":\"{source_work_item_id}-attempt-1-merge-candidate\"}}]}}"
@@ -7358,7 +7358,7 @@ fn post_merge_review_creates_worktree_and_runs_tester_then_reviewers() {
 
     write_post_merge_review_queue_entry(&main_dir, "main", &main_head, "source-work");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["post-merge-review", "--debounce-seconds", "0"])
         .env("PATH", mock_path(&bin_dir))
@@ -7416,7 +7416,7 @@ fn post_merge_review_creates_worktree_and_runs_tester_then_reviewers() {
     write_post_merge_review_queue_entry(&main_dir, "main", &new_head, "source-work-2");
     let worktree_inode_before = fs::metadata(&expected_worktree).unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["post-merge-review", "--debounce-seconds", "0"])
         .env("PATH", mock_path(&bin_dir))
@@ -7443,19 +7443,19 @@ fn work_attempt_run_rejects_review_only_worktree_already_in_flight() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     for wi in ["work-1", "work-2"] {
-        factory_cmd()
+        fluent_cmd()
             .current_dir(&main_dir)
             .args(["work-item", "create", wi, "--title", "Review codebase"])
             .assert()
             .success();
-        factory_cmd()
+        fluent_cmd()
             .current_dir(&main_dir)
             .args(["review", "codebase", wi, "attempt-review"])
             .assert()
             .success();
     }
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-2", "attempt-review", "--no-sandbox"])
         .assert()
@@ -7468,7 +7468,7 @@ fn work_attempt_run_rejects_review_only_worktree_already_in_flight() {
 fn post_merge_review_defers_queue_entry_when_worktree_in_flight() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "work-item",
@@ -7479,7 +7479,7 @@ fn post_merge_review_defers_queue_entry_when_worktree_in_flight() {
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["review", "codebase", "work-1", "attempt-review"])
         .assert()
@@ -7488,7 +7488,7 @@ fn post_merge_review_defers_queue_entry_when_worktree_in_flight() {
     let main_head = git_head(&main_dir);
     write_post_merge_review_queue_entry(&main_dir, "main", &main_head, "source-work");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["post-merge-review", "--debounce-seconds", "0"])
         .assert()
@@ -7496,7 +7496,7 @@ fn post_merge_review_defers_queue_entry_when_worktree_in_flight() {
         .stderr(predicate::str::contains("Deferring post-merge review"))
         .stderr(predicate::str::contains("\"work-1\""));
 
-    let queue_path = main_dir.join(".factory/work/post-merge-review-queue.json");
+    let queue_path = main_dir.join(".fluent/work/post-merge-review-queue.json");
     let queue: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&queue_path).unwrap()).unwrap();
     let entries = queue["entries"].as_array().expect("queue entries array");
@@ -7508,7 +7508,7 @@ fn post_merge_review_defers_queue_entry_when_worktree_in_flight() {
     assert_eq!(entries[0]["target_branch"], "main");
     let short = &main_head[..8.min(main_head.len())];
     let post_merge_item_path = main_dir
-        .join(".factory/work/items")
+        .join(".fluent/work/items")
         .join(format!("post-merge-main-{short}.json"));
     assert!(
         !post_merge_item_path.exists(),
@@ -7536,7 +7536,7 @@ fn create_review_only_worktree(main_dir: &Path, tmp: &TempDir, branch: &str) -> 
 
 fn seed_in_flight_review_only_attempt(main_dir: &Path, work_item_id: &str, branch: &str) {
     git::run(main_dir, &["checkout", branch], "checkout branch for seed").unwrap();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(main_dir)
         .args([
             "work-item",
@@ -7547,7 +7547,7 @@ fn seed_in_flight_review_only_attempt(main_dir: &Path, work_item_id: &str, branc
         ])
         .assert()
         .success();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(main_dir)
         .args(["review", "codebase", work_item_id, "attempt-review"])
         .assert()
@@ -7571,7 +7571,7 @@ fn review_only_worktree_prune_default_removes_orphan_keeps_others() {
     .unwrap();
     git::run(&main_dir, &["branch", "-D", "busy"], "delete in-use branch").unwrap();
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(&main_dir)
         .args(["cleanup", "--apply"])
         .output()
@@ -7598,7 +7598,7 @@ fn review_only_worktree_prune_all_removes_everything_but_in_use() {
     let busy = create_review_only_worktree(&main_dir, &tmp, "busy");
     seed_in_flight_review_only_attempt(&main_dir, "work-busy", "busy");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["cleanup", "--apply", "--prune-all-review-worktrees"])
         .assert()
@@ -7630,7 +7630,7 @@ fn post_merge_review_auto_prunes_orphan_worktree_before_processing_queue() {
     let bin_dir = tmp.path().join("bin-post-merge-auto-prune");
     write_mock_claude(&bin_dir, &review_only_mock_script("pass"));
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(&main_dir)
         .args(["post-merge-review", "--debounce-seconds", "0"])
         .env("PATH", mock_path(&bin_dir))
@@ -7657,13 +7657,13 @@ fn post_merge_review_auto_prunes_orphan_worktree_before_processing_queue() {
 
     let short = &main_head[..8.min(main_head.len())];
     let post_merge_item_path = main_dir
-        .join(".factory/work/items")
+        .join(".fluent/work/items")
         .join(format!("post-merge-main-{short}.json"));
     assert!(
         post_merge_item_path.exists(),
         "queue entry must still be processed in the same pass"
     );
-    let queue_path = main_dir.join(".factory/work/post-merge-review-queue.json");
+    let queue_path = main_dir.join(".fluent/work/post-merge-review-queue.json");
     let queue: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&queue_path).unwrap()).unwrap();
     assert!(
@@ -7687,7 +7687,7 @@ fn review_only_worktree_prune_dry_run_changes_nothing() {
     .unwrap();
     git::run(&main_dir, &["branch", "-D", "busy"], "delete in-use branch").unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(&main_dir)
         .args(["cleanup"])
         .assert()
@@ -7710,7 +7710,7 @@ fn review_only_worktree_prune_dry_run_changes_nothing() {
 fn observations_add_with_inline_content() {
     let tmp = TempDir::new().unwrap();
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["observation", "create", "Test observation content"])
         .output()
@@ -7730,7 +7730,7 @@ fn observations_add_with_inline_content() {
         "ID should contain slugified title: {id}"
     );
 
-    let obs_dir = tmp.path().join(".factory/observations");
+    let obs_dir = tmp.path().join(".fluent/observations");
     let file = obs_dir.join(format!("{id}.md"));
     assert!(file.exists(), "observation file should exist");
     let content = fs::read_to_string(&file).unwrap();
@@ -7741,7 +7741,7 @@ fn observations_add_with_inline_content() {
 fn observations_add_from_stdin() {
     let tmp = TempDir::new().unwrap();
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["observation", "create"])
         .write_stdin("Observation from stdin")
@@ -7758,7 +7758,7 @@ fn observations_add_from_stdin() {
     let id = stdout.trim();
     assert!(!id.is_empty());
 
-    let file = tmp.path().join(format!(".factory/observations/{id}.md"));
+    let file = tmp.path().join(format!(".fluent/observations/{id}.md"));
     assert!(file.exists(), "observation file should exist");
     let content = fs::read_to_string(&file).unwrap();
     assert!(content.contains("Observation from stdin"));
@@ -7768,7 +7768,7 @@ fn observations_add_from_stdin() {
 fn observations_add_empty_stdin_errors() {
     let tmp = TempDir::new().unwrap();
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["observation", "create"])
         .write_stdin("")
@@ -7786,7 +7786,7 @@ fn observations_add_empty_stdin_errors() {
 #[test]
 fn observations_resolve_inline() {
     let tmp = TempDir::new().unwrap();
-    let obs_dir = tmp.path().join(".factory/observations");
+    let obs_dir = tmp.path().join(".fluent/observations");
     fs::create_dir_all(&obs_dir).unwrap();
     fs::write(
         obs_dir.join("20260612-000000-test-obs.md"),
@@ -7794,7 +7794,7 @@ fn observations_resolve_inline() {
     )
     .unwrap();
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args([
             "observation",
@@ -7827,7 +7827,7 @@ fn observations_resolve_inline() {
 fn observations_resolve_unknown_id_errors() {
     let tmp = TempDir::new().unwrap();
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["observation", "resolve", "nonexistent-id", "whatever"])
         .output()
@@ -7844,7 +7844,7 @@ fn observations_resolve_unknown_id_errors() {
 #[test]
 fn observations_resolve_prefix_unique_match() {
     let tmp = TempDir::new().unwrap();
-    let obs_dir = tmp.path().join(".factory/observations");
+    let obs_dir = tmp.path().join(".fluent/observations");
     fs::create_dir_all(&obs_dir).unwrap();
     fs::write(
         obs_dir.join("20260612-143000-unique-entry.md"),
@@ -7852,7 +7852,7 @@ fn observations_resolve_prefix_unique_match() {
     )
     .unwrap();
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["observation", "resolve", "20260612-143", "Done"])
         .output()
@@ -7878,12 +7878,12 @@ fn observations_resolve_prefix_unique_match() {
 #[test]
 fn observations_resolve_prefix_ambiguous_errors() {
     let tmp = TempDir::new().unwrap();
-    let obs_dir = tmp.path().join(".factory/observations");
+    let obs_dir = tmp.path().join(".fluent/observations");
     fs::create_dir_all(&obs_dir).unwrap();
     fs::write(obs_dir.join("20260612-000000-alpha.md"), "a\n").unwrap();
     fs::write(obs_dir.join("20260612-000000-bravo.md"), "b\n").unwrap();
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["observation", "resolve", "20260612", "Done"])
         .output()
@@ -7904,13 +7904,13 @@ fn observations_resolve_prefix_ambiguous_errors() {
 #[test]
 fn observations_list_orders_chronologically() {
     let tmp = TempDir::new().unwrap();
-    let obs_dir = tmp.path().join(".factory/observations");
+    let obs_dir = tmp.path().join(".fluent/observations");
     fs::create_dir_all(&obs_dir).unwrap();
     fs::write(obs_dir.join("20260612-120000-second.md"), "Second entry\n").unwrap();
     fs::write(obs_dir.join("20260611-100000-first.md"), "First entry\n").unwrap();
     fs::write(obs_dir.join("20260613-080000-third.md"), "Third entry\n").unwrap();
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["observation", "list"])
         .output()
@@ -7934,7 +7934,7 @@ fn observations_list_orders_chronologically() {
 #[test]
 fn observations_show_open_and_resolved() {
     let tmp = TempDir::new().unwrap();
-    let obs_dir = tmp.path().join(".factory/observations");
+    let obs_dir = tmp.path().join(".fluent/observations");
     let resolved_dir = obs_dir.join("resolved");
     fs::create_dir_all(&resolved_dir).unwrap();
     fs::write(obs_dir.join("20260612-open.md"), "Open observation body\n").unwrap();
@@ -7945,7 +7945,7 @@ fn observations_show_open_and_resolved() {
     .unwrap();
 
     // Show open observation
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["observation", "show", "20260612-open"])
         .output()
@@ -7955,7 +7955,7 @@ fn observations_show_open_and_resolved() {
     assert!(stdout.contains("Open observation body"));
 
     // Show resolved observation (falls back to resolved dir)
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["observation", "show", "20260611-resolved"])
         .output()
@@ -7965,7 +7965,7 @@ fn observations_show_open_and_resolved() {
     assert!(stdout.contains("Resolved observation body"));
 
     // Show unknown observation
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["observation", "show", "nonexistent"])
         .output()
@@ -7976,11 +7976,11 @@ fn observations_show_open_and_resolved() {
 #[test]
 fn observations_migrate_splits_monolithic_files() {
     let tmp = TempDir::new().unwrap();
-    let factory = tmp.path().join(".factory");
-    fs::create_dir_all(&factory).unwrap();
+    let fluent = tmp.path().join(".fluent");
+    fs::create_dir_all(&fluent).unwrap();
 
     fs::write(
-        factory.join("observations.md"),
+        fluent.join("observations.md"),
         "# Observations\n\nOpen queue.\n\n---\n\n\
          2026-06-12 \u{2014} First open observation\nDetails here.\n\n\
          2026-06-12 \u{2014} Second open observation\nMore details.\n",
@@ -7988,13 +7988,13 @@ fn observations_migrate_splits_monolithic_files() {
     .unwrap();
 
     fs::write(
-        factory.join("observations-resolved.md"),
+        fluent.join("observations-resolved.md"),
         "# Resolved Observations\n\nResolved queue.\n\n---\n\n\
          2026-06-11 \u{2014} Old resolved observation\n\u{2192} Resolved: fixed.\n",
     )
     .unwrap();
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["observation", "migrate"])
         .output()
@@ -8008,16 +8008,16 @@ fn observations_migrate_splits_monolithic_files() {
 
     // Monolithic files removed
     assert!(
-        !factory.join("observations.md").exists(),
+        !fluent.join("observations.md").exists(),
         "observations.md should be removed"
     );
     assert!(
-        !factory.join("observations-resolved.md").exists(),
+        !fluent.join("observations-resolved.md").exists(),
         "observations-resolved.md should be removed"
     );
 
     // Per-file layout exists
-    let obs_dir = factory.join("observations");
+    let obs_dir = fluent.join("observations");
     assert!(obs_dir.is_dir());
     assert!(obs_dir.join("resolved").is_dir());
 
@@ -8066,7 +8066,7 @@ fn observations_migrate_splits_monolithic_files() {
     );
 
     // Idempotent: second run is a no-op
-    let output2 = factory_cmd()
+    let output2 = fluent_cmd()
         .current_dir(tmp.path())
         .args(["observation", "migrate"])
         .output()
@@ -8143,7 +8143,7 @@ fn log_command_writes_log_file_on_success() {
     let test_name = log::test_current_test_name();
     let log_path = log_dir.join(format!("{test_name}.log"));
 
-    let output = LoggedCommand::cargo_bin("factory")
+    let output = LoggedCommand::cargo_bin("fluent")
         .arg("version")
         .output()
         .unwrap();
@@ -8158,7 +8158,7 @@ fn log_command_writes_log_file_on_success() {
     let content = fs::read_to_string(&log_path).unwrap();
     assert!(content.contains("=== "), "log should contain header");
     assert!(
-        content.contains("command: factory version"),
+        content.contains("command: fluent version"),
         "log should contain command line"
     );
     assert!(content.contains("exit: 0"), "log should contain exit code");
@@ -8174,7 +8174,7 @@ fn log_command_writes_log_file_on_success() {
 
 #[test]
 #[serial(env_skip_log)]
-fn log_command_skips_on_factory_tests_skip_log() {
+fn log_command_skips_on_fluent_tests_skip_log() {
     let log_dir = log::test_log_dir_path();
     let test_name = log::test_current_test_name();
     let log_path = log_dir.join(format!("{test_name}.log"));
@@ -8183,13 +8183,13 @@ fn log_command_skips_on_factory_tests_skip_log() {
 
     // SAFETY: this test runs a single LoggedCommand synchronously and
     // restores the variable immediately; no other thread reads
-    // FACTORY_TESTS_SKIP_LOG in this window.
-    unsafe { std::env::set_var("FACTORY_TESTS_SKIP_LOG", "1") };
-    let output = LoggedCommand::cargo_bin("factory")
+    // FLUENT_TESTS_SKIP_LOG in this window.
+    unsafe { std::env::set_var("FLUENT_TESTS_SKIP_LOG", "1") };
+    let output = LoggedCommand::cargo_bin("fluent")
         .arg("version")
         .output()
         .unwrap();
-    unsafe { std::env::remove_var("FACTORY_TESTS_SKIP_LOG") };
+    unsafe { std::env::remove_var("FLUENT_TESTS_SKIP_LOG") };
 
     assert!(output.status.success());
     assert!(
@@ -8208,7 +8208,7 @@ fn log_command_failed_command_appends_to_failed_sentinel() {
     let failed_path = log_dir.join(".failed");
 
     let tmp = TempDir::new().unwrap();
-    let output = LoggedCommand::cargo_bin("factory")
+    let output = LoggedCommand::cargo_bin("fluent")
         .current_dir(tmp.path())
         .args(["work-item", "show", "nonexistent-work-item-for-test"])
         .output()
@@ -8232,7 +8232,7 @@ fn log_command_failed_command_appends_to_failed_sentinel() {
 #[test]
 fn auto_merge_with_both_flags_set_errors() {
     let tmp = TempDir::new().unwrap();
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["auto-merge", "some-work-item", "--all"])
         .output()
@@ -8248,7 +8248,7 @@ fn auto_merge_with_both_flags_set_errors() {
 #[test]
 fn auto_merge_with_neither_flag_set_errors() {
     let tmp = TempDir::new().unwrap();
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["auto-merge"])
         .output()
@@ -8264,7 +8264,7 @@ fn auto_merge_with_neither_flag_set_errors() {
 #[test]
 fn auto_merge_single_mode_rejects_unknown_work_item_id() {
     let tmp = TempDir::new().unwrap();
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["auto-merge", "nonexistent-work-item"])
         .output()
@@ -8287,14 +8287,14 @@ fn auto_merge_skips_candidate_already_marked_skipped() {
         "initial commit",
     )
     .unwrap();
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["work-item", "create", "wi-skip", "--title", "Test skip"])
         .output()
         .unwrap();
 
     // Write a completed attempt with review_state passed
-    let attempt_dir = tmp.path().join(".factory/work/attempts/wi-skip");
+    let attempt_dir = tmp.path().join(".fluent/work/attempts/wi-skip");
     fs::create_dir_all(&attempt_dir).unwrap();
     let attempt_json = serde_json::json!({
         "id": "attempt-1",
@@ -8309,7 +8309,7 @@ fn auto_merge_skips_candidate_already_marked_skipped() {
     .unwrap();
 
     // Write a merge candidate with auto_merge_skipped set
-    let mc_dir = tmp.path().join(".factory/work/merge-candidates/wi-skip");
+    let mc_dir = tmp.path().join(".fluent/work/merge-candidates/wi-skip");
     fs::create_dir_all(&mc_dir).unwrap();
     let candidate_json = serde_json::json!({
         "id": "attempt-1-merge-candidate",
@@ -8331,7 +8331,7 @@ fn auto_merge_skips_candidate_already_marked_skipped() {
     )
     .unwrap();
 
-    let child = std::process::Command::new(assert_cmd::cargo::cargo_bin("factory"))
+    let child = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
         .current_dir(tmp.path())
         .args(["auto-merge", "wi-skip", "--poll-seconds", "1"])
         .stderr(std::process::Stdio::piped())
@@ -8360,13 +8360,13 @@ fn auto_merge_exits_clean_on_sigterm() {
     )
     .unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["work-item", "create", "wi-sig", "--title", "Test signal"])
         .output()
         .unwrap();
 
-    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("factory"))
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
         .current_dir(tmp.path())
         .args(["auto-merge", "wi-sig", "--poll-seconds", "1"])
         .stderr(std::process::Stdio::piped())
@@ -8618,7 +8618,7 @@ fn no_legacy_run_strings_in_src() {
     let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let src = project_root.join("src");
     let forbidden = &[
-        ".factory/runs",
+        ".fluent/runs",
         "sessions.log",
         "active-run",
         "mod run;",
@@ -8638,10 +8638,10 @@ fn no_legacy_run_strings_in_src() {
 fn no_legacy_run_strings_in_documentation() {
     let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let forbidden = &[
-        ".factory/runs",
-        "factory run ",
-        "factory resume",
-        "factory watch",
+        ".fluent/runs",
+        "fluent run ",
+        "fluent resume",
+        "fluent watch",
         "sessions.log",
         "active-run",
         "legacy fallback",
@@ -8726,7 +8726,7 @@ fn no_legacy_prompt_files_in_prompts_dir() {
 
 #[test]
 fn deleted_subcommands_absent_from_help() {
-    let output = factory_cmd().args(["--help"]).output().unwrap();
+    let output = fluent_cmd().args(["--help"]).output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let in_commands = stdout
         .lines()
@@ -8767,14 +8767,14 @@ fn work_queue_add_and_list_round_trip() {
     let tmp = TempDir::new().unwrap();
     write_work_item_json(tmp.path(), "wi-q1", "Queue test");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["queue", "add", "wi-q1", "--priority", "5"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Queued Work Item wi-q1"));
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["queue", "list"])
         .assert()
@@ -8787,9 +8787,9 @@ fn work_queue_add_and_list_round_trip() {
 #[test]
 fn work_queue_add_unknown_work_item_errors() {
     let tmp = TempDir::new().unwrap();
-    fs::create_dir_all(tmp.path().join(".factory/work/items")).unwrap();
+    fs::create_dir_all(tmp.path().join(".fluent/work/items")).unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["queue", "add", "nonexistent"])
         .assert()
@@ -8802,19 +8802,19 @@ fn work_queue_add_existing_with_priority_updates_only_priority() {
     let tmp = TempDir::new().unwrap();
     write_work_item_json(tmp.path(), "wi-q2", "Priority update");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["queue", "add", "wi-q2", "--priority", "3"])
         .assert()
         .success();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["queue", "add", "wi-q2", "--priority", "10"])
         .assert()
         .success();
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["queue", "list"])
         .output()
@@ -8832,13 +8832,13 @@ fn work_queue_list_format_includes_priority_queued_at_status_id() {
     let tmp = TempDir::new().unwrap();
     write_work_item_json(tmp.path(), "wi-fmt", "Format test");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["queue", "add", "wi-fmt"])
         .assert()
         .success();
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["queue", "list"])
         .output()
@@ -8858,20 +8858,20 @@ fn work_queue_remove_after_add_removes_entry() {
     let tmp = TempDir::new().unwrap();
     write_work_item_json(tmp.path(), "wi-rm", "Remove test");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["queue", "add", "wi-rm"])
         .assert()
         .success();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["queue", "remove", "wi-rm"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Removed wi-rm"));
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["queue", "list"])
         .assert()
@@ -8882,9 +8882,9 @@ fn work_queue_remove_after_add_removes_entry() {
 #[test]
 fn work_queue_remove_unknown_errors() {
     let tmp = TempDir::new().unwrap();
-    fs::create_dir_all(tmp.path().join(".factory/work/items")).unwrap();
+    fs::create_dir_all(tmp.path().join(".fluent/work/items")).unwrap();
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(tmp.path())
         .args(["queue", "remove", "nonexistent"])
         .assert()
@@ -8899,9 +8899,9 @@ fn work_queue_remove_unknown_errors() {
 #[test]
 fn work_scheduler_run_exits_clean_on_sigterm_when_idle() {
     let tmp = TempDir::new().unwrap();
-    fs::create_dir_all(tmp.path().join(".factory/work/items")).unwrap();
+    fs::create_dir_all(tmp.path().join(".fluent/work/items")).unwrap();
 
-    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("factory"))
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
         .current_dir(tmp.path())
         .args(["scheduler", "run", "--poll-seconds", "1"])
         .stderr(std::process::Stdio::piped())
@@ -8935,19 +8935,19 @@ exit 0
 
     write_work_item_json(project, "wi-sched", "Scheduler test");
 
-    factory_cmd()
+    fluent_cmd()
         .current_dir(project)
         .args(["queue", "add", "wi-sched", "--priority", "1"])
         .assert()
         .success();
 
-    let queue_entry_path = project.join(".factory/work/queue/wi-sched.json");
+    let queue_entry_path = project.join(".fluent/work/queue/wi-sched.json");
     assert!(queue_entry_path.exists());
     let before: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&queue_entry_path).unwrap()).unwrap();
     assert_eq!(before["status"], "queued");
 
-    let child = std::process::Command::new(assert_cmd::cargo::cargo_bin("factory"))
+    let child = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
         .current_dir(project)
         .env(
             "PATH",
@@ -9000,7 +9000,7 @@ exit 0
 // ---------------------------------------------------------------------------
 
 fn write_rich_work_item(project_root: &Path) {
-    let base = project_root.join(".factory/work");
+    let base = project_root.join(".fluent/work");
 
     let items_dir = base.join("items");
     fs::create_dir_all(&items_dir).unwrap();
@@ -9056,7 +9056,7 @@ fn write_rich_work_item(project_root: &Path) {
   "work_item_id": "wi-read",
   "attempt_id": "attempt-1",
   "workspace_access": { "reads": [{"id": "ws-1", "path": "/tmp/ws"}], "writes": [] },
-  "artifact_area": { "path": ".factory/work/artifacts/wi-read/attempt-1/attempt-1-review-1" },
+  "artifact_area": { "path": ".fluent/work/artifacts/wi-read/attempt-1/attempt-1-review-1" },
   "review_context": {
     "candidate_workspace_id": "ws-1",
     "candidate_workspace_path": "/tmp/ws",
@@ -9091,7 +9091,7 @@ fn attempt_list_prints_attempts() {
     let tmp = TempDir::new().unwrap();
     write_rich_work_item(tmp.path());
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["attempt", "list", "wi-read"])
         .output()
@@ -9125,7 +9125,7 @@ fn attempt_show_prints_attempt_json() {
     let tmp = TempDir::new().unwrap();
     write_rich_work_item(tmp.path());
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["attempt", "show", "wi-read", "attempt-1"])
         .output()
@@ -9142,7 +9142,7 @@ fn merge_candidate_list_prints_candidates() {
     let tmp = TempDir::new().unwrap();
     write_rich_work_item(tmp.path());
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["merge-candidate", "list", "wi-read"])
         .output()
@@ -9165,7 +9165,7 @@ fn task_list_prints_tasks() {
     let tmp = TempDir::new().unwrap();
     write_rich_work_item(tmp.path());
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["task", "list", "wi-read", "attempt-1"])
         .output()
@@ -9192,7 +9192,7 @@ fn task_show_prints_task_json() {
     let tmp = TempDir::new().unwrap();
     write_rich_work_item(tmp.path());
 
-    let output = factory_cmd()
+    let output = fluent_cmd()
         .current_dir(tmp.path())
         .args(["task", "show", "wi-read", "attempt-1", "attempt-1-write-1"])
         .output()

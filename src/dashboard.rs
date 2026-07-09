@@ -199,7 +199,7 @@ fn draw_work_header(f: &mut ratatui::Frame, area: Rect, app: &App) {
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Factory Dashboard "),
+            .title(" Fluent Dashboard "),
     );
 
     f.render_widget(header, area);
@@ -356,7 +356,7 @@ mod tests {
                 merge: "-".to_string(),
                 action: "task-ready".to_string(),
             }],
-            errors: vec!["invalid Work Item file .factory/work/items/broken-work.json".to_string()],
+            errors: vec!["invalid Work Item file .fluent/work/items/broken-work.json".to_string()],
         });
 
         let text = render_app_text(&mut app);
@@ -365,7 +365,7 @@ mod tests {
         assert!(text.contains("Actionable: 1"));
         assert!(text.contains("Errors: 1"));
         assert!(text.contains("Work Item read errors"));
-        assert!(text.contains(".factory/work/items/broken-work.json"));
+        assert!(text.contains(".fluent/work/items/broken-work.json"));
     }
 
     #[test]

@@ -24,22 +24,22 @@ run_test() {
 }
 
 setup_entrypoint_test() {
-  TEST_DIR="$(mktemp -d -t factory-codex-entrypoint-XXXXXX)"
+  TEST_DIR="$(mktemp -d -t fluent-codex-entrypoint-XXXXXX)"
 
   MOCK_BIN="${TEST_DIR}/bin"
   WORKTREES="${TEST_DIR}/worktrees"
   mkdir -p "$MOCK_BIN" "$WORKTREES"
 
-  cat > "$MOCK_BIN/factory" <<'FACTORY'
+  cat > "$MOCK_BIN/fluent" <<'FLUENT'
 #!/usr/bin/env bash
 set -euo pipefail
 {
-  printf 'factory-bin=%s\n' "$0"
+  printf 'fluent-bin=%s\n' "$0"
   printf '%s\n' "$@"
-} > "$MOCK_FACTORY_ARGS"
-printf 'OPENAI_API_KEY=%s\n' "${OPENAI_API_KEY:-UNSET}" > "$MOCK_FACTORY_ENV"
-FACTORY
-  chmod +x "$MOCK_BIN/factory"
+} > "$MOCK_FLUENT_ARGS"
+printf 'OPENAI_API_KEY=%s\n' "${OPENAI_API_KEY:-UNSET}" > "$MOCK_FLUENT_ENV"
+FLUENT
+  chmod +x "$MOCK_BIN/fluent"
 
   cat > "$MOCK_BIN/codex" <<'CODEX'
 #!/usr/bin/env bash
@@ -78,8 +78,8 @@ SH
   MOCK_WORKSPACE_IN="${TEST_DIR}/workspace-in.tar"
   MOCK_WORKSPACE_OUT="${TEST_DIR}/workspace-out.tar"
   tar cf "$MOCK_WORKSPACE_IN" -C "${TEST_DIR}/workspace-src" testproject
-  MOCK_FACTORY_ARGS="${TEST_DIR}/factory-args"
-  MOCK_FACTORY_ENV="${TEST_DIR}/factory-env"
+  MOCK_FLUENT_ARGS="${TEST_DIR}/fluent-args"
+  MOCK_FLUENT_ENV="${TEST_DIR}/fluent-env"
 }
 
 cleanup_entrypoint_test() {
@@ -91,17 +91,17 @@ run_entrypoint_full() {
   local coder_env=("$@")
   HOME="${TEST_DIR}/fakehome" \
   PATH="${MOCK_BIN}:${PATH}" \
-  FACTORY_WORKTREES_ROOT="$WORKTREES" \
-  FACTORY_WORK_ITEM_ID="w1" \
-  FACTORY_WORK_ATTEMPT_ID="a1" \
-  FACTORY_PROJECT_NAME="testproject" \
-  FACTORY_S3_BUCKET="bucket" \
-  FACTORY_REGION="us-west-1" \
-  FACTORY_BIN="$MOCK_BIN/factory" \
+  FLUENT_WORKTREES_ROOT="$WORKTREES" \
+  FLUENT_WORK_ITEM_ID="w1" \
+  FLUENT_WORK_ATTEMPT_ID="a1" \
+  FLUENT_PROJECT_NAME="testproject" \
+  FLUENT_S3_BUCKET="bucket" \
+  FLUENT_REGION="us-west-1" \
+  FLUENT_BIN="$MOCK_BIN/fluent" \
   MOCK_WORKSPACE_IN="$MOCK_WORKSPACE_IN" \
   MOCK_WORKSPACE_OUT="$MOCK_WORKSPACE_OUT" \
-  MOCK_FACTORY_ARGS="$MOCK_FACTORY_ARGS" \
-  MOCK_FACTORY_ENV="$MOCK_FACTORY_ENV" \
+  MOCK_FLUENT_ARGS="$MOCK_FLUENT_ARGS" \
+  MOCK_FLUENT_ENV="$MOCK_FLUENT_ENV" \
   "${coder_env[@]}" \
     bash "$ENTRYPOINT"
 }
@@ -114,7 +114,7 @@ test_codex_writes_auth_json_and_unsets_openai_key() {
   local AUTH_JSON='{"auth_mode":"chatgpt","refresh_token":"tok123"}'
 
   run_entrypoint_full \
-    env FACTORY_CODER="codex" \
+    env FLUENT_CODER="codex" \
     CODEX_AUTH_JSON="$AUTH_JSON" \
     OPENAI_API_KEY="should-be-unset"
 
@@ -135,13 +135,13 @@ test_codex_writes_auth_json_and_unsets_openai_key() {
     RESULT=1
   fi
 
-  if ! grep -q 'OPENAI_API_KEY=UNSET' "$MOCK_FACTORY_ENV"; then
-    printf '    FAIL: OPENAI_API_KEY was not unset before factory binary\n'
+  if ! grep -q 'OPENAI_API_KEY=UNSET' "$MOCK_FLUENT_ENV"; then
+    printf '    FAIL: OPENAI_API_KEY was not unset before fluent binary\n'
     RESULT=1
   fi
 
-  if ! grep -q -- '--coder' "$MOCK_FACTORY_ARGS" || ! grep -q 'codex' "$MOCK_FACTORY_ARGS"; then
-    printf '    FAIL: factory was not called with --coder codex\n'
+  if ! grep -q -- '--coder' "$MOCK_FLUENT_ARGS" || ! grep -q 'codex' "$MOCK_FLUENT_ARGS"; then
+    printf '    FAIL: fluent was not called with --coder codex\n'
     RESULT=1
   fi
 
@@ -156,13 +156,13 @@ test_codex_missing_env_var_fails() {
   set +e
   OUTPUT="$(HOME="${TEST_DIR}/fakehome" \
     PATH="${MOCK_BIN}:${PATH}" \
-    FACTORY_WORKTREES_ROOT="$WORKTREES" \
-    FACTORY_CODER="codex" \
-    FACTORY_WORK_ITEM_ID="w1" \
-    FACTORY_WORK_ATTEMPT_ID="a1" \
-    FACTORY_PROJECT_NAME="testproject" \
-    FACTORY_S3_BUCKET="bucket" \
-    FACTORY_REGION="us-west-1" \
+    FLUENT_WORKTREES_ROOT="$WORKTREES" \
+    FLUENT_CODER="codex" \
+    FLUENT_WORK_ITEM_ID="w1" \
+    FLUENT_WORK_ATTEMPT_ID="a1" \
+    FLUENT_PROJECT_NAME="testproject" \
+    FLUENT_S3_BUCKET="bucket" \
+    FLUENT_REGION="us-west-1" \
     bash "$ENTRYPOINT" 2>&1)"
   STATUS=$?
   set -e
@@ -188,14 +188,14 @@ test_codex_apikey_auth_mode_rejected() {
   set +e
   OUTPUT="$(HOME="${TEST_DIR}/fakehome" \
     PATH="${MOCK_BIN}:${PATH}" \
-    FACTORY_WORKTREES_ROOT="$WORKTREES" \
-    FACTORY_CODER="codex" \
+    FLUENT_WORKTREES_ROOT="$WORKTREES" \
+    FLUENT_CODER="codex" \
     CODEX_AUTH_JSON='{"auth_mode":"apikey","api_key":"sk-test"}' \
-    FACTORY_WORK_ITEM_ID="w1" \
-    FACTORY_WORK_ATTEMPT_ID="a1" \
-    FACTORY_PROJECT_NAME="testproject" \
-    FACTORY_S3_BUCKET="bucket" \
-    FACTORY_REGION="us-west-1" \
+    FLUENT_WORK_ITEM_ID="w1" \
+    FLUENT_WORK_ATTEMPT_ID="a1" \
+    FLUENT_PROJECT_NAME="testproject" \
+    FLUENT_S3_BUCKET="bucket" \
+    FLUENT_REGION="us-west-1" \
     bash "$ENTRYPOINT" 2>&1)"
   STATUS=$?
   set -e
@@ -209,8 +209,8 @@ test_codex_apikey_auth_mode_rejected() {
     printf '    FAIL: expected error about auth_mode=chatgpt, got: %s\n' "$OUTPUT"
     RESULT=1
   fi
-  if [ -f "$MOCK_FACTORY_ARGS" ]; then
-    printf '    FAIL: factory binary was invoked despite auth_mode rejection\n'
+  if [ -f "$MOCK_FLUENT_ARGS" ]; then
+    printf '    FAIL: fluent binary was invoked despite auth_mode rejection\n'
     RESULT=1
   fi
 
@@ -226,14 +226,14 @@ test_codex_config_toml_apikey_rejected() {
   set +e
   OUTPUT="$(HOME="${TEST_DIR}/fakehome" \
     PATH="${MOCK_BIN}:${PATH}" \
-    FACTORY_WORKTREES_ROOT="$WORKTREES" \
-    FACTORY_CODER="codex" \
+    FLUENT_WORKTREES_ROOT="$WORKTREES" \
+    FLUENT_CODER="codex" \
     CODEX_AUTH_JSON='{"auth_mode":"chatgpt","refresh_token":"tok"}' \
-    FACTORY_WORK_ITEM_ID="w1" \
-    FACTORY_WORK_ATTEMPT_ID="a1" \
-    FACTORY_PROJECT_NAME="testproject" \
-    FACTORY_S3_BUCKET="bucket" \
-    FACTORY_REGION="us-west-1" \
+    FLUENT_WORK_ITEM_ID="w1" \
+    FLUENT_WORK_ATTEMPT_ID="a1" \
+    FLUENT_PROJECT_NAME="testproject" \
+    FLUENT_S3_BUCKET="bucket" \
+    FLUENT_REGION="us-west-1" \
     bash "$ENTRYPOINT" 2>&1)"
   STATUS=$?
   set -e
@@ -257,13 +257,13 @@ test_codex_openai_api_key_unset_in_binary_env() {
   mkdir -p "${TEST_DIR}/fakehome"
 
   run_entrypoint_full \
-    env FACTORY_CODER="codex" \
+    env FLUENT_CODER="codex" \
     CODEX_AUTH_JSON='{"auth_mode":"chatgpt","refresh_token":"tok"}' \
     OPENAI_API_KEY="leaked-key"
 
   RESULT=0
-  if ! grep -q 'OPENAI_API_KEY=UNSET' "$MOCK_FACTORY_ENV"; then
-    printf '    FAIL: OPENAI_API_KEY was not unset in factory binary env\n'
+  if ! grep -q 'OPENAI_API_KEY=UNSET' "$MOCK_FLUENT_ENV"; then
+    printf '    FAIL: OPENAI_API_KEY was not unset in fluent binary env\n'
     RESULT=1
   fi
 
@@ -276,12 +276,12 @@ test_claude_path_unchanged() {
   mkdir -p "${TEST_DIR}/fakehome"
 
   run_entrypoint_full \
-    env FACTORY_CODER="claude" \
+    env FLUENT_CODER="claude" \
     CLAUDE_CODE_OAUTH_TOKEN="test-token"
 
   RESULT=0
-  if ! grep -q -- '--coder' "$MOCK_FACTORY_ARGS" || ! grep -q 'claude' "$MOCK_FACTORY_ARGS"; then
-    printf '    FAIL: factory was not called with --coder claude\n'
+  if ! grep -q -- '--coder' "$MOCK_FLUENT_ARGS" || ! grep -q 'claude' "$MOCK_FLUENT_ARGS"; then
+    printf '    FAIL: fluent was not called with --coder claude\n'
     RESULT=1
   fi
 
@@ -295,23 +295,23 @@ test_default_coder_is_claude() {
 
   HOME="${TEST_DIR}/fakehome" \
   PATH="${MOCK_BIN}:${PATH}" \
-  FACTORY_WORKTREES_ROOT="$WORKTREES" \
+  FLUENT_WORKTREES_ROOT="$WORKTREES" \
   CLAUDE_CODE_OAUTH_TOKEN="test-token" \
-  FACTORY_WORK_ITEM_ID="w1" \
-  FACTORY_WORK_ATTEMPT_ID="a1" \
-  FACTORY_PROJECT_NAME="testproject" \
-  FACTORY_S3_BUCKET="bucket" \
-  FACTORY_REGION="us-west-1" \
-  FACTORY_BIN="$MOCK_BIN/factory" \
+  FLUENT_WORK_ITEM_ID="w1" \
+  FLUENT_WORK_ATTEMPT_ID="a1" \
+  FLUENT_PROJECT_NAME="testproject" \
+  FLUENT_S3_BUCKET="bucket" \
+  FLUENT_REGION="us-west-1" \
+  FLUENT_BIN="$MOCK_BIN/fluent" \
   MOCK_WORKSPACE_IN="$MOCK_WORKSPACE_IN" \
   MOCK_WORKSPACE_OUT="$MOCK_WORKSPACE_OUT" \
-  MOCK_FACTORY_ARGS="$MOCK_FACTORY_ARGS" \
-  MOCK_FACTORY_ENV="$MOCK_FACTORY_ENV" \
+  MOCK_FLUENT_ARGS="$MOCK_FLUENT_ARGS" \
+  MOCK_FLUENT_ENV="$MOCK_FLUENT_ENV" \
     bash "$ENTRYPOINT"
 
   RESULT=0
-  if ! grep -q 'claude' "$MOCK_FACTORY_ARGS"; then
-    printf '    FAIL: factory was not called with --coder claude (default)\n'
+  if ! grep -q 'claude' "$MOCK_FLUENT_ARGS"; then
+    printf '    FAIL: fluent was not called with --coder claude (default)\n'
     RESULT=1
   fi
 
@@ -326,13 +326,13 @@ test_unknown_coder_fails() {
   set +e
   OUTPUT="$(HOME="${TEST_DIR}/fakehome" \
     PATH="${MOCK_BIN}:${PATH}" \
-    FACTORY_WORKTREES_ROOT="$WORKTREES" \
-    FACTORY_CODER="gpt5" \
-    FACTORY_WORK_ITEM_ID="w1" \
-    FACTORY_WORK_ATTEMPT_ID="a1" \
-    FACTORY_PROJECT_NAME="testproject" \
-    FACTORY_S3_BUCKET="bucket" \
-    FACTORY_REGION="us-west-1" \
+    FLUENT_WORKTREES_ROOT="$WORKTREES" \
+    FLUENT_CODER="gpt5" \
+    FLUENT_WORK_ITEM_ID="w1" \
+    FLUENT_WORK_ATTEMPT_ID="a1" \
+    FLUENT_PROJECT_NAME="testproject" \
+    FLUENT_S3_BUCKET="bucket" \
+    FLUENT_REGION="us-west-1" \
     bash "$ENTRYPOINT" 2>&1)"
   STATUS=$?
   set -e
@@ -342,7 +342,7 @@ test_unknown_coder_fails() {
     printf '    FAIL: entrypoint succeeded with unknown coder\n'
     RESULT=1
   fi
-  if ! echo "$OUTPUT" | grep -q "Unsupported FACTORY_CODER"; then
+  if ! echo "$OUTPUT" | grep -q "Unsupported FLUENT_CODER"; then
     printf '    FAIL: expected error about unsupported coder, got: %s\n' "$OUTPUT"
     RESULT=1
   fi

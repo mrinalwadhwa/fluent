@@ -5,14 +5,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
-FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
+FLUENT_BIN="${FLUENT_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/fluent}"
 
 source "${PROJECT_DIR}/tests/lib/run_test.sh"
 source "${PROJECT_DIR}/tests/lib/work_test_fixtures.sh"
 LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 setup_test_project() {
-  TEST_DIR="$(mktemp -d -t factory-work-task-instructions-XXXXXX)"
+  TEST_DIR="$(mktemp -d -t fluent-work-task-instructions-XXXXXX)"
   mkdir -p "$TEST_DIR/project" "$TEST_DIR/bin"
   cd "$TEST_DIR/project"
   git init -b main > /dev/null 2>&1
@@ -53,7 +53,7 @@ printf 'ARGV_BEGIN\n' >> "$CODER_ARGS_LOG"
 for arg in "$@"; do
   printf 'ARG:%s\n' "$arg" >> "$CODER_ARGS_LOG"
   case "$arg" in
-    *"Work Item:"*|*"Execute this Factory review Task"*)
+    *"Work Item:"*|*"Execute this Fluent review Task"*)
       printf '%s\n' "$arg" >> "$CODER_PROMPT_LOG"
       ;;
   esac
@@ -81,17 +81,17 @@ MOCK_SCRIPT
 
 create_work_item_with_instructions() {
   write_instructions_file
-  "$FACTORY_BIN" work-item create work-1 \
+  "$FLUENT_BIN" work-item create work-1 \
     --title "Instruction propagation" \
     --instructions-file "$TEST_DIR/instructions.md" > /dev/null
 }
 
 create_attempt() {
-  "$FACTORY_BIN" attempt create work-1 attempt-1 > /dev/null
+  "$FLUENT_BIN" attempt create work-1 attempt-1 > /dev/null
 }
 
 json_value() {
-  jq -r "$1" .factory/work/items/work-1.json
+  jq -r "$1" .fluent/work/items/work-1.json
 }
 
 assert_contains() {
@@ -115,7 +115,7 @@ run_work_task_with_extra_args() {
     CODER_ARGS_LOG="${TEST_DIR}/coder-args.log" \
     CODER_PROMPT_LOG="${TEST_DIR}/coder-prompt.log" \
     TASK_OUTPUT_COUNT_FILE="${TEST_DIR}/task-output-count" \
-    "$FACTORY_BIN" task run --no-sandbox --coder codex \
+    "$FLUENT_BIN" task run --no-sandbox --coder codex \
       work-1 attempt-1 attempt-1-write-1 -- \
       --model test-model EXTRA_ARG_PROMPT_SENTINEL
 }
@@ -125,7 +125,7 @@ run_work_attempt_with_extra_args() {
     CODER_ARGS_LOG="${TEST_DIR}/coder-args.log" \
     CODER_PROMPT_LOG="${TEST_DIR}/coder-prompt.log" \
     TASK_OUTPUT_COUNT_FILE="${TEST_DIR}/task-output-count" \
-    "$FACTORY_BIN" attempt run --no-sandbox --coder codex \
+    "$FLUENT_BIN" attempt run --no-sandbox --coder codex \
       work-1 attempt-1 -- --model test-model EXTRA_ARG_PROMPT_SENTINEL
 }
 
@@ -134,7 +134,7 @@ test_create_persists_instructions_and_show_displays_them() {
   create_work_item_with_instructions
 
   RESULT=0
-  "$FACTORY_BIN" work-item show work-1 > "$TEST_DIR/show.json"
+  "$FLUENT_BIN" work-item show work-1 > "$TEST_DIR/show.json"
   [ "$(jq -r '.instructions' "$TEST_DIR/show.json")" = "$(cat "$TEST_DIR/instructions.md")" ] || RESULT=1
 
   cleanup_test_project
@@ -147,8 +147,8 @@ test_attempt_copies_instructions_to_initial_write_task() {
   create_attempt
 
   RESULT=0
-  [ "$("$FACTORY_BIN" work-item show work-1 | jq -r '.attempts[0].tasks[0].instructions')" = "$(cat "$TEST_DIR/instructions.md")" ] || RESULT=1
-  [ "$("$FACTORY_BIN" work-item show work-1 | jq -r '.attempts[0].tasks[0].id')" = "attempt-1-write-1" ] || RESULT=1
+  [ "$("$FLUENT_BIN" work-item show work-1 | jq -r '.attempts[0].tasks[0].instructions')" = "$(cat "$TEST_DIR/instructions.md")" ] || RESULT=1
+  [ "$("$FLUENT_BIN" work-item show work-1 | jq -r '.attempts[0].tasks[0].id')" = "attempt-1-write-1" ] || RESULT=1
 
   cleanup_test_project
   return $RESULT
@@ -196,7 +196,7 @@ test_attempt_run_keeps_extra_args_out_of_prompt() {
 
 test_minimal_work_item_keeps_minimal_prompt() {
   setup_test_project
-  "$FACTORY_BIN" work-item create work-1 --title "Minimal prompt" > /dev/null
+  "$FLUENT_BIN" work-item create work-1 --title "Minimal prompt" > /dev/null
   create_attempt
   write_mock_codex
 
@@ -205,12 +205,12 @@ test_minimal_work_item_keeps_minimal_prompt() {
     CODER_ARGS_LOG="${TEST_DIR}/coder-args.log" \
     CODER_PROMPT_LOG="${TEST_DIR}/coder-prompt.log" \
     TASK_OUTPUT_COUNT_FILE="${TEST_DIR}/task-output-count" \
-    "$FACTORY_BIN" task run --no-sandbox --coder codex \
+    "$FLUENT_BIN" task run --no-sandbox --coder codex \
       work-1 attempt-1 attempt-1-write-1 > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
 
   PROMPT="$(cat "$TEST_DIR/coder-prompt.log")"
   assert_contains "$PROMPT" "Work Item: work-1 - Minimal prompt" || RESULT=1
-  assert_contains "$PROMPT" "Factory Writer" || RESULT=1
+  assert_contains "$PROMPT" "Fluent Writer" || RESULT=1
   assert_not_contains "$PROMPT" "Task instructions:" || RESULT=1
   [ "$(json_value '.instructions // "missing"')" = "missing" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[0].instructions // "missing"')" = "missing" ] || RESULT=1

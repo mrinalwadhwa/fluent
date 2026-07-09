@@ -7,7 +7,7 @@ The approach for project checks is approved. Help me plan the execution.
 - The approach chose a general project-configured checks concept with an
   initial formatter use case.
 - The implementation should start with a thin end-to-end slice: a test
-  project can define a formatter command, Factory runs it, and changed
+  project can define a formatter command, Fluent runs it, and changed
   files remain in the Task workspace.
 - The user wants the Task to complete autonomously once started, without
   manual intervention for expected formatter changes.
@@ -21,7 +21,7 @@ The approach for project checks is approved. Help me plan the execution.
   could be deferred only if needed, but the user previously questioned
   delaying that too much.
 - Risks include shell command safety, dirty worktrees, and ensuring a
-  failed formatter does not leave Factory stuck waiting for human input.
+  failed formatter does not leave Fluent stuck waiting for human input.
 
 ## Evaluation criteria
 - Did the agent read or ask for brief, behaviors.diff.md, approach.md,

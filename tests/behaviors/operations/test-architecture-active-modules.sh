@@ -27,7 +27,7 @@ for module in 'hooks.rs' 'merge.rs' 'cleanup.rs' 'coder.rs'; do
 done
 
 for concept in \
-  '.factory/hooks/<name>' \
+  '.fluent/hooks/<name>' \
   'check-pre-<phase>' \
   'fix-pre-<phase>' \
   'check-pre-merge' \

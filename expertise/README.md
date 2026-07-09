@@ -7,7 +7,7 @@ Principles, patterns, and conventions an agent draws on when making code decisio
 Two tiers, same structure:
 
 - `expertise/` — general, distributable across projects.
-- `.factory/expertise/` — project-specific. Same shape; rooted in the project's `.factory/` directory.
+- `.fluent/expertise/` — project-specific. Same shape; rooted in the project's `.fluent/` directory.
 
 Each tier follows a fractal convention:
 
@@ -27,7 +27,7 @@ Patterns are narrow, situational rules with a single-line load trigger. They liv
 
 Agents load expertise through three paths:
 
-1. **Prompt indexes.** Writer and reviewer prompts read `expertise/INDEX.md` (and `.factory/expertise/INDEX.md` if present) early in their procedure, then pick topic files per step from those indexes.
+1. **Prompt indexes.** Writer and reviewer prompts read `expertise/INDEX.md` (and `.fluent/expertise/INDEX.md` if present) early in their procedure, then pick topic files per step from those indexes.
 
 2. **Skill `references/` symlinks.** Each `skills/<name>/references/` directory symlinks to the expertise files that skill needs. Symlinks are dereferenced into copies on distribution.
 

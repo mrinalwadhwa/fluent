@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "factory",
+    name = "fluent",
     about = "Run coding agents inside a macOS Seatbelt sandbox with session continuity"
 )]
 pub struct Cli {
@@ -21,7 +21,7 @@ pub struct Cli {
     #[arg(long)]
     pub force: bool,
 
-    /// Tail the factory log file
+    /// Tail the fluent log file
     #[arg(long)]
     pub logs: bool,
 
@@ -121,7 +121,7 @@ pub enum Commands {
     /// Drain the pending post-merge review queue (debounced)
     PostMergeReview {
         /// Override debounce in seconds (default
-        /// FACTORY_POST_MERGE_DEBOUNCE_SECONDS env var or 60)
+        /// FLUENT_POST_MERGE_DEBOUNCE_SECONDS env var or 60)
         #[arg(long)]
         debounce_seconds: Option<u64>,
         /// Restrict to a single target branch
@@ -136,7 +136,7 @@ pub enum Commands {
         path: Option<String>,
     },
 
-    /// Initialize .factory/ directory
+    /// Initialize .fluent/ directory
     Init,
 
     /// Clean stale Work Item artifacts and registered worktrees
@@ -156,7 +156,7 @@ pub enum Commands {
         path: Option<String>,
     },
 
-    /// Print Factory version and build commit
+    /// Print Fluent version and build commit
     Version,
 
     /// Manage per-file observations

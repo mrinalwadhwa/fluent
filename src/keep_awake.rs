@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-const LABEL: &str = "com.factory.keep-awake";
-const SENTINEL: &str = "factory/keep-awake-caffeinate";
+const LABEL: &str = "com.fluent.keep-awake";
+const SENTINEL: &str = "fluent/keep-awake-caffeinate";
 
 const PLIST_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -12,7 +12,7 @@ const PLIST_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.factory.keep-awake</string>
+    <string>com.fluent.keep-awake</string>
     <key>ProgramArguments</key>
     <array>
         <string>/bin/sh</string>
@@ -52,7 +52,7 @@ pub fn run(sub: Subcommand) -> Result<()> {
 
 fn ensure_macos() -> Result<()> {
     if cfg!(not(target_os = "macos")) {
-        bail!("factory keep-awake is macOS-only");
+        bail!("fluent keep-awake is macOS-only");
     }
     Ok(())
 }
@@ -64,11 +64,11 @@ fn home_dir() -> Result<PathBuf> {
 }
 
 fn wrapper_script_path() -> Result<PathBuf> {
-    Ok(home_dir()?.join(".config/factory/keep-awake-caffeinate"))
+    Ok(home_dir()?.join(".config/fluent/keep-awake-caffeinate"))
 }
 
 fn launch_agent_plist_path() -> Result<PathBuf> {
-    Ok(home_dir()?.join("Library/LaunchAgents/com.factory.keep-awake.plist"))
+    Ok(home_dir()?.join("Library/LaunchAgents/com.fluent.keep-awake.plist"))
 }
 
 fn get_uid() -> Result<String> {
@@ -391,12 +391,12 @@ mod tests {
     fn plist_contains_valid_xml_structure() {
         let dir = tempfile::tempdir().unwrap();
         let plist = dir.path().join("test.plist");
-        let wrapper = PathBuf::from("/mock/.config/factory/keep-awake-caffeinate");
+        let wrapper = PathBuf::from("/mock/.config/fluent/keep-awake-caffeinate");
         write_plist(&plist, &wrapper, true).unwrap();
         let content = fs::read_to_string(&plist).unwrap();
-        assert!(content.contains("com.factory.keep-awake"));
+        assert!(content.contains("com.fluent.keep-awake"));
         assert!(content.contains("/bin/sh"));
-        assert!(content.contains("/mock/.config/factory/keep-awake-caffeinate"));
+        assert!(content.contains("/mock/.config/fluent/keep-awake-caffeinate"));
         assert!(content.contains("<key>RunAtLoad</key>"));
         assert!(content.contains("<key>KeepAlive</key>"));
     }

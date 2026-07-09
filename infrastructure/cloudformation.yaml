@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Factory Fargate backend — single-container model
+Description: Fluent Fargate backend — single-container model
 
 Parameters:
   VpcId:
@@ -12,7 +12,7 @@ Parameters:
 
   ProjectName:
     Type: String
-    Default: factory
+    Default: fluent
     Description: Prefix for resource names
 
 Resources:
@@ -86,7 +86,7 @@ Resources:
   TaskSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Factory Fargate tasks
+      GroupDescription: Fluent Fargate tasks
       VpcId: !Ref VpcId
       SecurityGroupEgress:
         - IpProtocol: '-1'
@@ -129,7 +129,7 @@ Resources:
             Version: '2012-10-17'
             Statement:
               # S3 — workspace transfer for legacy runs and the Work
-              # model (Work Attempt and Work Merge). All Factory keys
+              # model (Work Attempt and Work Merge). All Fluent keys
               # live under runs/, work/, or work-merge/.
               - Effect: Allow
                 Action:
@@ -174,7 +174,7 @@ Resources:
         SizeInGiB: 30
       ContainerDefinitions:
         - Name: run
-          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${Repo}:factory-base-placeholder'
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${Repo}:fluent-base-placeholder'
           Essential: true
           WorkingDirectory: /workspace
           LinuxParameters:

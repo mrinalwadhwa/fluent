@@ -297,7 +297,7 @@ fn work_cleanup_plan(
     }
 
     let item_path = store.work_item_path(&work_item.id)?;
-    let work_root = source_root.join(".factory/work");
+    let work_root = source_root.join(".fluent/work");
     let state_paths = vec![
         store.work_attempts_dir().join(&work_item.id),
         store.work_tasks_dir().join(&work_item.id),
@@ -941,10 +941,10 @@ mod tests {
         store.create_work_item(&item).unwrap();
 
         let attempts_runtime =
-            project.join(".factory/work/runtime/attempts/runtime-cleanup/attempt-1");
+            project.join(".fluent/work/runtime/attempts/runtime-cleanup/attempt-1");
         fs::create_dir_all(&attempts_runtime).unwrap();
         fs::write(attempts_runtime.join("fargate-task-arn"), "arn-1").unwrap();
-        let merges_runtime = project.join(".factory/work/runtime/merges/runtime-cleanup/cand-1");
+        let merges_runtime = project.join(".fluent/work/runtime/merges/runtime-cleanup/cand-1");
         fs::create_dir_all(&merges_runtime).unwrap();
         fs::write(merges_runtime.join("fargate-task-arn"), "arn-2").unwrap();
 

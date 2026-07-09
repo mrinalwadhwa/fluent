@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test-keep-awake — Verify factory keep-awake behavior.
+# test-keep-awake — Verify fluent keep-awake behavior.
 #
 # Tests the keep-awake toggle using mocked pgrep, launchctl, and kill
 # so no real system changes occur. Each test sets HOME to a temp dir
@@ -21,32 +21,32 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
-FACTORY_BIN="${FACTORY_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/factory}"
+FLUENT_BIN="${FLUENT_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/fluent}"
 
 source "${PROJECT_DIR}/tests/lib/run_test.sh"
 LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 setup_test_env() {
-  TEST_HOME="$(mktemp -d -t factory-keep-awake-XXXXXX)"
-  MOCK_DIR="$(mktemp -d -t factory-mock-bin-XXXXXX)"
-  MOCK_STATE="$(mktemp -d -t factory-mock-state-XXXXXX)"
+  TEST_HOME="$(mktemp -d -t fluent-keep-awake-XXXXXX)"
+  MOCK_DIR="$(mktemp -d -t fluent-mock-bin-XXXXXX)"
+  MOCK_STATE="$(mktemp -d -t fluent-mock-state-XXXXXX)"
 
   mkdir -p "$TEST_HOME/Library/LaunchAgents"
-  mkdir -p "$TEST_HOME/.config/factory"
+  mkdir -p "$TEST_HOME/.config/fluent"
 
   # Mock pgrep
   cat > "$MOCK_DIR/pgrep" << 'MOCK_PGREP'
 #!/bin/sh
-echo "pgrep $@" >> "$FACTORY_MOCK_STATE/calls.log"
+echo "pgrep $@" >> "$FLUENT_MOCK_STATE/calls.log"
 if [ "$1" = "-f" ]; then
-  if [ -f "$FACTORY_MOCK_STATE/wrapper_pid" ]; then
-    cat "$FACTORY_MOCK_STATE/wrapper_pid"
+  if [ -f "$FLUENT_MOCK_STATE/wrapper_pid" ]; then
+    cat "$FLUENT_MOCK_STATE/wrapper_pid"
     exit 0
   fi
   exit 1
 elif [ "$1" = "-P" ]; then
-  if [ -f "$FACTORY_MOCK_STATE/caffeinate_pid" ]; then
-    cat "$FACTORY_MOCK_STATE/caffeinate_pid"
+  if [ -f "$FLUENT_MOCK_STATE/caffeinate_pid" ]; then
+    cat "$FLUENT_MOCK_STATE/caffeinate_pid"
     exit 0
   fi
   exit 1
@@ -58,7 +58,7 @@ MOCK_PGREP
   # Mock launchctl
   cat > "$MOCK_DIR/launchctl" << 'MOCK_LAUNCHCTL'
 #!/bin/sh
-echo "launchctl $@" >> "$FACTORY_MOCK_STATE/calls.log"
+echo "launchctl $@" >> "$FLUENT_MOCK_STATE/calls.log"
 exit 0
 MOCK_LAUNCHCTL
   chmod +x "$MOCK_DIR/launchctl"
@@ -66,17 +66,17 @@ MOCK_LAUNCHCTL
   # Mock kill
   cat > "$MOCK_DIR/kill" << 'MOCK_KILL'
 #!/bin/sh
-echo "kill $@" >> "$FACTORY_MOCK_STATE/calls.log"
+echo "kill $@" >> "$FLUENT_MOCK_STATE/calls.log"
 # Simulate process exiting by removing the PID files
 if [ "$1" = "-0" ]; then
-  if [ -f "$FACTORY_MOCK_STATE/wrapper_pid" ]; then
+  if [ -f "$FLUENT_MOCK_STATE/wrapper_pid" ]; then
     exit 0
   fi
   exit 1
 fi
 if [ "$1" = "-TERM" ]; then
-  rm -f "$FACTORY_MOCK_STATE/wrapper_pid" 2>/dev/null
-  rm -f "$FACTORY_MOCK_STATE/caffeinate_pid" 2>/dev/null
+  rm -f "$FLUENT_MOCK_STATE/wrapper_pid" 2>/dev/null
+  rm -f "$FLUENT_MOCK_STATE/caffeinate_pid" 2>/dev/null
 fi
 exit 0
 MOCK_KILL
@@ -91,7 +91,7 @@ MOCK_ID
 
   export HOME="$TEST_HOME"
   export PATH="$MOCK_DIR:$PATH"
-  export FACTORY_MOCK_STATE="$MOCK_STATE"
+  export FLUENT_MOCK_STATE="$MOCK_STATE"
 }
 
 teardown_test_env() {
@@ -101,7 +101,7 @@ teardown_test_env() {
 test_status_off_when_no_process() {
   setup_test_env
 
-  OUTPUT="$("$FACTORY_BIN" keep-awake status 2>&1)"
+  OUTPUT="$("$FLUENT_BIN" keep-awake status 2>&1)"
   STATUS=$?
 
   RESULT=0
@@ -123,7 +123,7 @@ test_status_on_when_process_running() {
   echo "12345" > "$MOCK_STATE/wrapper_pid"
   echo "12346" > "$MOCK_STATE/caffeinate_pid"
 
-  OUTPUT="$("$FACTORY_BIN" keep-awake status 2>&1)"
+  OUTPUT="$("$FLUENT_BIN" keep-awake status 2>&1)"
   STATUS=$?
 
   RESULT=0
@@ -145,16 +145,16 @@ test_on_first_time_installs_launch_agent() {
   # After bootstrap, simulate the process starting
   cat > "$MOCK_DIR/launchctl" << 'MOCK'
 #!/bin/sh
-echo "launchctl $@" >> "$FACTORY_MOCK_STATE/calls.log"
+echo "launchctl $@" >> "$FLUENT_MOCK_STATE/calls.log"
 if [ "$1" = "bootstrap" ]; then
-  echo "99901" > "$FACTORY_MOCK_STATE/wrapper_pid"
-  echo "99902" > "$FACTORY_MOCK_STATE/caffeinate_pid"
+  echo "99901" > "$FLUENT_MOCK_STATE/wrapper_pid"
+  echo "99902" > "$FLUENT_MOCK_STATE/caffeinate_pid"
 fi
 exit 0
 MOCK
   chmod +x "$MOCK_DIR/launchctl"
 
-  OUTPUT="$("$FACTORY_BIN" keep-awake on 2>&1)"
+  OUTPUT="$("$FLUENT_BIN" keep-awake on 2>&1)"
   STATUS=$?
 
   RESULT=0
@@ -173,12 +173,12 @@ MOCK
     printf '    OUTPUT: %s\n' "$OUTPUT"
     RESULT=1
   fi
-  PLIST="$TEST_HOME/Library/LaunchAgents/com.factory.keep-awake.plist"
+  PLIST="$TEST_HOME/Library/LaunchAgents/com.fluent.keep-awake.plist"
   if [ ! -f "$PLIST" ]; then
     printf '    FAIL: plist not written at %s\n' "$PLIST"
     RESULT=1
   fi
-  WRAPPER="$TEST_HOME/.config/factory/keep-awake-caffeinate"
+  WRAPPER="$TEST_HOME/.config/fluent/keep-awake-caffeinate"
   if [ ! -f "$WRAPPER" ]; then
     printf '    FAIL: wrapper script not written at %s\n' "$WRAPPER"
     RESULT=1
@@ -197,7 +197,7 @@ test_on_already_running_prints_already_on() {
   echo "55555" > "$MOCK_STATE/wrapper_pid"
   echo "55556" > "$MOCK_STATE/caffeinate_pid"
 
-  OUTPUT="$("$FACTORY_BIN" keep-awake on 2>&1)"
+  OUTPUT="$("$FLUENT_BIN" keep-awake on 2>&1)"
   STATUS=$?
 
   RESULT=0
@@ -217,7 +217,7 @@ test_on_already_running_prints_already_on() {
 test_off_when_already_off() {
   setup_test_env
 
-  OUTPUT="$("$FACTORY_BIN" keep-awake off 2>&1)"
+  OUTPUT="$("$FLUENT_BIN" keep-awake off 2>&1)"
   STATUS=$?
 
   RESULT=0
@@ -239,8 +239,8 @@ test_off_when_running() {
   echo "77777" > "$MOCK_STATE/wrapper_pid"
   echo "77778" > "$MOCK_STATE/caffeinate_pid"
   # Create existing plist with KeepAlive=true
-  PLIST="$TEST_HOME/Library/LaunchAgents/com.factory.keep-awake.plist"
-  WRAPPER="$TEST_HOME/.config/factory/keep-awake-caffeinate"
+  PLIST="$TEST_HOME/Library/LaunchAgents/com.fluent.keep-awake.plist"
+  WRAPPER="$TEST_HOME/.config/fluent/keep-awake-caffeinate"
   cat > "$PLIST" << 'XML'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -248,7 +248,7 @@ test_off_when_running() {
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.factory.keep-awake</string>
+    <string>com.fluent.keep-awake</string>
     <key>ProgramArguments</key>
     <array>
         <string>/bin/sh</string>
@@ -262,7 +262,7 @@ test_off_when_running() {
 </plist>
 XML
 
-  OUTPUT="$("$FACTORY_BIN" keep-awake off 2>&1)"
+  OUTPUT="$("$FLUENT_BIN" keep-awake off 2>&1)"
   STATUS=$?
 
   RESULT=0
@@ -291,12 +291,12 @@ XML
 
 test_uninstall_removes_plist_and_wrapper() {
   setup_test_env
-  PLIST="$TEST_HOME/Library/LaunchAgents/com.factory.keep-awake.plist"
-  WRAPPER="$TEST_HOME/.config/factory/keep-awake-caffeinate"
+  PLIST="$TEST_HOME/Library/LaunchAgents/com.fluent.keep-awake.plist"
+  WRAPPER="$TEST_HOME/.config/fluent/keep-awake-caffeinate"
   echo "test plist" > "$PLIST"
   echo "test wrapper" > "$WRAPPER"
 
-  OUTPUT="$("$FACTORY_BIN" keep-awake uninstall 2>&1)"
+  OUTPUT="$("$FLUENT_BIN" keep-awake uninstall 2>&1)"
   STATUS=$?
 
   RESULT=0
@@ -325,7 +325,7 @@ test_uninstall_removes_plist_and_wrapper() {
 test_uninstall_already_uninstalled() {
   setup_test_env
 
-  OUTPUT="$("$FACTORY_BIN" keep-awake uninstall 2>&1)"
+  OUTPUT="$("$FLUENT_BIN" keep-awake uninstall 2>&1)"
   STATUS=$?
 
   RESULT=0

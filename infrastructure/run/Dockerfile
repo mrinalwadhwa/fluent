@@ -15,7 +15,7 @@ USER root
 RUN apk add --no-cache git bash aws-cli jq tmux curl python3
 RUN npm install -g @anthropic-ai/claude-code @openai/codex
 
-COPY --from=builder /src/target/release/factory /usr/local/bin/factory
+COPY --from=builder /src/target/release/fluent /usr/local/bin/fluent
 COPY infrastructure/run/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

@@ -29,7 +29,7 @@ for phrase in \
   'Review tasks are read-only with respect to candidate workspaces' \
   'Merge Candidate' \
   'review state is separate from attempt review state' \
-  'Project-local `.factory/observations/` and `.factory/expertise/*` are durable Factory memory'
+  'Project-local `.fluent/observations/` and `.fluent/expertise/*` are durable Fluent memory'
 do
   if ! grep -Fq "$phrase" <<<"$flat_section"; then
     echo "core work model documentation does not contain: $phrase" >&2

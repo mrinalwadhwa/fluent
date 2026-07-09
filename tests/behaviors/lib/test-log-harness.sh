@@ -4,14 +4,14 @@
 # Verifies:
 #   - Passing case creates a log file with expected structure
 #   - Failing case creates a log file and appends to .failed sentinel
-#   - FACTORY_TESTS_SKIP_LOG=1 bypasses log writing entirely
+#   - FLUENT_TESTS_SKIP_LOG=1 bypasses log writing entirely
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 
-TEST_LOG_DIR="$(mktemp -d -t factory-test-log-harness-XXXXXX)"
+TEST_LOG_DIR="$(mktemp -d -t fluent-test-log-harness-XXXXXX)"
 
 source "${PROJECT_DIR}/tests/lib/run_test.sh"
 LOG_DIR="${TEST_LOG_DIR}/test-log-harness"
@@ -120,15 +120,15 @@ if [ "$RESULT" -eq 0 ]; then
 fi
 
 # -------------------------------------------------------------------------
-# Test 3: FACTORY_TESTS_SKIP_LOG=1 bypasses log writing
+# Test 3: FLUENT_TESTS_SKIP_LOG=1 bypasses log writing
 # -------------------------------------------------------------------------
 
-printf '  FACTORY_TESTS_SKIP_LOG=1 bypasses log writing ... '
+printf '  FLUENT_TESTS_SKIP_LOG=1 bypasses log writing ... '
 
-SKIP_DIR="$(mktemp -d -t factory-test-skip-XXXXXX)"
+SKIP_DIR="$(mktemp -d -t fluent-test-skip-XXXXXX)"
 
 (
-  export FACTORY_TESTS_SKIP_LOG=1
+  export FLUENT_TESTS_SKIP_LOG=1
   source "${PROJECT_DIR}/tests/lib/run_test.sh"
   LOG_DIR="${SKIP_DIR}/test-skip"
 
@@ -153,7 +153,7 @@ fi
 
 printf '  stale .failed sentinel is cleared on new run ... '
 
-STALE_DIR="$(mktemp -d -t factory-test-stale-XXXXXX)"
+STALE_DIR="$(mktemp -d -t fluent-test-stale-XXXXXX)"
 
 (
   source "${PROJECT_DIR}/tests/lib/run_test.sh"

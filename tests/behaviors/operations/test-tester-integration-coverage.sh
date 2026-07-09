@@ -19,7 +19,7 @@ PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 source "${PROJECT_DIR}/tests/lib/run_test.sh"
 LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
-EXTRACTOR="${PROJECT_DIR}/.factory/extract-tester-results"
+EXTRACTOR="${PROJECT_DIR}/.fluent/extract-tester-results"
 
 # -------------------------------------------------------------------------
 # Tests
@@ -34,8 +34,8 @@ CMDJSON
 
   cat > "${ARTIFACT_DIR}/nextest-stdout.log" <<'NEXTEST'
 {"type":"suite","event":"started","test_count":2}
-{"type":"test","event":"started","name":"factory::binary$init_writes_gitignore_when_absent"}
-{"type":"test","event":"ok","name":"factory::binary$init_writes_gitignore_when_absent","exec_time":0.359877709}
+{"type":"test","event":"started","name":"fluent::binary$init_writes_gitignore_when_absent"}
+{"type":"test","event":"ok","name":"fluent::binary$init_writes_gitignore_when_absent","exec_time":0.359877709}
 {"type":"suite","event":"ok","passed":1,"failed":0,"ignored":1,"measured":0,"filtered_out":164,"exec_time":0.359877709}
 NEXTEST
 
@@ -46,7 +46,7 @@ NEXTEST
   if ! printf '%s' "$OUTPUT" | python3 -c "
 import json, sys
 tests = json.load(sys.stdin)
-matches = [t for t in tests if t['id'] == 'factory::binary\$init_writes_gitignore_when_absent']
+matches = [t for t in tests if t['id'] == 'fluent::binary\$init_writes_gitignore_when_absent']
 if not matches:
     print('FAIL: integration test not found in results')
     sys.exit(1)
@@ -65,7 +65,7 @@ if matches[0]['test_harness'] != 'cargo-nextest':
 }
 
 test_tester_yaml_nextest_command_has_env_var() {
-  TESTER_YAML="${PROJECT_DIR}/.factory/tester.yaml"
+  TESTER_YAML="${PROJECT_DIR}/.fluent/tester.yaml"
 
   RESULT=0
 

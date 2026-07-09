@@ -95,7 +95,7 @@ Do not edit or commit in {{candidate_workspace_path}}. Multiple reviewers run ag
 ### Build cache and writable outputs
 
 - You may READ the candidate workspace's existing build outputs (binaries, compiled artifacts, installed dependencies) freely. The writer produced them as part of completing the write task.
-- Factory has pre-populated your reviewer artifact directory at {{artifact_dir}} with copies of the writer's build outputs for warm-start incremental builds. When you need to build new outputs the writer didn't produce, redirect them there.
+- Fluent has pre-populated your reviewer artifact directory at {{artifact_dir}} with copies of the writer's build outputs for warm-start incremental builds. When you need to build new outputs the writer didn't produce, redirect them there.
 - For Cargo: `CARGO_TARGET_DIR="{{artifact_dir}}/target" cargo build` (or cargo test). If the writer already built the binary you need, invoke it directly from the candidate workspace instead of recompiling.
 
 {{#if decisions_path}}

@@ -23,9 +23,9 @@ pub struct CliAttemptInvoker;
 
 impl AttemptInvoker for CliAttemptInvoker {
     fn invoke(&self, project_root: &Path, work_item_id: &str) -> Result<AttemptOutcome> {
-        let factory_bin = std::env::current_exe()?;
+        let fluent_bin = std::env::current_exe()?;
 
-        let create_status = Command::new(&factory_bin)
+        let create_status = Command::new(&fluent_bin)
             .current_dir(project_root)
             .args(["attempt", "create", work_item_id])
             .status()?;
@@ -34,7 +34,7 @@ impl AttemptInvoker for CliAttemptInvoker {
             return Ok(AttemptOutcome::Failed);
         }
 
-        let run_status = Command::new(&factory_bin)
+        let run_status = Command::new(&fluent_bin)
             .current_dir(project_root)
             .args(["attempt", "run", work_item_id, "--no-sandbox"])
             .status()?;
@@ -176,19 +176,19 @@ mod tests {
     }
 
     fn setup_project(tmp: &Path) {
-        fs::create_dir_all(tmp.join(".factory/work/items")).unwrap();
+        fs::create_dir_all(tmp.join(".fluent/work/items")).unwrap();
     }
 
     fn write_work_item(tmp: &Path, id: &str) {
         fs::write(
-            tmp.join(format!(".factory/work/items/{id}.json")),
+            tmp.join(format!(".fluent/work/items/{id}.json")),
             format!(r#"{{"id": "{id}", "title": "Test"}}"#),
         )
         .unwrap();
     }
 
     fn write_queue_entry(tmp: &Path, id: &str, priority: i64, status: &str, queued_at: &str) {
-        let dir = tmp.join(".factory/work/queue");
+        let dir = tmp.join(".fluent/work/queue");
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join(format!("{id}.json")),

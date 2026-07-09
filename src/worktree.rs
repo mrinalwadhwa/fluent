@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::git;
 
 /// Disable commit signing in a worktree so external coders can commit
-/// without hardware key. Factory's own git calls get this via the
+/// without hardware key. Fluent's own git calls get this via the
 /// wrapper's `-c commit.gpgsign=false`; this sets the persistent
 /// repo-level config for processes outside our control.
 pub fn disable_commit_signing(worktree_dir: &Path) -> Result<()> {

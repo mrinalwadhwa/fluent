@@ -38,7 +38,7 @@ pub fn usage_log_path() -> Result<PathBuf> {
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"))?;
     Ok(PathBuf::from(home)
         .join(".config")
-        .join("factory")
+        .join("fluent")
         .join("usage")
         .join("usage.jsonl"))
 }
@@ -47,7 +47,7 @@ pub fn summary_path() -> Result<PathBuf> {
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"))?;
     Ok(PathBuf::from(home)
         .join(".config")
-        .join("factory")
+        .join("fluent")
         .join("usage")
         .join("summary.json"))
 }
