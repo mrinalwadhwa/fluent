@@ -90,7 +90,7 @@ require_in_file "$PLAN" \
 
 require_in_file "$BUILD" \
   'capture-brief' \
-  "build-in-the-fluent skill"
+  "fluent skill"
 
 require_in_file "$ARCH" \
   "skills treat this Work Item planning context as the normal handoff" \

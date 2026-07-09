@@ -119,7 +119,7 @@ fluent work-item create <work-item-id> \
 
 For multiple Work Items, run `fluent work-item create` once per Work Item. Each Work Item's `<work-item-id>` is `<draft-id>-<slug>`. Use its plan file at `.fluent/drafts/<draft-id>/items/<slug>/plan.md`. For brief, behaviors, and approach, use the Work-Item-specific file under `items/<slug>/` if it exists, otherwise the shared file at the draft root.
 
-Do not create the Attempt or run it. That belongs to the autonomous stage in `build-in-the-fluent`. Stop here.
+Do not create the Attempt or run it. That belongs to the autonomous stage in `fluent`. Stop here.
 
 ## Plan format
 

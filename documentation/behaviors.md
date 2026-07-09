@@ -1820,7 +1820,7 @@ Test: tests/behaviors/operations/test-planning-skills-work-context.sh
 
 ### B2
 
-WHEN the user invokes the build-in-the-fluent skill for new delegated
+WHEN the user invokes the fluent skill for new delegated
 build work,
 THE SYSTEM SHALL teach Work Items, Attempts, Tasks, Workspaces, and Merge
 Candidates as the lifecycle, direct the user through Work Item creation,

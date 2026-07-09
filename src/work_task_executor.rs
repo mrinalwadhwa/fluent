@@ -1920,7 +1920,7 @@ fn review_skills_dir(project_root: &Path) -> PathBuf {
     project_root.join(".fluent/work/skills")
 }
 
-fn review_skill_path(role: &str, project_root: &Path) -> Result<String> {
+pub(crate) fn review_skill_path(role: &str, project_root: &Path) -> Result<String> {
     let skill_name = format!("review-{role}");
     let dest_dir = review_skills_dir(project_root);
     let skill_md = dest_dir.join(&skill_name).join("SKILL.md");

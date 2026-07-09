@@ -6,7 +6,7 @@ These instructions define how Coding Agents should assist with this project.
 
 Use the fluent to build the fluent. For non-trivial code,
 documentation, skill, expertise, or behavior changes, follow the
-`build-in-the-fluent` skill and go through the Fluent lifecycle:
+`fluent` skill and go through the Fluent lifecycle:
 brief, behaviors, approach, plan, execution, review, and land.
 
 Do not implement substantial product/code changes directly on `main`.

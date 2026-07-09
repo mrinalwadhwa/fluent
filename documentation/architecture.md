@@ -8,14 +8,13 @@ from intent capture through execution and review across multiple sessions.
 ```
 ┌─────────────────────────────────────────────────┐
 │  Skills                                         │
-│  capture-brief, define-behaviors,               │
-│  design-approach, plan-execution,               │
+│  fluent (interactive lifecycle),                │
 │  review-documentation, review-behaviors,        │
 │  review-architecture, review-skills,            │
 │  review-tests                                   │
 │  Portable procedures any agent follows          │
 ├─────────────────────────────────────────────────┤
-│  build-in-the-fluent skill                     │
+│  fluent skill                                  │
 │  Teaches agents the full workflow               │
 ├─────────────────────────────────────────────────┤
 │  Fluent command                                │
@@ -29,8 +28,8 @@ from intent capture through execution and review across multiple sessions.
 Skills describe procedures. They don't know about sandboxes, sessions,
 or runtimes. The fluent command handles the operational envelope:
 sandbox setup, credential injection, session continuity, worktree
-creation, and remote execution. The build-in-the-fluent skill bridges
-the two — an agent reads it and can drive the entire workflow.
+creation, and remote execution. The fluent skill bridges the two — an
+agent reads it and can drive the entire workflow.
 
 ## Workflow
 
@@ -1127,21 +1126,13 @@ fluent/main/
       claude-code.sb         ← Claude-specific Seatbelt profile layer
       codex.sb               ← Codex-specific Seatbelt profile layer
   skills/
-    build-in-the-fluent/SKILL.md
-    capture-brief/SKILL.md
-    define-behaviors/SKILL.md
-    design-approach/SKILL.md
-    design-approach/references/
-    plan-execution/SKILL.md
+    fluent/SKILL.md
+    fluent/references/               ← stage procedures and expertise (dereferenced at build time)
     review-architecture/SKILL.md
-    review-architecture/references/   ← symlinks to expertise/ (dereferenced on install)
     review-behaviors/SKILL.md
     review-documentation/SKILL.md
-    review-documentation/references/
     review-skills/SKILL.md
-    review-skills/references/
     review-tests/SKILL.md
-    review-tests/references/
   infrastructure/
     cloudformation.yaml
     run/

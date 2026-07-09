@@ -1616,4 +1616,16 @@ mod tests {
         let result = verify_rebase_completed(&repo, "main");
         assert!(result.is_ok(), "clean rebase should verify as success");
     }
+
+    #[test]
+    fn merge_reviewer_requires_review_skill() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let result = crate::work_task_executor::review_skill_path("nonexistent", tmp.path());
+        assert!(result.is_err(), "unknown review role should error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Required review-nonexistent skill not found"),
+            "error should name the missing skill: {err}"
+        );
+    }
 }
