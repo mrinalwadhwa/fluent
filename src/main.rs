@@ -414,8 +414,7 @@ fn cmd_attempt(
             let runtime = runtime.unwrap_or_else(|| "local".to_string());
             match runtime.as_str() {
                 "fargate" => {
-                    let coder_kind =
-                        CoderKind::resolve(coder_mapping.write.coder.as_str().into())?;
+                    let coder_kind = CoderKind::resolve(coder_mapping.write.coder.as_str().into())?;
                     fargate::launch_work_attempt(
                         project_root,
                         &work_item_id,
@@ -545,10 +544,7 @@ fn cmd_merge_candidate(
                 for candidate in &item.merge_candidates {
                     let review = format!("{:?}", candidate.review_state).to_lowercase();
                     let merge = format!("{:?}", candidate.merge_state.status).to_lowercase();
-                    println!(
-                        "{:<24} {:<12} {}",
-                        candidate.id, review, merge
-                    );
+                    println!("{:<24} {:<12} {}", candidate.id, review, merge);
                 }
             }
         }
@@ -739,9 +735,7 @@ fn cmd_task(
                 .iter()
                 .find(|t| t.id == task_id)
                 .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Task {task_id:?} not found in Attempt {attempt_id:?}"
-                    )
+                    anyhow::anyhow!("Task {task_id:?} not found in Attempt {attempt_id:?}")
                 })?;
             print!("{}", to_json_pretty(task)?);
         }
@@ -932,8 +926,7 @@ fn cmd_review(
         None => {
             let work_item_id =
                 work_item_id.ok_or_else(|| anyhow::anyhow!("work item id is required"))?;
-            let attempt_id =
-                attempt_id.ok_or_else(|| anyhow::anyhow!("attempt id is required"))?;
+            let attempt_id = attempt_id.ok_or_else(|| anyhow::anyhow!("attempt id is required"))?;
             let mut item = match store.read_work_item(&work_item_id) {
                 Ok(item) => item,
                 Err(WorkModelStorageError::ReadFile { source, .. })
