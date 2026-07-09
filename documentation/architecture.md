@@ -19,7 +19,7 @@ from intent capture through execution and review across multiple sessions.
 ├─────────────────────────────────────────────────┤
 │  Fluent command                                │
 │  fluent <noun> <verb> / status / dashboard      │
-│  fluent fargate teardown / init / version      │
+│  fluent update / fargate teardown / init        │
 │  fluent keep-awake on / off / status           │
 │  Deterministic, operational                     │
 └─────────────────────────────────────────────────┘
@@ -687,6 +687,33 @@ Git commit captured by `build.rs` when Cargo builds the binary. If Git
 is unavailable at build time, Fluent prints
 `unknown` in the commit field.
 
+## Self-update
+
+`fluent update` replaces the binary with the latest release from the
+configured release source, verifies the download against a published
+SHA-256 checksum, and re-materializes skills by invoking the new
+binary. The updater queries
+`{api_base}/repos/{owner}/{repo}/releases/latest` via curl, downloads
+the platform asset `fluent-{target-triple}` and its `.sha256` file,
+verifies the checksum, and atomically replaces the binary via POSIX
+rename. After replacement, the updater shells out to the new binary's
+`skills` command so skills are always in sync with the binary.
+
+On every command except `fluent update`, Fluent runs a cached update
+check: it queries the release source at most once per 24 hours, caches
+the result at `~/.config/fluent/update-check.json`, and prints a nudge
+to stderr when the current version is behind. The check never downloads
+or replaces the binary. Setting `FLUENT_NO_UPDATE_CHECK` suppresses
+both the query and the nudge. Offline check failures are silent.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `FLUENT_NO_UPDATE_CHECK` | (unset) | Suppress update check and nudge when set |
+| `FLUENT_RELEASE_REPO` | `ockam-network/fluent` | GitHub `owner/repo` for release queries |
+| `FLUENT_API_BASE` | `https://api.github.com` | GitHub API base URL |
+| `FLUENT_BINARY_PATH` | `current_exe()` | Override binary path (testing) |
+| `FLUENT_UPDATE_CACHE_PATH` | `~/.config/fluent/update-check.json` | Override cache file path (testing) |
+
 ## Agents
 
 ### Coder selection
@@ -1082,6 +1109,7 @@ fluent/main/
     review_diff_command.rs   ← Review diff CLI subcommand
     scheduler.rs             ← Sequential scheduler loop for queued Work Items
     transcript.rs            ← Parse stream-json transcripts incrementally
+    update.rs                ← Self-update and update-check nudge
     usage.rs                 ← Per-turn usage row logging and summary cache
     version.rs               ← Version command output format
     work_attempt_loop.rs     ← Advance one Work model Attempt
@@ -1133,6 +1161,8 @@ fluent/main/
     review-documentation/SKILL.md
     review-skills/SKILL.md
     review-tests/SKILL.md
+  scripts/
+    release.sh               ← Build, checksum, and publish a GitHub release
   infrastructure/
     cloudformation.yaml
     run/

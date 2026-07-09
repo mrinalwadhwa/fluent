@@ -6,6 +6,7 @@ use fluent::review;
 use log::LoggedCommand;
 use predicates::prelude::*;
 use serial_test::serial;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -13,6 +14,7 @@ use tempfile::TempDir;
 fn fluent_cmd() -> LoggedCommand {
     let mut cmd = LoggedCommand::cargo_bin("fluent");
     cmd.env_remove("FLUENT_TASK_KIND");
+    cmd.env("FLUENT_NO_UPDATE_CHECK", "1");
     cmd
 }
 
@@ -9255,4 +9257,539 @@ fn task_show_prints_task_json() {
     assert_eq!(value["id"], "attempt-1-write-1");
     assert_eq!(value["kind"], "write");
     assert_eq!(value["status"], "complete");
+}
+
+// -------------------------------------------------------------------------
+// Update: helpers
+// -------------------------------------------------------------------------
+
+fn target_triple() -> String {
+    let arch = std::env::consts::ARCH;
+    match std::env::consts::OS {
+        "macos" => format!("{arch}-apple-darwin"),
+        "linux" => format!("{arch}-unknown-linux-gnu"),
+        other => format!("{arch}-{other}"),
+    }
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    format!("{:x}", hasher.finalize())
+}
+
+/// Build a fixture release directory that `fluent update` can fetch via
+/// `file://` URLs through curl. Returns (api_base, release_repo) env values.
+///
+/// The fixture contains:
+/// - `repos/{owner}/{repo}/releases/latest` — GitHub API JSON
+/// - `download/v{version}/fluent-{triple}` — the binary asset
+/// - `download/v{version}/fluent-{triple}.sha256` — the checksum file
+///
+/// `binary_content` is what the downloaded "binary" contains.
+/// If `checksum_override` is Some, the .sha256 file uses that instead of the
+/// real hash (to test mismatch scenarios).
+/// If `omit_checksum` is true, no .sha256 asset is included in the release.
+fn setup_fixture_release(
+    dir: &Path,
+    version: &str,
+    binary_content: &[u8],
+    checksum_override: Option<&str>,
+    omit_checksum: bool,
+) -> (String, String) {
+    let owner = "test-owner";
+    let repo = "fluent";
+    let triple = target_triple();
+    let asset_name = format!("fluent-{triple}");
+    let tag = format!("v{version}");
+
+    let download_dir = dir.join("download").join(&tag);
+    fs::create_dir_all(&download_dir).unwrap();
+
+    let binary_path = download_dir.join(&asset_name);
+    fs::write(&binary_path, binary_content).unwrap();
+
+    let checksum = checksum_override
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| sha256_hex(binary_content));
+    let checksum_path = download_dir.join(format!("{asset_name}.sha256"));
+    fs::write(&checksum_path, format!("{checksum}  {asset_name}\n")).unwrap();
+
+    let binary_url = format!(
+        "file://{}",
+        binary_path.to_string_lossy()
+    );
+    let checksum_url = format!(
+        "file://{}",
+        checksum_path.to_string_lossy()
+    );
+
+    let mut assets = vec![serde_json::json!({
+        "name": asset_name,
+        "browser_download_url": binary_url,
+    })];
+    if !omit_checksum {
+        assets.push(serde_json::json!({
+            "name": format!("{asset_name}.sha256"),
+            "browser_download_url": checksum_url,
+        }));
+    }
+
+    let release_json = serde_json::json!({
+        "tag_name": tag,
+        "assets": assets,
+    });
+
+    let api_dir = dir
+        .join("repos")
+        .join(owner)
+        .join(repo)
+        .join("releases");
+    fs::create_dir_all(&api_dir).unwrap();
+    fs::write(
+        api_dir.join("latest"),
+        serde_json::to_string_pretty(&release_json).unwrap(),
+    )
+    .unwrap();
+
+    let api_base = format!("file://{}", dir.to_string_lossy());
+    let release_repo = format!("{owner}/{repo}");
+    (api_base, release_repo)
+}
+
+// -------------------------------------------------------------------------
+// Update: performing an update
+// -------------------------------------------------------------------------
+
+#[test]
+fn update_reports_up_to_date() {
+    let tmp = TempDir::new().unwrap();
+    let fixture_dir = tmp.path().join("fixture");
+    fs::create_dir_all(&fixture_dir).unwrap();
+
+    let current_version = env!("CARGO_PKG_VERSION");
+    let (api_base, release_repo) =
+        setup_fixture_release(&fixture_dir, current_version, b"binary-content", None, false);
+
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .env("FLUENT_API_BASE", &api_base)
+        .env("FLUENT_RELEASE_REPO", &release_repo)
+        .env("FLUENT_NO_UPDATE_CHECK", "1")
+        .arg("update")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "update should succeed when up to date: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("up to date"),
+        "should report up to date; got stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn update_replaces_binary_and_rematerializes_skills() {
+    let tmp = TempDir::new().unwrap();
+    let fixture_dir = tmp.path().join("fixture");
+    fs::create_dir_all(&fixture_dir).unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let fake_binary = bin_dir.join("fluent");
+    fs::write(&fake_binary, b"old-binary-content").unwrap();
+
+    let new_content = b"new-binary-content-v999";
+    let (api_base, release_repo) =
+        setup_fixture_release(&fixture_dir, "999.0.0", new_content, None, false);
+
+    let cache_path = tmp.path().join("update-cache.json");
+
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .env("FLUENT_API_BASE", &api_base)
+        .env("FLUENT_RELEASE_REPO", &release_repo)
+        .env("FLUENT_BINARY_PATH", fake_binary.to_str().unwrap())
+        .env("FLUENT_UPDATE_CACHE_PATH", cache_path.to_str().unwrap())
+        .env("FLUENT_NO_UPDATE_CHECK", "1")
+        .arg("update")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "update should succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let replaced = fs::read(&fake_binary).unwrap();
+    assert_eq!(
+        replaced, new_content,
+        "binary should be replaced with the downloaded content"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("999.0.0"),
+        "should report the new version; got stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn update_aborts_on_checksum_mismatch() {
+    let tmp = TempDir::new().unwrap();
+    let fixture_dir = tmp.path().join("fixture");
+    fs::create_dir_all(&fixture_dir).unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let fake_binary = bin_dir.join("fluent");
+    let original = b"original-binary";
+    fs::write(&fake_binary, original).unwrap();
+
+    let (api_base, release_repo) = setup_fixture_release(
+        &fixture_dir,
+        "999.0.0",
+        b"new-binary",
+        Some("0000000000000000000000000000000000000000000000000000000000000000"),
+        false,
+    );
+
+    let cache_path = tmp.path().join("update-cache.json");
+
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .env("FLUENT_API_BASE", &api_base)
+        .env("FLUENT_RELEASE_REPO", &release_repo)
+        .env("FLUENT_BINARY_PATH", fake_binary.to_str().unwrap())
+        .env("FLUENT_UPDATE_CACHE_PATH", cache_path.to_str().unwrap())
+        .env("FLUENT_NO_UPDATE_CHECK", "1")
+        .arg("update")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "update should fail on checksum mismatch"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.to_lowercase().contains("checksum"),
+        "error should mention checksum; got stderr:\n{stderr}"
+    );
+
+    let preserved = fs::read(&fake_binary).unwrap();
+    assert_eq!(
+        preserved, original,
+        "original binary should be preserved on checksum mismatch"
+    );
+}
+
+#[test]
+fn update_offline_preserves_binary() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let fake_binary = bin_dir.join("fluent");
+    let original = b"original-binary";
+    fs::write(&fake_binary, original).unwrap();
+
+    let cache_path = tmp.path().join("update-cache.json");
+
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .env("FLUENT_API_BASE", "file:///nonexistent/path")
+        .env("FLUENT_RELEASE_REPO", "no-owner/no-repo")
+        .env("FLUENT_BINARY_PATH", fake_binary.to_str().unwrap())
+        .env("FLUENT_UPDATE_CACHE_PATH", cache_path.to_str().unwrap())
+        .env("FLUENT_NO_UPDATE_CHECK", "1")
+        .arg("update")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "update should fail when offline"
+    );
+
+    let preserved = fs::read(&fake_binary).unwrap();
+    assert_eq!(
+        preserved, original,
+        "binary should be preserved when offline"
+    );
+}
+
+#[test]
+fn update_refuses_release_without_checksum() {
+    let tmp = TempDir::new().unwrap();
+    let fixture_dir = tmp.path().join("fixture");
+    fs::create_dir_all(&fixture_dir).unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let fake_binary = bin_dir.join("fluent");
+    let original = b"original-binary";
+    fs::write(&fake_binary, original).unwrap();
+
+    let (api_base, release_repo) = setup_fixture_release(
+        &fixture_dir,
+        "999.0.0",
+        b"new-binary",
+        None,
+        true, // omit checksum
+    );
+
+    let cache_path = tmp.path().join("update-cache.json");
+
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .env("FLUENT_API_BASE", &api_base)
+        .env("FLUENT_RELEASE_REPO", &release_repo)
+        .env("FLUENT_BINARY_PATH", fake_binary.to_str().unwrap())
+        .env("FLUENT_UPDATE_CACHE_PATH", cache_path.to_str().unwrap())
+        .env("FLUENT_NO_UPDATE_CHECK", "1")
+        .arg("update")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "update should refuse release without checksum"
+    );
+
+    let preserved = fs::read(&fake_binary).unwrap();
+    assert_eq!(
+        preserved, original,
+        "binary should be preserved when checksum is missing"
+    );
+}
+
+#[test]
+fn update_replace_leaves_working_binary_on_failure() {
+    let tmp = TempDir::new().unwrap();
+    let fixture_dir = tmp.path().join("fixture");
+    fs::create_dir_all(&fixture_dir).unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let fake_binary = bin_dir.join("fluent");
+    let original = b"original-binary";
+    fs::write(&fake_binary, original).unwrap();
+
+    // Set up a release where the asset download URL points to a nonexistent
+    // file, simulating a download failure after the release query succeeds.
+    let triple = target_triple();
+    let asset_name = format!("fluent-{triple}");
+    let tag = "v999.0.0";
+
+    let checksum_dir = fixture_dir.join("download").join(tag);
+    fs::create_dir_all(&checksum_dir).unwrap();
+    let checksum_path = checksum_dir.join(format!("{asset_name}.sha256"));
+    fs::write(&checksum_path, "deadbeef  fluent\n").unwrap();
+
+    let release_json = serde_json::json!({
+        "tag_name": tag,
+        "assets": [
+            {
+                "name": &asset_name,
+                "browser_download_url": "file:///nonexistent/binary",
+            },
+            {
+                "name": format!("{asset_name}.sha256"),
+                "browser_download_url": format!("file://{}", checksum_path.to_string_lossy()),
+            },
+        ],
+    });
+
+    let api_dir = fixture_dir.join("repos/test-owner/fluent/releases");
+    fs::create_dir_all(&api_dir).unwrap();
+    fs::write(
+        api_dir.join("latest"),
+        serde_json::to_string_pretty(&release_json).unwrap(),
+    )
+    .unwrap();
+
+    let cache_path = tmp.path().join("update-cache.json");
+
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .env("FLUENT_API_BASE", format!("file://{}", fixture_dir.to_string_lossy()))
+        .env("FLUENT_RELEASE_REPO", "test-owner/fluent")
+        .env("FLUENT_BINARY_PATH", fake_binary.to_str().unwrap())
+        .env("FLUENT_UPDATE_CACHE_PATH", cache_path.to_str().unwrap())
+        .env("FLUENT_NO_UPDATE_CHECK", "1")
+        .arg("update")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "update should fail when download fails"
+    );
+
+    let preserved = fs::read(&fake_binary).unwrap();
+    assert_eq!(
+        preserved, original,
+        "binary should be preserved when download fails"
+    );
+}
+
+// -------------------------------------------------------------------------
+// Update check and nudge
+// -------------------------------------------------------------------------
+
+#[test]
+fn update_check_never_replaces_binary() {
+    let tmp = TempDir::new().unwrap();
+    let fixture_dir = tmp.path().join("fixture");
+    fs::create_dir_all(&fixture_dir).unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let fake_binary = bin_dir.join("fluent");
+    let original = b"original-binary";
+    fs::write(&fake_binary, original).unwrap();
+
+    let (api_base, release_repo) =
+        setup_fixture_release(&fixture_dir, "999.0.0", b"new-binary", None, false);
+
+    let cache_path = tmp.path().join("update-cache.json");
+
+    // Run a non-update command (version) with the update check enabled.
+    // The nudge may appear on stderr, but the binary must not change.
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .env("FLUENT_API_BASE", &api_base)
+        .env("FLUENT_RELEASE_REPO", &release_repo)
+        .env("FLUENT_BINARY_PATH", fake_binary.to_str().unwrap())
+        .env("FLUENT_UPDATE_CACHE_PATH", cache_path.to_str().unwrap())
+        .env_remove("FLUENT_NO_UPDATE_CHECK")
+        .arg("version")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "version command should succeed even with update available"
+    );
+
+    let preserved = fs::read(&fake_binary).unwrap();
+    assert_eq!(
+        preserved, original,
+        "binary must not be replaced during an update check (B2)"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("fluent update"),
+        "nudge should appear when behind; got stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn update_check_offline_is_silent_and_nonfatal() {
+    let tmp = TempDir::new().unwrap();
+    let cache_path = tmp.path().join("update-cache.json");
+
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .env("FLUENT_API_BASE", "file:///nonexistent/path")
+        .env("FLUENT_RELEASE_REPO", "no-owner/no-repo")
+        .env("FLUENT_UPDATE_CACHE_PATH", cache_path.to_str().unwrap())
+        .env_remove("FLUENT_NO_UPDATE_CHECK")
+        .arg("version")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "command should succeed even when update check fails offline"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.to_lowercase().contains("error"),
+        "offline check should not print errors; got stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn update_check_is_cached_within_interval() {
+    let tmp = TempDir::new().unwrap();
+    let cache_path = tmp.path().join("update-cache.json");
+
+    // Write a fresh cache entry saying 999.0.0 is latest (which is "behind").
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let cache = serde_json::json!({
+        "checked_at": now,
+        "latest_version": "999.0.0",
+    });
+    fs::write(&cache_path, serde_json::to_string(&cache).unwrap()).unwrap();
+
+    // Point the API at a nonexistent path — if the code queries the source,
+    // it would fail. Since the cache is fresh, it should NOT query.
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .env("FLUENT_API_BASE", "file:///nonexistent/should-not-be-queried")
+        .env("FLUENT_RELEASE_REPO", "no-owner/no-repo")
+        .env("FLUENT_UPDATE_CACHE_PATH", cache_path.to_str().unwrap())
+        .env_remove("FLUENT_NO_UPDATE_CHECK")
+        .arg("version")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "command should succeed with cached check"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("fluent update"),
+        "cached check showing behind should print nudge; got stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn update_check_env_opt_out_suppresses_check_and_nudge() {
+    let tmp = TempDir::new().unwrap();
+    let cache_path = tmp.path().join("update-cache.json");
+
+    // Write a cache saying we're behind.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let cache = serde_json::json!({
+        "checked_at": now,
+        "latest_version": "999.0.0",
+    });
+    fs::write(&cache_path, serde_json::to_string(&cache).unwrap()).unwrap();
+
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .env("FLUENT_NO_UPDATE_CHECK", "1")
+        .env("FLUENT_UPDATE_CACHE_PATH", cache_path.to_str().unwrap())
+        .arg("version")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "version should succeed with opt-out"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("fluent update"),
+        "opt-out should suppress nudge; got stderr:\n{stderr}"
+    );
 }

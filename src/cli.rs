@@ -159,6 +159,9 @@ pub enum Commands {
     /// Install bundled skills into the agent skills directory
     Skills,
 
+    /// Update Fluent to the latest release
+    Update,
+
     /// Print Fluent version and build commit
     Version,
 

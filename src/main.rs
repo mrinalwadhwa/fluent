@@ -27,6 +27,7 @@ use fluent::observations;
 use fluent::os;
 use fluent::post_merge_review;
 use fluent::review;
+use fluent::update;
 use fluent::version;
 use fluent::work_attempt_loop::{self, WorkAttemptRunConfig, WorkAttemptRunOutcome};
 use fluent::work_merge_executor::{self, WorkMergeConfig};
@@ -84,6 +85,8 @@ fn main() -> Result<()> {
         println!("{}", fs::read_to_string(&profile.path)?);
         return Ok(());
     }
+
+    let is_update_command = matches!(cli.command, Some(Commands::Update));
 
     match cli.command {
         Some(Commands::Status { path }) => {
@@ -190,6 +193,9 @@ fn main() -> Result<()> {
                 println!("{outcome}");
             }
         },
+        Some(Commands::Update) => {
+            update::perform_update()?;
+        }
         Some(Commands::Skills) => {
             cmd_skills()?;
         }
@@ -206,6 +212,10 @@ fn main() -> Result<()> {
             let coder_kind = CoderKind::resolve(cli.coder.as_deref())?;
             cmd_interactive(&sandbox_root, &resolver, &cli.extra_args, coder_kind)?;
         }
+    }
+
+    if !is_update_command {
+        update::maybe_nudge();
     }
 
     Ok(())
