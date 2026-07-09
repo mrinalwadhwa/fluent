@@ -1675,6 +1675,45 @@ Test: tests/behaviors/operations/test-work-attempt-intake-review.sh (missing Wor
 Test: tests/behaviors/operations/test-work-attempt-intake-review.sh (duplicate Attempt id leaves item unchanged)
 Test: tests/behaviors/operations/test-work-attempt-intake-review.sh (invalid ids leave Work Item state unchanged)
 
+### B160
+
+WHEN `factory attempt list <work-item-id>` is invoked for a stored
+Work Item,
+THE SYSTEM SHALL print the Work Item's Attempts, each with its id and
+status, to stdout.
+Test: tests/binary.rs (attempt_list_prints_attempts)
+
+### B161
+
+WHEN `factory attempt show <work-item-id> <attempt-id>` is invoked for
+a stored Work Item,
+THE SYSTEM SHALL print that Attempt as JSON, including its tasks and
+status.
+Test: tests/binary.rs (attempt_show_prints_attempt_json)
+
+### B162
+
+WHEN `factory merge-candidate list <work-item-id>` is invoked for a
+stored Work Item,
+THE SYSTEM SHALL print the Work Item's Merge Candidates, each with its
+id, review state, and merge status, to stdout.
+Test: tests/binary.rs (merge_candidate_list_prints_candidates)
+
+### B163
+
+WHEN `factory task list <work-item-id> <attempt-id>` is invoked for a
+stored Work Item and Attempt,
+THE SYSTEM SHALL print the Attempt's Tasks, each with its id, kind, and
+status, to stdout.
+Test: tests/binary.rs (task_list_prints_tasks)
+
+### B164
+
+WHEN `factory task show <work-item-id> <attempt-id> <task-id>` is
+invoked for a stored Work Item, Attempt, and Task,
+THE SYSTEM SHALL print that Task as JSON.
+Test: tests/binary.rs (task_show_prints_task_json)
+
 ## Coder transient failures
 
 ### B1
