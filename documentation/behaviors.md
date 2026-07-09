@@ -1305,8 +1305,8 @@ system prompt for a Work merge-time reviewer,
 THE SYSTEM SHALL use the reviewer prompt's `[work-system]` section when
 one exists, fall back to the raw `[system]` section otherwise, then tell
 the reviewer to follow the candidate workspace's absolute
-`skills/review-<role>/SKILL.md` path when that skill exists, or to apply
-the reviewer role directly when it does not. If the candidate workspace
+materialized `review-<role>/SKILL.md` path (written from the bundled
+binary to `.fluent/work/skills/`). If the candidate workspace
 contains `.fluent/expertise/decisions.md`, the system shall name that
 absolute path as the recorded-decisions file.
 Test: src/work_merge_executor.rs (merge_reviewer_system_prompt_uses_work_section_without_legacy_filtering)

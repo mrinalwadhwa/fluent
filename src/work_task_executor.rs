@@ -1677,6 +1677,7 @@ fn run_review_coder(
         readable_roots.extend(input_artifact_readable_roots(input_artifacts));
         readable_roots.push(planning_files_dir(project_root, &item.id));
         readable_roots.push(general_expertise_dir(project_root));
+        readable_roots.push(review_skills_dir(project_root));
         build_coder_sandbox_with_read_only_roots(
             coder_kind,
             resolver,
@@ -1755,8 +1756,7 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
         )
     })?;
 
-    // Skill is required; fail if the review-<role>/SKILL.md isn't in any readable workspace.
-    let skill_path = review_skill_path(&task.role, input.readable_workspaces)?;
+    let skill_path = review_skill_path(&task.role, input.project_root)?;
 
     // Decisions: split into decisions_path (or empty).
     let decisions_path = decisions_path(input.readable_workspaces);
@@ -1916,23 +1916,23 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
     })
 }
 
-fn review_skill_path(role: &str, readable_workspaces: &[PathBuf]) -> Result<String> {
-    let relative = format!("skills/review-{role}/SKILL.md");
-    readable_workspaces
-        .iter()
-        .map(|workspace| workspace.join(&relative))
-        .find(|path| path.is_file())
-        .map(|path| path.display().to_string())
-        .ok_or_else(|| {
-            let searched = readable_workspaces
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            anyhow::anyhow!(
-                "Required review-{role} skill not found. Searched for {relative} in: {searched}"
-            )
-        })
+fn review_skills_dir(project_root: &Path) -> PathBuf {
+    project_root.join(".fluent/work/skills")
+}
+
+fn review_skill_path(role: &str, project_root: &Path) -> Result<String> {
+    let skill_name = format!("review-{role}");
+    let dest_dir = review_skills_dir(project_root);
+    let skill_md = dest_dir.join(&skill_name).join("SKILL.md");
+    if skill_md.is_file() {
+        return Ok(skill_md.display().to_string());
+    }
+    match materialize_skill(&skill_name, &dest_dir) {
+        Ok(skill_dir) => Ok(skill_dir.join("SKILL.md").display().to_string()),
+        Err(e) => Err(anyhow::anyhow!(
+            "Required review-{role} skill not found: {e}"
+        )),
+    }
 }
 
 fn decisions_path(readable_workspaces: &[PathBuf]) -> String {
@@ -2520,28 +2520,30 @@ mod tests {
     #[test]
     fn work_review_prompt_names_work_artifacts_and_writable_outputs() {
         let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
         let workspace = tmp.path().join("work-6-work-1-attempt-1");
-        let skill_dir = workspace.join("skills/review-tests");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(skill_dir.join("SKILL.md"), "test skill").unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        let artifact_dir = project_root
+            .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests");
+        let review_path = artifact_dir.join("review.md");
 
         let item = review_item();
         let prompts = build_work_review_prompts(WorkReviewPromptInput {
             item: &item,
             attempt_id: "attempt-1",
             task_id: "attempt-1-review-tests",
-            project_root: Path::new("/tmp/project"),
-            artifact_dir: Path::new("/tmp/project/.fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests"),
-            review_path: Path::new("/tmp/project/.fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"),
+            project_root,
+            artifact_dir: &artifact_dir,
+            review_path: &review_path,
             readable_workspaces: std::slice::from_ref(&workspace),
             input_artifacts: &[],
             review_only: false,
         })
         .unwrap();
 
-        assert!(prompts.review_prompt.contains(
-            "/tmp/project/.fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
-        ));
+        assert!(prompts
+            .review_prompt
+            .contains(&review_path.display().to_string()));
         assert!(prompts.review_prompt.contains("CARGO_TARGET_DIR"));
         assert!(prompts.review_prompt.contains("cargo build"));
         assert!(
@@ -2566,23 +2568,21 @@ mod tests {
     #[test]
     fn work_review_prompt_renders_role_conditional_blocks() {
         let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
         let workspace = tmp.path().join("work-6-work-1-attempt-1");
-        let skill_dir = workspace.join("skills/review-behaviors");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(skill_dir.join("SKILL.md"), "behaviors skill").unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        let artifact_dir = project_root
+            .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-behaviors");
+        let review_path = artifact_dir.join("review.md");
 
         let item = review_item_with_role("behaviors");
         let prompts = build_work_review_prompts(WorkReviewPromptInput {
             item: &item,
             attempt_id: "attempt-1",
             task_id: "attempt-1-review-behaviors",
-            project_root: Path::new("/tmp/project"),
-            artifact_dir: Path::new(
-                "/tmp/project/.fluent/work/artifacts/work-1/attempt-1/attempt-1-review-behaviors",
-            ),
-            review_path: Path::new(
-                "/tmp/project/.fluent/work/artifacts/work-1/attempt-1/attempt-1-review-behaviors/review.md",
-            ),
+            project_root,
+            artifact_dir: &artifact_dir,
+            review_path: &review_path,
             readable_workspaces: std::slice::from_ref(&workspace),
             input_artifacts: &[],
             review_only: false,
@@ -2631,9 +2631,7 @@ mod tests {
         let item = review_item();
         let tmp = tempfile::TempDir::new().unwrap();
         let workspace = tmp.path().join("candidate'space");
-        let skill_dir = workspace.join("skills/review-tests");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(skill_dir.join("SKILL.md"), "test skill").unwrap();
+        fs::create_dir_all(&workspace).unwrap();
         let review_path = tmp.path().join("review.md");
         let prompts = build_work_review_prompts(WorkReviewPromptInput {
             item: &item,
@@ -2699,9 +2697,7 @@ mod tests {
         let item = post_merge_review_item(Some("pre-merge-xyz".to_string()));
         let tmp = tempfile::TempDir::new().unwrap();
         let workspace = tmp.path().join("work-review-main");
-        let skill_dir = workspace.join("skills/review-tests");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(skill_dir.join("SKILL.md"), "test skill").unwrap();
+        fs::create_dir_all(&workspace).unwrap();
         let review_path = tmp.path().join("review.md");
         let prompts = build_work_review_prompts(WorkReviewPromptInput {
             item: &item,
@@ -2737,9 +2733,7 @@ mod tests {
         let item = post_merge_review_item(None);
         let tmp = tempfile::TempDir::new().unwrap();
         let workspace = tmp.path().join("work-review-main");
-        let skill_dir = workspace.join("skills/review-tests");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(skill_dir.join("SKILL.md"), "test skill").unwrap();
+        fs::create_dir_all(&workspace).unwrap();
         let review_path = tmp.path().join("review.md");
         let prompts = build_work_review_prompts(WorkReviewPromptInput {
             item: &item,
@@ -3301,5 +3295,34 @@ mod tests {
             err.contains("No bundled skill"),
             "error should name the problem: {err}"
         );
+    }
+
+    #[test]
+    fn review_skill_path_materializes_from_bundled_content() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = review_skill_path("tests", tmp.path()).unwrap();
+        assert!(
+            path.contains(".fluent/work/skills/review-tests/SKILL.md"),
+            "should resolve to materialized path: {path}"
+        );
+        assert!(
+            Path::new(&path).is_file(),
+            "materialized skill file should exist on disk"
+        );
+    }
+
+    #[test]
+    fn review_skill_path_reuses_already_materialized() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path1 = review_skill_path("architecture", tmp.path()).unwrap();
+        let path2 = review_skill_path("architecture", tmp.path()).unwrap();
+        assert_eq!(path1, path2, "repeated calls should return the same path");
+    }
+
+    #[test]
+    fn review_skill_path_errors_on_unknown_role() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let result = review_skill_path("nonexistent", tmp.path());
+        assert!(result.is_err(), "should error on unknown review role");
     }
 }

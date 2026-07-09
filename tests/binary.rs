@@ -2446,14 +2446,14 @@ fn work_review_codebase_missing_or_duplicate_leaves_state_unchanged() {
 }
 
 #[test]
-fn work_task_run_review_only_fails_when_skill_missing() {
+fn work_task_run_review_materializes_bundled_skill_without_project_skills() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     fs::remove_dir_all(main_dir.join("skills")).unwrap();
     git::run(&main_dir, &["add", "."], "stage skill removal").unwrap();
     git::run(
         &main_dir,
-        &["commit", "-m", "drop review skills for negative test"],
+        &["commit", "-m", "drop project-local skills"],
         "commit skill removal",
     )
     .unwrap();
@@ -2480,9 +2480,11 @@ fn work_task_run_review_only_fails_when_skill_missing() {
         .assert()
         .success();
 
-    let bin_dir = tmp.path().join("bin-review-only-no-skill");
+    let bin_dir = tmp.path().join("bin-review-only-bundled-skill");
     write_mock_claude(&bin_dir, "#!/bin/bash\nexit 0\n");
 
+    // Review succeeds because the binary carries bundled skills and
+    // materializes them to .fluent/work/skills/ on demand.
     fluent_cmd()
         .current_dir(&main_dir)
         .args([
@@ -2495,10 +2497,14 @@ fn work_task_run_review_only_fails_when_skill_missing() {
         ])
         .env("PATH", mock_path(&bin_dir))
         .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "Required review-tests skill not found",
-        ));
+        .success();
+
+    let materialized = main_dir.join(".fluent/work/skills/review-tests/SKILL.md");
+    assert!(
+        materialized.is_file(),
+        "bundled review skill should be materialized at {}",
+        materialized.display()
+    );
 }
 
 #[test]
