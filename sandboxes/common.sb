@@ -192,6 +192,11 @@
 (allow file-read* (subpath "/private/var"))
 (allow file-read* (subpath "/private/tmp"))
 
+;; Allow metadata on the /private node itself so realpath() can lstat it while
+;; resolving /private/var/folders temp paths (git init in a tempdir does this).
+;; Without it, git fails with "Invalid path '/private': Operation not permitted".
+(allow file-read-metadata (literal "/private"))
+
 ;; macOS symlinks: /etc -> /private/etc, /var -> /private/var
 ;; The DNS resolver reads /etc/resolv.conf via the symlink path.
 ;; Without these, getaddrinfo() fails with ENOENT.

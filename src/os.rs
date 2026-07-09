@@ -354,6 +354,28 @@ mod tests {
     }
 
     #[test]
+    fn rendered_profile_grants_private_ancestor_metadata() {
+        // git's realpath() lstats the bare /private node while resolving a
+        // /private/var/folders temp path; without metadata access it fails with
+        // "Invalid path '/private'". Tests that git-init in system temp rely on this.
+        let resolver = ContentResolver::new(None);
+        let profile = render_profile_common_only(
+            &resolver,
+            "/Users/test",
+            &[PathBuf::from("/Users/test/workspace")],
+            &[],
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&profile.path).unwrap();
+        assert!(
+            content.contains("(allow file-read-metadata (literal \"/private\"))"),
+            "common profile should grant metadata on /private so realpath can \
+             traverse into system temp: {content}"
+        );
+    }
+
+    #[test]
     fn test_render_profile_uses_claude_specific_layer() {
         let resolver = ContentResolver::new(None);
         let profile = render_profile_for_roots_for_coder(
