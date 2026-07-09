@@ -257,6 +257,7 @@ fn run_review_task(
         input_artifacts,
         artifact_dir,
         review_path,
+        role,
     ) = {
         let _lock = config
             .store_lock
@@ -302,6 +303,7 @@ fn run_review_task(
             )
         })?;
         let workspace_reads = task.workspace_access.reads.clone();
+        let role = task.role.clone();
         let candidate_commit = review_context.candidate_commit.clone();
         let input_artifacts =
             resolve_input_artifact_paths(config.project_root, &task.input_artifacts)?;
@@ -349,6 +351,7 @@ fn run_review_task(
             input_artifacts,
             artifact_dir,
             review_path,
+            role,
         )
     };
 
@@ -360,6 +363,14 @@ fn run_review_task(
     // diffing against its baseline.
     materialize_planning_files(&item, config.project_root)?;
     materialize_general_expertise(config.project_root)?;
+    // Materialize this Task's review-<role> skill here as well, so it is part of
+    // the guard's baseline. review_skill_path would otherwise write it during
+    // prompt construction, after the snapshot, and the source-checkout guard
+    // rejects that as a reviewer-induced change.
+    materialize_skill(
+        &format!("review-{role}"),
+        &review_skills_dir(config.project_root),
+    )?;
 
     let readable_workspaces = match ReviewReadableWorkspaces::resolve(
         config.project_root,

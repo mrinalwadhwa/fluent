@@ -2528,7 +2528,7 @@ fn work_task_run_review_materializes_bundled_skill_without_project_skills() {
         .success();
 
     let bin_dir = tmp.path().join("bin-review-only-bundled-skill");
-    write_mock_claude(&bin_dir, "#!/bin/bash\nexit 0\n");
+    write_mock_claude(&bin_dir, &review_only_mock_script("pass"));
 
     // Review succeeds because the binary carries bundled skills and
     // materializes them to .fluent/work/skills/ on demand.
