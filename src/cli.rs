@@ -156,6 +156,9 @@ pub enum Commands {
         path: Option<String>,
     },
 
+    /// Install bundled skills into the agent skills directory
+    Skills,
+
     /// Print Fluent version and build commit
     Version,
 

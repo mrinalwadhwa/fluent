@@ -190,6 +190,9 @@ fn main() -> Result<()> {
                 println!("{outcome}");
             }
         },
+        Some(Commands::Skills) => {
+            cmd_skills()?;
+        }
         Some(Commands::Version) => {
             println!("{}", version::version_string());
         }
@@ -1250,6 +1253,19 @@ fn cmd_init(cwd: &Path) -> Result<()> {
     fs::create_dir_all(fluent_dir.join("expertise"))?;
     write_gitignore_if_absent(&fluent_dir)?;
     eprintln!("  Initialized .fluent/ in {}", cwd.display());
+    Ok(())
+}
+
+// -------------------------------------------------------------------------
+// Skills
+// -------------------------------------------------------------------------
+
+fn cmd_skills() -> Result<()> {
+    let home = std::env::var("HOME")
+        .map_err(|_| anyhow::anyhow!("HOME not set; cannot locate agent skills directory"))?;
+    let skills_dir = PathBuf::from(home).join(".claude/skills");
+    let skill_dir = work_task_executor::materialize_skill("fluent", &skills_dir)?;
+    eprintln!("Installed fluent skill to {}", skill_dir.display());
     Ok(())
 }
 

@@ -85,6 +85,53 @@ fn version_prints_package_version_and_commit() {
 }
 
 #[test]
+fn fluent_skills_install_writes_single_skill() {
+    let tmp = TempDir::new().unwrap();
+
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .env("HOME", tmp.path().to_string_lossy().to_string())
+        .arg("skills")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "skills failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Installed fluent skill"),
+        "should report installation: {stderr}"
+    );
+
+    let skill_md = tmp
+        .path()
+        .join(".claude/skills/fluent/SKILL.md");
+    assert!(
+        skill_md.is_file(),
+        "SKILL.md should exist at {}",
+        skill_md.display()
+    );
+
+    let refs_dir = tmp
+        .path()
+        .join(".claude/skills/fluent/references");
+    assert!(
+        refs_dir.is_dir(),
+        "references/ should exist at {}",
+        refs_dir.display()
+    );
+
+    let capture = refs_dir.join("capture-brief.md");
+    assert!(
+        capture.is_file(),
+        "capture-brief.md reference should exist"
+    );
+}
+
+#[test]
 fn fargate_teardown_nothing_to_teardown() {
     let tmp = TempDir::new().unwrap();
 

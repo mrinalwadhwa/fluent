@@ -1462,7 +1462,7 @@ fn materialize_general_expertise(project_root: &Path) -> Result<PathBuf> {
 /// the path to the skill directory.
 ///
 /// Fails if a referenced expertise file is absent from the bundle.
-pub(crate) fn materialize_skill(skill_name: &str, dest_dir: &Path) -> Result<PathBuf> {
+pub fn materialize_skill(skill_name: &str, dest_dir: &Path) -> Result<PathBuf> {
     let prefix = format!("{skill_name}/");
     let files = crate::content::bundled_skill_files_under(&prefix);
     if files.is_empty() {
