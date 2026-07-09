@@ -3,7 +3,7 @@ commands:
     test_harness: cargo-nextest
   - command: |
       exit_code=0
-      for script in tests/behaviors/operations/*.sh; do
+      for script in tests/behaviors/operations/*.sh tests/behaviors/skills/*.sh; do
         [ -f "$script" ] || continue
         echo "--- $script ---"
         if bash "$script"; then

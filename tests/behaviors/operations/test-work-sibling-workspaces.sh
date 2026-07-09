@@ -215,23 +215,23 @@ test_documentation_describes_sibling_workspace_layout() {
 
   rg -n '\.fluent/work/workspaces/<attempt-id>|\.fluent/work/workspaces/' \
     "$PROJECT_DIR/documentation" \
-    "$PROJECT_DIR/skills/build-in-the-fluent/SKILL.md" \
+    "$PROJECT_DIR/skills/fluent/SKILL.md" \
     "$PROJECT_DIR/tests/behaviors/README.md" && RESULT=1
 
   rg -n '\.\./work-<work-item-id-byte-len>-<work-item-id>-<attempt-id>|\.\./work-6-work-1-attempt-1' \
     "$PROJECT_DIR/documentation" \
-    "$PROJECT_DIR/skills/build-in-the-fluent/SKILL.md" \
+    "$PROJECT_DIR/skills/fluent/SKILL.md" \
     "$PROJECT_DIR/tests/behaviors/README.md" > /dev/null || RESULT=1
 
   rg -n '\.fluent/work/artifacts/<attempt-id>|\.fluent/work/artifacts/attempt-1|\.fluent/work/artifacts/attempt-one' \
     "$PROJECT_DIR/documentation" \
-    "$PROJECT_DIR/skills/build-in-the-fluent/SKILL.md" \
+    "$PROJECT_DIR/skills/fluent/SKILL.md" \
     "$PROJECT_DIR/tests/behaviors/README.md" \
     | grep -Fv '<attempt-id>/...' && RESULT=1
 
   rg -n '\.fluent/work/artifacts/<work-item-id>/<attempt-id>|\.fluent/work/artifacts/work-1/attempt-1|\.fluent/work/artifacts/work-alpha/attempt-one' \
     "$PROJECT_DIR/documentation" \
-    "$PROJECT_DIR/skills/build-in-the-fluent/SKILL.md" \
+    "$PROJECT_DIR/skills/fluent/SKILL.md" \
     "$PROJECT_DIR/tests/behaviors/README.md" > /dev/null || RESULT=1
 
   return $RESULT

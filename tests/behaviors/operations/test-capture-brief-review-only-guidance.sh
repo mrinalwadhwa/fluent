@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-SKILL="$ROOT/skills/capture-brief/SKILL.md"
+SKILL="$ROOT/skills/fluent/references/capture-brief.md"
 
 failures=0
 
@@ -16,8 +16,8 @@ if ! grep -Fq 'review request' "$SKILL"; then
   failures=$((failures + 1))
 fi
 
-if ! grep -Fq 'build-in-the-fluent' "$SKILL"; then
-  echo "capture-brief does not reference build-in-the-fluent for review flow" >&2
+if ! grep -Fq 'fluent' "$SKILL"; then
+  echo "capture-brief does not reference fluent skill for review flow" >&2
   failures=$((failures + 1))
 fi
 

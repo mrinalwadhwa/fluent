@@ -22,12 +22,12 @@ artifact shape; they do not verify actual file or code research.
 
 Run a single scenario:
 ```sh
-tests/test-skill tests/behaviors/skills/timeout-flag.md skills/capture-brief/SKILL.md
+tests/test-skill tests/behaviors/skills/timeout-flag.md skills/fluent/references/capture-brief.md
 ```
 
 Run with automated judge:
 ```sh
-tests/test-skill tests/behaviors/skills/timeout-flag.md skills/capture-brief/SKILL.md --judge
+tests/test-skill tests/behaviors/skills/timeout-flag.md skills/fluent/references/capture-brief.md --judge
 ```
 
 ## Operational behaviors

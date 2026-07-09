@@ -1,7 +1,3 @@
----
-name: plan-execution
-description: Interview the user to plan how the approved work will run, produce plan.md, and create the Work Item(s) with the approved planning files.
----
 
 # Plan Execution
 

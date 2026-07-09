@@ -75,7 +75,11 @@ command -v claude >/dev/null 2>&1 || { echo "claude not found in PATH" >&2; exit
 # -------------------------------------------------------------------------
 
 SCENARIO_NAME="$(basename "$SCENARIO" .md)"
-SKILL_NAME="$(basename "$(dirname "$SKILL_PATH")")"
+if [ "$(basename "$SKILL_PATH")" = "SKILL.md" ]; then
+  SKILL_NAME="$(basename "$(dirname "$SKILL_PATH")")"
+else
+  SKILL_NAME="$(basename "$SKILL_PATH" .md)"
+fi
 RUN_DIR="$(mktemp -d -t "fluent-test-skill-${SCENARIO_NAME}-XXXXXX")"
 
 SCENARIO_CONTENT="$(cat "$SCENARIO")"

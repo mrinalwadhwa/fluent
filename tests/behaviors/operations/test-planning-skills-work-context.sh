@@ -27,11 +27,11 @@ require_not_in_file() {
   fi
 }
 
-CAPTURE="$ROOT/skills/capture-brief/SKILL.md"
-DEFINE="$ROOT/skills/define-behaviors/SKILL.md"
-APPROACH="$ROOT/skills/design-approach/SKILL.md"
-PLAN="$ROOT/skills/plan-execution/SKILL.md"
-BUILD="$ROOT/skills/build-in-the-fluent/SKILL.md"
+CAPTURE="$ROOT/skills/fluent/references/capture-brief.md"
+DEFINE="$ROOT/skills/fluent/references/define-behaviors.md"
+APPROACH="$ROOT/skills/fluent/references/design-approach.md"
+PLAN="$ROOT/skills/fluent/references/plan-execution.md"
+BUILD="$ROOT/skills/fluent/SKILL.md"
 ARCH="$ROOT/documentation/architecture.md"
 BEHAVIORS="$ROOT/documentation/behaviors.md"
 

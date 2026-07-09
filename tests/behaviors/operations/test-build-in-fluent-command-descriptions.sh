@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-SKILL="$ROOT/skills/build-in-the-fluent/SKILL.md"
+SKILL="$ROOT/skills/fluent/SKILL.md"
 FLUENT_BIN="${FLUENT_BIN_OVERRIDE:-$ROOT/target/debug/fluent}"
 
 if [ ! -x "$FLUENT_BIN" ]; then

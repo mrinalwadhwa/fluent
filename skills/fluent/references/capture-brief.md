@@ -1,7 +1,3 @@
----
-name: capture-brief
-description: Interview the user to capture what they want built and produce brief.md.
----
 
 # Capture Brief
 
@@ -103,7 +99,7 @@ For a review request rather than a build request: set the draft-id as above, the
 - [Role or expertise needed, if the user specified]
 ```
 
-Omit empty sections. Run the same Confirm step. Once confirmed, stop here. `build-in-the-fluent` handles Work Item creation and the review-only flow after confirmation.
+Omit empty sections. Run the same Confirm step. Once confirmed, stop here. The `fluent` skill handles Work Item creation and the review-only flow after confirmation.
 
 ## Brief format
 

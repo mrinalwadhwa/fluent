@@ -3046,7 +3046,7 @@ observable at runtime.
 
 ### B1
 
-WHEN `skills/capture-brief/SKILL.md` is read after this Work Item
+WHEN `skills/fluent/references/capture-brief.md` is read after this Work Item
 lands,
 THE SYSTEM SHALL contain in its "Rules" section a short rule
 naming the two acceptable question patterns (labeled multi-option
@@ -3057,7 +3057,7 @@ Test: tests/behaviors/operations/test-easy-to-answer-skill-rule.sh (rule present
 
 ### B2
 
-WHEN `skills/define-behaviors/SKILL.md` is read after this Work
+WHEN `skills/fluent/references/define-behaviors.md` is read after this Work
 Item lands,
 THE SYSTEM SHALL contain the same rule, with the same wording, in
 its "Rules" section (or equivalent).
@@ -3065,7 +3065,7 @@ Test: tests/behaviors/operations/test-easy-to-answer-skill-rule.sh (rule present
 
 ### B3
 
-WHEN `skills/design-approach/SKILL.md` is read after this Work
+WHEN `skills/fluent/references/design-approach.md` is read after this Work
 Item lands,
 THE SYSTEM SHALL contain the same rule, with the same wording, in
 its "Rules" section (or equivalent).
@@ -3073,7 +3073,7 @@ Test: tests/behaviors/operations/test-easy-to-answer-skill-rule.sh (rule present
 
 ### B4
 
-WHEN `skills/plan-execution/SKILL.md` is read after this Work
+WHEN `skills/fluent/references/plan-execution.md` is read after this Work
 Item lands,
 THE SYSTEM SHALL contain the same rule, with the same wording, in
 its "Rules" section (or equivalent).

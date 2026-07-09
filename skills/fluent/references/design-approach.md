@@ -1,7 +1,3 @@
----
-name: design-approach
-description: Interview the user to decide the technical approach for the defined behaviors and produce approach.md.
----
 
 # Design Approach
 

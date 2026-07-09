@@ -700,7 +700,7 @@ Check item {{ITEM_ID}}.
     #[test]
     fn test_bundled_content_does_not_include_agent_managed_content() {
         // Skills are bundled through BUNDLED_SKILL_FILES, not through bundled_content.
-        assert!(bundled_content("skills/build-in-the-fluent/SKILL.md").is_none());
+        assert!(bundled_content("skills/fluent/SKILL.md").is_none());
         assert!(bundled_content(".fluent/expertise/testing.md").is_none());
     }
 
@@ -743,8 +743,8 @@ Check item {{ITEM_ID}}.
             "should contain review-tests"
         );
         assert!(
-            names.contains(&"build-in-the-fluent"),
-            "should contain build-in-the-fluent"
+            names.contains(&"fluent"),
+            "should contain fluent"
         );
     }
 

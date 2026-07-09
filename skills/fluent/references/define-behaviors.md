@@ -1,7 +1,3 @@
----
-name: define-behaviors
-description: Interview the user to elaborate the brief into EARS-format behavior statements and produce behaviors.diff.md.
----
 
 # Define Behaviors
 

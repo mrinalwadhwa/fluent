@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-SKILL="$ROOT/skills/build-in-the-fluent/SKILL.md"
+SKILL="$ROOT/skills/fluent/SKILL.md"
 ARCHITECTURE="$ROOT/documentation/architecture.md"
 AGENT_INSTRUCTIONS="$ROOT/CLAUDE.md"
 
@@ -32,44 +32,44 @@ require_absent_from_file() {
 
 require_in_file "$SKILL" \
   "The delegated build lifecycle is the Work model" \
-  "build-in-the-fluent skill"
+  "fluent skill"
 require_in_file "$SKILL" \
   "Work Item → Attempt → Task →" \
-  "build-in-the-fluent skill"
+  "fluent skill"
 require_in_file "$SKILL" \
   "approved planning files" \
-  "build-in-the-fluent skill"
+  "fluent skill"
 require_in_file "$SKILL" \
   'Create an Attempt' \
-  "build-in-the-fluent skill"
+  "fluent skill"
 require_in_file "$SKILL" \
   'Run the Attempt' \
-  "build-in-the-fluent skill"
+  "fluent skill"
 require_in_file "$SKILL" \
   'fluent merge-candidate show <work-item-id> <merge-candidate-id>' \
-  "build-in-the-fluent skill"
+  "fluent skill"
 require_in_file "$SKILL" \
   'Land through `fluent merge-candidate land <work-item-id>' \
-  "build-in-the-fluent skill"
+  "fluent skill"
 require_in_file "$SKILL" \
   "unrelated work that can proceed in parallel" \
-  "build-in-the-fluent skill"
+  "fluent skill"
 require_in_file "$SKILL" \
   "Workspaces are" \
-  "build-in-the-fluent skill"
+  "fluent skill"
 require_in_file "$ARCHITECTURE" \
   "Fluent's execution lifecycle uses these durable nouns" \
   "architecture documentation"
 
 require_absent_from_file "$SKILL" \
   'Use legacy run artifacts only for explicit fallback' \
-  "build-in-the-fluent skill"
+  "fluent skill"
 require_absent_from_file "$SKILL" \
   'Fargate-only execution, coordinated child-run decomposition, or recovery' \
-  "build-in-the-fluent skill"
+  "fluent skill"
 require_absent_from_file "$SKILL" \
   "new Work-model Tasks as automatically creating legacy child runs" \
-  "build-in-the-fluent skill"
+  "fluent skill"
 require_absent_from_file "$ARCHITECTURE" \
   'commands remain supported as legacy compatibility' \
   "architecture documentation"

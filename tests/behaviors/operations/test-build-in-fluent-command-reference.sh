@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-SKILL="$ROOT/skills/build-in-the-fluent/SKILL.md"
+SKILL="$ROOT/skills/fluent/SKILL.md"
 FLUENT_BIN="${FLUENT_BIN_OVERRIDE:-$ROOT/target/debug/fluent}"
 
 if [ ! -x "$FLUENT_BIN" ]; then
@@ -12,12 +12,12 @@ fi
 failures=0
 
 if ! grep -Fq '## Fluent commands' "$SKILL"; then
-  echo "build-in-the-fluent lacks ## Fluent commands section" >&2
+  echo "fluent skill lacks ## Fluent commands section" >&2
   failures=$((failures + 1))
 fi
 
 if ! grep -Fq 'fluent --help' "$SKILL"; then
-  echo "build-in-the-fluent does not reference fluent --help" >&2
+  echo "fluent skill does not reference fluent --help" >&2
   failures=$((failures + 1))
 fi
 
@@ -28,7 +28,7 @@ required_commands=(
 
 for command in "${required_commands[@]}"; do
   if ! grep -Fq "$command" "$SKILL"; then
-    echo "missing ${command} from build-in-the-fluent skill" >&2
+    echo "missing ${command} from fluent skill" >&2
     failures=$((failures + 1))
   fi
 done
@@ -46,7 +46,7 @@ deleted_commands=(
 
 for command in "${deleted_commands[@]}"; do
   if grep -Fq "$command" "$SKILL"; then
-    echo "deleted command ${command} still present in build-in-the-fluent skill" >&2
+    echo "deleted command ${command} still present in fluent skill" >&2
     failures=$((failures + 1))
   fi
 done

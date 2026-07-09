@@ -1,9 +1,9 @@
 ---
-name: build-in-the-fluent
+name: fluent
 description: Operate the fluent workflow to build software autonomously over extended periods. Interactive stages (brief, behaviors, approach, plan) run with the user. Autonomous execution loops writer → tester → parallel reviewers. When all reviewers pass, it produces a Merge Candidate. When a decision needs a human, it sets `needs-user` and pauses, then resumes once the user resolves it.
 ---
 
-# Build in the Fluent
+# Fluent
 
 Follow a structured workflow: capture intent, define behaviors, design an approach, plan execution, execute, and review. Some stages need the user; others run autonomously.
 
@@ -23,18 +23,18 @@ If nothing needs attention, ask the user what they want to build.
 
 ## Interactive stages (user present)
 
-Follow the four planning skills directly in your session. Each writes into `.fluent/drafts/<draft-id>/` — don't create planning files outside that directory:
+Follow the four stage procedures in order. Each is a reference file in this skill — read it when entering that stage. Each writes into `.fluent/drafts/<draft-id>/` — don't create planning files outside that directory:
 
-- `capture-brief` writes `brief.md`.
-- `define-behaviors` writes `behaviors.diff.md`.
-- `design-approach` writes `approach.md`.
-- `plan-execution` writes `plan.md` and creates the Work Item.
+- `references/capture-brief.md` — interview the user and write `brief.md`.
+- `references/define-behaviors.md` — elaborate the brief into EARS statements and write `behaviors.diff.md`.
+- `references/design-approach.md` — decide the technical approach and write `approach.md`.
+- `references/plan-execution.md` — plan the steps and write `plan.md`, then create the Work Item.
 
 For a codebase, module, or area review (not building something new), capture enough context to create a Work Item and use the review-only flow in the autonomous stages below.
 
 ## Autonomous stages (user away)
 
-`plan-execution` has already created the Work Item(s) with the approved planning files. From here, use the Work model for delegated execution:
+`references/plan-execution.md` has already created the Work Item(s) with the approved planning files. From here, use the Work model for delegated execution:
 
 1. Create an Attempt: `fluent attempt create <work-item-id>`. (An `attempt-N` id is auto-assigned; pass an explicit id for scripted flows.)
 2. Run the Attempt: `fluent attempt run <work-item-id>`. (Defaults to the most recently created Attempt; pass an explicit id to target a specific one.)
@@ -89,4 +89,4 @@ Don't pause for:
 
 Use `fluent --help` for the top-level surface and `fluent <command> --help` for a specific command's flags. Run `fluent cleanup` after terminal Work Items land or fail; `--apply` removes the terminal state.
 
-During interactive stages, follow the skills directly rather than calling these commands ad hoc. `plan-execution` is the one exception — it ends by running `fluent work-item create` as documented in its skill.
+During interactive stages, follow the stage references directly rather than calling these commands ad hoc. `references/plan-execution.md` is the one exception — it ends by running `fluent work-item create` as documented in its procedure.

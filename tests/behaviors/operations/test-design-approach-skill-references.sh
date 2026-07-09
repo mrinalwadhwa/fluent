@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-SKILL_DIR="$ROOT/skills/design-approach"
-SKILL="$SKILL_DIR/SKILL.md"
+SKILL="$ROOT/skills/fluent/references/design-approach.md"
+REFS_DIR="$ROOT/skills/fluent/references"
 failures=0
 
 if grep -Eq '(^|[^[:alnum:]_./-])expertise/[[:alnum:]_.-]+\.md' "$SKILL"; then
@@ -16,8 +16,8 @@ if ! grep -Fq "references/architecture.md" "$SKILL"; then
   failures=$((failures + 1))
 fi
 
-if [ ! -e "$SKILL_DIR/references/architecture.md" ]; then
-  echo "design-approach does not ship references/architecture.md" >&2
+if [ ! -e "$REFS_DIR/architecture.md" ]; then
+  echo "fluent skill does not ship references/architecture.md" >&2
   failures=$((failures + 1))
 fi
 
