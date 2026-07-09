@@ -55,10 +55,10 @@ create_project_with_unique_sibling_parent() {
 
 test_cleanup_work_items_dry_run_and_apply() {
   create_project_with_unique_sibling_parent
-  "$FACTORY_BIN" work create work-1 --title "Cleanup work" >/dev/null
-  "$FACTORY_BIN" work attempt work-1 attempt-1 >/dev/null
-  "$FACTORY_BIN" work create work-active --title "Active work" >/dev/null
-  "$FACTORY_BIN" work attempt work-active attempt-1 >/dev/null
+  "$FACTORY_BIN" work-item create work-1 --title "Cleanup work" >/dev/null
+  "$FACTORY_BIN" attempt create work-1 attempt-1 >/dev/null
+  "$FACTORY_BIN" work-item create work-active --title "Active work" >/dev/null
+  "$FACTORY_BIN" attempt create work-active attempt-1 >/dev/null
 
   python3 - <<'PY'
 import json
@@ -190,7 +190,7 @@ PY
 
 test_cleanup_work_items_remove_orphan_artifact_roots() {
   create_project
-  "$FACTORY_BIN" work create work-active --title "Active work" >/dev/null
+  "$FACTORY_BIN" work-item create work-active --title "Active work" >/dev/null
 
   ORPHAN_ROOT=".factory/work/artifacts/work-orphan"
   ACTIVE_ROOT=".factory/work/artifacts/work-active"
@@ -245,8 +245,8 @@ test_cleanup_work_items_remove_orphan_artifact_roots() {
 
 test_cleanup_work_items_ignore_unmanaged_artifacts() {
   create_project
-  "$FACTORY_BIN" work create work-1 --title "Cleanup work" >/dev/null
-  "$FACTORY_BIN" work attempt work-1 attempt-1 >/dev/null
+  "$FACTORY_BIN" work-item create work-1 --title "Cleanup work" >/dev/null
+  "$FACTORY_BIN" attempt create work-1 attempt-1 >/dev/null
 
   OUTSIDE_DIR="$(mktemp -d -t factory-test-cleanup-outside-XXXXXX)"
   OUTSIDE_FILE="${OUTSIDE_DIR}/outside.md"
@@ -327,8 +327,8 @@ PY
 
 test_cleanup_selects_abandoned_needs_user_work_item() {
   create_project_with_unique_sibling_parent
-  "$FACTORY_BIN" work create work-stale --title "Stale needs-user work" >/dev/null
-  "$FACTORY_BIN" work attempt work-stale attempt-1 >/dev/null
+  "$FACTORY_BIN" work-item create work-stale --title "Stale needs-user work" >/dev/null
+  "$FACTORY_BIN" attempt create work-stale attempt-1 >/dev/null
 
   python3 - <<'PY'
 import json
@@ -345,7 +345,7 @@ task["status"] = "needs-user"
 task_path.write_text(json.dumps(task, indent=2) + "\n")
 PY
 
-  "$FACTORY_BIN" work abandon work-stale --reason "replacement landed" >/dev/null
+  "$FACTORY_BIN" work-item abandon work-stale --reason "replacement landed" >/dev/null
 
   WORKTREE_DIR="$(cd .. && pwd)/work-10-work-stale-attempt-1"
   BRANCH_NAME="work/work-stale/attempt-1/attempt-1-write-1"
@@ -386,9 +386,9 @@ PY
 
 test_cleanup_skips_abandoned_work_item_with_reviewing_attempt() {
   create_project
-  "$FACTORY_BIN" work create work-active --title "Active review work" >/dev/null
-  "$FACTORY_BIN" work attempt work-active attempt-1 >/dev/null
-  "$FACTORY_BIN" work abandon work-active --reason "replacement landed" >/dev/null
+  "$FACTORY_BIN" work-item create work-active --title "Active review work" >/dev/null
+  "$FACTORY_BIN" attempt create work-active attempt-1 >/dev/null
+  "$FACTORY_BIN" work-item abandon work-active --reason "replacement landed" >/dev/null
 
   python3 - <<'PY'
 import json
@@ -411,8 +411,8 @@ PY
 
 test_cleanup_skips_abandoned_work_item_with_active_merge_candidate() {
   create_project
-  "$FACTORY_BIN" work create work-active --title "Active candidate work" >/dev/null
-  "$FACTORY_BIN" work attempt work-active attempt-1 >/dev/null
+  "$FACTORY_BIN" work-item create work-active --title "Active candidate work" >/dev/null
+  "$FACTORY_BIN" attempt create work-active attempt-1 >/dev/null
   python3 - <<'PY'
 import json
 from pathlib import Path
@@ -434,7 +434,7 @@ task["output"] = {
 }
 task_path.write_text(json.dumps(task, indent=2) + "\n")
 PY
-  "$FACTORY_BIN" work abandon work-active --reason "replacement landed" >/dev/null
+  "$FACTORY_BIN" work-item abandon work-active --reason "replacement landed" >/dev/null
   mkdir -p .factory/work/merge-candidates/work-active
   printf '%s\n' \
     '{' \

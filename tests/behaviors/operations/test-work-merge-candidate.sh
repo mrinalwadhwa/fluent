@@ -137,7 +137,7 @@ MOCK_SCRIPT
 }
 
 json_value() {
-  "$FACTORY_BIN" work show work-1 | jq -r "$1"
+  "$FACTORY_BIN" work-item show work-1 | jq -r "$1"
 }
 
 attempt_record_path() {
@@ -174,10 +174,10 @@ assert_fails() {
 }
 
 create_passed_merge_candidate() {
-  "$FACTORY_BIN" work create work-1 --title "Merge candidate" > /dev/null
-  "$FACTORY_BIN" work attempt work-1 attempt-1 > /dev/null
+  "$FACTORY_BIN" work-item create work-1 --title "Merge candidate" > /dev/null
+  "$FACTORY_BIN" attempt create work-1 attempt-1 > /dev/null
   PATH="${TEST_DIR}/bin:$PATH" \
-    "$FACTORY_BIN" work attempt run work-1 attempt-1 --no-sandbox \
+    "$FACTORY_BIN" attempt run work-1 attempt-1 --no-sandbox \
       > "$TEST_DIR/attempt-stdout" 2> "$TEST_DIR/attempt-stderr"
 }
 
@@ -189,7 +189,7 @@ run_merge() {
     MERGE_REVIEW_TIMING_LOG="${MERGE_REVIEW_TIMING_LOG:-}" \
     CANDIDATE_WORKSPACE="${TEST_DIR}/work-6-work-1-attempt-1" \
     PATH="${TEST_DIR}/bin:$PATH" \
-    "$FACTORY_BIN" work merge --no-sandbox work-1 attempt-1-merge-candidate
+    "$FACTORY_BIN" merge-candidate land --no-sandbox work-1 attempt-1-merge-candidate
 }
 
 assert_no_merge_reviewer_worktrees() {
@@ -263,7 +263,7 @@ EOF
   # candidate, the post-merge review fires asynchronously instead.
   [ "$(json_value '.merge_candidates[0].merge_state.review_artifacts | length')" = "0" ] || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stdout")" "Merged Merge Candidate attempt-1-merge-candidate" || RESULT=1
-  "$FACTORY_BIN" work merge-candidate work-1 attempt-1-merge-candidate \
+  "$FACTORY_BIN" merge-candidate show work-1 attempt-1-merge-candidate \
     > "$TEST_DIR/landed-candidate" 2> "$TEST_DIR/stderr" || RESULT=1
   [ "$(jq -r '.merge_state.status' "$TEST_DIR/landed-candidate")" = "merged" ] || RESULT=1
   [ "$(jq -r '.merge_state.merged_commit' "$TEST_DIR/landed-candidate")" = "$LANDED_COMMIT" ] || RESULT=1
@@ -285,7 +285,7 @@ test_work_merge_rejects_missing_work_item() {
   MAIN_BEFORE="$(git rev-parse main)"
 
   RESULT=0
-  if "$FACTORY_BIN" work merge --no-sandbox missing-work attempt-1-merge-candidate \
+  if "$FACTORY_BIN" merge-candidate land --no-sandbox missing-work attempt-1-merge-candidate \
     > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr"; then
     printf '    FAIL: command unexpectedly succeeded for missing Work Item\n'
     RESULT=1
@@ -302,16 +302,16 @@ test_work_merge_rejects_missing_merge_candidate() {
   create_passed_merge_candidate
 
   MAIN_BEFORE="$(git rev-parse main)"
-  STATE_BEFORE="$("$FACTORY_BIN" work show work-1)"
+  STATE_BEFORE="$("$FACTORY_BIN" work-item show work-1)"
 
   RESULT=0
-  if "$FACTORY_BIN" work merge --no-sandbox work-1 missing-candidate \
+  if "$FACTORY_BIN" merge-candidate land --no-sandbox work-1 missing-candidate \
     > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr"; then
     printf '    FAIL: command unexpectedly succeeded for missing Merge Candidate\n'
     RESULT=1
   fi
   [ "$(git rev-parse main)" = "$MAIN_BEFORE" ] || RESULT=1
-  [ "$("$FACTORY_BIN" work show work-1)" = "$STATE_BEFORE" ] || RESULT=1
+  [ "$("$FACTORY_BIN" work-item show work-1)" = "$STATE_BEFORE" ] || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "missing-candidate" || RESULT=1
   return $RESULT
 }
@@ -478,14 +478,14 @@ test_work_merge_candidate_inspection_read_only() {
   write_mock_claude
   create_passed_merge_candidate
   MAIN_BEFORE="$(git rev-parse main)"
-  STATE_BEFORE="$("$FACTORY_BIN" work show work-1)"
+  STATE_BEFORE="$("$FACTORY_BIN" work-item show work-1)"
 
   RESULT=0
-  "$FACTORY_BIN" work merge-candidate work-1 attempt-1-merge-candidate \
+  "$FACTORY_BIN" merge-candidate show work-1 attempt-1-merge-candidate \
     > "$TEST_DIR/candidate" 2> "$TEST_DIR/stderr" || RESULT=1
   jq -e '.id == "attempt-1-merge-candidate"' "$TEST_DIR/candidate" > /dev/null || RESULT=1
   [ "$(git rev-parse main)" = "$MAIN_BEFORE" ] || RESULT=1
-  [ "$("$FACTORY_BIN" work show work-1)" = "$STATE_BEFORE" ] || RESULT=1
+  [ "$("$FACTORY_BIN" work-item show work-1)" = "$STATE_BEFORE" ] || RESULT=1
   [ "$(json_value '.merge_candidates[0].merge_state.status')" = "pending" ] || RESULT=1
   return $RESULT
 }

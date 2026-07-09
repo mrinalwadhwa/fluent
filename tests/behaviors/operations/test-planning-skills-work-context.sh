@@ -73,7 +73,7 @@ require_in_file "$PLAN" \
   '## Decide one Work Item or several' \
   "plan-execution skill"
 require_in_file "$PLAN" \
-  'factory work create' \
+  'factory work-item create' \
   "plan-execution skill"
 require_in_file "$PLAN" \
   '## Plan format' \

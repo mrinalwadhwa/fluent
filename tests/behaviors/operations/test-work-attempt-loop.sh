@@ -22,8 +22,8 @@ setup_test_project() {
   printf 'test\n' > README.md
   seed_review_skill_stubs "."
   git add . && git commit -m "init" > /dev/null 2>&1
-  "$FACTORY_BIN" work create work-1 --title "Attempt loop" > /dev/null
-  "$FACTORY_BIN" work attempt work-1 attempt-1 > /dev/null
+  "$FACTORY_BIN" work-item create work-1 --title "Attempt loop" > /dev/null
+  "$FACTORY_BIN" attempt create work-1 attempt-1 > /dev/null
 }
 
 cleanup_test_project() {
@@ -87,7 +87,7 @@ MOCK_SCRIPT
 }
 
 json_value() {
-  "$FACTORY_BIN" work show work-1 | jq -r "$1"
+  "$FACTORY_BIN" work-item show work-1 | jq -r "$1"
 }
 
 assert_contains() {
@@ -110,11 +110,11 @@ assert_fails() {
 run_attempt_loop() {
   PATH="${TEST_DIR}/bin:$PATH" \
     FACTORY_MAX_TOTAL_WRITE_ROUNDS="${FACTORY_MAX_TOTAL_WRITE_ROUNDS:-3}" \
-    "$FACTORY_BIN" work attempt run work-1 attempt-1 --no-sandbox
+    "$FACTORY_BIN" attempt run work-1 attempt-1 --no-sandbox
 }
 
 run_write_task() {
-  PATH="${TEST_DIR}/bin:$PATH" "$FACTORY_BIN" work task run \
+  PATH="${TEST_DIR}/bin:$PATH" "$FACTORY_BIN" task run \
     work-1 attempt-1 attempt-1-write-1 --no-sandbox
 }
 
@@ -166,7 +166,7 @@ test_attempt_loop_passes_review_round() {
   [ "$(json_value '.merge_candidates[0].target_branch')" = "main" ] || return 1
   [ "$(json_value '.merge_candidates[0].review_state')" = "pending" ] || return 1
   [ "$(json_value '.merge_candidates[0].candidate_commit')" = "$(git -C ../work-6-work-1-attempt-1 rev-parse HEAD)" ] || return 1
-  "$FACTORY_BIN" work merge-candidate work-1 attempt-1-merge-candidate > "$TEST_DIR/candidate"
+  "$FACTORY_BIN" merge-candidate show work-1 attempt-1-merge-candidate > "$TEST_DIR/candidate"
   [ "$(jq -r '.candidate_commit' "$TEST_DIR/candidate")" = "$(json_value '.merge_candidates[0].candidate_commit')" ] || return 1
   [ "$(jq -r '.target_workspace.path' "$TEST_DIR/candidate")" = "." ] || return 1
   [ "$(jq -r '.source_branch' "$TEST_DIR/candidate")" = "main" ] || return 1
@@ -180,7 +180,7 @@ test_work_show_includes_merge_candidate() {
   write_mock_claude pass
 
   run_attempt_loop > "$TEST_DIR/stdout"
-  "$FACTORY_BIN" work show work-1 > "$TEST_DIR/show"
+  "$FACTORY_BIN" work-item show work-1 > "$TEST_DIR/show"
 
   [ "$(jq -r '.merge_candidates | length' "$TEST_DIR/show")" = "1" ] || return 1
   [ "$(jq -r '.merge_candidates[0].id' "$TEST_DIR/show")" = "attempt-1-merge-candidate" ] || return 1
@@ -193,7 +193,7 @@ test_work_merge_candidate_prints_pretty_json() {
   write_mock_claude pass
 
   run_attempt_loop > "$TEST_DIR/stdout"
-  "$FACTORY_BIN" work merge-candidate work-1 attempt-1-merge-candidate > "$TEST_DIR/candidate"
+  "$FACTORY_BIN" merge-candidate show work-1 attempt-1-merge-candidate > "$TEST_DIR/candidate"
 
   jq -e '.id == "attempt-1-merge-candidate"' "$TEST_DIR/candidate" > /dev/null || return 1
   grep -q '^{' "$TEST_DIR/candidate" || return 1
@@ -209,8 +209,8 @@ test_work_merge_candidate_missing_requests_leave_state_unchanged() {
   BEFORE="$(cat .factory/work/items/work-1.json)"
 
   RESULT=0
-  assert_fails "$FACTORY_BIN" work merge-candidate missing-work attempt-1-merge-candidate || RESULT=1
-  assert_fails "$FACTORY_BIN" work merge-candidate work-1 missing-candidate || RESULT=1
+  assert_fails "$FACTORY_BIN" merge-candidate show missing-work attempt-1-merge-candidate || RESULT=1
+  assert_fails "$FACTORY_BIN" merge-candidate show work-1 missing-candidate || RESULT=1
   [ "$(cat .factory/work/items/work-1.json)" = "$BEFORE" ] || RESULT=1
   return $RESULT
 }
@@ -221,7 +221,7 @@ test_attempt_loop_runs_planned_review_tasks() {
   write_mock_claude pass
 
   run_write_task > "$TEST_DIR/write-stdout" 2> "$TEST_DIR/write-stderr"
-  "$FACTORY_BIN" work review work-1 attempt-1 > "$TEST_DIR/review-stdout"
+  "$FACTORY_BIN" review work-1 attempt-1 > "$TEST_DIR/review-stdout"
 
   RESULT=0
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review" and (.status // "planned") == "planned")] | length')" = "5" ] || RESULT=1
@@ -351,10 +351,10 @@ test_attempt_loop_invalid_or_terminal_request_leaves_state_unchanged() {
 
   RESULT=0
   BEFORE="$(cat .factory/work/items/work-1.json)"
-  assert_fails "$FACTORY_BIN" work attempt run missing-work attempt-1 --no-sandbox || RESULT=1
-  assert_fails "$FACTORY_BIN" work attempt run ../escape attempt-1 --no-sandbox || RESULT=1
-  assert_fails "$FACTORY_BIN" work attempt run work-1 missing-attempt --no-sandbox || RESULT=1
-  assert_fails "$FACTORY_BIN" work attempt run work-1 ../escape --no-sandbox || RESULT=1
+  assert_fails "$FACTORY_BIN" attempt run missing-work attempt-1 --no-sandbox || RESULT=1
+  assert_fails "$FACTORY_BIN" attempt run ../escape attempt-1 --no-sandbox || RESULT=1
+  assert_fails "$FACTORY_BIN" attempt run work-1 missing-attempt --no-sandbox || RESULT=1
+  assert_fails "$FACTORY_BIN" attempt run work-1 ../escape --no-sandbox || RESULT=1
   [ "$(cat .factory/work/items/work-1.json)" = "$BEFORE" ] || RESULT=1
 
   run_attempt_loop > "$TEST_DIR/stdout" || RESULT=1

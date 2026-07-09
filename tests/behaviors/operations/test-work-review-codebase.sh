@@ -22,7 +22,7 @@ setup_test_project() {
   printf 'test\n' > README.md
   seed_review_skill_stubs "."
   git add . && git commit -m "init" > /dev/null 2>&1
-  "$FACTORY_BIN" work create work-1 --title "Review codebase" > /dev/null
+  "$FACTORY_BIN" work-item create work-1 --title "Review codebase" > /dev/null
 }
 
 cleanup_test_project() {
@@ -61,7 +61,7 @@ MOCK_SCRIPT
 }
 
 json_value() {
-  "$FACTORY_BIN" work show work-1 | jq -r "$1"
+  "$FACTORY_BIN" work-item show work-1 | jq -r "$1"
 }
 
 assert_contains() {
@@ -82,11 +82,11 @@ assert_fails() {
 }
 
 run_review_codebase() {
-  "$FACTORY_BIN" work review-codebase work-1 attempt-review --from-working-tree
+  "$FACTORY_BIN" review codebase work-1 attempt-review --from-working-tree
 }
 
 run_attempt_loop() {
-  PATH="${TEST_DIR}/bin:$PATH" "$FACTORY_BIN" work attempt run \
+  PATH="${TEST_DIR}/bin:$PATH" "$FACTORY_BIN" attempt run \
     work-1 attempt-review --no-sandbox
 }
 
@@ -114,8 +114,8 @@ test_review_codebase_rejects_missing_and_duplicate() {
   RESULT=0
   run_review_codebase > /dev/null || RESULT=1
   BEFORE="$(find .factory/work -type f -print0 | sort -z | xargs -0 shasum)"
-  assert_fails "$FACTORY_BIN" work review-codebase missing-work attempt-other || RESULT=1
-  assert_fails "$FACTORY_BIN" work review-codebase work-1 attempt-review || RESULT=1
+  assert_fails "$FACTORY_BIN" review codebase missing-work attempt-other || RESULT=1
+  assert_fails "$FACTORY_BIN" review codebase work-1 attempt-review || RESULT=1
   AFTER="$(find .factory/work -type f -print0 | sort -z | xargs -0 shasum)"
   [ "$AFTER" = "$BEFORE" ] || RESULT=1
 
@@ -165,7 +165,7 @@ test_review_codebase_rejects_source_changes() {
   run_review_codebase > /dev/null
 
   RESULT=0
-  assert_fails env PATH="${TEST_DIR}/bin:$PATH" "$FACTORY_BIN" work attempt run \
+  assert_fails env PATH="${TEST_DIR}/bin:$PATH" "$FACTORY_BIN" attempt run \
     work-1 attempt-review --no-sandbox || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "changed source checkout outside managed artifact area" || RESULT=1
   [ "$(json_value '(.merge_candidates // []) | length')" = "0" ] || RESULT=1

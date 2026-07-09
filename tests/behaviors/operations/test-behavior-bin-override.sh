@@ -66,13 +66,13 @@ test_script_uses_factory_bin_override() {
 test_work_task_instructions_uses_factory_bin_override() {
   test_script_uses_factory_bin_override \
     "$PROJECT_DIR/tests/behaviors/operations/test-work-task-instructions.sh" \
-    "work create"
+    "work-item create"
 }
 
 test_work_task_run_uses_factory_bin_override() {
   test_script_uses_factory_bin_override \
     "$PROJECT_DIR/tests/behaviors/operations/test-work-task-run.sh" \
-    "work create"
+    "work-item create"
 }
 
 test_version_uses_factory_bin_override() {

@@ -46,10 +46,10 @@ require_in_file "$SKILL" \
   'Run the Attempt' \
   "build-in-the-factory skill"
 require_in_file "$SKILL" \
-  'factory work merge-candidate <work-item-id> <merge-candidate-id>' \
+  'factory merge-candidate show <work-item-id> <merge-candidate-id>' \
   "build-in-the-factory skill"
 require_in_file "$SKILL" \
-  'Land through `factory work merge <work-item-id>' \
+  'Land through `factory merge-candidate land <work-item-id>' \
   "build-in-the-factory skill"
 require_in_file "$SKILL" \
   "unrelated work that can proceed in parallel" \

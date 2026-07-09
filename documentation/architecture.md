@@ -19,7 +19,7 @@ from intent capture through execution and review across multiple sessions.
 │  Teaches agents the full workflow               │
 ├─────────────────────────────────────────────────┤
 │  Factory command                                │
-│  factory work / status / dashboard / cleanup    │
+│  factory <noun> <verb> / status / dashboard      │
 │  factory fargate teardown / init / version      │
 │  factory keep-awake on / off / status           │
 │  Deterministic, operational                     │
@@ -52,13 +52,13 @@ Attempt, Task, Workspace, and Merge Candidate. This model is documented
 and represented in Rust so scheduling, status, review, and merge paths
 use the same vocabulary.
 
-`factory work task run <work-item-id> <attempt-id> <task-id>` executes a
-stored write or review Task through the selected coder, `factory work
+`factory task run <work-item-id> <attempt-id> <task-id>` executes a
+stored write or review Task through the selected coder, `factory
 attempt run <work-item-id> <attempt-id>` advances an Attempt through safe
-write and review transitions, and `factory work merge <work-item-id>
+write and review transitions, and `factory merge-candidate land <work-item-id>
 <merge-candidate-id>` executes a stored Merge Candidate.
 
-`factory work create <id> --title <title>` exposes the first Work Item
+`factory work-item create <id> --title <title>` exposes the first Work Item
 intake surface. It writes Work Item metadata under
 `.factory/work/items/` and leaves Attempt, Task, and Merge Candidate
 collections empty. It does not schedule work.
@@ -66,20 +66,20 @@ Callers may attach approved planning context directly to the Work Item with
 `--planning-context <text>`, `--planning-context-file <path>`, or
 separate `--brief-file`, `--behaviors-file`, `--approach-file`, and
 `--plan-file` inputs. Factory stores that context as optional
-`WorkItem.planning_context` so `factory work show <id>` exposes the
+`WorkItem.planning_context` so `factory work-item show <id>` exposes the
 brief, behaviors, approach, and plan that write Tasks use. Planning
 skills treat this Work Item planning context as the normal handoff to
 delegated Work execution. Callers may also pass explicit prompt text with `--instructions <text>` or
 `--instructions-file <path>`; Factory stores that text as optional
 `WorkItem.instructions` and gives it precedence over derived planning
-context when it creates write Task instructions. `factory work attempt
+context when it creates write Task instructions. `factory attempt create
 <work-item-id> <attempt-id>` creates the first operational transition
 from intake: it appends a planned Attempt with one initial `write` Task.
 The Task declares role `author`, copies explicit Work Item instructions
 or derives instructions from Work Item planning context into optional
 `Task.instructions`, and declares one writable workspace reference at
 `../work-<work-item-id-byte-len>-<work-item-id>-<attempt-id>`.
-`factory work task run` creates or reuses that writable workspace as a
+`factory task run` creates or reuses that writable workspace as a
 sibling git worktree beside the source checkout, runs the coder there,
 and completes the Task only after the workspace is clean and contains a
 new commit produced after Factory bound the workspace for that Task run.
@@ -88,7 +88,7 @@ portability, resolves them through the source checkout parent at
 execution time, and rejects writable Task workspace paths outside the
 expected managed sibling workspace before it creates or binds a
 worktree.
-`factory work review <work-item-id> <attempt-id>` appends planned
+`factory review <work-item-id> <attempt-id>` appends planned
 `review` Tasks for the default reviewer set after a completed write Task
 exists. Each review Task reads the candidate workspace, carries review
 context copied from the write output, and writes only under
@@ -100,7 +100,7 @@ rediscovering the author Task. Running a review Task requires
 `review.md` in that artifact area; the Task can complete even when that
 artifact says `Verdict: fail` or `Verdict: uncertain` because verdict
 acceptance belongs to later review or merge policy.
-`factory work review-codebase <work-item-id> <attempt-id>` appends a
+`factory review codebase <work-item-id> <attempt-id>` appends a
 review-only Attempt for full-codebase review of the current source
 checkout. Review-only Attempts contain review Tasks only, read the source
 checkout through workspace id `source` at path `.`, and write artifacts
@@ -115,8 +115,8 @@ If a reviewer changes source HEAD, the guard resets HEAD before failing
 the Task. If a reviewer changes source files or protected `.factory/`
 state outside the Task artifact area, the guard restores protected
 checkout state before failing the Task. This restorative guard applies
-only to interactive `ReviewOnly` Attempts (e.g. `factory work
-review-codebase`).
+only to interactive `ReviewOnly` Attempts (e.g. `factory review
+codebase`).
 
 Post-merge review Attempts use `AttemptKind::PostMergeReview` and a
 non-restoring `PostMergeSourceGuard`. This guard verifies that the
@@ -129,7 +129,7 @@ review Tasks with a clear error and does not attempt restoration.
 
 When a review round includes a candidate workspace, Factory creates a
 `TaskKind::Tester` Task alongside the reviewer Tasks. The Tester is a
-deterministic subcommand (`factory work tester run`) that reads
+deterministic subcommand (`factory tester run`) that reads
 `.factory/tester.yaml` from the candidate workspace, runs each declared
 test command sequentially, invokes `.factory/extract-tester-results` to
 normalize the raw output into per-test entries, and writes
@@ -153,7 +153,7 @@ overrides the built-in detection when present. Review-only and
 post-merge review Attempts skip this step because they review the source
 checkout, not a candidate with writer-produced build outputs.
 
-`factory work attempt run <work-item-id> <attempt-id>` is the first
+`factory attempt run <work-item-id> <attempt-id>` is the first
 Attempt-level orchestration path. It advances one Attempt by running the
 next planned write Task serially through the Task executor, or by running
 planned review Tasks in parallel with concurrency limited to
@@ -200,7 +200,7 @@ state `passed` and does not create a Merge Candidate. Any fail marks the
 Attempt failed with review state `failed` and does not create a follow-up
 write Task. Uncertain verdicts without failures mark the Attempt
 `needs-user` and write the same Work handoff artifact.
-`factory work list` and `factory work show <id>` expose the same durable
+`factory work-item list` and `factory work-item show <id>` expose the same durable
 Work Item model for inspection. These commands use `.factory/work/items/`
 through the Rust storage model and validate stored objects.
 `factory status` and `factory dashboard` use Work Items as the default
@@ -216,9 +216,9 @@ receives those instructions from explicit Work Item instructions first,
 or from rendered Work Item planning context when explicit instructions
 are absent. Extra arguments passed after `--` remain coder flags only;
 Factory does not append them as additional prompt text.
-`factory work merge-candidate <work-item-id> <merge-candidate-id>` prints
+`factory merge-candidate show <work-item-id> <merge-candidate-id>` prints
 one stored Merge Candidate as pretty JSON. This command only reads the
-boundary object. `factory work merge <work-item-id> <merge-candidate-id>`
+boundary object. `factory merge-candidate land <work-item-id> <merge-candidate-id>`
 executes a Merge Candidate that still needs to land: it invokes an agent
 to rebase the candidate workspace against the target branch, regenerates
 post-rebase provenance, runs configured pre-merge checks in the candidate
@@ -241,7 +241,7 @@ Attempt's Task list, the per-Task prompt logs, and the per-Task artifact
 directories. The agent may squash, reorder, reword, or drop redundant
 commits during rebase as long as all pre-rebase content changes are
 preserved. No project hooks run during the rebase step; `fix-pre-merge`
-continues to own post-rebase cleanup. Re-running `factory work merge`
+continues to own post-rebase cleanup. Re-running `factory merge-candidate land`
 after a failed rebase creates a new rebase Task (with an incremented
 suffix) and operates on the candidate workspace in its current state.
 
@@ -301,7 +301,7 @@ reviewer launch panic), Factory invokes the same Coder used at
 Attempt time against the candidate workspace, passing the failed
 merge review artifact paths as input, asking the coder to address
 the findings and commit. After the follow-up writer commits, the
-loop restarts at rebase. One `factory work merge` invocation may
+loop restarts at rebase. One `factory merge-candidate land` invocation may
 advance at most `MAX_MERGE_FOLLOWUP_WRITES_PER_INVOCATION = 2`
 follow-up write cycles. If a third round would be needed, Factory
 marks the Merge Candidate `needs-user`, writes a handoff under
@@ -382,7 +382,7 @@ endpoint is known.
 defaults to a dry run and only mutates state with `--apply`. A Work Item
 is eligible when every Attempt is terminal, every Task in those Attempts
 is terminal, and every Merge Candidate is terminal. Operators can also
-run `factory work abandon <work-item-id> [--reason <text>]` to mark a
+run `factory work-item abandon <work-item-id> [--reason <text>]` to mark a
 stale Work Item as intentionally abandoned; cleanup treats that marker as
 terminal only when no Attempt is executing or reviewing, no Task is
 executing, and no Merge Candidate is reviewing or merging. Cleanup removes
@@ -575,7 +575,7 @@ with the operator-provided reason. Attempts live in
 `tasks/<work-item-id>/<attempt-id>/<task-id>.json`, and Merge Candidates
 live in `merge-candidates/<work-item-id>/<merge-candidate-id>.json`.
 `WorkModelStore` assembles those split records into the public
-`WorkItem` shape from `factory::work_model` for `factory work show`,
+`WorkItem` shape from `factory::work_model` for `factory work-item show`,
 status, dashboard, task execution, review, merge, and cleanup.
 If an item file contains nested Attempts, Tasks, or Merge Candidates,
 Factory ignores those nested operational collections and exposes only
@@ -763,8 +763,8 @@ billing. The entrypoint also unsets `OPENAI_API_KEY` and rejects any
 
 The Fargate run image builds the Rust Factory binary during the Docker
 image build and copies it to `/usr/local/bin/factory`; the task
-entrypoint dispatches to `factory work attempt run` or
-`factory work merge` depending on the mode.
+entrypoint dispatches to `factory attempt run` or
+`factory merge-candidate land` depending on the mode.
 
 Sandboxed local Claude runs refresh Claude OAuth credentials outside the
 sandbox at session boundaries. Sandboxed local Codex runs do not use that
@@ -836,7 +836,7 @@ Local machine                    Fargate task
 1. upload project workspace → S3
 2. start ECS task ───────────►
                                  3. pull workspace from S3
-                                 4. factory work attempt run
+                                 4. factory attempt run
                                     --no-sandbox --coder $CODER
                                     <work-item> <attempt>
                                  5. Factory launches coder
@@ -915,15 +915,15 @@ worktree, no wrapper directories.
 Commands:
 
 ```
-factory work attempt run   --runtime fargate <work-item-id> <attempt-id>
-factory work attempt watch                   <work-item-id> <attempt-id>
-factory work attempt pull                    <work-item-id> <attempt-id>
-factory work attempt stop                    <work-item-id> <attempt-id>
+factory attempt run   --runtime fargate <work-item-id> <attempt-id>
+factory attempt watch                   <work-item-id> <attempt-id>
+factory attempt pull                    <work-item-id> <attempt-id>
+factory attempt stop                    <work-item-id> <attempt-id>
 
-factory work merge   --runtime fargate <work-item-id> <candidate-id>
-factory work merge-watch                <work-item-id> <candidate-id>
-factory work merge-pull                 <work-item-id> <candidate-id>
-factory work merge-stop                 <work-item-id> <candidate-id>
+factory merge-candidate land  --runtime fargate <work-item-id> <candidate-id>
+factory merge-candidate watch                   <work-item-id> <candidate-id>
+factory merge-candidate pull                    <work-item-id> <candidate-id>
+factory merge-candidate stop                    <work-item-id> <candidate-id>
 ```
 
 The local launcher uploads the project workspace to
@@ -1254,8 +1254,8 @@ the common git directory.
 `auto_merge.rs` is a long-lived polling process that watches Work
 Items for merge-ready Merge Candidates and fires
 `work_merge_executor::merge_candidate` automatically. Two modes:
-single Work Item (`factory work auto-merge <id>`) or all Work Items
-(`factory work auto-merge --all`). The watcher polls every 30
+single Work Item (`factory auto-merge <id>`) or all Work Items
+(`factory auto-merge --all`). The watcher polls every 30
 seconds (configurable via `--poll-seconds`).
 
 A candidate is merge-ready when the latest Attempt has
@@ -1445,15 +1445,15 @@ to stderr and do not fail the Task.
 
 ### Queue substrate
 
-Work Items are queued via `factory work queue add <work-item-id>
+Work Items are queued via `factory queue add <work-item-id>
 [--priority N]`. Each entry is stored at
 `.factory/work/queue/<work-item-id>.json` with fields: `work_item_id`,
 `queued_at` (RFC 3339 UTC), `priority` (numeric, higher = sooner,
 default 0), and `status` (`queued`, `running`, `done`, `failed`,
 `needs-user`).
 
-`factory work queue list` prints entries sorted by priority descending,
-then `queued_at` ascending. `factory work queue remove` deletes the
+`factory queue list` prints entries sorted by priority descending,
+then `queued_at` ascending. `factory queue remove` deletes the
 entry file.
 
 The queue validates that the Work Item exists before creating an entry.
@@ -1461,16 +1461,16 @@ Malformed queue files are skipped with a warning.
 
 ### Sequential scheduler
 
-`factory work scheduler run` enters a polling loop that reads the queue,
+`factory scheduler run` enters a polling loop that reads the queue,
 picks the highest-priority `queued` entry, sets its status to `running`,
-creates an Attempt via `factory work attempt <id>`, and executes it via
-`factory work attempt run <id> --no-sandbox` (sandbox is disabled for
+creates an Attempt via `factory attempt create <id>`, and executes it via
+`factory attempt run <id> --no-sandbox` (sandbox is disabled for
 unattended execution).
 
 When the Attempt terminates, the scheduler updates the queue entry
 status: `done` on success, `failed` on failure, `needs-user` when human
 input is required. The scheduler does not perform merges — that is the
-job of `factory work auto-merge --all`, which runs as a sibling process.
+job of `factory auto-merge --all`, which runs as a sibling process.
 
 On SIGTERM or SIGINT while idle, the scheduler exits immediately. While
 an Attempt is running, it allows the Attempt to complete before exiting.

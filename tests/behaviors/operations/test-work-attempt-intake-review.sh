@@ -37,7 +37,7 @@ assert_fails() {
 }
 
 create_work_item() {
-  "$FACTORY_BIN" work create work-1 --title "Attempt intake" > /dev/null
+  "$FACTORY_BIN" work-item create work-1 --title "Attempt intake" > /dev/null
 }
 
 json_value() {
@@ -45,7 +45,7 @@ json_value() {
 }
 
 show_json_value() {
-  "$FACTORY_BIN" work show work-1 | jq -r "$1"
+  "$FACTORY_BIN" work-item show work-1 | jq -r "$1"
 }
 
 attempt_json_value() {
@@ -66,7 +66,7 @@ test_attempt_adds_planned_attempt() {
   create_work_item
 
   RESULT=0
-  "$FACTORY_BIN" work attempt work-1 attempt-1 > /dev/null
+  "$FACTORY_BIN" attempt create work-1 attempt-1 > /dev/null
   [ "$(attempt_json_value attempt-1 '.id')" = "attempt-1" ] || RESULT=1
   [ "$(attempt_json_value attempt-1 '.work_item_id')" = "work-1" ] || RESULT=1
   [ "$(attempt_json_value attempt-1 '.status')" = "planned" ] || RESULT=1
@@ -82,8 +82,8 @@ test_attempt_appends_to_existing_attempts() {
   create_work_item
 
   RESULT=0
-  "$FACTORY_BIN" work attempt work-1 attempt-1 > /dev/null
-  "$FACTORY_BIN" work attempt work-1 attempt-2 > /dev/null
+  "$FACTORY_BIN" attempt create work-1 attempt-1 > /dev/null
+  "$FACTORY_BIN" attempt create work-1 attempt-2 > /dev/null
   [ "$(attempt_json_value attempt-1 '.order')" = "0" ] || RESULT=1
   [ "$(attempt_json_value attempt-2 '.order')" = "1" ] || RESULT=1
   [ "$(show_json_value '.attempts | length')" = "2" ] || RESULT=1
@@ -103,7 +103,7 @@ test_attempt_adds_one_initial_write_task() {
   create_work_item
 
   RESULT=0
-  "$FACTORY_BIN" work attempt work-1 attempt-1 > /dev/null
+  "$FACTORY_BIN" attempt create work-1 attempt-1 > /dev/null
   [ "$(show_json_value '.attempts[0].tasks | length')" = "1" ] || RESULT=1
   [ "$(task_json_value attempt-1 attempt-1-write-1 '.kind')" = "write" ] || RESULT=1
 
@@ -116,7 +116,7 @@ test_initial_write_task_has_ids_and_one_writable_workspace() {
   create_work_item
 
   RESULT=0
-  "$FACTORY_BIN" work attempt work-1 attempt-1 > /dev/null
+  "$FACTORY_BIN" attempt create work-1 attempt-1 > /dev/null
   [ "$(task_json_value attempt-1 attempt-1-write-1 '.work_item_id')" = "work-1" ] || RESULT=1
   [ "$(task_json_value attempt-1 attempt-1-write-1 '.attempt_id')" = "attempt-1" ] || RESULT=1
   [ "$(task_json_value attempt-1 attempt-1-write-1 '.workspace_access.reads | length')" = "0" ] || RESULT=1
@@ -130,7 +130,7 @@ test_missing_work_item_does_not_create_state() {
   setup_test_project
 
   RESULT=0
-  assert_fails "$FACTORY_BIN" work attempt missing-work attempt-1 || RESULT=1
+  assert_fails "$FACTORY_BIN" attempt create missing-work attempt-1 || RESULT=1
   if [ -e .factory/work/items/missing-work.json ]; then
     printf '    FAIL: missing Work Item command created Work Item state\n'
     RESULT=1
@@ -143,11 +143,11 @@ test_missing_work_item_does_not_create_state() {
 test_duplicate_attempt_id_leaves_item_unchanged() {
   setup_test_project
   create_work_item
-  "$FACTORY_BIN" work attempt work-1 attempt-1 > /dev/null
+  "$FACTORY_BIN" attempt create work-1 attempt-1 > /dev/null
 
   RESULT=0
   BEFORE="$(cat .factory/work/items/work-1.json)"
-  assert_fails "$FACTORY_BIN" work attempt work-1 attempt-1 || RESULT=1
+  assert_fails "$FACTORY_BIN" attempt create work-1 attempt-1 || RESULT=1
   AFTER="$(cat .factory/work/items/work-1.json)"
   [ "$AFTER" = "$BEFORE" ] || RESULT=1
 
@@ -161,8 +161,8 @@ test_invalid_ids_leave_work_item_state_unchanged() {
 
   RESULT=0
   BEFORE="$(cat .factory/work/items/work-1.json)"
-  assert_fails "$FACTORY_BIN" work attempt ../escape attempt-1 || RESULT=1
-  assert_fails "$FACTORY_BIN" work attempt work-1 ../escape || RESULT=1
+  assert_fails "$FACTORY_BIN" attempt create ../escape attempt-1 || RESULT=1
+  assert_fails "$FACTORY_BIN" attempt create work-1 ../escape || RESULT=1
   AFTER="$(cat .factory/work/items/work-1.json)"
   [ "$AFTER" = "$BEFORE" ] || RESULT=1
 
@@ -173,10 +173,10 @@ test_invalid_ids_leave_work_item_state_unchanged() {
 test_show_prints_attempt_and_task_as_pretty_json() {
   setup_test_project
   create_work_item
-  "$FACTORY_BIN" work attempt work-1 attempt-1 > /dev/null
+  "$FACTORY_BIN" attempt create work-1 attempt-1 > /dev/null
 
   RESULT=0
-  "$FACTORY_BIN" work show work-1 > "$TEST_DIR/show.json"
+  "$FACTORY_BIN" work-item show work-1 > "$TEST_DIR/show.json"
   grep -q '^{' "$TEST_DIR/show.json" || RESULT=1
   grep -q '^  "id": "work-1"' "$TEST_DIR/show.json" || RESULT=1
   [ "$(jq -r '.id' "$TEST_DIR/show.json")" = "work-1" ] || RESULT=1

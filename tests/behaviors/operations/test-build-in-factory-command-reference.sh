@@ -23,7 +23,6 @@ fi
 
 required_commands=(
   "factory status"
-  "factory work"
   "factory cleanup"
 )
 
@@ -41,6 +40,8 @@ deleted_commands=(
   "factory resume"
   "factory pull"
   "factory shell"
+  "factory work "
+  "factory observations "
 )
 
 for command in "${deleted_commands[@]}"; do
@@ -51,10 +52,11 @@ for command in "${deleted_commands[@]}"; do
 done
 
 for phrase in \
-  "factory work attempt" \
-  "factory work merge-candidate" \
-  "factory work merge" \
-  "factory work create"
+  "factory attempt create" \
+  "factory attempt run" \
+  "factory merge-candidate show" \
+  "factory merge-candidate land" \
+  "factory work-item create"
 do
   if ! grep -Fq "$phrase" "$SKILL"; then
     echo "missing Work-model command: ${phrase}" >&2

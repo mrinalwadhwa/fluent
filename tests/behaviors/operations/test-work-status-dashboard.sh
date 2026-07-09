@@ -120,8 +120,8 @@ capture_dashboard_after_poll_mutation() {
 }
 
 create_planned_work_item() {
-  "$FACTORY_BIN" work create work-visible --title "Visible Work" > /dev/null
-  "$FACTORY_BIN" work attempt work-visible attempt-visible > /dev/null
+  "$FACTORY_BIN" work-item create work-visible --title "Visible Work" > /dev/null
+  "$FACTORY_BIN" attempt create work-visible attempt-visible > /dev/null
 }
 
 write_mock_claude() {
@@ -162,19 +162,19 @@ MOCK_SCRIPT
 
 create_merge_ready_work_item() {
   write_mock_claude
-  "$FACTORY_BIN" work create work-action --title "Actionable Work" > /dev/null
-  "$FACTORY_BIN" work attempt work-action attempt-action > /dev/null
+  "$FACTORY_BIN" work-item create work-action --title "Actionable Work" > /dev/null
+  "$FACTORY_BIN" attempt create work-action attempt-action > /dev/null
   PATH="${TEST_DIR}/bin:$PATH" \
-    "$FACTORY_BIN" work attempt run work-action attempt-action --no-sandbox \
+    "$FACTORY_BIN" attempt run work-action attempt-action --no-sandbox \
       > "$TEST_DIR/attempt-run-stdout" 2> "$TEST_DIR/attempt-run-stderr"
 }
 
 create_needs_user_work_item() {
   write_uncertain_mock_claude
-  "$FACTORY_BIN" work create work-needs-user --title "Needs User Work" > /dev/null
-  "$FACTORY_BIN" work attempt work-needs-user attempt-needs-user > /dev/null
+  "$FACTORY_BIN" work-item create work-needs-user --title "Needs User Work" > /dev/null
+  "$FACTORY_BIN" attempt create work-needs-user attempt-needs-user > /dev/null
   PATH="${TEST_DIR}/bin:$PATH" \
-    "$FACTORY_BIN" work attempt run work-needs-user attempt-needs-user --no-sandbox \
+    "$FACTORY_BIN" attempt run work-needs-user attempt-needs-user --no-sandbox \
       > "$TEST_DIR/needs-user-stdout" 2> "$TEST_DIR/needs-user-stderr"
 }
 
@@ -224,8 +224,8 @@ test_status_surfaces_needs_user_state() {
 test_status_surfaces_abandoned_work_as_terminal() {
   setup_test_project
   trap cleanup_test_project RETURN
-  "$FACTORY_BIN" work create work-abandoned --title "Abandoned Work" > /dev/null
-  "$FACTORY_BIN" work attempt work-abandoned attempt-abandoned > /dev/null
+  "$FACTORY_BIN" work-item create work-abandoned --title "Abandoned Work" > /dev/null
+  "$FACTORY_BIN" attempt create work-abandoned attempt-abandoned > /dev/null
   python3 - <<'PY'
 import json
 from pathlib import Path
@@ -240,7 +240,7 @@ task = json.loads(task_path.read_text())
 task["status"] = "needs-user"
 task_path.write_text(json.dumps(task, indent=2) + "\n")
 PY
-  "$FACTORY_BIN" work abandon work-abandoned --reason "replacement landed" > /dev/null
+  "$FACTORY_BIN" work-item abandon work-abandoned --reason "replacement landed" > /dev/null
 
   RESULT=0
   OUTPUT="$("$FACTORY_BIN" status 2>&1)"
@@ -290,7 +290,7 @@ test_dashboard_refreshes_work_items_on_poll() {
   RESULT=0
   OUTPUT="$(capture_dashboard_after_poll_mutation \
     "$TEST_DIR/project" \
-    "'$FACTORY_BIN' work create work-polled --title 'Polled Work' > /dev/null" \
+    "'$FACTORY_BIN' work-item create work-polled --title 'Polled Work' > /dev/null" \
     "work-visible - Visible Work" \
     "work-polled - Polled Work")"
   FINAL_OUTPUT="$(printf '%s' "$OUTPUT" | clean_dashboard_output_tail)"

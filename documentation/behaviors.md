@@ -34,7 +34,7 @@ Test: tests/behaviors/operations/test-version.sh
 
 ### B1
 
-WHEN `factory observations add "<content>"` is invoked,
+WHEN `factory observation create "<content>"` is invoked,
 THE SYSTEM SHALL write a new observation file at
 `.factory/observations/<id>.md` where `<id>` follows the format
 `YYYYMMDD-HHMMSS-<short-title>` derived from the current timestamp
@@ -45,7 +45,7 @@ Test: src/observations.rs (generate_id_includes_timestamp_and_slug)
 
 ### B2
 
-WHEN `factory observations add` is invoked without an inline content
+WHEN `factory observation create` is invoked without an inline content
 argument,
 THE SYSTEM SHALL read the observation body from stdin and SHALL fail
 with a clear error if stdin is empty.
@@ -54,7 +54,7 @@ Test: tests/binary.rs (observations_add_empty_stdin_errors)
 
 ### B3
 
-WHEN two `factory observations add` invocations would generate the
+WHEN two `factory observation create` invocations would generate the
 same `<id>` (same second, same first-line title),
 THE SYSTEM SHALL suffix the second with a counter
 (`YYYYMMDD-HHMMSS-<short-title>-2`) so the resulting filenames are
@@ -64,7 +64,7 @@ Test: src/observations.rs (migrate_collision_suffixes)
 
 ### B4
 
-WHEN `factory observations resolve <id> "<resolution>"` is invoked
+WHEN `factory observation resolve <id> "<resolution>"` is invoked
 and `<id>` matches exactly one file under `.factory/observations/`,
 THE SYSTEM SHALL append the resolution context to the file
 (preserving the existing observation content) and move the file to
@@ -73,7 +73,7 @@ Test: tests/binary.rs (observations_resolve_inline)
 
 ### B5
 
-WHEN `factory observations resolve <id>` is invoked without an inline
+WHEN `factory observation resolve <id>` is invoked without an inline
 resolution argument,
 THE SYSTEM SHALL read the resolution body from stdin and SHALL fail
 with a clear error if stdin is empty.
@@ -105,7 +105,7 @@ Test: src/observations.rs (expand_prefix_ambiguous)
 
 ### B9
 
-WHEN `factory observations list` is invoked,
+WHEN `factory observation list` is invoked,
 THE SYSTEM SHALL print one line per open observation under
 `.factory/observations/`, ordered by id ascending (chronological), in
 the format `<id>  <first line of body>`.
@@ -113,7 +113,7 @@ Test: tests/binary.rs (observations_list_orders_chronologically)
 
 ### B10
 
-WHEN `factory observations show <id>` is invoked,
+WHEN `factory observation show <id>` is invoked,
 THE SYSTEM SHALL print the body of the observation at
 `.factory/observations/<id>.md` if present, otherwise at
 `.factory/observations/resolved/<id>.md`, on stdout.
@@ -121,7 +121,7 @@ Test: tests/binary.rs (observations_show_open_and_resolved)
 
 ### B11
 
-WHEN `factory observations migrate` is invoked with monolithic
+WHEN `factory observation migrate` is invoked with monolithic
 observation files present,
 THE SYSTEM SHALL split `.factory/observations.md` and
 `.factory/observations-resolved.md` into one file per observation
@@ -134,7 +134,7 @@ Test: src/observations.rs (migrate_idempotent)
 
 ### B12
 
-WHEN `factory observations migrate` is invoked with no monolithic
+WHEN `factory observation migrate` is invoked with no monolithic
 observation files present,
 THE SYSTEM SHALL exit successfully without creating or modifying files.
 Test: tests/binary.rs (observations_migrate_splits_monolithic_files)
@@ -156,7 +156,7 @@ Test: src/work_model.rs (concurrent_writes_to_distinct_work_items_do_not_race)
 
 ### B2
 
-WHEN `factory work create <id> --title <title>` is invoked from a
+WHEN `factory work-item create <id> --title <title>` is invoked from a
 directory,
 THE SYSTEM SHALL create `.factory/work/items/<id>.json` containing Work
 Item metadata with that id and title, while Attempts, Tasks, and Merge
@@ -166,7 +166,7 @@ Test: tests/behaviors/operations/test-work-inspection.sh (work create writes min
 
 ### B3
 
-IF `factory work create <id> --title <title>` is invoked for an
+IF `factory work-item create <id> --title <title>` is invoked for an
 existing Work Item id,
 THEN THE SYSTEM SHALL exit non-zero and leave the existing Work Item
 unchanged.
@@ -175,7 +175,7 @@ Test: tests/behaviors/operations/test-work-inspection.sh (work create existing i
 
 ### B4
 
-IF `factory work create <id> --title <title>` is invoked with an invalid
+IF `factory work-item create <id> --title <title>` is invoked with an invalid
 Work Item id,
 THEN THE SYSTEM SHALL exit non-zero and not write a Work Item file.
 Test: tests/binary.rs (work_create_rejects_invalid_work_item_id)
@@ -184,25 +184,25 @@ Test: tests/behaviors/operations/test-work-inspection.sh (work create invalid id
 ### B5
 
 WHEN a Work Item is created through intake,
-THE SYSTEM SHALL make it visible through `factory work list` and
-`factory work show <id>`.
+THE SYSTEM SHALL make it visible through `factory work-item list` and
+`factory work-item show <id>`.
 Test: tests/binary.rs (work_create_item_is_visible_through_list_and_show)
 Test: tests/behaviors/operations/test-work-inspection.sh (work create item is visible)
 
 ### B6
 
-WHEN `factory work create` is invoked with rich instructions,
+WHEN `factory work-item create` is invoked with rich instructions,
 THE SYSTEM SHALL persist those instructions in stored Work Item state and
-make them visible through `factory work show <id>`.
+make them visible through `factory work-item show <id>`.
 Test: tests/binary.rs (work_create_persists_instructions_and_attempt_copies_them_to_write_task)
 Test: tests/behaviors/operations/test-work-inspection.sh (work create persists instructions)
 
 ### B7
 
-WHEN `factory work create` is invoked with approved planning context,
+WHEN `factory work-item create` is invoked with approved planning context,
 THE SYSTEM SHALL persist the brief, behaviors, approach, and plan context
 in stored Work Item state and make that context visible through
-`factory work show <id>`.
+`factory work-item show <id>`.
 Test: tests/binary.rs (work_create_persists_planning_context_and_attempt_copies_it_to_write_task)
 
 ### B8
@@ -210,13 +210,13 @@ Test: tests/binary.rs (work_create_persists_planning_context_and_attempt_copies_
 WHEN planning skills describe how to pass approved planning context to
 delegated Work execution,
 THE SYSTEM SHALL describe Work Item planning context through
-`factory work create --brief-file --behaviors-file --approach-file
+`factory work-item create --brief-file --behaviors-file --approach-file
 --plan-file` as the path for storing approved planning context.
 Test: tests/behaviors/operations/test-planning-skills-work-context.sh
 
 ### B9
 
-WHEN `factory work list` is invoked,
+WHEN `factory work-item list` is invoked,
 THE SYSTEM SHALL read stored Work Items from `.factory/work/items/` and
 assemble Attempts, Tasks, and Merge Candidates only from their split
 collections before printing each Work Item with its id and title.
@@ -233,21 +233,21 @@ Test: tests/work_model_external.rs (work_model_store_ignores_nested_operational_
 
 ### B11
 
-WHEN `factory work list` is invoked and no Work Items exist,
+WHEN `factory work-item list` is invoked and no Work Items exist,
 THE SYSTEM SHALL print an empty-state message and exit successfully.
 Test: tests/binary.rs (work_list_empty_state_succeeds_without_work_items)
 Test: tests/behaviors/operations/test-work-inspection.sh (work list prints empty state)
 
 ### B12
 
-WHEN `factory work show <id>` is invoked for a stored Work Item,
+WHEN `factory work-item show <id>` is invoked for a stored Work Item,
 THE SYSTEM SHALL print the Work Item as deterministic pretty JSON.
 Test: tests/binary.rs (work_show_outputs_pretty_json_for_one_work_item)
 Test: tests/behaviors/operations/test-work-inspection.sh (work show prints pretty JSON)
 
 ### B13
 
-IF `factory work show <id>` is invoked for a missing Work Item,
+IF `factory work-item show <id>` is invoked for a missing Work Item,
 THEN THE SYSTEM SHALL exit non-zero and report that the Work Item was
 not found.
 Test: tests/binary.rs (work_show_missing_item_reports_not_found)
@@ -255,7 +255,7 @@ Test: tests/behaviors/operations/test-work-inspection.sh (work show missing item
 
 ### B14
 
-WHEN `factory work abandon <id>` is invoked for a stored Work Item
+WHEN `factory work-item abandon <id>` is invoked for a stored Work Item
 without executing or reviewing Attempts, executing Tasks, reviewing
 Merge Candidates, or executing Merge Candidate merges,
 THE SYSTEM SHALL record durable Work Item abandonment state and persist
@@ -265,14 +265,14 @@ Test: tests/behaviors/operations/test-work-inspection.sh (work abandon persists 
 
 ### B15
 
-IF `factory work abandon <id>` is invoked for a missing Work Item,
+IF `factory work-item abandon <id>` is invoked for a missing Work Item,
 THEN THE SYSTEM SHALL exit non-zero, report that the Work Item was not
 found, and leave Work state unchanged.
 Test: tests/behaviors/operations/test-work-inspection.sh (work abandon missing item fails)
 
 ### B16
 
-IF `factory work abandon <id>` is invoked for a Work Item with an
+IF `factory work-item abandon <id>` is invoked for a Work Item with an
 executing or reviewing Attempt, executing Task, reviewing Merge
 Candidate, or executing Merge Candidate merge,
 THEN THE SYSTEM SHALL exit non-zero and leave Work Item state unchanged.
@@ -321,7 +321,7 @@ Test: tests/binary.rs (work_list_empty_state_succeeds_without_work_items)
 
 ### B20
 
-WHEN `factory work attempt <work-item-id>` is invoked without an
+WHEN `factory attempt create <work-item-id>` is invoked without an
 attempt-id positional argument,
 THE SYSTEM SHALL create an Attempt with id `attempt-N` where N is the
 smallest positive integer such that no Attempt with that id exists on
@@ -336,7 +336,7 @@ Test: tests/binary.rs (work_attempt_auto_id_fills_gap)
 
 ### B21
 
-WHEN `factory work attempt <work-item-id> <attempt-id>` is invoked with
+WHEN `factory attempt create <work-item-id> <attempt-id>` is invoked with
 an explicit attempt-id,
 THE SYSTEM SHALL create the Attempt with that exact id.
 Test: tests/binary.rs (work_attempt_adds_planned_attempt_with_initial_write_task)
@@ -344,7 +344,7 @@ Test: tests/binary.rs (work_attempt_explicit_id_still_works)
 
 ### B22
 
-WHEN `factory work attempt run <work-item-id>` is invoked without an
+WHEN `factory attempt run <work-item-id>` is invoked without an
 attempt-id,
 THE SYSTEM SHALL operate on the most recently created Attempt of the
 Work Item.
@@ -352,14 +352,14 @@ Test: src/work_model.rs (latest_attempt_id_returns_last)
 
 ### B23
 
-WHEN `factory work attempt run <work-item-id> <attempt-id>` is invoked
+WHEN `factory attempt run <work-item-id> <attempt-id>` is invoked
 with an explicit attempt-id,
 THE SYSTEM SHALL operate on that exact Attempt.
 Test: tests/binary.rs (work_attempt_explicit_id_still_works)
 
 ### B24
 
-WHEN `factory work merge <work-item-id>` is invoked without a
+WHEN `factory merge-candidate land <work-item-id>` is invoked without a
 merge-candidate-id,
 THE SYSTEM SHALL operate on the most recently created Merge Candidate
 of the Work Item.
@@ -367,14 +367,14 @@ Test: src/work_model.rs (latest_merge_candidate_id_returns_last)
 
 ### B25
 
-WHEN `factory work merge <work-item-id> <merge-candidate-id>` is
+WHEN `factory merge-candidate land <work-item-id> <merge-candidate-id>` is
 invoked with an explicit merge-candidate-id,
 THE SYSTEM SHALL use that exact Merge Candidate.
 Untestable: No binary test exercises explicit merge-candidate-id; implicit latest-candidate path is tested
 
 ### B26
 
-IF `factory work attempt run <work-item-id>` is invoked without an
+IF `factory attempt run <work-item-id>` is invoked without an
 attempt-id and no Attempts exist on the Work Item,
 THEN THE SYSTEM SHALL exit non-zero with an error message explaining
 no Attempt exists to run.
@@ -382,7 +382,7 @@ Test: tests/binary.rs (work_attempt_run_no_attempts_reports_error)
 
 ### B27
 
-IF `factory work merge <work-item-id>` is invoked without a
+IF `factory merge-candidate land <work-item-id>` is invoked without a
 merge-candidate-id and no Merge Candidates exist on the Work Item,
 THEN THE SYSTEM SHALL exit non-zero with an error message explaining
 no Merge Candidate exists to merge.
@@ -390,7 +390,7 @@ Test: tests/binary.rs (work_merge_no_candidates_reports_error)
 
 ### B28
 
-WHEN `factory work attempt <work-item-id> <attempt-id>` is invoked for a
+WHEN `factory attempt create <work-item-id> <attempt-id>` is invoked for a
 stored Work Item,
 THE SYSTEM SHALL append a planned Attempt under that Work Item and create
 one initial scheduler-facing `write` Task for the Attempt.
@@ -400,7 +400,7 @@ Test: tests/behaviors/operations/test-work-attempt-intake-review.sh (attempt add
 
 ### B29
 
-WHEN `factory work attempt <work-item-id> <attempt-id>` creates the
+WHEN `factory attempt create <work-item-id> <attempt-id>` creates the
 initial `write` Task,
 THE SYSTEM SHALL give the Task role `author`, id `<attempt-id>-write`,
 the matching Work Item and Attempt ids, and exactly one writable
@@ -414,7 +414,7 @@ Test: tests/behaviors/operations/test-work-attempt-intake-review.sh (work show p
 
 ### B30
 
-WHEN `factory work attempt <work-item-id> <attempt-id>` creates the
+WHEN `factory attempt create <work-item-id> <attempt-id>` creates the
 initial `write` Task for a Work Item with instructions,
 THE SYSTEM SHALL copy those instructions to the Task so Task execution
 can build the coder prompt from durable Work model state.
@@ -423,7 +423,7 @@ Test: tests/behaviors/operations/test-work-task-instructions.sh (attempt copies 
 
 ### B31
 
-WHEN `factory work attempt <work-item-id> <attempt-id>` creates the
+WHEN `factory attempt create <work-item-id> <attempt-id>` creates the
 initial `write` Task for a Work Item with planning context and no
 explicit instructions,
 THE SYSTEM SHALL derive Task instructions from the Work Item planning
@@ -433,7 +433,7 @@ Test: tests/binary.rs (work_create_persists_planning_context_and_attempt_copies_
 
 ### B32
 
-WHEN `factory work task run <work-item-id> <attempt-id> <task-id>` is
+WHEN `factory task run <work-item-id> <attempt-id> <task-id>` is
 invoked for an existing planned `write` Task with exactly one writable
 workspace,
 THE SYSTEM SHALL create or reuse a registered git worktree at that
@@ -459,8 +459,8 @@ Test: tests/binary.rs (work_behavior_review_task_prompt_states_missing_behavior_
 
 ### B35
 
-WHEN `factory work task run <work-item-id> <attempt-id> <task-id>` or
-`factory work attempt run <work-item-id> <attempt-id>` launches a
+WHEN `factory task run <work-item-id> <attempt-id> <task-id>` or
+`factory attempt run <work-item-id> <attempt-id>` launches a
 `write` Task with stored Task instructions,
 THE SYSTEM SHALL include those instructions in the coder prompt.
 Test: tests/binary.rs (work_task_run_includes_task_instructions_in_coder_prompt)
@@ -471,8 +471,8 @@ Test: tests/behaviors/operations/test-work-task-instructions.sh (attempt run use
 
 ### B36
 
-WHEN `factory work task run <work-item-id> <attempt-id> <task-id>` or
-`factory work attempt run <work-item-id> <attempt-id>` launches a
+WHEN `factory task run <work-item-id> <attempt-id> <task-id>` or
+`factory attempt run <work-item-id> <attempt-id>` launches a
 `write` Task,
 THE SYSTEM SHALL tell the coder that the Task completes only after all
 Task output is committed and the writable workspace is clean.
@@ -481,8 +481,8 @@ Test: tests/behaviors/operations/test-work-task-run.sh (run passes Task context 
 
 ### B37
 
-WHEN `factory work task run <work-item-id> <attempt-id> <task-id>` or
-`factory work attempt run <work-item-id> <attempt-id>` launches a
+WHEN `factory task run <work-item-id> <attempt-id> <task-id>` or
+`factory attempt run <work-item-id> <attempt-id>` launches a
 `write` Task,
 THE SYSTEM SHALL tell the author to perform an upfront scope preflight
 that identifies likely touched behavior statements, user-facing docs,
@@ -588,8 +588,8 @@ Test: tests/behaviors/operations/test-behavior-bin-override.sh (operation script
 
 ### B48
 
-IF a caller passes extra args to `factory work task run` or
-`factory work attempt run`,
+IF a caller passes extra args to `factory task run` or
+`factory attempt run`,
 THE SYSTEM SHALL pass those args only as coder options and SHALL NOT
 treat them as additional task prompt content.
 Test: tests/binary.rs (work_task_run_keeps_extra_args_out_of_task_prompt)
@@ -671,7 +671,7 @@ Test: tests/binary.rs (write_task_transcript_persists_after_successful_attempt)
 
 ### B57
 
-WHEN `factory work show <work-item-id>` returns Task JSON for a
+WHEN `factory work-item show <work-item-id>` returns Task JSON for a
 completed `write` Task,
 THE SYSTEM SHALL include the `artifact_area.path` field populated with
 the expected artifact directory path.
@@ -756,7 +756,7 @@ with their own creation path not affected by this change.
 
 ### B67
 
-WHEN `factory work review <work-item-id> <attempt-id>` is invoked for an
+WHEN `factory review <work-item-id> <attempt-id>` is invoked for an
 Attempt with completed write output,
 THE SYSTEM SHALL append planned `review` Tasks that read the candidate
 workspace, declare no writable workspace, and declare artifact areas
@@ -766,7 +766,7 @@ Test: tests/behaviors/operations/test-work-task-run.sh (review planning adds rea
 
 ### B68
 
-IF `factory work review <work-item-id> <attempt-id>` is invoked for an
+IF `factory review <work-item-id> <attempt-id>` is invoked for an
 Attempt without completed write output,
 THEN THE SYSTEM SHALL exit non-zero and leave stored Work Item state
 unchanged.
@@ -775,7 +775,7 @@ Test: tests/behaviors/operations/test-work-task-run.sh (review planning requires
 
 ### B69
 
-WHEN `factory work review-codebase <work-item-id> <attempt-id>` is
+WHEN `factory review codebase <work-item-id> <attempt-id>` is
 invoked (without `--from-working-tree`) for a stored Work Item with no
 existing Attempt of that id,
 THE SYSTEM SHALL append a review-only Attempt with a planned Tester Task
@@ -787,7 +787,7 @@ Test: tests/binary.rs (work_review_codebase_default_creates_worktree_attempt_wit
 
 ### B70
 
-WHEN `factory work review-codebase <work-item-id> <attempt-id>
+WHEN `factory review codebase <work-item-id> <attempt-id>
 --from-working-tree` is invoked for a stored Work Item with no existing
 Attempt of that id,
 THE SYSTEM SHALL append a review-only Attempt with planned review Tasks
@@ -809,7 +809,7 @@ Test: tests/behaviors/operations/test-work-review-codebase.sh (review-codebase c
 
 ### B72
 
-IF `factory work review-codebase <work-item-id> <attempt-id>` is invoked
+IF `factory review codebase <work-item-id> <attempt-id>` is invoked
 for a missing Work Item or duplicate Attempt id,
 THEN THE SYSTEM SHALL exit non-zero without changing Work state.
 Test: tests/binary.rs (work_review_codebase_missing_or_duplicate_leaves_state_unchanged)
@@ -817,7 +817,7 @@ Test: tests/behaviors/operations/test-work-review-codebase.sh (review-codebase r
 
 ### B73
 
-WHEN `factory work task run <work-item-id> <attempt-id> <task-id>` is
+WHEN `factory task run <work-item-id> <attempt-id> <task-id>` is
 invoked for a planned `review` Task,
 THE SYSTEM SHALL complete the Task after the reviewer writes `review.md`
 under the Task artifact area, even when that artifact contains
@@ -828,7 +828,7 @@ Test: tests/behaviors/operations/test-work-task-run.sh (review Task with uncerta
 
 ### B74
 
-WHEN `factory work attempt run <work-item-id> <attempt-id>` is invoked
+WHEN `factory attempt run <work-item-id> <attempt-id>` is invoked
 for an Attempt with a planned write Task,
 THE SYSTEM SHALL run the write Task through the existing Task executor,
 then reload stored Work Item state before planning later transitions.
@@ -837,7 +837,7 @@ Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop passes 
 
 ### B75
 
-WHEN `factory work attempt run <work-item-id> <attempt-id>` advances a
+WHEN `factory attempt run <work-item-id> <attempt-id>` advances a
 normal Work Attempt whose initial write Task has completed and no review
 round is planned for that write output,
 THE SYSTEM SHALL plan initial review Tasks using the full Work reviewer
@@ -873,7 +873,7 @@ Test: src/work_attempt_loop.rs (unmappable_followup_inputs_fall_back_to_full_rev
 
 ### B79
 
-WHEN `factory work attempt run <work-item-id> <attempt-id>` is invoked
+WHEN `factory attempt run <work-item-id> <attempt-id>` is invoked
 for a normal Work Attempt with planned review Tasks,
 THE SYSTEM SHALL run the planned review Tasks in parallel with
 concurrency limited to `FACTORY_MAX_PARALLEL_REVIEWERS` (default 5,
@@ -883,7 +883,7 @@ Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop passes 
 
 ### B80
 
-WHEN `factory work attempt run <work-item-id> <attempt-id>` is invoked
+WHEN `factory attempt run <work-item-id> <attempt-id>` is invoked
 for a review-only Attempt whose workspace is a review-only worktree
 (`../work-review-<sanitized-branch>/`) with planned review Tasks,
 THE SYSTEM SHALL run the planned review Tasks in parallel with
@@ -893,7 +893,7 @@ Test: tests/binary.rs (post_merge_review_creates_worktree_and_runs_tester_then_r
 
 ### B81
 
-WHEN `factory work attempt run <work-item-id> <attempt-id>` is invoked
+WHEN `factory attempt run <work-item-id> <attempt-id>` is invoked
 for a review-only Attempt whose workspace is the source checkout (`.`)
 with planned review Tasks,
 THE SYSTEM SHALL run the planned review Tasks serially because reviewers
@@ -910,20 +910,20 @@ Test: src/work_attempt_loop.rs (cap_enforcement_limits_in_flight_reviewers)
 
 ### B83
 
-WHEN `factory work merge <work-item-id> <merge-candidate-id>` finishes
+WHEN `factory merge-candidate land <work-item-id> <merge-candidate-id>` finishes
 the fast-forward,
 THE SYSTEM SHALL append an entry to the post-merge review queue at
 `.factory/work/post-merge-review-queue.json` recording the target
 branch, merged commit, timestamp, source Work Item, and source Merge
-Candidate, then spawn a detached `factory work post-merge-review run`
+Candidate, then spawn a detached `factory post-merge-review run`
 child that sleeps the debounce window before reviewing. The merge
 command SHALL return immediately after spawning the child; no LLM
-reviewers run inside `factory work merge`.
+reviewers run inside `factory merge-candidate land`.
 Untestable: Requires detached process spawn with debounce timing and queue file coordination
 
 ### B84
 
-WHEN `factory work post-merge-review run` runs,
+WHEN `factory post-merge-review run` runs,
 THE SYSTEM SHALL sleep the debounce window, then for each target
 branch with a queued entry at least `debounce_seconds` old, run a
 review-only Attempt inside the review-only worktree for that branch
@@ -946,7 +946,7 @@ WHEN the post-merge review finds any reviewer artifact with a failing
 or uncertain verdict,
 THE SYSTEM SHALL create a post-merge-review-fix Work Item with the
 failed review artifacts as planning context, run its first Attempt,
-and on a successful Merge Candidate auto-invoke `factory work merge`.
+and on a successful Merge Candidate auto-invoke `factory merge-candidate land`.
 The auto-merge spawns its own detached post-merge review with
 `FACTORY_POST_MERGE_REVIEW_FIX_DEPTH` incremented; recursion stops at
 `FACTORY_MAX_POST_MERGE_REVIEW_FIX_DEPTH` (default 5).
@@ -973,14 +973,14 @@ SHALL thread the `base_commit` onto each Task's review context, and the
 review prompt SHALL then include a `git -C <worktree> diff
 <base_commit>..HEAD` review diff command so reviewers can inspect exactly
 the change that landed and triggered the review. Review-only Attempts
-without a `base_commit` (e.g., `factory work review-codebase`) SHALL omit
+without a `base_commit` (e.g., `factory review codebase`) SHALL omit
 the review diff command from the prompt.
 Test: src/work_task_executor.rs (work_review_prompt_populates_diff_command_for_post_merge_when_base_commit_present)
 Test: src/work_task_executor.rs (work_review_prompt_omits_diff_command_for_review_only_without_base_commit)
 
 ### B89
 
-WHEN `factory work review-codebase` is invoked interactively by the
+WHEN `factory review codebase` is invoked interactively by the
 user against the current source checkout,
 THE SYSTEM SHALL apply the existing restorative guard semantics:
 snapshot non-Factory worktree state and protected `.factory/`
@@ -1083,7 +1083,7 @@ Untestable: Requires a candidate workspace with a detected toolchain build direc
 
 ### B100
 
-WHEN `factory work attempt run <work-item-id> <attempt-id>` is invoked
+WHEN `factory attempt run <work-item-id> <attempt-id>` is invoked
 for a review-only Attempt whose review-only worktree is already in use
 by another in-flight review-only Attempt (state-based detection: any
 review-only-like Attempt against the same worktree whose status is
@@ -1104,7 +1104,7 @@ Test: tests/binary.rs (post_merge_review_defers_queue_entry_when_worktree_in_fli
 
 ### B102
 
-WHEN `factory work review-only-worktree prune` is invoked without
+WHEN `factory cleanup` is invoked without
 options,
 THE SYSTEM SHALL remove every registered review-only worktree
 (`../work-review-*`) whose corresponding local branch no longer exists,
@@ -1113,14 +1113,14 @@ Test: tests/binary.rs (review_only_worktree_prune_default_removes_orphan_keeps_o
 
 ### B103
 
-WHEN `factory work review-only-worktree prune --all` is invoked,
+WHEN `factory cleanup --prune-all-review-worktrees` is invoked,
 THE SYSTEM SHALL remove every registered review-only worktree present,
 regardless of whether the corresponding branch still exists.
 Test: tests/binary.rs (review_only_worktree_prune_all_removes_everything_but_in_use)
 
 ### B104
 
-IF `factory work review-only-worktree prune` would remove a review-only
+IF `factory cleanup` would remove a review-only
 worktree currently in use by an in-flight review-only Attempt,
 THEN THE SYSTEM SHALL skip that worktree and continue with the others,
 printing a notice naming the in-flight Work Item and Attempt.
@@ -1129,7 +1129,7 @@ Test: tests/binary.rs (review_only_worktree_prune_all_removes_everything_but_in_
 
 ### B105
 
-WHEN `factory work review-only-worktree prune --dry-run` is invoked
+WHEN `factory cleanup` (dry run is the default) is invoked
 (with or without `--all`),
 THE SYSTEM SHALL report the worktrees that would be removed and any
 that would be skipped (with reasons) without actually removing any, and
@@ -1138,7 +1138,7 @@ Test: tests/binary.rs (review_only_worktree_prune_dry_run_changes_nothing)
 
 ### B106
 
-WHEN `factory work review-only-worktree prune` completes (in any mode),
+WHEN `factory cleanup` completes (in any mode),
 THE SYSTEM SHALL print a summary line counting removed, skipped-in-use,
 and kept worktrees.
 Test: tests/binary.rs (review_only_worktree_prune_default_removes_orphan_keeps_others)
@@ -1147,9 +1147,9 @@ Test: tests/binary.rs (review_only_worktree_prune_dry_run_changes_nothing)
 
 ### B107
 
-WHEN `factory work post-merge-review run` starts a pass,
+WHEN `factory post-merge-review run` starts a pass,
 THE SYSTEM SHALL prune orphan review-only worktrees (the same default
-mode the manual `factory work review-only-worktree prune` command
+mode the manual `factory cleanup` command
 uses, including the "skip if in use" rule) before processing queued
 entries, and log removed and skipped paths to the post-merge review
 log.
@@ -1177,7 +1177,7 @@ Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop passes 
 
 ### B110
 
-WHEN `factory work attempt run <work-item-id> <attempt-id>` is invoked
+WHEN `factory attempt run <work-item-id> <attempt-id>` is invoked
 for a review-only Attempt with planned review Tasks,
 THE SYSTEM SHALL run those reviewer Tasks, require each reviewer to write
 its Work review artifact, and leave non-Factory source files unchanged.
@@ -1240,7 +1240,7 @@ Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop passes 
 
 ### B117
 
-IF `factory work attempt run <work-item-id> <attempt-id>` is invoked for
+IF `factory attempt run <work-item-id> <attempt-id>` is invoked for
 an Attempt whose reviews already passed and whose Merge Candidate already
 exists,
 THEN THE SYSTEM SHALL leave Work Item state unchanged and report the
@@ -1250,7 +1250,7 @@ Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop invalid
 
 ### B118
 
-WHEN `factory work merge-candidate <work-item-id> <merge-candidate-id>`
+WHEN `factory merge-candidate show <work-item-id> <merge-candidate-id>`
 is invoked,
 THE SYSTEM SHALL print the stored Merge Candidate as pretty JSON.
 Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
@@ -1258,14 +1258,14 @@ Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop passes 
 
 ### B119
 
-IF `factory work merge-candidate <work-item-id> <merge-candidate-id>` is
+IF `factory merge-candidate show <work-item-id> <merge-candidate-id>` is
 invoked for a missing Work Item or missing Merge Candidate,
 THEN THE SYSTEM SHALL exit non-zero and leave Work Item state unchanged.
 Test: tests/binary.rs (work_merge_candidate_missing_item_or_candidate_reports_error)
 
 ### B120
 
-WHEN `factory work merge <work-item-id> <merge-candidate-id>` is invoked
+WHEN `factory merge-candidate land <work-item-id> <merge-candidate-id>` is invoked
 for a stored Merge Candidate that still needs to land,
 THE SYSTEM SHALL update the candidate workspace against the target
 branch, run configured pre-merge checks, run the full merge-time reviewer
@@ -1274,7 +1274,7 @@ Test: tests/binary.rs (work_merge_candidate_lands_after_merge_time_reviews)
 
 ### B121
 
-WHEN `factory work merge <work-item-id> <merge-candidate-id>` launches a
+WHEN `factory merge-candidate land <work-item-id> <merge-candidate-id>` launches a
 merge-time reviewer for a Work Merge Candidate,
 THE SYSTEM SHALL name the exact
 `.factory/work/artifacts/<work-item-id>/<attempt-id>/<candidate-id>/merge/reviews/<role>/review.md`
@@ -1300,7 +1300,7 @@ Test: tests/binary.rs (work_merge_behavior_review_prompt_states_missing_behavior
 
 ### B124
 
-WHEN `factory work merge <work-item-id> <merge-candidate-id>` builds the
+WHEN `factory merge-candidate land <work-item-id> <merge-candidate-id>` builds the
 system prompt for a Work merge-time reviewer,
 THE SYSTEM SHALL use the reviewer prompt's `[work-system]` section when
 one exists, fall back to the raw `[system]` section otherwise, then tell
@@ -1338,7 +1338,7 @@ Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge lands 
 
 ### B128
 
-WHEN `factory work merge <work-item-id> <merge-candidate-id>` is invoked
+WHEN `factory merge-candidate land <work-item-id> <merge-candidate-id>` is invoked
 for a Merge Candidate with merge status `merged` and a stored
 `merged_commit`,
 THE SYSTEM SHALL report the stored merged commit without resolving
@@ -1348,7 +1348,7 @@ Test: tests/binary.rs (work_merge_candidate_rerun_after_cleanup_preserves_landed
 
 ### B129
 
-IF `factory work merge <work-item-id> <merge-candidate-id>` is invoked
+IF `factory merge-candidate land <work-item-id> <merge-candidate-id>` is invoked
 for a Merge Candidate whose stored provenance no longer matches the
 passed Attempt output,
 THEN THE SYSTEM SHALL leave the target branch and stored Merge Candidate
@@ -1357,7 +1357,7 @@ Test: tests/binary.rs (work_merge_candidate_rejects_stale_stored_provenance_with
 
 ### B130
 
-WHEN `factory work merge <work-item-id> <merge-candidate-id>` reaches
+WHEN `factory merge-candidate land <work-item-id> <merge-candidate-id>` reaches
 the rebase step,
 THE SYSTEM SHALL invoke an agent to perform `git rebase <target>` inside
 the candidate workspace and produce a rebased candidate-tip commit,
@@ -1370,7 +1370,7 @@ Test: tests/binary.rs (work_merge_candidate_rebases_when_target_advanced)
 WHEN the rebase step is invoked,
 THE SYSTEM SHALL record the rebase as a Task on the Attempt with its own
 ID, kind `rebase`, artifact directory, prompt log, and status, visible
-via `factory work show <work-item-id>`.
+via `factory work-item show <work-item-id>`.
 Test: tests/binary.rs (work_merge_candidate_rebases_when_target_advanced)
 
 ### B132
@@ -1431,7 +1431,7 @@ Test: tests/binary.rs (work_merge_candidate_rebases_when_target_advanced)
 ### B138
 
 WHEN the rebase Task or a subsequent merge step fails and the user
-resolves the underlying issue, then re-runs `factory work merge` for the
+resolves the underlying issue, then re-runs `factory merge-candidate land` for the
 same Merge Candidate,
 THE SYSTEM SHALL re-run the rebase step from the candidate workspace in
 its current state and SHALL NOT reject the candidate solely because
@@ -1449,7 +1449,7 @@ Test: tests/binary.rs (work_merge_candidate_rejects_target_moved_during_review)
 
 ### B140
 
-WHEN `factory work merge <work-item-id> <merge-candidate-id>` lands a
+WHEN `factory merge-candidate land <work-item-id> <merge-candidate-id>` lands a
 Merge Candidate,
 THE SYSTEM SHALL record merge status `merged`, the merged commit, and
 merge-time review artifacts on the stored Merge Candidate, then remove the
@@ -1459,7 +1459,7 @@ Test: tests/binary.rs (work_merge_candidate_lands_after_merge_time_reviews)
 
 ### B141
 
-IF merge-time reviewers fail while `factory work merge <work-item-id>
+IF merge-time reviewers fail while `factory merge-candidate land <work-item-id>
 <merge-candidate-id>` executes and the same-invocation follow-up
 write budget (`MAX_MERGE_FOLLOWUP_WRITES_PER_INVOCATION = 2`) is
 exhausted,
@@ -1495,7 +1495,7 @@ Untestable: Requires reviewer panic or launch failure during live merge executio
 ### B144
 
 IF a merge-time reviewer modifies, stages, unstages, or creates files in
-the candidate workspace while `factory work merge <work-item-id>
+the candidate workspace while `factory merge-candidate land <work-item-id>
 <merge-candidate-id>` executes,
 THEN THE SYSTEM SHALL stop before merging, leave the target branch
 unchanged, record the reviewer as non-passing, and expose an error that
@@ -1508,7 +1508,7 @@ Test: tests/behaviors/operations/test-work-merge-candidate.sh (work merge dirty 
 
 ### B145
 
-IF configured pre-merge checks fail while `factory work merge
+IF configured pre-merge checks fail while `factory merge-candidate land
 <work-item-id> <merge-candidate-id>` executes,
 THEN THE SYSTEM SHALL leave the target branch unchanged and record merge
 status `failed`, a failure reason, and check artifacts on the stored
@@ -1577,7 +1577,7 @@ Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop marks m
 
 ### B151
 
-IF a Task executor fails while `factory work attempt run` advances an
+IF a Task executor fails while `factory attempt run` advances an
 Attempt,
 THEN THE SYSTEM SHALL leave the Work Item state written by the Task
 executor intact and exit non-zero without planning later transitions.
@@ -1585,7 +1585,7 @@ Test: tests/binary.rs (work_attempt_run_stops_when_task_executor_fails)
 
 ### B152
 
-IF `factory work attempt run <work-item-id> <attempt-id>` evaluates a
+IF `factory attempt run <work-item-id> <attempt-id>` evaluates a
 completed review Task whose stored `artifact_area.path` points outside
 `.factory/work/artifacts/`,
 THEN THE SYSTEM SHALL exit non-zero and leave stored Work Item state
@@ -1594,7 +1594,7 @@ Test: tests/binary.rs (work_attempt_run_rejects_unmanaged_completed_review_artif
 
 ### B153
 
-IF `factory work attempt run <work-item-id> <attempt-id>` is invoked
+IF `factory attempt run <work-item-id> <attempt-id>` is invoked
 for a missing Work Item, invalid Work Item id, missing Attempt, or
 terminal Attempt,
 THEN THE SYSTEM SHALL exit non-zero and leave stored Work Item state
@@ -1663,7 +1663,7 @@ Test: tests/behaviors/operations/test-work-task-run.sh (invalid task requests do
 
 ### B159
 
-IF `factory work attempt <work-item-id> <attempt-id>` is invoked for a
+IF `factory attempt create <work-item-id> <attempt-id>` is invoked for a
 missing Work Item, an invalid Work Item id, a duplicate Attempt id, or
 an invalid Attempt id,
 THEN THE SYSTEM SHALL exit non-zero and leave stored Work Item state
@@ -1785,7 +1785,7 @@ WHEN the user invokes the build-in-the-factory skill for new delegated
 build work,
 THE SYSTEM SHALL teach Work Items, Attempts, Tasks, Workspaces, and Merge
 Candidates as the lifecycle, direct the user through Work Item creation,
-Attempt execution, Merge Candidate inspection, and `factory work merge`.
+Attempt execution, Merge Candidate inspection, and `factory merge-candidate land`.
 Test: tests/behaviors/operations/test-build-in-factory-work-model-guidance.sh
 
 ### B3
@@ -1925,7 +1925,7 @@ Test: src/fargate_bootstrap.rs (teardown_outcome_display_partial_keep_s3)
 
 ### B1
 
-WHEN `factory work attempt run <work-id> --runtime fargate --coder
+WHEN `factory attempt run <work-id> --runtime fargate --coder
 codex` is invoked,
 THE SYSTEM SHALL launch an ECS task using the Factory base image,
 pass `FACTORY_CODER=codex` plus the Codex auth env var as task
@@ -1935,7 +1935,7 @@ Test: src/fargate.rs (codex_overrides_include_auth_json_and_factory_coder)
 
 ### B2
 
-WHEN `factory work merge <work-id> --runtime fargate --coder codex`
+WHEN `factory merge-candidate land <work-id> --runtime fargate --coder codex`
 is invoked,
 THE SYSTEM SHALL launch an ECS task that runs the agentic rebase
 step using Codex, then proceeds through merge checks, reviews, and
@@ -2261,14 +2261,14 @@ Test: tests/binary.rs (fargate_ensure_setup_skips_project_build_when_ecr_tag_exi
 
 ### B4
 
-WHEN `factory work merge --runtime fargate` runs,
+WHEN `factory merge-candidate land --runtime fargate` runs,
 THE SYSTEM SHALL launch the ECS task using the project image whose
 tag matches the SHA-256 of `.factory/Dockerfile` at launch time.
 Untestable: Requires live ECS task launch with ECR project image
 
 ### B5
 
-WHEN `factory work merge --runtime fargate` runs and the project
+WHEN `factory merge-candidate land --runtime fargate` runs and the project
 image for the current `.factory/Dockerfile` content hash does not
 exist in ECR,
 THE SYSTEM SHALL build and push the project image (same procedure
@@ -2306,7 +2306,7 @@ Untestable: Requires Docker image build and Rust toolchain verification inside c
 IF the project's `.factory/Dockerfile` cannot be built (syntax
 error, unreachable base image, network failure during `docker
 build`),
-THEN `factory fargate ensure-setup` and `factory work merge
+THEN `factory fargate ensure-setup` and `factory merge-candidate land
 --runtime fargate` SHALL exit non-zero with a clear error that
 names the failing build step and leaves the project's ECR repo
 unchanged.
@@ -2434,7 +2434,7 @@ Test: src/work_model.rs (set_merge_candidate_terminal_round_trip)
 
 ### B9
 
-WHEN `factory work show` returns Task, Attempt, and Merge Candidate
+WHEN `factory work-item show` returns Task, Attempt, and Merge Candidate
 JSON,
 THE SYSTEM SHALL include the timestamp fields verbatim from their
 on-disk representation.
@@ -2548,9 +2548,9 @@ Test: src/work_model.rs (task_without_depends_on_omits_field)
 
 ### B1
 
-WHEN `factory work auto-merge <work-item-id>` is invoked,
+WHEN `factory auto-merge <work-item-id>` is invoked,
 THE SYSTEM SHALL poll the named Work Item's state every 30 seconds
-and fire `factory work merge <work-item-id> <merge-candidate-id>`
+and fire `factory merge-candidate land <work-item-id> <merge-candidate-id>`
 on the Work Item's latest Attempt's Merge Candidate when its
 `review_state == passed` and `merge_state.status == pending` and
 `merge_state.auto_merge_skipped` is not `true`.
@@ -2559,7 +2559,7 @@ Test: tests/binary.rs (auto_merge_exits_clean_on_sigterm)
 
 ### B2
 
-WHEN `factory work auto-merge --all` is invoked,
+WHEN `factory auto-merge --all` is invoked,
 THE SYSTEM SHALL poll every Work Item in the project every 30
 seconds and fire merge on any Merge Candidate that satisfies the
 ready conditions above. Each WI is evaluated independently each
@@ -2568,7 +2568,7 @@ Test: src/auto_merge.rs (find_ready_candidate_returns_some_when_attempt_passed_a
 
 ### B3
 
-WHEN `factory work auto-merge` is invoked with both `<work-item-id>`
+WHEN `factory auto-merge` is invoked with both `<work-item-id>`
 and `--all` set,
 THE SYSTEM SHALL exit non-zero with a clear error stating the two
 modes are mutually exclusive.
@@ -2626,14 +2626,14 @@ Test: src/auto_merge.rs (find_ready_candidate_returns_none_when_candidate_review
 
 ### B9
 
-WHEN `factory work auto-merge` receives SIGINT or SIGTERM while
+WHEN `factory auto-merge` receives SIGINT or SIGTERM while
 no merge is in progress,
 THE SYSTEM SHALL exit zero immediately.
 Test: tests/binary.rs (auto_merge_exits_clean_on_sigterm)
 
 ### B10
 
-WHEN `factory work auto-merge` receives SIGINT or SIGTERM while a
+WHEN `factory auto-merge` receives SIGINT or SIGTERM while a
 merge is in progress,
 THE SYSTEM SHALL allow the current merge invocation to complete
 (success, failure, or hang on a long agentic rebase), persist any
@@ -2645,7 +2645,7 @@ Untestable: Requires a long-running merge mock; verified by code inspection of t
 WHEN the watcher's polling tick reads Work Item state from
 `.factory/work/`,
 THE SYSTEM SHALL NOT modify any state files itself; state mutation
-happens only through `factory work merge` invocations and the
+happens only through `factory merge-candidate land` invocations and the
 store APIs those invocations call.
 Test: src/auto_merge.rs (find_ready_candidate_returns_some_when_attempt_passed_and_candidate_pending)
 
@@ -2659,14 +2659,14 @@ Test: src/auto_merge.rs (find_ready_candidate_returns_none_when_no_attempts)
 
 ### B13
 
-WHEN `factory work auto-merge` is invoked with neither a Work Item
+WHEN `factory auto-merge` is invoked with neither a Work Item
 ID nor `--all`,
 THE SYSTEM SHALL exit non-zero with a clear error.
 Test: tests/binary.rs (auto_merge_with_neither_flag_set_errors)
 
 ### B14
 
-WHEN `factory work auto-merge` runs and a Merge Candidate
+WHEN `factory auto-merge` runs and a Merge Candidate
 satisfies the ready conditions on multiple consecutive ticks,
 THE SYSTEM SHALL fire merge only once and then either mark the
 candidate skipped (on failure) or wait for the candidate to
@@ -3148,7 +3148,7 @@ tests/behaviors/operations/test-work-status-dashboard.sh (dashboard lists Work I
 
 ### B10
 
-WHEN a `factory work *` subcommand is invoked,
+WHEN a `factory <noun> <verb>` command is invoked,
 THE SYSTEM SHALL behave identically to before this Work Item
 lands. No Work-model behavior changes.
 Test: all work_* tests in tests/binary.rs (pre-existing Work model test suite)
@@ -3224,7 +3224,7 @@ Test: src/usage.rs (recompute_summary_creates_zero_summary_when_log_missing)
 
 ### B1
 
-WHEN `factory work queue add <work-item-id>` is invoked,
+WHEN `factory queue add <work-item-id>` is invoked,
 THE SYSTEM SHALL write
 `.factory/work/queue/<work-item-id>.json` with `{work_item_id,
 queued_at, priority (default 0), status: "queued"}`. If the
@@ -3238,7 +3238,7 @@ work_queue_add_existing_with_priority_updates_only_priority)
 
 ### B2
 
-WHEN `factory work queue add` is invoked with an unknown
+WHEN `factory queue add` is invoked with an unknown
 `work-item-id` (no matching `.factory/work/items/<id>.json`),
 THE SYSTEM SHALL exit non-zero with a clear error and SHALL NOT
 create the queue file.
@@ -3247,7 +3247,7 @@ Test: tests/binary.rs (work_queue_add_unknown_work_item_errors)
 
 ### B3
 
-WHEN `factory work queue list` is invoked,
+WHEN `factory queue list` is invoked,
 THE SYSTEM SHALL print each queue entry on its own line, sorted
 by `priority` descending then `queued_at` ascending, in the
 format `<priority> <queued_at> <status> <work-item-id>`.
@@ -3257,7 +3257,7 @@ Test: tests/binary.rs (work_queue_list_format_includes_priority_queued_at_status
 
 ### B4
 
-WHEN `factory work queue remove <work-item-id>` is invoked and
+WHEN `factory queue remove <work-item-id>` is invoked and
 the file exists,
 THE SYSTEM SHALL delete the file and exit zero. If the file
 does not exist, SHALL exit non-zero with a clear "not queued"
@@ -3270,13 +3270,13 @@ work_queue_remove_unknown_errors)
 
 ### B1
 
-WHEN `factory work scheduler run` is invoked,
+WHEN `factory scheduler run` is invoked,
 THE SYSTEM SHALL enter a polling loop that, on each iteration:
 reads `.factory/work/queue/`, picks the highest-priority entry
 with `status == "queued"` (ties broken by `queued_at` ascending),
 updates its `status` to `running`, and invokes the equivalent
-of `factory work attempt <work-item-id>` to create the next
-Attempt followed by `factory work attempt run <work-item-id>`
+of `factory attempt create <work-item-id>` to create the next
+Attempt followed by `factory attempt run <work-item-id>`
 to execute it.
 Test: src/scheduler.rs (pick_next_queued_returns_highest_priority_queued,
 pick_next_queued_breaks_priority_ties_by_queued_at,
@@ -3300,11 +3300,11 @@ run_one_updates_status_to_needs_user_on_needs_user_outcome)
 
 WHEN the running Attempt terminates,
 THE SYSTEM SHALL NOT invoke merge logic itself. Merging is the
-job of `factory work auto-merge --all`, which the user runs
+job of `factory auto-merge --all`, which the user runs
 separately as a sibling long-running process.
 Test: src/scheduler.rs (run_one_updates_status_to_done_on_complete_outcome
 — mock invoker does not call merge; CliAttemptInvoker invokes
-only `factory work attempt` and `factory work attempt run`)
+only `factory attempt create` and `factory attempt run`)
 
 ### B4
 
@@ -3326,7 +3326,7 @@ Test: tests/binary.rs (work_scheduler_run_exits_clean_on_sigterm_when_idle)
 WHEN the scheduler receives SIGTERM or SIGINT while an Attempt
 is mid-execution,
 THE SYSTEM SHALL allow the Attempt to complete (do not interrupt
-the child `factory work attempt run` process), update the queue
+the child `factory attempt run` process), update the queue
 entry's `status` accordingly, then exit zero.
 Test: src/scheduler.rs (signal handling uses AtomicBool checked
 at loop boundaries, not mid-invocation; run_one completes
@@ -3424,7 +3424,7 @@ Test: src/work_model.rs (resolve_coder_mapping_per_task_cli_flag_wins)
 
 WHEN Factory creates an Attempt,
 THE SYSTEM SHALL store the Attempt's coder mapping on the Attempt
-record so it can be inspected via `factory work show <work-item-id>`.
+record so it can be inspected via `factory work-item show <work-item-id>`.
 Test: src/work_model.rs (coder_mapping_round_trips_json)
 Test: src/work_model.rs (attempt_with_coder_mapping_round_trips)
 

@@ -3,12 +3,12 @@
 # Supports two dispatch modes:
 #
 #   Work Attempt mode (FACTORY_WORK_ITEM_ID + FACTORY_WORK_ATTEMPT_ID):
-#     Pull tar into /worktrees, run `factory work attempt run`, upload
+#     Pull tar into /worktrees, run `factory attempt run`, upload
 #     /worktrees back to S3.
 #
 #   Work Merge mode (FACTORY_WORK_ITEM_ID +
 #   FACTORY_WORK_MERGE_CANDIDATE_ID): same shape, runs
-#   `factory work merge` instead.
+#   `factory merge-candidate land` instead.
 #
 # Environment variables (passed as task overrides):
 #   FACTORY_S3_BUCKET                 S3 bucket for workspace transfer
@@ -152,20 +152,20 @@ fi
 
 case "$MODE" in
   work-attempt)
-    printf 'factory-run: running factory work attempt run %s %s (coder=%s)\n' \
+    printf 'factory-run: running factory attempt run %s %s (coder=%s)\n' \
       "$FACTORY_WORK_ITEM_ID" "$FACTORY_WORK_ATTEMPT_ID" "$CODER"
 
-    "$FACTORY_BIN" work attempt run \
+    "$FACTORY_BIN" attempt run \
       --no-sandbox \
       --coder "$CODER" \
       "$FACTORY_WORK_ITEM_ID" \
       "$FACTORY_WORK_ATTEMPT_ID"
     ;;
   work-merge)
-    printf 'factory-run: running factory work merge %s %s (coder=%s)\n' \
+    printf 'factory-run: running factory merge-candidate land %s %s (coder=%s)\n' \
       "$FACTORY_WORK_ITEM_ID" "$FACTORY_WORK_MERGE_CANDIDATE_ID" "$CODER"
 
-    "$FACTORY_BIN" work merge \
+    "$FACTORY_BIN" merge-candidate land \
       --no-sandbox \
       --coder "$CODER" \
       "$FACTORY_WORK_ITEM_ID" \

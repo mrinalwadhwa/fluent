@@ -74,14 +74,14 @@ assert_fails() {
 }
 
 work_json_value() {
-  "$FACTORY_BIN" work show "$1" | jq -r "$2"
+  "$FACTORY_BIN" work-item show "$1" | jq -r "$2"
 }
 
 run_write_task() {
   TASK_RUN_MOCK_MODE=commit \
     PATH="${TEST_DIR}/bin:$PATH" \
     CODER_CWD_LOG="${TEST_DIR}/coder-cwd.log" \
-    "$FACTORY_BIN" work task run --no-sandbox --coder codex \
+    "$FACTORY_BIN" task run --no-sandbox --coder codex \
       "$1" "$2" "$2-write-1"
 }
 
@@ -90,8 +90,8 @@ test_attempt_records_sibling_candidate_path() {
   trap cleanup_test_project RETURN
 
   RESULT=0
-  "$FACTORY_BIN" work create work-alpha --title "Sibling path" > /dev/null
-  "$FACTORY_BIN" work attempt work-alpha attempt-one > /dev/null
+  "$FACTORY_BIN" work-item create work-alpha --title "Sibling path" > /dev/null
+  "$FACTORY_BIN" attempt create work-alpha attempt-one > /dev/null
 
   PATH_VALUE="$(work_json_value work-alpha '.attempts[0].tasks[0].workspace_access.writes[0].path')"
   [ "$PATH_VALUE" = "../work-10-work-alpha-attempt-one" ] || RESULT=1
@@ -108,10 +108,10 @@ test_attempt_paths_include_work_item_to_avoid_collisions() {
   trap cleanup_test_project RETURN
 
   RESULT=0
-  "$FACTORY_BIN" work create work-alpha --title "First item" > /dev/null
-  "$FACTORY_BIN" work create work-beta --title "Second item" > /dev/null
-  "$FACTORY_BIN" work attempt work-alpha shared-attempt > /dev/null
-  "$FACTORY_BIN" work attempt work-beta shared-attempt > /dev/null
+  "$FACTORY_BIN" work-item create work-alpha --title "First item" > /dev/null
+  "$FACTORY_BIN" work-item create work-beta --title "Second item" > /dev/null
+  "$FACTORY_BIN" attempt create work-alpha shared-attempt > /dev/null
+  "$FACTORY_BIN" attempt create work-beta shared-attempt > /dev/null
 
   ALPHA_PATH="$(work_json_value work-alpha '.attempts[0].tasks[0].workspace_access.writes[0].path')"
   BETA_PATH="$(work_json_value work-beta '.attempts[0].tasks[0].workspace_access.writes[0].path')"
@@ -119,10 +119,10 @@ test_attempt_paths_include_work_item_to_avoid_collisions() {
   [ "$BETA_PATH" = "../work-9-work-beta-shared-attempt" ] || RESULT=1
   [ "$ALPHA_PATH" != "$BETA_PATH" ] || RESULT=1
 
-  "$FACTORY_BIN" work create work-a --title "Hyphen first" > /dev/null
-  "$FACTORY_BIN" work create work-a-b --title "Hyphen second" > /dev/null
-  "$FACTORY_BIN" work attempt work-a b-c > /dev/null
-  "$FACTORY_BIN" work attempt work-a-b c > /dev/null
+  "$FACTORY_BIN" work-item create work-a --title "Hyphen first" > /dev/null
+  "$FACTORY_BIN" work-item create work-a-b --title "Hyphen second" > /dev/null
+  "$FACTORY_BIN" attempt create work-a b-c > /dev/null
+  "$FACTORY_BIN" attempt create work-a-b c > /dev/null
 
   HYPHEN_FIRST_PATH="$(work_json_value work-a '.attempts[0].tasks[0].workspace_access.writes[0].path')"
   HYPHEN_SECOND_PATH="$(work_json_value work-a-b '.attempts[0].tasks[0].workspace_access.writes[0].path')"
@@ -139,8 +139,8 @@ test_task_run_creates_registered_sibling_worktree() {
   write_mock_codex
 
   RESULT=0
-  "$FACTORY_BIN" work create work-alpha --title "Run task" > /dev/null
-  "$FACTORY_BIN" work attempt work-alpha attempt-one > /dev/null
+  "$FACTORY_BIN" work-item create work-alpha --title "Run task" > /dev/null
+  "$FACTORY_BIN" attempt create work-alpha attempt-one > /dev/null
   run_write_task work-alpha attempt-one > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
 
   WORKSPACE_PATH="../work-10-work-alpha-attempt-one"
@@ -159,8 +159,8 @@ test_task_run_rejects_unmanaged_workspace_paths() {
   write_mock_codex
 
   RESULT=0
-  "$FACTORY_BIN" work create work-alpha --title "Reject paths" > /dev/null
-  "$FACTORY_BIN" work attempt work-alpha attempt-one > /dev/null
+  "$FACTORY_BIN" work-item create work-alpha --title "Reject paths" > /dev/null
+  "$FACTORY_BIN" attempt create work-alpha attempt-one > /dev/null
 
   TASK_RECORD=.factory/work/tasks/work-alpha/attempt-one/attempt-one-write-1.json
 
@@ -193,12 +193,12 @@ test_attempt_run_keeps_state_and_artifacts_in_source_checkout() {
   write_mock_codex
 
   RESULT=0
-  "$FACTORY_BIN" work create work-alpha --title "Attempt run" > /dev/null
-  "$FACTORY_BIN" work attempt work-alpha attempt-one > /dev/null
+  "$FACTORY_BIN" work-item create work-alpha --title "Attempt run" > /dev/null
+  "$FACTORY_BIN" attempt create work-alpha attempt-one > /dev/null
   TASK_RUN_MOCK_MODE=commit \
     PATH="${TEST_DIR}/bin:$PATH" \
     CODER_CWD_LOG="${TEST_DIR}/coder-cwd.log" \
-    "$FACTORY_BIN" work attempt run --no-sandbox --coder codex \
+    "$FACTORY_BIN" attempt run --no-sandbox --coder codex \
       work-alpha attempt-one > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
 
   [ -f .factory/work/items/work-alpha.json ] || RESULT=1

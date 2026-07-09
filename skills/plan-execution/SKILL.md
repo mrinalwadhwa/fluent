@@ -113,7 +113,7 @@ Once the user confirms, move to Work Item creation.
 For a single Work Item, `<work-item-id>` equals `<draft-id>`. Run:
 
 ```sh
-factory work create <work-item-id> \
+factory work-item create <work-item-id> \
   --title "<short title>" \
   --brief-file .factory/drafts/<draft-id>/brief.md \
   --behaviors-file .factory/drafts/<draft-id>/behaviors.diff.md \
@@ -121,7 +121,7 @@ factory work create <work-item-id> \
   --plan-file .factory/drafts/<draft-id>/plan.md
 ```
 
-For multiple Work Items, run `factory work create` once per Work Item. Each Work Item's `<work-item-id>` is `<draft-id>-<slug>`. Use its plan file at `.factory/drafts/<draft-id>/items/<slug>/plan.md`. For brief, behaviors, and approach, use the Work-Item-specific file under `items/<slug>/` if it exists, otherwise the shared file at the draft root.
+For multiple Work Items, run `factory work-item create` once per Work Item. Each Work Item's `<work-item-id>` is `<draft-id>-<slug>`. Use its plan file at `.factory/drafts/<draft-id>/items/<slug>/plan.md`. For brief, behaviors, and approach, use the Work-Item-specific file under `items/<slug>/` if it exists, otherwise the shared file at the draft root.
 
 Do not create the Attempt or run it. That belongs to the autonomous stage in `build-in-the-factory`. Stop here.
 
