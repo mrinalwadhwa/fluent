@@ -43,18 +43,23 @@ detect_triple() {
 
 resolve_latest_tag() {
   local _base_url="$1"
-  local _url="${_base_url}/latest"
 
+  # Fixture source (tests): the file at <base>/latest holds the tag verbatim.
   if printf '%s' "$_base_url" | grep -q '^file://'; then
     local _path
-    _path="$(printf '%s' "$_url" | sed 's|^file://||')"
+    _path="$(printf '%s' "${_base_url}/latest" | sed 's|^file://||')"
     cat "$_path"
     return
   fi
 
+  # GitHub: read the latest release tag from the API. The releases/latest web
+  # page is HTML, so read the JSON tag_name field instead (grep/sed, no jq).
   curl --proto '=https' --tlsv1.2 --fail --silent --location \
     --connect-timeout 10 --max-time 30 \
-    "$_url"
+    "https://api.github.com/repos/${FLUENT_REPO}/releases/latest" \
+    | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' \
+    | head -1 \
+    | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/'
 }
 
 download_asset() {
