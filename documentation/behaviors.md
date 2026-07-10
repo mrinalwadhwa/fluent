@@ -3982,6 +3982,33 @@ THEN THE SYSTEM SHALL leave a working binary in place rather than a
 partial or corrupt one.
 Test: tests/binary.rs (update_replace_leaves_working_binary_on_failure)
 
+## Project initialization
+
+### B1
+
+WHEN `fluent init` is invoked in a directory without `.fluent/`,
+THE SYSTEM SHALL create `.fluent/` with the initial directory structure,
+write a `.fluent/.gitignore`, and install skills via the default
+`fluent skills add` path.
+Test: tests/binary.rs (init_installs_full_fluent_skill)
+
+### B2
+
+WHEN `fluent init` is invoked in a directory that already has `.fluent/`,
+THE SYSTEM SHALL print "Already initialized," write a `.fluent/.gitignore`
+if absent, and still install skills via the default `fluent skills add`
+path.
+Test: tests/binary.rs (init_reinit_installs_skills)
+
+### B3
+
+IF skill installation fails during `fluent init`,
+THEN THE SYSTEM SHALL print a warning and continue without failing the
+init.
+Test: tests/binary.rs (init_installs_full_fluent_skill)
+
+---
+
 ## Skill installation
 
 ### B1
