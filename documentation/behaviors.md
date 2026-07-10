@@ -3999,3 +3999,41 @@ WHEN `npx skills add mrinalwadhwa/fluent` runs,
 THE SYSTEM SHALL install all publicly-installable skills, each
 self-contained with its SKILL.md and references.
 Test: tests/behaviors/operations/test-plugin-install.sh
+
+## Install script
+
+### B1
+
+WHEN the install script runs on a supported platform,
+THE SYSTEM SHALL install the current release binary to
+`~/.local/bin/fluent` so that `fluent version` runs successfully.
+Test: tests/behaviors/operations/test-install-script.sh (installs a runnable binary)
+
+### B2
+
+IF the platform has no published release asset,
+THEN THE SYSTEM SHALL report the platform is unsupported and exit
+without installing.
+Test: tests/behaviors/operations/test-install-script.sh (unsupported platform)
+
+### B3
+
+WHEN the install script installs and `--no-modify-path` is not set,
+THE SYSTEM SHALL add `~/.local/bin` to PATH through the user's shell
+configuration and report that the shell must be reloaded.
+Test: tests/behaviors/operations/test-install-script.sh (modifies PATH)
+
+### B4
+
+WHERE `--no-modify-path` is set and `~/.local/bin` is not already on
+PATH,
+THE SYSTEM SHALL warn the user to add it manually and make no
+shell-configuration change.
+Test: tests/behaviors/operations/test-install-script.sh (no-modify-path warns)
+
+### B5
+
+IF the download fails,
+THEN THE SYSTEM SHALL report the failure and exit without leaving a
+partial binary.
+Test: tests/behaviors/operations/test-install-script.sh (download failure)
