@@ -9938,6 +9938,28 @@ fn skills_add_agent_flag_targets_agents() {
 }
 
 #[test]
+fn skills_add_agent_wildcard_targets_all_agents() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add", "--agent", "*"])
+        .assert()
+        .success();
+
+    assert!(
+        home.join(".claude/skills/fluent/SKILL.md").exists(),
+        "--agent * should install to .claude/skills/"
+    );
+    assert!(
+        home.join(".codex/skills/fluent/SKILL.md").exists(),
+        "--agent * should install to .codex/skills/"
+    );
+}
+
+#[test]
 fn skills_add_writes_to_data_directory() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
