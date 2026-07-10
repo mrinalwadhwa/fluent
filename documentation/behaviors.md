@@ -4070,7 +4070,7 @@ Test: tests/binary.rs (skills_show_prints_skill_content)
 WHEN `fluent skills show <name> --path` is invoked,
 THE SYSTEM SHALL print the absolute path to the named skill's SKILL.md
 to stdout without printing the file content.
-Test: tests/binary.rs (skills_show_path_prints_skill_path)
+Test: tests/binary.rs (skills_show_prints_skill_path)
 
 ## Install script
 
