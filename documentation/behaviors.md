@@ -4040,21 +4040,32 @@ skills_add_default_updates_existing_project_skill)
 
 ### B4
 
-WHEN `fluent skills add` runs with `-g`/`--global`, `--project`, or
-`--agent <agents>`,
-THE SYSTEM SHALL scope the install to the global skill directories,
-the project skill directory, or the named agents respectively.
-Test: tests/binary.rs (skills_add_global_flag_skips_project,
-skills_add_project_flag_targets_project,
-skills_add_agent_flag_targets_agents)
+WHEN `fluent skills add` runs with `-g`/`--global`,
+THE SYSTEM SHALL scope the install to the global skill directories
+and SHALL NOT update any project-level installation.
+Test: tests/binary.rs (skills_add_global_flag_skips_project)
 
 ### B5
+
+WHEN `fluent skills add` runs with `--project`,
+THE SYSTEM SHALL scope the install to the project skill directory
+and SHALL NOT install to global directories.
+Test: tests/binary.rs (skills_add_project_flag_targets_project)
+
+### B6
+
+WHEN `fluent skills add` runs with `--agent <agents>`,
+THE SYSTEM SHALL scope the install to the named agents' skill
+directories.
+Test: tests/binary.rs (skills_add_agent_flag_targets_agents)
+
+### B7
 
 WHEN `fluent skills show <name>` is invoked,
 THE SYSTEM SHALL print the named skill's SKILL.md content to stdout.
 Test: tests/binary.rs (skills_show_prints_skill_content)
 
-### B6
+### B8
 
 WHEN `fluent skills show <name> --path` is invoked,
 THE SYSTEM SHALL print the absolute path to the named skill's SKILL.md
