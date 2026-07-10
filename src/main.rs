@@ -1300,6 +1300,7 @@ fn cmd_skills_add() -> Result<()> {
         work_task_executor::materialize_skill(name, &data_dir)?;
     }
 
+    // Install to the global skill roots.
     let global_dirs = global_skill_roots(&home);
     for dir in &global_dirs {
         for name in &names {
@@ -1312,7 +1313,63 @@ fn cmd_skills_add() -> Result<()> {
         );
     }
 
+    // Scan for shim-marked fluent installations in candidate directories
+    // beyond the global roots and replace them with the full skill.
+    let scan_dirs = shim_scan_candidate_dirs(&home);
+    for dir in &scan_dirs {
+        if global_dirs.iter().any(|g| g == dir) {
+            continue;
+        }
+        replace_shim_if_present(dir)?;
+    }
+
     Ok(())
+}
+
+const SHIM_MARKER: &str = "fluent-shim: true";
+
+fn is_fluent_shim(skills_dir: &Path) -> bool {
+    let skill_md = skills_dir.join("fluent/SKILL.md");
+    match fs::read_to_string(&skill_md) {
+        Ok(content) => content.contains(SHIM_MARKER),
+        Err(_) => false,
+    }
+}
+
+fn replace_shim_if_present(skills_dir: &Path) -> Result<()> {
+    if !is_fluent_shim(skills_dir) {
+        return Ok(());
+    }
+    work_task_executor::materialize_skill("fluent", skills_dir)?;
+    eprintln!(
+        "Replaced fluent shim in {}",
+        skills_dir.display()
+    );
+    Ok(())
+}
+
+/// Candidate directories where a fluent shim might have been installed by
+/// the `skills` CLI. These are the known per-agent skill directories.
+fn shim_scan_candidate_dirs(home: &str) -> Vec<PathBuf> {
+    let home = PathBuf::from(home);
+    let mut dirs = Vec::new();
+
+    // Claude Code per-agent directories
+    for agent in &["claude", "codex"] {
+        let dir = home.join(format!(".{agent}/skills"));
+        if dir.is_dir() {
+            dirs.push(dir);
+        }
+    }
+
+    // The main ~/.claude/skills is a global root, included for completeness
+    // but will be skipped if already in global_dirs.
+    let claude_skills = home.join(".claude/skills");
+    if claude_skills.is_dir() && !dirs.contains(&claude_skills) {
+        dirs.push(claude_skills);
+    }
+
+    dirs
 }
 
 fn cmd_skills_show(path_only: bool, name: &str) -> Result<()> {

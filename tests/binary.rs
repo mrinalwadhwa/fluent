@@ -9759,6 +9759,63 @@ fn skills_add_bare_is_alias_for_skills_add() {
 }
 
 #[test]
+fn skills_add_replaces_shim_marked_directory() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+
+    // Pre-install a shim-marked fluent skill in a secondary agent directory.
+    let agent_skills = home.join(".codex/skills");
+    let shim_dir = agent_skills.join("fluent");
+    fs::create_dir_all(&shim_dir).unwrap();
+    fs::write(
+        shim_dir.join("SKILL.md"),
+        "---\nname: fluent\nfluent-shim: true\n---\nShim content\n",
+    )
+    .unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add"])
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(shim_dir.join("SKILL.md")).unwrap();
+    assert!(
+        !content.contains("fluent-shim: true"),
+        "shim-marked directory must be replaced with the full skill"
+    );
+    assert!(
+        shim_dir.join("references").is_dir(),
+        "replaced directory must contain references"
+    );
+}
+
+#[test]
+fn skills_add_does_not_clobber_unmarked_directory() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+
+    // Pre-install a real (non-shim) fluent skill in a secondary agent directory.
+    let agent_skills = home.join(".codex/skills");
+    let real_dir = agent_skills.join("fluent");
+    fs::create_dir_all(&real_dir).unwrap();
+    let custom_content = "---\nname: fluent\n---\nCustom full skill\n";
+    fs::write(real_dir.join("SKILL.md"), custom_content).unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add"])
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(real_dir.join("SKILL.md")).unwrap();
+    assert_eq!(
+        content, custom_content,
+        "unmarked fluent skill must not be overwritten"
+    );
+}
+
+#[test]
 fn skills_add_writes_to_data_directory() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
