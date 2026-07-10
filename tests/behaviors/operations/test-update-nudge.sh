@@ -8,7 +8,7 @@ FLUENT_BIN="${FLUENT_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/fluent}"
 source "${PROJECT_DIR}/tests/lib/run_test.sh"
 LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
-TRIPLE="$(uname -m)-apple-darwin"
+TRIPLE="$(rustc -vV | grep '^host:' | awk '{print $2}')"
 ASSET_NAME="fluent-${TRIPLE}"
 
 setup_fixture() {
