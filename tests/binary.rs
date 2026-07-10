@@ -10002,6 +10002,38 @@ fn init_installs_full_fluent_skill() {
 }
 
 #[test]
+fn skills_add_refreshes_stale_installation() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let skills_dir = home.join(".claude/skills");
+    let fluent_dir = skills_dir.join("fluent");
+    fs::create_dir_all(&fluent_dir).unwrap();
+
+    // Pre-install an outdated full skill
+    fs::write(
+        fluent_dir.join("SKILL.md"),
+        "---\nname: fluent\n---\nOld version\n",
+    )
+    .unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add"])
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(fluent_dir.join("SKILL.md")).unwrap();
+    assert!(
+        !content.contains("Old version"),
+        "skills add must overwrite stale full skill with the current binary's version"
+    );
+    assert!(
+        content.contains("fluent"),
+        "refreshed skill must contain fluent content"
+    );
+}
+
+#[test]
 fn skills_show_prints_skill_path() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
