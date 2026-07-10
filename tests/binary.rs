@@ -10014,6 +10014,32 @@ fn init_installs_full_fluent_skill() {
 }
 
 #[test]
+fn init_succeeds_when_skill_installation_fails() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+
+    // Without HOME, cmd_skills_add fails, but init should still succeed.
+    let output = fluent_cmd()
+        .env_remove("HOME")
+        .current_dir(&project)
+        .args(["init"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "init must succeed even when skill installation fails");
+    assert!(
+        project.join(".fluent").is_dir(),
+        "init must create .fluent/ even when skill installation fails"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("warning: could not install skills"),
+        "init must print a warning when skill installation fails: {stderr}"
+    );
+}
+
+#[test]
 fn init_reinit_installs_skills() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");

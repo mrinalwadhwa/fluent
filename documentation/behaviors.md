@@ -4005,7 +4005,7 @@ Test: tests/binary.rs (init_reinit_installs_skills)
 IF skill installation fails during `fluent init`,
 THEN THE SYSTEM SHALL print a warning and continue without failing the
 init.
-Test: tests/binary.rs (init_installs_full_fluent_skill)
+Test: tests/binary.rs (init_succeeds_when_skill_installation_fails)
 
 ---
 
