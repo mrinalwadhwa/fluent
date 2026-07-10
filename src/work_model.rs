@@ -808,7 +808,11 @@ impl WorkItem {
         Ok(candidate_id)
     }
 
-    pub fn abandon(&mut self, reason: Option<String>) -> Result<(), WorkModelError> {
+    pub fn abandon(
+        &mut self,
+        reason: Option<String>,
+        project_root: Option<&Path>,
+    ) -> Result<(), WorkModelError> {
         if let Some(attempt) = self.attempts.iter().find(|attempt| {
             matches!(
                 attempt.status,
@@ -824,7 +828,17 @@ impl WorkItem {
             .attempts
             .iter()
             .flat_map(|attempt| attempt.tasks.iter())
-            .find(|task| task.status == TaskStatus::Executing)
+            .find(|task| {
+                task.status == TaskStatus::Executing
+                    && match project_root {
+                        Some(root) => {
+                            let lock_path =
+                                crate::lease::task_lock_path(root, &self.id, &task.id);
+                            crate::lease::is_leased(&lock_path)
+                        }
+                        None => true,
+                    }
+            })
         {
             return Err(WorkModelError::WorkItemAbandonmentBlocked {
                 work_item_id: self.id.clone(),
@@ -3319,7 +3333,7 @@ mod tests {
         work_item.attempts[0].tasks[0].status = TaskStatus::NeedsUser;
 
         work_item
-            .abandon(Some("replacement landed".to_string()))
+            .abandon(Some("replacement landed".to_string()), None)
             .unwrap();
 
         assert_eq!(
@@ -3343,7 +3357,7 @@ mod tests {
         work_item.attempts[0].status = AttemptStatus::Executing;
         work_item.attempts[0].tasks[0].status = TaskStatus::Executing;
 
-        let error = work_item.abandon(Some("stale".to_string())).unwrap_err();
+        let error = work_item.abandon(Some("stale".to_string()), None).unwrap_err();
 
         assert!(matches!(
             error,
@@ -3366,7 +3380,7 @@ mod tests {
         work_item.add_initial_attempt("attempt-1").unwrap();
         work_item.attempts[0].status = AttemptStatus::Reviewing;
 
-        let error = work_item.abandon(Some("stale".to_string())).unwrap_err();
+        let error = work_item.abandon(Some("stale".to_string()), None).unwrap_err();
 
         assert!(matches!(
             error,
@@ -3390,7 +3404,7 @@ mod tests {
         work_item.attempts[0].status = AttemptStatus::Failed;
         work_item.attempts[0].tasks[0].status = TaskStatus::Executing;
 
-        let error = work_item.abandon(Some("stale".to_string())).unwrap_err();
+        let error = work_item.abandon(Some("stale".to_string()), None).unwrap_err();
 
         assert!(matches!(
             error,
@@ -3424,7 +3438,7 @@ mod tests {
             }],
         };
 
-        let error = work_item.abandon(Some("stale".to_string())).unwrap_err();
+        let error = work_item.abandon(Some("stale".to_string()), None).unwrap_err();
 
         assert!(matches!(
             error,
@@ -3435,7 +3449,7 @@ mod tests {
         work_item.merge_candidates[0].review_state = MergeCandidateReviewState::Pending;
         work_item.merge_candidates[0].merge_state.status = MergeCandidateMergeStatus::Executing;
 
-        let error = work_item.abandon(Some("stale".to_string())).unwrap_err();
+        let error = work_item.abandon(Some("stale".to_string()), None).unwrap_err();
 
         assert!(matches!(
             error,

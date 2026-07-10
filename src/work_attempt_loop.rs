@@ -143,15 +143,51 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             continue;
         }
 
-        if attempt
-            .tasks
-            .iter()
-            .any(|task| task.status == TaskStatus::Executing)
         {
-            bail!(
-                "Attempt {:?} has an executing Task and cannot be advanced",
-                config.attempt_id
-            );
+            let executing_tasks: Vec<String> = attempt
+                .tasks
+                .iter()
+                .filter(|task| task.status == TaskStatus::Executing)
+                .map(|task| task.id.clone())
+                .collect();
+
+            if !executing_tasks.is_empty() {
+                let mut has_live = false;
+                let mut stale_ids = Vec::new();
+                for task_id in &executing_tasks {
+                    let lock_path = crate::lease::task_lock_path(
+                        config.project_root,
+                        config.work_item_id,
+                        task_id,
+                    );
+                    if crate::lease::is_leased(&lock_path) {
+                        has_live = true;
+                    } else {
+                        stale_ids.push(task_id.clone());
+                    }
+                }
+
+                if has_live {
+                    bail!(
+                        "Attempt {:?} has an executing Task and cannot be advanced",
+                        config.attempt_id
+                    );
+                }
+
+                let mut item = item;
+                let attempt_mut = item
+                    .attempts
+                    .iter_mut()
+                    .find(|a| a.id == config.attempt_id)
+                    .unwrap();
+                for task in &mut attempt_mut.tasks {
+                    if stale_ids.contains(&task.id) {
+                        task.status = TaskStatus::Planned;
+                    }
+                }
+                config.store.write_work_item(&item)?;
+                continue;
+            }
         }
         if let Some(task) = attempt
             .tasks

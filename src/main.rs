@@ -298,7 +298,7 @@ fn cmd_work_item(project_root: &Path, command: WorkItemCommands) -> Result<()> {
                 }
                 Err(error) => return Err(error.into()),
             };
-            item.abandon(reason)?;
+            item.abandon(reason, Some(project_root))?;
             store.write_work_item(&item)?;
             println!("Abandoned Work Item {}", item.id);
         }

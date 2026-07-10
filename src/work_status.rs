@@ -386,7 +386,7 @@ mod tests {
         item.add_initial_attempt("attempt-1").unwrap();
         item.attempts[0].status = AttemptStatus::NeedsUser;
         item.attempts[0].tasks[0].status = TaskStatus::NeedsUser;
-        item.abandon(Some("replacement landed".to_string()))
+        item.abandon(Some("replacement landed".to_string()), None)
             .unwrap();
 
         let row = summarize_work_item(&item);

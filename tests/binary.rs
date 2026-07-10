@@ -10221,6 +10221,126 @@ fn lease_child_process_holder_reads_as_leased_from_parent() {
 }
 
 #[test]
+fn attempt_run_reclaims_stale_executing_task_and_advances() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let bin_dir = tmp.path().join("bin-reclaim");
+    write_mock_claude(&bin_dir, &loop_mock_script("pass"));
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Reclaim stale"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let task_path = work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-write-1");
+    let mut task_value = read_json_value(&task_path);
+    task_value["status"] = serde_json::json!("executing");
+    write_json_value(&task_path, &task_value);
+
+    let attempt_path = main_dir
+        .join(".fluent/work/attempts/work-1")
+        .join("attempt-1.json");
+    let mut attempt_value = read_json_value(&attempt_path);
+    attempt_value["status"] = serde_json::json!("executing");
+    write_json_value(&attempt_path, &attempt_value);
+
+    let output = fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "attempt run should reclaim stale task: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Completed Task attempt-1-write-1"),
+        "stale task should be re-run and complete: {stdout}"
+    );
+}
+
+#[test]
+fn attempt_run_refuses_to_advance_when_lease_is_held() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Live lease"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let task_path = work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-write-1");
+    let mut task_value = read_json_value(&task_path);
+    task_value["status"] = serde_json::json!("executing");
+    write_json_value(&task_path, &task_value);
+
+    let attempt_path = main_dir
+        .join(".fluent/work/attempts/work-1")
+        .join("attempt-1.json");
+    let mut attempt_value = read_json_value(&attempt_path);
+    attempt_value["status"] = serde_json::json!("executing");
+    write_json_value(&attempt_path, &attempt_value);
+
+    let lock_path =
+        fluent::lease::task_lock_path(&main_dir, "work-1", "attempt-1-write-1");
+    fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+
+    let mut holder = std::process::Command::new("python3")
+        .args([
+            "-c",
+            &format!(
+                concat!(
+                    "import fcntl, sys\n",
+                    "f = open('{}', 'w')\n",
+                    "fcntl.flock(f, fcntl.LOCK_EX)\n",
+                    "print('ready', flush=True)\n",
+                    "sys.stdin.readline()\n",
+                ),
+                lock_path.display()
+            ),
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    {
+        let stdout = holder.stdout.as_mut().unwrap();
+        let mut buf = String::new();
+        use std::io::BufRead;
+        std::io::BufReader::new(stdout).read_line(&mut buf).unwrap();
+    }
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be advanced"));
+
+    drop(holder.stdin.take());
+    holder.wait().unwrap();
+}
+
+#[test]
 fn lease_child_process_exit_frees_lock() {
     let tmp = TempDir::new().unwrap();
     let lock_path = tmp.path().join("exit.lock");
