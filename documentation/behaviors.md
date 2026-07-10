@@ -4021,6 +4021,19 @@ Test: tests/binary.rs (skills_add_global_flag_skips_project,
 skills_add_project_flag_targets_project,
 skills_add_agent_flag_targets_agents)
 
+### B5
+
+WHEN `fluent skills show <name>` is invoked,
+THE SYSTEM SHALL print the named skill's SKILL.md content to stdout.
+Test: tests/binary.rs (skills_show_prints_skill_content)
+
+### B6
+
+WHEN `fluent skills show <name> --path` is invoked,
+THE SYSTEM SHALL print the absolute path to the named skill's SKILL.md
+to stdout without printing the file content.
+Test: tests/binary.rs (skills_show_path_prints_skill_path)
+
 ## Install script
 
 ### B1

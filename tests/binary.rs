@@ -10043,3 +10043,24 @@ fn skills_show_prints_skill_path() {
         "should print path to SKILL.md: {stdout}"
     );
 }
+
+#[test]
+fn skills_show_prints_skill_content() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let data_dir = home.join(".local/share/fluent/skills/fluent");
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::write(data_dir.join("SKILL.md"), "skill body here\n").unwrap();
+
+    let output = fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "show", "fluent"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout, "skill body here\n",
+        "should print SKILL.md content to stdout"
+    );
+}
