@@ -9696,3 +9696,110 @@ fn update_check_env_opt_out_suppresses_check_and_nudge() {
         "opt-out should suppress nudge; got stderr:\n{stderr}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Skills add
+// ---------------------------------------------------------------------------
+
+#[test]
+fn skills_add_materializes_full_skill_and_references() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add"])
+        .assert()
+        .success();
+
+    let skills_dir = home.join(".claude/skills");
+    let fluent_skill = skills_dir.join("fluent/SKILL.md");
+    assert!(
+        fluent_skill.exists(),
+        "fluent/SKILL.md must exist after skills add"
+    );
+
+    let content = fs::read_to_string(&fluent_skill).unwrap();
+    assert!(
+        !content.contains("fluent-shim: true"),
+        "materialized fluent skill must be the full skill, not the shim"
+    );
+
+    let refs_dir = skills_dir.join("fluent/references");
+    assert!(
+        refs_dir.is_dir(),
+        "fluent/references/ must exist after skills add"
+    );
+
+    let review_skill = skills_dir.join("review-tests/SKILL.md");
+    assert!(
+        review_skill.exists(),
+        "review skills must also be materialized"
+    );
+}
+
+#[test]
+fn skills_add_bare_is_alias_for_skills_add() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills"])
+        .assert()
+        .success();
+
+    let fluent_skill = home.join(".claude/skills/fluent/SKILL.md");
+    assert!(
+        fluent_skill.exists(),
+        "bare 'fluent skills' must install skills (backward compat)"
+    );
+}
+
+#[test]
+fn skills_add_writes_to_data_directory() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add"])
+        .assert()
+        .success();
+
+    let data_skill = home.join(".local/share/fluent/skills/fluent/SKILL.md");
+    assert!(
+        data_skill.exists(),
+        "skills add must write full skill to data directory for hand-off"
+    );
+    let content = fs::read_to_string(&data_skill).unwrap();
+    assert!(
+        !content.contains("fluent-shim: true"),
+        "data directory skill must be the full skill"
+    );
+}
+
+#[test]
+fn skills_show_prints_skill_path() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let data_dir = home
+        .join(".local/share/fluent/skills/fluent");
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::write(data_dir.join("SKILL.md"), "test content").unwrap();
+
+    let output = fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "show", "--path", "fluent"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().ends_with("fluent/SKILL.md"),
+        "should print path to SKILL.md: {stdout}"
+    );
+}

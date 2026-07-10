@@ -337,7 +337,7 @@ pub fn perform_update() -> Result<()> {
 }
 
 fn rematerialize_skills(new_binary: &Path) {
-    let result = Command::new(new_binary).arg("skills").status();
+    let result = Command::new(new_binary).args(["skills", "add"]).status();
 
     match result {
         Ok(status) if status.success() => {}

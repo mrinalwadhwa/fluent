@@ -156,8 +156,11 @@ pub enum Commands {
         path: Option<String>,
     },
 
-    /// Install bundled skills into the agent skills directory
-    Skills,
+    /// Install bundled skills into agent skill directories
+    Skills {
+        #[command(subcommand)]
+        command: Option<SkillsCommands>,
+    },
 
     /// Update Fluent to the latest release
     Update,
@@ -628,6 +631,38 @@ pub enum ObservationCommands {
 
     /// Migrate monolithic observation files to per-file layout
     Migrate,
+}
+
+// ---------------------------------------------------------------------------
+// Skills
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+pub enum SkillsCommands {
+    /// Install bundled skills into agent skill directories
+    Add {
+        /// Install into global skill directories only
+        #[arg(short = 'g', long, conflicts_with_all = ["project", "agent"])]
+        global: bool,
+
+        /// Install into the project skill directory
+        #[arg(long, conflicts_with_all = ["global", "agent"])]
+        project: bool,
+
+        /// Install for specific agents (comma-separated, or * for all)
+        #[arg(long, conflicts_with_all = ["global", "project"])]
+        agent: Option<String>,
+    },
+
+    /// Print the path to a bundled skill's data directory
+    Show {
+        /// Print the path instead of the content
+        #[arg(long)]
+        path: bool,
+
+        /// Skill name
+        name: String,
+    },
 }
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use std::fs;
 use std::io::ErrorKind;
@@ -12,8 +12,8 @@ use fluent::cleanup::{
 };
 use fluent::cli::{
     AttemptCommands, Cli, Commands, FargateCommands, KeepAwakeCommands, MergeCandidateCommands,
-    ObservationCommands, QueueCommands, ReviewCommands, SchedulerCommands, TaskCommands,
-    TesterCommands, WorkItemCommands,
+    ObservationCommands, QueueCommands, ReviewCommands, SchedulerCommands, SkillsCommands,
+    TaskCommands, TesterCommands, WorkItemCommands,
 };
 use fluent::coder::CoderKind;
 use fluent::content::ContentResolver;
@@ -196,8 +196,8 @@ fn main() -> Result<()> {
         Some(Commands::Update) => {
             update::perform_update()?;
         }
-        Some(Commands::Skills) => {
-            cmd_skills()?;
+        Some(Commands::Skills { command }) => {
+            cmd_skills(command)?;
         }
         Some(Commands::Version) => {
             println!("{}", version::version_string());
@@ -1270,20 +1270,90 @@ fn cmd_init(cwd: &Path) -> Result<()> {
 // Skills
 // -------------------------------------------------------------------------
 
-fn cmd_skills() -> Result<()> {
+fn cmd_skills(command: Option<SkillsCommands>) -> Result<()> {
+    match command {
+        Some(SkillsCommands::Add {
+            global: _,
+            project: _,
+            agent: _,
+        })
+        | None => {
+            cmd_skills_add()?;
+        }
+        Some(SkillsCommands::Show { path, name }) => {
+            cmd_skills_show(path, &name)?;
+        }
+    }
+    Ok(())
+}
+
+fn cmd_skills_add() -> Result<()> {
     let home = std::env::var("HOME")
         .map_err(|_| anyhow::anyhow!("HOME not set; cannot locate agent skills directory"))?;
-    let skills_dir = PathBuf::from(home).join(".claude/skills");
+
     let names = fluent::content::bundled_skill_names();
+
+    // Write the full skill to the fixed data directory so the shim can
+    // read it for hand-off regardless of which agent directories exist.
+    let data_dir = skills_data_dir(&home);
     for name in &names {
-        work_task_executor::materialize_skill(name, &skills_dir)?;
+        work_task_executor::materialize_skill(name, &data_dir)?;
     }
-    eprintln!(
-        "Installed {} skills to {}",
-        names.len(),
-        skills_dir.display()
-    );
+
+    let global_dirs = global_skill_roots(&home);
+    for dir in &global_dirs {
+        for name in &names {
+            work_task_executor::materialize_skill(name, dir)?;
+        }
+        eprintln!(
+            "Installed {} skills to {}",
+            names.len(),
+            dir.display()
+        );
+    }
+
     Ok(())
+}
+
+fn cmd_skills_show(path_only: bool, name: &str) -> Result<()> {
+    let home = std::env::var("HOME")
+        .map_err(|_| anyhow::anyhow!("HOME not set; cannot locate data directory"))?;
+    let data_dir = skills_data_dir(&home);
+    let skill_dir = data_dir.join(name);
+
+    if path_only {
+        let skill_md = skill_dir.join("SKILL.md");
+        println!("{}", skill_md.display());
+    } else {
+        let skill_md = skill_dir.join("SKILL.md");
+        let content = fs::read_to_string(&skill_md).with_context(|| {
+            format!("Cannot read skill {:?} at {}", name, skill_md.display())
+        })?;
+        print!("{content}");
+    }
+    Ok(())
+}
+
+/// Fixed data directory where `fluent skills add` writes the full skill for
+/// hand-off reads by the shim.
+fn skills_data_dir(home: &str) -> PathBuf {
+    PathBuf::from(home)
+        .join(".local")
+        .join("share")
+        .join("fluent")
+        .join("skills")
+}
+
+/// Candidate global skill roots where agents may read skills from.
+fn global_skill_roots(home: &str) -> Vec<PathBuf> {
+    let home = PathBuf::from(home);
+    let mut roots = Vec::new();
+
+    // Claude Code global skills directory
+    let claude_skills = home.join(".claude").join("skills");
+    roots.push(claude_skills);
+
+    roots
 }
 
 // -------------------------------------------------------------------------
