@@ -3898,6 +3898,14 @@ Test: src/work_attempt_loop.rs (passing_or_missing_tester_does_not_block)
 
 ### B1
 
+WHEN fluent runs an update check,
+THE SYSTEM SHALL query the fluent.computer update endpoint as its default
+release source, sending only its fluent version and OS via User-Agent and
+nothing machine-identifying. `FLUENT_API_BASE` still overrides for tests.
+Test: tests/binary.rs (update_check_queries_update_endpoint)
+
+### B2
+
 WHEN an update check finds the current version is behind the latest
 release,
 THE SYSTEM SHALL print to stderr a nudge naming the latest version and
@@ -3905,20 +3913,20 @@ THE SYSTEM SHALL print to stderr a nudge naming the latest version and
 status.
 Test: tests/behaviors/operations/test-update-nudge.sh
 
-### B2
+### B3
 
 WHILE running any command other than `fluent update`,
 THE SYSTEM SHALL NOT download or replace the binary.
 Test: tests/binary.rs (update_check_never_replaces_binary)
 
-### B3
+### B4
 
 IF the release source cannot be reached during an update check,
 THEN THE SYSTEM SHALL continue the command normally, with no error and
 no nudge.
 Test: tests/binary.rs (update_check_offline_is_silent_and_nonfatal)
 
-### B4
+### B5
 
 WHEN Fluent would run an update check but one has run within the cached
 interval,
@@ -3926,7 +3934,7 @@ THE SYSTEM SHALL NOT query the release source again and SHALL base any
 nudge on the cached result.
 Test: tests/binary.rs (update_check_is_cached_within_interval)
 
-### B5
+### B6
 
 WHERE `FLUENT_NO_UPDATE_CHECK` is set,
 THE SYSTEM SHALL neither query the release source nor show a nudge.
@@ -3961,28 +3969,13 @@ Test: tests/binary.rs (update_replaces_binary_and_rematerializes_skills)
 
 ### B5
 
-IF the downloaded release's checksum does not match the published
-checksum,
-THEN THE SYSTEM SHALL abort the update and leave the current binary in
-place.
-Test: tests/binary.rs (update_aborts_on_checksum_mismatch)
-
-### B6
-
 IF `fluent update` cannot reach the release source or the download
 fails,
 THEN THE SYSTEM SHALL report the failure and leave the current binary
 in place.
 Test: tests/binary.rs (update_offline_preserves_binary)
 
-### B7
-
-IF a release has no published checksum to verify against,
-THEN THE SYSTEM SHALL refuse to install it and leave the current binary
-in place.
-Test: tests/binary.rs (update_refuses_release_without_checksum)
-
-### B8
+### B6
 
 IF replacing the binary does not complete successfully,
 THEN THE SYSTEM SHALL leave a working binary in place rather than a

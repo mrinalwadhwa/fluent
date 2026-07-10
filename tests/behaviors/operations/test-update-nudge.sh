@@ -18,9 +18,6 @@ setup_fixture() {
   mkdir -p "$download"
 
   printf 'new-binary-content' > "$download/$ASSET_NAME"
-  local sha
-  sha=$(shasum -a 256 "$download/$ASSET_NAME" | awk '{print $1}')
-  printf '%s  %s\n' "$sha" "$ASSET_NAME" > "$download/${ASSET_NAME}.sha256"
 
   local api_dir="$fixture/repos/test-owner/fluent/releases"
   mkdir -p "$api_dir"
@@ -31,10 +28,6 @@ setup_fixture() {
     {
       "name": "$ASSET_NAME",
       "browser_download_url": "file://$download/$ASSET_NAME"
-    },
-    {
-      "name": "${ASSET_NAME}.sha256",
-      "browser_download_url": "file://$download/${ASSET_NAME}.sha256"
     }
   ]
 }

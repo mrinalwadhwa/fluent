@@ -1,5 +1,4 @@
 use anyhow::{Context, Result, bail};
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -7,7 +6,7 @@ use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_RELEASE_REPO: &str = "mrinalwadhwa/fluent";
-const DEFAULT_API_BASE: &str = "https://api.github.com";
+const DEFAULT_UPDATE_ENDPOINT: &str = "https://fluent.computer/latest";
 const CHECK_INTERVAL_SECS: u64 = 86400;
 const CURL_CONNECT_TIMEOUT: u32 = 5;
 const CURL_MAX_TIME_CHECK: u32 = 10;
@@ -18,8 +17,19 @@ fn release_repo() -> String {
     std::env::var("FLUENT_RELEASE_REPO").unwrap_or_else(|_| DEFAULT_RELEASE_REPO.to_string())
 }
 
-fn api_base() -> String {
-    std::env::var("FLUENT_API_BASE").unwrap_or_else(|_| DEFAULT_API_BASE.to_string())
+fn release_url() -> String {
+    if let Ok(base) = std::env::var("FLUENT_API_BASE") {
+        let repo = release_repo();
+        format!("{base}/repos/{repo}/releases/latest")
+    } else {
+        DEFAULT_UPDATE_ENDPOINT.to_string()
+    }
+}
+
+fn user_agent() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    let os = std::env::consts::OS;
+    format!("fluent/{version} ({os})")
 }
 
 fn config_dir() -> PathBuf {
@@ -103,17 +113,14 @@ impl std::fmt::Display for Version {
 struct LatestRelease {
     version: Version,
     asset_url: String,
-    checksum_url: String,
 }
 
 fn query_latest_release() -> Result<LatestRelease> {
-    let repo = release_repo();
-    let base = api_base();
-    let url = format!("{base}/repos/{repo}/releases/latest");
+    let url = release_url();
     let triple = target_triple();
     let asset_name = format!("fluent-{triple}");
-    let checksum_name = format!("{asset_name}.sha256");
 
+    let ua = user_agent();
     let output = Command::new("curl")
         .args([
             "--silent",
@@ -123,6 +130,8 @@ fn query_latest_release() -> Result<LatestRelease> {
             &CURL_CONNECT_TIMEOUT.to_string(),
             "--max-time",
             &CURL_MAX_TIME_CHECK.to_string(),
+            "-H",
+            &format!("User-Agent: {ua}"),
             &url,
         ])
         .output()
@@ -159,21 +168,9 @@ fn query_latest_release() -> Result<LatestRelease> {
         .ok_or_else(|| anyhow::anyhow!("Release has no asset named {asset_name:?}"))?
         .to_string();
 
-    let checksum_url = assets
-        .iter()
-        .find(|a| a["name"].as_str() == Some(&checksum_name))
-        .and_then(|a| a["browser_download_url"].as_str())
-        .map(|s| s.to_string());
-
-    let checksum_url = match checksum_url {
-        Some(url) => url,
-        None => bail!("Release has no checksum asset {checksum_name:?}"),
-    };
-
     Ok(LatestRelease {
         version,
         asset_url,
-        checksum_url,
     })
 }
 
@@ -202,45 +199,6 @@ fn download_file(url: &str, dest: &Path, max_time: u32) -> Result<()> {
         bail!("Download failed (exit {})", status.code().unwrap_or(-1));
     }
     Ok(())
-}
-
-fn fetch_checksum(url: &str) -> Result<String> {
-    let output = Command::new("curl")
-        .args([
-            "--silent",
-            "--fail",
-            "--location",
-            "--connect-timeout",
-            &CURL_CONNECT_TIMEOUT.to_string(),
-            "--max-time",
-            &CURL_MAX_TIME_CHECK.to_string(),
-            url,
-        ])
-        .output()
-        .context("Failed to run curl for checksum")?;
-
-    if !output.status.success() {
-        bail!(
-            "Checksum download failed (exit {})",
-            output.status.code().unwrap_or(-1)
-        );
-    }
-
-    let text = String::from_utf8(output.stdout).context("Checksum file is not valid UTF-8")?;
-    let hash = text
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("Checksum file is empty"))?
-        .to_lowercase();
-    Ok(hash)
-}
-
-pub fn verify_checksum(file: &Path, expected: &str) -> Result<bool> {
-    let data = fs::read(file).context("Failed to read file for checksum")?;
-    let mut hasher = Sha256::new();
-    hasher.update(&data);
-    let actual = format!("{:x}", hasher.finalize());
-    Ok(actual == expected.to_lowercase())
 }
 
 // -------------------------------------------------------------------------
@@ -363,15 +321,6 @@ pub fn perform_update() -> Result<()> {
         download_file(&release.asset_url, &tmp_path, CURL_MAX_TIME_DOWNLOAD)
             .context("Failed to download the release binary")?;
 
-        let expected = fetch_checksum(&release.checksum_url)
-            .context("Failed to download the release checksum")?;
-
-        let valid = verify_checksum(&tmp_path, &expected).context("Failed to verify checksum")?;
-
-        if !valid {
-            bail!("Checksum mismatch — aborting update to keep the current binary safe");
-        }
-
         atomic_replace(&tmp_path, &bin)?;
         Ok(())
     })();
@@ -472,32 +421,31 @@ mod tests {
     }
 
     #[test]
-    fn verify_checksum_matches() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("test.bin");
-        let content = b"hello world";
-        fs::write(&file, content).unwrap();
-
-        let mut hasher = Sha256::new();
-        hasher.update(content);
-        let expected = format!("{:x}", hasher.finalize());
-
-        assert!(verify_checksum(&file, &expected).unwrap());
+    fn release_url_defaults_to_update_endpoint() {
+        let url = release_url();
+        assert_eq!(url, DEFAULT_UPDATE_ENDPOINT);
     }
 
     #[test]
-    fn verify_checksum_rejects_mismatch() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("test.bin");
-        fs::write(&file, b"hello world").unwrap();
+    fn release_url_uses_github_format_when_api_base_set() {
+        unsafe {
+            std::env::set_var("FLUENT_API_BASE", "https://api.example.com");
+            std::env::set_var("FLUENT_RELEASE_REPO", "test/repo");
+        }
+        let url = release_url();
+        unsafe {
+            std::env::remove_var("FLUENT_API_BASE");
+            std::env::remove_var("FLUENT_RELEASE_REPO");
+        }
+        assert_eq!(url, "https://api.example.com/repos/test/repo/releases/latest");
+    }
 
-        assert!(
-            !verify_checksum(
-                &file,
-                "0000000000000000000000000000000000000000000000000000000000000000"
-            )
-            .unwrap()
-        );
+    #[test]
+    fn user_agent_includes_version_and_os() {
+        let ua = user_agent();
+        let version = env!("CARGO_PKG_VERSION");
+        let os = std::env::consts::OS;
+        assert_eq!(ua, format!("fluent/{version} ({os})"));
     }
 
     #[test]

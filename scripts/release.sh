@@ -5,7 +5,6 @@ if [[ "${TRACE-0}" == "1" ]]; then set -o xtrace; fi
 
 command -v cargo >/dev/null 2>&1 || { printf 'error: cargo not found\n' >&2; exit 1; }
 command -v gh >/dev/null 2>&1    || { printf 'error: gh CLI not found\n' >&2; exit 1; }
-command -v shasum >/dev/null 2>&1 || { printf 'error: shasum not found\n' >&2; exit 1; }
 command -v codesign >/dev/null 2>&1 || { printf 'error: codesign not found\n' >&2; exit 1; }
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -43,17 +42,11 @@ printf 'Ad-hoc signing %s ...\n' "$ASSET_NAME"
 codesign --sign - --force "$STAGING/$ASSET_NAME"
 codesign --verify --strict "$STAGING/$ASSET_NAME"
 
-printf 'Computing checksum ...\n'
-CHECKSUM=$(shasum -a 256 "$STAGING/$ASSET_NAME" | awk '{print $1}')
-printf '%s  %s\n' "$CHECKSUM" "$ASSET_NAME" > "$STAGING/${ASSET_NAME}.sha256"
-
 printf 'Creating GitHub release %s ...\n' "$TAG"
 gh release create "$TAG" \
   --title "$TAG" \
   --notes "Release ${version}" \
-  "$STAGING/$ASSET_NAME" \
-  "$STAGING/${ASSET_NAME}.sha256"
+  "$STAGING/$ASSET_NAME"
 
 printf 'Released %s as %s\n' "$version" "$TAG"
-printf '  asset:    %s\n' "$ASSET_NAME"
-printf '  checksum: %s\n' "$CHECKSUM"
+printf '  asset: %s\n' "$ASSET_NAME"
