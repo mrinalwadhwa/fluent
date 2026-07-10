@@ -3988,3 +3988,21 @@ IF replacing the binary does not complete successfully,
 THEN THE SYSTEM SHALL leave a working binary in place rather than a
 partial or corrupt one.
 Test: tests/binary.rs (update_replace_leaves_working_binary_on_failure)
+
+## Skill installation
+
+### B1
+
+WHEN `fluent skills` runs,
+THE SYSTEM SHALL install all publicly-installable skills (the `fluent`
+orchestrator plus `review-architecture`, `review-behaviors`,
+`review-documentation`, `review-skills`, and `review-tests`) into the
+agent skills directory at `~/.claude/skills/`.
+Test: tests/binary.rs (fluent_skills_install_writes_all_public_skills)
+
+### B2
+
+WHEN `npx skills add mrinalwadhwa/fluent` runs,
+THE SYSTEM SHALL install all publicly-installable skills, each
+self-contained with its SKILL.md and references.
+Test: tests/behaviors/operations/test-plugin-install.sh
