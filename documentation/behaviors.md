@@ -1714,6 +1714,30 @@ invoked for a stored Work Item, Attempt, and Task,
 THE SYSTEM SHALL print that Task as JSON.
 Test: tests/binary.rs (task_show_prints_task_json)
 
+## Atomic state-file writes
+
+### B1
+
+WHEN the system writes a state file (Work Item, Attempt, Task,
+Merge Candidate, review state, tester results, coder info,
+expertise, skills, or planning section),
+THE SYSTEM SHALL write through an atomic temporary-file-and-rename
+path so that a concurrent reader never observes empty or partial
+file content.
+Test: src/atomic_write.rs (concurrent_reader_never_sees_empty_or_partial)
+
+### B2
+
+IF a state-file write fails after the target file already exists,
+THEN THE SYSTEM SHALL preserve the existing file contents intact.
+Test: src/atomic_write.rs (failed_write_preserves_existing_contents)
+
+### B3
+
+IF a state-file write fails before the target file exists,
+THEN THE SYSTEM SHALL leave no partial target file on disk.
+Test: src/atomic_write.rs (failed_first_write_leaves_no_partial_target)
+
 ## Coder transient failures
 
 ### B1
