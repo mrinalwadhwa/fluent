@@ -36,12 +36,12 @@ fluent skills add
 
 ## Step 3 — Continue with the full skill
 
-Read the full fluent skill the binary provides. It is at the data directory:
+Read the full fluent skill from the data directory the binary wrote to:
 
-```sh
-cat "$(fluent skills show --path fluent)"
+```
+~/.local/share/fluent/skills/fluent/SKILL.md
 ```
 
-Follow the instructions in the full skill from the beginning as if this shim
-had not been loaded. The full skill replaces this shim — do not return to these
-instructions.
+Read that file now with the Read tool (expand `~` to the user's home directory).
+Follow its instructions from the beginning as if this shim had not been loaded.
+The full skill replaces this shim — do not return to these instructions.
