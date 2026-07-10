@@ -62,6 +62,31 @@ else
   done
 fi
 
+# --- The fluent skill carries the shim marker and has no references ---
+
+fluent_skill="$ROOT/skills/fluent/SKILL.md"
+if [ ! -f "$fluent_skill" ]; then
+  fail "skills/fluent/SKILL.md does not exist"
+elif ! grep -q 'fluent-shim: true' "$fluent_skill"; then
+  fail "skills/fluent/SKILL.md does not carry the fluent-shim marker"
+fi
+
+if [ -d "$ROOT/skills/fluent/references" ]; then
+  fail "skills/fluent/ should not have a references/ directory (shim must be minimal)"
+fi
+
+# --- The full skill lives in fluent.full/ and is not a skill directory ---
+
+if [ ! -f "$ROOT/skills/fluent.full/fluent.md" ]; then
+  fail "skills/fluent.full/fluent.md (full skill body) does not exist"
+fi
+if [ ! -d "$ROOT/skills/fluent.full/references" ]; then
+  fail "skills/fluent.full/references/ (full skill references) does not exist"
+fi
+if [ -f "$ROOT/skills/fluent.full/SKILL.md" ]; then
+  fail "skills/fluent.full/ must not have a SKILL.md (would make it a discoverable skill)"
+fi
+
 if [ "$failures" -ne 0 ]; then
   exit 1
 fi

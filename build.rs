@@ -57,8 +57,12 @@ fn generate_bundled_skills() {
 
     let mut entries: Vec<(String, String)> = Vec::new();
 
+    // Collect names that have a `.full/` override so we can skip their
+    // plain directories (the shim) when bundling.
+    let full_overrides = find_full_overrides(&skills_dir);
+
     if skills_dir.is_dir() {
-        collect_skill_files(&skills_dir, &skills_dir, &mut entries);
+        collect_skill_files(&skills_dir, &skills_dir, &full_overrides, &mut entries);
     }
 
     entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -79,7 +83,30 @@ fn generate_bundled_skills() {
     fs::write(&dest, code).expect("failed to write bundled_skills.rs");
 }
 
-fn collect_skill_files(base: &Path, dir: &Path, entries: &mut Vec<(String, String)>) {
+/// Scan `skills/` for `<name>.full/` directories. Returns the set of `name`
+/// strings that have a `.full/` override.
+fn find_full_overrides(skills_dir: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    let entries = match fs::read_dir(skills_dir) {
+        Ok(e) => e,
+        Err(_) => return names,
+    };
+    for entry in entries.flatten() {
+        let fname = entry.file_name();
+        let fname = fname.to_string_lossy();
+        if fname.ends_with(".full") && entry.path().is_dir() {
+            names.push(fname.trim_end_matches(".full").to_string());
+        }
+    }
+    names
+}
+
+fn collect_skill_files(
+    base: &Path,
+    dir: &Path,
+    full_overrides: &[String],
+    entries: &mut Vec<(String, String)>,
+) {
     let mut dir_entries: Vec<fs::DirEntry> = fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", dir.display()))
         .collect::<Result<_, _>>()
@@ -92,7 +119,37 @@ fn collect_skill_files(base: &Path, dir: &Path, entries: &mut Vec<(String, Strin
             .unwrap_or_else(|e| panic!("failed to read metadata for {}: {e}", path.display()));
 
         if metadata.is_dir() {
-            collect_skill_files(base, &path, entries);
+            // Skip a top-level `<name>/` directory when `<name>.full/` exists,
+            // so the shim is never bundled.
+            if dir == base {
+                let dir_name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                if !dir_name.ends_with(".full")
+                    && full_overrides.iter().any(|n| *n == dir_name)
+                {
+                    continue;
+                }
+            }
+
+            // A `.full/` directory maps its contents into `<name>/`:
+            //   `<name>.full/<name>.md`       → `<name>/SKILL.md`
+            //   `<name>.full/references/...`  → `<name>/references/...`
+            if dir == base {
+                let dir_name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                if let Some(skill_name) = dir_name.strip_suffix(".full") {
+                    collect_full_override_files(skill_name, &path, entries);
+                    continue;
+                }
+            }
+
+            collect_skill_files(base, &path, full_overrides, entries);
         } else if metadata.is_file() {
             let rel = path
                 .strip_prefix(base)
@@ -102,6 +159,48 @@ fn collect_skill_files(base: &Path, dir: &Path, entries: &mut Vec<(String, Strin
             let content = fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
             entries.push((rel, content));
+        }
+    }
+}
+
+/// Collect files from a `<name>.full/` directory, mapping them into
+/// `<name>/` paths for bundling.
+fn collect_full_override_files(
+    skill_name: &str,
+    full_dir: &Path,
+    entries: &mut Vec<(String, String)>,
+) {
+    // Map `<name>.full/<name>.md` → `<name>/SKILL.md`
+    let main_file = full_dir.join(format!("{skill_name}.md"));
+    if main_file.is_file() {
+        let content = fs::read_to_string(&main_file)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", main_file.display()));
+        entries.push((format!("{skill_name}/SKILL.md"), content));
+    }
+
+    // Map `<name>.full/references/*` → `<name>/references/*`
+    let refs_dir = full_dir.join("references");
+    if refs_dir.is_dir() {
+        collect_files_recursively(&refs_dir, &format!("{skill_name}/references"), entries);
+    }
+}
+
+fn collect_files_recursively(dir: &Path, prefix: &str, entries: &mut Vec<(String, String)>) {
+    let mut dir_entries: Vec<fs::DirEntry> = fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", dir.display()))
+        .collect::<Result<_, _>>()
+        .unwrap_or_else(|e| panic!("failed to iterate {}: {e}", dir.display()));
+    dir_entries.sort_by_key(|e| e.file_name());
+
+    for entry in dir_entries {
+        let path = entry.path();
+        let fname = path.file_name().unwrap_or_default().to_string_lossy();
+        if path.is_dir() {
+            collect_files_recursively(&path, &format!("{prefix}/{fname}"), entries);
+        } else if path.is_file() {
+            let content = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+            entries.push((format!("{prefix}/{fname}"), content));
         }
     }
 }

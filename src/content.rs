@@ -759,6 +759,23 @@ Check item {{ITEM_ID}}.
     }
 
     #[test]
+    fn bundled_fluent_skill_is_full_not_shim() {
+        let entries = bundled_skill_files_under("fluent/");
+        let skill_md = entries
+            .iter()
+            .find(|(p, _)| *p == "fluent/SKILL.md")
+            .expect("bundled fluent skill must have SKILL.md");
+        assert!(
+            !skill_md.1.contains("fluent-shim: true"),
+            "bundled fluent/SKILL.md must be the full skill, not the shim"
+        );
+        assert!(
+            entries.iter().any(|(p, _)| p.starts_with("fluent/references/")),
+            "bundled fluent skill must include references"
+        );
+    }
+
+    #[test]
     fn test_bundled_content_expertise() {
         for name in GENERAL_EXPERTISE_FILES {
             let key = format!("expertise/{name}");
