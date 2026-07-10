@@ -376,7 +376,7 @@ fn truncate_tail(s: &str, max: usize) -> String {
 fn write_results(artifact_dir: &Path, results: &TesterResults) -> Result<()> {
     let json = serde_json::to_string_pretty(results)?;
     let path = artifact_dir.join("tester-results.json");
-    fs::write(&path, &json)?;
+    crate::atomic_write::atomic_write(&path, json.as_bytes())?;
     eprintln!("  Wrote {}", path.display());
     Ok(())
 }

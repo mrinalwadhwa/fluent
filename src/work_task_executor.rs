@@ -1144,9 +1144,11 @@ fn capture_coder_info(coder_kind: CoderKind, model: &str, artifact_dir: &Path) {
         return;
     }
     let path = artifact_dir.join("coder-info.json");
-    if let Err(e) = fs::write(
+    if let Err(e) = crate::atomic_write::atomic_write(
         &path,
-        serde_json::to_string_pretty(&info).unwrap_or_default(),
+        serde_json::to_string_pretty(&info)
+            .unwrap_or_default()
+            .as_bytes(),
     ) {
         eprintln!("warning: cannot write coder-info.json: {e}");
     }
@@ -1448,21 +1450,8 @@ fn materialize_general_expertise(project_root: &Path) -> Result<PathBuf> {
         let content = crate::content::bundled_content(&relative)
             .ok_or_else(|| anyhow::anyhow!("missing bundled expertise file: {relative}"))?;
         let final_path = dir.join(name);
-        let mut tmp = tempfile::NamedTempFile::new_in(&dir).with_context(|| {
-            format!(
-                "Failed to create temp file while writing expertise {}",
-                final_path.display()
-            )
-        })?;
-        use std::io::Write;
-        tmp.write_all(content.as_bytes()).with_context(|| {
-            format!(
-                "Failed to write expertise content for {}",
-                final_path.display()
-            )
-        })?;
-        tmp.persist(&final_path)
-            .with_context(|| format!("Failed to persist expertise at {}", final_path.display()))?;
+        crate::atomic_write::atomic_write(&final_path, content.as_bytes())
+            .with_context(|| format!("Failed to write expertise at {}", final_path.display()))?;
     }
     Ok(dir)
 }
@@ -1491,19 +1480,8 @@ pub fn materialize_skill(skill_name: &str, dest_dir: &Path) -> Result<PathBuf> {
                 )
             })?;
         }
-        let dir_for_tmp = file_path.parent().unwrap_or(dest_dir);
-        let mut tmp = tempfile::NamedTempFile::new_in(dir_for_tmp).with_context(|| {
-            format!(
-                "Failed to create temp file while writing skill {}",
-                file_path.display()
-            )
-        })?;
-        use std::io::Write;
-        tmp.write_all(content.as_bytes()).with_context(|| {
-            format!("Failed to write skill content for {}", file_path.display())
-        })?;
-        tmp.persist(&file_path)
-            .with_context(|| format!("Failed to persist skill at {}", file_path.display()))?;
+        crate::atomic_write::atomic_write(&file_path, content.as_bytes())
+            .with_context(|| format!("Failed to write skill at {}", file_path.display()))?;
     }
     Ok(skill_dir)
 }
@@ -1575,22 +1553,9 @@ fn write_section_atomically(
         return Ok(None);
     };
     let final_path = dir.join(name);
-    let mut tmp = tempfile::NamedTempFile::new_in(dir).with_context(|| {
+    crate::atomic_write::atomic_write(&final_path, text.as_bytes()).with_context(|| {
         format!(
-            "Failed to create temp file while writing planning section {}",
-            final_path.display()
-        )
-    })?;
-    use std::io::Write;
-    tmp.write_all(text.as_bytes()).with_context(|| {
-        format!(
-            "Failed to write planning section content for {}",
-            final_path.display()
-        )
-    })?;
-    tmp.persist(&final_path).with_context(|| {
-        format!(
-            "Failed to persist planning section at {}",
+            "Failed to write planning section at {}",
             final_path.display()
         )
     })?;

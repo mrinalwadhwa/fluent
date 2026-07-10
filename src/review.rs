@@ -133,7 +133,10 @@ impl ReviewStateSource {
 
 pub fn write_review_state(run_dir: &Path, state: &ReviewState) -> Result<()> {
     let content = serde_json::to_string_pretty(state)?;
-    fs::write(run_dir.join("review-state.json"), format!("{content}\n"))?;
+    crate::atomic_write::atomic_write(
+        &run_dir.join("review-state.json"),
+        format!("{content}\n").as_bytes(),
+    )?;
     Ok(())
 }
 
