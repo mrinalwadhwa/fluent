@@ -3922,7 +3922,7 @@ Test: tests/binary.rs (update_check_offline_is_silent_and_nonfatal)
 
 WHEN Fluent would run an update check but one has run within the cached
 interval,
-THE SYSTEM SHALL not query the release source again and SHALL base any
+THE SYSTEM SHALL NOT query the release source again and SHALL base any
 nudge on the cached result.
 Test: tests/binary.rs (update_check_is_cached_within_interval)
 
