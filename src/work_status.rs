@@ -36,7 +36,7 @@ pub fn load_work_status(project_root: &Path) -> Result<WorkStatus, anyhow::Error
 
     for result in store.list_work_item_results()? {
         match result {
-            Ok(item) => rows.push(summarize_work_item(&item)),
+            Ok(item) => rows.push(summarize_work_item(&item, Some(project_root))),
             Err(error) => errors.push(error.to_string()),
         }
     }
@@ -44,7 +44,7 @@ pub fn load_work_status(project_root: &Path) -> Result<WorkStatus, anyhow::Error
     Ok(WorkStatus { rows, errors })
 }
 
-pub fn summarize_work_item(item: &WorkItem) -> WorkItemStatus {
+pub fn summarize_work_item(item: &WorkItem, project_root: Option<&Path>) -> WorkItemStatus {
     let attempt = item.attempts.last();
     let merge_candidate = attempt.and_then(|attempt| {
         item.merge_candidates
@@ -61,7 +61,7 @@ pub fn summarize_work_item(item: &WorkItem) -> WorkItemStatus {
             .unwrap_or_else(|| "-".to_string()),
         task: attempt
             .and_then(select_task)
-            .map(format_task)
+            .map(|task| format_task_with_liveness(task, item, project_root))
             .unwrap_or_else(|| "-".to_string()),
         review: attempt
             .and_then(|attempt| attempt.review_state.as_ref())
@@ -74,7 +74,8 @@ pub fn summarize_work_item(item: &WorkItem) -> WorkItemStatus {
         merge: merge_candidate
             .map(format_merge_state)
             .unwrap_or_else(|| "-".to_string()),
-        action: action_label(item, attempt, merge_candidate).to_string(),
+        action: action_label_with_liveness(item, attempt, merge_candidate, project_root)
+            .to_string(),
     }
 }
 
@@ -172,13 +173,48 @@ fn format_attempt(attempt: &Attempt) -> String {
     format!("{} [{}]", attempt.id, attempt_status_label(&attempt.status))
 }
 
-fn format_task(task: &Task) -> String {
+fn format_task_with_liveness(
+    task: &Task,
+    item: &WorkItem,
+    project_root: Option<&Path>,
+) -> String {
     format!(
         "{}:{} [{}]",
         task_kind_label(task.kind),
         task.id,
-        task.status.as_str()
+        effective_task_status_label(task, item, project_root)
     )
+}
+
+fn effective_task_status_label(
+    task: &Task,
+    item: &WorkItem,
+    project_root: Option<&Path>,
+) -> &'static str {
+    if task.status == TaskStatus::Executing {
+        if let Some(root) = project_root {
+            let lock_path = crate::lease::task_lock_path(root, &item.id, &task.id);
+            if !crate::lease::is_leased(&lock_path) {
+                return "interrupted";
+            }
+        }
+    }
+    task.status.as_str()
+}
+
+fn is_task_live_executing(
+    task: &Task,
+    item: &WorkItem,
+    project_root: Option<&Path>,
+) -> bool {
+    task.status == TaskStatus::Executing
+        && match project_root {
+            Some(root) => {
+                let lock_path = crate::lease::task_lock_path(root, &item.id, &task.id);
+                crate::lease::is_leased(&lock_path)
+            }
+            None => true,
+        }
 }
 
 fn format_merge_state(candidate: &MergeCandidate) -> String {
@@ -187,10 +223,11 @@ fn format_merge_state(candidate: &MergeCandidate) -> String {
     format!("{status} review:{review}")
 }
 
-fn action_label(
+fn action_label_with_liveness(
     item: &WorkItem,
     attempt: Option<&Attempt>,
     merge_candidate: Option<&MergeCandidate>,
+    project_root: Option<&Path>,
 ) -> &'static str {
     if item.abandonment.is_some() {
         return "abandoned";
@@ -208,14 +245,19 @@ fn action_label(
         if attempt
             .tasks
             .iter()
-            .any(|task| task.status == TaskStatus::Executing)
+            .any(|task| is_task_live_executing(task, item, project_root))
         {
             return "executing";
         }
-        if attempt
-            .tasks
-            .iter()
-            .any(|task| task.status == TaskStatus::Planned)
+        let has_reclaimable = attempt.tasks.iter().any(|task| {
+            task.status == TaskStatus::Executing
+                && !is_task_live_executing(task, item, project_root)
+        });
+        if has_reclaimable
+            || attempt
+                .tasks
+                .iter()
+                .any(|task| task.status == TaskStatus::Planned)
         {
             return "task-ready";
         }
@@ -302,7 +344,7 @@ mod tests {
         };
         item.add_initial_attempt("attempt-1").unwrap();
 
-        let row = summarize_work_item(&item);
+        let row = summarize_work_item(&item, None);
 
         assert_eq!(row.attempt, "attempt-1 [planned]");
         assert_eq!(row.task, "write:attempt-1-write-1 [planned]");
@@ -345,7 +387,7 @@ mod tests {
         attempt.review_state = Some(AttemptReviewState::Passed);
         let candidate_id = item.create_or_get_merge_candidate("attempt-1").unwrap();
 
-        let row = summarize_work_item(&item);
+        let row = summarize_work_item(&item, None);
 
         assert_eq!(row.merge_candidate, candidate_id);
         assert_eq!(row.merge, "pending review:pending");
@@ -366,7 +408,7 @@ mod tests {
         item.add_initial_attempt("attempt-1").unwrap();
         item.attempts[0].tasks[0].status = TaskStatus::NeedsUser;
 
-        let row = summarize_work_item(&item);
+        let row = summarize_work_item(&item, None);
 
         assert_eq!(row.task, "write:attempt-1-write-1 [needs-user]");
         assert_eq!(row.action, "needs-user");
@@ -389,7 +431,7 @@ mod tests {
         item.abandon(Some("replacement landed".to_string()), None)
             .unwrap();
 
-        let row = summarize_work_item(&item);
+        let row = summarize_work_item(&item, None);
 
         assert_eq!(row.task, "write:attempt-1-write-1 [needs-user]");
         assert_eq!(row.action, "abandoned");
@@ -486,7 +528,7 @@ mod tests {
             auto_merge_skipped: None,
         };
 
-        let row = summarize_work_item(&item);
+        let row = summarize_work_item(&item, None);
 
         assert_eq!(row.action, "merged");
         assert_eq!(row.merge, "merged review:pending");

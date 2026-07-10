@@ -10379,3 +10379,54 @@ fn lease_child_process_exit_frees_lock() {
         "lock should be freed after child process exits"
     );
 }
+
+#[test]
+fn status_shows_stale_executing_task_as_interrupted() {
+    let tmp = TempDir::new().unwrap();
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args([
+            "work-item",
+            "create",
+            "work-1",
+            "--title",
+            "Stale executing",
+        ])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let task_path = work_task_record_path(tmp.path(), "work-1", "attempt-1", "attempt-1-write-1");
+    let mut task_value = read_json_value(&task_path);
+    task_value["status"] = serde_json::json!("executing");
+    write_json_value(&task_path, &task_value);
+
+    let attempt_path = tmp
+        .path()
+        .join(".fluent/work/attempts/work-1")
+        .join("attempt-1.json");
+    let mut attempt_value = read_json_value(&attempt_path);
+    attempt_value["status"] = serde_json::json!("executing");
+    write_json_value(&attempt_path, &attempt_value);
+
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .arg("status")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[interrupted]"),
+        "task should show as interrupted: {stdout}"
+    );
+    assert!(
+        stdout.contains("task-ready"),
+        "action should be task-ready, not executing: {stdout}"
+    );
+}
