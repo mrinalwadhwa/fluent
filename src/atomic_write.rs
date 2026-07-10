@@ -50,13 +50,17 @@ mod tests {
 
     #[test]
     fn concurrent_reader_never_sees_empty_or_partial() {
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         let initial = serde_json::json!({"version": 0, "status": "init"});
-        atomic_write(&path, serde_json::to_vec_pretty(&initial).unwrap().as_slice()).unwrap();
+        atomic_write(
+            &path,
+            serde_json::to_vec_pretty(&initial).unwrap().as_slice(),
+        )
+        .unwrap();
 
         let stop = Arc::new(AtomicBool::new(false));
         let reader_path = path.clone();
