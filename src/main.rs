@@ -1258,11 +1258,13 @@ fn cmd_init(cwd: &Path) -> Result<()> {
             "  Already initialized: .fluent/ exists in {}",
             cwd.display()
         );
-        return Ok(());
+    } else {
+        fs::create_dir_all(fluent_dir.join("expertise"))?;
+        write_gitignore_if_absent(&fluent_dir)?;
+        eprintln!("  Initialized .fluent/ in {}", cwd.display());
     }
-    fs::create_dir_all(fluent_dir.join("expertise"))?;
-    write_gitignore_if_absent(&fluent_dir)?;
-    eprintln!("  Initialized .fluent/ in {}", cwd.display());
+
+    cmd_skills_add(cwd, false, false, None)?;
     Ok(())
 }
 

@@ -9972,6 +9972,36 @@ fn skills_add_writes_to_data_directory() {
 }
 
 #[test]
+fn init_installs_full_fluent_skill() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .current_dir(&project)
+        .args(["init"])
+        .assert()
+        .success();
+
+    assert!(
+        project.join(".fluent").is_dir(),
+        "fluent init must create .fluent/"
+    );
+    assert!(
+        home.join(".claude/skills/fluent/SKILL.md").exists(),
+        "fluent init must install the full skill to global directory"
+    );
+    let content = fs::read_to_string(home.join(".claude/skills/fluent/SKILL.md")).unwrap();
+    assert!(
+        !content.contains("fluent-shim: true"),
+        "installed skill must be the full skill, not the shim"
+    );
+}
+
+#[test]
 fn skills_show_prints_skill_path() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
