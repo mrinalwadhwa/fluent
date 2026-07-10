@@ -356,11 +356,30 @@ task["status"] = "executing"
 task_path.write_text(json.dumps(task, indent=2) + "\n")
 PY
 
+  LOCK_DIR=".fluent/work/locks/work-active"
+  mkdir -p "$LOCK_DIR"
+  LOCK_FILE="${LOCK_DIR}/attempt-1-write-1.lock"
+
+  READY_FIFO="$TEST_DIR/holder-ready"
+  mkfifo "$READY_FIFO"
+  python3 -c "
+import fcntl, sys, time
+f = open('${LOCK_FILE}', 'w')
+fcntl.flock(f, fcntl.LOCK_EX)
+open('${READY_FIFO}', 'w').close()
+time.sleep(60)
+" &
+  HOLDER_PID=$!
+  cat "$READY_FIFO" > /dev/null
+
   RESULT=0
   assert_fails "$FLUENT_BIN" work-item abandon work-active --reason "obsolete" || RESULT=1
   ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
   assert_contains "$ERROR_OUTPUT" "cannot be abandoned" || RESULT=1
   assert_not_contains "$(cat .fluent/work/items/work-active.json)" "abandonment" || RESULT=1
+
+  kill "$HOLDER_PID" 2>/dev/null || true
+  wait "$HOLDER_PID" 2>/dev/null || true
 
   cleanup_test_project
   return $RESULT

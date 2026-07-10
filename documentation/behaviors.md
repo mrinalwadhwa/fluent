@@ -1737,6 +1737,29 @@ IF a state-file write fails before the target file exists,
 THEN THE SYSTEM SHALL leave no partial target file on disk.
 Test: src/atomic_write.rs (failed_first_write_leaves_no_partial_target)
 
+## Task execution liveness
+
+### B1
+
+WHEN `fluent status` includes a task that is recorded as `executing`
+but whose lease no live runner holds (stale executing),
+THE SYSTEM SHALL report it as interrupted, not as executing.
+Test: tests/binary.rs (status_shows_stale_executing_task_as_interrupted)
+
+### B2
+
+WHEN the attempt loop encounters a stale-executing task,
+THE SYSTEM SHALL reclaim the task and continue advancing the attempt,
+rather than failing with "cannot be advanced."
+Test: tests/binary.rs (attempt_run_reclaims_stale_executing_task_and_advances)
+
+### B3
+
+WHILE a live runner holds a task's lease,
+THE SYSTEM SHALL treat the task as executing and SHALL NOT reclaim or
+re-drive it.
+Test: tests/binary.rs (attempt_run_refuses_to_advance_when_lease_is_held)
+
 ## Coder transient failures
 
 ### B1

@@ -10157,7 +10157,7 @@ fn skills_show_prints_skill_content() {
 // -------------------------------------------------------------------------
 
 #[test]
-fn lease_acquired_lock_reads_as_leased_and_freed_lock_reads_as_not_leased() {
+fn lease_acquire_creates_file_and_drop_frees_lock() {
     let tmp = TempDir::new().unwrap();
     let lock_path = tmp.path().join("task.lock");
 
@@ -10429,4 +10429,107 @@ fn status_shows_stale_executing_task_as_interrupted() {
         stdout.contains("task-ready"),
         "action should be task-ready, not executing: {stdout}"
     );
+}
+
+#[test]
+fn abandon_succeeds_when_executing_task_has_no_lease() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Stale abandon"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let task_path = work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-write-1");
+    let mut task_value = read_json_value(&task_path);
+    task_value["status"] = serde_json::json!("executing");
+    write_json_value(&task_path, &task_value);
+
+    let attempt_path = main_dir
+        .join(".fluent/work/attempts/work-1")
+        .join("attempt-1.json");
+    let mut attempt_value = read_json_value(&attempt_path);
+    attempt_value["status"] = serde_json::json!("failed");
+    write_json_value(&attempt_path, &attempt_value);
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "abandon", "work-1", "--reason", "stale"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn abandon_fails_when_executing_task_lease_is_held() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Live abandon"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let task_path = work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-write-1");
+    let mut task_value = read_json_value(&task_path);
+    task_value["status"] = serde_json::json!("executing");
+    write_json_value(&task_path, &task_value);
+
+    let attempt_path = main_dir
+        .join(".fluent/work/attempts/work-1")
+        .join("attempt-1.json");
+    let mut attempt_value = read_json_value(&attempt_path);
+    attempt_value["status"] = serde_json::json!("failed");
+    write_json_value(&attempt_path, &attempt_value);
+
+    let lock_path = fluent::lease::task_lock_path(&main_dir, "work-1", "attempt-1-write-1");
+    fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+
+    let mut holder = std::process::Command::new("python3")
+        .args([
+            "-c",
+            &format!(
+                concat!(
+                    "import fcntl, sys\n",
+                    "f = open('{}', 'w')\n",
+                    "fcntl.flock(f, fcntl.LOCK_EX)\n",
+                    "print('ready', flush=True)\n",
+                    "sys.stdin.readline()\n",
+                ),
+                lock_path.display()
+            ),
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    {
+        let stdout = holder.stdout.as_mut().unwrap();
+        let mut buf = String::new();
+        use std::io::BufRead;
+        std::io::BufReader::new(stdout).read_line(&mut buf).unwrap();
+    }
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "abandon", "work-1", "--reason", "live"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be abandoned"));
+
+    drop(holder.stdin.take());
+    holder.wait().unwrap();
 }
