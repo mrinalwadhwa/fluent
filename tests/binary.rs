@@ -9280,11 +9280,7 @@ fn target_triple() -> String {
 /// The fixture contains:
 /// - `repos/{owner}/{repo}/releases/latest` — GitHub API JSON
 /// - `download/v{version}/fluent-{triple}` — the binary asset
-fn setup_fixture_release(
-    dir: &Path,
-    version: &str,
-    binary_content: &[u8],
-) -> (String, String) {
+fn setup_fixture_release(dir: &Path, version: &str, binary_content: &[u8]) -> (String, String) {
     let owner = "test-owner";
     let repo = "fluent";
     let triple = target_triple();
@@ -9333,11 +9329,8 @@ fn update_reports_up_to_date() {
     fs::create_dir_all(&fixture_dir).unwrap();
 
     let current_version = env!("CARGO_PKG_VERSION");
-    let (api_base, release_repo) = setup_fixture_release(
-        &fixture_dir,
-        current_version,
-        b"binary-content",
-    );
+    let (api_base, release_repo) =
+        setup_fixture_release(&fixture_dir, current_version, b"binary-content");
 
     let output = fluent_cmd()
         .current_dir(tmp.path())
@@ -9372,8 +9365,7 @@ fn update_replaces_binary_and_rematerializes_skills() {
     fs::write(&fake_binary, b"old-binary-content").unwrap();
 
     let new_content = b"new-binary-content-v999";
-    let (api_base, release_repo) =
-        setup_fixture_release(&fixture_dir, "999.0.0", new_content);
+    let (api_base, release_repo) = setup_fixture_release(&fixture_dir, "999.0.0", new_content);
 
     let cache_path = tmp.path().join("update-cache.json");
 
@@ -9515,8 +9507,7 @@ fn update_check_queries_update_endpoint() {
     let fixture_dir = tmp.path().join("fixture");
     fs::create_dir_all(&fixture_dir).unwrap();
 
-    let (api_base, release_repo) =
-        setup_fixture_release(&fixture_dir, "999.0.0", b"new-binary");
+    let (api_base, release_repo) = setup_fixture_release(&fixture_dir, "999.0.0", b"new-binary");
 
     let cache_path = tmp.path().join("update-cache.json");
 
@@ -9555,8 +9546,7 @@ fn update_check_never_replaces_binary() {
     let original = b"original-binary";
     fs::write(&fake_binary, original).unwrap();
 
-    let (api_base, release_repo) =
-        setup_fixture_release(&fixture_dir, "999.0.0", b"new-binary");
+    let (api_base, release_repo) = setup_fixture_release(&fixture_dir, "999.0.0", b"new-binary");
 
     let cache_path = tmp.path().join("update-cache.json");
 
@@ -10037,8 +10027,7 @@ fn skills_add_refreshes_stale_installation() {
 fn skills_show_prints_skill_path() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
-    let data_dir = home
-        .join(".local/share/fluent/skills/fluent");
+    let data_dir = home.join(".local/share/fluent/skills/fluent");
     fs::create_dir_all(&data_dir).unwrap();
     fs::write(data_dir.join("SKILL.md"), "test content").unwrap();
 

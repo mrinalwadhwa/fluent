@@ -1317,11 +1317,7 @@ fn cmd_skills_add(
         for name in &names {
             work_task_executor::materialize_skill(name, dir)?;
         }
-        eprintln!(
-            "Installed {} skills to {}",
-            names.len(),
-            dir.display()
-        );
+        eprintln!("Installed {} skills to {}", names.len(), dir.display());
     }
 
     // Scan for shim-marked fluent installations in candidate directories
@@ -1406,10 +1402,7 @@ fn replace_shim_if_present(skills_dir: &Path) -> Result<()> {
         return Ok(());
     }
     work_task_executor::materialize_skill("fluent", skills_dir)?;
-    eprintln!(
-        "Replaced fluent shim in {}",
-        skills_dir.display()
-    );
+    eprintln!("Replaced fluent shim in {}", skills_dir.display());
     Ok(())
 }
 
@@ -1448,9 +1441,8 @@ fn cmd_skills_show(path_only: bool, name: &str) -> Result<()> {
         println!("{}", skill_md.display());
     } else {
         let skill_md = skill_dir.join("SKILL.md");
-        let content = fs::read_to_string(&skill_md).with_context(|| {
-            format!("Cannot read skill {:?} at {}", name, skill_md.display())
-        })?;
+        let content = fs::read_to_string(&skill_md)
+            .with_context(|| format!("Cannot read skill {:?} at {}", name, skill_md.display()))?;
         print!("{content}");
     }
     Ok(())

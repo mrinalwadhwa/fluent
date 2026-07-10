@@ -168,10 +168,7 @@ fn query_latest_release() -> Result<LatestRelease> {
         .ok_or_else(|| anyhow::anyhow!("Release has no asset named {asset_name:?}"))?
         .to_string();
 
-    Ok(LatestRelease {
-        version,
-        asset_url,
-    })
+    Ok(LatestRelease { version, asset_url })
 }
 
 // -------------------------------------------------------------------------
@@ -437,7 +434,10 @@ mod tests {
             std::env::remove_var("FLUENT_API_BASE");
             std::env::remove_var("FLUENT_RELEASE_REPO");
         }
-        assert_eq!(url, "https://api.example.com/repos/test/repo/releases/latest");
+        assert_eq!(
+            url,
+            "https://api.example.com/repos/test/repo/releases/latest"
+        );
     }
 
     #[test]

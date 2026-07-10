@@ -770,7 +770,9 @@ Check item {{ITEM_ID}}.
             "bundled fluent/SKILL.md must be the full skill, not the shim"
         );
         assert!(
-            entries.iter().any(|(p, _)| p.starts_with("fluent/references/")),
+            entries
+                .iter()
+                .any(|(p, _)| p.starts_with("fluent/references/")),
             "bundled fluent skill must include references"
         );
     }
