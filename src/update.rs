@@ -101,7 +101,6 @@ impl std::fmt::Display for Version {
 
 #[derive(Debug)]
 struct LatestRelease {
-    tag: String,
     version: Version,
     asset_url: String,
     checksum_url: String,
@@ -172,7 +171,6 @@ fn query_latest_release() -> Result<LatestRelease> {
     };
 
     Ok(LatestRelease {
-        tag,
         version,
         asset_url,
         checksum_url,
