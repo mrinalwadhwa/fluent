@@ -3987,20 +3987,41 @@ Test: tests/binary.rs (update_replace_leaves_working_binary_on_failure)
 ### B1
 
 WHEN `fluent init` is invoked in a directory without `.fluent/`,
-THE SYSTEM SHALL create `.fluent/` with the initial directory structure,
-write a `.fluent/.gitignore`, and install skills via the default
-`fluent skills add` path.
-Test: tests/binary.rs (init_installs_full_fluent_skill)
+THE SYSTEM SHALL create `.fluent/` with the initial directory structure.
+Test: tests/binary.rs (init_creates_fluent_structure)
 
 ### B2
 
-WHEN `fluent init` is invoked in a directory that already has `.fluent/`,
-THE SYSTEM SHALL print "Already initialized," write a `.fluent/.gitignore`
-if absent, and still install skills via the default `fluent skills add`
-path.
-Test: tests/binary.rs (init_reinit_installs_skills)
+WHEN `fluent init` is invoked in a directory without `.fluent/`,
+THE SYSTEM SHALL write a `.fluent/.gitignore`.
+Test: tests/binary.rs (init_writes_gitignore_when_absent)
 
 ### B3
+
+WHEN `fluent init` is invoked in a directory without `.fluent/`,
+THE SYSTEM SHALL install skills via the default `fluent skills add` path.
+Test: tests/binary.rs (init_installs_full_fluent_skill)
+
+### B4
+
+WHEN `fluent init` is invoked in a directory that already has `.fluent/`,
+THE SYSTEM SHALL print "Already initialized."
+Test: tests/binary.rs (init_is_idempotent)
+
+### B5
+
+WHEN `fluent init` is invoked in a directory that already has `.fluent/`
+and `.fluent/.gitignore` is absent,
+THE SYSTEM SHALL write a `.fluent/.gitignore`.
+Test: tests/binary.rs (init_backfills_gitignore_on_existing_fluent)
+
+### B6
+
+WHEN `fluent init` is invoked in a directory that already has `.fluent/`,
+THE SYSTEM SHALL install skills via the default `fluent skills add` path.
+Test: tests/binary.rs (init_reinit_installs_skills)
+
+### B7
 
 IF skill installation fails during `fluent init`,
 THEN THE SYSTEM SHALL print a warning and continue without failing the
