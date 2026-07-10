@@ -742,10 +742,7 @@ Check item {{ITEM_ID}}.
             names.contains(&"review-tests"),
             "should contain review-tests"
         );
-        assert!(
-            names.contains(&"fluent"),
-            "should contain fluent"
-        );
+        assert!(names.contains(&"fluent"), "should contain fluent");
     }
 
     #[test]

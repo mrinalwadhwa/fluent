@@ -346,9 +346,8 @@ mod tests {
             "workspace should be writable: {content}"
         );
         assert!(
-            content.contains(
-                "(allow file-write* (subpath \"/Users/test/.fluent/artifacts/tester\"))"
-            ),
+            content
+                .contains("(allow file-write* (subpath \"/Users/test/.fluent/artifacts/tester\"))"),
             "artifact dir should be writable: {content}"
         );
     }

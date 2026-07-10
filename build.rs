@@ -88,9 +88,8 @@ fn collect_skill_files(base: &Path, dir: &Path, entries: &mut Vec<(String, Strin
 
     for entry in dir_entries {
         let path = entry.path();
-        let metadata = fs::metadata(&path).unwrap_or_else(|e| {
-            panic!("failed to read metadata for {}: {e}", path.display())
-        });
+        let metadata = fs::metadata(&path)
+            .unwrap_or_else(|e| panic!("failed to read metadata for {}: {e}", path.display()));
 
         if metadata.is_dir() {
             collect_skill_files(base, &path, entries);
@@ -100,9 +99,8 @@ fn collect_skill_files(base: &Path, dir: &Path, entries: &mut Vec<(String, Strin
                 .unwrap()
                 .to_string_lossy()
                 .replace('\\', "/");
-            let content = fs::read_to_string(&path).unwrap_or_else(|e| {
-                panic!("failed to read {}: {e}", path.display())
-            });
+            let content = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
             entries.push((rel, content));
         }
     }

@@ -15,13 +15,11 @@ const CURL_MAX_TIME_DOWNLOAD: u32 = 300;
 const CACHE_FILE_NAME: &str = "update-check.json";
 
 fn release_repo() -> String {
-    std::env::var("FLUENT_RELEASE_REPO")
-        .unwrap_or_else(|_| DEFAULT_RELEASE_REPO.to_string())
+    std::env::var("FLUENT_RELEASE_REPO").unwrap_or_else(|_| DEFAULT_RELEASE_REPO.to_string())
 }
 
 fn api_base() -> String {
-    std::env::var("FLUENT_API_BASE")
-        .unwrap_or_else(|_| DEFAULT_API_BASE.to_string())
+    std::env::var("FLUENT_API_BASE").unwrap_or_else(|_| DEFAULT_API_BASE.to_string())
 }
 
 fn config_dir() -> PathBuf {
@@ -83,13 +81,11 @@ impl Version {
     }
 
     pub fn current() -> Self {
-        Version::parse(env!("CARGO_PKG_VERSION"))
-            .expect("CARGO_PKG_VERSION is valid semver")
+        Version::parse(env!("CARGO_PKG_VERSION")).expect("CARGO_PKG_VERSION is valid semver")
     }
 
     pub fn is_behind(&self, latest: &Version) -> bool {
-        (latest.major, latest.minor, latest.patch)
-            > (self.major, self.minor, self.patch)
+        (latest.major, latest.minor, latest.patch) > (self.major, self.minor, self.patch)
     }
 }
 
@@ -140,8 +136,8 @@ fn query_latest_release() -> Result<LatestRelease> {
         );
     }
 
-    let body = String::from_utf8(output.stdout)
-        .context("Release API response is not valid UTF-8")?;
+    let body =
+        String::from_utf8(output.stdout).context("Release API response is not valid UTF-8")?;
     let json: serde_json::Value =
         serde_json::from_str(&body).context("Failed to parse release API response")?;
 
@@ -205,10 +201,7 @@ fn download_file(url: &str, dest: &Path, max_time: u32) -> Result<()> {
         .context("Failed to run curl for download")?;
 
     if !status.success() {
-        bail!(
-            "Download failed (exit {})",
-            status.code().unwrap_or(-1)
-        );
+        bail!("Download failed (exit {})", status.code().unwrap_or(-1));
     }
     Ok(())
 }
@@ -235,8 +228,7 @@ fn fetch_checksum(url: &str) -> Result<String> {
         );
     }
 
-    let text = String::from_utf8(output.stdout)
-        .context("Checksum file is not valid UTF-8")?;
+    let text = String::from_utf8(output.stdout).context("Checksum file is not valid UTF-8")?;
     let hash = text
         .split_whitespace()
         .next()
@@ -340,9 +332,7 @@ pub fn maybe_nudge() {
 }
 
 fn print_nudge(latest: &Version) {
-    eprintln!(
-        "A newer fluent is available ({latest}) — run `fluent update`"
-    );
+    eprintln!("A newer fluent is available ({latest}) — run `fluent update`");
 }
 
 // -------------------------------------------------------------------------
@@ -355,8 +345,7 @@ pub fn perform_update() -> Result<()> {
 
     eprintln!("Checking for updates...");
 
-    let release = query_latest_release()
-        .context("Failed to reach the release source")?;
+    let release = query_latest_release().context("Failed to reach the release source")?;
 
     write_cache(&release.version.to_string());
 
@@ -365,10 +354,7 @@ pub fn perform_update() -> Result<()> {
         return Ok(());
     }
 
-    eprintln!(
-        "Updating fluent {} → {} ...",
-        current, release.version
-    );
+    eprintln!("Updating fluent {} → {} ...", current, release.version);
 
     let parent = bin
         .parent()
@@ -382,8 +368,7 @@ pub fn perform_update() -> Result<()> {
         let expected = fetch_checksum(&release.checksum_url)
             .context("Failed to download the release checksum")?;
 
-        let valid = verify_checksum(&tmp_path, &expected)
-            .context("Failed to verify checksum")?;
+        let valid = verify_checksum(&tmp_path, &expected).context("Failed to verify checksum")?;
 
         if !valid {
             bail!("Checksum mismatch — aborting update to keep the current binary safe");
@@ -508,7 +493,13 @@ mod tests {
         let file = dir.path().join("test.bin");
         fs::write(&file, b"hello world").unwrap();
 
-        assert!(!verify_checksum(&file, "0000000000000000000000000000000000000000000000000000000000000000").unwrap());
+        assert!(
+            !verify_checksum(
+                &file,
+                "0000000000000000000000000000000000000000000000000000000000000000"
+            )
+            .unwrap()
+        );
     }
 
     #[test]

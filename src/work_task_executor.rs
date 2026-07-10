@@ -784,13 +784,13 @@ impl SourceCheckoutReviewGuard {
 
     fn finish(&self) -> Result<()> {
         ensure_source_head_unchanged(&self.path, &self.head)?;
-        let non_fluent_error =
-            if let Err(error) = ensure_no_non_fluent_worktree_changes(&self.path) {
-                restore_non_fluent_worktree_changes(&self.path)?;
-                Some(error)
-            } else {
-                None
-            };
+        let non_fluent_error = if let Err(error) = ensure_no_non_fluent_worktree_changes(&self.path)
+        {
+            restore_non_fluent_worktree_changes(&self.path)?;
+            Some(error)
+        } else {
+            None
+        };
         if let Err(error) = ensure_source_changed_only_artifact_area(self) {
             restore_source_changes_outside_artifact_area(self)?;
             return Err(error);
@@ -1500,10 +1500,7 @@ pub fn materialize_skill(skill_name: &str, dest_dir: &Path) -> Result<PathBuf> {
         })?;
         use std::io::Write;
         tmp.write_all(content.as_bytes()).with_context(|| {
-            format!(
-                "Failed to write skill content for {}",
-                file_path.display()
-            )
+            format!("Failed to write skill content for {}", file_path.display())
         })?;
         tmp.persist(&file_path)
             .with_context(|| format!("Failed to persist skill at {}", file_path.display()))?;
@@ -2534,8 +2531,8 @@ mod tests {
         let project_root = tmp.path();
         let workspace = tmp.path().join("work-6-work-1-attempt-1");
         fs::create_dir_all(&workspace).unwrap();
-        let artifact_dir = project_root
-            .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests");
+        let artifact_dir =
+            project_root.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests");
         let review_path = artifact_dir.join("review.md");
 
         let item = review_item();
@@ -2552,9 +2549,11 @@ mod tests {
         })
         .unwrap();
 
-        assert!(prompts
-            .review_prompt
-            .contains(&review_path.display().to_string()));
+        assert!(
+            prompts
+                .review_prompt
+                .contains(&review_path.display().to_string())
+        );
         assert!(prompts.review_prompt.contains("CARGO_TARGET_DIR"));
         assert!(prompts.review_prompt.contains("cargo build"));
         assert!(
@@ -2582,8 +2581,8 @@ mod tests {
         let project_root = tmp.path();
         let workspace = tmp.path().join("work-6-work-1-attempt-1");
         fs::create_dir_all(&workspace).unwrap();
-        let artifact_dir = project_root
-            .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-behaviors");
+        let artifact_dir =
+            project_root.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-behaviors");
         let review_path = artifact_dir.join("review.md");
 
         let item = review_item_with_role("behaviors");

@@ -108,18 +108,14 @@ fn fluent_skills_install_writes_single_skill() {
         "should report installation: {stderr}"
     );
 
-    let skill_md = tmp
-        .path()
-        .join(".claude/skills/fluent/SKILL.md");
+    let skill_md = tmp.path().join(".claude/skills/fluent/SKILL.md");
     assert!(
         skill_md.is_file(),
         "SKILL.md should exist at {}",
         skill_md.display()
     );
 
-    let refs_dir = tmp
-        .path()
-        .join(".claude/skills/fluent/references");
+    let refs_dir = tmp.path().join(".claude/skills/fluent/references");
     assert!(
         refs_dir.is_dir(),
         "references/ should exist at {}",
@@ -127,10 +123,7 @@ fn fluent_skills_install_writes_single_skill() {
     );
 
     let capture = refs_dir.join("capture-brief.md");
-    assert!(
-        capture.is_file(),
-        "capture-brief.md reference should exist"
-    );
+    assert!(capture.is_file(), "capture-brief.md reference should exist");
 }
 
 #[test]
@@ -1627,8 +1620,8 @@ exit 0
         .assert()
         .success();
 
-    let transcript = main_dir
-        .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/transcript.jsonl");
+    let transcript =
+        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/transcript.jsonl");
     assert!(
         transcript.is_file(),
         "transcript.jsonl should exist at {}",
@@ -1691,8 +1684,8 @@ exit 1
         .output()
         .unwrap();
 
-    let transcript = main_dir
-        .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/transcript.jsonl");
+    let transcript =
+        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/transcript.jsonl");
     assert!(
         transcript.is_file(),
         "transcript.jsonl should persist even on failure at {}",
@@ -3135,10 +3128,7 @@ fn work_attempt_run_review_only_restores_mixed_source_and_fluent_changes() {
         .success();
 
     let bin_dir = tmp.path().join("bin-review-only-mixed-dirty");
-    write_mock_claude(
-        &bin_dir,
-        &review_only_dirty_source_and_fluent_mock_script(),
-    );
+    write_mock_claude(&bin_dir, &review_only_dirty_source_and_fluent_mock_script());
 
     fluent_cmd()
         .current_dir(&main_dir)
@@ -6645,8 +6635,7 @@ fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() 
     let check_artifact = main_dir.join(
         ".fluent/work/artifacts/work-merge-cleanup/attempt-1/candidate-1/merge/checks/checks.json",
     );
-    let attempt_artifact_dir =
-        main_dir.join(".fluent/work/artifacts/work-merge-cleanup/attempt-1");
+    let attempt_artifact_dir = main_dir.join(".fluent/work/artifacts/work-merge-cleanup/attempt-1");
     let candidate_artifact_dir = attempt_artifact_dir.join("candidate-1");
     let review_artifact = main_dir
         .join(".fluent/work/artifacts/work-merge-cleanup/attempt-1/candidate-1/merge/reviews/tests/review.md");
@@ -9316,14 +9305,8 @@ fn setup_fixture_release(
     let checksum_path = download_dir.join(format!("{asset_name}.sha256"));
     fs::write(&checksum_path, format!("{checksum}  {asset_name}\n")).unwrap();
 
-    let binary_url = format!(
-        "file://{}",
-        binary_path.to_string_lossy()
-    );
-    let checksum_url = format!(
-        "file://{}",
-        checksum_path.to_string_lossy()
-    );
+    let binary_url = format!("file://{}", binary_path.to_string_lossy());
+    let checksum_url = format!("file://{}", checksum_path.to_string_lossy());
 
     let mut assets = vec![serde_json::json!({
         "name": asset_name,
@@ -9341,11 +9324,7 @@ fn setup_fixture_release(
         "assets": assets,
     });
 
-    let api_dir = dir
-        .join("repos")
-        .join(owner)
-        .join(repo)
-        .join("releases");
+    let api_dir = dir.join("repos").join(owner).join(repo).join("releases");
     fs::create_dir_all(&api_dir).unwrap();
     fs::write(
         api_dir.join("latest"),
@@ -9369,8 +9348,13 @@ fn update_reports_up_to_date() {
     fs::create_dir_all(&fixture_dir).unwrap();
 
     let current_version = env!("CARGO_PKG_VERSION");
-    let (api_base, release_repo) =
-        setup_fixture_release(&fixture_dir, current_version, b"binary-content", None, false);
+    let (api_base, release_repo) = setup_fixture_release(
+        &fixture_dir,
+        current_version,
+        b"binary-content",
+        None,
+        false,
+    );
 
     let output = fluent_cmd()
         .current_dir(tmp.path())
@@ -9512,10 +9496,7 @@ fn update_offline_preserves_binary() {
         .output()
         .unwrap();
 
-    assert!(
-        !output.status.success(),
-        "update should fail when offline"
-    );
+    assert!(!output.status.success(), "update should fail when offline");
 
     let preserved = fs::read(&fake_binary).unwrap();
     assert_eq!(
@@ -9618,7 +9599,10 @@ fn update_replace_leaves_working_binary_on_failure() {
 
     let output = fluent_cmd()
         .current_dir(tmp.path())
-        .env("FLUENT_API_BASE", format!("file://{}", fixture_dir.to_string_lossy()))
+        .env(
+            "FLUENT_API_BASE",
+            format!("file://{}", fixture_dir.to_string_lossy()),
+        )
         .env("FLUENT_RELEASE_REPO", "test-owner/fluent")
         .env("FLUENT_BINARY_PATH", fake_binary.to_str().unwrap())
         .env("FLUENT_UPDATE_CACHE_PATH", cache_path.to_str().unwrap())
@@ -9738,7 +9722,10 @@ fn update_check_is_cached_within_interval() {
     // it would fail. Since the cache is fresh, it should NOT query.
     let output = fluent_cmd()
         .current_dir(tmp.path())
-        .env("FLUENT_API_BASE", "file:///nonexistent/should-not-be-queried")
+        .env(
+            "FLUENT_API_BASE",
+            "file:///nonexistent/should-not-be-queried",
+        )
         .env("FLUENT_RELEASE_REPO", "no-owner/no-repo")
         .env("FLUENT_UPDATE_CACHE_PATH", cache_path.to_str().unwrap())
         .env_remove("FLUENT_NO_UPDATE_CHECK")
