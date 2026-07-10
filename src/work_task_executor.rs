@@ -131,6 +131,11 @@ fn run_write_task(
     worktree::disable_commit_signing(&workspace_path)?;
     let baseline_commit = head_commit(&workspace_path)?;
 
+    let lock_path =
+        crate::lease::task_lock_path(config.project_root, config.work_item_id, config.task_id);
+    let _lease = crate::lease::acquire(&lock_path)
+        .with_context(|| format!("Failed to acquire lease for Task {:?}", config.task_id))?;
+
     item.attempts[attempt_index].status = AttemptStatus::Executing;
     item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Executing;
     crate::work_model::mark_task_started(&mut item.attempts[attempt_index].tasks[task_index]);
@@ -250,6 +255,11 @@ fn run_review_task(
     coder_kind: CoderKind,
     model: Option<&str>,
 ) -> Result<WorkTaskRunResult> {
+    let lock_path =
+        crate::lease::task_lock_path(config.project_root, config.work_item_id, config.task_id);
+    let _lease = crate::lease::acquire(&lock_path)
+        .with_context(|| format!("Failed to acquire lease for Task {:?}", config.task_id))?;
+
     let (
         attempt_kind,
         workspace_reads,
@@ -499,6 +509,11 @@ fn run_review_task(
 }
 
 fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
+    let lock_path =
+        crate::lease::task_lock_path(config.project_root, config.work_item_id, config.task_id);
+    let _lease = crate::lease::acquire(&lock_path)
+        .with_context(|| format!("Failed to acquire lease for Task {:?}", config.task_id))?;
+
     let artifact_dir = {
         let _lock = config
             .store_lock

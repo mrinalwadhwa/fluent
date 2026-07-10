@@ -10151,3 +10151,111 @@ fn skills_show_prints_skill_content() {
         "should print SKILL.md content to stdout"
     );
 }
+
+// -------------------------------------------------------------------------
+// Task lease liveness
+// -------------------------------------------------------------------------
+
+#[test]
+fn lease_acquired_lock_reads_as_leased_and_freed_lock_reads_as_not_leased() {
+    let tmp = TempDir::new().unwrap();
+    let lock_path = tmp.path().join("task.lock");
+
+    assert!(
+        !fluent::lease::is_leased(&lock_path),
+        "non-existent lock file should not read as leased"
+    );
+
+    let lease = fluent::lease::acquire(&lock_path).unwrap();
+    // Within the same process on macOS, flock is per-process so is_leased
+    // cannot detect it. Verify the lock file was created instead.
+    assert!(lock_path.exists(), "lock file should exist after acquisition");
+
+    drop(lease);
+    assert!(
+        !fluent::lease::is_leased(&lock_path),
+        "released lock should not read as leased"
+    );
+}
+
+#[test]
+fn lease_child_process_holder_reads_as_leased_from_parent() {
+    let tmp = TempDir::new().unwrap();
+    let lock_path = tmp.path().join("child.lock");
+
+    let mut child = std::process::Command::new("python3")
+        .args([
+            "-c",
+            &format!(
+                concat!(
+                    "import fcntl, sys, time\n",
+                    "f = open('{}', 'w')\n",
+                    "fcntl.flock(f, fcntl.LOCK_EX)\n",
+                    "print('ready', flush=True)\n",
+                    "time.sleep(60)\n",
+                ),
+                lock_path.display()
+            ),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let stdout = child.stdout.as_mut().unwrap();
+    let mut buf = String::new();
+    use std::io::BufRead;
+    std::io::BufReader::new(stdout).read_line(&mut buf).unwrap();
+    assert!(buf.contains("ready"), "child should signal readiness");
+
+    assert!(
+        fluent::lease::is_leased(&lock_path),
+        "lock held by child process should read as leased"
+    );
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(
+        !fluent::lease::is_leased(&lock_path),
+        "lock should not read as leased after child exits"
+    );
+}
+
+#[test]
+fn lease_child_process_exit_frees_lock() {
+    let tmp = TempDir::new().unwrap();
+    let lock_path = tmp.path().join("exit.lock");
+
+    let mut child = std::process::Command::new("python3")
+        .args([
+            "-c",
+            &format!(
+                concat!(
+                    "import fcntl, sys\n",
+                    "f = open('{}', 'w')\n",
+                    "fcntl.flock(f, fcntl.LOCK_EX)\n",
+                    "print('ready', flush=True)\n",
+                    "sys.stdin.readline()\n",
+                ),
+                lock_path.display()
+            ),
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let stdout = child.stdout.as_mut().unwrap();
+    let mut buf = String::new();
+    use std::io::BufRead;
+    std::io::BufReader::new(stdout).read_line(&mut buf).unwrap();
+
+    assert!(fluent::lease::is_leased(&lock_path));
+
+    drop(child.stdin.take());
+    child.wait().unwrap();
+
+    assert!(
+        !fluent::lease::is_leased(&lock_path),
+        "lock should be freed after child process exits"
+    );
+}

@@ -428,6 +428,7 @@ dependencies = [
  "clap",
  "crossterm",
  "ctrlc",
+ "libc",
  "predicates",
  "ratatui",
  "serde",
