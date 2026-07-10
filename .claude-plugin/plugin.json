@@ -1,0 +1,8 @@
+{
+  "name": "fluent",
+  "description": "Autonomous software-building workflow with structured review",
+  "version": "1.0.0",
+  "author": {
+    "name": "Mrinal Wadhwa"
+  }
+}

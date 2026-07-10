@@ -1,0 +1,13 @@
+{
+  "name": "mrinalwadhwa-fluent",
+  "owner": {
+    "name": "Mrinal Wadhwa"
+  },
+  "plugins": [
+    {
+      "name": "fluent",
+      "source": "./",
+      "description": "Autonomous software-building workflow with structured review"
+    }
+  ]
+}
