@@ -87,7 +87,7 @@ fn version_prints_package_version_and_commit() {
 }
 
 #[test]
-fn fluent_skills_install_writes_single_skill() {
+fn fluent_skills_install_writes_all_public_skills() {
     let tmp = TempDir::new().unwrap();
 
     let output = fluent_cmd()
@@ -103,16 +103,30 @@ fn fluent_skills_install_writes_single_skill() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("Installed fluent skill"),
-        "should report installation: {stderr}"
-    );
 
-    let skill_md = tmp.path().join(".claude/skills/fluent/SKILL.md");
+    let expected_skills = [
+        "fluent",
+        "review-architecture",
+        "review-behaviors",
+        "review-documentation",
+        "review-skills",
+        "review-tests",
+    ];
+
+    for skill_name in &expected_skills {
+        let skill_md = tmp
+            .path()
+            .join(format!(".claude/skills/{skill_name}/SKILL.md"));
+        assert!(
+            skill_md.is_file(),
+            "SKILL.md should exist for {skill_name} at {}",
+            skill_md.display()
+        );
+    }
+
     assert!(
-        skill_md.is_file(),
-        "SKILL.md should exist at {}",
-        skill_md.display()
+        stderr.contains("Installed 6 skills"),
+        "should report installing all skills: {stderr}"
     );
 
     let refs_dir = tmp.path().join(".claude/skills/fluent/references");

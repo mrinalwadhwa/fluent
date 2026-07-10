@@ -1274,8 +1274,11 @@ fn cmd_skills() -> Result<()> {
     let home = std::env::var("HOME")
         .map_err(|_| anyhow::anyhow!("HOME not set; cannot locate agent skills directory"))?;
     let skills_dir = PathBuf::from(home).join(".claude/skills");
-    let skill_dir = work_task_executor::materialize_skill("fluent", &skills_dir)?;
-    eprintln!("Installed fluent skill to {}", skill_dir.display());
+    let names = fluent::content::bundled_skill_names();
+    for name in &names {
+        work_task_executor::materialize_skill(name, &skills_dir)?;
+    }
+    eprintln!("Installed {} skills to {}", names.len(), skills_dir.display());
     Ok(())
 }
 
