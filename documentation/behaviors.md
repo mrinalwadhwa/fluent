@@ -3943,12 +3943,23 @@ Test: tests/binary.rs (update_reports_up_to_date)
 ### B2
 
 WHEN `fluent update` runs and a newer release is available,
-THE SYSTEM SHALL replace the running binary with the downloaded release
-and re-materialize the skills by invoking the new binary, then report
-the new version.
+THE SYSTEM SHALL replace the running binary with the downloaded release.
 Test: tests/binary.rs (update_replaces_binary_and_rematerializes_skills)
 
 ### B3
+
+WHEN `fluent update` replaces the running binary,
+THE SYSTEM SHALL re-materialize the skills so they reflect the newly
+installed version.
+Test: tests/binary.rs (update_replaces_binary_and_rematerializes_skills)
+
+### B4
+
+WHEN `fluent update` replaces the running binary,
+THE SYSTEM SHALL report the new version.
+Test: tests/binary.rs (update_replaces_binary_and_rematerializes_skills)
+
+### B5
 
 IF the downloaded release's checksum does not match the published
 checksum,
@@ -3956,7 +3967,7 @@ THEN THE SYSTEM SHALL abort the update and leave the current binary in
 place.
 Test: tests/binary.rs (update_aborts_on_checksum_mismatch)
 
-### B4
+### B6
 
 IF `fluent update` cannot reach the release source or the download
 fails,
@@ -3964,14 +3975,14 @@ THEN THE SYSTEM SHALL report the failure and leave the current binary
 in place.
 Test: tests/binary.rs (update_offline_preserves_binary)
 
-### B5
+### B7
 
 IF a release has no published checksum to verify against,
 THEN THE SYSTEM SHALL refuse to install it and leave the current binary
 in place.
 Test: tests/binary.rs (update_refuses_release_without_checksum)
 
-### B6
+### B8
 
 IF replacing the binary does not complete successfully,
 THEN THE SYSTEM SHALL leave a working binary in place rather than a
