@@ -1721,9 +1721,8 @@ Test: tests/binary.rs (task_show_prints_task_json)
 WHEN the system writes a state file (Work Item, Attempt, Task,
 Merge Candidate, review state, tester results, coder info,
 expertise, skills, or planning section),
-THE SYSTEM SHALL write through an atomic temporary-file-and-rename
-path so that a concurrent reader never observes empty or partial
-file content.
+THE SYSTEM SHALL ensure that a concurrent reader never observes
+empty or partial file content.
 Test: src/atomic_write.rs (concurrent_reader_never_sees_empty_or_partial)
 
 ### B2
