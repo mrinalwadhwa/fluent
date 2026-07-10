@@ -1264,7 +1264,9 @@ fn cmd_init(cwd: &Path) -> Result<()> {
         eprintln!("  Initialized .fluent/ in {}", cwd.display());
     }
 
-    cmd_skills_add(cwd, false, false, None)?;
+    if let Err(e) = cmd_skills_add(cwd, false, false, None) {
+        eprintln!("  warning: could not install skills: {e}");
+    }
     Ok(())
 }
 
