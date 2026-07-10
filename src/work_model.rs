@@ -2554,10 +2554,11 @@ impl WorkModelStore {
                     source,
                 })?;
         } else {
-            fs::write(&path, json).map_err(|source| WorkModelStorageError::WriteFile {
-                path: path.clone(),
-                source,
-            })?;
+            crate::atomic_write::atomic_write(&path, json.as_bytes())
+                .map_err(|source| WorkModelStorageError::WriteFile {
+                    path: path.clone(),
+                    source,
+                })?;
         }
 
         self.write_attempt_records(work_item)?;
@@ -3153,10 +3154,11 @@ fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), WorkModel
         path: path.to_path_buf(),
         source,
     })?;
-    fs::write(path, json).map_err(|source| WorkModelStorageError::WriteFile {
-        path: path.to_path_buf(),
-        source,
-    })
+    crate::atomic_write::atomic_write(path, json.as_bytes())
+        .map_err(|source| WorkModelStorageError::WriteFile {
+            path: path.to_path_buf(),
+            source,
+        })
 }
 
 fn prune_json_files(dir: &Path, keep: &HashSet<PathBuf>) -> Result<(), WorkModelStorageError> {
