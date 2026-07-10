@@ -1278,7 +1278,11 @@ fn cmd_skills() -> Result<()> {
     for name in &names {
         work_task_executor::materialize_skill(name, &skills_dir)?;
     }
-    eprintln!("Installed {} skills to {}", names.len(), skills_dir.display());
+    eprintln!(
+        "Installed {} skills to {}",
+        names.len(),
+        skills_dir.display()
+    );
     Ok(())
 }
 
