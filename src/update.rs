@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const DEFAULT_RELEASE_REPO: &str = "ockam-network/fluent";
+const DEFAULT_RELEASE_REPO: &str = "mrinalwadhwa/fluent";
 const DEFAULT_API_BASE: &str = "https://api.github.com";
 const CHECK_INTERVAL_SECS: u64 = 86400;
 const CURL_CONNECT_TIMEOUT: u32 = 5;

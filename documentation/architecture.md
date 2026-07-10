@@ -709,7 +709,7 @@ both the query and the nudge. Offline check failures are silent.
 | Env var | Default | Purpose |
 |---|---|---|
 | `FLUENT_NO_UPDATE_CHECK` | (unset) | Suppress update check and nudge when set |
-| `FLUENT_RELEASE_REPO` | `ockam-network/fluent` | GitHub `owner/repo` for release queries |
+| `FLUENT_RELEASE_REPO` | `mrinalwadhwa/fluent` | GitHub `owner/repo` for release queries |
 | `FLUENT_API_BASE` | `https://api.github.com` | GitHub API base URL |
 | `FLUENT_BINARY_PATH` | `current_exe()` | Override binary path (testing) |
 | `FLUENT_UPDATE_CACHE_PATH` | `~/.config/fluent/update-check.json` | Override cache file path (testing) |
