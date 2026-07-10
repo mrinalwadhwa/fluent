@@ -9422,6 +9422,11 @@ fn update_replaces_binary_and_rematerializes_skills() {
         stderr.contains("999.0.0"),
         "should report the new version; got stderr:\n{stderr}"
     );
+
+    assert!(
+        stderr.contains("skills re-materialization"),
+        "should attempt skills re-materialization; got stderr:\n{stderr}"
+    );
 }
 
 #[test]
