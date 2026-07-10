@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-SKILL="$ROOT/skills/fluent/references/design-approach.md"
-REFS_DIR="$ROOT/skills/fluent/references"
+SKILL="$ROOT/skills/fluent.full/references/design-approach.md"
+REFS_DIR="$ROOT/skills/fluent.full/references"
 failures=0
 
 if grep -Eq '(^|[^[:alnum:]_./-])expertise/[[:alnum:]_.-]+\.md' "$SKILL"; then

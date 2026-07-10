@@ -27,11 +27,12 @@ require_not_in_file() {
   fi
 }
 
-CAPTURE="$ROOT/skills/fluent/references/capture-brief.md"
-DEFINE="$ROOT/skills/fluent/references/define-behaviors.md"
-APPROACH="$ROOT/skills/fluent/references/design-approach.md"
-PLAN="$ROOT/skills/fluent/references/plan-execution.md"
-BUILD="$ROOT/skills/fluent/SKILL.md"
+# The full fluent skill and its references live in fluent.full/.
+CAPTURE="$ROOT/skills/fluent.full/references/capture-brief.md"
+DEFINE="$ROOT/skills/fluent.full/references/define-behaviors.md"
+APPROACH="$ROOT/skills/fluent.full/references/design-approach.md"
+PLAN="$ROOT/skills/fluent.full/references/plan-execution.md"
+BUILD="$ROOT/skills/fluent.full/fluent.md"
 ARCH="$ROOT/documentation/architecture.md"
 BEHAVIORS="$ROOT/documentation/behaviors.md"
 

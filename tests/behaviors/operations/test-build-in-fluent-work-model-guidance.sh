@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-SKILL="$ROOT/skills/fluent/SKILL.md"
+# Check the full fluent skill body, not the shim.
+SKILL="$ROOT/skills/fluent.full/fluent.md"
 ARCHITECTURE="$ROOT/documentation/architecture.md"
 AGENT_INSTRUCTIONS="$ROOT/CLAUDE.md"
 

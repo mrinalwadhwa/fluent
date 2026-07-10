@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-SKILL="$ROOT/skills/fluent/references/capture-brief.md"
+SKILL="$ROOT/skills/fluent.full/references/capture-brief.md"
 
 failures=0
 

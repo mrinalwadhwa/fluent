@@ -4,10 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
 SKILLS=(
-  "$ROOT/skills/fluent/references/capture-brief.md"
-  "$ROOT/skills/fluent/references/define-behaviors.md"
-  "$ROOT/skills/fluent/references/design-approach.md"
-  "$ROOT/skills/fluent/references/plan-execution.md"
+  "$ROOT/skills/fluent.full/references/capture-brief.md"
+  "$ROOT/skills/fluent.full/references/define-behaviors.md"
+  "$ROOT/skills/fluent.full/references/design-approach.md"
+  "$ROOT/skills/fluent.full/references/plan-execution.md"
 )
 
 failures=0

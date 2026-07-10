@@ -109,7 +109,7 @@ EOF_ARTIFACTS
 test_skill_harness_prints_existing_artifacts() {
   cd "$PROJECT_DIR"
 
-  run_skill_harness 1 skills/fluent/references/capture-brief.md --judge
+  run_skill_harness 1 skills/fluent.full/references/capture-brief.md --judge
 
   RESULT=0
   assert_result_dir_exists || return 1
@@ -124,7 +124,7 @@ test_skill_harness_prints_existing_artifacts() {
 test_skill_harness_omits_brief_without_artifact() {
   cd "$PROJECT_DIR"
 
-  run_skill_harness 0 skills/fluent/references/capture-brief.md --judge
+  run_skill_harness 0 skills/fluent.full/references/capture-brief.md --judge
 
   RESULT=0
   assert_result_dir_exists || return 1
@@ -139,7 +139,7 @@ test_skill_harness_omits_brief_without_artifact() {
 test_skill_harness_omits_verdict_without_judge() {
   cd "$PROJECT_DIR"
 
-  run_skill_harness 1 skills/fluent/references/capture-brief.md
+  run_skill_harness 1 skills/fluent.full/references/capture-brief.md
 
   RESULT=0
   assert_result_dir_exists || return 1
@@ -156,19 +156,19 @@ test_skill_harness_names_planning_artifacts() {
 
   RESULT=0
 
-  run_skill_harness 1 skills/fluent/references/define-behaviors.md --judge
+  run_skill_harness 1 skills/fluent.full/references/define-behaviors.md --judge
   assert_result_dir_exists || return 1
   assert_printed_artifact "behaviors.diff.md" "define-behaviors artifact" || RESULT=1
   assert_not_printed_artifact "brief.md" "capture-brief artifact" || RESULT=1
   assert_printed_artifacts_exist || RESULT=1
 
-  run_skill_harness 1 skills/fluent/references/design-approach.md --judge
+  run_skill_harness 1 skills/fluent.full/references/design-approach.md --judge
   assert_result_dir_exists || return 1
   assert_printed_artifact "approach.md" "design-approach artifact" || RESULT=1
   assert_not_printed_artifact "brief.md" "capture-brief artifact" || RESULT=1
   assert_printed_artifacts_exist || RESULT=1
 
-  run_skill_harness 1 skills/fluent/references/plan-execution.md --judge
+  run_skill_harness 1 skills/fluent.full/references/plan-execution.md --judge
   assert_result_dir_exists || return 1
   assert_printed_artifact "plan.md" "plan-execution artifact" || RESULT=1
   assert_not_printed_artifact "brief.md" "capture-brief artifact" || RESULT=1

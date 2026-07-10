@@ -3046,7 +3046,7 @@ observable at runtime.
 
 ### B1
 
-WHEN `skills/fluent/references/capture-brief.md` is read after this Work Item
+WHEN `skills/fluent.full/references/capture-brief.md` is read after this Work Item
 lands,
 THE SYSTEM SHALL contain in its "Rules" section a short rule
 naming the two acceptable question patterns (labeled multi-option
@@ -3057,7 +3057,7 @@ Test: tests/behaviors/operations/test-easy-to-answer-skill-rule.sh (rule present
 
 ### B2
 
-WHEN `skills/fluent/references/define-behaviors.md` is read after this Work
+WHEN `skills/fluent.full/references/define-behaviors.md` is read after this Work
 Item lands,
 THE SYSTEM SHALL contain the same rule, with the same wording, in
 its "Rules" section (or equivalent).
@@ -3065,7 +3065,7 @@ Test: tests/behaviors/operations/test-easy-to-answer-skill-rule.sh (rule present
 
 ### B3
 
-WHEN `skills/fluent/references/design-approach.md` is read after this Work
+WHEN `skills/fluent.full/references/design-approach.md` is read after this Work
 Item lands,
 THE SYSTEM SHALL contain the same rule, with the same wording, in
 its "Rules" section (or equivalent).
@@ -3073,7 +3073,7 @@ Test: tests/behaviors/operations/test-easy-to-answer-skill-rule.sh (rule present
 
 ### B4
 
-WHEN `skills/fluent/references/plan-execution.md` is read after this Work
+WHEN `skills/fluent.full/references/plan-execution.md` is read after this Work
 Item lands,
 THE SYSTEM SHALL contain the same rule, with the same wording, in
 its "Rules" section (or equivalent).
@@ -3986,19 +3986,40 @@ Test: tests/binary.rs (update_replace_leaves_working_binary_on_failure)
 
 ### B1
 
-WHEN `fluent skills` runs,
-THE SYSTEM SHALL install all publicly-installable skills (the `fluent`
-orchestrator plus `review-architecture`, `review-behaviors`,
-`review-documentation`, `review-skills`, and `review-tests`) into the
-agent skills directory at `~/.claude/skills/`.
-Test: tests/binary.rs (fluent_skills_install_writes_all_public_skills)
+WHEN `fluent skills add` runs,
+THE SYSTEM SHALL materialize the full fluent skill — its `SKILL.md` and
+`references/` — from the running binary into the target skill
+directories, together with the review skills, and SHALL replace any
+installed fluent shim it finds with the full skill.
+Test: tests/binary.rs (skills_add_materializes_full_skill_and_references,
+skills_add_replaces_shim_marked_directory,
+skills_add_does_not_clobber_unmarked_directory)
 
 ### B2
 
-WHEN `npx skills add mrinalwadhwa/fluent` runs,
-THE SYSTEM SHALL install all publicly-installable skills, each
-self-contained with its SKILL.md and references.
+WHEN `npx skills add mrinalwadhwa/fluent --skill fluent` runs,
+THE SYSTEM SHALL install the fluent shim, not the full fluent skill,
+alongside the self-contained review skills.
 Test: tests/behaviors/operations/test-plugin-install.sh
+
+### B3
+
+WHEN `fluent skills add` runs without an explicit scope flag,
+THE SYSTEM SHALL install into the global skill directories, unless a
+project-level fluent skill already exists, in which case it SHALL
+update that project-level installation.
+Test: tests/binary.rs (skills_add_default_is_global,
+skills_add_default_updates_existing_project_skill)
+
+### B4
+
+WHEN `fluent skills add` runs with `-g`/`--global`, `--project`, or
+`--agent <agents>`,
+THE SYSTEM SHALL scope the install to the global skill directories,
+the project skill directory, or the named agents respectively.
+Test: tests/binary.rs (skills_add_global_flag_skips_project,
+skills_add_project_flag_targets_project,
+skills_add_agent_flag_targets_agents)
 
 ## Install script
 

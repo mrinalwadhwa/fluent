@@ -6,38 +6,40 @@ fluent runs on macOS (Apple Silicon and Intel).
 
 ## Install
 
+### From the binary
+
 ```sh
 curl fluent.computer/install | sh
+fluent skills add
 ```
 
-This installs the `fluent` binary to `~/.local/bin`.
+The first command installs the `fluent` binary to `~/.local/bin`. The second
+installs the fluent skill into your coding agent so you can invoke `/fluent`.
+
+### From the skill registry
+
+```sh
+npx skills add mrinalwadhwa/fluent --skill fluent
+```
+
+This installs a bootstrap shim. On first run, `/fluent` installs the binary
+if it is not already present, then materializes the full skill from the binary
+and continues.
 
 ## Use it with your coding agent
 
-fluent drives your existing coding agent (such as Claude Code). Add its skill:
-
-```sh
-npx skills add mrinalwadhwa/fluent
-```
-
-Then start the workflow from your agent:
+Start the workflow from your agent (such as Claude Code):
 
 ```
 /fluent
 ```
-
-On first run, `/fluent` installs the `fluent` binary if it is not already present,
-then takes it from there — capturing intent, planning with you, and executing.
-
-If you prefer, install the binary directly first with the command in Install
-above; `/fluent` will use it.
 
 ## In a project
 
 Run these from inside your project's git repository.
 
 ```sh
-fluent init      # set up fluent's working state in the repo
+fluent init      # set up fluent's working state and install the skill
 /fluent          # start building
 ```
 

@@ -2,7 +2,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-SKILL="$ROOT/skills/fluent/SKILL.md"
+# The full fluent skill body lives in fluent.full/ (the shim in skills/fluent/
+# is a bootstrap stub that doesn't carry the command references).
+SKILL="$ROOT/skills/fluent.full/fluent.md"
 FLUENT_BIN="${FLUENT_BIN_OVERRIDE:-$ROOT/target/debug/fluent}"
 
 if [ ! -x "$FLUENT_BIN" ]; then
