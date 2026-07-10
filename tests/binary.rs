@@ -9992,6 +9992,42 @@ fn init_installs_full_fluent_skill() {
 }
 
 #[test]
+fn init_reinit_installs_skills() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+
+    // First init creates .fluent/
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .current_dir(&project)
+        .args(["init"])
+        .assert()
+        .success();
+
+    // Remove the installed skill to prove re-init installs it again
+    let skill_path = home.join(".claude/skills/fluent/SKILL.md");
+    assert!(skill_path.exists(), "first init must install the skill");
+    fs::remove_dir_all(home.join(".claude/skills/fluent")).unwrap();
+
+    // Second init on already-initialized project
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .current_dir(&project)
+        .args(["init"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Already initialized"));
+
+    assert!(
+        skill_path.exists(),
+        "re-init must install skills to global directory"
+    );
+}
+
+#[test]
 fn skills_add_refreshes_stale_installation() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
