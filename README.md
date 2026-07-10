@@ -9,7 +9,7 @@ fluent runs on macOS (Apple Silicon and Intel).
 ### From the binary
 
 ```sh
-curl fluent.computer/install | sh
+curl -fsSL fluent.computer/install | sh
 fluent skills add
 ```
 

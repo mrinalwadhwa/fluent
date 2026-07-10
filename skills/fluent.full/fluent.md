@@ -24,7 +24,7 @@ fluent --version
 If `fluent` is not found, install it and check again:
 
 ```sh
-curl fluent.computer/install | sh
+curl -fsSL fluent.computer/install | sh
 fluent --version
 ```
 
