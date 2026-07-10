@@ -9816,6 +9816,138 @@ fn skills_add_does_not_clobber_unmarked_directory() {
 }
 
 #[test]
+fn skills_add_default_is_global() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    // Create a project directory without any pre-existing fluent skill
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .current_dir(&project)
+        .args(["skills", "add"])
+        .assert()
+        .success();
+
+    assert!(
+        home.join(".claude/skills/fluent/SKILL.md").exists(),
+        "default install should go to global directory"
+    );
+    assert!(
+        !project.join(".claude/skills/fluent/SKILL.md").exists(),
+        "should not install to project when no project-level skill exists"
+    );
+}
+
+#[test]
+fn skills_add_default_updates_existing_project_skill() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    // Pre-install a project-level fluent skill
+    let project = tmp.path().join("project");
+    let project_skills = project.join(".claude/skills/fluent");
+    fs::create_dir_all(&project_skills).unwrap();
+    fs::write(
+        project_skills.join("SKILL.md"),
+        "---\nname: fluent\nfluent-shim: true\n---\nold shim\n",
+    )
+    .unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .current_dir(&project)
+        .args(["skills", "add"])
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(project_skills.join("SKILL.md")).unwrap();
+    assert!(
+        !content.contains("fluent-shim: true"),
+        "project-level fluent skill should be updated when it already exists"
+    );
+}
+
+#[test]
+fn skills_add_project_flag_targets_project() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .current_dir(&project)
+        .args(["skills", "add", "--project"])
+        .assert()
+        .success();
+
+    assert!(
+        project.join(".claude/skills/fluent/SKILL.md").exists(),
+        "--project should install to project directory"
+    );
+    assert!(
+        !home.join(".claude/skills/fluent/SKILL.md").exists(),
+        "--project should not install to global directory"
+    );
+}
+
+#[test]
+fn skills_add_global_flag_skips_project() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    // Pre-install a project-level fluent skill
+    let project = tmp.path().join("project");
+    let project_skills = project.join(".claude/skills/fluent");
+    fs::create_dir_all(&project_skills).unwrap();
+    let old_content = "---\nname: fluent\n---\nproject skill\n";
+    fs::write(project_skills.join("SKILL.md"), old_content).unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .current_dir(&project)
+        .args(["skills", "add", "-g"])
+        .assert()
+        .success();
+
+    assert!(
+        home.join(".claude/skills/fluent/SKILL.md").exists(),
+        "-g should install to global directory"
+    );
+    let content = fs::read_to_string(project_skills.join("SKILL.md")).unwrap();
+    assert_eq!(
+        content, old_content,
+        "-g should not update project-level skill"
+    );
+}
+
+#[test]
+fn skills_add_agent_flag_targets_agents() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add", "--agent", "codex"])
+        .assert()
+        .success();
+
+    assert!(
+        home.join(".codex/skills/fluent/SKILL.md").exists(),
+        "--agent codex should install to .codex/skills/"
+    );
+}
+
+#[test]
 fn skills_add_writes_to_data_directory() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");

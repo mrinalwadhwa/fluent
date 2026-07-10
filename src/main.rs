@@ -197,7 +197,7 @@ fn main() -> Result<()> {
             update::perform_update()?;
         }
         Some(Commands::Skills { command }) => {
-            cmd_skills(command)?;
+            cmd_skills(&cwd, command)?;
         }
         Some(Commands::Version) => {
             println!("{}", version::version_string());
@@ -1270,15 +1270,17 @@ fn cmd_init(cwd: &Path) -> Result<()> {
 // Skills
 // -------------------------------------------------------------------------
 
-fn cmd_skills(command: Option<SkillsCommands>) -> Result<()> {
+fn cmd_skills(cwd: &Path, command: Option<SkillsCommands>) -> Result<()> {
     match command {
         Some(SkillsCommands::Add {
-            global: _,
-            project: _,
-            agent: _,
-        })
-        | None => {
-            cmd_skills_add()?;
+            global,
+            project,
+            agent,
+        }) => {
+            cmd_skills_add(cwd, global, project, agent)?;
+        }
+        None => {
+            cmd_skills_add(cwd, false, false, None)?;
         }
         Some(SkillsCommands::Show { path, name }) => {
             cmd_skills_show(path, &name)?;
@@ -1287,22 +1289,27 @@ fn cmd_skills(command: Option<SkillsCommands>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_skills_add() -> Result<()> {
+fn cmd_skills_add(
+    cwd: &Path,
+    force_global: bool,
+    force_project: bool,
+    agent: Option<String>,
+) -> Result<()> {
     let home = std::env::var("HOME")
         .map_err(|_| anyhow::anyhow!("HOME not set; cannot locate agent skills directory"))?;
 
     let names = fluent::content::bundled_skill_names();
 
-    // Write the full skill to the fixed data directory so the shim can
-    // read it for hand-off regardless of which agent directories exist.
+    // Always write the full skill to the fixed data directory so the shim
+    // can read it for hand-off regardless of which agent directories exist.
     let data_dir = skills_data_dir(&home);
     for name in &names {
         work_task_executor::materialize_skill(name, &data_dir)?;
     }
 
-    // Install to the global skill roots.
-    let global_dirs = global_skill_roots(&home);
-    for dir in &global_dirs {
+    let install_dirs = resolve_install_dirs(cwd, &home, force_global, force_project, &agent)?;
+
+    for dir in &install_dirs {
         for name in &names {
             work_task_executor::materialize_skill(name, dir)?;
         }
@@ -1314,16 +1321,70 @@ fn cmd_skills_add() -> Result<()> {
     }
 
     // Scan for shim-marked fluent installations in candidate directories
-    // beyond the global roots and replace them with the full skill.
+    // beyond what we just installed to and replace them.
     let scan_dirs = shim_scan_candidate_dirs(&home);
     for dir in &scan_dirs {
-        if global_dirs.iter().any(|g| g == dir) {
+        if install_dirs.iter().any(|d| d == dir) {
             continue;
         }
         replace_shim_if_present(dir)?;
     }
 
     Ok(())
+}
+
+fn resolve_install_dirs(
+    cwd: &Path,
+    home: &str,
+    force_global: bool,
+    force_project: bool,
+    agent: &Option<String>,
+) -> Result<Vec<PathBuf>> {
+    if force_project {
+        let project_dir = cwd.join(".claude/skills");
+        return Ok(vec![project_dir]);
+    }
+
+    if let Some(agents) = agent {
+        let home = PathBuf::from(home);
+        let mut dirs = Vec::new();
+        for a in agents.split(',') {
+            let a = a.trim();
+            if a == "*" {
+                dirs.extend(all_agent_skill_dirs(&home));
+            } else {
+                dirs.push(home.join(format!(".{a}/skills")));
+            }
+        }
+        if dirs.is_empty() {
+            bail!("No agent skill directories found");
+        }
+        return Ok(dirs);
+    }
+
+    // Default or --global: install to global roots.
+    let mut dirs = global_skill_roots(home);
+
+    // If not explicitly --global, also update a project-level fluent skill
+    // if one already exists (B5).
+    if !force_global {
+        let project_dir = cwd.join(".claude/skills");
+        let project_fluent = project_dir.join("fluent/SKILL.md");
+        if project_fluent.exists() {
+            dirs.push(project_dir);
+        }
+    }
+
+    Ok(dirs)
+}
+
+fn all_agent_skill_dirs(home: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for agent in &["claude", "codex"] {
+        let dir = home.join(format!(".{agent}/skills"));
+        dirs.push(dir);
+    }
+    dirs
 }
 
 const SHIM_MARKER: &str = "fluent-shim: true";
