@@ -13,6 +13,23 @@ Behaviors describe what the system must do; the approach describes how. If execu
 
 The delegated build lifecycle is the Work model: Work Item → Attempt → Task → Workspace → Merge Candidate. Work Items represent planned Fluent work, Attempts carry one execution history, Tasks are schedulable units, Workspaces are the filesystem contexts Tasks read or write, and Merge Candidates are reviewed outputs ready to land.
 
+## Make sure fluent is installed
+
+Everything below uses the `fluent` command. Check that it is available before running any other step:
+
+```sh
+fluent --version
+```
+
+If `fluent` is not found, install it and check again:
+
+```sh
+curl fluent.computer/install | sh
+fluent --version
+```
+
+The installer puts `fluent` in `~/.local/bin`. If the second check still fails, that directory is not on the current `PATH`: run the rest of this workflow with the full path `~/.local/bin/fluent`, and tell the user to add `~/.local/bin` to their `PATH` for future sessions.
+
 ## On session start
 
 Run `fluent status` or `fluent work-item list` to see current Work. If stored Work Items exist, inspect the relevant one with `fluent work-item show <work-item-id>`. Continue the latest non-terminal Attempt when the next action is clear, or present the `needs-user` handoff when an Attempt or Merge Candidate asks for user input.
