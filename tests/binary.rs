@@ -10027,7 +10027,10 @@ fn init_succeeds_when_skill_installation_fails() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "init must succeed even when skill installation fails");
+    assert!(
+        output.status.success(),
+        "init must succeed even when skill installation fails"
+    );
     assert!(
         project.join(".fluent").is_dir(),
         "init must create .fluent/ even when skill installation fails"
