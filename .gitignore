@@ -31,3 +31,4 @@ tests/output/
 # Added by cargo
 /target
 /.cargo-home
+/.cargo
