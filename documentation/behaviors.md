@@ -1915,6 +1915,7 @@ WHEN a task coder error is an auth rejection,
 THE SYSTEM SHALL pause the Attempt at `needs-user` without retrying the
 task.
 Test: tests/binary.rs (work_task_run_auth_rejection_pauses_attempt_without_retrying)
+Test: tests/binary.rs (work_task_run_write_auth_rejection_pauses_attempt_without_retrying)
 
 ### B4
 
@@ -1922,6 +1923,7 @@ WHEN a task coder error is an auth rejection,
 THE SYSTEM SHALL write a handoff that instructs the user to
 re-authenticate and resume.
 Test: tests/binary.rs (work_task_run_auth_rejection_pauses_attempt_without_retrying)
+Test: tests/binary.rs (work_task_run_write_auth_rejection_pauses_attempt_without_retrying)
 
 ---
 
