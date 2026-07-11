@@ -11282,3 +11282,43 @@ fn land_lock_acquire_and_drop_cycle() {
         "lock should be free after guard is dropped"
     );
 }
+
+#[test]
+fn land_lock_child_exit_frees_lock() {
+    let tmp = TempDir::new().unwrap();
+    let lock_path = tmp.path().join("land-exit.lock");
+
+    let mut child = std::process::Command::new("python3")
+        .args([
+            "-c",
+            &format!(
+                concat!(
+                    "import fcntl, sys\n",
+                    "f = open('{}', 'w')\n",
+                    "fcntl.flock(f, fcntl.LOCK_EX)\n",
+                    "print('ready', flush=True)\n",
+                    "sys.stdin.readline()\n",
+                ),
+                lock_path.display()
+            ),
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let stdout = child.stdout.as_mut().unwrap();
+    let mut buf = String::new();
+    use std::io::BufRead;
+    std::io::BufReader::new(stdout).read_line(&mut buf).unwrap();
+
+    assert!(fluent::land_lock::is_locked(&lock_path));
+
+    drop(child.stdin.take());
+    child.wait().unwrap();
+
+    assert!(
+        !fluent::land_lock::is_locked(&lock_path),
+        "lock should be freed after holder process exits"
+    );
+}
