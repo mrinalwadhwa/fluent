@@ -156,10 +156,7 @@ fn run_write_task(
         model,
     );
     let mut retries = 0;
-    while run_result.is_err()
-        && !is_auth_error(&run_result)
-        && retries < max_task_retries()
-    {
+    while run_result.is_err() && !is_auth_error(&run_result) && retries < max_task_retries() {
         retries += 1;
         eprintln!(
             "  Retrying coder (attempt {}/{})",
@@ -454,10 +451,7 @@ fn run_review_task(
         model,
     );
     let mut retries = 0;
-    while run_result.is_err()
-        && !is_auth_error(&run_result)
-        && retries < max_task_retries()
-    {
+    while run_result.is_err() && !is_auth_error(&run_result) && retries < max_task_retries() {
         retries += 1;
         eprintln!(
             "  Retrying coder (attempt {}/{})",
@@ -974,8 +968,13 @@ fn mark_task_failed_attempt_needs_user(
             &mut item.attempts[attempt_index],
             AttemptStatus::NeedsUser,
         );
-        let handoff_path =
-            write_task_error_handoff(project_root, work_item_id, attempt_id, task_id, auth_message)?;
+        let handoff_path = write_task_error_handoff(
+            project_root,
+            work_item_id,
+            attempt_id,
+            task_id,
+            auth_message,
+        )?;
         item.attempts[attempt_index].artifacts.push(ArtifactRef {
             producer_id: task_id.to_string(),
             path: handoff_path,
@@ -1032,7 +1031,14 @@ fn lock_mark_task_failed_attempt_needs_user(
     auth_message: Option<&str>,
 ) -> Result<()> {
     let _lock = store_lock.map(|m| m.lock().unwrap_or_else(|e| e.into_inner()));
-    mark_task_failed_attempt_needs_user(store, project_root, work_item_id, attempt_id, task_id, auth_message)
+    mark_task_failed_attempt_needs_user(
+        store,
+        project_root,
+        work_item_id,
+        attempt_id,
+        task_id,
+        auth_message,
+    )
 }
 
 fn resolve_workspace_path(project_root: &Path, path: &str) -> PathBuf {
