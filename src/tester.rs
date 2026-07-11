@@ -65,6 +65,35 @@ struct TesterCommand {
     test_harness: String,
 }
 
+fn tester_writable_roots(candidate: &Path, artifact: &Path, home: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![candidate.to_path_buf(), artifact.to_path_buf()];
+
+    let cargo_registry = home.join(".cargo/registry");
+    let cargo_git = home.join(".cargo/git/db");
+    if cargo_registry.is_dir() {
+        roots.push(cargo_registry);
+    }
+    if cargo_git.is_dir() {
+        roots.push(cargo_git);
+    }
+
+    if candidate.join("package.json").is_file() {
+        let mut pnpm_stores = Vec::new();
+        if let Ok(pnpm_home) = std::env::var("PNPM_HOME") {
+            pnpm_stores.push(PathBuf::from(pnpm_home).join("store"));
+        }
+        pnpm_stores.push(home.join("Library/pnpm/store"));
+        pnpm_stores.push(home.join(".local/share/pnpm/store"));
+        for store in pnpm_stores {
+            if store.is_dir() {
+                roots.push(store);
+            }
+        }
+    }
+
+    roots
+}
+
 pub fn run(
     candidate_workspace: &Path,
     artifact_dir: &Path,
@@ -116,15 +145,9 @@ pub fn run(
             .unwrap_or_else(|_| candidate_workspace.to_path_buf());
         let artifact_abs =
             fs::canonicalize(artifact_dir).unwrap_or_else(|_| artifact_dir.to_path_buf());
-        let mut writable_roots = vec![candidate_abs, artifact_abs];
-        let cargo_registry = PathBuf::from(&home).join(".cargo/registry");
-        let cargo_git = PathBuf::from(&home).join(".cargo/git/db");
-        if cargo_registry.is_dir() {
-            writable_roots.push(cargo_registry);
-        }
-        if cargo_git.is_dir() {
-            writable_roots.push(cargo_git);
-        }
+        let home_path = Path::new(&home);
+        let writable_roots =
+            tester_writable_roots(&candidate_abs, &artifact_abs, home_path);
         match os::render_profile_common_only(resolver, &home, &writable_roots, &[]) {
             Ok(profile) => {
                 eprintln!("  Sandbox profile  {}", profile.path.display());
@@ -875,5 +898,118 @@ echo '[{"id": "my_test", "test_harness": "cargo-nextest", "status": "pass", "dur
         let stderr = fs::read_to_string(artifact_dir.path().join(&cmd.stderr_log)).unwrap();
         assert!(stdout.contains("out"));
         assert!(stderr.contains("err"));
+    }
+
+    #[test]
+    fn writable_roots_include_pnpm_store_when_package_json_exists() {
+        let tmp = TempDir::new().unwrap();
+        let candidate = tmp.path().join("candidate");
+        let artifact = tmp.path().join("artifact");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&candidate).unwrap();
+        fs::create_dir_all(&artifact).unwrap();
+
+        fs::write(candidate.join("package.json"), "{}").unwrap();
+        let pnpm_store = home.join("Library/pnpm/store");
+        fs::create_dir_all(&pnpm_store).unwrap();
+
+        let roots = tester_writable_roots(&candidate, &artifact, &home);
+        assert!(
+            roots.contains(&pnpm_store),
+            "writable roots should include the pnpm store when package.json exists; got: {roots:?}"
+        );
+    }
+
+    #[test]
+    fn writable_roots_exclude_pnpm_store_without_package_json() {
+        let tmp = TempDir::new().unwrap();
+        let candidate = tmp.path().join("candidate");
+        let artifact = tmp.path().join("artifact");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&candidate).unwrap();
+        fs::create_dir_all(&artifact).unwrap();
+
+        let pnpm_store = home.join("Library/pnpm/store");
+        fs::create_dir_all(&pnpm_store).unwrap();
+
+        let roots = tester_writable_roots(&candidate, &artifact, &home);
+        assert!(
+            !roots.contains(&pnpm_store),
+            "writable roots should not include the pnpm store without package.json; got: {roots:?}"
+        );
+    }
+
+    #[test]
+    fn writable_roots_exclude_pnpm_store_when_dir_missing() {
+        let tmp = TempDir::new().unwrap();
+        let candidate = tmp.path().join("candidate");
+        let artifact = tmp.path().join("artifact");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&candidate).unwrap();
+        fs::create_dir_all(&artifact).unwrap();
+        fs::create_dir_all(&home).unwrap();
+
+        fs::write(candidate.join("package.json"), "{}").unwrap();
+
+        let roots = tester_writable_roots(&candidate, &artifact, &home);
+        let pnpm_store = home.join("Library/pnpm/store");
+        assert!(
+            !roots.contains(&pnpm_store),
+            "writable roots should not include a non-existent pnpm store; got: {roots:?}"
+        );
+    }
+
+    #[test]
+    fn writable_roots_include_cargo_caches_when_present() {
+        let tmp = TempDir::new().unwrap();
+        let candidate = tmp.path().join("candidate");
+        let artifact = tmp.path().join("artifact");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&candidate).unwrap();
+        fs::create_dir_all(&artifact).unwrap();
+
+        let cargo_registry = home.join(".cargo/registry");
+        let cargo_git = home.join(".cargo/git/db");
+        fs::create_dir_all(&cargo_registry).unwrap();
+        fs::create_dir_all(&cargo_git).unwrap();
+
+        let roots = tester_writable_roots(&candidate, &artifact, &home);
+        assert!(roots.contains(&cargo_registry));
+        assert!(roots.contains(&cargo_git));
+    }
+
+    #[test]
+    fn writable_roots_always_include_candidate_and_artifact() {
+        let tmp = TempDir::new().unwrap();
+        let candidate = tmp.path().join("candidate");
+        let artifact = tmp.path().join("artifact");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&candidate).unwrap();
+        fs::create_dir_all(&artifact).unwrap();
+        fs::create_dir_all(&home).unwrap();
+
+        let roots = tester_writable_roots(&candidate, &artifact, &home);
+        assert_eq!(roots[0], candidate);
+        assert_eq!(roots[1], artifact);
+    }
+
+    #[test]
+    fn writable_roots_include_xdg_pnpm_store_when_present() {
+        let tmp = TempDir::new().unwrap();
+        let candidate = tmp.path().join("candidate");
+        let artifact = tmp.path().join("artifact");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&candidate).unwrap();
+        fs::create_dir_all(&artifact).unwrap();
+
+        fs::write(candidate.join("package.json"), "{}").unwrap();
+        let xdg_store = home.join(".local/share/pnpm/store");
+        fs::create_dir_all(&xdg_store).unwrap();
+
+        let roots = tester_writable_roots(&candidate, &artifact, &home);
+        assert!(
+            roots.contains(&xdg_store),
+            "writable roots should include the XDG pnpm store; got: {roots:?}"
+        );
     }
 }
