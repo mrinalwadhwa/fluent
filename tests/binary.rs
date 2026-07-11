@@ -5392,6 +5392,143 @@ exit 7
 }
 
 #[test]
+fn work_task_run_tester_persistent_error_pauses_attempt_at_needs_user() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let tester_yaml = main_dir.join(".fluent/tester.yaml");
+    fs::create_dir_all(tester_yaml.parent().unwrap()).unwrap();
+    fs::write(
+        &tester_yaml,
+        "commands:\n  - command: \"true\"\n    test_harness: shell-harness\n",
+    )
+    .unwrap();
+    git::run(&main_dir, &["add", ".fluent/tester.yaml"], "stage").unwrap();
+    git::run(&main_dir, &["commit", "-m", "Add tester.yaml"], "commit").unwrap();
+
+    create_completed_work_attempt(&tmp, &main_dir);
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let artifact_dir =
+        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-tester");
+    let blocker = artifact_dir.join("tester-results.json");
+    let _ = fs::remove_file(&blocker);
+    fs::create_dir_all(&blocker).unwrap();
+
+    let bin_dir = tmp.path().join("bin-tester");
+    write_mock_claude(&bin_dir, "#!/bin/bash\nexit 0\n");
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-tester",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_MAX_TASK_RETRIES", "2")
+        .assert()
+        .failure();
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let tester_task = value["attempts"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "attempt-1-tester")
+        .unwrap();
+    assert_eq!(
+        value["attempts"][0]["status"], "needs-user",
+        "attempt should pause at needs-user after persistent tester error"
+    );
+    assert_eq!(tester_task["status"], "failed");
+}
+
+#[test]
+fn work_task_run_tester_recovers_when_error_is_transient() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    let attempt_file = tmp.path().join("tester-attempt-count");
+    let artifact_dir =
+        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-tester");
+    let blocker = artifact_dir.join("tester-results.json");
+
+    let tester_yaml = main_dir.join(".fluent/tester.yaml");
+    fs::create_dir_all(tester_yaml.parent().unwrap()).unwrap();
+    fs::write(
+        &tester_yaml,
+        format!(
+            "commands:\n  - command: |\n      \
+             if [ ! -f '{attempt_file}' ]; then\n        \
+             printf '1' > '{attempt_file}'\n        \
+             mkdir -p '{blocker}'\n      \
+             else\n        \
+             rm -rf '{blocker}'\n      \
+             fi\n    \
+             test_harness: shell-harness\n",
+            attempt_file = attempt_file.display(),
+            blocker = blocker.display(),
+        ),
+    )
+    .unwrap();
+    git::run(&main_dir, &["add", ".fluent/tester.yaml"], "stage").unwrap();
+    git::run(&main_dir, &["commit", "-m", "Add tester.yaml"], "commit").unwrap();
+
+    create_completed_work_attempt(&tmp, &main_dir);
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-tester");
+    write_mock_claude(&bin_dir, "#!/bin/bash\nexit 0\n");
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-tester",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_MAX_TASK_RETRIES", "2")
+        .assert()
+        .success();
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let tester_task = value["attempts"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "attempt-1-tester")
+        .unwrap();
+    assert_eq!(
+        tester_task["status"], "complete",
+        "tester task should complete after recovery on retry"
+    );
+    assert_ne!(
+        value["attempts"][0]["status"], "failed",
+        "attempt should not be failed after successful retry"
+    );
+    assert_ne!(
+        value["attempts"][0]["status"], "needs-user",
+        "attempt should not be needs-user after successful retry"
+    );
+}
+
+#[test]
 fn work_task_run_rejects_success_without_commits() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
