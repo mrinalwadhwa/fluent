@@ -968,7 +968,8 @@ fn write_task_error_handoff(
     attempt_id: &str,
     task_id: &str,
 ) -> Result<String> {
-    let relative_path = work_artifact_path(work_item_id, attempt_id, "needs-user.md");
+    let filename = format!("needs-user-{task_id}.md");
+    let relative_path = work_artifact_path(work_item_id, attempt_id, &filename);
     let path = project_root.join(&relative_path);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;

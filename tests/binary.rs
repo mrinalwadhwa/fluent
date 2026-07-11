@@ -4902,6 +4902,55 @@ fn work_task_run_persistent_coder_error_pauses_attempt_at_needs_user() {
 }
 
 #[test]
+fn work_task_run_handoff_file_includes_task_id() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-review");
+    write_mock_claude(&bin_dir, "#!/bin/bash\nexit 7\n");
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-review-tests",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_MAX_TASK_RETRIES", "0")
+        .assert()
+        .failure();
+
+    let handoff_path = main_dir.join(
+        ".fluent/work/artifacts/work-1/attempt-1/needs-user-attempt-1-review-tests.md",
+    );
+    assert!(
+        handoff_path.exists(),
+        "handoff file should include the task ID in its name"
+    );
+    let content = fs::read_to_string(&handoff_path).unwrap();
+    assert!(
+        content.contains("attempt-1-review-tests"),
+        "handoff content should reference the failing task"
+    );
+    let old_path =
+        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/needs-user.md");
+    assert!(
+        !old_path.exists(),
+        "old fixed-name handoff should not exist"
+    );
+}
+
+#[test]
 fn work_task_run_fails_review_task_that_dirties_candidate_workspace() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
