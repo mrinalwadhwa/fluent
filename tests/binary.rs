@@ -4977,9 +4977,8 @@ fn work_task_run_handoff_file_includes_task_id() {
         .assert()
         .failure();
 
-    let handoff_path = main_dir.join(
-        ".fluent/work/artifacts/work-1/attempt-1/needs-user-attempt-1-review-tests.md",
-    );
+    let handoff_path = main_dir
+        .join(".fluent/work/artifacts/work-1/attempt-1/needs-user-attempt-1-review-tests.md");
     assert!(
         handoff_path.exists(),
         "handoff file should include the task ID in its name"
@@ -4989,8 +4988,7 @@ fn work_task_run_handoff_file_includes_task_id() {
         content.contains("attempt-1-review-tests"),
         "handoff content should reference the failing task"
     );
-    let old_path =
-        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/needs-user.md");
+    let old_path = main_dir.join(".fluent/work/artifacts/work-1/attempt-1/needs-user.md");
     assert!(
         !old_path.exists(),
         "old fixed-name handoff should not exist"
@@ -5460,8 +5458,7 @@ fn work_task_run_tester_persistent_error_pauses_attempt_at_needs_user() {
         .assert()
         .success();
 
-    let artifact_dir =
-        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-tester");
+    let artifact_dir = main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-tester");
     let blocker = artifact_dir.join("tester-results.json");
     let _ = fs::remove_file(&blocker);
     fs::create_dir_all(&blocker).unwrap();
@@ -5504,8 +5501,7 @@ fn work_task_run_tester_recovers_when_error_is_transient() {
     let main_dir = setup_git_project(&tmp);
 
     let attempt_file = tmp.path().join("tester-attempt-count");
-    let artifact_dir =
-        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-tester");
+    let artifact_dir = main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-tester");
     let blocker = artifact_dir.join("tester-results.json");
 
     let tester_yaml = main_dir.join(".fluent/tester.yaml");
