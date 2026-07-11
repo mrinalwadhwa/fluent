@@ -160,7 +160,9 @@ planned review Tasks in parallel with concurrency limited to
 Attempts run review Tasks serially because their reviewers share a source
 checkout. When a write, review, or tester Task coder errors, the Task
 executor retries up to `FLUENT_MAX_TASK_RETRIES` (default 2) times
-before marking the Task failed and pausing the Attempt at `needs-user`.
+before marking the Task failed and pausing the Attempt at `needs-user`,
+except for auth rejections (401), which skip retries and escalate
+immediately.
 Each failed Task writes a per-task handoff file
 (`needs-user-{task_id}.md`) so concurrent review failures preserve
 independent context. The loop reloads stored state before deciding the
@@ -376,11 +378,16 @@ instead of letting the coder fail mid-Task with a cold 401. Two layers:
   rate-limit detection so 401 wins when both match. The caller bails
   with the same recovery message.
 
-Automatic OAuth refresh is explicitly out of scope. The module returns
-typed errors; callers bail with a descriptive error that propagates as
-`TaskStatus::Failed`. A follow-up Work Item will tackle refresh once
-the correct request format for the Claude.ai subscription OAuth
-endpoint is known.
+Automatic OAuth refresh is explicitly out of scope. The coder returns
+a typed `AuthError` (via `anyhow::Error::new`) instead of a plain
+string `bail!`, so callers can recover the type via
+`downcast_ref::<AuthError>()`. Both task retry loops in the task
+executor recognize `AuthError`, skip retries entirely, and escalate
+immediately to `needs-user` with the auth-specific handoff message
+from `AuthError::user_message()`. Other coder errors still retry up
+to `FLUENT_MAX_TASK_RETRIES`. A follow-up Work Item will tackle
+OAuth refresh once the correct request format for the Claude.ai
+subscription OAuth endpoint is known.
 
 `fluent cleanup` owns the terminal Work model cleanup lifecycle. It
 defaults to a dry run and only mutates state with `--apply`. A Work Item

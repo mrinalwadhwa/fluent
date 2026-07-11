@@ -1909,6 +1909,14 @@ Test: tests/binary.rs (work_task_run_pauses_attempt_when_review_coder_exits_nonz
 Test: tests/binary.rs (work_task_run_pauses_attempt_when_write_coder_exits_nonzero)
 Test: tests/binary.rs (work_task_run_tester_persistent_error_pauses_attempt_at_needs_user)
 
+### B3
+
+WHEN a coder run fails with an auth rejection,
+THE SYSTEM SHALL pause the Attempt at `needs-user` without retrying the
+task, and the handoff SHALL instruct the user to re-authenticate and
+resume.
+Test: tests/binary.rs (work_task_run_auth_rejection_pauses_attempt_without_retrying)
+
 ---
 
 ## Brief capture
