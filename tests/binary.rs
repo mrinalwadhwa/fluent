@@ -11093,3 +11093,113 @@ exit 0
         &prompt[..prompt.len().min(800)]
     );
 }
+
+#[test]
+fn land_rebase_verify_uses_three_dot_when_target_advanced() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work-item",
+            "create",
+            "work-1",
+            "--title",
+            "Land with advanced target",
+        ])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    // Run the attempt loop (write + reviews) using a mock that captures
+    // the rebase prompt.
+    let rebase_prompt_log = tmp.path().join("rebase-prompt.log");
+    let bin_dir = tmp.path().join("bin-land-three-dot");
+    write_mock_claude(
+        &bin_dir,
+        &format!(
+            r##"#!/bin/bash
+PROMPT=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-p" ]; then
+    shift
+    PROMPT="$1"
+    break
+  fi
+  shift
+done
+
+if [ -z "$PROMPT" ]; then
+  exit 0
+fi
+
+if echo "$PROMPT" | grep -q "Rebase the candidate branch"; then
+  printf '%s' "$PROMPT" > '{log}'
+  TARGET=$(echo "$PROMPT" | grep -o 'onto `[^`]*`' | sed 's/onto `//;s/`//')
+  git rebase "$TARGET" 2>/dev/null
+  exit $?
+fi
+
+case "$PWD" in
+  */work-6-work-1-attempt-1)
+    printf 'loop output\n' > loop-output.txt
+    git add loop-output.txt
+    git commit -m "Add loop output" >/dev/null
+    ;;
+  *)
+    printf 'Verdict: pass\n\nLoop review.\n' > review.md
+    ;;
+esac
+exit 0
+"##,
+            log = rebase_prompt_log.display(),
+        ),
+    );
+
+    // Drive write + reviews to produce a merge candidate.
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    // Advance main with an unrelated commit so the land triggers a rebase.
+    commit_file(
+        &main_dir,
+        "target-only.txt",
+        "target advanced\n",
+        "Advance target",
+    );
+
+    // Land — should trigger rebase and the prompt should use three-dot.
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "merge-candidate",
+            "land",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let rebase_prompt = fs::read_to_string(&rebase_prompt_log).unwrap();
+    assert!(
+        rebase_prompt.contains("...HEAD"),
+        "rebase-verify prompt should use three-dot diffs, got:\n{}",
+        &rebase_prompt[..rebase_prompt.len().min(800)]
+    );
+    // Verify no two-dot "..HEAD" remains (three-dot "...HEAD" is fine).
+    let without_three_dot = rebase_prompt.replace("...HEAD", "");
+    assert!(
+        !without_three_dot.contains("..HEAD"),
+        "rebase-verify prompt should not use two-dot diffs"
+    );
+}

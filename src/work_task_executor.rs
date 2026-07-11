@@ -2873,7 +2873,7 @@ mod tests {
                 let suffix = "`) to see the change that triggered this review.";
                 line.strip_prefix(prefix)?.strip_suffix(suffix)
             })
-            .expect("post-merge review prompt should render diff command with base_commit..HEAD");
+            .expect("post-merge review prompt should render diff command with base_commit...HEAD");
 
         assert_eq!(
             command,

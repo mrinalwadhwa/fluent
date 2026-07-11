@@ -3,7 +3,7 @@ Rebase the candidate branch onto `{{target_branch}}`. The workspace is clean and
 ## Phase 1 — Run the rebase
 
 1. Snapshot the candidate's changes so you can verify preservation in Phase 2:
-   `git diff {{target_branch}}..HEAD > {{artifact_dir}}/pre-rebase.diff`
+   `git diff {{target_branch}}...HEAD > {{artifact_dir}}/pre-rebase.diff`
 2. Run `git rebase {{target_branch}}`.
 3. If the rebase completes without conflicts, proceed to Phase 2.
 4. If the rebase stops with conflicts, work through them until the rebase completes:
@@ -17,7 +17,7 @@ Rebase the candidate branch onto `{{target_branch}}`. The workspace is clean and
 
 Before finishing, confirm:
 - The rebase has finished (no in-progress rebase state).
-- The post-rebase diff (`git diff {{target_branch}}..HEAD`) contains every change from the pre-rebase snapshot at `{{artifact_dir}}/pre-rebase.diff` (context lines may shift; no candidate content should be missing).
+- The post-rebase diff (`git diff {{target_branch}}...HEAD`) contains every change from the pre-rebase snapshot at `{{artifact_dir}}/pre-rebase.diff` (context lines may shift; no candidate content should be missing).
 - The workspace has no unstaged or untracked changes.
 
 Then delete the snapshot: `rm {{artifact_dir}}/pre-rebase.diff`.
