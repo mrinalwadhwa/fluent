@@ -996,7 +996,7 @@ fn init_gitignore_excludes_working_state_and_tracks_durable() {
     }
 
     // Ephemeral paths must be ignored
-    for path in &["work", "drafts"] {
+    for path in &["work", "drafts", "observations"] {
         let full = format!(".fluent/{}", path);
         let output = std::process::Command::new("git")
             .args(["check-ignore", &full])
@@ -1013,7 +1013,6 @@ fn init_gitignore_excludes_working_state_and_tracks_durable() {
     for path in &[
         ".gitignore",
         "expertise",
-        "observations",
         "hooks",
         "Dockerfile",
         "tester.yaml",
@@ -1079,6 +1078,23 @@ fn init_backfills_gitignore_on_existing_fluent() {
     assert!(
         gitignore.is_file(),
         ".gitignore should be backfilled on existing .fluent/"
+    );
+}
+
+#[test]
+fn init_gitignore_does_not_allowlist_observations() {
+    let tmp = TempDir::new().unwrap();
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .arg("init")
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(tmp.path().join(".fluent/.gitignore")).unwrap();
+    assert!(
+        !content.contains("observations"),
+        ".fluent/.gitignore must not re-include observations; got:\n{content}"
     );
 }
 

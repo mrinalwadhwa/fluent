@@ -1529,7 +1529,6 @@ const FLUENT_GITIGNORE: &str = "\
 /*
 !/.gitignore
 !/expertise/
-!/observations/
 !/hooks/
 !/Dockerfile
 !/tester.yaml
