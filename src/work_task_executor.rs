@@ -1926,13 +1926,13 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
     let review_diff_command = if input.review_only {
         match review_context.base_commit.as_deref() {
             Some(base) if !base.is_empty() => {
-                render_review_diff_command(candidate_workspace, &format!("{base}..HEAD"))
+                render_review_diff_command(candidate_workspace, &format!("{base}...HEAD"))
             }
             _ => String::new(),
         }
     } else {
         let review_range = format!(
-            "{}..{}",
+            "{}...{}",
             review_context.source_branch, review_context.candidate_commit
         );
         render_review_diff_command(candidate_workspace, &review_range)
@@ -2810,7 +2810,7 @@ mod tests {
 
         assert_eq!(
             command,
-            render_review_diff_command(&workspace, "main..abc123")
+            render_review_diff_command(&workspace, "main...abc123")
         );
         assert!(command.contains("'\\''"));
         assert_shell_command_invokes_fake_git(
@@ -2819,7 +2819,7 @@ mod tests {
                 "-C".to_string(),
                 workspace.display().to_string(),
                 "diff".to_string(),
-                "main..abc123".to_string(),
+                "main...abc123".to_string(),
             ],
         );
     }
@@ -2877,7 +2877,7 @@ mod tests {
 
         assert_eq!(
             command,
-            render_review_diff_command(&workspace, "pre-merge-xyz..HEAD")
+            render_review_diff_command(&workspace, "pre-merge-xyz...HEAD")
         );
     }
 

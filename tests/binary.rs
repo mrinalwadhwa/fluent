@@ -11025,3 +11025,71 @@ fn abandon_fails_when_executing_task_lease_is_held() {
     drop(holder.stdin.take());
     holder.wait().unwrap();
 }
+
+#[test]
+fn review_diff_uses_three_dot_when_source_branch_advanced() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+
+    // Advance main with an unrelated commit after the WI diverged.
+    commit_file(
+        &main_dir,
+        "unrelated.txt",
+        "sibling landed\n",
+        "Advance main with sibling work",
+    );
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    // Mock that captures the reviewer prompt to a log file.
+    let prompt_log = tmp.path().join("reviewer-prompt.log");
+    let bin_dir = tmp.path().join("bin-review-three-dot");
+    write_mock_claude(
+        &bin_dir,
+        &format!(
+            r##"#!/bin/bash
+{guard}PROMPT=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-p" ]; then
+    shift
+    PROMPT="$1"
+    break
+  fi
+  shift
+done
+printf '%s' "$PROMPT" > '{log}'
+printf 'Verdict: pass\n\nReview passed.\n' > review.md
+exit 0
+"##,
+            guard = MOCK_PROMPT_GUARD,
+            log = prompt_log.display(),
+        ),
+    );
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-review-tests",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let prompt = fs::read_to_string(&prompt_log).unwrap();
+    // The diff command in the prompt should use three-dot for merge-base.
+    assert!(
+        prompt.contains("git") && prompt.contains("diff") && prompt.contains("main..."),
+        "review diff command should use three-dot (merge-base), got prompt:\n{}",
+        &prompt[..prompt.len().min(800)]
+    );
+}
