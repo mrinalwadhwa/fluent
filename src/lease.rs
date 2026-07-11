@@ -1,7 +1,8 @@
 use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
+
+use rustix::fs::{FlockOperation, flock};
 
 pub fn task_lock_path(project_root: &Path, work_item_id: &str, task_id: &str) -> PathBuf {
     project_root
@@ -22,10 +23,7 @@ pub fn acquire(lock_path: &Path) -> io::Result<TaskLease> {
         .create(true)
         .write(true)
         .open(lock_path)?;
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
+    flock(&file, FlockOperation::NonBlockingLockExclusive).map_err(io::Error::from)?;
     Ok(TaskLease { _file: file })
 }
 
@@ -34,11 +32,11 @@ pub fn is_leased(lock_path: &Path) -> bool {
         Ok(f) => f,
         Err(_) => return false,
     };
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc == 0 {
-        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
-        false
-    } else {
-        true
+    match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => {
+            let _ = flock(&file, FlockOperation::Unlock);
+            false
+        }
+        Err(_) => true,
     }
 }
