@@ -3,7 +3,8 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "fluent",
-    about = "Run coding agents inside a macOS Seatbelt sandbox with session continuity"
+    about = "Run coding agents inside a macOS Seatbelt sandbox with session continuity",
+    version = crate::version::version_tag_str(),
 )]
 pub struct Cli {
     #[command(subcommand)]

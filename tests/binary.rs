@@ -86,6 +86,37 @@ fn version_prints_package_version_and_commit() {
 }
 
 #[test]
+fn version_flag_matches_version_subcommand() {
+    let tmp = TempDir::new().unwrap();
+
+    let subcommand = fluent_cmd()
+        .current_dir(tmp.path())
+        .arg("version")
+        .output()
+        .unwrap();
+    assert!(subcommand.status.success());
+
+    let flag = fluent_cmd()
+        .current_dir(tmp.path())
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(
+        flag.status.success(),
+        "--version failed: stderr={}",
+        String::from_utf8_lossy(&flag.stderr)
+    );
+
+    let subcommand_out = String::from_utf8(subcommand.stdout).unwrap();
+    let flag_out = String::from_utf8(flag.stdout).unwrap();
+    assert_eq!(
+        subcommand_out.trim(),
+        flag_out.trim(),
+        "--version output must match `version` subcommand output"
+    );
+}
+
+#[test]
 fn fluent_skills_install_writes_all_public_skills() {
     let tmp = TempDir::new().unwrap();
 
