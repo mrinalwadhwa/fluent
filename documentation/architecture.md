@@ -158,11 +158,12 @@ next planned write Task serially through the Task executor, or by running
 planned review Tasks in parallel with concurrency limited to
 `FLUENT_MAX_PARALLEL_REVIEWERS` (default 5, minimum 1). Review-only
 Attempts run review Tasks serially because their reviewers share a source
-checkout. When a write, review, or tester Task coder errors, the Task
-executor retries up to `FLUENT_MAX_TASK_RETRIES` (default 2) times
-before marking the Task failed and pausing the Attempt at `needs-user`,
-except for auth rejections (401), which skip retries and escalate
-immediately.
+checkout. When a write or review Task coder errors, the Task executor
+retries up to `FLUENT_MAX_TASK_RETRIES` (default 2) times before marking
+the Task failed and pausing the Attempt at `needs-user`, except for auth
+rejections (401), which skip retries and escalate immediately. Tester
+Task errors follow the same retry-then-pause policy but do not check for
+auth rejections because the tester invokes test harnesses, not a coder.
 Each failed Task writes a per-task handoff file
 (`needs-user-{task_id}.md`) so concurrent review failures preserve
 independent context. The loop reloads stored state before deciding the
