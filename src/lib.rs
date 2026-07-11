@@ -12,6 +12,7 @@ pub mod fargate_bootstrap;
 pub mod git;
 pub mod hooks;
 pub mod keep_awake;
+pub mod land_lock;
 pub mod lease;
 pub mod notify;
 pub mod os;

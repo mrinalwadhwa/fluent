@@ -11203,3 +11203,82 @@ exit 0
         "rebase-verify prompt should not use two-dot diffs"
     );
 }
+
+// Land lock serialization
+// -------------------------------------------------------------------------
+
+#[test]
+fn land_lock_blocks_concurrent_acquire_until_released() {
+    let tmp = TempDir::new().unwrap();
+    let lock_path = tmp.path().join("land.lock");
+
+    let mut holder = std::process::Command::new("python3")
+        .args([
+            "-c",
+            &format!(
+                concat!(
+                    "import fcntl, sys\n",
+                    "f = open('{}', 'w')\n",
+                    "fcntl.flock(f, fcntl.LOCK_EX)\n",
+                    "print('ready', flush=True)\n",
+                    "sys.stdin.readline()\n",
+                ),
+                lock_path.display()
+            ),
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    {
+        let stdout = holder.stdout.as_mut().unwrap();
+        let mut buf = String::new();
+        use std::io::BufRead;
+        std::io::BufReader::new(stdout).read_line(&mut buf).unwrap();
+        assert!(buf.contains("ready"));
+    }
+
+    assert!(
+        fluent::land_lock::is_locked(&lock_path),
+        "lock held by child should read as locked"
+    );
+
+    let lock_path_clone = lock_path.clone();
+    let handle = std::thread::spawn(move || fluent::land_lock::acquire(&lock_path_clone));
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(!handle.is_finished(), "blocking acquire should wait");
+
+    drop(holder.stdin.take());
+    holder.wait().unwrap();
+
+    let guard = handle.join().unwrap();
+    assert!(guard.is_ok(), "acquire should succeed after holder exits");
+
+    drop(guard);
+    assert!(
+        !fluent::land_lock::is_locked(&lock_path),
+        "lock should be free after guard is dropped"
+    );
+}
+
+#[test]
+fn land_lock_acquire_and_drop_cycle() {
+    let tmp = TempDir::new().unwrap();
+    let lock_path = fluent::land_lock::lock_path(tmp.path());
+
+    assert!(
+        !fluent::land_lock::is_locked(&lock_path),
+        "non-existent lock should not read as locked"
+    );
+
+    let guard = fluent::land_lock::acquire(&lock_path).unwrap();
+    assert!(lock_path.exists(), "lock file should exist after acquire");
+
+    drop(guard);
+    assert!(
+        !fluent::land_lock::is_locked(&lock_path),
+        "lock should be free after guard is dropped"
+    );
+}

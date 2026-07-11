@@ -151,6 +151,11 @@ fn execute_merge(
     ensure_registered_worktree(config.project_root, source_workspace)?;
     ensure_clean_worktree(source_workspace)?;
     ensure_clean_worktree(target_workspace)?;
+
+    let land_lock_path = crate::land_lock::lock_path(config.project_root);
+    let _land_lock = crate::land_lock::acquire(&land_lock_path)
+        .map_err(|e| anyhow::anyhow!("failed to acquire land lock: {e}"))?;
+
     let target_head_before = git::run_stdout(
         target_workspace,
         &["rev-parse", &candidate.target_branch],
