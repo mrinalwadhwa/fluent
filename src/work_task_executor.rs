@@ -156,7 +156,10 @@ fn run_write_task(
         model,
     );
     let mut retries = 0;
-    while run_result.is_err() && retries < max_task_retries() {
+    while run_result.is_err()
+        && !is_auth_error(&run_result)
+        && retries < max_task_retries()
+    {
         retries += 1;
         eprintln!(
             "  Retrying coder (attempt {}/{})",
@@ -179,12 +182,16 @@ fn run_write_task(
     }
 
     if let Err(error) = run_result {
+        let auth_message = error
+            .downcast_ref::<crate::claude_auth::AuthError>()
+            .map(|e| e.user_message());
         mark_task_failed_attempt_needs_user(
             config.store,
             config.project_root,
             config.work_item_id,
             config.attempt_id,
             config.task_id,
+            auth_message.as_deref(),
         )?;
         return Err(error);
     }
@@ -447,7 +454,10 @@ fn run_review_task(
         model,
     );
     let mut retries = 0;
-    while run_result.is_err() && retries < max_task_retries() {
+    while run_result.is_err()
+        && !is_auth_error(&run_result)
+        && retries < max_task_retries()
+    {
         retries += 1;
         eprintln!(
             "  Retrying coder (attempt {}/{})",
@@ -484,6 +494,9 @@ fn run_review_task(
     }
 
     if let Err(error) = run_result {
+        let auth_message = error
+            .downcast_ref::<crate::claude_auth::AuthError>()
+            .map(|e| e.user_message());
         lock_mark_task_failed_attempt_needs_user(
             config.store,
             config.store_lock,
@@ -491,6 +504,7 @@ fn run_review_task(
             config.work_item_id,
             config.attempt_id,
             config.task_id,
+            auth_message.as_deref(),
         )?;
         return Err(error);
     }
@@ -654,6 +668,7 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
                 config.work_item_id,
                 config.attempt_id,
                 config.task_id,
+                None,
             )?;
             return Err(error);
         }
@@ -933,12 +948,20 @@ fn mark_task_failed(
     Ok(())
 }
 
+fn is_auth_error(result: &Result<()>) -> bool {
+    result
+        .as_ref()
+        .err()
+        .map_or(false, |e| e.is::<crate::claude_auth::AuthError>())
+}
+
 fn mark_task_failed_attempt_needs_user(
     store: &WorkModelStore,
     project_root: &Path,
     work_item_id: &str,
     attempt_id: &str,
     task_id: &str,
+    auth_message: Option<&str>,
 ) -> Result<()> {
     let mut item = read_work_item_or_not_found(store, work_item_id)?;
     if let Some((attempt_index, task_index)) = find_attempt_task_indexes(&item, attempt_id, task_id)
@@ -952,7 +975,7 @@ fn mark_task_failed_attempt_needs_user(
             AttemptStatus::NeedsUser,
         );
         let handoff_path =
-            write_task_error_handoff(project_root, work_item_id, attempt_id, task_id)?;
+            write_task_error_handoff(project_root, work_item_id, attempt_id, task_id, auth_message)?;
         item.attempts[attempt_index].artifacts.push(ArtifactRef {
             producer_id: task_id.to_string(),
             path: handoff_path,
@@ -967,6 +990,7 @@ fn write_task_error_handoff(
     work_item_id: &str,
     attempt_id: &str,
     task_id: &str,
+    auth_message: Option<&str>,
 ) -> Result<String> {
     let filename = format!("needs-user-{task_id}.md");
     let relative_path = work_artifact_path(work_item_id, attempt_id, &filename);
@@ -974,14 +998,16 @@ fn write_task_error_handoff(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(
-        &path,
+    let body = if let Some(msg) = auth_message {
+        format!("# Attempt needs user input\n\n{msg}\n")
+    } else {
         format!(
             "# Attempt needs user input\n\nTask {task_id:?} failed after {} retries. \
              The coder execution errored persistently.\n",
             max_task_retries()
-        ),
-    )?;
+        )
+    };
+    fs::write(&path, body)?;
     Ok(relative_path)
 }
 
@@ -1003,9 +1029,10 @@ fn lock_mark_task_failed_attempt_needs_user(
     work_item_id: &str,
     attempt_id: &str,
     task_id: &str,
+    auth_message: Option<&str>,
 ) -> Result<()> {
     let _lock = store_lock.map(|m| m.lock().unwrap_or_else(|e| e.into_inner()));
-    mark_task_failed_attempt_needs_user(store, project_root, work_item_id, attempt_id, task_id)
+    mark_task_failed_attempt_needs_user(store, project_root, work_item_id, attempt_id, task_id, auth_message)
 }
 
 fn resolve_workspace_path(project_root: &Path, path: &str) -> PathBuf {

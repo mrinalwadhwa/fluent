@@ -181,9 +181,7 @@ impl Coder for SandboxedClaudeCode {
         extra_env: &[(String, String)],
         transcript_file: Option<&Path>,
     ) -> Result<i32> {
-        if let Err(auth_err) = crate::claude_auth::ensure_not_expired() {
-            bail!(auth_err.user_message());
-        }
+        crate::claude_auth::ensure_not_expired()?;
         let want_transcript = transcript_file.is_some();
         run_with_transcript_retrying(
             || {
@@ -262,9 +260,7 @@ impl Coder for BareClaudeCode {
         extra_env: &[(String, String)],
         transcript_file: Option<&Path>,
     ) -> Result<i32> {
-        if let Err(auth_err) = crate::claude_auth::ensure_not_expired() {
-            bail!(auth_err.user_message());
-        }
+        crate::claude_auth::ensure_not_expired()?;
         let want_transcript = transcript_file.is_some();
         let model = self.effective_model();
         run_with_transcript_retrying(
@@ -720,7 +716,7 @@ where
 
         // 401 auth failure short-circuits before rate-limit detection.
         if let Some(auth_err) = crate::claude_auth::classify_transcript_401(path) {
-            bail!(auth_err.user_message());
+            return Err(anyhow::Error::new(auth_err));
         }
 
         // Try structured parsing first, then fall back to text detection.

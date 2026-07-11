@@ -14,6 +14,14 @@ pub enum AuthError {
     Rejected { request_id: Option<String> },
 }
 
+impl std::fmt::Display for AuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.user_message())
+    }
+}
+
+impl std::error::Error for AuthError {}
+
 impl AuthError {
     pub fn user_message(&self) -> String {
         let prefix = match self {

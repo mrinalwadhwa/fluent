@@ -4996,6 +4996,79 @@ fn work_task_run_handoff_file_includes_task_id() {
 }
 
 #[test]
+fn work_task_run_auth_rejection_pauses_attempt_without_retrying() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-auth-401");
+    let counter_file = tmp.path().join("auth-invocation-count");
+    write_mock_claude(
+        &bin_dir,
+        &format!(
+            r##"#!/bin/bash
+HAS_PROMPT=0
+for arg in "$@"; do
+  if [ "$arg" = "-p" ]; then HAS_PROMPT=1; break; fi
+done
+if [ "$HAS_PROMPT" = 0 ]; then exit 0; fi
+COUNTER='{counter}'
+count=$(cat "$COUNTER" 2>/dev/null || echo 0)
+count=$((count + 1))
+printf '%s' "$count" > "$COUNTER"
+echo '{{"type":"result","api_error_status":401,"request_id":"req-test-401"}}'
+exit 1
+"##,
+            counter = counter_file.display()
+        ),
+    );
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-review-tests",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_MAX_TASK_RETRIES", "2")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("401"));
+
+    let invocations: u32 = fs::read_to_string(&counter_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(invocations, 1, "auth rejection should not be retried");
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    assert_eq!(
+        value["attempts"][0]["status"], "needs-user",
+        "attempt should pause at needs-user on auth rejection"
+    );
+
+    let handoff_path = main_dir.join(
+        ".fluent/work/artifacts/work-1/attempt-1/needs-user-attempt-1-review-tests.md",
+    );
+    assert!(handoff_path.exists(), "handoff file should exist");
+    let handoff = fs::read_to_string(&handoff_path).unwrap();
+    assert!(
+        handoff.contains("re-authenticate"),
+        "handoff should instruct user to re-authenticate: {handoff}"
+    );
+}
+
+#[test]
 fn work_task_run_fails_review_task_that_dirties_candidate_workspace() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
