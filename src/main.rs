@@ -1267,6 +1267,14 @@ fn cmd_init(cwd: &Path) -> Result<()> {
     if let Err(e) = cmd_skills_add(cwd, false, false, None) {
         eprintln!("  warning: could not install skills: {e}");
     }
+
+    if cwd.file_name().and_then(|n| n.to_str()) != Some("main") {
+        eprintln!();
+        eprintln!("  Tip: place your repo at <project>/main/ so attempt worktrees");
+        eprintln!("  land as siblings under <project>/ instead of scattering into the");
+        eprintln!("  parent directory.");
+    }
+
     Ok(())
 }
 

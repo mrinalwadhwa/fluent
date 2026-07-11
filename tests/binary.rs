@@ -1098,6 +1098,32 @@ fn init_gitignore_does_not_allowlist_observations() {
     );
 }
 
+#[test]
+fn init_prints_layout_tip_when_dir_not_named_main() {
+    let tmp = TempDir::new().unwrap();
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .arg("init")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Tip:"));
+}
+
+#[test]
+fn init_no_layout_tip_when_dir_named_main() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = tmp.path().join("main");
+    fs::create_dir(&main_dir).unwrap();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .arg("init")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Tip:").not());
+}
+
 // -------------------------------------------------------------------------
 // Status
 // -------------------------------------------------------------------------

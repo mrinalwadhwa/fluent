@@ -44,7 +44,10 @@ fluent init      # set up fluent's working state and install the skill
 ```
 
 fluent creates its work in sibling git worktrees next to your repo, so your
-working tree stays clean while it builds.
+working tree stays clean while it builds. Place your repo at
+`<project>/main/` so worktrees land as `<project>/work-*` siblings grouped
+under the project directory. `fluent init` prints a reminder if the
+directory is not named `main`.
 
 ## Staying up to date
 
