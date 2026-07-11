@@ -530,7 +530,7 @@ Observations are stored as one file per entry under
 observations` CLI surface manages the lifecycle: `add` records a new
 observation, `resolve` appends resolution context and moves the file,
 `list` prints the open queue, and `show` prints a single entry. The
-per-file layout prevents merge conflicts when parallel Work Items add
+per-file layout prevents write collisions when parallel sessions add
 or resolve observations concurrently. A one-shot `migrate` command
 converted the prior monolithic `observations.md` and
 `observations-resolved.md` into the per-file layout.

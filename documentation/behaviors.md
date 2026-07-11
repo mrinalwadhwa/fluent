@@ -30,6 +30,13 @@ stdout and exit successfully without requiring a Fluent project.
 Test: tests/binary.rs (version_prints_package_version_and_commit)
 Test: tests/behaviors/operations/test-version.sh
 
+### B2
+
+WHEN `fluent --version` is invoked,
+THE SYSTEM SHALL print the same version and build commit output as
+`fluent version`.
+Test: tests/binary.rs (version_flag_matches_version_subcommand)
+
 ## Observations management
 
 ### B1

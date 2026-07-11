@@ -7086,7 +7086,7 @@ fn setup_git_project(tmp: &TempDir) -> std::path::PathBuf {
     // under .fluent/work/ doesn't appear as uncommitted changes.
     fs::write(
         main_dir.join(".gitignore"),
-        ".fluent/*\n!.fluent/observations/\n!.fluent/expertise/\n!.fluent/hooks/\n!.fluent/Dockerfile\n!.fluent/tester.yaml\n!.fluent/extract-tester-results\n",
+        ".fluent/*\n!.fluent/expertise/\n!.fluent/hooks/\n!.fluent/Dockerfile\n!.fluent/tester.yaml\n!.fluent/extract-tester-results\n",
     )
     .unwrap();
     for role in [
