@@ -832,8 +832,7 @@ impl WorkItem {
                 task.status == TaskStatus::Executing
                     && match project_root {
                         Some(root) => {
-                            let lock_path =
-                                crate::lease::task_lock_path(root, &self.id, &task.id);
+                            let lock_path = crate::lease::task_lock_path(root, &self.id, &task.id);
                             crate::lease::is_leased(&lock_path)
                         }
                         None => true,
@@ -3357,7 +3356,9 @@ mod tests {
         work_item.attempts[0].status = AttemptStatus::Executing;
         work_item.attempts[0].tasks[0].status = TaskStatus::Executing;
 
-        let error = work_item.abandon(Some("stale".to_string()), None).unwrap_err();
+        let error = work_item
+            .abandon(Some("stale".to_string()), None)
+            .unwrap_err();
 
         assert!(matches!(
             error,
@@ -3380,7 +3381,9 @@ mod tests {
         work_item.add_initial_attempt("attempt-1").unwrap();
         work_item.attempts[0].status = AttemptStatus::Reviewing;
 
-        let error = work_item.abandon(Some("stale".to_string()), None).unwrap_err();
+        let error = work_item
+            .abandon(Some("stale".to_string()), None)
+            .unwrap_err();
 
         assert!(matches!(
             error,
@@ -3404,7 +3407,9 @@ mod tests {
         work_item.attempts[0].status = AttemptStatus::Failed;
         work_item.attempts[0].tasks[0].status = TaskStatus::Executing;
 
-        let error = work_item.abandon(Some("stale".to_string()), None).unwrap_err();
+        let error = work_item
+            .abandon(Some("stale".to_string()), None)
+            .unwrap_err();
 
         assert!(matches!(
             error,
@@ -3438,7 +3443,9 @@ mod tests {
             }],
         };
 
-        let error = work_item.abandon(Some("stale".to_string()), None).unwrap_err();
+        let error = work_item
+            .abandon(Some("stale".to_string()), None)
+            .unwrap_err();
 
         assert!(matches!(
             error,
@@ -3449,7 +3456,9 @@ mod tests {
         work_item.merge_candidates[0].review_state = MergeCandidateReviewState::Pending;
         work_item.merge_candidates[0].merge_state.status = MergeCandidateMergeStatus::Executing;
 
-        let error = work_item.abandon(Some("stale".to_string()), None).unwrap_err();
+        let error = work_item
+            .abandon(Some("stale".to_string()), None)
+            .unwrap_err();
 
         assert!(matches!(
             error,

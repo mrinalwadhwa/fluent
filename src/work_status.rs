@@ -173,11 +173,7 @@ fn format_attempt(attempt: &Attempt) -> String {
     format!("{} [{}]", attempt.id, attempt_status_label(&attempt.status))
 }
 
-fn format_task_with_liveness(
-    task: &Task,
-    item: &WorkItem,
-    project_root: Option<&Path>,
-) -> String {
+fn format_task_with_liveness(task: &Task, item: &WorkItem, project_root: Option<&Path>) -> String {
     format!(
         "{}:{} [{}]",
         task_kind_label(task.kind),
@@ -202,11 +198,7 @@ fn effective_task_status_label(
     task.status.as_str()
 }
 
-fn is_task_live_executing(
-    task: &Task,
-    item: &WorkItem,
-    project_root: Option<&Path>,
-) -> bool {
+fn is_task_live_executing(task: &Task, item: &WorkItem, project_root: Option<&Path>) -> bool {
     task.status == TaskStatus::Executing
         && match project_root {
             Some(root) => {

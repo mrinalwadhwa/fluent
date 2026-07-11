@@ -10281,7 +10281,10 @@ fn lease_acquire_creates_file_and_drop_frees_lock() {
     let lease = fluent::lease::acquire(&lock_path).unwrap();
     // Within the same process on macOS, flock is per-process so is_leased
     // cannot detect it. Verify the lock file was created instead.
-    assert!(lock_path.exists(), "lock file should exist after acquisition");
+    assert!(
+        lock_path.exists(),
+        "lock file should exist after acquisition"
+    );
 
     drop(lease);
     assert!(
@@ -10411,8 +10414,7 @@ fn attempt_run_refuses_to_advance_when_lease_is_held() {
     attempt_value["status"] = serde_json::json!("executing");
     write_json_value(&attempt_path, &attempt_value);
 
-    let lock_path =
-        fluent::lease::task_lock_path(&main_dir, "work-1", "attempt-1-write-1");
+    let lock_path = fluent::lease::task_lock_path(&main_dir, "work-1", "attempt-1-write-1");
     fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
 
     let mut holder = std::process::Command::new("python3")
