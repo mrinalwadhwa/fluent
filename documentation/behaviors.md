@@ -1864,6 +1864,22 @@ limit retry, since transient failure cannot be detected without
 the transcript content.
 Untestable: Negative code path; all production callers configure a transcript
 
+## Task error resilience
+
+### B1
+
+WHEN a review or tester task coder error occurs,
+THE SYSTEM SHALL NOT terminally fail the Attempt on that error alone: a
+transient error SHALL be recovered automatically via bounded retry, and
+a persistent error SHALL pause the Attempt at `needs-user` for a human,
+rather than marking it `failed`.
+Test: tests/binary.rs (work_task_run_recovers_review_task_when_coder_succeeds_on_retry)
+Test: tests/binary.rs (work_task_run_persistent_coder_error_pauses_attempt_at_needs_user)
+Test: tests/binary.rs (work_task_run_pauses_attempt_when_review_coder_exits_nonzero)
+Test: tests/binary.rs (work_task_run_pauses_attempt_when_write_coder_exits_nonzero)
+
+---
+
 ## Brief capture
 
 ### B1

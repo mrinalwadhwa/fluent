@@ -15,7 +15,7 @@ use crate::review_diff_command::render_review_diff_command;
 use crate::work_model::{
     ArtifactRef, AttemptKind, AttemptStatus, TaskKind, TaskOutput, TaskStatus, WorkItem,
     WorkModelStorageError, WorkModelStore, WorkspaceRef, resolve_expected_candidate_workspace_path,
-    resolve_managed_sibling_workspace_path, to_json_pretty,
+    resolve_managed_sibling_workspace_path, to_json_pretty, work_artifact_path,
 };
 use crate::worktree;
 
@@ -142,7 +142,7 @@ fn run_write_task(
     item.attempts[attempt_index].tasks[task_index].output = None;
     config.store.write_work_item(&item)?;
 
-    let run_result = run_task_coder(
+    let mut run_result = run_task_coder(
         &item,
         config.attempt_id,
         config.task_id,
@@ -155,22 +155,37 @@ fn run_write_task(
         config.no_sandbox,
         model,
     );
+    let mut retries = 0;
+    while run_result.is_err() && retries < max_task_retries() {
+        retries += 1;
+        eprintln!(
+            "  Retrying coder (attempt {}/{})",
+            retries + 1,
+            max_task_retries() + 1
+        );
+        run_result = run_task_coder(
+            &item,
+            config.attempt_id,
+            config.task_id,
+            config.project_root,
+            &workspace_path,
+            &prior_reviews,
+            config.resolver,
+            config.extra_args,
+            coder_kind,
+            config.no_sandbox,
+            model,
+        );
+    }
 
     if let Err(error) = run_result {
-        let mut failed_item = read_work_item_or_not_found(config.store, config.work_item_id)?;
-        if let Some((attempt_index, task_index)) =
-            find_attempt_task_indexes(&failed_item, config.attempt_id, config.task_id)
-        {
-            crate::work_model::set_task_terminal(
-                &mut failed_item.attempts[attempt_index].tasks[task_index],
-                TaskStatus::Failed,
-            );
-            crate::work_model::set_attempt_terminal(
-                &mut failed_item.attempts[attempt_index],
-                AttemptStatus::Failed,
-            );
-            config.store.write_work_item(&failed_item)?;
-        }
+        mark_task_failed_attempt_needs_user(
+            config.store,
+            config.project_root,
+            config.work_item_id,
+            config.attempt_id,
+            config.task_id,
+        )?;
         return Err(error);
     }
 
@@ -415,7 +430,7 @@ fn run_review_task(
         );
     }
 
-    let run_result = run_review_coder(
+    let mut run_result = run_review_coder(
         &item,
         config.attempt_id,
         config.task_id,
@@ -431,6 +446,31 @@ fn run_review_task(
         config.no_sandbox,
         model,
     );
+    let mut retries = 0;
+    while run_result.is_err() && retries < max_task_retries() {
+        retries += 1;
+        eprintln!(
+            "  Retrying coder (attempt {}/{})",
+            retries + 1,
+            max_task_retries() + 1
+        );
+        run_result = run_review_coder(
+            &item,
+            config.attempt_id,
+            config.task_id,
+            config.project_root,
+            &artifact_dir,
+            &review_path,
+            &readable_workspace_paths,
+            &input_artifacts,
+            attempt_kind.is_review_only_like(),
+            config.resolver,
+            config.extra_args,
+            coder_kind,
+            config.no_sandbox,
+            model,
+        );
+    }
 
     if let Err(error) = readable_workspaces.finish() {
         lock_mark_task_failed(
@@ -444,9 +484,10 @@ fn run_review_task(
     }
 
     if let Err(error) = run_result {
-        lock_mark_task_failed(
+        lock_mark_task_failed_attempt_needs_user(
             config.store,
             config.store_lock,
+            config.project_root,
             config.work_item_id,
             config.attempt_id,
             config.task_id,
@@ -580,20 +621,36 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
 
     let results_path = artifact_dir.join("tester-results.json");
 
-    let tester_result = crate::tester::run(
+    let mut tester_result = crate::tester::run(
         &candidate_workspace,
         &artifact_dir,
         config.no_sandbox,
         config.resolver,
     );
+    let mut retries = 0;
+    while tester_result.is_err() && retries < max_task_retries() {
+        retries += 1;
+        eprintln!(
+            "  Retrying tester (attempt {}/{})",
+            retries + 1,
+            max_task_retries() + 1
+        );
+        tester_result = crate::tester::run(
+            &candidate_workspace,
+            &artifact_dir,
+            config.no_sandbox,
+            config.resolver,
+        );
+    }
 
     match tester_result {
         Ok(()) => {}
         Err(error) => {
             eprintln!("  Tester error: {error:#}");
-            lock_mark_task_failed(
+            lock_mark_task_failed_attempt_needs_user(
                 config.store,
                 config.store_lock,
+                config.project_root,
                 config.work_item_id,
                 config.attempt_id,
                 config.task_id,
@@ -845,6 +902,15 @@ fn find_attempt_task_indexes(
     Some((attempt_index, task_index))
 }
 
+const DEFAULT_MAX_TASK_RETRIES: usize = 2;
+
+fn max_task_retries() -> usize {
+    std::env::var("FLUENT_MAX_TASK_RETRIES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_MAX_TASK_RETRIES)
+}
+
 fn mark_task_failed(
     store: &WorkModelStore,
     work_item_id: &str,
@@ -867,6 +933,57 @@ fn mark_task_failed(
     Ok(())
 }
 
+fn mark_task_failed_attempt_needs_user(
+    store: &WorkModelStore,
+    project_root: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    task_id: &str,
+) -> Result<()> {
+    let mut item = read_work_item_or_not_found(store, work_item_id)?;
+    if let Some((attempt_index, task_index)) = find_attempt_task_indexes(&item, attempt_id, task_id)
+    {
+        crate::work_model::set_task_terminal(
+            &mut item.attempts[attempt_index].tasks[task_index],
+            TaskStatus::Failed,
+        );
+        crate::work_model::set_attempt_terminal(
+            &mut item.attempts[attempt_index],
+            AttemptStatus::NeedsUser,
+        );
+        let handoff_path =
+            write_task_error_handoff(project_root, work_item_id, attempt_id, task_id)?;
+        item.attempts[attempt_index].artifacts.push(ArtifactRef {
+            producer_id: task_id.to_string(),
+            path: handoff_path,
+        });
+        store.write_work_item(&item)?;
+    }
+    Ok(())
+}
+
+fn write_task_error_handoff(
+    project_root: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    task_id: &str,
+) -> Result<String> {
+    let relative_path = work_artifact_path(work_item_id, attempt_id, "needs-user.md");
+    let path = project_root.join(&relative_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(
+        &path,
+        format!(
+            "# Attempt needs user input\n\nTask {task_id:?} failed after {} retries. \
+             The coder execution errored persistently.\n",
+            max_task_retries()
+        ),
+    )?;
+    Ok(relative_path)
+}
+
 fn lock_mark_task_failed(
     store: &WorkModelStore,
     store_lock: Option<&std::sync::Mutex<()>>,
@@ -876,6 +993,18 @@ fn lock_mark_task_failed(
 ) -> Result<()> {
     let _lock = store_lock.map(|m| m.lock().unwrap_or_else(|e| e.into_inner()));
     mark_task_failed(store, work_item_id, attempt_id, task_id)
+}
+
+fn lock_mark_task_failed_attempt_needs_user(
+    store: &WorkModelStore,
+    store_lock: Option<&std::sync::Mutex<()>>,
+    project_root: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    task_id: &str,
+) -> Result<()> {
+    let _lock = store_lock.map(|m| m.lock().unwrap_or_else(|e| e.into_inner()));
+    mark_task_failed_attempt_needs_user(store, project_root, work_item_id, attempt_id, task_id)
 }
 
 fn resolve_workspace_path(project_root: &Path, path: &str) -> PathBuf {

@@ -268,12 +268,14 @@ test_coder_failure_marks_task_failed() {
   create_work_task
   write_mock_codex
 
+  export FLUENT_MAX_TASK_RETRIES=0
   RESULT=0
   assert_fails run_task fail || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "Coder exited with code 7" || RESULT=1
-  [ "$(show_json_value '.attempts[0].status')" = "failed" ] || RESULT=1
+  [ "$(show_json_value '.attempts[0].status')" = "needs-user" ] || RESULT=1
   [ "$(show_json_value '.attempts[0].tasks[0].status')" = "failed" ] || RESULT=1
   assert_not_complete || RESULT=1
+  unset FLUENT_MAX_TASK_RETRIES
 
   cleanup_test_project
   return $RESULT

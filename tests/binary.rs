@@ -4475,13 +4475,14 @@ fn work_attempt_run_stops_when_task_executor_fails() {
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_MAX_TASK_RETRIES", "0")
         .assert()
         .failure()
         .stderr(predicate::str::contains("Coder exited with code 7"));
 
     let value = read_work_show_json(&main_dir, "work-1");
     let attempt = &value["attempts"][0];
-    assert_eq!(attempt["status"], "failed");
+    assert_eq!(attempt["status"], "needs-user");
     assert_eq!(attempt["tasks"][0]["status"], "failed");
     assert_eq!(attempt["tasks"].as_array().unwrap().len(), 1);
 }
@@ -4751,7 +4752,7 @@ fn work_task_run_rejects_unmanaged_review_artifact_area_path() {
 }
 
 #[test]
-fn work_task_run_marks_review_task_failed_when_coder_exits_nonzero() {
+fn work_task_run_pauses_attempt_when_review_coder_exits_nonzero() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     create_completed_work_attempt(&tmp, &main_dir);
@@ -4775,6 +4776,7 @@ fn work_task_run_marks_review_task_failed_when_coder_exits_nonzero() {
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_MAX_TASK_RETRIES", "0")
         .assert()
         .failure()
         .stderr(predicate::str::contains("Coder exited with code 7"));
@@ -4786,7 +4788,116 @@ fn work_task_run_marks_review_task_failed_when_coder_exits_nonzero() {
         .iter()
         .find(|task| task["id"] == "attempt-1-review-tests")
         .unwrap();
-    assert_eq!(value["attempts"][0]["status"], "failed");
+    assert_eq!(value["attempts"][0]["status"], "needs-user");
+    assert_eq!(review_task["status"], "failed");
+}
+
+#[test]
+fn work_task_run_recovers_review_task_when_coder_succeeds_on_retry() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-review");
+    let attempt_file = tmp.path().join("attempt-count");
+    write_mock_claude(
+        &bin_dir,
+        &format!(
+            r##"#!/bin/bash
+ATTEMPT_FILE='{attempt_file}'
+if [ ! -f "$ATTEMPT_FILE" ]; then
+    printf '1' > "$ATTEMPT_FILE"
+    exit 7
+fi
+printf 'Verdict: pass\n' > review.md
+exit 0
+"##,
+            attempt_file = attempt_file.display()
+        ),
+    );
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-review-tests",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_MAX_TASK_RETRIES", "2")
+        .assert()
+        .success();
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let review_task = value["attempts"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "attempt-1-review-tests")
+        .unwrap();
+    assert_eq!(
+        review_task["status"], "complete",
+        "review task should complete after recovery on retry"
+    );
+    assert_ne!(
+        value["attempts"][0]["status"], "failed",
+        "attempt should not be failed after successful retry"
+    );
+    assert_ne!(
+        value["attempts"][0]["status"], "needs-user",
+        "attempt should not be needs-user after successful retry"
+    );
+}
+
+#[test]
+fn work_task_run_persistent_coder_error_pauses_attempt_at_needs_user() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-review");
+    write_mock_claude(&bin_dir, "#!/bin/bash\nexit 7\n");
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-review-tests",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_MAX_TASK_RETRIES", "2")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Coder exited with code 7"));
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let review_task = value["attempts"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "attempt-1-review-tests")
+        .unwrap();
+    assert_eq!(
+        value["attempts"][0]["status"], "needs-user",
+        "attempt should pause at needs-user, not fail terminally"
+    );
     assert_eq!(review_task["status"], "failed");
 }
 
@@ -5184,7 +5295,7 @@ exit 0
 }
 
 #[test]
-fn work_task_run_marks_task_failed_when_coder_exits_nonzero() {
+fn work_task_run_pauses_attempt_when_write_coder_exits_nonzero() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     let bin_dir = tmp.path().join("bin");
@@ -5218,6 +5329,7 @@ exit 7
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_MAX_TASK_RETRIES", "0")
         .assert()
         .failure()
         .stderr(predicate::str::contains("Coder exited with code 7"));
@@ -5225,7 +5337,7 @@ exit 7
     let value = read_work_show_json(&main_dir, "work-1");
     let attempt = &value["attempts"][0];
     let task = &attempt["tasks"][0];
-    assert_eq!(attempt["status"], "failed");
+    assert_eq!(attempt["status"], "needs-user");
     assert_eq!(task["status"], "failed");
     assert!(task.get("output").is_none());
 }

@@ -335,12 +335,14 @@ test_attempt_loop_stops_after_task_executor_failure() {
   trap cleanup_test_project RETURN
   write_mock_claude pass fail
 
+  export FLUENT_MAX_TASK_RETRIES=0
   RESULT=0
   assert_fails run_attempt_loop || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "Coder exited with code 9" || RESULT=1
-  [ "$(json_value '.attempts[0].status')" = "failed" ] || RESULT=1
+  [ "$(json_value '.attempts[0].status')" = "needs-user" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[0].status')" = "failed" ] || RESULT=1
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review")] | length')" = "0" ] || RESULT=1
+  unset FLUENT_MAX_TASK_RETRIES
   return $RESULT
 }
 
