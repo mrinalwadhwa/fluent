@@ -31,10 +31,15 @@ Review the codebase at {{candidate_workspace_path}}.
 3. Determine the overall Verdict:
    - `pass` — no findings.
    - `fail` — at least one finding.
+   - `uncertain` — you're not confident; surface for human judgment.
+
+   Before you emit `fail`:
+   - **Ground removal claims in the diff.** If a finding asserts that content was deleted, removed, or regressed, verify the diff actually removes the cited content. Do not `fail` on a removal claim the diff does not support.
+   - **Route design decisions to `uncertain`.** If resolving a finding requires a design decision that the brief does not settle, emit `uncertain` instead of `fail`. A design decision is one where reasonable choices exist and the review context does not prescribe which to take.
 4. Write your review report to {{review_path}}. Format:
 
     ```
-    Verdict: <pass | fail>
+    Verdict: <pass | fail | uncertain>
 
     ## Findings
 

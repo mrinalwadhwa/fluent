@@ -62,6 +62,10 @@ The Writer's workspace and commits:
    - `pass` — no `- [ ] (blocking)` findings.
    - `fail` — at least one `- [ ] (blocking)` finding.
    - `uncertain` — you're not confident; surface for human or other-reviewer judgment.
+
+   Before you emit `fail`:
+   - **Ground removal claims in the diff.** If a finding asserts that content was deleted, removed, or regressed, verify the diff actually removes the cited content. Do not `fail` on a removal claim the diff does not support.
+   - **Route design decisions to `uncertain`.** If resolving a finding requires a design decision that the brief, behaviors, or approach do not settle, emit `uncertain` instead of `fail`. A design decision is one where reasonable choices exist and the Work Item does not prescribe which to take.
 5. Write your review report to {{review_path}}. Format:
 
     ```

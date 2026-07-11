@@ -1864,6 +1864,24 @@ limit retry, since transient failure cannot be detected without
 the transcript content.
 Untestable: Negative code path; all production callers configure a transcript
 
+## Review verdict reliability
+
+### B1
+
+WHEN a review would base a `Fail` verdict on a removal claim,
+THE SYSTEM SHALL confirm the diff actually removes the cited content,
+and SHALL NOT `Fail` on a removal claim the diff does not support.
+Test: tests/behaviors/skills/review-verdict-rules.sh
+
+### B2
+
+WHEN resolving a review finding requires a design decision that the
+brief, behaviors, or approach do not settle,
+THE SYSTEM SHALL return `Uncertain` rather than `Fail`.
+Test: tests/behaviors/skills/review-verdict-rules.sh
+
+---
+
 ## Task error resilience
 
 ### B1
