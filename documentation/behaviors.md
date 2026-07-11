@@ -273,8 +273,9 @@ Test: tests/behaviors/operations/test-work-inspection.sh (work abandon missing i
 ### B16
 
 IF `fluent work-item abandon <id>` is invoked for a Work Item with an
-executing or reviewing Attempt, executing Task, reviewing Merge
-Candidate, or executing Merge Candidate merge,
+executing or reviewing Attempt, an executing Task held by a live
+runner's lease, a reviewing Merge Candidate, or an executing Merge
+Candidate merge,
 THEN THE SYSTEM SHALL exit non-zero and leave Work Item state unchanged.
 Test: src/work_model.rs (abandon_rejects_executing_attempt_without_changing_marker)
 Test: src/work_model.rs (abandon_rejects_reviewing_attempt_without_changing_marker)
@@ -1759,6 +1760,15 @@ WHILE a live runner holds a task's lease,
 THE SYSTEM SHALL treat the task as executing and SHALL NOT reclaim or
 re-drive it.
 Test: tests/binary.rs (attempt_run_refuses_to_advance_when_lease_is_held)
+
+### B4
+
+WHEN `fluent work-item abandon <id>` is invoked for a Work Item whose
+only blocking task is stale executing (recorded `executing` but no live
+runner holds its lease),
+THE SYSTEM SHALL abandon the Work Item rather than reject the
+abandonment.
+Test: tests/binary.rs (abandon_succeeds_when_executing_task_has_no_lease)
 
 ## Coder transient failures
 
