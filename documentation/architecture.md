@@ -521,8 +521,9 @@ Work-model behavior reviewers receive the Work Item behavior increment
 from `WorkItem.planning_context.behaviors` in the prompt when one exists,
 or an explicit statement that no behavior increment was provided.
 
-Project-local `.fluent/observations/` and `.fluent/expertise/*` are
-durable Fluent memory that belongs in normal repository history.
+Project-local `.fluent/expertise/*` is durable Fluent memory that
+belongs in normal repository history. `.fluent/observations/` is a
+local working backlog that stays ignored and is not committed.
 Observations are stored as one file per entry under
 `.fluent/observations/<id>.md` (open) and
 `.fluent/observations/resolved/<id>.md` (resolved). The `fluent
@@ -1137,7 +1138,7 @@ fluent/main/
     Dockerfile               ← per-project Fargate image (Rust toolchain)
     tester.yaml              ← test command declarations for the Tester subcommand
     extract-tester-results   ← normalize raw test output into per-test JSON
-    observations/             ← per-file observation queue (tracked)
+    observations/             ← per-file observation queue (local, not tracked)
       <id>.md                ← open observations
       resolved/
         <id>.md              ← resolved observations
