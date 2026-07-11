@@ -5575,8 +5575,8 @@ exit 1
         "attempt should pause at needs-user on auth rejection"
     );
 
-    let handoff_path = main_dir
-        .join(".fluent/work/artifacts/work-1/attempt-1/needs-user-attempt-1-write-1.md");
+    let handoff_path =
+        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/needs-user-attempt-1-write-1.md");
     assert!(handoff_path.exists(), "handoff file should exist");
     let handoff = fs::read_to_string(&handoff_path).unwrap();
     assert!(
