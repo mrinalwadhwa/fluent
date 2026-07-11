@@ -158,8 +158,13 @@ next planned write Task serially through the Task executor, or by running
 planned review Tasks in parallel with concurrency limited to
 `FLUENT_MAX_PARALLEL_REVIEWERS` (default 5, minimum 1). Review-only
 Attempts run review Tasks serially because their reviewers share a source
-checkout. The loop reloads stored state before deciding the next
-transition. After the
+checkout. When a write, review, or tester Task coder errors, the Task
+executor retries up to `FLUENT_MAX_TASK_RETRIES` (default 2) times
+before marking the Task failed and pausing the Attempt at `needs-user`.
+Each failed Task writes a per-task handoff file
+(`needs-user-{task_id}.md`) so concurrent review failures preserve
+independent context. The loop reloads stored state before deciding the
+next transition. After the
 initial write output completes it plans review Tasks for the full Work
 reviewer set. After a follow-up write output completes it derives the
 next review roles from that Task's failed review input artifacts; when
