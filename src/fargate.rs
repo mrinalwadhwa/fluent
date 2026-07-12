@@ -723,6 +723,7 @@ pub fn launch_work_merge(
     work_item_id: &str,
     merge_candidate_id: &str,
     coder: CoderKind,
+    skip_post_merge_review: bool,
 ) -> Result<()> {
     let coder_env = coder_task_overrides(coder)?;
 
@@ -745,6 +746,9 @@ pub fn launch_work_merge(
         serde_json::json!({"name": "FLUENT_S3_BUCKET", "value": config.s3_bucket}),
         serde_json::json!({"name": "FLUENT_REGION", "value": config.region}),
     ];
+    if skip_post_merge_review {
+        env_overrides.push(serde_json::json!({"name": "FLUENT_NO_POST_MERGE_REVIEW", "value": "1"}));
+    }
     for (k, v) in &coder_env {
         env_overrides.push(serde_json::json!({"name": k, "value": v}));
     }

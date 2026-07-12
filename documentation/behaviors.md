@@ -919,7 +919,7 @@ Test: src/work_attempt_loop.rs (cap_enforcement_limits_in_flight_reviewers)
 ### B83
 
 WHEN `fluent merge-candidate land <work-item-id> <merge-candidate-id>` finishes
-the fast-forward,
+the fast-forward and `--no-post-merge-review` was not passed,
 THE SYSTEM SHALL append an entry to the post-merge review queue at
 `.fluent/work/post-merge-review-queue.json` recording the target
 branch, merged commit, timestamp, source Work Item, and source Merge
@@ -928,6 +928,25 @@ child that sleeps the debounce window before reviewing. The merge
 command SHALL return immediately after spawning the child; no LLM
 reviewers run inside `fluent merge-candidate land`.
 Untestable: Requires detached process spawn with debounce timing and queue file coordination
+Test: tests/binary.rs (work_merge_candidate_land_default_enqueues_post_merge_review)
+
+### B83a
+
+WHERE `--no-post-merge-review` is passed to
+`fluent merge-candidate land`,
+THE SYSTEM SHALL skip appending to the post-merge review queue and
+SHALL NOT spawn a detached post-merge-review child.
+Test: tests/binary.rs (work_merge_candidate_land_no_post_merge_review_skips_queue_entry)
+
+### B83b
+
+WHEN `fluent merge-candidate land` runs with `--runtime fargate` and
+`--no-post-merge-review`,
+THE SYSTEM SHALL propagate the flag to the Fargate container via the
+`FLUENT_NO_POST_MERGE_REVIEW` environment variable; the container
+entrypoint SHALL pass `--no-post-merge-review` to the inner
+`fluent merge-candidate land` invocation.
+Untestable: Requires Fargate ECS task launch which cannot run in the sandbox
 
 ### B84
 

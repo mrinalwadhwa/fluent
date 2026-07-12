@@ -621,6 +621,7 @@ fn cmd_merge_candidate(
                         &work_item_id,
                         &merge_candidate_id,
                         coder_kind,
+                        no_post_merge_review,
                     )?;
                     println!(
                         "Launched merge of {merge_candidate_id} for Work Item {work_item_id} on Fargate"
