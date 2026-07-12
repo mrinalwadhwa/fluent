@@ -895,4 +895,130 @@ mod tests {
             "general write path must NOT have a source-branch mutation guard"
         );
     }
+
+    #[test]
+    fn post_merge_fix_landed_records_merged_not_failed() {
+        let source = include_str!("post_merge_review.rs");
+
+        // The fix Attempt is sandboxed — the coder cannot write to the target
+        // branch directly, so the ONLY way to land is through merge_candidate
+        // which records the Work Item as merged.
+        let fix_field = find_no_sandbox_value_after(
+            source,
+            "fn auto_run_post_merge_review_fix",
+            "fix attempt sandbox",
+        );
+        assert!(
+            fix_field.contains("false"),
+            "fix Attempt must be sandboxed (no_sandbox: false): {fix_field}"
+        );
+
+        // The merge step calls work_merge_executor::merge_candidate, which
+        // records the Work Item as merged on success.
+        assert!(
+            source.contains("work_merge_executor::merge_candidate(merge_config)"),
+            "auto_run_post_merge_review_fix must land through work_merge_executor::merge_candidate"
+        );
+
+        // When a merge candidate WAS produced, reconcile_impossible_state is a
+        // no-op — it does not overwrite the merged status set by the merge executor.
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(tmp.path());
+        let store = WorkModelStore::new(tmp.path());
+        let head_before =
+            crate::git::run_stdout(tmp.path(), &["rev-parse", "main"], "head").unwrap();
+
+        let mut item = WorkItem {
+            id: "b1-fix".to_string(),
+            title: "B1 fix".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+
+        // Target advanced (as it would after a successful merge_candidate call)
+        std::fs::write(tmp.path().join("fix.txt"), "landed").unwrap();
+        crate::git::run(tmp.path(), &["add", "fix.txt"], "add").unwrap();
+        crate::git::run(tmp.path(), &["commit", "-m", "fix landed"], "commit").unwrap();
+
+        reconcile_impossible_state(
+            tmp.path(),
+            &store,
+            "b1-fix",
+            "attempt-1",
+            "main",
+            &head_before,
+            true,
+        );
+
+        let stored = store.read_work_item("b1-fix").unwrap();
+        assert_eq!(
+            stored.attempts[0].status,
+            AttemptStatus::Planned,
+            "reconcile must not override status when a merge candidate was produced"
+        );
+    }
+
+    #[test]
+    fn post_merge_fix_that_does_not_pass_leaves_target_branch_unchanged() {
+        let source = include_str!("post_merge_review.rs");
+
+        // The fix Attempt is sandboxed — the coder's writable roots exclude the
+        // target branch's worktree, so a non-passing fix cannot mutate the target.
+        let fix_field = find_no_sandbox_value_after(
+            source,
+            "fn auto_run_post_merge_review_fix",
+            "fix attempt sandbox",
+        );
+        assert!(
+            fix_field.contains("false"),
+            "fix Attempt must be sandboxed (no_sandbox: false): {fix_field}"
+        );
+
+        // If the target branch somehow advanced without a merge candidate,
+        // reconcile_impossible_state marks needs-user (never bare failed).
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(tmp.path());
+        let store = WorkModelStore::new(tmp.path());
+        let head_before =
+            crate::git::run_stdout(tmp.path(), &["rev-parse", "main"], "head").unwrap();
+
+        let mut item = WorkItem {
+            id: "b2-fix".to_string(),
+            title: "B2 fix".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+
+        // Simulate unexpected target advancement without a merge candidate
+        std::fs::write(tmp.path().join("rogue.txt"), "unexpected").unwrap();
+        crate::git::run(tmp.path(), &["add", "rogue.txt"], "add").unwrap();
+        crate::git::run(tmp.path(), &["commit", "-m", "rogue advance"], "commit").unwrap();
+
+        reconcile_impossible_state(
+            tmp.path(),
+            &store,
+            "b2-fix",
+            "attempt-1",
+            "main",
+            &head_before,
+            false,
+        );
+
+        let stored = store.read_work_item("b2-fix").unwrap();
+        assert_eq!(
+            stored.attempts[0].status,
+            AttemptStatus::NeedsUser,
+            "unexpected target advancement must result in needs-user, not bare failed"
+        );
+    }
 }
