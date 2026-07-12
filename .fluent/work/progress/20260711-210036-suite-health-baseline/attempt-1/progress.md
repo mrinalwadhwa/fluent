@@ -9,3 +9,8 @@
   - Added failing_ids(), introduced_tester_failures(), baseline_tester_results_path()
   - Modified interpret_reviews to use delta when baseline exists
   - Unit tests cover: pre-existing-red passes, introduced-red blocks, no-baseline fallback
+- [x] Address review finding: `documentation/architecture.md` gate behavior description incorrect (from attempt-1-review-documentation/review.md)
+  - commit 042454c
+- [x] Address review finding: `documentation/behaviors.md` Suite-health gate B1 incomplete (from attempt-1-review-documentation/review.md)
+  - commit 042454c
+  - Rewrote B1 to baseline-aware form, added B2 for no-baseline fallback, renumbered B3/B4

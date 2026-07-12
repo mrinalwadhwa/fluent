@@ -4009,12 +4009,24 @@ Test: src/work_task_executor.rs (tester_task_does_not_write_transcript)
 
 ### B1
 
-WHEN the round's `tester-results.json` reports one or more Tester
-failures (tests with `status == "fail"`),
-THE SYSTEM SHALL NOT classify the round outcome as a Merge Candidate.
-Test: src/work_attempt_loop.rs (tester_failure_blocks_merge_candidate)
+WHEN the suite-health gate evaluates tester failures and a pre-write
+baseline of failing tests exists,
+THE SYSTEM SHALL block only on failures the Work Item introduced —
+tests failing now that were not failing in the baseline — and SHALL
+NOT block on tests already failing at the baseline.
+Test: src/work_attempt_loop.rs (preexisting_failures_pass_gate_with_baseline)
+Test: src/work_attempt_loop.rs (introduced_failure_blocks_gate_with_baseline)
 
 ### B2
+
+WHEN the suite-health gate evaluates tester failures and no baseline
+is available,
+THE SYSTEM SHALL count all current failures, blocking on any test with
+`status == "fail"`.
+Test: src/work_attempt_loop.rs (no_baseline_falls_back_to_absolute_count)
+Test: src/work_attempt_loop.rs (tester_failure_blocks_merge_candidate)
+
+### B3
 
 WHEN a round is blocked by a Tester failure and the write-round budget
 remains,
@@ -4024,10 +4036,10 @@ SHALL record `needs-user`.
 Test: src/work_attempt_loop.rs (tester_failure_routes_to_followup_within_budget)
 Test: src/work_attempt_loop.rs (tester_failure_records_needs_user_at_cap)
 
-### B3
+### B4
 
 WHEN the round has no readable `tester-results.json` or it reports no
-Tester failures,
+introduced Tester failures,
 THE SYSTEM SHALL leave the round outcome to the reviewer verdicts
 unchanged (the gate does not block).
 Test: src/work_attempt_loop.rs (passing_or_missing_tester_does_not_block)

@@ -174,10 +174,13 @@ next review roles from that Task's failed review input artifacts; when
 it cannot derive at least one role, it falls back to the full Work
 reviewer set. After a completed review round it interprets review
 artifacts with the review subsystem verdict parser and checks the
-round's `tester-results.json` for test failures — any test with
-`status == "fail"` blocks the Merge Candidate path (fail-open: a
-missing or unparseable results file does not block). All pass with no
-tester failures marks the Attempt review state as passed, completes
+round's `tester-results.json` for test failures — only failures the
+Work Item introduced (tests failing now that were not failing in the
+pre-write baseline) block the Merge Candidate path; pre-existing
+failures pass through. When no baseline is available the gate falls
+back to blocking on any failure (fail-open: a missing or unparseable
+results file does not block). All pass with no introduced tester
+failures marks the Attempt review state as passed, completes
 the Attempt, and creates or returns one durable Merge Candidate for
 later merge execution. The Merge
 Candidate records the source candidate workspace, target workspace,
