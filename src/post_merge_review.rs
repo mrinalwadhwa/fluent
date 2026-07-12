@@ -716,11 +716,8 @@ mod tests {
     #[test]
     fn post_merge_fix_attempt_runs_sandboxed() {
         let source = include_str!("post_merge_review.rs");
-        let field = find_no_sandbox_value_after(
-            source,
-            "fn auto_run_post_merge_review_fix",
-            "fix attempt",
-        );
+        let field =
+            find_no_sandbox_value_after(source, "fn auto_run_post_merge_review_fix", "fix attempt");
         assert!(
             field.contains("false"),
             "post-merge-review-fix Attempt must run sandboxed (no_sandbox: false), found: {field}"
@@ -730,11 +727,8 @@ mod tests {
     #[test]
     fn post_merge_fix_merge_step_remains_unsandboxed() {
         let source = include_str!("post_merge_review.rs");
-        let field = find_no_sandbox_value_after(
-            source,
-            "let merge_config = WorkMergeConfig",
-            "merge step",
-        );
+        let field =
+            find_no_sandbox_value_after(source, "let merge_config = WorkMergeConfig", "merge step");
         assert!(
             field.contains("true"),
             "merge step must remain unsandboxed (no_sandbox: true), found: {field}"
@@ -755,12 +749,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         init_git_repo(tmp.path());
         let store = WorkModelStore::new(tmp.path());
-        let head_before = crate::git::run_stdout(
-            tmp.path(),
-            &["rev-parse", "main"],
-            "get head",
-        )
-        .unwrap();
+        let head_before =
+            crate::git::run_stdout(tmp.path(), &["rev-parse", "main"], "get head").unwrap();
 
         let mut item = WorkItem {
             id: "fix-1".to_string(),
@@ -802,12 +792,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         init_git_repo(tmp.path());
         let store = WorkModelStore::new(tmp.path());
-        let head_before = crate::git::run_stdout(
-            tmp.path(),
-            &["rev-parse", "main"],
-            "get head",
-        )
-        .unwrap();
+        let head_before =
+            crate::git::run_stdout(tmp.path(), &["rev-parse", "main"], "get head").unwrap();
 
         let mut item = WorkItem {
             id: "fix-2".to_string(),
@@ -849,12 +835,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         init_git_repo(tmp.path());
         let store = WorkModelStore::new(tmp.path());
-        let head_before = crate::git::run_stdout(
-            tmp.path(),
-            &["rev-parse", "main"],
-            "get head",
-        )
-        .unwrap();
+        let head_before =
+            crate::git::run_stdout(tmp.path(), &["rev-parse", "main"], "get head").unwrap();
 
         let mut item = WorkItem {
             id: "fix-3".to_string(),
