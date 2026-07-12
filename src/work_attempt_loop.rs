@@ -614,6 +614,52 @@ fn tester_failures(tester_results_path: &Path) -> usize {
     results.tests.iter().filter(|t| t.status == "fail").count()
 }
 
+fn failing_ids(path: &Path) -> HashSet<String> {
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return HashSet::new(),
+    };
+    let results: crate::tester::TesterResults = match serde_json::from_str(&content) {
+        Ok(r) => r,
+        Err(_) => return HashSet::new(),
+    };
+    results
+        .tests
+        .iter()
+        .filter(|t| t.status == "fail")
+        .map(|t| t.id.clone())
+        .collect()
+}
+
+fn introduced_tester_failures(
+    current_path: &Path,
+    baseline_path: Option<&Path>,
+) -> usize {
+    match baseline_path {
+        Some(bp) => {
+            let current = failing_ids(current_path);
+            let baseline = failing_ids(bp);
+            current.difference(&baseline).count()
+        }
+        None => tester_failures(current_path),
+    }
+}
+
+fn baseline_tester_results_path(project_root: &Path, attempt: &Attempt) -> Option<PathBuf> {
+    let work_item_id = &attempt.work_item_id;
+    let attempt_id = &attempt.id;
+    let baseline_artifact = format!("{attempt_id}-baseline-tester");
+    let artifact_path = work_artifact_path(work_item_id, attempt_id, &baseline_artifact);
+    let path = project_root
+        .join(&artifact_path)
+        .join("tester-results.json");
+    if path.is_file() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
 fn latest_tester_results_path(project_root: &Path, attempt: &Attempt) -> Option<PathBuf> {
     let start = attempt
         .tasks
@@ -663,9 +709,11 @@ fn interpret_reviews(
 
     let tester_result_path =
         latest_tester_results_path(project_root, &item.attempts[attempt_index]);
+    let baseline_path =
+        baseline_tester_results_path(project_root, &item.attempts[attempt_index]);
     let tester_fail_count = tester_result_path
         .as_ref()
-        .map(|p| tester_failures(p))
+        .map(|p| introduced_tester_failures(p, baseline_path.as_deref()))
         .unwrap_or(0);
 
     let has_failures = !failed.is_empty() || tester_fail_count > 0;
@@ -1591,6 +1639,134 @@ mod tests {
         assert!(
             matches!(outcome, WorkAttemptRunOutcome::NeedsUser { .. }),
             "tester failure at budget cap should record needs-user; got {outcome:?}"
+        );
+    }
+
+    fn make_fixture_with_baseline(
+        project_root: &Path,
+        review_verdict: &str,
+        tester_json: Option<&str>,
+        baseline_json: Option<&str>,
+    ) -> (WorkModelStore, WorkItem) {
+        let (store, item) =
+            make_interpret_reviews_fixture(project_root, review_verdict, tester_json);
+        if let Some(json) = baseline_json {
+            let baseline_dir = project_root
+                .join(work_artifact_path("work-1", "attempt-1", "attempt-1-baseline-tester"));
+            fs::create_dir_all(&baseline_dir).unwrap();
+            fs::write(baseline_dir.join("tester-results.json"), json).unwrap();
+        }
+        (store, item)
+    }
+
+    fn tester_json_with_ids(fail_ids: &[&str], pass_ids: &[&str]) -> String {
+        let mut tests = Vec::new();
+        for id in fail_ids {
+            tests.push(format!(
+                r#"{{"id": "{}", "test_harness": "cargo-nextest", "status": "fail", "duration_ms": 5, "failure_excerpt": "assertion failed"}}"#,
+                id
+            ));
+        }
+        for id in pass_ids {
+            tests.push(format!(
+                r#"{{"id": "{}", "test_harness": "cargo-nextest", "status": "pass", "duration_ms": 10, "failure_excerpt": null}}"#,
+                id
+            ));
+        }
+        let tests_str = tests.join(", ");
+        let total = fail_ids.len() + pass_ids.len();
+        let pass = pass_ids.len();
+        let fail = fail_ids.len();
+        format!(
+            r#"{{"commands": [], "tests": [{}], "summary": {{"total": {}, "pass": {}, "fail": {}, "skipped": 0}}, "error": null}}"#,
+            tests_str, total, pass, fail
+        )
+    }
+
+    #[test]
+    fn failing_ids_extracts_fail_test_ids() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("results.json");
+        fs::write(&path, tester_json_with_ids(&["test_x", "test_y"], &["test_z"])).unwrap();
+        let ids = failing_ids(&path);
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains("test_x"));
+        assert!(ids.contains("test_y"));
+    }
+
+    #[test]
+    fn failing_ids_returns_empty_for_missing_file() {
+        let ids = failing_ids(Path::new("/nonexistent/path.json"));
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn introduced_failures_subtracts_baseline() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let current = tmp.path().join("current.json");
+        let baseline = tmp.path().join("baseline.json");
+        fs::write(&current, tester_json_with_ids(&["test_a", "test_b"], &[])).unwrap();
+        fs::write(&baseline, tester_json_with_ids(&["test_a"], &["test_c"])).unwrap();
+        assert_eq!(introduced_tester_failures(&current, Some(&baseline)), 1);
+    }
+
+    #[test]
+    fn introduced_failures_counts_all_without_baseline() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let current = tmp.path().join("current.json");
+        fs::write(&current, tester_json_with_ids(&["test_a", "test_b"], &[])).unwrap();
+        assert_eq!(introduced_tester_failures(&current, None), 2);
+    }
+
+    #[test]
+    fn preexisting_failures_pass_gate_with_baseline() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let baseline_json = tester_json_with_ids(&["test_b"], &["test_a"]);
+        let current_json = tester_json_with_ids(&["test_b"], &["test_a"]);
+        let (store, _) = make_fixture_with_baseline(
+            tmp.path(),
+            "PASS",
+            Some(&current_json),
+            Some(&baseline_json),
+        );
+        let item = store.read_work_item("work-1").unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true).unwrap();
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
+            "pre-existing failure should pass gate when baseline matches; got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn introduced_failure_blocks_gate_with_baseline() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let baseline_json = tester_json_with_ids(&["test_b"], &["test_a", "test_c"]);
+        let current_json = tester_json_with_ids(&["test_b", "test_c"], &["test_a"]);
+        let (store, _) = make_fixture_with_baseline(
+            tmp.path(),
+            "PASS",
+            Some(&current_json),
+            Some(&baseline_json),
+        );
+        let item = store.read_work_item("work-1").unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true).unwrap();
+        assert!(
+            !matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
+            "introduced failure (test_c) should block gate; got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn no_baseline_falls_back_to_absolute_count() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let current_json = tester_json_with_ids(&["test_b"], &["test_a"]);
+        let (store, _) =
+            make_fixture_with_baseline(tmp.path(), "PASS", Some(&current_json), None);
+        let item = store.read_work_item("work-1").unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true).unwrap();
+        assert!(
+            !matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
+            "without baseline, any failure should block gate; got {outcome:?}"
         );
     }
 

@@ -131,6 +131,21 @@ fn run_write_task(
     worktree::disable_commit_signing(&workspace_path)?;
     let baseline_commit = head_commit(&workspace_path)?;
 
+    let is_first_write = !item.attempts[attempt_index]
+        .tasks
+        .iter()
+        .any(|t| t.kind == TaskKind::Tester);
+    if is_first_write {
+        capture_baseline_tester(
+            config.project_root,
+            &workspace_path,
+            config.work_item_id,
+            config.attempt_id,
+            config.no_sandbox,
+            config.resolver,
+        );
+    }
+
     let lock_path =
         crate::lease::task_lock_path(config.project_root, config.work_item_id, config.task_id);
     let _lease = crate::lease::acquire(&lock_path)
@@ -555,6 +570,27 @@ fn run_review_task(
         task_id: config.task_id.to_string(),
         output: path_for_model(config.project_root, &review_path),
     })
+}
+
+fn capture_baseline_tester(
+    project_root: &Path,
+    candidate_workspace: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    no_sandbox: bool,
+    resolver: &ContentResolver,
+) {
+    let baseline_artifact = format!("{attempt_id}-baseline-tester");
+    let artifact_rel = work_artifact_path(work_item_id, attempt_id, &baseline_artifact);
+    let artifact_dir = project_root.join(&artifact_rel);
+    if let Err(e) = fs::create_dir_all(&artifact_dir) {
+        eprintln!("  Baseline tester: failed to create artifact dir: {e:#}");
+        return;
+    }
+    eprintln!("  Baseline tester   running on pre-write workspace");
+    if let Err(e) = crate::tester::run(candidate_workspace, &artifact_dir, no_sandbox, resolver) {
+        eprintln!("  Baseline tester: run failed: {e:#}");
+    }
 }
 
 fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
