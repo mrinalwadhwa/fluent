@@ -18,11 +18,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::coder::CoderKind;
 use crate::content::ContentResolver;
+use crate::git;
 use crate::review;
 use crate::work_attempt_loop::{self, WorkAttemptRunConfig, WorkAttemptRunOutcome};
 use crate::work_merge_executor::{self, WorkMergeConfig};
 use crate::work_model::{
-    ArtifactRef, PlanningContext, TaskKind, TaskStatus, WorkItem, WorkModelStore,
+    ArtifactRef, AttemptStatus, PlanningContext, TaskKind, TaskStatus, WorkItem, WorkModelStore,
 };
 
 const DEFAULT_DEBOUNCE_SECONDS: u64 = 60;
@@ -477,6 +478,11 @@ fn auto_run_post_merge_review_fix(
     findings: &[ArtifactRef],
 ) -> Result<String> {
     let id = create_post_merge_review_fix_work_item(store, parent_branch, findings)?;
+    let head_before = git::run_stdout(
+        project_root,
+        &["rev-parse", parent_branch],
+        "record target branch HEAD before fix",
+    )?;
     let resolver = ContentResolver::new(Some(project_root));
     let coder_kind = CoderKind::resolve(None)?;
     let run_result = work_attempt_loop::run_attempt(WorkAttemptRunConfig {
@@ -488,8 +494,10 @@ fn auto_run_post_merge_review_fix(
         extra_args: &[],
         no_sandbox: false,
     })?;
+    let mut had_merge_candidate = false;
     for outcome in &run_result.outcomes {
         if let WorkAttemptRunOutcome::MergeCandidateReady { candidate_id } = outcome {
+            had_merge_candidate = true;
             // Bump the post-merge-review-fix depth so a spawned post-merge-review
             // child sees the new depth and can stop recursing eventually.
             let next_depth = current_depth() + 1;
@@ -513,7 +521,59 @@ fn auto_run_post_merge_review_fix(
             break;
         }
     }
+    reconcile_impossible_state(
+        project_root,
+        store,
+        &id,
+        "attempt-1",
+        parent_branch,
+        &head_before,
+        had_merge_candidate,
+    );
     Ok(id)
+}
+
+/// Defense-in-depth: if the target branch advanced during the fix
+/// Attempt without the Attempt producing a Merge Candidate, something
+/// bypassed the normal land path. Mark the Attempt `needs-user` so the
+/// operator gets a diagnostic instead of a bare `failed`.
+fn reconcile_impossible_state(
+    project_root: &Path,
+    store: &WorkModelStore,
+    work_item_id: &str,
+    attempt_id: &str,
+    target_branch: &str,
+    head_before: &str,
+    had_merge_candidate: bool,
+) {
+    if had_merge_candidate {
+        return;
+    }
+    let head_after = match git::run_stdout(
+        project_root,
+        &["rev-parse", target_branch],
+        "resolve target branch HEAD after fix",
+    ) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    if head_after.trim() == head_before.trim() {
+        return;
+    }
+    eprintln!(
+        "  reconcile_impossible_state: target branch {target_branch} advanced \
+         from {} to {} without a Merge Candidate; marking {work_item_id} as needs-user",
+        head_before.trim(),
+        head_after.trim(),
+    );
+    let mut item = match store.read_work_item(work_item_id) {
+        Ok(item) => item,
+        Err(_) => return,
+    };
+    if let Some(attempt) = item.attempts.iter_mut().find(|a| a.id == attempt_id) {
+        crate::work_model::set_attempt_terminal(attempt, AttemptStatus::NeedsUser);
+    }
+    let _ = store.write_work_item(&item);
 }
 
 /// Forward-fix Work Item creation helper. Builds a Work Item whose
@@ -686,6 +746,161 @@ mod tests {
         assert!(
             field.contains("true"),
             "merge step must remain unsandboxed (no_sandbox: true), found: {field}"
+        );
+    }
+
+    fn init_git_repo(dir: &Path) {
+        crate::git::run(dir, &["init", "-b", "main"], "init").unwrap();
+        crate::git::run(dir, &["config", "user.email", "test@test"], "cfg email").unwrap();
+        crate::git::run(dir, &["config", "user.name", "Test"], "cfg name").unwrap();
+        std::fs::write(dir.join("README.md"), "init").unwrap();
+        crate::git::run(dir, &["add", "README.md"], "add").unwrap();
+        crate::git::run(dir, &["commit", "-m", "initial"], "commit").unwrap();
+    }
+
+    #[test]
+    fn reconcile_marks_needs_user_when_target_advanced_without_candidate() {
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(tmp.path());
+        let store = WorkModelStore::new(tmp.path());
+        let head_before = crate::git::run_stdout(
+            tmp.path(),
+            &["rev-parse", "main"],
+            "get head",
+        )
+        .unwrap();
+
+        let mut item = WorkItem {
+            id: "fix-1".to_string(),
+            title: "test fix".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+
+        // Simulate the target branch advancing (a commit lands on main)
+        std::fs::write(tmp.path().join("extra.txt"), "change").unwrap();
+        crate::git::run(tmp.path(), &["add", "extra.txt"], "add").unwrap();
+        crate::git::run(tmp.path(), &["commit", "-m", "advance"], "commit").unwrap();
+
+        reconcile_impossible_state(
+            tmp.path(),
+            &store,
+            "fix-1",
+            "attempt-1",
+            "main",
+            &head_before,
+            false,
+        );
+
+        let stored = store.read_work_item("fix-1").unwrap();
+        assert_eq!(
+            stored.attempts[0].status,
+            AttemptStatus::NeedsUser,
+            "target advanced without Merge Candidate → needs-user"
+        );
+    }
+
+    #[test]
+    fn reconcile_is_noop_when_merge_candidate_produced() {
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(tmp.path());
+        let store = WorkModelStore::new(tmp.path());
+        let head_before = crate::git::run_stdout(
+            tmp.path(),
+            &["rev-parse", "main"],
+            "get head",
+        )
+        .unwrap();
+
+        let mut item = WorkItem {
+            id: "fix-2".to_string(),
+            title: "test fix".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+
+        // Target branch advances, but we had a merge candidate
+        std::fs::write(tmp.path().join("extra.txt"), "change").unwrap();
+        crate::git::run(tmp.path(), &["add", "extra.txt"], "add").unwrap();
+        crate::git::run(tmp.path(), &["commit", "-m", "advance"], "commit").unwrap();
+
+        reconcile_impossible_state(
+            tmp.path(),
+            &store,
+            "fix-2",
+            "attempt-1",
+            "main",
+            &head_before,
+            true,
+        );
+
+        let stored = store.read_work_item("fix-2").unwrap();
+        assert_eq!(
+            stored.attempts[0].status,
+            AttemptStatus::Planned,
+            "had_merge_candidate=true → reconcile is a no-op"
+        );
+    }
+
+    #[test]
+    fn reconcile_is_noop_when_target_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(tmp.path());
+        let store = WorkModelStore::new(tmp.path());
+        let head_before = crate::git::run_stdout(
+            tmp.path(),
+            &["rev-parse", "main"],
+            "get head",
+        )
+        .unwrap();
+
+        let mut item = WorkItem {
+            id: "fix-3".to_string(),
+            title: "test fix".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+
+        // Target branch does NOT advance, no merge candidate
+        reconcile_impossible_state(
+            tmp.path(),
+            &store,
+            "fix-3",
+            "attempt-1",
+            "main",
+            &head_before,
+            false,
+        );
+
+        let stored = store.read_work_item("fix-3").unwrap();
+        assert_eq!(
+            stored.attempts[0].status,
+            AttemptStatus::Planned,
+            "target unchanged → reconcile is a no-op"
+        );
+    }
+
+    #[test]
+    fn no_source_branch_mutation_guard_on_general_write_path() {
+        let source = include_str!("work_task_executor.rs");
+        assert!(
+            !source.contains("ensure_source_branch_unchanged"),
+            "general write path must NOT have a source-branch mutation guard"
         );
     }
 }
