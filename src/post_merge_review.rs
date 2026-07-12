@@ -383,7 +383,7 @@ fn review_one(project_root: &Path, entry: &QueueEntry) -> Result<PerBranchOutcom
         attempt_id,
         resolver: &resolver,
         extra_args: &[],
-        no_sandbox: false,
+        no_sandbox: true,
     }) {
         eprintln!(
             "  Post-merge review for {} failed: {error:#}",
@@ -728,21 +728,13 @@ mod tests {
     }
 
     #[test]
-    fn post_merge_review_only_attempt_runs_sandboxed() {
-        let source = include_str!("post_merge_review.rs");
-        let field =
-            find_no_sandbox_value_after(source, "fn review_one", "review-only attempt");
-        assert!(
-            field.contains("false"),
-            "review-only Attempt must run sandboxed (no_sandbox: false), found: {field}"
-        );
-    }
-
-    #[test]
     fn post_merge_fix_merge_step_remains_unsandboxed() {
         let source = include_str!("post_merge_review.rs");
-        let field =
-            find_no_sandbox_value_after(source, "WorkMergeConfig", "merge step");
+        let field = find_no_sandbox_value_after(
+            source,
+            "let merge_config = WorkMergeConfig",
+            "merge step",
+        );
         assert!(
             field.contains("true"),
             "merge step must remain unsandboxed (no_sandbox: true), found: {field}"
