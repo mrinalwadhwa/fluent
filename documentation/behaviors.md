@@ -4009,6 +4009,15 @@ Test: src/work_task_executor.rs (tester_task_does_not_write_transcript)
 
 ### B1
 
+WHEN the first write Task of an Attempt begins and no Tester Task
+exists on the Attempt,
+THE SYSTEM SHALL run the tester suite on the pre-write workspace and
+persist results as the baseline artifact at
+`.fluent/work/artifacts/<work-item-id>/<attempt-id>/<attempt-id>-baseline-tester/tester-results.json`.
+Test: src/work_task_executor.rs (capture_baseline_tester_persists_results_as_artifact)
+
+### B2
+
 WHEN the suite-health gate evaluates tester failures and a pre-write
 baseline of failing tests exists,
 THE SYSTEM SHALL block only on failures the Work Item introduced —
@@ -4017,7 +4026,7 @@ NOT block on tests already failing at the baseline.
 Test: src/work_attempt_loop.rs (preexisting_failures_pass_gate_with_baseline)
 Test: src/work_attempt_loop.rs (introduced_failure_blocks_gate_with_baseline)
 
-### B2
+### B3
 
 WHEN the suite-health gate evaluates tester failures and no baseline
 is available,
@@ -4026,7 +4035,7 @@ THE SYSTEM SHALL count all current failures, blocking on any test with
 Test: src/work_attempt_loop.rs (no_baseline_falls_back_to_absolute_count)
 Test: src/work_attempt_loop.rs (tester_failure_blocks_merge_candidate)
 
-### B3
+### B4
 
 WHEN a round is blocked by a Tester failure and the write-round budget
 remains,
@@ -4036,7 +4045,7 @@ SHALL record `needs-user`.
 Test: src/work_attempt_loop.rs (tester_failure_routes_to_followup_within_budget)
 Test: src/work_attempt_loop.rs (tester_failure_records_needs_user_at_cap)
 
-### B4
+### B5
 
 WHEN the round has no readable `tester-results.json` or it reports no
 introduced Tester failures,

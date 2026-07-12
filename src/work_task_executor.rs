@@ -3514,4 +3514,35 @@ mod tests {
         let result = review_skill_path("nonexistent", tmp.path());
         assert!(result.is_err(), "should error on unknown review role");
     }
+
+    #[test]
+    fn capture_baseline_tester_persists_results_as_artifact() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let workspace = project_root.join("workspace");
+        std::fs::create_dir_all(workspace.join(".fluent")).unwrap();
+        std::fs::write(
+            workspace.join(".fluent/tester.yaml"),
+            "commands:\n  - command: \"echo ok\"\n    test_harness: shell-harness\n",
+        )
+        .unwrap();
+
+        let resolver = ContentResolver::new(Some(project_root));
+        capture_baseline_tester(
+            project_root,
+            &workspace,
+            "work-1",
+            "attempt-1",
+            true,
+            &resolver,
+        );
+
+        let results_path = project_root.join(
+            ".fluent/work/artifacts/work-1/attempt-1/attempt-1-baseline-tester/tester-results.json",
+        );
+        assert!(
+            results_path.exists(),
+            "baseline tester should persist tester-results.json as artifact"
+        );
+    }
 }
