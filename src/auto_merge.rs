@@ -137,6 +137,7 @@ fn attempt_merge(
         extra_args: &[],
         coder_kind,
         no_sandbox,
+        skip_post_merge_review: false,
     });
 
     classify_merge_outcome(result)

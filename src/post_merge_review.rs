@@ -505,6 +505,7 @@ fn auto_run_post_merge_review_fix(
                 extra_args: &[],
                 coder_kind,
                 no_sandbox: true,
+                skip_post_merge_review: false,
             };
             if let Err(error) = work_merge_executor::merge_candidate(merge_config) {
                 eprintln!("  Forward-fix auto-merge failed: {error}");

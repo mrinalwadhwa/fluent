@@ -25,6 +25,7 @@ pub struct WorkMergeConfig<'a> {
     pub extra_args: &'a [String],
     pub coder_kind: CoderKind,
     pub no_sandbox: bool,
+    pub skip_post_merge_review: bool,
 }
 
 pub struct WorkMergeOutcome {
@@ -224,20 +225,22 @@ fn execute_merge(
         Vec::new(),
     )?;
 
-    let entry = crate::post_merge_review::QueueEntry {
-        target_branch: candidate.target_branch.clone(),
-        merged_commit: outcome.merged_commit.clone(),
-        merged_at_unix: crate::post_merge_review::now_unix(),
-        source_work_item_id: config.work_item_id.to_string(),
-        source_merge_candidate_id: candidate.id.clone(),
-        base_commit: target_head_before.clone(),
-    };
-    if let Err(error) = crate::post_merge_review::queue_and_spawn(
-        config.project_root,
-        entry,
-        crate::post_merge_review::debounce_seconds(),
-    ) {
-        eprintln!("  Warning: post-merge review queue/spawn failed: {error}");
+    if !config.skip_post_merge_review {
+        let entry = crate::post_merge_review::QueueEntry {
+            target_branch: candidate.target_branch.clone(),
+            merged_commit: outcome.merged_commit.clone(),
+            merged_at_unix: crate::post_merge_review::now_unix(),
+            source_work_item_id: config.work_item_id.to_string(),
+            source_merge_candidate_id: candidate.id.clone(),
+            base_commit: target_head_before.clone(),
+        };
+        if let Err(error) = crate::post_merge_review::queue_and_spawn(
+            config.project_root,
+            entry,
+            crate::post_merge_review::debounce_seconds(),
+        ) {
+            eprintln!("  Warning: post-merge review queue/spawn failed: {error}");
+        }
     }
     Ok(outcome)
 }
@@ -1116,6 +1119,7 @@ mod tests {
             extra_args: &[],
             coder_kind: CoderKind::Codex,
             no_sandbox: true,
+            skip_post_merge_review: false,
         }) {
             Ok(_) => panic!("abandoned Work Item should reject merge execution"),
             Err(error) => error,

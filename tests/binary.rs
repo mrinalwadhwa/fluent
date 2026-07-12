@@ -4064,6 +4064,125 @@ fn work_merge_rebase_provenance_updated_after_rebase() {
 }
 
 #[test]
+fn work_merge_candidate_land_no_post_merge_review_skips_queue_entry() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work-item",
+            "create",
+            "work-1",
+            "--title",
+            "Quiet land",
+        ])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-quiet-land");
+    write_mock_claude(&bin_dir, &rebase_mock_script("pass"));
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "merge-candidate",
+            "land",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+            "--no-post-merge-review",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let candidate = &value["merge_candidates"][0];
+    assert_eq!(candidate["merge_state"]["status"], "merged");
+
+    let queue_path = main_dir.join(".fluent/work/post-merge-review-queue.json");
+    if queue_path.exists() {
+        let queue: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&queue_path).unwrap()).unwrap();
+        let entries = queue["entries"].as_array().expect("queue entries array");
+        assert!(
+            entries.is_empty(),
+            "post-merge review queue must have no entries with --no-post-merge-review"
+        );
+    }
+}
+
+#[test]
+fn work_merge_candidate_land_default_enqueues_post_merge_review() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work-item",
+            "create",
+            "work-1",
+            "--title",
+            "Default land",
+        ])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-default-land");
+    write_mock_claude(&bin_dir, &rebase_mock_script("pass"));
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "merge-candidate",
+            "land",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let candidate = &value["merge_candidates"][0];
+    assert_eq!(candidate["merge_state"]["status"], "merged");
+
+    let queue_path = main_dir.join(".fluent/work/post-merge-review-queue.json");
+    let queue: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&queue_path).unwrap()).unwrap();
+    let entries = queue["entries"].as_array().expect("queue entries array");
+    assert_eq!(
+        entries.len(),
+        1,
+        "default land must append exactly one post-merge review queue entry"
+    );
+    assert_eq!(entries[0]["source_work_item_id"], "work-1");
+}
+
+#[test]
 fn work_attempt_run_plans_followup_for_failed_reviews() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);

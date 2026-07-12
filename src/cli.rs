@@ -397,6 +397,10 @@ pub enum MergeCandidateCommands {
         #[arg(long)]
         no_sandbox: bool,
 
+        /// Skip the post-merge review after landing
+        #[arg(long)]
+        no_post_merge_review: bool,
+
         /// Coding agent to launch: claude or codex
         #[arg(long)]
         coder: Option<String>,

@@ -588,6 +588,7 @@ fn cmd_merge_candidate(
             work_item_id,
             merge_candidate_id,
             no_sandbox,
+            no_post_merge_review,
             coder,
             runtime,
             extra_args,
@@ -638,6 +639,7 @@ fn cmd_merge_candidate(
                 extra_args: &extra_args,
                 coder_kind,
                 no_sandbox: no_sandbox || global_no_sandbox,
+                skip_post_merge_review: no_post_merge_review,
             })?;
             println!(
                 "Merged Merge Candidate {} at {}",
