@@ -631,10 +631,7 @@ fn failing_ids(path: &Path) -> HashSet<String> {
         .collect()
 }
 
-fn introduced_tester_failures(
-    current_path: &Path,
-    baseline_path: Option<&Path>,
-) -> usize {
+fn introduced_tester_failures(current_path: &Path, baseline_path: Option<&Path>) -> usize {
     match baseline_path {
         Some(bp) => {
             let current = failing_ids(current_path);
@@ -653,11 +650,7 @@ fn baseline_tester_results_path(project_root: &Path, attempt: &Attempt) -> Optio
     let path = project_root
         .join(&artifact_path)
         .join("tester-results.json");
-    if path.is_file() {
-        Some(path)
-    } else {
-        None
-    }
+    if path.is_file() { Some(path) } else { None }
 }
 
 fn latest_tester_results_path(project_root: &Path, attempt: &Attempt) -> Option<PathBuf> {
@@ -709,8 +702,7 @@ fn interpret_reviews(
 
     let tester_result_path =
         latest_tester_results_path(project_root, &item.attempts[attempt_index]);
-    let baseline_path =
-        baseline_tester_results_path(project_root, &item.attempts[attempt_index]);
+    let baseline_path = baseline_tester_results_path(project_root, &item.attempts[attempt_index]);
     let tester_fail_count = tester_result_path
         .as_ref()
         .map(|p| introduced_tester_failures(p, baseline_path.as_deref()))
@@ -1651,8 +1643,11 @@ mod tests {
         let (store, item) =
             make_interpret_reviews_fixture(project_root, review_verdict, tester_json);
         if let Some(json) = baseline_json {
-            let baseline_dir = project_root
-                .join(work_artifact_path("work-1", "attempt-1", "attempt-1-baseline-tester"));
+            let baseline_dir = project_root.join(work_artifact_path(
+                "work-1",
+                "attempt-1",
+                "attempt-1-baseline-tester",
+            ));
             fs::create_dir_all(&baseline_dir).unwrap();
             fs::write(baseline_dir.join("tester-results.json"), json).unwrap();
         }
@@ -1687,7 +1682,11 @@ mod tests {
     fn failing_ids_extracts_fail_test_ids() {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("results.json");
-        fs::write(&path, tester_json_with_ids(&["test_x", "test_y"], &["test_z"])).unwrap();
+        fs::write(
+            &path,
+            tester_json_with_ids(&["test_x", "test_y"], &["test_z"]),
+        )
+        .unwrap();
         let ids = failing_ids(&path);
         assert_eq!(ids.len(), 2);
         assert!(ids.contains("test_x"));
@@ -1760,8 +1759,7 @@ mod tests {
     fn no_baseline_falls_back_to_absolute_count() {
         let tmp = tempfile::TempDir::new().unwrap();
         let current_json = tester_json_with_ids(&["test_b"], &["test_a"]);
-        let (store, _) =
-            make_fixture_with_baseline(tmp.path(), "PASS", Some(&current_json), None);
+        let (store, _) = make_fixture_with_baseline(tmp.path(), "PASS", Some(&current_json), None);
         let item = store.read_work_item("work-1").unwrap();
         let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true).unwrap();
         assert!(
