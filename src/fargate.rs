@@ -747,7 +747,8 @@ pub fn launch_work_merge(
         serde_json::json!({"name": "FLUENT_REGION", "value": config.region}),
     ];
     if skip_post_merge_review {
-        env_overrides.push(serde_json::json!({"name": "FLUENT_NO_POST_MERGE_REVIEW", "value": "1"}));
+        env_overrides
+            .push(serde_json::json!({"name": "FLUENT_NO_POST_MERGE_REVIEW", "value": "1"}));
     }
     for (k, v) in &coder_env {
         env_overrides.push(serde_json::json!({"name": k, "value": v}));
