@@ -4069,13 +4069,7 @@ fn work_merge_candidate_land_no_post_merge_review_skips_queue_entry() {
     let main_dir = setup_git_project(&tmp);
     fluent_cmd()
         .current_dir(&main_dir)
-        .args([
-            "work-item",
-            "create",
-            "work-1",
-            "--title",
-            "Quiet land",
-        ])
+        .args(["work-item", "create", "work-1", "--title", "Quiet land"])
         .assert()
         .success();
     fluent_cmd()
@@ -4129,13 +4123,7 @@ fn work_merge_candidate_land_default_enqueues_post_merge_review() {
     let main_dir = setup_git_project(&tmp);
     fluent_cmd()
         .current_dir(&main_dir)
-        .args([
-            "work-item",
-            "create",
-            "work-1",
-            "--title",
-            "Default land",
-        ])
+        .args(["work-item", "create", "work-1", "--title", "Default land"])
         .assert()
         .success();
     fluent_cmd()

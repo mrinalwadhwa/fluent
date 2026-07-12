@@ -146,8 +146,7 @@ pub fn run(
         let artifact_abs =
             fs::canonicalize(artifact_dir).unwrap_or_else(|_| artifact_dir.to_path_buf());
         let home_path = Path::new(&home);
-        let writable_roots =
-            tester_writable_roots(&candidate_abs, &artifact_abs, home_path);
+        let writable_roots = tester_writable_roots(&candidate_abs, &artifact_abs, home_path);
         match os::render_profile_common_only(resolver, &home, &writable_roots, &[]) {
             Ok(profile) => {
                 eprintln!("  Sandbox profile  {}", profile.path.display());
