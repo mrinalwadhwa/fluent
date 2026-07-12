@@ -32,3 +32,4 @@ tests/output/
 /target
 /.cargo-home
 /.cargo
+.cargo-home/
