@@ -5808,6 +5808,9 @@ fn work_task_run_tester_recovers_when_error_is_transient() {
     git::run(&main_dir, &["commit", "-m", "Add tester.yaml"], "commit").unwrap();
 
     create_completed_work_attempt(&tmp, &main_dir);
+    // The baseline tester capture ran the script once, consuming the "first
+    // call" state. Reset so the actual tester task still exercises the retry.
+    let _ = fs::remove_file(&attempt_file);
     fluent_cmd()
         .current_dir(&main_dir)
         .args(["review", "work-1", "attempt-1"])
@@ -7442,6 +7445,11 @@ exit 0
     let tester_results = main_dir
         .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-tester/tester-results.json");
     fs::create_dir_all(tester_results.parent().unwrap()).unwrap();
+    // The baseline tester capture may have run a tester.yaml script that left
+    // a directory at this path; remove it so the stub file can be written.
+    if tester_results.is_dir() {
+        fs::remove_dir_all(&tester_results).unwrap();
+    }
     fs::write(
         &tester_results,
         r#"{"commands":[],"tests":[],"summary":{"total":0,"pass":0,"fail":0,"skipped":0},"error":null}"#,

@@ -14,3 +14,7 @@
 - [x] Address review finding: `documentation/behaviors.md` Suite-health gate B1 incomplete (from attempt-1-review-documentation/review.md)
   - commit 042454c
   - Rewrote B1 to baseline-aware form, added B2 for no-baseline fallback, renumbered B3/B4
+- [x] Address tester finding: `work_task_run_tester_recovers_when_error_is_transient` failure introduced by baseline capture (from attempt-1-tester-2/tester-results.json)
+  - The baseline tester capture during write task setup runs tester.yaml scripts, which in this test creates a directory at the tester-results.json path; the helper then fails to write a stub file there
+  - Fixed helper to remove a directory at the path before writing the stub
+  - Reset the test's attempt-count file after baseline so the retry path is still exercised
