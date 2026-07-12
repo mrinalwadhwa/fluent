@@ -382,7 +382,7 @@ fn review_one(project_root: &Path, entry: &QueueEntry) -> Result<PerBranchOutcom
         attempt_id,
         resolver: &resolver,
         extra_args: &[],
-        no_sandbox: true,
+        no_sandbox: false,
     }) {
         eprintln!(
             "  Post-merge review for {} failed: {error:#}",
@@ -486,7 +486,7 @@ fn auto_run_post_merge_review_fix(
         attempt_id: "attempt-1",
         resolver: &resolver,
         extra_args: &[],
-        no_sandbox: true,
+        no_sandbox: false,
     })?;
     for outcome in &run_result.outcomes {
         if let WorkAttemptRunOutcome::MergeCandidateReady { candidate_id } = outcome {
@@ -639,5 +639,53 @@ mod tests {
         assert_eq!(outcome.reviewed.len(), 1);
         let queue = load_queue(tmp.path()).unwrap();
         assert!(queue.entries.is_empty());
+    }
+
+    fn find_no_sandbox_value_after(source: &str, anchor: &str, context: &str) -> String {
+        let anchor_pos = source
+            .find(anchor)
+            .unwrap_or_else(|| panic!("{context}: anchor {anchor:?} not found"));
+        let after = &source[anchor_pos..];
+        let field_pos = after
+            .find("no_sandbox:")
+            .unwrap_or_else(|| panic!("{context}: no_sandbox field not found after anchor"));
+        let field_text = &after[field_pos..field_pos + 30.min(after.len() - field_pos)];
+        field_text.to_string()
+    }
+
+    #[test]
+    fn post_merge_fix_attempt_runs_sandboxed() {
+        let source = include_str!("post_merge_review.rs");
+        let field = find_no_sandbox_value_after(
+            source,
+            "fn auto_run_post_merge_review_fix",
+            "fix attempt",
+        );
+        assert!(
+            field.contains("false"),
+            "post-merge-review-fix Attempt must run sandboxed (no_sandbox: false), found: {field}"
+        );
+    }
+
+    #[test]
+    fn post_merge_review_only_attempt_runs_sandboxed() {
+        let source = include_str!("post_merge_review.rs");
+        let field =
+            find_no_sandbox_value_after(source, "fn review_one", "review-only attempt");
+        assert!(
+            field.contains("false"),
+            "review-only Attempt must run sandboxed (no_sandbox: false), found: {field}"
+        );
+    }
+
+    #[test]
+    fn post_merge_fix_merge_step_remains_unsandboxed() {
+        let source = include_str!("post_merge_review.rs");
+        let field =
+            find_no_sandbox_value_after(source, "WorkMergeConfig", "merge step");
+        assert!(
+            field.contains("true"),
+            "merge step must remain unsandboxed (no_sandbox: true), found: {field}"
+        );
     }
 }
