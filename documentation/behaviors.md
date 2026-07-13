@@ -4037,21 +4037,34 @@ Test: src/work_attempt_loop.rs (tester_failure_blocks_merge_candidate)
 
 ### B4
 
-WHEN a round is blocked by a Tester failure and the write-round budget
-remains,
-THE SYSTEM SHALL schedule a follow-up write round with the failing
-Tester results as input; when the write-round budget is exhausted, it
-SHALL record `needs-user`.
+WHEN a round is blocked by a Tester failure **or a Tester error** and
+the write-round budget remains,
+THE SYSTEM SHALL schedule a follow-up write round with the Tester
+results as input; when the write-round budget is exhausted, it SHALL
+record `needs-user`.
 Test: src/work_attempt_loop.rs (tester_failure_routes_to_followup_within_budget)
 Test: src/work_attempt_loop.rs (tester_failure_records_needs_user_at_cap)
+Test: src/work_attempt_loop.rs (tester_error_routes_to_followup_within_budget)
+Test: src/work_attempt_loop.rs (tester_error_records_needs_user_at_cap)
 
 ### B5
 
-WHEN the round has no readable `tester-results.json` or it reports no
-introduced Tester failures,
+WHEN the round has a readable `tester-results.json` with **no top-level
+error** that reports no introduced Tester failures, OR there is no
+readable `tester-results.json`,
 THE SYSTEM SHALL leave the round outcome to the reviewer verdicts
 unchanged (the gate does not block).
 Test: src/work_attempt_loop.rs (passing_or_missing_tester_does_not_block)
+Test: src/work_attempt_loop.rs (errored_tester_does_not_fall_through_to_reviewers)
+
+### B6
+
+WHEN the suite-health gate reads a `tester-results.json` whose
+top-level `error` is set,
+THE SYSTEM SHALL treat the round as not clean and block it, regardless
+of the tester baseline.
+Test: src/work_attempt_loop.rs (tester_error_blocks_merge_candidate)
+Test: src/work_attempt_loop.rs (tester_error_blocks_regardless_of_baseline)
 
 ## Update check and nudge
 
