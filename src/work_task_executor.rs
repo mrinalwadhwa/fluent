@@ -3359,6 +3359,27 @@ mod tests {
     }
 
     #[test]
+    fn extract_tester_results_bootstrap_requires_unique_ids() {
+        let item = review_item();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path();
+        std::fs::create_dir_all(workspace.join(".fluent")).unwrap();
+
+        let prompt = build_write_task_prompt_with_workspace(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            &[],
+            Some(workspace),
+            None,
+        );
+        assert!(
+            prompt.contains("globally unique"),
+            "extract-tester-results bootstrap should require globally unique ids"
+        );
+    }
+
+    #[test]
     fn writer_prompt_omits_bootstrap_when_both_files_present() {
         let item = review_item();
         let tmp = tempfile::TempDir::new().unwrap();

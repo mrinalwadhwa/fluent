@@ -35,6 +35,7 @@ The script must:
 ```json
 [{"id": "test_name", "test_harness": "cargo-nextest", "status": "pass", "duration_ms": 42, "failure_excerpt": null}]
 ```
+- Every `id` must be globally unique across all commands and harnesses. When a test name recurs across binaries, files, or sections, prefix with the binary, file, or section to disambiguate.
 - `status` must be one of: `pass`, `fail`, `skipped`, `not_run`.
 - `failure_excerpt` is a string (at most 500 chars) or null.
 - Be executable (`chmod +x`).
