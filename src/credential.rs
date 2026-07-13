@@ -112,6 +112,12 @@ fn refresh_oauth_token() -> Result<()> {
     Ok(())
 }
 
+/// Force a fresh OAuth token read from the Keychain, bypassing the
+/// inject guard that skips when a token is already set.
+pub fn force_refresh_oauth_token() -> Result<()> {
+    refresh_oauth_token()
+}
+
 fn extract_oauth_token(json_str: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(json_str).ok()?;
     v.get("claudeAiOauth")?

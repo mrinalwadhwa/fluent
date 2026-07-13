@@ -130,6 +130,8 @@ pub fn spawn_detached_runner(project_root: &Path, debounce_secs: u64) -> Result<
     let log_clone = log_file
         .try_clone()
         .context("clone log handle for stderr")?;
+    crate::credential::force_refresh_oauth_token()
+        .context("force fresh OAuth token before detached spawn")?;
     let fluent_bin = std::env::current_exe().context("locate fluent binary")?;
     let mut cmd = Command::new(&fluent_bin);
     cmd.current_dir(project_root)
@@ -866,6 +868,25 @@ mod tests {
             stored.attempts[0].status,
             AttemptStatus::Planned,
             "target unchanged → reconcile is a no-op"
+        );
+    }
+
+    #[test]
+    fn spawn_detached_runner_forces_fresh_credential() {
+        let source = include_str!("post_merge_review.rs");
+        let fn_start = source
+            .find("fn spawn_detached_runner(")
+            .expect("spawn_detached_runner function not found");
+        let body = &source[fn_start..];
+        let refresh_pos = body
+            .find("force_refresh_oauth_token()")
+            .expect("force_refresh_oauth_token() call not found in spawn_detached_runner");
+        let spawn_pos = body
+            .find("cmd.spawn()")
+            .expect("cmd.spawn() call not found in spawn_detached_runner");
+        assert!(
+            refresh_pos < spawn_pos,
+            "force_refresh_oauth_token() must precede cmd.spawn() in spawn_detached_runner"
         );
     }
 
