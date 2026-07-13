@@ -1845,6 +1845,55 @@ mod tests {
     }
 
     #[test]
+    fn tester_error_routes_to_followup_within_budget() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, _) =
+            make_interpret_reviews_fixture(tmp.path(), "PASS", Some(errored_tester_json()));
+
+        let item = store.read_work_item("work-1").unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true).unwrap();
+
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::PlannedWriteRound { .. }),
+            "tester error with budget should schedule follow-up write; got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn tester_error_records_needs_user_at_cap() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, _) =
+            make_interpret_reviews_fixture(tmp.path(), "PASS", Some(errored_tester_json()));
+
+        let item = store.read_work_item("work-1").unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", false).unwrap();
+
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::NeedsUser { .. }),
+            "tester error at budget cap should record needs-user; got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn errored_tester_does_not_fall_through_to_reviewers() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, _) =
+            make_interpret_reviews_fixture(tmp.path(), "PASS", Some(errored_tester_json()));
+
+        let item = store.read_work_item("work-1").unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true).unwrap();
+
+        assert!(
+            !matches!(
+                outcome,
+                WorkAttemptRunOutcome::MergeCandidateReady { .. }
+                    | WorkAttemptRunOutcome::ReviewOnlyComplete
+            ),
+            "errored tester must not fall through to reviewer pass path; got {outcome:?}"
+        );
+    }
+
+    #[test]
     fn tester_error_blocks_regardless_of_baseline() {
         let tmp = tempfile::TempDir::new().unwrap();
         let errored_json = errored_tester_json();
