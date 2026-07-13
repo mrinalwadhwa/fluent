@@ -27,6 +27,8 @@ The invoking layer decides what's in scope. For a diff-scoped review, that's the
 
 5. Check the documentation set as a whole for vocabulary drift — the same concept named differently across pages, or a doc term that conflicts with what the code, tests, or user-facing surface calls it.
 
-6. For each improvement, decide if it blocks shipping. Inaccurate paths, commands, or workflows that would break a reader's task typically block. Vague phrasing, minor AI tells, and small clarity nits typically don't.
+6. Check the candidate's commit messages over the provided commit range against the project's stated commit-message conventions in `AGENTS.md` or `CLAUDE.md`. If the project states commit conventions, flag any commit that violates them. If the project states no commit conventions, skip this step — do not impose conventions the project did not state.
+
+7. For each improvement, decide if it blocks shipping. Inaccurate paths, commands, or workflows that would break a reader's task typically block. Vague phrasing, minor AI tells, and small clarity nits typically don't.
 
 The invoking layer may add checks in addition to those above.
