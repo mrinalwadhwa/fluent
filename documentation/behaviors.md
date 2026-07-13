@@ -4265,6 +4265,23 @@ THE SYSTEM SHALL print the absolute path to the named skill's SKILL.md
 to stdout without printing the file content.
 Test: tests/binary.rs (skills_show_prints_skill_path)
 
+## Documentation review — commit conventions
+
+### B1
+
+WHEN the documentation reviewer reviews a normal Attempt candidate and
+the project states commit-message conventions in `AGENTS.md` or
+`CLAUDE.md`,
+THE SYSTEM SHALL flag any of the candidate's commits (over
+`{{source_branch}}..{{candidate_commit}}`) that violate those
+conventions as documentation findings, and SHALL NOT flag against
+conventions the project did not state.
+Untestable: requires an end-to-end LLM reviewer run against a
+repository with stated commit conventions; verified by dogfood and the
+review-skills reviewer, not a deterministic test.
+
+---
+
 ## Install script
 
 ### B1
