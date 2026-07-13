@@ -642,6 +642,18 @@ fn introduced_tester_failures(current_path: &Path, baseline_path: Option<&Path>)
     }
 }
 
+fn tester_errored(tester_results_path: &Path) -> bool {
+    let content = match fs::read_to_string(tester_results_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let results: crate::tester::TesterResults = match serde_json::from_str(&content) {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    results.error.is_some()
+}
+
 fn baseline_tester_results_path(project_root: &Path, attempt: &Attempt) -> Option<PathBuf> {
     let work_item_id = &attempt.work_item_id;
     let attempt_id = &attempt.id;
@@ -707,11 +719,15 @@ fn interpret_reviews(
         .as_ref()
         .map(|p| introduced_tester_failures(p, baseline_path.as_deref()))
         .unwrap_or(0);
+    let tester_has_error = tester_result_path
+        .as_ref()
+        .map(|p| tester_errored(p))
+        .unwrap_or(false);
 
-    let has_failures = !failed.is_empty() || tester_fail_count > 0;
+    let has_failures = !failed.is_empty() || tester_fail_count > 0 || tester_has_error;
 
     if has_failures {
-        if tester_fail_count > 0 {
+        if tester_fail_count > 0 || tester_has_error {
             if let Some(ref path) = tester_result_path {
                 if let Ok(relative) = path.strip_prefix(project_root) {
                     failed.push(ArtifactRef {
@@ -1801,6 +1817,46 @@ mod tests {
                 WorkAttemptRunOutcome::MergeCandidateReady { .. }
             ),
             "missing tester results should allow merge candidate; got {outcome_missing:?}"
+        );
+    }
+
+    fn errored_tester_json() -> &'static str {
+        r#"{
+            "commands": [],
+            "tests": [],
+            "summary": {"total": 0, "pass": 0, "fail": 0, "skipped": 0},
+            "error": {"kind": "extractor_failure", "message": "extractor failed", "details": "exit code 1"}
+        }"#
+    }
+
+    #[test]
+    fn tester_error_blocks_merge_candidate() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, _) =
+            make_interpret_reviews_fixture(tmp.path(), "PASS", Some(errored_tester_json()));
+
+        let item = store.read_work_item("work-1").unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true).unwrap();
+
+        assert!(
+            !matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
+            "tester error must block merge candidate; got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn tester_error_blocks_regardless_of_baseline() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let errored_json = errored_tester_json();
+        let (store, _) =
+            make_fixture_with_baseline(tmp.path(), "PASS", Some(errored_json), Some(errored_json));
+
+        let item = store.read_work_item("work-1").unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true).unwrap();
+
+        assert!(
+            !matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
+            "tester error must block even when baseline also errored; got {outcome:?}"
         );
     }
 }
