@@ -22,6 +22,7 @@ setup_test_project() {
   git config user.name "test"
   printf 'test\n' > README.md
   seed_review_skill_stubs "."
+  seed_tester_config "."
   git add . && git commit -m "init" > /dev/null 2>&1
 }
 

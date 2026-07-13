@@ -11,6 +11,17 @@ seed_review_skill_stubs() {
   done
 }
 
+# Seed a minimal tester config so the tester runs clean (no error).
+# Usage: seed_tester_config <workspace_path>
+seed_tester_config() {
+  local workspace="$1"
+  mkdir -p "${workspace}/.fluent"
+  printf 'commands:\n  - command: "true"\n    test_harness: shell-harness\n' \
+    > "${workspace}/.fluent/tester.yaml"
+  printf '#!/bin/sh\necho '"'"'[]'"'"'\n' > "${workspace}/.fluent/extract-tester-results"
+  chmod +x "${workspace}/.fluent/extract-tester-results"
+}
+
 # Seed a minimal tester-results.json artifact so review tasks that
 # depend on the tester can find their input artifact.
 # Usage: seed_tester_results <project_root> <work_item_id> <attempt_id>

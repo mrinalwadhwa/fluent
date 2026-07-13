@@ -21,6 +21,7 @@ setup_test_project() {
   git config user.name "test"
   printf 'test\n' > README.md
   seed_review_skill_stubs "."
+  seed_tester_config "."
   git add . && git commit -m "init" > /dev/null 2>&1
   "$FLUENT_BIN" work-item create work-1 --title "Attempt loop" > /dev/null
   "$FLUENT_BIN" attempt create work-1 attempt-1 > /dev/null

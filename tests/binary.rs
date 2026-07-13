@@ -5723,16 +5723,6 @@ fn work_task_run_tester_persistent_error_pauses_attempt_at_needs_user() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
 
-    let tester_yaml = main_dir.join(".fluent/tester.yaml");
-    fs::create_dir_all(tester_yaml.parent().unwrap()).unwrap();
-    fs::write(
-        &tester_yaml,
-        "commands:\n  - command: \"true\"\n    test_harness: shell-harness\n",
-    )
-    .unwrap();
-    git::run(&main_dir, &["add", ".fluent/tester.yaml"], "stage").unwrap();
-    git::run(&main_dir, &["commit", "-m", "Add tester.yaml"], "commit").unwrap();
-
     create_completed_work_attempt(&tmp, &main_dir);
     fluent_cmd()
         .current_dir(&main_dir)
@@ -7384,6 +7374,22 @@ fn setup_git_project(tmp: &TempDir) -> std::path::PathBuf {
         let skill_dir = main_dir.join(format!("skills/review-{role}"));
         fs::create_dir_all(&skill_dir).unwrap();
         fs::write(skill_dir.join("SKILL.md"), "stub skill for tests").unwrap();
+    }
+    let fluent_dir = main_dir.join(".fluent");
+    fs::create_dir_all(&fluent_dir).unwrap();
+    fs::write(
+        fluent_dir.join("tester.yaml"),
+        "commands:\n  - command: \"true\"\n    test_harness: shell-harness\n",
+    )
+    .unwrap();
+    let extractor_path = fluent_dir.join("extract-tester-results");
+    fs::write(&extractor_path, "#!/bin/sh\necho '[]'\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&extractor_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&extractor_path, perms).unwrap();
     }
     git::run(&main_dir, &["add", "."], "stage files").unwrap();
     git::run(&main_dir, &["commit", "-m", "init"], "initial commit").unwrap();
