@@ -225,6 +225,27 @@ pub fn run(
         }
     };
 
+    let duplicate_ids = find_duplicate_ids(&tests);
+    if !duplicate_ids.is_empty() {
+        let results = TesterResults {
+            commands: command_results,
+            tests: Vec::new(),
+            summary: Summary {
+                total: 0,
+                pass: 0,
+                fail: 0,
+                skipped: 0,
+            },
+            error: Some(TesterError {
+                kind: "duplicate_test_ids".to_string(),
+                message: format!("Duplicate test ids: {}", duplicate_ids.join(", ")),
+                details: String::new(),
+            }),
+        };
+        write_results(artifact_dir, &results)?;
+        return Ok(());
+    }
+
     let mut tests = cap_failure_excerpts(tests);
     tests.sort_by(|a, b| {
         a.test_harness
@@ -353,6 +374,17 @@ fn run_extractor(
     }
 
     Ok(tests)
+}
+
+fn find_duplicate_ids(tests: &[TestResult]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut duplicates = std::collections::BTreeSet::new();
+    for test in tests {
+        if !seen.insert(&test.id) {
+            duplicates.insert(test.id.clone());
+        }
+    }
+    duplicates.into_iter().collect()
 }
 
 fn compute_summary(tests: &[TestResult]) -> Summary {
@@ -669,10 +701,48 @@ echo '[
             [
                 "tester_yaml_problem",
                 "extractor_missing",
-                "extractor_failure"
+                "extractor_failure",
+                "duplicate_test_ids"
             ]
             .contains(&error.kind.as_str())
         );
+    }
+
+    #[test]
+    fn duplicate_test_ids_produce_error() {
+        let workspace = TempDir::new().unwrap();
+        let artifact_dir = TempDir::new().unwrap();
+        make_workspace(workspace.path());
+
+        write_tester_yaml(
+            workspace.path(),
+            "commands:\n  - command: echo test\n    test_harness: cargo-nextest\n",
+        );
+        write_extractor(
+            workspace.path(),
+            r#"#!/bin/sh
+echo '[
+  {"id": "rejects_null_args", "test_harness": "cargo-nextest", "status": "pass", "duration_ms": 1, "failure_excerpt": null},
+  {"id": "unique_test", "test_harness": "cargo-nextest", "status": "pass", "duration_ms": 2, "failure_excerpt": null},
+  {"id": "rejects_null_args", "test_harness": "cargo-nextest", "status": "fail", "duration_ms": 3, "failure_excerpt": "boom"}
+]'
+"#,
+        );
+
+        run(workspace.path(), artifact_dir.path(), true, &resolver()).unwrap();
+        let results = read_results(artifact_dir.path());
+
+        let error = results.error.as_ref().expect("should have error");
+        assert_eq!(error.kind, "duplicate_test_ids");
+        assert!(
+            error.message.contains("rejects_null_args"),
+            "error message should name the colliding id; got: {}",
+            error.message
+        );
+        assert!(results.tests.is_empty(), "should emit no test entries");
+        assert_eq!(results.summary.total, 0);
+        assert_eq!(results.summary.pass, 0);
+        assert_eq!(results.summary.fail, 0);
     }
 
     #[test]
