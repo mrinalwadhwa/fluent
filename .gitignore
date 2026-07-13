@@ -33,3 +33,4 @@ tests/output/
 /.cargo-home
 /.cargo
 .cargo-home/
+cargo-home/
