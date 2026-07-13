@@ -3946,8 +3946,8 @@ Test: src/tester.rs (tester_results_tests_ordered_by_test_harness_then_id)
 
 WHEN the `error` field is non-null,
 IT SHALL have: `kind` (one of `"tester_yaml_problem"`,
-`"extractor_missing"`, `"extractor_failure"`), `message` (string),
-`details` (string).
+`"extractor_missing"`, `"extractor_failure"`,
+`"duplicate_test_ids"`), `message` (string), `details` (string).
 Test: src/tester.rs (tester_results_error_object_shape)
 
 ### B18
@@ -4004,6 +4004,24 @@ transcript file SHALL be written by Tester (the existing reviewer
 and writer transcript paths are unaffected).
 Test: src/work_task_executor.rs (tester_task_does_not_spawn_coder_process)
 Test: src/work_task_executor.rs (tester_task_does_not_write_transcript)
+
+### B21
+
+WHEN the Tester assembles `tester-results.json` from the extractor
+output and two or more test entries share the same `id`,
+THE SYSTEM SHALL produce `tester-results.json` with
+`error.kind == "duplicate_test_ids"`, name the colliding ids in the
+error, and emit no pass/fail partition.
+Test: src/tester.rs (duplicate_test_ids_produce_error)
+
+### B22
+
+WHEN the writer bootstraps `.fluent/extract-tester-results` from the
+contract in `prompts/write-user.md` because the file is missing,
+THE SYSTEM SHALL instruct that every emitted test `id` be globally
+unique across all commands and harnesses, prefixing with the binary,
+file, or section when a test name recurs.
+Test: src/work_task_executor.rs (extract_tester_results_bootstrap_requires_unique_ids)
 
 ## Suite-health gate
 
