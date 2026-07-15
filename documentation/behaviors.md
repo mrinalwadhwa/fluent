@@ -972,12 +972,13 @@ Untestable: Requires concurrent detached processes racing on debounce window tim
 WHEN the post-merge review finds any reviewer artifact with a failing
 or uncertain verdict,
 THE SYSTEM SHALL create a post-merge-review-fix Work Item with the
-failed review artifacts as planning context, run its first Attempt,
-and on a successful Merge Candidate auto-invoke `fluent merge-candidate land`.
-The auto-merge spawns its own detached post-merge review with
-`FLUENT_POST_MERGE_REVIEW_FIX_DEPTH` incremented; recursion stops at
-`FLUENT_MAX_POST_MERGE_REVIEW_FIX_DEPTH` (default 5).
-Untestable: Requires end-to-end post-merge review with LLM reviewers, auto-fix, and recursive depth tracking
+failed review artifacts as planning context and run its first Attempt.
+A passing Merge Candidate is left pending — it lands only when the
+user runs `auto-merge` or invokes `fluent merge-candidate land`,
+exactly like any other candidate. The fix-depth recursion bound is
+persisted on Work Item state and checked at land time; see the
+"Post-merge forward-fix landing" area for details.
+Untestable: Requires end-to-end post-merge review with LLM reviewers and auto-fix
 
 ### B87
 
@@ -4318,6 +4319,55 @@ conventions the project did not state.
 Untestable: requires an end-to-end LLM reviewer run against a
 repository with stated commit conventions; verified by dogfood and the
 review-skills reviewer, not a deterministic test.
+
+---
+
+## Post-merge forward-fix landing
+
+### B1
+
+WHEN the post-merge review builds a post-merge-review-fix Work Item's
+Attempt to a passing Merge Candidate,
+THE SYSTEM SHALL leave that Merge Candidate pending and SHALL NOT land
+it; the candidate is landed only by a later explicit land — the
+`auto-merge` watcher or `fluent merge-candidate land` — exactly like
+any other candidate.
+Untestable: Requires an end-to-end post-merge review Attempt reaching a Merge Candidate with LLM reviewers.
+
+### B2
+
+WHEN the post-merge review running at fix depth N auto-creates a
+post-merge-review-fix Work Item,
+THE SYSTEM SHALL record fix depth N+1 on that Work Item's persisted
+state, so a later land of its Merge Candidate — performed by any
+process, including the separate `auto-merge` watcher — resumes at the
+correct fix depth.
+Test: src/post_merge_review.rs (fix_work_item_records_incremented_fix_depth)
+
+### B3
+
+WHEN a Merge Candidate is landed and the merge executor spawns a
+post-merge review for that land,
+THE SYSTEM SHALL derive the fix depth from the landed Merge
+Candidate's Work Item persisted state — depth 0 when the Work Item
+records none — independent of any process environment variable.
+Test: src/post_merge_review.rs (fix_depth_defaults_to_zero_for_non_fix_work_item)
+
+### B4
+
+WHERE a landed Merge Candidate's Work Item is at fix depth at or above
+the cap `FLUENT_MAX_POST_MERGE_REVIEW_FIX_DEPTH` (default 5),
+THE SYSTEM SHALL NOT spawn a post-merge review for that land, bounding
+the forward-fix recursion the same way across in-process and
+cross-process lands.
+Test: src/post_merge_review.rs (does_not_spawn_post_merge_review_at_or_above_fix_depth_cap)
+
+### B5
+
+WHEN a Work Item carrying a recorded fix depth is written and re-read
+through the Work model store,
+THE SYSTEM SHALL preserve the fix depth.
+Test: src/work_model.rs (work_item_fix_depth_round_trips_through_storage)
 
 ---
 

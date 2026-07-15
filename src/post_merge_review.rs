@@ -1,8 +1,9 @@
 //! Post-merge review: deterministic merges queue a review-only Attempt
 //! against the target branch's current HEAD. Reviews fan out in
 //! parallel (using the existing review skill set). Findings auto-create
-//! a post-merge-review-fix Work Item that runs through the write→review loop and
-//! auto-merges on pass.
+//! a post-merge-review-fix Work Item that runs through the write→review
+//! loop. A passing Merge Candidate is left pending — it lands only
+//! when the user runs `auto-merge` or `merge-candidate land`.
 //!
 //! The merge command spawns a detached child that sleeps a debounce
 //! window before running. Multiple merges within the window coalesce —
