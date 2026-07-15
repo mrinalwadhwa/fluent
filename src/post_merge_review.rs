@@ -467,8 +467,13 @@ fn review_one(project_root: &Path, entry: &QueueEntry, fix_depth: u64) -> Result
     let post_merge_review_fix_work_item = if findings.is_empty() {
         None
     } else {
-        match auto_run_post_merge_review_fix(project_root, &store, &entry.target_branch, &findings, fix_depth)
-        {
+        match auto_run_post_merge_review_fix(
+            project_root,
+            &store,
+            &entry.target_branch,
+            &findings,
+            fix_depth,
+        ) {
             Ok(id) => Some(id),
             Err(error) => {
                 eprintln!(
@@ -995,10 +1000,7 @@ mod tests {
     #[test]
     fn does_not_spawn_post_merge_review_at_or_above_fix_depth_cap() {
         let cap = max_post_merge_review_fix_depth();
-        assert!(
-            should_spawn_post_merge_review(0),
-            "depth 0 is below cap"
-        );
+        assert!(should_spawn_post_merge_review(0), "depth 0 is below cap");
         assert!(
             should_spawn_post_merge_review(cap - 1),
             "depth just below cap should spawn"

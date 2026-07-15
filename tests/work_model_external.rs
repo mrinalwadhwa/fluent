@@ -51,7 +51,7 @@ fn work_item() -> WorkItem {
         planning_context: None,
         instructions: None,
         abandonment: None,
-            post_merge_review_fix_depth: None,
+        post_merge_review_fix_depth: None,
         attempts: vec![Attempt {
             id: "attempt-1".to_string(),
             work_item_id: "work-1".to_string(),
@@ -207,7 +207,7 @@ fn work_model_store_preserves_attempt_append_order() {
         planning_context: None,
         instructions: None,
         abandonment: None,
-            post_merge_review_fix_depth: None,
+        post_merge_review_fix_depth: None,
         attempts: Vec::new(),
         merge_candidates: Vec::new(),
     };
@@ -704,7 +704,7 @@ fn work_item_add_initial_attempt_creates_scheduler_facing_write_task() {
         planning_context: None,
         instructions: None,
         abandonment: None,
-            post_merge_review_fix_depth: None,
+        post_merge_review_fix_depth: None,
         attempts: Vec::new(),
         merge_candidates: Vec::new(),
     };
@@ -776,7 +776,7 @@ fn work_item_add_initial_attempt_rejects_duplicate_attempt_id() {
         planning_context: None,
         instructions: None,
         abandonment: None,
-            post_merge_review_fix_depth: None,
+        post_merge_review_fix_depth: None,
         attempts: Vec::new(),
         merge_candidates: Vec::new(),
     };
@@ -800,7 +800,7 @@ fn work_item_add_initial_attempt_rejects_invalid_attempt_id() {
         planning_context: None,
         instructions: None,
         abandonment: None,
-            post_merge_review_fix_depth: None,
+        post_merge_review_fix_depth: None,
         attempts: Vec::new(),
         merge_candidates: Vec::new(),
     };
