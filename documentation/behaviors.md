@@ -1741,6 +1741,27 @@ invoked for a stored Work Item, Attempt, and Task,
 THE SYSTEM SHALL print that Task as JSON.
 Test: tests/binary.rs (task_show_prints_task_json)
 
+### B165
+
+WHEN `fluent task run <work-item-id> <attempt-id> <task-id>` or
+`fluent attempt run <work-item-id> <attempt-id>` launches a
+`write` Task,
+THE SYSTEM SHALL direct the writer to orient to the codebase before
+implementing — skim the existing code around the planned changes,
+match its structure, naming, error handling, and idioms, and follow
+the project's stated conventions in its `AGENTS.md` / `CLAUDE.md`.
+Test: src/work_task_executor.rs (write_user_prompt_directs_codebase_orientation)
+
+### B166
+
+WHEN `fluent task run <work-item-id> <attempt-id> <task-id>` or
+`fluent attempt run <work-item-id> <attempt-id>` launches a
+`write` Task,
+THE SYSTEM SHALL direct the writer to follow the project's stated
+commit conventions (`AGENTS.md` / `CLAUDE.md`) — subject length,
+mood, prohibited trailers — when writing commit messages.
+Test: src/work_task_executor.rs (write_user_prompt_directs_commit_conventions)
+
 ## Atomic state-file writes
 
 ### B1
