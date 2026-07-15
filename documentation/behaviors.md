@@ -4408,3 +4408,55 @@ IF the download fails,
 THEN THE SYSTEM SHALL report the failure and exit without leaving a
 partial binary.
 Test: tests/behaviors/operations/test-install-script.sh (download failure)
+
+---
+
+## Project model seeding
+
+### B1
+
+WHEN an Attempt is about to run its writer Task and the workspace has
+no project expertise index,
+THE SYSTEM SHALL run the seed step to generate the project model before
+the writer Task runs.
+Test: src/work_task_executor.rs (should_seed_project_model_true_when_write_role_and_index_absent)
+
+### B2
+
+WHEN the seed step runs,
+THE SYSTEM SHALL write `.fluent/expertise/INDEX.md` and a
+codebase-overview file into `.fluent/expertise/`.
+Untestable: The generated files require a real LLM seed pass; the
+deterministic scheduling that produces the step is covered by B1.
+
+### B3
+
+WHEN the seed step generates the codebase overview,
+THE SYSTEM SHALL cover enough of the project to orient a writer:
+entry points, where the major components live, key conventions, and
+how to build and test.
+Untestable: Content quality of an LLM-generated overview cannot be
+asserted from a test.
+
+### B4
+
+WHERE a project expertise index already exists,
+THE SYSTEM SHALL NOT run the seed step; keeping the model current is
+the capture phase's responsibility, not the seed's.
+Test: src/work_task_executor.rs (should_seed_project_model_false_when_index_present)
+
+### B5
+
+WHEN the seed step completes within an Attempt,
+THE SYSTEM SHALL make the project expertise index available to that
+Attempt's writer Task, so `has_project_expertise_index` is satisfied
+and the writer orients from the project model.
+Test: src/work_task_executor.rs (write_prompt_includes_project_index_after_seed)
+
+### B6
+
+IF the seed step fails,
+THEN THE SYSTEM SHALL log a warning and proceed with the writer
+without a project model — degrading to the pre-seed behavior — rather
+than aborting the Attempt.
+Test: tests/binary.rs (seed_failure_does_not_abort_attempt)
