@@ -3695,6 +3695,45 @@ mod tests {
     }
 
     #[test]
+    fn seed_prompt_renders_with_output_paths() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path();
+        let resolver = ContentResolver::new(None);
+        let template = resolver
+            .resolve_content("prompts/seed-user.md")
+            .expect("seed-user.md must resolve");
+
+        let index_path = workspace.join(".fluent/expertise/INDEX.md");
+        let overview_path = workspace.join(".fluent/expertise/overview.md");
+        let rendered = crate::content::render_template(
+            &template,
+            &[
+                ("index_path", &index_path.display().to_string()),
+                ("overview_path", &overview_path.display().to_string()),
+                ("workspace_path", &workspace.display().to_string()),
+            ],
+        )
+        .expect("seed template must render");
+
+        assert!(
+            rendered.contains(&index_path.display().to_string()),
+            "rendered seed prompt should contain the INDEX.md path"
+        );
+        assert!(
+            rendered.contains(&overview_path.display().to_string()),
+            "rendered seed prompt should contain the overview.md path"
+        );
+        assert!(
+            rendered.contains(&workspace.display().to_string()),
+            "rendered seed prompt should contain the workspace path"
+        );
+        assert!(
+            rendered.contains("Seed project expertise overview"),
+            "rendered seed prompt should include the commit message instruction"
+        );
+    }
+
+    #[test]
     fn should_seed_project_model_true_when_write_role_and_index_absent() {
         let tmp = tempfile::TempDir::new().unwrap();
         let workspace = tmp.path();
