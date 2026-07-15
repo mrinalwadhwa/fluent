@@ -3734,6 +3734,58 @@ mod tests {
     }
 
     #[test]
+    fn write_prompt_includes_project_index_after_seed() {
+        let item = review_item();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path();
+
+        assert!(
+            should_seed_project_model(TaskKind::Write, workspace),
+            "seed should fire before INDEX.md exists"
+        );
+
+        let prompt_before = build_write_task_prompt_with_workspace(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            &[],
+            Some(workspace),
+            None,
+        );
+        assert!(
+            !prompt_before.contains("learned model of THIS project"),
+            "prompt should not include project expertise before seed"
+        );
+
+        let expertise_dir = workspace.join(".fluent/expertise");
+        fs::create_dir_all(&expertise_dir).unwrap();
+        fs::write(expertise_dir.join("INDEX.md"), "# Project Index\n").unwrap();
+        fs::write(expertise_dir.join("overview.md"), "# Overview\n").unwrap();
+
+        assert!(
+            !should_seed_project_model(TaskKind::Write, workspace),
+            "seed should not fire after INDEX.md exists"
+        );
+
+        let prompt_after = build_write_task_prompt_with_workspace(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            &[],
+            Some(workspace),
+            None,
+        );
+        assert!(
+            prompt_after.contains("learned model of THIS project"),
+            "prompt should include project expertise after seed produces INDEX.md"
+        );
+        assert!(
+            prompt_after.contains(&expertise_dir.join("INDEX.md").display().to_string()),
+            "prompt should reference the INDEX.md path"
+        );
+    }
+
+    #[test]
     fn should_seed_project_model_true_when_write_role_and_index_absent() {
         let tmp = tempfile::TempDir::new().unwrap();
         let workspace = tmp.path();
