@@ -120,11 +120,17 @@ pub fn now_unix() -> u64 {
 /// Spawn a detached Fluent subprocess that will run the post-merge
 /// review after the debounce window. Standard streams are redirected
 /// to a log file so the parent merge command can return immediately.
-pub fn spawn_detached_runner(project_root: &Path, debounce_secs: u64) -> Result<()> {
-    if current_depth() >= max_post_merge_review_fix_depth() {
+///
+/// The `fix_depth` parameter controls recursion bounding: when it
+/// reaches the cap, the spawn is skipped entirely.
+pub fn spawn_detached_runner(
+    project_root: &Path,
+    debounce_secs: u64,
+    fix_depth: u64,
+) -> Result<()> {
+    if !should_spawn_post_merge_review(fix_depth) {
         eprintln!(
-            "  Skipping post-merge review spawn: post-merge-review-fix depth {} >= cap {}",
-            current_depth(),
+            "  Skipping post-merge review spawn: fix depth {fix_depth} >= cap {}",
             max_post_merge_review_fix_depth()
         );
         return Ok(());
@@ -150,7 +156,6 @@ pub fn spawn_detached_runner(project_root: &Path, debounce_secs: u64) -> Result<
             "--debounce-seconds",
             &debounce_secs.to_string(),
         ])
-        .env(POST_MERGE_REVIEW_FIX_DEPTH_ENV, current_depth().to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(log_clone));
@@ -184,14 +189,23 @@ pub fn run(
     auto_prune_orphan_review_only_worktrees(project_root);
 
     // Find candidate branches: latest entry per branch that's at least
-    // debounce_secs old.
+    // debounce_secs old, and track the maximum fix_depth across all
+    // coalesced entries per branch.
     let mut latest_by_branch: std::collections::BTreeMap<String, QueueEntry> =
+        std::collections::BTreeMap::new();
+    let mut max_depth_by_branch: std::collections::BTreeMap<String, u64> =
         std::collections::BTreeMap::new();
     for entry in &queue.entries {
         if let Some(filter) = target_filter
             && filter != entry.target_branch
         {
             continue;
+        }
+        let depth = max_depth_by_branch
+            .entry(entry.target_branch.clone())
+            .or_insert(0);
+        if entry.fix_depth > *depth {
+            *depth = entry.fix_depth;
         }
         let pending = latest_by_branch.get(&entry.target_branch);
         if pending
@@ -202,10 +216,14 @@ pub fn run(
         }
     }
 
-    let mut branches_to_process: Vec<QueueEntry> = Vec::new();
+    let mut branches_to_process: Vec<(QueueEntry, u64)> = Vec::new();
     for (_branch, entry) in latest_by_branch {
         if now.saturating_sub(entry.merged_at_unix) >= debounce_secs {
-            branches_to_process.push(entry);
+            let depth = max_depth_by_branch
+                .get(&entry.target_branch)
+                .copied()
+                .unwrap_or(0);
+            branches_to_process.push((entry, depth));
         }
     }
 
@@ -215,7 +233,7 @@ pub fn run(
 
     let mut succeeded_branches: Vec<&QueueEntry> = Vec::new();
     let inflight_store = WorkModelStore::new(project_root);
-    for entry in &branches_to_process {
+    for (entry, fix_depth) in &branches_to_process {
         match crate::review_only_worktree::detect_in_flight(
             &inflight_store,
             &entry.target_branch,
@@ -245,7 +263,7 @@ pub fn run(
             "  Running post-merge review for {} at {}",
             entry.target_branch, entry.merged_commit
         );
-        match review_one(project_root, entry) {
+        match review_one(project_root, entry, *fix_depth) {
             Ok(per) => {
                 succeeded_branches.push(entry);
                 outcome.reviewed.push(per);
@@ -332,7 +350,7 @@ fn auto_prune_orphan_review_only_worktrees(project_root: &Path) {
     }
 }
 
-fn review_one(project_root: &Path, entry: &QueueEntry) -> Result<PerBranchOutcome> {
+fn review_one(project_root: &Path, entry: &QueueEntry, fix_depth: u64) -> Result<PerBranchOutcome> {
     let store = WorkModelStore::new(project_root);
     let short = &entry.merged_commit[..8.min(entry.merged_commit.len())];
     let work_item_id = format!(
@@ -458,7 +476,7 @@ fn review_one(project_root: &Path, entry: &QueueEntry) -> Result<PerBranchOutcom
     let post_merge_review_fix_work_item = if findings.is_empty() {
         None
     } else {
-        match auto_run_post_merge_review_fix(project_root, &store, &entry.target_branch, &findings)
+        match auto_run_post_merge_review_fix(project_root, &store, &entry.target_branch, &findings, fix_depth)
         {
             Ok(id) => Some(id),
             Err(error) => {
@@ -489,8 +507,9 @@ fn auto_run_post_merge_review_fix(
     store: &WorkModelStore,
     parent_branch: &str,
     findings: &[ArtifactRef],
+    fix_depth: u64,
 ) -> Result<String> {
-    let id = create_post_merge_review_fix_work_item(store, parent_branch, findings)?;
+    let id = create_post_merge_review_fix_work_item(store, parent_branch, findings, fix_depth)?;
     let head_before = git::run_stdout(
         project_root,
         &["rev-parse", parent_branch],
@@ -596,6 +615,7 @@ pub fn create_post_merge_review_fix_work_item(
     store: &WorkModelStore,
     parent_branch: &str,
     findings: &[ArtifactRef],
+    fix_depth: u64,
 ) -> Result<String> {
     let id = format!(
         "post-merge-review-fix-{}-{}",
@@ -616,7 +636,7 @@ pub fn create_post_merge_review_fix_work_item(
         planning_context: Some(planning_context),
         instructions: None,
         abandonment: None,
-        post_merge_review_fix_depth: None,
+        post_merge_review_fix_depth: Some(fix_depth + 1),
         attempts: Vec::new(),
         merge_candidates: Vec::new(),
     };
@@ -641,9 +661,14 @@ fn format_findings_as_brief(findings: &[ArtifactRef]) -> String {
 /// Append the current entry to the queue and spawn the detached
 /// post-merge review runner. Called by the merge executor right after
 /// a successful fast-forward.
-pub fn queue_and_spawn(project_root: &Path, entry: QueueEntry, debounce_secs: u64) -> Result<()> {
+pub fn queue_and_spawn(
+    project_root: &Path,
+    entry: QueueEntry,
+    debounce_secs: u64,
+    fix_depth: u64,
+) -> Result<()> {
     append_entry(project_root, entry)?;
-    spawn_detached_runner(project_root, debounce_secs)
+    spawn_detached_runner(project_root, debounce_secs, fix_depth)
 }
 
 #[cfg(test)]
@@ -1042,6 +1067,23 @@ mod tests {
             stored.attempts[0].status,
             AttemptStatus::NeedsUser,
             "unexpected target advancement must result in needs-user, not bare failed"
+        );
+    }
+
+    #[test]
+    fn fix_work_item_records_incremented_fix_depth() {
+        let tmp = TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let findings = vec![ArtifactRef {
+            producer_id: "review-1".to_string(),
+            path: "reviews/review.md".to_string(),
+        }];
+        let id = create_post_merge_review_fix_work_item(&store, "main", &findings, 2).unwrap();
+        let wi = store.read_work_item(&id).unwrap();
+        assert_eq!(
+            wi.post_merge_review_fix_depth,
+            Some(3),
+            "fix Work Item at depth 2 should record depth 3"
         );
     }
 

@@ -226,6 +226,8 @@ fn execute_merge(
     )?;
 
     if !config.skip_post_merge_review {
+        let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+        let fix_depth = crate::post_merge_review::fix_depth_for(&item);
         let entry = crate::post_merge_review::QueueEntry {
             target_branch: candidate.target_branch.clone(),
             merged_commit: outcome.merged_commit.clone(),
@@ -233,12 +235,13 @@ fn execute_merge(
             source_work_item_id: config.work_item_id.to_string(),
             source_merge_candidate_id: candidate.id.clone(),
             base_commit: target_head_before.clone(),
-            fix_depth: 0,
+            fix_depth,
         };
         if let Err(error) = crate::post_merge_review::queue_and_spawn(
             config.project_root,
             entry,
             crate::post_merge_review::debounce_seconds(),
+            fix_depth,
         ) {
             eprintln!("  Warning: post-merge review queue/spawn failed: {error}");
         }
