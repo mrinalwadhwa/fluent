@@ -7466,7 +7466,11 @@ fn setup_git_project(tmp: &TempDir) -> std::path::PathBuf {
 fn seed_project_expertise(main_dir: &Path) {
     let expertise_dir = main_dir.join(".fluent/expertise");
     fs::create_dir_all(&expertise_dir).unwrap();
-    fs::write(expertise_dir.join("INDEX.md"), "# Project Expertise Index\n").unwrap();
+    fs::write(
+        expertise_dir.join("INDEX.md"),
+        "# Project Expertise Index\n",
+    )
+    .unwrap();
     fs::write(expertise_dir.join("overview.md"), "# Overview\n").unwrap();
     git::run(main_dir, &["add", ".fluent/expertise"], "stage expertise").unwrap();
     git::run(

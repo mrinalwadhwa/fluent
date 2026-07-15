@@ -1405,7 +1405,9 @@ fn run_task_coder(
             no_sandbox,
             model,
         ) {
-            eprintln!("  Warning: seed project model failed, continuing without project expertise: {err}");
+            eprintln!(
+                "  Warning: seed project model failed, continuing without project expertise: {err}"
+            );
         }
     }
 
@@ -1715,10 +1717,7 @@ pub fn materialize_skill(skill_name: &str, dest_dir: &Path) -> Result<PathBuf> {
 }
 
 fn should_seed_project_model(task_kind: TaskKind, workspace_path: &Path) -> bool {
-    task_kind == TaskKind::Write
-        && !workspace_path
-            .join(".fluent/expertise/INDEX.md")
-            .is_file()
+    task_kind == TaskKind::Write && !workspace_path.join(".fluent/expertise/INDEX.md").is_file()
 }
 
 fn run_seed_project_model(
