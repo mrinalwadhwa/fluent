@@ -431,21 +431,23 @@ fn worktree_is_dirty(worktree_dir: &Path) -> Result<bool> {
     Ok(!output.stdout.is_empty())
 }
 
+fn autofix_commit_message() -> (&'static str, &'static str) {
+    (
+        "Conform code to project standards",
+        "- Apply the fix-pre-merge hook's changes so check-pre-merge passes.",
+    )
+}
+
 fn commit_autofix(worktree_dir: &Path) -> Result<()> {
     git::run(
         worktree_dir,
         &["add", "--", ".", ":(exclude).fluent"],
         "stage fix-pre-merge changes",
     )?;
+    let (subject, body) = autofix_commit_message();
     git::run(
         worktree_dir,
-        &[
-            "commit",
-            "-m",
-            "Apply fix-pre-merge changes",
-            "-m",
-            "- Apply changes produced by the project's fix-pre-merge hook before landing.",
-        ],
+        &["commit", "-m", subject, "-m", body],
         "commit fix-pre-merge changes",
     )
 }
@@ -1644,5 +1646,18 @@ mod tests {
             err.contains("Required review-nonexistent skill not found"),
             "error should name the missing skill: {err}"
         );
+    }
+
+    #[test]
+    fn autofix_commit_subject_names_no_hook_or_process() {
+        let (subject, _body) = autofix_commit_message();
+        assert!(!subject.is_empty(), "subject must not be empty");
+        let lower = subject.to_lowercase();
+        for banned in ["fix-pre-merge", "hook", "before landing"] {
+            assert!(
+                !lower.contains(banned),
+                "subject must not contain \"{banned}\": {subject}"
+            );
+        }
     }
 }
