@@ -16,19 +16,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::coder::CoderKind;
 use crate::content::ContentResolver;
 use crate::git;
 use crate::review;
 use crate::work_attempt_loop::{self, WorkAttemptRunConfig, WorkAttemptRunOutcome};
-use crate::work_merge_executor::{self, WorkMergeConfig};
 use crate::work_model::{
     ArtifactRef, AttemptStatus, PlanningContext, TaskKind, TaskStatus, WorkItem, WorkModelStore,
 };
 
 const DEFAULT_DEBOUNCE_SECONDS: u64 = 60;
 const DEFAULT_MAX_POST_MERGE_REVIEW_FIX_DEPTH: u64 = 5;
-const POST_MERGE_REVIEW_FIX_DEPTH_ENV: &str = "FLUENT_POST_MERGE_REVIEW_FIX_DEPTH";
 
 pub fn debounce_seconds() -> u64 {
     std::env::var("FLUENT_POST_MERGE_DEBOUNCE_SECONDS")
@@ -42,13 +39,6 @@ pub fn max_post_merge_review_fix_depth() -> u64 {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_MAX_POST_MERGE_REVIEW_FIX_DEPTH)
-}
-
-pub fn current_depth() -> u64 {
-    std::env::var(POST_MERGE_REVIEW_FIX_DEPTH_ENV)
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(0)
 }
 
 pub fn fix_depth_for(wi: &WorkItem) -> u64 {
@@ -498,10 +488,12 @@ fn review_one(project_root: &Path, entry: &QueueEntry, fix_depth: u64) -> Result
     })
 }
 
-/// Create a post-merge-review-fix Work Item from review findings, run its first
-/// Attempt, and (on Merge Candidate ready) auto-merge it. Recursion is
-/// bounded by `FLUENT_MAX_POST_MERGE_REVIEW_FIX_DEPTH`: the spawned post-merge
-/// review for the auto-merge runs with depth+1 in its environment.
+/// Create a post-merge-review-fix Work Item from review findings and
+/// run its first Attempt. A passing Merge Candidate is left pending —
+/// it lands only when the user runs `auto-merge` or invokes
+/// `fluent merge-candidate land`. Recursion is bounded by the fix
+/// depth persisted on the Work Item's state; the cap is checked at
+/// land time by `spawn_detached_runner`.
 fn auto_run_post_merge_review_fix(
     project_root: &Path,
     store: &WorkModelStore,
@@ -516,7 +508,6 @@ fn auto_run_post_merge_review_fix(
         "record target branch HEAD before fix",
     )?;
     let resolver = ContentResolver::new(Some(project_root));
-    let coder_kind = CoderKind::resolve(None)?;
     let run_result = work_attempt_loop::run_attempt(WorkAttemptRunConfig {
         project_root,
         store,
@@ -526,33 +517,10 @@ fn auto_run_post_merge_review_fix(
         extra_args: &[],
         no_sandbox: false,
     })?;
-    let mut had_merge_candidate = false;
-    for outcome in &run_result.outcomes {
-        if let WorkAttemptRunOutcome::MergeCandidateReady { candidate_id } = outcome {
-            had_merge_candidate = true;
-            // Bump the post-merge-review-fix depth so a spawned post-merge-review
-            // child sees the new depth and can stop recursing eventually.
-            let next_depth = current_depth() + 1;
-            unsafe {
-                std::env::set_var(POST_MERGE_REVIEW_FIX_DEPTH_ENV, next_depth.to_string());
-            }
-            let merge_config = WorkMergeConfig {
-                project_root,
-                store,
-                work_item_id: &id,
-                merge_candidate_id: candidate_id,
-                resolver: &resolver,
-                extra_args: &[],
-                coder_kind,
-                no_sandbox: true,
-                skip_post_merge_review: false,
-            };
-            if let Err(error) = work_merge_executor::merge_candidate(merge_config) {
-                eprintln!("  Forward-fix auto-merge failed: {error}");
-            }
-            break;
-        }
-    }
+    let had_merge_candidate = run_result
+        .outcomes
+        .iter()
+        .any(|o| matches!(o, WorkAttemptRunOutcome::MergeCandidateReady { .. }));
     reconcile_impossible_state(
         project_root,
         store,
@@ -766,17 +734,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn post_merge_fix_merge_step_remains_unsandboxed() {
-        let source = include_str!("post_merge_review.rs");
-        let field =
-            find_no_sandbox_value_after(source, "let merge_config = WorkMergeConfig", "merge step");
-        assert!(
-            field.contains("true"),
-            "merge step must remain unsandboxed (no_sandbox: true), found: {field}"
-        );
-    }
-
     fn init_git_repo(dir: &Path) {
         crate::git::run(dir, &["init", "-b", "main"], "init").unwrap();
         crate::git::run(dir, &["config", "user.email", "test@test"], "cfg email").unwrap();
@@ -939,74 +896,6 @@ mod tests {
         assert!(
             !source.contains("ensure_source_branch_unchanged"),
             "general write path must NOT have a source-branch mutation guard"
-        );
-    }
-
-    #[test]
-    fn post_merge_fix_landed_records_merged_not_failed() {
-        let source = include_str!("post_merge_review.rs");
-
-        // The fix Attempt is sandboxed — the coder cannot write to the target
-        // branch directly, so the ONLY way to land is through merge_candidate
-        // which records the Work Item as merged.
-        let fix_field = find_no_sandbox_value_after(
-            source,
-            "fn auto_run_post_merge_review_fix",
-            "fix attempt sandbox",
-        );
-        assert!(
-            fix_field.contains("false"),
-            "fix Attempt must be sandboxed (no_sandbox: false): {fix_field}"
-        );
-
-        // The merge step calls work_merge_executor::merge_candidate, which
-        // records the Work Item as merged on success.
-        assert!(
-            source.contains("work_merge_executor::merge_candidate(merge_config)"),
-            "auto_run_post_merge_review_fix must land through work_merge_executor::merge_candidate"
-        );
-
-        // When a merge candidate WAS produced, reconcile_impossible_state is a
-        // no-op — it does not overwrite the merged status set by the merge executor.
-        let tmp = TempDir::new().unwrap();
-        init_git_repo(tmp.path());
-        let store = WorkModelStore::new(tmp.path());
-        let head_before =
-            crate::git::run_stdout(tmp.path(), &["rev-parse", "main"], "head").unwrap();
-
-        let mut item = WorkItem {
-            id: "b1-fix".to_string(),
-            title: "B1 fix".to_string(),
-            planning_context: None,
-            instructions: None,
-            abandonment: None,
-            post_merge_review_fix_depth: None,
-            attempts: Vec::new(),
-            merge_candidates: Vec::new(),
-        };
-        item.add_initial_attempt("attempt-1").unwrap();
-        store.create_work_item(&item).unwrap();
-
-        // Target advanced (as it would after a successful merge_candidate call)
-        std::fs::write(tmp.path().join("fix.txt"), "landed").unwrap();
-        crate::git::run(tmp.path(), &["add", "fix.txt"], "add").unwrap();
-        crate::git::run(tmp.path(), &["commit", "-m", "fix landed"], "commit").unwrap();
-
-        reconcile_impossible_state(
-            tmp.path(),
-            &store,
-            "b1-fix",
-            "attempt-1",
-            "main",
-            &head_before,
-            true,
-        );
-
-        let stored = store.read_work_item("b1-fix").unwrap();
-        assert_eq!(
-            stored.attempts[0].status,
-            AttemptStatus::Planned,
-            "reconcile must not override status when a merge candidate was produced"
         );
     }
 
