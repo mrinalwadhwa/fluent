@@ -3186,7 +3186,7 @@ mod tests {
         );
         let expected = project_expertise_dir.join("INDEX.md").display().to_string();
         assert!(
-            prompt.contains("workspace-specific decisions"),
+            prompt.contains("learned model of THIS project"),
             "prompt should include the project expertise line when present; got prompt:\n{prompt}"
         );
         assert!(
