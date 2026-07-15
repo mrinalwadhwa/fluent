@@ -232,6 +232,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "wi-1".to_string(),
@@ -398,6 +399,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: vec![],
             merge_candidates: vec![],
         };

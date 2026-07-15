@@ -260,6 +260,7 @@ fn cmd_work_item(project_root: &Path, command: WorkItemCommands) -> Result<()> {
                 planning_context,
                 instructions,
                 abandonment: None,
+                post_merge_review_fix_depth: None,
                 attempts: Vec::new(),
                 merge_candidates: Vec::new(),
             };

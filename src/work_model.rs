@@ -168,6 +168,8 @@ pub struct WorkItem {
     pub instructions: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub abandonment: Option<WorkItemAbandonment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_merge_review_fix_depth: Option<u64>,
     #[serde(default)]
     pub attempts: Vec<Attempt>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2263,6 +2265,8 @@ struct WorkItemRecord {
     instructions: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     abandonment: Option<WorkItemAbandonment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    post_merge_review_fix_depth: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2302,6 +2306,7 @@ impl From<&WorkItem> for WorkItemRecord {
             planning_context: work_item.planning_context.clone(),
             instructions: work_item.instructions.clone(),
             abandonment: work_item.abandonment.clone(),
+            post_merge_review_fix_depth: work_item.post_merge_review_fix_depth,
         }
     }
 }
@@ -2314,6 +2319,7 @@ impl From<WorkItemRecord> for WorkItem {
             planning_context: record.planning_context,
             instructions: record.instructions,
             abandonment: record.abandonment,
+            post_merge_review_fix_depth: record.post_merge_review_fix_depth,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         }
@@ -3295,6 +3301,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -3324,6 +3331,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -3349,6 +3357,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -3375,6 +3384,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -3400,6 +3410,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -3426,6 +3437,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: vec![MergeCandidate {
                 id: "candidate-1".to_string(),
@@ -3477,6 +3489,7 @@ mod tests {
             abandonment: Some(WorkItemAbandonment {
                 reason: Some("replacement landed".to_string()),
             }),
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -3496,6 +3509,7 @@ mod tests {
             abandonment: Some(WorkItemAbandonment {
                 reason: Some("replacement landed".to_string()),
             }),
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -3812,6 +3826,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -3905,6 +3920,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -4029,6 +4045,7 @@ mod tests {
             }),
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -4148,6 +4165,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -4388,6 +4406,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -4479,6 +4498,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -4515,6 +4535,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -4563,6 +4584,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -4598,6 +4620,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -4635,6 +4658,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -4687,6 +4711,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -4739,6 +4764,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -4792,6 +4818,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -4886,6 +4913,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -4919,6 +4947,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: "work-1".to_string(),
@@ -5025,6 +5054,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: vec![Attempt {
                 id: "attempt-1".to_string(),
                 work_item_id: id.to_string(),
@@ -5064,6 +5094,7 @@ mod tests {
                         planning_context: None,
                         instructions: None,
                         abandonment: None,
+                        post_merge_review_fix_depth: None,
                         attempts: Vec::new(),
                         merge_candidates: Vec::new(),
                     };
@@ -5103,6 +5134,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         }
@@ -5194,6 +5226,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -5248,6 +5281,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -5547,6 +5581,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -5751,6 +5786,26 @@ mod tests {
         assert_eq!(mapping.write.coder, CoderKind::Pi);
         assert_eq!(mapping.write.model, "custom-model");
         assert_eq!(mapping.review.coder, CoderKind::Claude);
+    }
+
+    #[test]
+    fn work_item_fix_depth_round_trips_through_storage() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem {
+            id: "fix-depth-rt".to_string(),
+            title: "Round-trip fix depth".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            post_merge_review_fix_depth: Some(3),
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+        let read = store.read_work_item("fix-depth-rt").unwrap();
+        assert_eq!(read.post_merge_review_fix_depth, Some(3));
     }
 
     #[test]

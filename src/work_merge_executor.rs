@@ -233,6 +233,7 @@ fn execute_merge(
             source_work_item_id: config.work_item_id.to_string(),
             source_merge_candidate_id: candidate.id.clone(),
             base_commit: target_head_before.clone(),
+            fix_depth: 0,
         };
         if let Err(error) = crate::post_merge_review::queue_and_spawn(
             config.project_root,
@@ -1100,6 +1101,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -1140,6 +1142,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -1261,6 +1264,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -1433,6 +1437,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };

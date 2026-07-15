@@ -51,6 +51,14 @@ pub fn current_depth() -> u64 {
         .unwrap_or(0)
 }
 
+pub fn fix_depth_for(wi: &WorkItem) -> u64 {
+    wi.post_merge_review_fix_depth.unwrap_or(0)
+}
+
+pub fn should_spawn_post_merge_review(fix_depth: u64) -> bool {
+    fix_depth < max_post_merge_review_fix_depth()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QueueEntry {
     pub target_branch: String,
@@ -60,6 +68,8 @@ pub struct QueueEntry {
     pub source_merge_candidate_id: String,
     #[serde(default)]
     pub base_commit: String,
+    #[serde(default)]
+    pub fix_depth: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -356,6 +366,7 @@ fn review_one(project_root: &Path, entry: &QueueEntry) -> Result<PerBranchOutcom
         }),
         instructions: None,
         abandonment: None,
+        post_merge_review_fix_depth: None,
         attempts: Vec::new(),
         merge_candidates: Vec::new(),
     };
@@ -605,6 +616,7 @@ pub fn create_post_merge_review_fix_work_item(
         planning_context: Some(planning_context),
         instructions: None,
         abandonment: None,
+        post_merge_review_fix_depth: None,
         attempts: Vec::new(),
         merge_candidates: Vec::new(),
     };
@@ -649,6 +661,7 @@ mod tests {
             source_work_item_id: "work-1".into(),
             source_merge_candidate_id: "attempt-1-merge-candidate".into(),
             base_commit: String::new(),
+            fix_depth: 0,
         };
         append_entry(tmp.path(), entry.clone()).unwrap();
         let queue = load_queue(tmp.path()).unwrap();
@@ -669,6 +682,7 @@ mod tests {
                 source_work_item_id: "work-1".into(),
                 source_merge_candidate_id: "attempt-1-merge-candidate".into(),
                 base_commit: String::new(),
+                fix_depth: 0,
             },
         )
         .unwrap();
@@ -693,6 +707,7 @@ mod tests {
                     source_work_item_id: format!("work-{n}"),
                     source_merge_candidate_id: format!("attempt-{n}-merge-candidate"),
                     base_commit: String::new(),
+                    fix_depth: 0,
                 },
             )
             .unwrap();
@@ -760,6 +775,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -803,6 +819,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -846,6 +863,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -937,6 +955,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -996,6 +1015,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
@@ -1022,6 +1042,42 @@ mod tests {
             stored.attempts[0].status,
             AttemptStatus::NeedsUser,
             "unexpected target advancement must result in needs-user, not bare failed"
+        );
+    }
+
+    #[test]
+    fn fix_depth_defaults_to_zero_for_non_fix_work_item() {
+        let wi = WorkItem {
+            id: "regular-work".to_string(),
+            title: "A regular work item".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            post_merge_review_fix_depth: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        assert_eq!(fix_depth_for(&wi), 0);
+    }
+
+    #[test]
+    fn does_not_spawn_post_merge_review_at_or_above_fix_depth_cap() {
+        let cap = max_post_merge_review_fix_depth();
+        assert!(
+            should_spawn_post_merge_review(0),
+            "depth 0 is below cap"
+        );
+        assert!(
+            should_spawn_post_merge_review(cap - 1),
+            "depth just below cap should spawn"
+        );
+        assert!(
+            !should_spawn_post_merge_review(cap),
+            "depth at cap should not spawn"
+        );
+        assert!(
+            !should_spawn_post_merge_review(cap + 1),
+            "depth above cap should not spawn"
         );
     }
 }

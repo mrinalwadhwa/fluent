@@ -299,6 +299,7 @@ mod tests {
             planning_context: None,
             instructions: None,
             abandonment: None,
+            post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         };
