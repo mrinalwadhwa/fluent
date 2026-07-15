@@ -5710,6 +5710,7 @@ exit 7
 fn work_task_run_write_auth_rejection_pauses_attempt_without_retrying() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
+    seed_project_expertise(&main_dir);
 
     let bin_dir = tmp.path().join("bin-write-auth-401");
     let counter_file = tmp.path().join("write-auth-invocation-count");
@@ -7460,6 +7461,20 @@ fn setup_git_project(tmp: &TempDir) -> std::path::PathBuf {
     git::run(&main_dir, &["commit", "-m", "init"], "initial commit").unwrap();
 
     main_dir
+}
+
+fn seed_project_expertise(main_dir: &Path) {
+    let expertise_dir = main_dir.join(".fluent/expertise");
+    fs::create_dir_all(&expertise_dir).unwrap();
+    fs::write(expertise_dir.join("INDEX.md"), "# Project Expertise Index\n").unwrap();
+    fs::write(expertise_dir.join("overview.md"), "# Overview\n").unwrap();
+    git::run(main_dir, &["add", ".fluent/expertise"], "stage expertise").unwrap();
+    git::run(
+        main_dir,
+        &["commit", "-m", "Seed project expertise overview"],
+        "commit expertise",
+    )
+    .unwrap();
 }
 
 fn create_completed_work_attempt(tmp: &TempDir, main_dir: &Path) {
@@ -9463,7 +9478,7 @@ fn no_legacy_prompt_files_in_prompts_dir() {
         "Legacy prompts/author.md should not exist"
     );
 
-    let allowed_prefixes = ["write-", "review-", "rebase-"];
+    let allowed_prefixes = ["write-", "review-", "rebase-", "seed-"];
     for entry in fs::read_dir(&prompts_dir).unwrap() {
         let entry = entry.unwrap();
         let name = entry.file_name().to_string_lossy().to_string();
