@@ -124,7 +124,7 @@ Skip TDD only when the step has no new behavior to test. Skip-eligible examples:
 
 ### D. Commit and advance
 
-1. Make one commit per step. Include everything the step touched — code, tests, `tester.yaml` updates, pattern files, docs — in that commit. Write a message describing what changed.
+1. Make one commit per step. Include everything the step touched — code, tests, `tester.yaml` updates, pattern files, docs — in that commit. Write a message that describes what changed and follows the project's stated commit conventions (`AGENTS.md` / `CLAUDE.md`) — subject length, mood, prohibited trailers, and the like.
 2. In progress.md: toggle `- [ ]` to `- [x]` and add a nested bullet below it with the commit hash and anything the next round should know.
 3. Move to the next `- [ ]` item.
 

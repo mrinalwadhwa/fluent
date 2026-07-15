@@ -3537,6 +3537,23 @@ mod tests {
     }
 
     #[test]
+    fn write_user_prompt_directs_commit_conventions() {
+        let prompt = build_write_task_prompt(&review_item(), "attempt-1", "attempt-1-write-1", &[]);
+        let d1_region = prompt
+            .find("### D. Commit and advance")
+            .expect("prompt should contain §D heading");
+        let d1_text = &prompt[d1_region..];
+        assert!(
+            d1_text.contains("commit conventions"),
+            "§D.1 should reference the project's commit conventions"
+        );
+        assert!(
+            d1_text.contains("AGENTS.md") || d1_text.contains("CLAUDE.md"),
+            "§D.1 should reference AGENTS.md or CLAUDE.md as the source of commit conventions"
+        );
+    }
+
+    #[test]
     fn write_user_prompt_directs_codebase_orientation() {
         let prompt = build_write_task_prompt(&review_item(), "attempt-1", "attempt-1-write-1", &[]);
         assert!(
