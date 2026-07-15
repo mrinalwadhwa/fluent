@@ -1728,6 +1728,71 @@ exit 0
 }
 
 #[test]
+fn seed_failure_does_not_abort_attempt() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-seed-fail");
+    let counter_path = tmp.path().join("call-counter");
+
+    write_mock_claude(
+        &bin_dir,
+        &format!(
+            r##"#!/bin/bash
+COUNTER="{}"
+if [ ! -f "$COUNTER" ]; then
+    echo 1 > "$COUNTER"
+    exit 1
+fi
+printf 'task output\n' > task-output.txt
+git add task-output.txt
+git commit -m "Add task output" >/dev/null
+exit 0
+"##,
+            counter_path.display()
+        ),
+    );
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Seed fail test"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let output = fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_MAX_TASK_RETRIES", "0")
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("seed project model failed"),
+        "stderr should warn about seed failure; got:\n{stderr}"
+    );
+    assert!(
+        output.status.success(),
+        "write task should succeed despite seed failure: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        stderr
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Completed Task attempt-1-write-1"));
+}
+
+#[test]
 fn write_task_transcript_persists_after_failed_attempt() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
