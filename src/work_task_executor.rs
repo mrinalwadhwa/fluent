@@ -1395,6 +1395,20 @@ fn run_task_coder(
         .ok_or_else(|| anyhow::anyhow!("Task {task_id:?} not found"))?;
     materialize_planning_files(item, project_root)?;
     materialize_general_expertise(project_root)?;
+
+    if should_seed_project_model(task.kind, workspace_path) {
+        if let Err(err) = run_seed_project_model(
+            workspace_path,
+            resolver,
+            extra_args,
+            coder_kind,
+            no_sandbox,
+            model,
+        ) {
+            eprintln!("  Warning: seed project model failed, continuing without project expertise: {err}");
+        }
+    }
+
     let progress_dir = progress_md_dir(project_root, &item.id, attempt_id);
     fs::create_dir_all(&progress_dir).with_context(|| {
         format!(
@@ -1698,6 +1712,78 @@ pub fn materialize_skill(skill_name: &str, dest_dir: &Path) -> Result<PathBuf> {
             .with_context(|| format!("Failed to write skill at {}", file_path.display()))?;
     }
     Ok(skill_dir)
+}
+
+fn should_seed_project_model(task_kind: TaskKind, workspace_path: &Path) -> bool {
+    task_kind == TaskKind::Write
+        && !workspace_path
+            .join(".fluent/expertise/INDEX.md")
+            .is_file()
+}
+
+fn run_seed_project_model(
+    workspace_path: &Path,
+    resolver: &ContentResolver,
+    extra_args: &[String],
+    coder_kind: CoderKind,
+    no_sandbox: bool,
+    model: Option<&str>,
+) -> Result<()> {
+    eprintln!("  Seeding project expertise model…");
+
+    let workspace_resolver = ContentResolver::new(Some(workspace_path));
+    let system_prompt = workspace_resolver
+        .resolve_content("prompts/write-system.md")
+        .unwrap_or_default();
+
+    let expertise_dir = workspace_path.join(".fluent/expertise");
+    let index_path = expertise_dir.join("INDEX.md");
+    let overview_path = expertise_dir.join("overview.md");
+
+    let template = resolver
+        .resolve_content("prompts/seed-user.md")
+        .ok_or_else(|| anyhow::anyhow!("bundled seed-user.md must resolve"))?;
+    let prompt = crate::content::render_template(
+        &template,
+        &[
+            ("index_path", &index_path.display().to_string()),
+            ("overview_path", &overview_path.display().to_string()),
+            ("workspace_path", &workspace_path.display().to_string()),
+        ],
+    )
+    .map_err(|e| anyhow::anyhow!("seed-user.md template error: {e}"))?;
+
+    let (sandbox, _sandbox_profile) = if no_sandbox {
+        (CoderSandbox::None, None)
+    } else {
+        let common_git_dir = worktree::git_common_dir(workspace_path)?;
+        build_coder_sandbox_with_writable_and_read_only_roots(
+            coder_kind,
+            resolver,
+            workspace_path,
+            &[common_git_dir],
+            &[],
+        )?
+    };
+
+    let coder = coder_kind.boxed_with_model(sandbox, model);
+    let exit_code = coder.run(
+        &prompt,
+        &system_prompt,
+        workspace_path,
+        extra_args,
+        &[],
+        None,
+    )?;
+    if exit_code != 0 {
+        bail!("Seed coder exited with code {exit_code}");
+    }
+
+    if !index_path.is_file() {
+        bail!("Seed coder did not produce {}", index_path.display());
+    }
+
+    Ok(())
 }
 
 fn progress_md_dir(project_root: &Path, work_item_id: &str, attempt_id: &str) -> PathBuf {
@@ -3606,5 +3692,30 @@ mod tests {
             results_path.exists(),
             "baseline tester should persist tester-results.json as artifact"
         );
+    }
+
+    #[test]
+    fn should_seed_project_model_true_when_write_role_and_index_absent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path();
+        assert!(should_seed_project_model(TaskKind::Write, workspace));
+    }
+
+    #[test]
+    fn should_seed_project_model_false_when_index_present() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path();
+        let expertise_dir = workspace.join(".fluent/expertise");
+        fs::create_dir_all(&expertise_dir).unwrap();
+        fs::write(expertise_dir.join("INDEX.md"), "# Index\n").unwrap();
+        assert!(!should_seed_project_model(TaskKind::Write, workspace));
+    }
+
+    #[test]
+    fn should_seed_project_model_false_for_non_write_tasks() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path();
+        assert!(!should_seed_project_model(TaskKind::Review, workspace));
+        assert!(!should_seed_project_model(TaskKind::Tester, workspace));
     }
 }

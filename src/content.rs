@@ -122,6 +122,7 @@ pub fn bundled_content(relative: &str) -> Option<String> {
         }
         "prompts/rebase-system.md" => Some(include_str!("../prompts/rebase-system.md").to_string()),
         "prompts/rebase-user.md" => Some(include_str!("../prompts/rebase-user.md").to_string()),
+        "prompts/seed-user.md" => Some(include_str!("../prompts/seed-user.md").to_string()),
         // Sandbox profiles
         "sandbox/common.sb" => Some(include_str!("../sandboxes/common.sb").to_string()),
         "sandbox/claude-code.sb" => Some(include_str!("../sandboxes/claude-code.sb").to_string()),
