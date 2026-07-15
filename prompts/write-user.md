@@ -41,20 +41,32 @@ The script must:
 - Be executable (`chmod +x`).
 
 {{/if}}
-## Phase 1 — Understand the Work Item
+## Phase 1 — Understand the Work Item and the codebase
+
+First, understand what this Work Item asks for:
 
 1. Read Brief at {{brief_path}} — what to change and why.
 2. Read Behaviors at {{behaviors_path}} — EARS statements describing observable changes in behavior.
 3. Read Approach at {{approach_path}} — technical direction on how to make the changes.
 4. Read Plan at {{plan_path}} — series of incremental steps; each one makes new changes in behavior observable and verifiable.
-5. Read the expertise indexes. Each index is a list of expertise files you can load in Phase 3.
-   - {{general_expertise_index}} — architecture, testing, documentation, tooling
+5. Read the expertise indexes:
+   - {{general_expertise_index}} — general, project-agnostic principles (architecture, testing,
+     documentation, tooling). Load individual files on demand in Phase 3, by relevance to each step.
 {{#if has_project_expertise_index}}
-   - {{project_expertise_index}} — workspace-specific decisions, conventions, patterns
+   - {{project_expertise_index}} — fluent's learned model of THIS project (recorded decisions,
+     conventions, patterns, and a codebase overview when present). Read the files it indexes now;
+     this is fluent's own accumulated understanding of the project — prefer it over re-deriving.
 {{/if}}
 {{#if has_prior_reviews}}
 6. Read each prior review file. The list below is the complete set from the most recent prior round: {{prior_reviews_list}}
 {{/if}}
+
+Before implementing, orient to the codebase so your work fits how this project already does things:
+- Skim the existing code around what the plan touches. Match its structure, naming, error
+  handling, and idioms.
+- Follow the project's stated conventions in its `AGENTS.md` / `CLAUDE.md` (your coding agent
+  loads these): code style, naming, commit-message rules, prohibited practices.
+Your changes should read as though the project's regular maintainers wrote them.
 
 The Brief, Behaviors, Approach, and Plan files are read-only.
 

@@ -3537,6 +3537,27 @@ mod tests {
     }
 
     #[test]
+    fn write_user_prompt_directs_codebase_orientation() {
+        let prompt = build_write_task_prompt(&review_item(), "attempt-1", "attempt-1-write-1", &[]);
+        assert!(
+            prompt.contains("Understand the Work Item and the codebase"),
+            "Phase 1 heading should reference understanding the codebase"
+        );
+        assert!(
+            prompt.contains("AGENTS.md") && prompt.contains("CLAUDE.md"),
+            "Phase 1 should direct the writer to follow the project's AGENTS.md / CLAUDE.md"
+        );
+        assert!(
+            prompt.contains("existing code"),
+            "Phase 1 should direct the writer to skim the existing code"
+        );
+        assert!(
+            prompt.contains("conventions"),
+            "Phase 1 should reference following the project's conventions"
+        );
+    }
+
+    #[test]
     fn capture_baseline_tester_persists_results_as_artifact() {
         let tmp = tempfile::TempDir::new().unwrap();
         let project_root = tmp.path();
