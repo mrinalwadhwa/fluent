@@ -1000,10 +1000,21 @@ fn mark_task_failed_attempt_needs_user(
             &mut item.attempts[attempt_index].tasks[task_index],
             TaskStatus::Failed,
         );
-        crate::work_model::set_attempt_terminal(
+        let pause_kind = if auth_message.is_some() {
+            crate::work_model::PauseKind::Auth
+        } else {
+            crate::work_model::PauseKind::RoundCap
+        };
+        crate::work_model::suspend_attempt(
             &mut item.attempts[attempt_index],
-            AttemptStatus::NeedsUser,
+            pause_kind,
         );
+        if auth_message.is_some() {
+            crate::notify::notify(
+                "Fluent",
+                "Auth token expired. Run 'claude /login' to re-authenticate, then 'fluent attempt run'.",
+            );
+        }
         let handoff_path = write_task_error_handoff(
             project_root,
             work_item_id,

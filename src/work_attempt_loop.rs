@@ -851,9 +851,9 @@ fn interpret_reviews(
         if !followup_budget_available {
             let handoff_path =
                 write_budget_exhausted_handoff(project_root, &item.id, attempt_id, &failed)?;
-            crate::work_model::set_attempt_terminal(
+            crate::work_model::suspend_attempt(
                 &mut item.attempts[attempt_index],
-                AttemptStatus::NeedsUser,
+                crate::work_model::PauseKind::RoundCap,
             );
             item.attempts[attempt_index].artifacts.push(ArtifactRef {
                 producer_id: "attempt-loop".to_string(),
@@ -872,9 +872,9 @@ fn interpret_reviews(
         let handoff_path =
             write_needs_user_handoff(project_root, &item.id, attempt_id, &uncertain)?;
         item.attempts[attempt_index].review_state = Some(AttemptReviewState::Uncertain);
-        crate::work_model::set_attempt_terminal(
+        crate::work_model::suspend_attempt(
             &mut item.attempts[attempt_index],
-            AttemptStatus::NeedsUser,
+            crate::work_model::PauseKind::Uncertain,
         );
         item.attempts[attempt_index].artifacts.push(ArtifactRef {
             producer_id: "attempt-loop".to_string(),
@@ -2171,6 +2171,133 @@ mod tests {
         assert!(
             !should_capture(&attempt),
             "single-round attempt with no findings should skip capture"
+        );
+    }
+
+    #[test]
+    fn auth_pause_records_kind_and_leaves_attempt_resumable() {
+        let mut attempt = Attempt {
+            id: "attempt-1".to_string(),
+            work_item_id: "work-1".to_string(),
+            kind: AttemptKind::Write,
+            status: AttemptStatus::Executing,
+            coder_mapping: CoderMapping::default(),
+            tasks: vec![
+                Task {
+                    id: "attempt-1-write-1".to_string(),
+                    kind: TaskKind::Write,
+                    status: TaskStatus::Complete,
+                    role: "author".to_string(),
+                    instructions: None,
+                    work_item_id: "work-1".to_string(),
+                    attempt_id: Some("attempt-1".to_string()),
+                    workspace_access: WorkspaceAccess {
+                        reads: Vec::new(),
+                        writes: Vec::new(),
+                    },
+                    artifact_area: None,
+                    review_context: None,
+                    input_artifacts: Vec::new(),
+                    depends_on: None,
+                    output: None,
+                    created_at: None,
+                    started_at: None,
+                    completed_at: None,
+                },
+                Task {
+                    id: "attempt-1-review-tests".to_string(),
+                    kind: TaskKind::Review,
+                    status: TaskStatus::Failed,
+                    role: "tests".to_string(),
+                    instructions: None,
+                    work_item_id: "work-1".to_string(),
+                    attempt_id: Some("attempt-1".to_string()),
+                    workspace_access: WorkspaceAccess {
+                        reads: Vec::new(),
+                        writes: Vec::new(),
+                    },
+                    artifact_area: None,
+                    review_context: None,
+                    input_artifacts: Vec::new(),
+                    depends_on: None,
+                    output: None,
+                    created_at: None,
+                    started_at: None,
+                    completed_at: None,
+                },
+            ],
+            review_state: None,
+            pause_kind: None,
+            artifacts: Vec::new(),
+            created_at: None,
+            completed_at: None,
+        };
+
+        crate::work_model::suspend_attempt(
+            &mut attempt,
+            crate::work_model::PauseKind::Auth,
+        );
+
+        assert_eq!(attempt.status, AttemptStatus::NeedsUser);
+        assert_eq!(
+            attempt.pause_kind,
+            Some(crate::work_model::PauseKind::Auth)
+        );
+        assert!(
+            attempt.completed_at.is_some(),
+            "suspended attempt should have completed_at set"
+        );
+    }
+
+    #[test]
+    fn auth_suspend_posts_reauth_notification() {
+        crate::notify::notify(
+            "Fluent",
+            "Auth token expired. Run 'claude /login' to re-authenticate, then 'fluent attempt run'.",
+        );
+    }
+
+    #[test]
+    fn budget_exhaustion_records_round_cap_pause_kind() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, _) =
+            make_interpret_reviews_fixture(tmp.path(), "PASS", Some(failing_tester_json()));
+
+        let item = store.read_work_item("work-1").unwrap();
+        let outcome =
+            interpret_reviews(tmp.path(), &store, item, "attempt-1", false, None).unwrap();
+
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::NeedsUser { .. }),
+            "budget exhaustion should produce needs-user; got {outcome:?}"
+        );
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(
+            stored.attempts[0].pause_kind,
+            Some(crate::work_model::PauseKind::RoundCap),
+            "budget exhaustion should record RoundCap pause kind"
+        );
+    }
+
+    #[test]
+    fn uncertain_reviews_record_uncertain_pause_kind() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, _) =
+            make_interpret_reviews_fixture(tmp.path(), "UNCERTAIN", None);
+
+        let item = store.read_work_item("work-1").unwrap();
+        let outcome =
+            interpret_reviews(tmp.path(), &store, item, "attempt-1", true, None).unwrap();
+
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::NeedsUser { .. }),
+            "uncertain review should produce needs-user; got {outcome:?}"
+        );
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(
+            stored.attempts[0].pause_kind,
+            Some(crate::work_model::PauseKind::Uncertain),
+            "uncertain review should record Uncertain pause kind"
         );
     }
 }

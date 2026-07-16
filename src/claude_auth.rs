@@ -28,7 +28,7 @@ impl AuthError {
             AuthError::Expired { .. } => "Claude auth token expired.",
             AuthError::Rejected { .. } => "Claude auth token rejected (HTTP 401).",
         };
-        format!("{prefix} Run 'claude /login' to re-authenticate, then retry the Task.")
+        format!("{prefix} Run 'claude /login' to re-authenticate, then 'fluent attempt run'.")
     }
 }
 
@@ -140,8 +140,8 @@ mod tests {
             "should name recovery action: {msg}"
         );
         assert!(
-            msg.contains("retry the Task"),
-            "should mention retry: {msg}"
+            msg.contains("fluent attempt run"),
+            "should name resume command: {msg}"
         );
     }
 
@@ -157,6 +157,28 @@ mod tests {
             msg.contains("claude /login"),
             "should name recovery action: {msg}"
         );
+    }
+
+    #[test]
+    fn auth_handoff_names_attempt_run_recovery() {
+        for err in [
+            AuthError::Expired {
+                expires_at: 1_700_000_000_000,
+            },
+            AuthError::Rejected {
+                request_id: Some("req-test".into()),
+            },
+        ] {
+            let msg = err.user_message();
+            assert!(
+                msg.contains("claude /login"),
+                "should mention re-auth command: {msg}"
+            );
+            assert!(
+                msg.contains("fluent attempt run"),
+                "should name resume command: {msg}"
+            );
+        }
     }
 
     // -- KeychainEnvelope deserialization tests --
