@@ -2547,37 +2547,13 @@ mod tests {
         // Set up a real git repo as the workspace
         let workspace = project_root.join("workspace");
         fs::create_dir_all(&workspace).unwrap();
-        std::process::Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(&workspace)
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(&workspace)
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(&workspace)
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "commit.gpgsign", "false"])
-            .current_dir(&workspace)
-            .output()
-            .unwrap();
+        git::run(&workspace, &["init", "--initial-branch=main"], "init").unwrap();
+        git::run(&workspace, &["config", "user.email", "test@test.com"], "config email").unwrap();
+        git::run(&workspace, &["config", "user.name", "Test"], "config name").unwrap();
+        git::run(&workspace, &["config", "commit.gpgsign", "false"], "config gpgsign").unwrap();
         fs::write(workspace.join("src.rs"), "fn main() {}").unwrap();
-        std::process::Command::new("git")
-            .args(["add", "."])
-            .current_dir(&workspace)
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["commit", "-m", "initial"])
-            .current_dir(&workspace)
-            .output()
-            .unwrap();
+        git::run(&workspace, &["add", "."], "add").unwrap();
+        git::run(&workspace, &["commit", "-m", "initial"], "commit").unwrap();
 
         let base_commit = git::run_stdout(
             &workspace,
@@ -2655,16 +2631,8 @@ mod tests {
         let expertise_dir = workspace.join(".fluent/expertise");
         fs::create_dir_all(&expertise_dir).unwrap();
         fs::write(expertise_dir.join("learning.md"), "# Learning").unwrap();
-        std::process::Command::new("git")
-            .args(["add", ".fluent/expertise/learning.md"])
-            .current_dir(&workspace)
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["commit", "-m", "capture learning"])
-            .current_dir(&workspace)
-            .output()
-            .unwrap();
+        git::run(&workspace, &["add", ".fluent/expertise/learning.md"], "add expertise").unwrap();
+        git::run(&workspace, &["commit", "-m", "capture learning"], "commit capture").unwrap();
 
         let capture_head = git::run_stdout(
             &workspace,
@@ -2773,16 +2741,8 @@ mod tests {
         fs::create_dir_all(&expertise_dir).unwrap();
         fs::write(expertise_dir.join("learning.md"), "# Learning").unwrap();
         fs::write(workspace.join("src.rs"), "fn main() { /* modified */ }").unwrap();
-        std::process::Command::new("git")
-            .args(["add", "."])
-            .current_dir(&workspace)
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["commit", "-m", "straying capture"])
-            .current_dir(&workspace)
-            .output()
-            .unwrap();
+        git::run(&workspace, &["add", "."], "add all").unwrap();
+        git::run(&workspace, &["commit", "-m", "straying capture"], "commit stray").unwrap();
 
         let attempt_index = 0;
         let write_task_index = 2;
