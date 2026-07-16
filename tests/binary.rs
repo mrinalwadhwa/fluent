@@ -5289,7 +5289,7 @@ fn work_task_run_handoff_file_includes_task_id() {
 }
 
 #[test]
-fn work_task_run_auth_rejection_pauses_attempt_without_retrying() {
+fn work_task_run_auth_rejection_pauses_attempt_after_one_retry() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     create_completed_work_attempt(&tmp, &main_dir);
@@ -5806,7 +5806,7 @@ exit 7
 }
 
 #[test]
-fn work_task_run_write_auth_rejection_pauses_attempt_without_retrying() {
+fn work_task_run_write_auth_rejection_pauses_attempt_after_one_retry() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     seed_project_expertise(&main_dir);
