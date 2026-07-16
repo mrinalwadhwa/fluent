@@ -4641,3 +4641,59 @@ the Merge Candidate and land proceed as if capture had not run.
 Test: tests/binary.rs (capture_failure_does_not_abort_run)
 Derived: Mirrors the seed step's non-fatal contract and Project
 initialization:B7.
+
+---
+
+## Primary-flow command guidance
+
+### B1
+
+WHEN a primary-flow command completes at a state transition or terminal outcome,
+THE SYSTEM SHALL print, after the result, a next-action line naming the specific `fluent`
+command to run next for that state.
+Test: tests/binary.rs (work_item_create_output_names_attempt_create_next)
+Test: tests/binary.rs (attempt_create_output_names_attempt_run_next)
+
+### B2
+
+WHEN `fluent attempt run` reaches a terminal outcome,
+THE SYSTEM SHALL print the next action for that specific outcome: a ready Merge Candidate
+names `merge-candidate show`/`land`; a planned follow-up round names `attempt run` again;
+a failed Attempt names the recovery/inspection step; a review-only completion names its
+next step.
+Test: tests/binary.rs (attempt_run_output_names_next_action_for_merge_candidate_ready)
+Test: tests/binary.rs (attempt_run_output_names_next_action_for_failed)
+
+### B3
+
+WHEN an Attempt is `needs-user`,
+THE SYSTEM SHALL print the recovery command for the pause reason — for an auth pause,
+re-authenticate then `fluent attempt run`.
+Test: tests/binary.rs (needs_user_auth_output_names_reauth_and_attempt_run)
+
+### B4
+
+WHEN `fluent status` or `fluent work-item list` runs with no Work Items,
+THE SYSTEM SHALL print a planning-stage primer directing the agent to capture a brief,
+then behaviors, approach, and plan, then `work-item create`.
+Test: tests/binary.rs (empty_status_output_primes_planning_stages)
+
+### B5
+
+WHEN a printed next-action involves a fluent skill stage,
+THE SYSTEM SHALL include a drift-pointer naming the fluent skill stage to re-read.
+Test: tests/binary.rs (planning_primer_points_to_fluent_skill)
+
+### B6
+
+WHERE quiet output is requested (FLUENT_QUIET set to a truthy value),
+THE SYSTEM SHALL print only the command result, omitting the next-action and drift-pointer
+lines.
+Test: tests/binary.rs (quiet_mode_omits_next_action_hints)
+
+### B7
+
+WHEN a primary-flow command prints a next-action line,
+THE SYSTEM SHALL keep the command result itself readable and unchanged in meaning, with
+the next-action additive and visually distinct (not interleaved into the result).
+Test: tests/binary.rs (next_action_is_appended_not_interleaved_into_result)
