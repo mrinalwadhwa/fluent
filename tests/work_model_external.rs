@@ -1,8 +1,8 @@
 use fluent::work_model::{
     Attempt, AttemptKind, AttemptReviewState, AttemptStatus, CoderMapping, MergeCandidate,
-    MergeCandidateMergeState, MergeReviewState, ReviewContext, Task, TaskArtifactArea,
-    TaskKind, TaskOutput, TaskStatus, WorkItem, WorkModelError, WorkModelStorageError,
-    WorkModelStore, WorkspaceAccess, WorkspaceRef, from_json,
+    MergeCandidateMergeState, MergeReviewState, ReviewContext, Task, TaskArtifactArea, TaskKind,
+    TaskOutput, TaskStatus, WorkItem, WorkModelError, WorkModelStorageError, WorkModelStore,
+    WorkspaceAccess, WorkspaceRef, from_json,
 };
 use std::fs;
 

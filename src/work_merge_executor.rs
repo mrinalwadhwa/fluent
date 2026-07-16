@@ -9,8 +9,8 @@ use crate::git;
 use crate::hooks::{self, HookContext, HookOutcome};
 use crate::work_model::{
     ArtifactRef, MergeCandidate, MergeCandidateMergeState, MergeCandidateMergeStatus,
-    MergeReviewState, Task, TaskKind, TaskStatus, WORK_ARTIFACTS_DIR, WorkItem,
-    WorkModelError, WorkModelStorageError, WorkModelStore, WorkspaceAccess,
+    MergeReviewState, Task, TaskKind, TaskStatus, WORK_ARTIFACTS_DIR, WorkItem, WorkModelError,
+    WorkModelStorageError, WorkModelStore, WorkspaceAccess,
     resolve_expected_candidate_workspace_path, work_artifact_path,
 };
 use crate::worktree;

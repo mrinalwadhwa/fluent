@@ -6,8 +6,8 @@ use std::path::{Component, Path, PathBuf};
 use crate::git;
 use crate::review;
 use crate::work_model::{
-    Attempt, AttemptStatus, MergeCandidate, MergeCandidateMergeStatus, MergeReviewState,
-    Task, TaskStatus, WORK_ARTIFACTS_DIR, WorkItem, WorkModelStore,
+    Attempt, AttemptStatus, MergeCandidate, MergeCandidateMergeStatus, MergeReviewState, Task,
+    TaskStatus, WORK_ARTIFACTS_DIR, WorkItem, WorkModelStore,
     resolve_expected_candidate_workspace_path,
 };
 
