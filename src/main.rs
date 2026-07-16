@@ -275,6 +275,9 @@ fn cmd_work_item(project_root: &Path, command: WorkItemCommands) -> Result<()> {
             let items = store.list_work_items()?;
             if items.is_empty() {
                 println!("No Work Items found");
+                if guidance::guidance_enabled() {
+                    eprintln!("{}", guidance::empty_status_primer());
+                }
             } else {
                 println!("{:<24} TITLE", "ID");
                 for item in items {
@@ -1279,7 +1282,11 @@ fn cmd_interactive(
 
 fn cmd_status(search_root: &Path) -> Result<()> {
     let work_status = work_status::load_work_status(search_root)?;
+    let is_empty = work_status.is_empty();
     print!("{}", work_status::format_work_status(&work_status));
+    if is_empty && guidance::guidance_enabled() {
+        eprintln!("{}", guidance::empty_status_primer());
+    }
     Ok(())
 }
 

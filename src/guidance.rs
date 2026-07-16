@@ -11,7 +11,7 @@ pub fn guidance_enabled() -> bool {
 }
 
 pub fn after_work_item_create() -> &'static str {
-    "\n→ Next: fluent attempt create <work-item-id>"
+    "\n→ Next: fluent attempt create <work-item-id>\n  (fluent skill: plan-execution)"
 }
 
 pub fn after_attempt_create() -> &'static str {
@@ -55,6 +55,10 @@ pub fn after_merge_candidate_land() -> &'static str {
     "\n→ Next: fluent cleanup <work-item-id>"
 }
 
+pub fn empty_status_primer() -> &'static str {
+    "\n→ Next: capture a brief, then define behaviors, design an approach, and plan execution, then fluent work-item create\n  (fluent skill: capture-brief)"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,6 +67,12 @@ mod tests {
     fn after_work_item_create_names_attempt_create() {
         let hint = after_work_item_create();
         assert!(hint.contains("attempt create"));
+    }
+
+    #[test]
+    fn after_work_item_create_includes_drift_pointer() {
+        let hint = after_work_item_create();
+        assert!(hint.contains("fluent skill"));
     }
 
     #[test]
@@ -128,5 +138,21 @@ mod tests {
     fn after_merge_candidate_land_names_cleanup() {
         let hint = after_merge_candidate_land();
         assert!(hint.contains("cleanup"));
+    }
+
+    #[test]
+    fn empty_status_primer_names_planning_stages() {
+        let hint = empty_status_primer();
+        assert!(hint.contains("brief"));
+        assert!(hint.contains("behaviors"));
+        assert!(hint.contains("approach"));
+        assert!(hint.contains("work-item create"));
+    }
+
+    #[test]
+    fn empty_status_primer_includes_drift_pointer() {
+        let hint = empty_status_primer();
+        assert!(hint.contains("fluent skill"));
+        assert!(hint.contains("capture-brief"));
     }
 }

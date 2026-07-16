@@ -12074,3 +12074,74 @@ exit 1
         "auth pause next-action should name re-authenticate and attempt run on stderr; got:\n{stderr}"
     );
 }
+
+#[test]
+fn empty_status_output_primes_planning_stages() {
+    let tmp = TempDir::new().unwrap();
+
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .arg("status")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("brief"),
+        "empty status should mention brief on stderr; got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("behaviors"),
+        "empty status should mention behaviors on stderr; got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("approach"),
+        "empty status should mention approach on stderr; got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("work-item create"),
+        "empty status should name work-item create on stderr; got:\n{stderr}"
+    );
+}
+
+#[test]
+fn planning_primer_points_to_fluent_skill() {
+    let tmp = TempDir::new().unwrap();
+
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .arg("status")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("fluent skill"),
+        "planning primer should include drift-pointer on stderr; got:\n{stderr}"
+    );
+}
+
+#[test]
+fn empty_work_item_list_primes_planning_stages() {
+    let tmp = TempDir::new().unwrap();
+
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["work-item", "list"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("No Work Items found"),
+        "result should indicate no items on stdout"
+    );
+    assert!(
+        stderr.contains("brief") && stderr.contains("work-item create"),
+        "empty list should print planning primer on stderr; got:\n{stderr}"
+    );
+}
