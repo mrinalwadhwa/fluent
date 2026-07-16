@@ -1324,9 +1324,10 @@ fn seed_agent_instructions(cwd: &Path) -> Result<()> {
         let path = cwd.join(name);
         if path.exists() {
             let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
-            if !targets.iter().any(|t| {
-                t.canonicalize().unwrap_or_else(|_| t.clone()) == canonical
-            }) {
+            if !targets
+                .iter()
+                .any(|t| t.canonicalize().unwrap_or_else(|_| t.clone()) == canonical)
+            {
                 targets.push(path);
             }
         }
@@ -1361,7 +1362,11 @@ fn upsert_craft_block(content: &str) -> String {
     } else if content.is_empty() {
         CRAFT_SECTION.to_string()
     } else {
-        let separator = if content.ends_with('\n') { "\n" } else { "\n\n" };
+        let separator = if content.ends_with('\n') {
+            "\n"
+        } else {
+            "\n\n"
+        };
         format!("{}{}{}", content, separator, CRAFT_SECTION)
     }
 }

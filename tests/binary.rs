@@ -1198,11 +1198,7 @@ fn init_updates_craft_section_in_place_idempotently() {
     let pre = "# My Project\n\nSome content.\n";
     let post = "\n## Footer\n";
     let old_block = "<!-- BEGIN fluent -->\nold craft content\n<!-- END fluent -->";
-    fs::write(
-        project.join("AGENTS.md"),
-        format!("{pre}{old_block}{post}"),
-    )
-    .unwrap();
+    fs::write(project.join("AGENTS.md"), format!("{pre}{old_block}{post}")).unwrap();
 
     fluent_cmd()
         .env("HOME", home.to_str().unwrap())
