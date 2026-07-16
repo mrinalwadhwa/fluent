@@ -2893,10 +2893,11 @@ Test: src/work_model.rs (merge_state_skips_serializing_auto_merge_skipped_when_n
 
 WHEN any Claude coder variant (`SandboxedClaudeCode`,
 `BareClaudeCode`) is about to launch the `claude` process,
-THE SYSTEM SHALL call `claude_auth::ensure_not_expired()` first,
-and SHALL bail with the error's user-facing message (the Task fails
-with `TaskStatus::Failed`) if the call returns an error.
-Untestable: Structural integration verified by code inspection — `ensure_not_expired()` is the first call in both `SandboxedClaudeCode::run` and `BareClaudeCode::run`
+THE SYSTEM SHALL call `ensure_not_expired_with_refresh()` first,
+which checks `claude_auth::ensure_not_expired()` and, on failure,
+attempts `credential::refresh_credentials()` once and rechecks.
+The Task fails only if the recheck still returns an error.
+Untestable: Structural integration verified by code inspection — `ensure_not_expired_with_refresh()` is the first call in both `SandboxedClaudeCode::run` and `BareClaudeCode::run`
 
 ### B2
 
@@ -2944,13 +2945,16 @@ Test: src/claude_auth.rs (tests::keychain_envelope_deserializes_without_refresh_
 WHEN `src/coder.rs::run_with_transcript_retrying` observes the
 coder process exit non-zero AND the transcript's most recent
 `result` event has `api_error_status == 401`,
+THE SYSTEM SHALL attempt `credential::refresh_credentials()` once
+and re-run the coder session. If the re-run still produces a 401,
 THE SYSTEM SHALL return `AuthError::Rejected { request_id }`
 (populated from the transcript's `result.request_id` when
-present) so the caller bails with a recovery message (the Task
-fails with `TaskStatus::Failed`).
+present) so the caller bails with a recovery message.
 Test: src/claude_auth.rs (tests::classify_transcript_401_returns_rejected_on_result_401)
 Test: src/claude_auth.rs (tests::classify_transcript_401_extracts_request_id_when_present)
 Test: src/claude_auth.rs (tests::classify_transcript_401_returns_rejected_with_none_request_id_when_missing)
+Test: src/coder.rs (coder_retries_once_after_credential_refresh_on_401)
+Test: src/coder.rs (coder_surfaces_auth_error_when_refresh_does_not_help)
 
 ### B7
 
@@ -2965,9 +2969,10 @@ Untestable: Structural ordering verified by code inspection — `classify_transc
 WHEN the user-facing error message is constructed for either
 `AuthError::Expired` or `AuthError::Rejected`,
 THE SYSTEM SHALL name the recovery action explicitly, mentioning
-`claude /login` and `retry the Task` in the message.
+`claude /login` and `fluent attempt run` in the message.
 Test: src/claude_auth.rs (tests::auth_error_expired_user_message_names_login_action)
 Test: src/claude_auth.rs (tests::auth_error_rejected_user_message_names_login_action)
+Test: src/claude_auth.rs (tests::auth_handoff_names_attempt_run_recovery)
 
 ### B9
 
@@ -2975,6 +2980,90 @@ WHEN any Codex coder variant (`CodexCode`) is about to launch,
 THE SYSTEM SHALL NOT call `claude_auth::ensure_not_expired()`.
 Codex auth lifecycle is out of scope for this Work Item.
 Untestable: Structural absence verified by code inspection — `CodexCode::run` does not reference `claude_auth`
+
+## Credential refresh and retry
+
+### B1
+
+WHEN a coder session fails with an auth 401, or the pre-launch
+expiry check finds the token expired,
+THE SYSTEM SHALL attempt `credential::refresh_credentials()` once
+and re-run the coder session before treating the 401 as a task
+failure.
+Test: src/coder.rs (coder_retries_once_after_credential_refresh_on_401)
+
+### B2
+
+WHERE the refresh resolves the credential (the re-run session no
+longer returns a 401),
+THE SYSTEM SHALL continue the task normally, with no pause.
+Test: src/coder.rs (coder_succeeds_on_retry_when_refresh_fixes_auth)
+
+### B3
+
+WHERE the session still returns a 401 after the refresh and retry,
+THE SYSTEM SHALL fail the task and pause the Attempt to `needs-user`
+marked with the `auth` pause kind.
+Test: src/coder.rs (coder_surfaces_auth_error_when_refresh_does_not_help)
+
+### B4
+
+WHEN refresh-on-401-retry recovers a session (B2),
+THE SYSTEM SHALL post a local notification that it recovered after
+a credential refresh, mirroring the rate-limit resume notification.
+Test: src/coder.rs (recovered_after_refresh_posts_notification)
+
+## Resumable needs-user attempts
+
+### B1
+
+WHEN an Attempt pauses to `needs-user`,
+THE SYSTEM SHALL record the pause kind on the Attempt (`auth`,
+`uncertain`, or `round-cap`) and keep the Attempt in a suspended,
+resumable state rather than a terminal one.
+Test: src/work_attempt_loop.rs (auth_pause_records_kind_and_leaves_attempt_resumable)
+Test: src/work_attempt_loop.rs (budget_exhaustion_records_round_cap_pause_kind)
+Test: src/work_attempt_loop.rs (uncertain_reviews_record_uncertain_pause_kind)
+
+### B2
+
+WHEN `fluent attempt run` is invoked on an Attempt suspended with
+the `auth` pause kind,
+THE SYSTEM SHALL re-run only the tasks that failed on auth, against
+the existing writer commit, without starting a fresh Attempt or
+discarding committed work.
+Test: src/work_attempt_loop.rs (resume_auth_pause_reruns_only_auth_failed_tasks)
+
+### B3
+
+WHEN the re-run auth-failed tasks pass,
+THE SYSTEM SHALL continue the Attempt through its normal transitions
+(to a Merge Candidate, or the next write round).
+Test: src/work_attempt_loop.rs (resume_auth_pause_advances_to_merge_candidate_on_pass)
+
+### B4
+
+WHEN an Attempt suspends with the `auth` pause kind,
+THE SYSTEM SHALL post a local notification prompting the user to
+re-authenticate (`claude /login`) and then run `fluent attempt run`.
+Test: src/work_attempt_loop.rs (auth_suspend_posts_reauth_notification)
+
+### B5
+
+WHEN an Attempt is suspended with the `auth` pause kind,
+THE SYSTEM SHALL write a handoff that names the recovery that
+exists: re-authenticate (`claude /login`), then `fluent attempt run`.
+Test: src/claude_auth.rs (auth_handoff_names_attempt_run_recovery)
+
+### B6
+
+WHEN `fluent attempt run` is invoked on an Attempt suspended with a
+pause kind whose resume is not yet implemented (`uncertain`,
+`round-cap`),
+THE SYSTEM SHALL report that the pause needs its specific input and
+that resuming it is not yet supported, rather than the generic
+"cannot advance" error — and leave the Attempt suspended.
+Test: src/work_attempt_loop.rs (resume_unimplemented_kind_reports_clearly_and_leaves_suspended)
 
 ## Keep-awake toggle
 
