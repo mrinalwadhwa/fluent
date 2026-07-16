@@ -5342,7 +5342,10 @@ exit 1
         .trim()
         .parse()
         .unwrap();
-    assert_eq!(invocations, 1, "auth rejection should not be retried");
+    assert_eq!(
+        invocations, 3,
+        "expected 3 invocations: original 401, refresh probe, one retry"
+    );
 
     let value = read_work_show_json(&main_dir, "work-1");
     assert_eq!(
@@ -5861,7 +5864,10 @@ exit 1
         .trim()
         .parse()
         .unwrap();
-    assert_eq!(invocations, 1, "auth rejection should not be retried");
+    assert_eq!(
+        invocations, 3,
+        "expected 3 invocations: original 401, refresh probe, one retry"
+    );
 
     let value = read_work_show_json(&main_dir, "work-1");
     assert_eq!(

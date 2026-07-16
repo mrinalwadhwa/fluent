@@ -181,7 +181,7 @@ impl Coder for SandboxedClaudeCode {
         extra_env: &[(String, String)],
         transcript_file: Option<&Path>,
     ) -> Result<i32> {
-        crate::claude_auth::ensure_not_expired()?;
+        ensure_not_expired_with_refresh()?;
         let want_transcript = transcript_file.is_some();
         run_with_transcript_retrying(
             || {
@@ -260,7 +260,7 @@ impl Coder for BareClaudeCode {
         extra_env: &[(String, String)],
         transcript_file: Option<&Path>,
     ) -> Result<i32> {
-        crate::claude_auth::ensure_not_expired()?;
+        ensure_not_expired_with_refresh()?;
         let want_transcript = transcript_file.is_some();
         let model = self.effective_model();
         run_with_transcript_retrying(
@@ -497,6 +497,18 @@ const DEFAULT_RATE_LIMIT_RETRY_AFTER_SECS: u64 = 1800;
 const RATE_LIMIT_MAX_RETRIES: u32 = 2;
 const DEFAULT_JITTER_MAX_SECS: u64 = 30;
 
+fn ensure_not_expired_with_refresh() -> Result<(), crate::claude_auth::AuthError> {
+    if let Err(_) = crate::claude_auth::ensure_not_expired() {
+        eprintln!("  Token expired — refreshing credentials before launch.");
+        let _ = crate::credential::refresh_credentials();
+        if let Err(err) = crate::claude_auth::ensure_not_expired() {
+            return Err(err);
+        }
+        eprintln!("  Credential refresh resolved the expiry — proceeding.");
+    }
+    Ok(())
+}
+
 /// Parsed rate-limit info from a coder transcript.
 #[derive(Debug, Clone)]
 pub struct RateLimitInfo {
@@ -699,10 +711,15 @@ where
 {
     let mut attempt: u32 = 0;
     let mut rl_state = RateLimitState::Normal;
+    let mut auth_refreshed = false;
 
     loop {
         let exit = run_with_transcript(build_cmd(), transcript_file)?;
         if exit == 0 {
+            if auth_refreshed {
+                crate::notify::notify("Fluent", "Recovered after credential refresh.");
+                eprintln!("  Credential refresh resolved the auth issue — continuing.");
+            }
             if matches!(rl_state, RateLimitState::RateLimited) {
                 crate::notify::notify("Fluent", "Fluent resumed after rate-limit pause.");
                 eprintln!("  Rate-limit cleared — resuming.");
@@ -714,8 +731,13 @@ where
             return Ok(exit);
         };
 
-        // 401 auth failure short-circuits before rate-limit detection.
         if let Some(auth_err) = crate::claude_auth::classify_transcript_401(path) {
+            if !auth_refreshed {
+                auth_refreshed = true;
+                eprintln!("  Auth 401 detected — refreshing credentials and retrying.");
+                let _ = crate::credential::refresh_credentials();
+                continue;
+            }
             return Err(anyhow::Error::new(auth_err));
         }
 
@@ -1304,6 +1326,122 @@ mod model_default_tests {
             envs.iter()
                 .any(|(k, v)| *k == OsStr::new("GIT_EDITOR") && *v == Some(OsStr::new("vim"))),
             "caller override of GIT_EDITOR should win"
+        );
+    }
+}
+
+#[cfg(test)]
+mod auth_refresh_tests {
+    use super::*;
+
+    fn make_401_script(counter_path: &Path, succeed_on_call: Option<u32>) -> String {
+        let counter = counter_path.display();
+        let success_check = match succeed_on_call {
+            Some(n) => format!(r#"if [ "$count" -ge {n} ]; then exit 0; fi"#),
+            None => String::new(),
+        };
+        format!(
+            r#"count=0
+if [ -f "{counter}" ]; then count=$(cat "{counter}"); fi
+count=$((count + 1))
+printf '%s' "$count" > "{counter}"
+{success_check}
+echo '{{"type":"result","api_error_status":401,"request_id":"req-test"}}'
+exit 1"#
+        )
+    }
+
+    #[test]
+    fn coder_retries_once_after_credential_refresh_on_401() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let counter = dir.path().join("counter");
+        let script = make_401_script(&counter, None);
+
+        let _ = run_with_transcript_retrying(
+            move || {
+                let mut cmd = Command::new("/bin/sh");
+                cmd.arg("-c").arg(&script);
+                cmd
+            },
+            Some(&transcript),
+        );
+
+        let count: u32 = std::fs::read_to_string(&counter)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(count, 2, "should invoke command exactly twice (original + one retry)");
+    }
+
+    #[test]
+    fn coder_succeeds_on_retry_when_refresh_fixes_auth() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let counter = dir.path().join("counter");
+        let script = make_401_script(&counter, Some(2));
+
+        let result = run_with_transcript_retrying(
+            move || {
+                let mut cmd = Command::new("/bin/sh");
+                cmd.arg("-c").arg(&script);
+                cmd
+            },
+            Some(&transcript),
+        );
+
+        assert_eq!(result.unwrap(), 0, "should succeed after retry");
+    }
+
+    #[test]
+    fn coder_surfaces_auth_error_when_refresh_does_not_help() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let counter = dir.path().join("counter");
+        let script = make_401_script(&counter, None);
+
+        let result = run_with_transcript_retrying(
+            move || {
+                let mut cmd = Command::new("/bin/sh");
+                cmd.arg("-c").arg(&script);
+                cmd
+            },
+            Some(&transcript),
+        );
+
+        let err = result.unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::claude_auth::AuthError>().is_some(),
+            "should return AuthError, got: {err}"
+        );
+    }
+
+    #[test]
+    fn recovered_after_refresh_posts_notification() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let counter = dir.path().join("counter");
+        let script = make_401_script(&counter, Some(2));
+
+        let result = run_with_transcript_retrying(
+            move || {
+                let mut cmd = Command::new("/bin/sh");
+                cmd.arg("-c").arg(&script);
+                cmd
+            },
+            Some(&transcript),
+        );
+
+        assert_eq!(result.unwrap(), 0);
+        let count: u32 = std::fs::read_to_string(&counter)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            count, 2,
+            "recovery path requires exactly 2 invocations (401 then success)"
         );
     }
 }
