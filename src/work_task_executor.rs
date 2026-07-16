@@ -1860,14 +1860,18 @@ pub fn run_capture_learnings(
         .collect();
     readable_roots.dedup();
 
+    let expertise_dir = workspace_path.join(".fluent/expertise");
+    fs::create_dir_all(&expertise_dir)?;
+
     let (sandbox, _sandbox_profile) = if no_sandbox {
         (CoderSandbox::None, None)
     } else {
         let common_git_dir = worktree::git_common_dir(workspace_path)?;
+        readable_roots.push(workspace_path.to_path_buf());
         build_coder_sandbox_with_writable_and_read_only_roots(
             coder_kind,
             resolver,
-            workspace_path,
+            &expertise_dir,
             &[common_git_dir],
             &readable_roots,
         )?
@@ -4117,6 +4121,59 @@ mod tests {
             notifications.len(),
             0,
             "should not post a notification on non-auth suspend"
+        );
+    }
+
+    #[test]
+    fn capture_sandbox_writable_root_is_expertise_only() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let expertise_dir = workspace.join(".fluent/expertise");
+        fs::create_dir_all(&expertise_dir).unwrap();
+
+        let resolver = ContentResolver::new(None);
+        let common_git_dir = workspace.join(".git");
+        fs::create_dir_all(&common_git_dir).unwrap();
+
+        let review_dir = tmp.path().join("reviews");
+        fs::create_dir_all(&review_dir).unwrap();
+        let readable_roots = vec![review_dir.clone()];
+
+        let mut capture_readable = readable_roots.clone();
+        capture_readable.push(workspace.clone());
+
+        let (_sandbox, profile) = build_coder_sandbox_with_writable_and_read_only_roots(
+            CoderKind::Claude,
+            &resolver,
+            &expertise_dir,
+            &[common_git_dir.clone()],
+            &capture_readable,
+        )
+        .unwrap();
+
+        let profile = profile.expect("sandbox profile should be present");
+        let content = fs::read_to_string(&profile.path).unwrap();
+
+        let expertise_str = expertise_dir.to_string_lossy();
+        let workspace_str = workspace.to_string_lossy();
+
+        assert!(
+            content.contains(&format!(
+                "(allow file-write* (subpath \"{expertise_str}\"))"
+            )),
+            "sandbox should grant write access to .fluent/expertise; profile:\n{content}"
+        );
+        assert!(
+            content.contains(&format!(
+                "(allow file-read*  (subpath \"{workspace_str}\"))"
+            )),
+            "sandbox should grant read access to the workspace; profile:\n{content}"
+        );
+        assert!(
+            !content.contains(&format!(
+                "(allow file-write* (subpath \"{workspace_str}\"))"
+            )),
+            "sandbox should NOT grant write access to the full workspace; profile:\n{content}"
         );
     }
 }
