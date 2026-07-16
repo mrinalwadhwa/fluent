@@ -316,6 +316,19 @@ mod tests {
     }
 
     #[test]
+    fn find_ready_candidate_ready_for_fix_depth_corrective_candidate() {
+        let mut wi = make_work_item_with_candidate(
+            AttemptReviewState::Passed,
+            AttemptStatus::Complete,
+            MergeReviewState::Pending,
+            MergeCandidateMergeStatus::Pending,
+            None,
+        );
+        wi.post_merge_review_fix_depth = Some(1);
+        assert!(find_ready_candidate(&wi).is_some());
+    }
+
+    #[test]
     fn find_ready_candidate_returns_none_when_attempt_needs_user() {
         let wi = make_work_item_with_candidate(
             AttemptReviewState::Passed,
