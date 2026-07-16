@@ -12,9 +12,9 @@ use crate::review::{self, Verdict};
 use crate::review_diff_command;
 use crate::review_only_worktree;
 use crate::work_model::{
-    ArtifactRef, Attempt, AttemptReviewState, AttemptStatus, Task, TaskKind, TaskOutput, TaskStatus,
-    WorkItem, WorkModelStorageError, WorkModelStore, resolve_managed_sibling_workspace_path,
-    work_artifact_path,
+    ArtifactRef, Attempt, AttemptReviewState, AttemptStatus, Task, TaskKind, TaskOutput,
+    TaskStatus, WorkItem, WorkModelStorageError, WorkModelStore,
+    resolve_managed_sibling_workspace_path, work_artifact_path,
 };
 use crate::work_task_executor::{self, WorkTaskRunConfig};
 
@@ -633,8 +633,11 @@ fn try_capture(
         .and_then(|(i, task)| task.output.as_ref().map(|output| (i, output.clone())))
         .ok_or_else(|| anyhow::anyhow!("no completed write task with output"))?;
 
-    let workspace_path =
-        resolve_managed_sibling_workspace_path(project_root, &write_output.workspace_path, "capture workspace")?;
+    let workspace_path = resolve_managed_sibling_workspace_path(
+        project_root,
+        &write_output.workspace_path,
+        "capture workspace",
+    )?;
 
     let review_artifact_paths = all_review_artifact_paths(project_root, attempt);
     if review_artifact_paths.is_empty() {
@@ -650,7 +653,8 @@ fn try_capture(
     };
 
     let diff_range = format!("{}...HEAD", write_output.source_branch);
-    let diff_command = review_diff_command::render_review_diff_command(&workspace_path, &diff_range);
+    let diff_command =
+        review_diff_command::render_review_diff_command(&workspace_path, &diff_range);
 
     work_task_executor::run_capture_learnings(
         &workspace_path,
@@ -1763,7 +1767,8 @@ mod tests {
             make_interpret_reviews_fixture(tmp.path(), "PASS", Some(failing_tester_json()));
 
         let item = store.read_work_item("work-1").unwrap();
-        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", false, None).unwrap();
+        let outcome =
+            interpret_reviews(tmp.path(), &store, item, "attempt-1", false, None).unwrap();
 
         assert!(
             matches!(outcome, WorkAttemptRunOutcome::NeedsUser { .. }),
@@ -1911,8 +1916,15 @@ mod tests {
         let (store_pass, _) =
             make_interpret_reviews_fixture(tmp_pass.path(), "PASS", Some(passing_tester_json()));
         let item_pass = store_pass.read_work_item("work-1").unwrap();
-        let outcome_pass =
-            interpret_reviews(tmp_pass.path(), &store_pass, item_pass, "attempt-1", true, None).unwrap();
+        let outcome_pass = interpret_reviews(
+            tmp_pass.path(),
+            &store_pass,
+            item_pass,
+            "attempt-1",
+            true,
+            None,
+        )
+        .unwrap();
         assert!(
             matches!(
                 outcome_pass,
@@ -1988,7 +2000,8 @@ mod tests {
             make_interpret_reviews_fixture(tmp.path(), "PASS", Some(errored_tester_json()));
 
         let item = store.read_work_item("work-1").unwrap();
-        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", false, None).unwrap();
+        let outcome =
+            interpret_reviews(tmp.path(), &store, item, "attempt-1", false, None).unwrap();
 
         assert!(
             matches!(outcome, WorkAttemptRunOutcome::NeedsUser { .. }),
@@ -2052,9 +2065,7 @@ mod tests {
         );
     }
 
-    fn make_multi_round_fixture(
-        project_root: &Path,
-    ) -> (WorkModelStore, WorkItem) {
+    fn make_multi_round_fixture(project_root: &Path) -> (WorkModelStore, WorkItem) {
         let store = WorkModelStore::new(project_root);
         let mut item = WorkItem {
             id: "work-1".to_string(),
@@ -2133,8 +2144,7 @@ mod tests {
             "multi-round attempt should trigger capture"
         );
 
-        let outcome =
-            interpret_reviews(tmp.path(), &store, item, "attempt-1", true, None).unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true, None).unwrap();
 
         assert!(
             matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),

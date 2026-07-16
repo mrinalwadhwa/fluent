@@ -1799,7 +1799,13 @@ fn capture_failure_does_not_abort_run() {
 
     fluent_cmd()
         .current_dir(&main_dir)
-        .args(["work-item", "create", "work-1", "--title", "Capture fail test"])
+        .args([
+            "work-item",
+            "create",
+            "work-1",
+            "--title",
+            "Capture fail test",
+        ])
         .assert()
         .success();
     fluent_cmd()
