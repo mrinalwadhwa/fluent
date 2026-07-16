@@ -973,9 +973,9 @@ WHEN the post-merge review finds any reviewer artifact with a failing
 or uncertain verdict,
 THE SYSTEM SHALL create a post-merge-review-fix Work Item with the
 failed review artifacts as planning context and run its first Attempt.
-A passing Merge Candidate is left pending — it lands only when the
-user runs `auto-merge` or invokes `fluent merge-candidate land`,
-exactly like any other candidate. The fix-depth recursion bound is
+A passing Merge Candidate is left pending — it lands when a live
+`auto-merge` watcher picks it up or the user invokes
+`fluent merge-candidate land`, exactly like any other candidate. The fix-depth recursion bound is
 persisted on Work Item state and checked at land time; see the
 "Post-merge forward-fix landing" area for details.
 Untestable: Requires end-to-end post-merge review with LLM reviewers and auto-fix
@@ -2748,12 +2748,12 @@ Test: src/work_model.rs (task_without_depends_on_omits_field)
 ### B1
 
 WHEN `fluent auto-merge <work-item-id>` is invoked,
-THE SYSTEM SHALL poll the named Work Item's state every 30 seconds
-and fire `fluent merge-candidate land <work-item-id> <merge-candidate-id>`
-on the Work Item's latest Attempt's Merge Candidate when its
-`review_state == passed` and `merge_state.status == pending` and
+THE SYSTEM SHALL poll the named Work Item's state every 30 seconds and fire
+`fluent merge-candidate land <work-item-id> <merge-candidate-id>` on the latest
+Attempt's Merge Candidate WHEN that Attempt is `Complete` with
+`review_state == passed`, the candidate's `merge_state.status == pending`, and
 `merge_state.auto_merge_skipped` is not `true`.
-Test: src/auto_merge.rs (find_ready_candidate_returns_some_when_attempt_passed_and_candidate_pending)
+Test: src/auto_merge.rs (find_ready_candidate_ready_for_real_passed_ordinary_candidate)
 Test: tests/binary.rs (auto_merge_exits_clean_on_sigterm)
 
 ### B2
@@ -2763,7 +2763,7 @@ THE SYSTEM SHALL poll every Work Item in the project every 30
 seconds and fire merge on any Merge Candidate that satisfies the
 ready conditions above. Each WI is evaluated independently each
 tick.
-Test: src/auto_merge.rs (find_ready_candidate_returns_some_when_attempt_passed_and_candidate_pending)
+Test: src/auto_merge.rs (find_ready_candidate_ready_for_real_passed_ordinary_candidate)
 
 ### B3
 
@@ -2807,30 +2807,38 @@ Test: src/auto_merge.rs (classify_merge_outcome_recognizes_authentication_failed
 WHEN a future tick observes a Merge Candidate with
 `merge_state.auto_merge_skipped == true`,
 THE SYSTEM SHALL skip that candidate and SHALL NOT attempt to
-merge it, even if its `review_state` and `merge_state.status`
-otherwise satisfy the ready conditions.
+merge it, even if the Attempt and `merge_state.status` otherwise
+satisfy the ready conditions.
 Test: src/auto_merge.rs (find_ready_candidate_returns_none_when_auto_merge_skipped)
 Test: tests/binary.rs (auto_merge_skips_candidate_already_marked_skipped)
 
 ### B8
 
-WHEN a future tick observes a Merge Candidate whose
-`merge_state.status == needs-user` or whose
-`review_state != passed`,
+WHEN a future tick observes a Merge Candidate whose latest Attempt is not
+`Complete`-with-passing-reviews (for example, the Attempt is paused `needs-user`),
+or whose `merge_state.status` is not `pending`,
 THE SYSTEM SHALL skip the candidate without setting
 `auto_merge_skipped` and SHALL pick it up automatically on a
 later tick if it transitions back to a ready state.
+Test: src/auto_merge.rs (find_ready_candidate_returns_none_when_attempt_needs_user)
 Test: src/auto_merge.rs (find_ready_candidate_returns_none_when_merge_status_needs_user)
-Test: src/auto_merge.rs (find_ready_candidate_returns_none_when_candidate_review_not_passed)
 
 ### B9
+
+WHEN the watcher observes a post-merge corrective Merge Candidate whose Attempt is
+`Complete` with passing reviews and which is unmerged,
+THE SYSTEM SHALL treat it as ready identically to an ordinary candidate, using the
+same readiness rule and the same common lander.
+Test: src/auto_merge.rs (find_ready_candidate_ready_for_fix_depth_corrective_candidate)
+
+### B10
 
 WHEN `fluent auto-merge` receives SIGINT or SIGTERM while
 no merge is in progress,
 THE SYSTEM SHALL exit zero immediately.
 Test: tests/binary.rs (auto_merge_exits_clean_on_sigterm)
 
-### B10
+### B11
 
 WHEN `fluent auto-merge` receives SIGINT or SIGTERM while a
 merge is in progress,
@@ -2839,16 +2847,16 @@ THE SYSTEM SHALL allow the current merge invocation to complete
 resulting state changes via the store, then exit.
 Untestable: Requires a long-running merge mock; verified by code inspection of the polling loop
 
-### B11
+### B12
 
 WHEN the watcher's polling tick reads Work Item state from
 `.fluent/work/`,
 THE SYSTEM SHALL NOT modify any state files itself; state mutation
 happens only through `fluent merge-candidate land` invocations and the
 store APIs those invocations call.
-Test: src/auto_merge.rs (find_ready_candidate_returns_some_when_attempt_passed_and_candidate_pending)
+Test: src/auto_merge.rs (find_ready_candidate_ready_for_real_passed_ordinary_candidate)
 
-### B12
+### B13
 
 WHEN the watcher sees a Work Item with no Attempts or no Merge
 Candidates yet,
@@ -2856,7 +2864,7 @@ THE SYSTEM SHALL skip it on this tick without printing anything
 and re-evaluate on the next tick.
 Test: src/auto_merge.rs (find_ready_candidate_returns_none_when_no_attempts)
 
-### B13
+### B14
 
 WHEN `fluent auto-merge` is invoked with neither a Work Item
 ID nor `--all`,
