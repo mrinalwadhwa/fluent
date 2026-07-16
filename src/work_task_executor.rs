@@ -1785,6 +1785,96 @@ fn run_seed_project_model(
     Ok(())
 }
 
+pub fn run_capture_learnings(
+    workspace_path: &Path,
+    resolver: &ContentResolver,
+    extra_args: &[String],
+    coder_kind: CoderKind,
+    no_sandbox: bool,
+    model: Option<&str>,
+    review_artifact_paths: &[PathBuf],
+    diff_command: &str,
+) -> Result<()> {
+    eprintln!("  Capturing learnings from review run…");
+
+    let workspace_resolver = ContentResolver::new(Some(workspace_path));
+    let system_prompt = workspace_resolver
+        .resolve_content("prompts/write-system.md")
+        .unwrap_or_default();
+
+    let learnings_dir = workspace_path.join(".fluent/expertise/learnings");
+    let learnings_index_path = learnings_dir.join("INDEX.md");
+    let expertise_index_path = workspace_path.join(".fluent/expertise/INDEX.md");
+
+    let review_paths_rendered = review_artifact_paths
+        .iter()
+        .map(|p| format!("- {}", p.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let has_learnings_index = if learnings_index_path.is_file() {
+        "yes"
+    } else {
+        ""
+    };
+
+    let template = resolver
+        .resolve_content("prompts/capture-user.md")
+        .ok_or_else(|| anyhow::anyhow!("bundled capture-user.md must resolve"))?;
+    let prompt = crate::content::render_template(
+        &template,
+        &[
+            ("review_artifact_paths", &review_paths_rendered),
+            ("diff_command", diff_command),
+            ("learnings_dir", &learnings_dir.display().to_string()),
+            (
+                "learnings_index_path",
+                &learnings_index_path.display().to_string(),
+            ),
+            (
+                "expertise_index_path",
+                &expertise_index_path.display().to_string(),
+            ),
+            ("has_learnings_index", has_learnings_index),
+        ],
+    )
+    .map_err(|e| anyhow::anyhow!("capture-user.md template error: {e}"))?;
+
+    let mut readable_roots: Vec<PathBuf> = review_artifact_paths
+        .iter()
+        .filter_map(|p| p.parent().map(|parent| parent.to_path_buf()))
+        .collect();
+    readable_roots.dedup();
+
+    let (sandbox, _sandbox_profile) = if no_sandbox {
+        (CoderSandbox::None, None)
+    } else {
+        let common_git_dir = worktree::git_common_dir(workspace_path)?;
+        build_coder_sandbox_with_writable_and_read_only_roots(
+            coder_kind,
+            resolver,
+            workspace_path,
+            &[common_git_dir],
+            &readable_roots,
+        )?
+    };
+
+    let coder = coder_kind.boxed_with_model(sandbox, model);
+    let exit_code = coder.run(
+        &prompt,
+        &system_prompt,
+        workspace_path,
+        extra_args,
+        &[],
+        None,
+    )?;
+    if exit_code != 0 {
+        bail!("Capture coder exited with code {exit_code}");
+    }
+
+    Ok(())
+}
+
 fn progress_md_dir(project_root: &Path, work_item_id: &str, attempt_id: &str) -> PathBuf {
     project_root
         .join(crate::work_model::WORK_PROGRESS_DIR)
@@ -3807,5 +3897,62 @@ mod tests {
         let workspace = tmp.path();
         assert!(!should_seed_project_model(TaskKind::Review, workspace));
         assert!(!should_seed_project_model(TaskKind::Tester, workspace));
+    }
+
+    #[test]
+    fn capture_prompt_includes_findings_and_diff_inputs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path();
+        let resolver = ContentResolver::new(None);
+        let template = resolver
+            .resolve_content("prompts/capture-user.md")
+            .expect("capture-user.md must resolve");
+
+        let learnings_dir = workspace.join(".fluent/expertise/learnings");
+        let learnings_index_path = learnings_dir.join("INDEX.md");
+        let expertise_index_path = workspace.join(".fluent/expertise/INDEX.md");
+
+        let review_paths = "- /tmp/review-1/review.md\n- /tmp/review-2/review.md";
+        let diff_command = "git -C '/tmp/workspace' diff 'main...HEAD'";
+
+        let rendered = crate::content::render_template(
+            &template,
+            &[
+                ("review_artifact_paths", review_paths),
+                ("diff_command", diff_command),
+                ("learnings_dir", &learnings_dir.display().to_string()),
+                (
+                    "learnings_index_path",
+                    &learnings_index_path.display().to_string(),
+                ),
+                (
+                    "expertise_index_path",
+                    &expertise_index_path.display().to_string(),
+                ),
+                ("has_learnings_index", ""),
+            ],
+        )
+        .expect("capture template must render");
+
+        assert!(
+            rendered.contains("/tmp/review-1/review.md"),
+            "rendered capture prompt should include first review artifact path"
+        );
+        assert!(
+            rendered.contains("/tmp/review-2/review.md"),
+            "rendered capture prompt should include second review artifact path"
+        );
+        assert!(
+            rendered.contains(diff_command),
+            "rendered capture prompt should include the diff command"
+        );
+        assert!(
+            rendered.contains(&learnings_dir.display().to_string()),
+            "rendered capture prompt should include the learnings directory path"
+        );
+        assert!(
+            rendered.contains(&expertise_index_path.display().to_string()),
+            "rendered capture prompt should include the expertise index path"
+        );
     }
 }

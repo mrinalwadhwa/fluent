@@ -7,11 +7,14 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 use crate::content::ContentResolver;
+use crate::git;
 use crate::review::{self, Verdict};
+use crate::review_diff_command;
 use crate::review_only_worktree;
 use crate::work_model::{
-    ArtifactRef, Attempt, AttemptReviewState, AttemptStatus, Task, TaskKind, TaskStatus, WorkItem,
-    WorkModelStorageError, WorkModelStore, work_artifact_path,
+    ArtifactRef, Attempt, AttemptReviewState, AttemptStatus, Task, TaskKind, TaskOutput, TaskStatus,
+    WorkItem, WorkModelStorageError, WorkModelStore, resolve_managed_sibling_workspace_path,
+    work_artifact_path,
 };
 use crate::work_task_executor::{self, WorkTaskRunConfig};
 
@@ -228,6 +231,11 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                 item,
                 config.attempt_id,
                 can_advance,
+                Some(CaptureConfig {
+                    resolver: config.resolver,
+                    extra_args: config.extra_args,
+                    no_sandbox: config.no_sandbox,
+                }),
             )?;
             let should_stop = matches!(
                 outcome,
@@ -591,6 +599,85 @@ fn next_review_roles(attempt: &Attempt) -> Vec<&'static str> {
     }
 }
 
+struct CaptureConfig<'a> {
+    resolver: &'a ContentResolver,
+    extra_args: &'a [String],
+    no_sandbox: bool,
+}
+
+fn run_capture_step(
+    project_root: &Path,
+    item: &mut WorkItem,
+    attempt_index: usize,
+    config: &CaptureConfig<'_>,
+) {
+    let result = try_capture(project_root, item, attempt_index, config);
+    if let Err(err) = result {
+        eprintln!("  Warning: capture learnings failed, continuing without capture: {err}");
+    }
+}
+
+fn try_capture(
+    project_root: &Path,
+    item: &mut WorkItem,
+    attempt_index: usize,
+    config: &CaptureConfig<'_>,
+) -> Result<()> {
+    let attempt = &item.attempts[attempt_index];
+    let (write_task_index, write_output) = attempt
+        .tasks
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, task)| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+        .and_then(|(i, task)| task.output.as_ref().map(|output| (i, output.clone())))
+        .ok_or_else(|| anyhow::anyhow!("no completed write task with output"))?;
+
+    let workspace_path =
+        resolve_managed_sibling_workspace_path(project_root, &write_output.workspace_path, "capture workspace")?;
+
+    let review_artifact_paths = all_review_artifact_paths(project_root, attempt);
+    if review_artifact_paths.is_empty() {
+        return Ok(());
+    }
+
+    let mapping_pair = attempt.coder_mapping.for_task_kind(TaskKind::Write);
+    let coder_kind = mapping_pair.coder;
+    let model = if mapping_pair.model.is_empty() {
+        None
+    } else {
+        Some(mapping_pair.model.as_str())
+    };
+
+    let diff_range = format!("{}...HEAD", write_output.source_branch);
+    let diff_command = review_diff_command::render_review_diff_command(&workspace_path, &diff_range);
+
+    work_task_executor::run_capture_learnings(
+        &workspace_path,
+        config.resolver,
+        config.extra_args,
+        coder_kind,
+        config.no_sandbox,
+        model,
+        &review_artifact_paths,
+        &diff_command,
+    )?;
+
+    let new_head = git::run_stdout(
+        &workspace_path,
+        &["rev-parse", "HEAD"],
+        "resolve post-capture HEAD",
+    )?;
+    if new_head != write_output.commit {
+        item.attempts[attempt_index].tasks[write_task_index].output = Some(TaskOutput {
+            commit: new_head,
+            ..write_output
+        });
+    }
+
+    Ok(())
+}
+
 fn should_capture(attempt: &Attempt) -> bool {
     attempt
         .tasks
@@ -698,6 +785,7 @@ fn interpret_reviews(
     mut item: WorkItem,
     attempt_id: &str,
     followup_budget_available: bool,
+    capture_config: Option<CaptureConfig<'_>>,
 ) -> Result<WorkAttemptRunOutcome> {
     let attempt_index = item
         .attempts
@@ -802,7 +890,9 @@ fn interpret_reviews(
         return Ok(WorkAttemptRunOutcome::ReviewOnlyComplete);
     }
     if should_capture(&item.attempts[attempt_index]) {
-        // Capture learnings — session wired in Step 2
+        if let Some(ref cc) = capture_config {
+            run_capture_step(project_root, &mut item, attempt_index, cc);
+        }
     }
     let candidate_id = item.create_or_get_merge_candidate(attempt_id)?;
     store.write_work_item(&item)?;
@@ -846,6 +936,23 @@ fn latest_review_artifacts(
                 review_path: artifact_dir.join("review.md"),
             })
         })
+        .collect()
+}
+
+fn all_review_artifact_paths(
+    project_root: &Path,
+    attempt: &crate::work_model::Attempt,
+) -> Vec<PathBuf> {
+    attempt
+        .tasks
+        .iter()
+        .filter(|task| task.kind == TaskKind::Review && task.status == TaskStatus::Complete)
+        .filter_map(|task| task.artifact_area.as_ref())
+        .filter_map(|area| {
+            work_task_executor::resolve_managed_artifact_area_path(project_root, &area.path).ok()
+        })
+        .map(|dir| dir.join("review.md"))
+        .filter(|path| path.is_file())
         .collect()
 }
 
@@ -1626,7 +1733,7 @@ mod tests {
             make_interpret_reviews_fixture(tmp.path(), "PASS", Some(failing_tester_json()));
 
         let item = store.read_work_item("work-1").unwrap();
-        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true).unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true, None).unwrap();
 
         assert!(
             !matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
@@ -1641,7 +1748,7 @@ mod tests {
             make_interpret_reviews_fixture(tmp.path(), "PASS", Some(failing_tester_json()));
 
         let item = store.read_work_item("work-1").unwrap();
-        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true).unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true, None).unwrap();
 
         assert!(
             matches!(outcome, WorkAttemptRunOutcome::PlannedWriteRound { .. }),
@@ -1656,7 +1763,7 @@ mod tests {
             make_interpret_reviews_fixture(tmp.path(), "PASS", Some(failing_tester_json()));
 
         let item = store.read_work_item("work-1").unwrap();
-        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", false).unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", false, None).unwrap();
 
         assert!(
             matches!(outcome, WorkAttemptRunOutcome::NeedsUser { .. }),
@@ -1759,7 +1866,7 @@ mod tests {
             Some(&baseline_json),
         );
         let item = store.read_work_item("work-1").unwrap();
-        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true).unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true, None).unwrap();
         assert!(
             matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
             "pre-existing failure should pass gate when baseline matches; got {outcome:?}"
@@ -1778,7 +1885,7 @@ mod tests {
             Some(&baseline_json),
         );
         let item = store.read_work_item("work-1").unwrap();
-        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true).unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true, None).unwrap();
         assert!(
             !matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
             "introduced failure (test_c) should block gate; got {outcome:?}"
@@ -1791,7 +1898,7 @@ mod tests {
         let current_json = tester_json_with_ids(&["test_b"], &["test_a"]);
         let (store, _) = make_fixture_with_baseline(tmp.path(), "PASS", Some(&current_json), None);
         let item = store.read_work_item("work-1").unwrap();
-        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true).unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true, None).unwrap();
         assert!(
             !matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
             "without baseline, any failure should block gate; got {outcome:?}"
@@ -1805,7 +1912,7 @@ mod tests {
             make_interpret_reviews_fixture(tmp_pass.path(), "PASS", Some(passing_tester_json()));
         let item_pass = store_pass.read_work_item("work-1").unwrap();
         let outcome_pass =
-            interpret_reviews(tmp_pass.path(), &store_pass, item_pass, "attempt-1", true).unwrap();
+            interpret_reviews(tmp_pass.path(), &store_pass, item_pass, "attempt-1", true, None).unwrap();
         assert!(
             matches!(
                 outcome_pass,
@@ -1823,6 +1930,7 @@ mod tests {
             item_missing,
             "attempt-1",
             true,
+            None,
         )
         .unwrap();
         assert!(
@@ -1850,7 +1958,7 @@ mod tests {
             make_interpret_reviews_fixture(tmp.path(), "PASS", Some(errored_tester_json()));
 
         let item = store.read_work_item("work-1").unwrap();
-        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true).unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true, None).unwrap();
 
         assert!(
             !matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
@@ -1865,7 +1973,7 @@ mod tests {
             make_interpret_reviews_fixture(tmp.path(), "PASS", Some(errored_tester_json()));
 
         let item = store.read_work_item("work-1").unwrap();
-        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true).unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true, None).unwrap();
 
         assert!(
             matches!(outcome, WorkAttemptRunOutcome::PlannedWriteRound { .. }),
@@ -1880,7 +1988,7 @@ mod tests {
             make_interpret_reviews_fixture(tmp.path(), "PASS", Some(errored_tester_json()));
 
         let item = store.read_work_item("work-1").unwrap();
-        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", false).unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", false, None).unwrap();
 
         assert!(
             matches!(outcome, WorkAttemptRunOutcome::NeedsUser { .. }),
@@ -1895,7 +2003,7 @@ mod tests {
             make_interpret_reviews_fixture(tmp.path(), "PASS", Some(errored_tester_json()));
 
         let item = store.read_work_item("work-1").unwrap();
-        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true).unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true, None).unwrap();
 
         assert!(
             !matches!(
@@ -1915,7 +2023,7 @@ mod tests {
             make_fixture_with_baseline(tmp.path(), "PASS", Some(errored_json), Some(errored_json));
 
         let item = store.read_work_item("work-1").unwrap();
-        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true).unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true, None).unwrap();
 
         assert!(
             !matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
