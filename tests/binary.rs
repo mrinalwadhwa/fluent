@@ -1275,6 +1275,44 @@ fn craft_section_names_skill_and_lifecycle_stages() {
     }
 }
 
+#[test]
+fn init_succeeds_when_craft_section_write_fails() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+
+    // Create a read-only AGENTS.md so the craft section write fails.
+    let agents = project.join("AGENTS.md");
+    fs::write(&agents, "# Existing\n").unwrap();
+    let mut perms = fs::metadata(&agents).unwrap().permissions();
+    perms.set_readonly(true);
+    fs::set_permissions(&agents, perms).unwrap();
+
+    let output = fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .current_dir(&project)
+        .args(["init"])
+        .output()
+        .unwrap();
+
+    // Restore write permission for cleanup.
+    let mut perms = fs::metadata(&agents).unwrap().permissions();
+    perms.set_readonly(false);
+    fs::set_permissions(&agents, perms).unwrap();
+
+    assert!(
+        output.status.success(),
+        "init must succeed even when craft section write fails"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("warning: could not seed agent instructions"),
+        "init must print a warning when craft section write fails: {stderr}"
+    );
+}
+
 // -------------------------------------------------------------------------
 // Status
 // -------------------------------------------------------------------------
