@@ -9,7 +9,7 @@ use crate::content::ContentResolver;
 use crate::work_merge_executor::{self, WorkMergeConfig};
 use crate::work_model::{
     AttemptReviewState, AttemptStatus, MergeCandidate, MergeCandidateMergeStatus,
-    MergeCandidateReviewState, WorkItem, WorkModelStorageError, WorkModelStore,
+    MergeReviewState, WorkItem, WorkModelStorageError, WorkModelStore,
 };
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
@@ -109,7 +109,7 @@ pub fn find_ready_candidate(wi: &WorkItem) -> Option<&MergeCandidate> {
     if candidate.merge_state.status != MergeCandidateMergeStatus::Pending {
         return None;
     }
-    if candidate.review_state != MergeCandidateReviewState::Passed {
+    if candidate.merge_review_state != MergeReviewState::Passed {
         return None;
     }
     if candidate.merge_state.auto_merge_skipped == Some(true) {
@@ -222,7 +222,7 @@ mod tests {
     fn make_work_item_with_candidate(
         review_state: AttemptReviewState,
         attempt_status: AttemptStatus,
-        candidate_review_state: MergeCandidateReviewState,
+        candidate_merge_review_state: MergeReviewState,
         merge_status: MergeCandidateMergeStatus,
         auto_merge_skipped: Option<bool>,
     ) -> WorkItem {
@@ -290,7 +290,7 @@ mod tests {
             source_branch: "main".to_string(),
             target_branch: "main".to_string(),
             candidate_commit: "abc123".to_string(),
-            review_state: candidate_review_state,
+            merge_review_state: candidate_merge_review_state,
             merge_state: MergeCandidateMergeState {
                 status: merge_status,
                 merged_commit: None,
@@ -311,7 +311,7 @@ mod tests {
         let wi = make_work_item_with_candidate(
             AttemptReviewState::Passed,
             AttemptStatus::Complete,
-            MergeCandidateReviewState::Passed,
+            MergeReviewState::Passed,
             MergeCandidateMergeStatus::Pending,
             None,
         );
@@ -323,7 +323,7 @@ mod tests {
         let wi = make_work_item_with_candidate(
             AttemptReviewState::Passed,
             AttemptStatus::Complete,
-            MergeCandidateReviewState::Passed,
+            MergeReviewState::Passed,
             MergeCandidateMergeStatus::Merged,
             None,
         );
@@ -335,7 +335,7 @@ mod tests {
         let wi = make_work_item_with_candidate(
             AttemptReviewState::Passed,
             AttemptStatus::Complete,
-            MergeCandidateReviewState::Passed,
+            MergeReviewState::Passed,
             MergeCandidateMergeStatus::Pending,
             Some(true),
         );
@@ -347,7 +347,7 @@ mod tests {
         let wi = make_work_item_with_candidate(
             AttemptReviewState::Passed,
             AttemptStatus::Complete,
-            MergeCandidateReviewState::Pending,
+            MergeReviewState::Pending,
             MergeCandidateMergeStatus::Pending,
             None,
         );
@@ -359,7 +359,7 @@ mod tests {
         let wi = make_work_item_with_candidate(
             AttemptReviewState::Passed,
             AttemptStatus::Complete,
-            MergeCandidateReviewState::Passed,
+            MergeReviewState::Passed,
             MergeCandidateMergeStatus::NeedsUser,
             None,
         );
@@ -371,7 +371,7 @@ mod tests {
         let mut wi = make_work_item_with_candidate(
             AttemptReviewState::Passed,
             AttemptStatus::Complete,
-            MergeCandidateReviewState::Passed,
+            MergeReviewState::Passed,
             MergeCandidateMergeStatus::Pending,
             None,
         );
@@ -413,7 +413,7 @@ mod tests {
         let wi = make_work_item_with_candidate(
             AttemptReviewState::Failed,
             AttemptStatus::Complete,
-            MergeCandidateReviewState::Passed,
+            MergeReviewState::Passed,
             MergeCandidateMergeStatus::Pending,
             None,
         );

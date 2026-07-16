@@ -802,7 +802,7 @@ impl WorkItem {
             source_branch: write_output.source_branch.clone(),
             target_branch: write_output.source_branch.clone(),
             candidate_commit: write_output.commit.clone(),
-            review_state: MergeCandidateReviewState::Pending,
+            merge_review_state: MergeReviewState::Pending,
             merge_state: MergeCandidateMergeState::default(),
             created_at: Some(now_iso8601()),
             started_at: None,
@@ -850,7 +850,7 @@ impl WorkItem {
             });
         }
         if let Some(candidate) = self.merge_candidates.iter().find(|candidate| {
-            candidate.review_state == MergeCandidateReviewState::Reviewing
+            candidate.merge_review_state == MergeReviewState::Reviewing
                 || candidate.merge_state.status == MergeCandidateMergeStatus::Executing
         }) {
             return Err(WorkModelError::WorkItemAbandonmentBlocked {
@@ -1668,7 +1668,7 @@ pub struct ArtifactRef {
     pub path: String,
 }
 
-/// Candidate merge result and its own review state.
+/// Candidate merge result and its merge-review lifecycle state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MergeCandidate {
     pub id: String,
@@ -1678,7 +1678,8 @@ pub struct MergeCandidate {
     pub source_branch: String,
     pub target_branch: String,
     pub candidate_commit: String,
-    pub review_state: MergeCandidateReviewState,
+    #[serde(alias = "review_state")]
+    pub merge_review_state: MergeReviewState,
     #[serde(default)]
     pub merge_state: MergeCandidateMergeState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1778,10 +1779,10 @@ impl MergeCandidate {
     }
 }
 
-/// Review state attached to a merge candidate, not to the attempt.
+/// Merge-time review lifecycle state for a merge candidate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum MergeCandidateReviewState {
+pub enum MergeReviewState {
     Pending,
     Reviewing,
     Passed,
@@ -3482,7 +3483,7 @@ mod tests {
                 source_branch: "main".to_string(),
                 target_branch: "main".to_string(),
                 candidate_commit: "abc123".to_string(),
-                review_state: MergeCandidateReviewState::Reviewing,
+                merge_review_state: MergeReviewState::Reviewing,
                 merge_state: MergeCandidateMergeState::default(),
                 created_at: None,
                 started_at: None,
@@ -3500,7 +3501,7 @@ mod tests {
         ));
         assert!(work_item.abandonment.is_none());
 
-        work_item.merge_candidates[0].review_state = MergeCandidateReviewState::Pending;
+        work_item.merge_candidates[0].merge_review_state = MergeReviewState::Pending;
         work_item.merge_candidates[0].merge_state.status = MergeCandidateMergeStatus::Executing;
 
         let error = work_item
@@ -4322,7 +4323,7 @@ mod tests {
             source_branch: "main".to_string(),
             target_branch: "main".to_string(),
             candidate_commit: "commit-initial".to_string(),
-            review_state: MergeCandidateReviewState::Failed,
+            merge_review_state: MergeReviewState::Failed,
             merge_state: MergeCandidateMergeState {
                 status: MergeCandidateMergeStatus::Failed,
                 merged_commit: None,
@@ -4612,7 +4613,7 @@ mod tests {
         assert_eq!(candidate.source_branch, "main");
         assert_eq!(candidate.target_branch, "main");
         assert_eq!(candidate.candidate_commit, "commit-followup");
-        assert_eq!(candidate.review_state, MergeCandidateReviewState::Pending);
+        assert_eq!(candidate.merge_review_state, MergeReviewState::Pending);
         work_item.validate().unwrap();
     }
 
@@ -4730,7 +4731,7 @@ mod tests {
             source_branch: "main".to_string(),
             target_branch: "main".to_string(),
             candidate_commit: "commit-original".to_string(),
-            review_state: MergeCandidateReviewState::Pending,
+            merge_review_state: MergeReviewState::Pending,
             merge_state: MergeCandidateMergeState::default(),
             created_at: None,
             started_at: None,
@@ -4784,7 +4785,7 @@ mod tests {
             source_branch: "main".to_string(),
             target_branch: "main".to_string(),
             candidate_commit: "stale-commit".to_string(),
-            review_state: MergeCandidateReviewState::Pending,
+            merge_review_state: MergeReviewState::Pending,
             merge_state: MergeCandidateMergeState::default(),
             created_at: None,
             started_at: None,
@@ -4801,7 +4802,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_merge_candidate_preserves_failed_review_state() {
+    fn failed_merge_candidate_preserves_failed_merge_review_state() {
         let mut work_item = WorkItem {
             id: "work-1".to_string(),
             title: "Preserve merge failure state".to_string(),
@@ -4838,7 +4839,7 @@ mod tests {
             source_branch: "main".to_string(),
             target_branch: "main".to_string(),
             candidate_commit: "commit-original".to_string(),
-            review_state: MergeCandidateReviewState::Pending,
+            merge_review_state: MergeReviewState::Pending,
             merge_state: MergeCandidateMergeState {
                 status: MergeCandidateMergeStatus::Failed,
                 merged_commit: None,
@@ -4893,7 +4894,7 @@ mod tests {
             source_branch: "main".to_string(),
             target_branch: "main".to_string(),
             candidate_commit: "stale-commit".to_string(),
-            review_state: MergeCandidateReviewState::Pending,
+            merge_review_state: MergeReviewState::Pending,
             merge_state: MergeCandidateMergeState {
                 status: MergeCandidateMergeStatus::Failed,
                 merged_commit: None,
@@ -4917,7 +4918,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_candidate_review_state_is_separate_from_attempt_review_state() {
+    fn merge_candidate_merge_review_state_is_separate_from_attempt_review_state() {
         let attempt = Attempt {
             id: "attempt-1".to_string(),
             work_item_id: "work-1".to_string(),
@@ -4939,7 +4940,7 @@ mod tests {
             source_branch: "main".to_string(),
             target_branch: "main".to_string(),
             candidate_commit: "abc123".to_string(),
-            review_state: MergeCandidateReviewState::Passed,
+            merge_review_state: MergeReviewState::Passed,
             merge_state: MergeCandidateMergeState::default(),
             created_at: None,
             started_at: None,
@@ -4947,7 +4948,7 @@ mod tests {
         };
 
         assert_eq!(attempt.review_state, Some(AttemptReviewState::Uncertain));
-        assert_eq!(candidate.review_state, MergeCandidateReviewState::Passed);
+        assert_eq!(candidate.merge_review_state, MergeReviewState::Passed);
     }
 
     #[test]
@@ -5444,7 +5445,7 @@ mod tests {
             source_branch: "main".to_string(),
             target_branch: "main".to_string(),
             candidate_commit: "abc123".to_string(),
-            review_state: MergeCandidateReviewState::Pending,
+            merge_review_state: MergeReviewState::Pending,
             merge_state: MergeCandidateMergeState::default(),
             created_at: Some("2026-06-12T10:00:00+00:00".to_string()),
             started_at: Some("2026-06-12T10:01:00+00:00".to_string()),
@@ -5592,7 +5593,7 @@ mod tests {
             source_branch: "main".to_string(),
             target_branch: "main".to_string(),
             candidate_commit: "abc123".to_string(),
-            review_state: MergeCandidateReviewState::Pending,
+            merge_review_state: MergeReviewState::Pending,
             merge_state: MergeCandidateMergeState::default(),
             created_at: None,
             started_at: None,
@@ -5612,7 +5613,7 @@ mod tests {
             source_branch: "main".to_string(),
             target_branch: "main".to_string(),
             candidate_commit: "abc123".to_string(),
-            review_state: MergeCandidateReviewState::Pending,
+            merge_review_state: MergeReviewState::Pending,
             merge_state: MergeCandidateMergeState::default(),
             created_at: None,
             started_at: Some("2026-01-01T00:00:00+00:00".to_string()),
@@ -6004,5 +6005,22 @@ mod tests {
             !mapping.behavior_tests.model.is_empty(),
             "model should be resolved at creation"
         );
+    }
+
+    #[test]
+    fn merge_candidate_deserializes_old_review_state_key() {
+        let json = r#"{
+            "id": "mc-1",
+            "attempt_id": "a-1",
+            "source_workspace": {"id": "src", "path": "work/a"},
+            "target_workspace": {"id": "tgt", "path": "."},
+            "source_branch": "main",
+            "target_branch": "main",
+            "candidate_commit": "abc123",
+            "review_state": "pending",
+            "merge_state": {"status": "pending"}
+        }"#;
+        let candidate: MergeCandidate = serde_json::from_str(json).unwrap();
+        assert_eq!(candidate.merge_review_state, MergeReviewState::Pending);
     }
 }

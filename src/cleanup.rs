@@ -6,7 +6,7 @@ use std::path::{Component, Path, PathBuf};
 use crate::git;
 use crate::review;
 use crate::work_model::{
-    Attempt, AttemptStatus, MergeCandidate, MergeCandidateMergeStatus, MergeCandidateReviewState,
+    Attempt, AttemptStatus, MergeCandidate, MergeCandidateMergeStatus, MergeReviewState,
     Task, TaskStatus, WORK_ARTIFACTS_DIR, WorkItem, WorkModelStore,
     resolve_expected_candidate_workspace_path,
 };
@@ -216,7 +216,7 @@ fn work_item_has_no_active_execution(work_item: &WorkItem) -> bool {
             .iter()
             .all(|task| task.status != TaskStatus::Executing)
     }) && work_item.merge_candidates.iter().all(|candidate| {
-        candidate.review_state != MergeCandidateReviewState::Reviewing
+        candidate.merge_review_state != MergeReviewState::Reviewing
             && candidate.merge_state.status != MergeCandidateMergeStatus::Executing
     })
 }
@@ -237,7 +237,7 @@ fn merge_candidate_is_terminal(candidate: &MergeCandidate) -> bool {
     matches!(
         candidate.merge_state.status,
         MergeCandidateMergeStatus::Merged | MergeCandidateMergeStatus::Failed
-    ) || matches!(candidate.review_state, MergeCandidateReviewState::Failed)
+    ) || matches!(candidate.merge_review_state, MergeReviewState::Failed)
 }
 
 fn work_cleanup_plan(
@@ -703,7 +703,7 @@ mod tests {
             source_branch: "main".to_string(),
             target_branch: "main".to_string(),
             candidate_commit: "abc123".to_string(),
-            review_state: MergeCandidateReviewState::Reviewing,
+            merge_review_state: MergeReviewState::Reviewing,
             merge_state: crate::work_model::MergeCandidateMergeState::default(),
             created_at: None,
             started_at: None,
@@ -711,7 +711,7 @@ mod tests {
         };
         let mut merging_candidate = reviewing_candidate.clone();
         merging_candidate.id = "candidate-merging".to_string();
-        merging_candidate.review_state = MergeCandidateReviewState::Pending;
+        merging_candidate.merge_review_state = MergeReviewState::Pending;
         merging_candidate.merge_state.status = MergeCandidateMergeStatus::Executing;
 
         for candidate in [reviewing_candidate, merging_candidate] {

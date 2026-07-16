@@ -577,7 +577,7 @@ fn cmd_merge_candidate(
             } else {
                 println!("{:<24} {:<12} MERGE", "ID", "REVIEW");
                 for candidate in &item.merge_candidates {
-                    let review = format!("{:?}", candidate.review_state).to_lowercase();
+                    let review = format!("{:?}", candidate.merge_review_state).to_lowercase();
                     let merge = format!("{:?}", candidate.merge_state.status).to_lowercase();
                     println!("{:<24} {:<12} {}", candidate.id, review, merge);
                 }

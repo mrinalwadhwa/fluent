@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::work_model::{
     Attempt, AttemptReviewState, AttemptStatus, MergeCandidate, MergeCandidateMergeStatus,
-    MergeCandidateReviewState, Task, TaskKind, TaskStatus, WorkItem, WorkModelStore,
+    MergeReviewState, Task, TaskKind, TaskStatus, WorkItem, WorkModelStore,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,7 +211,7 @@ fn is_task_live_executing(task: &Task, item: &WorkItem, project_root: Option<&Pa
 
 fn format_merge_state(candidate: &MergeCandidate) -> String {
     let status = merge_status_label(&candidate.merge_state.status);
-    let review = merge_review_label(&candidate.review_state);
+    let review = merge_review_label(&candidate.merge_review_state);
     format!("{status} review:{review}")
 }
 
@@ -297,12 +297,12 @@ fn task_kind_label(kind: TaskKind) -> &'static str {
     kind.as_str()
 }
 
-fn merge_review_label(status: &MergeCandidateReviewState) -> &'static str {
+fn merge_review_label(status: &MergeReviewState) -> &'static str {
     match status {
-        MergeCandidateReviewState::Pending => "pending",
-        MergeCandidateReviewState::Reviewing => "reviewing",
-        MergeCandidateReviewState::Passed => "passed",
-        MergeCandidateReviewState::Failed => "failed",
+        MergeReviewState::Pending => "pending",
+        MergeReviewState::Reviewing => "reviewing",
+        MergeReviewState::Passed => "passed",
+        MergeReviewState::Failed => "failed",
     }
 }
 

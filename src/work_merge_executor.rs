@@ -9,7 +9,7 @@ use crate::git;
 use crate::hooks::{self, HookContext, HookOutcome};
 use crate::work_model::{
     ArtifactRef, MergeCandidate, MergeCandidateMergeState, MergeCandidateMergeStatus,
-    MergeCandidateReviewState, Task, TaskKind, TaskStatus, WORK_ARTIFACTS_DIR, WorkItem,
+    MergeReviewState, Task, TaskKind, TaskStatus, WORK_ARTIFACTS_DIR, WorkItem,
     WorkModelError, WorkModelStorageError, WorkModelStore, WorkspaceAccess,
     resolve_expected_candidate_workspace_path, work_artifact_path,
 };
@@ -470,7 +470,7 @@ fn set_candidate_executing(
     candidate_id: &str,
 ) -> Result<()> {
     update_candidate(store, work_item_id, candidate_id, |candidate| {
-        candidate.review_state = MergeCandidateReviewState::Pending;
+        candidate.merge_review_state = MergeReviewState::Pending;
         candidate.merge_state = MergeCandidateMergeState {
             status: MergeCandidateMergeStatus::Executing,
             merged_commit: None,
@@ -498,9 +498,9 @@ fn record_candidate_failure(
             return;
         }
         if !review_artifacts.is_empty()
-            || candidate.review_state == MergeCandidateReviewState::Reviewing
+            || candidate.merge_review_state == MergeReviewState::Reviewing
         {
-            candidate.review_state = MergeCandidateReviewState::Failed;
+            candidate.merge_review_state = MergeReviewState::Failed;
         }
         candidate.merge_state = MergeCandidateMergeState {
             status: MergeCandidateMergeStatus::Failed,
@@ -526,7 +526,7 @@ fn record_candidate_merged(
     review_artifacts: Vec<ArtifactRef>,
 ) -> Result<()> {
     update_candidate(store, work_item_id, candidate_id, |candidate| {
-        candidate.review_state = MergeCandidateReviewState::Passed;
+        candidate.merge_review_state = MergeReviewState::Passed;
         candidate.merge_state = MergeCandidateMergeState {
             status: MergeCandidateMergeStatus::Merged,
             merged_commit: Some(merged_commit.to_string()),
@@ -1214,7 +1214,7 @@ mod tests {
             .iter()
             .find(|candidate| candidate.id == candidate_id)
             .unwrap();
-        assert_eq!(candidate.review_state, MergeCandidateReviewState::Passed);
+        assert_eq!(candidate.merge_review_state, MergeReviewState::Passed);
         assert_eq!(
             candidate.merge_state.status,
             MergeCandidateMergeStatus::Merged
@@ -1248,7 +1248,7 @@ mod tests {
             .iter()
             .find(|candidate| candidate.id == candidate_id)
             .unwrap();
-        assert_eq!(candidate.review_state, MergeCandidateReviewState::Passed);
+        assert_eq!(candidate.merge_review_state, MergeReviewState::Passed);
         assert_eq!(
             candidate.merge_state.status,
             MergeCandidateMergeStatus::Merged

@@ -1,6 +1,6 @@
 use fluent::work_model::{
     Attempt, AttemptKind, AttemptReviewState, AttemptStatus, CoderMapping, MergeCandidate,
-    MergeCandidateMergeState, MergeCandidateReviewState, ReviewContext, Task, TaskArtifactArea,
+    MergeCandidateMergeState, MergeReviewState, ReviewContext, Task, TaskArtifactArea,
     TaskKind, TaskOutput, TaskStatus, WorkItem, WorkModelError, WorkModelStorageError,
     WorkModelStore, WorkspaceAccess, WorkspaceRef, from_json,
 };
@@ -78,7 +78,7 @@ fn merge_candidate() -> MergeCandidate {
         source_branch: "main".to_string(),
         target_branch: "main".to_string(),
         candidate_commit: "abc123".to_string(),
-        review_state: MergeCandidateReviewState::Pending,
+        merge_review_state: MergeReviewState::Pending,
         merge_state: MergeCandidateMergeState::default(),
         created_at: None,
         started_at: None,
