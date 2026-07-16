@@ -1375,6 +1375,12 @@ exit 1"#
         let counter = dir.path().join("counter");
         let script = make_401_script(&counter, None);
 
+        let refresh_count = Arc::new(Mutex::new(0u32));
+        let refresh_clone = Arc::clone(&refresh_count);
+        let refresh = move || {
+            *refresh_clone.lock().unwrap() += 1;
+        };
+
         let _ = run_with_transcript_retrying(
             move || {
                 let mut cmd = Command::new("/bin/sh");
@@ -1382,8 +1388,8 @@ exit 1"#
                 cmd
             },
             Some(&transcript),
-            &crate::notify::notify,
-            &real_credential_refresh,
+            &|_, _| {},
+            &refresh,
         );
 
         let count: u32 = std::fs::read_to_string(&counter)
@@ -1394,6 +1400,11 @@ exit 1"#
         assert_eq!(
             count, 2,
             "should invoke command exactly twice (original + one retry)"
+        );
+        assert_eq!(
+            *refresh_count.lock().unwrap(),
+            1,
+            "should invoke refresh exactly once"
         );
     }
 
@@ -1411,8 +1422,8 @@ exit 1"#
                 cmd
             },
             Some(&transcript),
-            &crate::notify::notify,
-            &real_credential_refresh,
+            &|_, _| {},
+            &|| {},
         );
 
         assert_eq!(result.unwrap(), 0, "should succeed after retry");
@@ -1432,8 +1443,8 @@ exit 1"#
                 cmd
             },
             Some(&transcript),
-            &crate::notify::notify,
-            &real_credential_refresh,
+            &|_, _| {},
+            &|| {},
         );
 
         let err = result.unwrap_err();
@@ -1460,6 +1471,12 @@ exit 1"#
                 .push((title.to_string(), body.to_string()));
         };
 
+        let refresh_count = Arc::new(Mutex::new(0u32));
+        let refresh_clone = Arc::clone(&refresh_count);
+        let refresh = move || {
+            *refresh_clone.lock().unwrap() += 1;
+        };
+
         let result = run_with_transcript_retrying(
             move || {
                 let mut cmd = Command::new("/bin/sh");
@@ -1468,7 +1485,7 @@ exit 1"#
             },
             Some(&transcript),
             &notify,
-            &real_credential_refresh,
+            &refresh,
         );
 
         assert_eq!(result.unwrap(), 0);
@@ -1483,6 +1500,11 @@ exit 1"#
             notifications[0].1.contains("credential refresh"),
             "notification should mention credential refresh: {}",
             notifications[0].1
+        );
+        assert_eq!(
+            *refresh_count.lock().unwrap(),
+            1,
+            "should invoke refresh exactly once"
         );
     }
 }
