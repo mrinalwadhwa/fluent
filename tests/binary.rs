@@ -1125,6 +1125,157 @@ fn init_no_layout_tip_when_dir_named_main() {
 }
 
 // -------------------------------------------------------------------------
+// Init — craft section seeding
+// -------------------------------------------------------------------------
+
+#[test]
+fn init_appends_craft_section_to_existing_agents_md() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+
+    fs::write(project.join("AGENTS.md"), "# My Project\n").unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .current_dir(&project)
+        .arg("init")
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(project.join("AGENTS.md")).unwrap();
+    assert!(
+        content.starts_with("# My Project\n"),
+        "existing content must be preserved"
+    );
+    assert!(
+        content.contains("<!-- BEGIN fluent -->"),
+        "craft section begin marker must be present"
+    );
+    assert!(
+        content.contains("<!-- END fluent -->"),
+        "craft section end marker must be present"
+    );
+}
+
+#[test]
+fn init_creates_agents_md_with_craft_section_when_none() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+
+    assert!(!project.join("AGENTS.md").exists());
+    assert!(!project.join("CLAUDE.md").exists());
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .current_dir(&project)
+        .arg("init")
+        .assert()
+        .success();
+
+    assert!(
+        project.join("AGENTS.md").exists(),
+        "AGENTS.md must be created when neither AGENTS.md nor CLAUDE.md exist"
+    );
+    let content = fs::read_to_string(project.join("AGENTS.md")).unwrap();
+    assert!(content.contains("<!-- BEGIN fluent -->"));
+    assert!(content.contains("<!-- END fluent -->"));
+}
+
+#[test]
+fn init_updates_craft_section_in_place_idempotently() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+
+    let pre = "# My Project\n\nSome content.\n";
+    let post = "\n## Footer\n";
+    let old_block = "<!-- BEGIN fluent -->\nold craft content\n<!-- END fluent -->";
+    fs::write(
+        project.join("AGENTS.md"),
+        format!("{pre}{old_block}{post}"),
+    )
+    .unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .current_dir(&project)
+        .arg("init")
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(project.join("AGENTS.md")).unwrap();
+    assert!(
+        content.starts_with(pre),
+        "content before the markers must be preserved"
+    );
+    assert!(
+        content.ends_with(post),
+        "content after the markers must be preserved"
+    );
+    assert!(
+        !content.contains("old craft content"),
+        "old craft content must be replaced"
+    );
+    assert!(
+        content.contains("<!-- BEGIN fluent -->"),
+        "begin marker must be present"
+    );
+    assert!(
+        content.contains("<!-- END fluent -->"),
+        "end marker must be present"
+    );
+    assert_eq!(
+        content.matches("<!-- BEGIN fluent -->").count(),
+        1,
+        "begin marker must appear exactly once"
+    );
+}
+
+#[test]
+fn craft_section_names_skill_and_lifecycle_stages() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .current_dir(&project)
+        .arg("init")
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(project.join("AGENTS.md")).unwrap();
+    assert!(
+        content.contains("fluent skill"),
+        "craft section must name the fluent skill"
+    );
+    for stage in &[
+        "brief",
+        "behaviors",
+        "approach",
+        "plan",
+        "execute",
+        "review",
+        "land",
+    ] {
+        assert!(
+            content.contains(stage),
+            "craft section must mention lifecycle stage: {stage}"
+        );
+    }
+}
+
+// -------------------------------------------------------------------------
 // Status
 // -------------------------------------------------------------------------
 

@@ -1272,6 +1272,10 @@ fn cmd_init(cwd: &Path) -> Result<()> {
         eprintln!("  warning: could not install skills: {e}");
     }
 
+    if let Err(e) = seed_agent_instructions(cwd) {
+        eprintln!("  warning: could not seed agent instructions: {e}");
+    }
+
     if cwd.file_name().and_then(|n| n.to_str()) != Some("main") {
         eprintln!();
         eprintln!("  Tip: place your repo at <project>/main/ so attempt worktrees");
@@ -1280,6 +1284,86 @@ fn cmd_init(cwd: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+// -------------------------------------------------------------------------
+// Agent-instructions craft section
+// -------------------------------------------------------------------------
+
+const CRAFT_BEGIN: &str = "<!-- BEGIN fluent -->";
+const CRAFT_END: &str = "<!-- END fluent -->";
+
+const CRAFT_SECTION: &str = "\
+<!-- BEGIN fluent -->
+## Driving fluent
+
+This project uses **fluent** to build changes through a structured, reviewed lifecycle.
+Drive it through the **fluent skill** — your authoritative reference; invoke it for the
+full procedure. This section is a summary.
+
+- **Lifecycle:** capture a brief → define behaviors → design an approach → plan, then
+  autonomous execute → review → land. The first four stages are a conversation with the
+  user — don't skip them.
+- **Work model:** a Work Item holds the plan; an Attempt runs writer → tester → reviewers
+  in rounds; a passing Attempt yields a Merge Candidate to land.
+- **Observations:** capture durable lessons and future work with `fluent observation
+  create`; list them with `fluent observation list`.
+- **Pause for the user:** when a decision genuinely needs a human, fluent sets
+  `needs-user` and pauses; resume with `fluent attempt run` once resolved.
+- **On session start:** run `fluent status` to see what needs attention.
+
+See the fluent skill for the full brief/behaviors/approach/plan procedure.
+<!-- END fluent -->
+";
+
+fn seed_agent_instructions(cwd: &Path) -> Result<()> {
+    let candidates = ["AGENTS.md", "CLAUDE.md"];
+    let mut targets: Vec<PathBuf> = Vec::new();
+
+    for name in &candidates {
+        let path = cwd.join(name);
+        if path.exists() {
+            let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+            if !targets.iter().any(|t| {
+                t.canonicalize().unwrap_or_else(|_| t.clone()) == canonical
+            }) {
+                targets.push(path);
+            }
+        }
+    }
+
+    if targets.is_empty() {
+        targets.push(cwd.join("AGENTS.md"));
+    }
+
+    for target in &targets {
+        let content = if target.exists() {
+            fs::read_to_string(target)?
+        } else {
+            String::new()
+        };
+        let updated = upsert_craft_block(&content);
+        fs::write(target, updated)?;
+    }
+
+    Ok(())
+}
+
+fn upsert_craft_block(content: &str) -> String {
+    if let (Some(begin), Some(end)) = (content.find(CRAFT_BEGIN), content.find(CRAFT_END)) {
+        let end_of_marker = end + CRAFT_END.len();
+        let after = if content[end_of_marker..].starts_with('\n') {
+            &content[end_of_marker + 1..]
+        } else {
+            &content[end_of_marker..]
+        };
+        format!("{}{}{}", &content[..begin], CRAFT_SECTION, after)
+    } else if content.is_empty() {
+        CRAFT_SECTION.to_string()
+    } else {
+        let separator = if content.ends_with('\n') { "\n" } else { "\n\n" };
+        format!("{}{}{}", content, separator, CRAFT_SECTION)
+    }
 }
 
 // -------------------------------------------------------------------------
