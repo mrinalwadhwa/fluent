@@ -1381,7 +1381,10 @@ exit 1"#
             .trim()
             .parse()
             .unwrap();
-        assert_eq!(count, 2, "should invoke command exactly twice (original + one retry)");
+        assert_eq!(
+            count, 2,
+            "should invoke command exactly twice (original + one retry)"
+        );
     }
 
     #[test]
@@ -1423,7 +1426,8 @@ exit 1"#
 
         let err = result.unwrap_err();
         assert!(
-            err.downcast_ref::<crate::claude_auth::AuthError>().is_some(),
+            err.downcast_ref::<crate::claude_auth::AuthError>()
+                .is_some(),
             "should return AuthError, got: {err}"
         );
     }
@@ -1456,7 +1460,11 @@ exit 1"#
 
         assert_eq!(result.unwrap(), 0);
         let notifications = calls.lock().unwrap();
-        assert_eq!(notifications.len(), 1, "should post exactly one notification");
+        assert_eq!(
+            notifications.len(),
+            1,
+            "should post exactly one notification"
+        );
         assert_eq!(notifications[0].0, "Fluent");
         assert!(
             notifications[0].1.contains("credential refresh"),

@@ -5922,9 +5922,21 @@ mod tests {
         assert_eq!(attempt.status, AttemptStatus::Planned);
         assert_eq!(attempt.pause_kind, None);
         assert!(attempt.completed_at.is_none());
-        assert_eq!(attempt.tasks[0].status, TaskStatus::Complete, "writer stays complete");
-        assert_eq!(attempt.tasks[1].status, TaskStatus::Complete, "tester stays complete");
-        assert_eq!(attempt.tasks[2].status, TaskStatus::Planned, "failed review resets to planned");
+        assert_eq!(
+            attempt.tasks[0].status,
+            TaskStatus::Complete,
+            "writer stays complete"
+        );
+        assert_eq!(
+            attempt.tasks[1].status,
+            TaskStatus::Complete,
+            "tester stays complete"
+        );
+        assert_eq!(
+            attempt.tasks[2].status,
+            TaskStatus::Planned,
+            "failed review resets to planned"
+        );
     }
 
     #[test]
@@ -5968,9 +5980,7 @@ mod tests {
         let store = WorkModelStore::new(tmp.path());
         store.create_work_item(&item).unwrap();
 
-        let attempt_path = store
-            .work_attempt_path("work-omit", "attempt-1")
-            .unwrap();
+        let attempt_path = store.work_attempt_path("work-omit", "attempt-1").unwrap();
         let raw = std::fs::read_to_string(attempt_path).unwrap();
         assert!(
             !raw.contains("pause_kind"),

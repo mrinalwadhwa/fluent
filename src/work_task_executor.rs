@@ -1005,10 +1005,7 @@ fn mark_task_failed_attempt_needs_user(
         } else {
             crate::work_model::PauseKind::RoundCap
         };
-        crate::work_model::suspend_attempt(
-            &mut item.attempts[attempt_index],
-            pause_kind,
-        );
+        crate::work_model::suspend_attempt(&mut item.attempts[attempt_index], pause_kind);
         if auth_message.is_some() {
             crate::notify::notify(
                 "Fluent",

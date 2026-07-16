@@ -2265,16 +2265,10 @@ mod tests {
             completed_at: None,
         };
 
-        crate::work_model::suspend_attempt(
-            &mut attempt,
-            crate::work_model::PauseKind::Auth,
-        );
+        crate::work_model::suspend_attempt(&mut attempt, crate::work_model::PauseKind::Auth);
 
         assert_eq!(attempt.status, AttemptStatus::NeedsUser);
-        assert_eq!(
-            attempt.pause_kind,
-            Some(crate::work_model::PauseKind::Auth)
-        );
+        assert_eq!(attempt.pause_kind, Some(crate::work_model::PauseKind::Auth));
         assert!(
             attempt.completed_at.is_some(),
             "suspended attempt should have completed_at set"
@@ -2306,12 +2300,10 @@ mod tests {
     #[test]
     fn uncertain_reviews_record_uncertain_pause_kind() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let (store, _) =
-            make_interpret_reviews_fixture(tmp.path(), "UNCERTAIN", None);
+        let (store, _) = make_interpret_reviews_fixture(tmp.path(), "UNCERTAIN", None);
 
         let item = store.read_work_item("work-1").unwrap();
-        let outcome =
-            interpret_reviews(tmp.path(), &store, item, "attempt-1", true, None).unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true, None).unwrap();
 
         assert!(
             matches!(outcome, WorkAttemptRunOutcome::NeedsUser { .. }),
@@ -2427,8 +2419,7 @@ mod tests {
 
         crate::work_model::reopen_attempt(&mut item.attempts[0]);
 
-        let outcome =
-            interpret_reviews(tmp.path(), &store, item, "attempt-1", true, None).unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true, None).unwrap();
         assert!(
             matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
             "reopened attempt with passing reviews should advance to merge candidate; got {outcome:?}"
@@ -2450,10 +2441,7 @@ mod tests {
             merge_candidates: Vec::new(),
         };
         item.add_initial_attempt("attempt-1").unwrap();
-        crate::work_model::suspend_attempt(
-            &mut item.attempts[0],
-            PauseKind::Uncertain,
-        );
+        crate::work_model::suspend_attempt(&mut item.attempts[0], PauseKind::Uncertain);
         store.create_work_item(&item).unwrap();
         let resolver = ContentResolver::new(None);
 
