@@ -3046,7 +3046,7 @@ Test: src/work_attempt_loop.rs (resume_auth_pause_advances_to_merge_candidate_on
 WHEN an Attempt suspends with the `auth` pause kind,
 THE SYSTEM SHALL post a local notification prompting the user to
 re-authenticate (`claude /login`) and then run `fluent attempt run`.
-Test: src/work_attempt_loop.rs (auth_suspend_posts_reauth_notification)
+Test: src/work_task_executor.rs (auth_suspend_posts_reauth_notification)
 
 ### B5
 

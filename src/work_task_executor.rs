@@ -204,6 +204,7 @@ fn run_write_task(
             config.attempt_id,
             config.task_id,
             auth_message.as_deref(),
+            &crate::notify::notify,
         )?;
         return Err(error);
     }
@@ -514,6 +515,7 @@ fn run_review_task(
             config.attempt_id,
             config.task_id,
             auth_message.as_deref(),
+            &crate::notify::notify,
         )?;
         return Err(error);
     }
@@ -699,6 +701,7 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
                 config.attempt_id,
                 config.task_id,
                 None,
+                &crate::notify::notify,
             )?;
             return Err(error);
         }
@@ -992,6 +995,7 @@ fn mark_task_failed_attempt_needs_user(
     attempt_id: &str,
     task_id: &str,
     auth_message: Option<&str>,
+    notify_fn: &dyn Fn(&str, &str),
 ) -> Result<()> {
     let mut item = read_work_item_or_not_found(store, work_item_id)?;
     if let Some((attempt_index, task_index)) = find_attempt_task_indexes(&item, attempt_id, task_id)
@@ -1007,7 +1011,7 @@ fn mark_task_failed_attempt_needs_user(
         };
         crate::work_model::suspend_attempt(&mut item.attempts[attempt_index], pause_kind);
         if auth_message.is_some() {
-            crate::notify::notify(
+            notify_fn(
                 "Fluent",
                 "Auth token expired. Run 'claude /login' to re-authenticate, then 'fluent attempt run'.",
             );
@@ -1073,6 +1077,7 @@ fn lock_mark_task_failed_attempt_needs_user(
     attempt_id: &str,
     task_id: &str,
     auth_message: Option<&str>,
+    notify_fn: &dyn Fn(&str, &str),
 ) -> Result<()> {
     let _lock = store_lock.map(|m| m.lock().unwrap_or_else(|e| e.into_inner()));
     mark_task_failed_attempt_needs_user(
@@ -1082,6 +1087,7 @@ fn lock_mark_task_failed_attempt_needs_user(
         attempt_id,
         task_id,
         auth_message,
+        notify_fn,
     )
 }
 
@@ -2815,6 +2821,7 @@ mod tests {
     use crate::work_model::{TaskOutput, TaskStatus, WorkItem, WorkItemAbandonment};
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
+    use std::sync::{Arc, Mutex};
 
     fn review_item() -> WorkItem {
         review_item_with_role("tests")
@@ -4014,6 +4021,102 @@ mod tests {
         assert!(
             rendered.contains(&expertise_index_path.display().to_string()),
             "rendered capture prompt should include the expertise index path"
+        );
+    }
+
+    #[test]
+    fn auth_suspend_posts_reauth_notification() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Notify test".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            post_merge_review_fix_depth: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+
+        let calls: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let calls_clone = Arc::clone(&calls);
+        let notify = move |title: &str, body: &str| {
+            calls_clone
+                .lock()
+                .unwrap()
+                .push((title.to_string(), body.to_string()));
+        };
+
+        mark_task_failed_attempt_needs_user(
+            &store,
+            tmp.path(),
+            "work-1",
+            "attempt-1",
+            "attempt-1-write-1",
+            Some("Auth token expired"),
+            &notify,
+        )
+        .unwrap();
+
+        let notifications = calls.lock().unwrap();
+        assert_eq!(
+            notifications.len(),
+            1,
+            "should post exactly one notification on auth suspend"
+        );
+        assert_eq!(notifications[0].0, "Fluent");
+        assert!(
+            notifications[0].1.contains("re-authenticate"),
+            "notification should mention re-authentication: {}",
+            notifications[0].1
+        );
+    }
+
+    #[test]
+    fn non_auth_suspend_skips_notification() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Notify test".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            post_merge_review_fix_depth: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+
+        let calls: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let calls_clone = Arc::clone(&calls);
+        let notify = move |title: &str, body: &str| {
+            calls_clone
+                .lock()
+                .unwrap()
+                .push((title.to_string(), body.to_string()));
+        };
+
+        mark_task_failed_attempt_needs_user(
+            &store,
+            tmp.path(),
+            "work-1",
+            "attempt-1",
+            "attempt-1-write-1",
+            None,
+            &notify,
+        )
+        .unwrap();
+
+        let notifications = calls.lock().unwrap();
+        assert_eq!(
+            notifications.len(),
+            0,
+            "should not post a notification on non-auth suspend"
         );
     }
 }
