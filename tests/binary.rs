@@ -3109,7 +3109,7 @@ fn work_attempt_run_drives_write_reviews_and_passes() {
     assert_eq!(candidate["target_workspace"]["path"], ".");
     assert_eq!(candidate["source_branch"], "main");
     assert_eq!(candidate["target_branch"], "main");
-    assert_eq!(candidate["review_state"], "pending");
+    assert_eq!(candidate["merge_review_state"], "pending");
     assert!(
         main_dir
             .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md")
@@ -3766,7 +3766,7 @@ fn work_merge_candidate_failed_check_leaves_target_unchanged() {
     assert_eq!(git_head(&main_dir), main_before);
     let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];
-    assert_eq!(candidate["review_state"], "pending");
+    assert_eq!(candidate["merge_review_state"], "pending");
     assert_eq!(candidate["merge_state"]["status"], "failed");
     assert!(
         candidate["merge_state"]["failure_reason"]
@@ -3840,7 +3840,7 @@ fn work_merge_candidate_warns_when_cleanup_fails_after_landing() {
     assert!(candidate_workspace.exists());
     let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];
-    assert_eq!(candidate["review_state"], "passed");
+    assert_eq!(candidate["merge_review_state"], "passed");
     assert_eq!(candidate["merge_state"]["status"], "merged");
     assert_eq!(candidate["merge_state"]["merged_commit"], candidate_head);
 }
@@ -3923,7 +3923,7 @@ fn work_merge_candidate_rerun_after_cleanup_preserves_landed_state() {
     assert!(!candidate_workspace.exists());
     let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];
-    assert_eq!(candidate["review_state"], "passed");
+    assert_eq!(candidate["merge_review_state"], "passed");
     assert_eq!(candidate["merge_state"]["status"], "merged");
     // The merged_commit captured in state matches the HEAD landed on first
     // merge; a rerun must preserve it.
