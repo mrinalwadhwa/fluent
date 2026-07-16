@@ -472,15 +472,12 @@ fn cmd_attempt(
                 extra_args: &extra_args,
                 no_sandbox: no_sandbox || global_no_sandbox,
             })?;
-            let pause_kind = store
-                .read_work_item(&work_item_id)
-                .ok()
-                .and_then(|item| {
-                    item.attempts
-                        .iter()
-                        .find(|a| a.id == attempt_id)
-                        .and_then(|a| a.pause_kind.clone())
-                });
+            let pause_kind = store.read_work_item(&work_item_id).ok().and_then(|item| {
+                item.attempts
+                    .iter()
+                    .find(|a| a.id == attempt_id)
+                    .and_then(|a| a.pause_kind.clone())
+            });
             for outcome in &result.outcomes {
                 match outcome {
                     WorkAttemptRunOutcome::RanTask { task_id, output } => {
@@ -514,9 +511,7 @@ fn cmd_attempt(
                     }
                 }
                 if guidance::guidance_enabled() {
-                    if let Some(hint) =
-                        guidance::after_attempt_run(outcome, pause_kind.as_ref())
-                    {
+                    if let Some(hint) = guidance::after_attempt_run(outcome, pause_kind.as_ref()) {
                         eprintln!("{hint}");
                     }
                 }

@@ -11882,13 +11882,7 @@ fn quiet_mode_omits_next_action_hints() {
     let output = fluent_cmd()
         .current_dir(tmp.path())
         .env("FLUENT_QUIET", "1")
-        .args([
-            "work-item",
-            "create",
-            "test-quiet",
-            "--title",
-            "Quiet test",
-        ])
+        .args(["work-item", "create", "test-quiet", "--title", "Quiet test"])
         .output()
         .unwrap();
 
@@ -11911,13 +11905,7 @@ fn next_action_is_appended_not_interleaved_into_result() {
 
     let output = fluent_cmd()
         .current_dir(tmp.path())
-        .args([
-            "work-item",
-            "create",
-            "test-order",
-            "--title",
-            "Order test",
-        ])
+        .args(["work-item", "create", "test-order", "--title", "Order test"])
         .output()
         .unwrap();
 

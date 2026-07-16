@@ -23,16 +23,16 @@ pub fn after_attempt_run(
     pause_kind: Option<&PauseKind>,
 ) -> Option<&'static str> {
     match outcome {
-        WorkAttemptRunOutcome::MergeCandidateReady { .. } => {
-            Some("\n→ Next: fluent merge-candidate show <work-item-id>, then fluent merge-candidate land <work-item-id>")
-        }
+        WorkAttemptRunOutcome::MergeCandidateReady { .. } => Some(
+            "\n→ Next: fluent merge-candidate show <work-item-id>, then fluent merge-candidate land <work-item-id>",
+        ),
         WorkAttemptRunOutcome::PlannedWriteRound { .. } => {
             Some("\n→ Next: fluent attempt run <work-item-id>")
         }
         WorkAttemptRunOutcome::NeedsUser { .. } => match pause_kind {
-            Some(PauseKind::Auth) => {
-                Some("\n→ Next: re-authenticate (claude /login), then fluent attempt run <work-item-id>")
-            }
+            Some(PauseKind::Auth) => Some(
+                "\n→ Next: re-authenticate (claude /login), then fluent attempt run <work-item-id>",
+            ),
             _ => Some("\n→ Next: resolve the issue, then fluent attempt run <work-item-id>"),
         },
         WorkAttemptRunOutcome::ReviewOnlyComplete => {
