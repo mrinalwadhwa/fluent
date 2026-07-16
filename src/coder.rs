@@ -502,7 +502,7 @@ const RATE_LIMIT_MAX_RETRIES: u32 = 2;
 const DEFAULT_JITTER_MAX_SECS: u64 = 30;
 
 fn ensure_not_expired_with_refresh() -> Result<(), crate::claude_auth::AuthError> {
-    if let Err(_) = crate::claude_auth::ensure_not_expired() {
+    if crate::claude_auth::ensure_not_expired().is_err() {
         eprintln!("  Token expired — refreshing credentials before launch.");
         let _ = crate::credential::refresh_credentials();
         if let Err(err) = crate::claude_auth::ensure_not_expired() {
