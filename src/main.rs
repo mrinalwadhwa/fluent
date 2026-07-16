@@ -22,6 +22,7 @@ use fluent::dashboard;
 use fluent::fargate;
 use fluent::fargate_bootstrap;
 use fluent::git;
+use fluent::guidance;
 use fluent::keep_awake;
 use fluent::observations;
 use fluent::os;
@@ -266,6 +267,9 @@ fn cmd_work_item(project_root: &Path, command: WorkItemCommands) -> Result<()> {
             };
             store.create_work_item(&item)?;
             println!("Created Work Item {}", item.id);
+            if guidance::guidance_enabled() {
+                println!("{}", guidance::after_work_item_create());
+            }
         }
         WorkItemCommands::List => {
             let items = store.list_work_items()?;

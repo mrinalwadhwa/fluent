@@ -10,6 +10,7 @@ pub mod dashboard;
 pub mod fargate;
 pub mod fargate_bootstrap;
 pub mod git;
+pub mod guidance;
 pub mod hooks;
 pub mod keep_awake;
 pub mod land_lock;

@@ -11841,3 +11841,90 @@ fn land_lock_child_exit_frees_lock() {
         "lock should be freed after holder process exits"
     );
 }
+
+// -------------------------------------------------------------------------
+// Primary-flow command guidance
+// -------------------------------------------------------------------------
+
+#[test]
+fn work_item_create_output_names_attempt_create_next() {
+    let tmp = TempDir::new().unwrap();
+
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .args([
+            "work-item",
+            "create",
+            "test-guidance",
+            "--title",
+            "Guidance test",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Created Work Item"),
+        "result line should be present"
+    );
+    assert!(
+        stdout.contains("attempt create"),
+        "next-action should name attempt create"
+    );
+}
+
+#[test]
+fn quiet_mode_omits_next_action_hints() {
+    let tmp = TempDir::new().unwrap();
+
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .env("FLUENT_QUIET", "1")
+        .args([
+            "work-item",
+            "create",
+            "test-quiet",
+            "--title",
+            "Quiet test",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Created Work Item"),
+        "result line should still be present"
+    );
+    assert!(
+        !stdout.contains("attempt create"),
+        "next-action should be suppressed in quiet mode"
+    );
+}
+
+#[test]
+fn next_action_is_appended_not_interleaved_into_result() {
+    let tmp = TempDir::new().unwrap();
+
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .args([
+            "work-item",
+            "create",
+            "test-order",
+            "--title",
+            "Order test",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let result_pos = stdout.find("Created Work Item").expect("result line present");
+    let hint_pos = stdout.find("attempt create").expect("next-action present");
+    assert!(
+        hint_pos > result_pos,
+        "next-action should appear after the result line"
+    );
+}
