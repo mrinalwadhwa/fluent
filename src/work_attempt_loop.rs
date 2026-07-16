@@ -12,7 +12,7 @@ use crate::review::{self, Verdict};
 use crate::review_diff_command;
 use crate::review_only_worktree;
 use crate::work_model::{
-    ArtifactRef, Attempt, AttemptReviewState, AttemptStatus, Task, TaskKind, TaskOutput,
+    ArtifactRef, Attempt, AttemptReviewState, AttemptStatus, PauseKind, Task, TaskKind, TaskOutput,
     TaskStatus, WorkItem, WorkModelStorageError, WorkModelStore,
     resolve_managed_sibling_workspace_path, work_artifact_path,
 };
@@ -67,6 +67,7 @@ pub enum WorkAttemptRunOutcome {
     ReviewOnlyFailed,
 }
 
+#[derive(Debug)]
 pub struct WorkAttemptRunResult {
     pub outcomes: Vec<WorkAttemptRunOutcome>,
 }
@@ -84,7 +85,20 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             .find(|attempt| attempt.id == config.attempt_id)
             .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", config.attempt_id))?;
 
-        reject_terminal_attempt(attempt.status.clone())?;
+        match reject_terminal_attempt(attempt)? {
+            TerminalCheck::ReopenAuth => {
+                let mut item = item;
+                let attempt_mut = item
+                    .attempts
+                    .iter_mut()
+                    .find(|a| a.id == config.attempt_id)
+                    .unwrap();
+                crate::work_model::reopen_attempt(attempt_mut);
+                config.store.write_work_item(&item)?;
+                continue;
+            }
+            TerminalCheck::Continue => {}
+        }
 
         if !worktree_ensured && attempt.kind.is_review_only_like() {
             reject_if_review_only_worktree_in_flight(
@@ -436,11 +450,29 @@ fn ensure_review_only_worktree_if_applicable(project_root: &Path, attempt: &Atte
     .map(|_| ())
 }
 
-fn reject_terminal_attempt(status: AttemptStatus) -> Result<()> {
-    match status {
+enum TerminalCheck {
+    Continue,
+    ReopenAuth,
+}
+
+fn reject_terminal_attempt(attempt: &Attempt) -> Result<TerminalCheck> {
+    match attempt.status {
         AttemptStatus::Failed => bail!("Attempt is failed and cannot be advanced"),
-        AttemptStatus::NeedsUser => bail!("Attempt needs user input before it can advance"),
-        _ => Ok(()),
+        AttemptStatus::NeedsUser => match attempt.pause_kind {
+            Some(PauseKind::Auth) => Ok(TerminalCheck::ReopenAuth),
+            Some(PauseKind::Uncertain) => bail!(
+                "Attempt is paused with uncertain reviews. \
+                 Resolve the uncertain verdicts and re-run; \
+                 resuming this pause kind is not yet supported."
+            ),
+            Some(PauseKind::RoundCap) => bail!(
+                "Attempt is paused at the write-round cap. \
+                 Address the failing reviews and re-run; \
+                 resuming this pause kind is not yet supported."
+            ),
+            None => bail!("Attempt needs user input before it can advance"),
+        },
+        _ => Ok(TerminalCheck::Continue),
     }
 }
 
@@ -2298,6 +2330,167 @@ mod tests {
             stored.attempts[0].pause_kind,
             Some(crate::work_model::PauseKind::Uncertain),
             "uncertain review should record Uncertain pause kind"
+        );
+    }
+
+    #[test]
+    fn resume_auth_pause_reruns_only_auth_failed_tasks() {
+        let mut attempt = Attempt {
+            id: "attempt-1".to_string(),
+            work_item_id: "work-1".to_string(),
+            kind: AttemptKind::Write,
+            status: AttemptStatus::NeedsUser,
+            coder_mapping: CoderMapping::default(),
+            tasks: vec![
+                Task {
+                    id: "attempt-1-write-1".to_string(),
+                    kind: TaskKind::Write,
+                    status: TaskStatus::Complete,
+                    role: "author".to_string(),
+                    instructions: None,
+                    work_item_id: "work-1".to_string(),
+                    attempt_id: Some("attempt-1".to_string()),
+                    workspace_access: WorkspaceAccess {
+                        reads: Vec::new(),
+                        writes: Vec::new(),
+                    },
+                    artifact_area: None,
+                    review_context: None,
+                    input_artifacts: Vec::new(),
+                    depends_on: None,
+                    output: Some(TaskOutput {
+                        workspace_id: "candidate".to_string(),
+                        workspace_path: "work/wi-1/attempt-1".to_string(),
+                        source_branch: "main".to_string(),
+                        commit: "abc123".to_string(),
+                    }),
+                    created_at: None,
+                    started_at: None,
+                    completed_at: None,
+                },
+                Task {
+                    id: "attempt-1-review-tests".to_string(),
+                    kind: TaskKind::Review,
+                    status: TaskStatus::Failed,
+                    role: "tests".to_string(),
+                    instructions: None,
+                    work_item_id: "work-1".to_string(),
+                    attempt_id: Some("attempt-1".to_string()),
+                    workspace_access: WorkspaceAccess {
+                        reads: Vec::new(),
+                        writes: Vec::new(),
+                    },
+                    artifact_area: None,
+                    review_context: None,
+                    input_artifacts: Vec::new(),
+                    depends_on: None,
+                    output: None,
+                    created_at: None,
+                    started_at: None,
+                    completed_at: None,
+                },
+            ],
+            review_state: None,
+            pause_kind: Some(PauseKind::Auth),
+            artifacts: Vec::new(),
+            created_at: None,
+            completed_at: Some("2026-07-16T12:00:00Z".to_string()),
+        };
+
+        assert!(matches!(
+            reject_terminal_attempt(&attempt).unwrap(),
+            TerminalCheck::ReopenAuth
+        ));
+
+        crate::work_model::reopen_attempt(&mut attempt);
+
+        assert_eq!(attempt.status, AttemptStatus::Planned);
+        assert!(attempt.pause_kind.is_none());
+        assert!(attempt.completed_at.is_none());
+        assert_eq!(
+            attempt.tasks[0].status,
+            TaskStatus::Complete,
+            "writer task should stay Complete"
+        );
+        assert_eq!(
+            attempt.tasks[1].status,
+            TaskStatus::Planned,
+            "auth-failed review task should reset to Planned"
+        );
+    }
+
+    #[test]
+    fn resume_auth_pause_advances_to_merge_candidate_on_pass() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+
+        let (fixture_store, _) =
+            make_interpret_reviews_fixture(tmp.path(), "PASS", Some(passing_tester_json()));
+        let mut item = fixture_store.read_work_item("work-1").unwrap();
+
+        item.attempts[0].status = AttemptStatus::NeedsUser;
+        item.attempts[0].pause_kind = Some(PauseKind::Auth);
+        item.attempts[0].completed_at = Some("2026-07-16T12:00:00Z".to_string());
+        store.write_work_item(&item).unwrap();
+
+        crate::work_model::reopen_attempt(&mut item.attempts[0]);
+
+        let outcome =
+            interpret_reviews(tmp.path(), &store, item, "attempt-1", true, None).unwrap();
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
+            "reopened attempt with passing reviews should advance to merge candidate; got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn resume_unimplemented_kind_reports_clearly_and_leaves_suspended() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Paused attempt".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            post_merge_review_fix_depth: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        crate::work_model::suspend_attempt(
+            &mut item.attempts[0],
+            PauseKind::Uncertain,
+        );
+        store.create_work_item(&item).unwrap();
+        let resolver = ContentResolver::new(None);
+
+        let error = run_attempt(WorkAttemptRunConfig {
+            project_root: tmp.path(),
+            store: &store,
+            work_item_id: "work-1",
+            attempt_id: "attempt-1",
+            resolver: &resolver,
+            extra_args: &[],
+            no_sandbox: true,
+        })
+        .unwrap_err();
+
+        let msg = error.to_string();
+        assert!(
+            msg.contains("not yet supported"),
+            "should mention that resume is not yet supported: {msg}"
+        );
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(
+            stored.attempts[0].status,
+            AttemptStatus::NeedsUser,
+            "attempt should remain suspended"
+        );
+        assert_eq!(
+            stored.attempts[0].pause_kind,
+            Some(PauseKind::Uncertain),
+            "pause kind should be preserved"
         );
     }
 }
