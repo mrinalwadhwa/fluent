@@ -165,7 +165,7 @@ test_attempt_loop_passes_review_round() {
   [ "$(json_value '.merge_candidates[0].target_workspace.path')" = "." ] || return 1
   [ "$(json_value '.merge_candidates[0].source_branch')" = "main" ] || return 1
   [ "$(json_value '.merge_candidates[0].target_branch')" = "main" ] || return 1
-  [ "$(json_value '.merge_candidates[0].review_state')" = "pending" ] || return 1
+  [ "$(json_value '.merge_candidates[0].merge_review_state')" = "pending" ] || return 1
   [ "$(json_value '.merge_candidates[0].candidate_commit')" = "$(git -C ../work-6-work-1-attempt-1 rev-parse HEAD)" ] || return 1
   "$FLUENT_BIN" merge-candidate show work-1 attempt-1-merge-candidate > "$TEST_DIR/candidate"
   [ "$(jq -r '.candidate_commit' "$TEST_DIR/candidate")" = "$(json_value '.merge_candidates[0].candidate_commit')" ] || return 1

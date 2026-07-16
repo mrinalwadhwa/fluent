@@ -438,7 +438,7 @@ EOF
   [ "$(git rev-parse main)" = "$MAIN_BEFORE" ] || RESULT=1
   [ "$(cat "$TEST_DIR/check-marker")" = "check-ran" ] || RESULT=1
   [ "$(json_value '.merge_candidates[0].merge_state.status')" = "failed" ] || RESULT=1
-  [ "$(json_value '.merge_candidates[0].review_state')" = "pending" ] || RESULT=1
+  [ "$(json_value '.merge_candidates[0].merge_review_state')" = "pending" ] || RESULT=1
   assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" "check-pre-merge failed" || RESULT=1
   [ "$(json_value '.merge_candidates[0].merge_state.check_artifacts | length')" = "1" ] || RESULT=1
   HOOKS_DIR="$(json_value '.merge_candidates[0].merge_state.check_artifacts[0].path')"
@@ -463,7 +463,7 @@ test_work_merge_rebase_failure_leaves_target_unchanged() {
   [ "$(git rev-parse main)" = "$MAIN_BEFORE" ] || RESULT=1
   [ "$(cat merge-output.txt)" = "target version" ] || RESULT=1
   [ "$(json_value '.merge_candidates[0].merge_state.status')" = "failed" ] || RESULT=1
-  [ "$(json_value '.merge_candidates[0].review_state')" = "pending" ] || RESULT=1
+  [ "$(json_value '.merge_candidates[0].merge_review_state')" = "pending" ] || RESULT=1
   assert_contains "$(json_value '.merge_candidates[0].merge_state.failure_reason')" "Rebase agent failed" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "Rebase agent failed" || RESULT=1
   if git -C ../work-6-work-1-attempt-1 status 2>&1 | grep -qi "rebase in progress"; then

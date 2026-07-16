@@ -975,8 +975,9 @@ THE SYSTEM SHALL create a post-merge-review-fix Work Item with the
 failed review artifacts as planning context and run its first Attempt.
 A passing Merge Candidate is left pending — it lands when a live
 `auto-merge` watcher picks it up or the user invokes
-`fluent merge-candidate land`, exactly like any other candidate. The fix-depth recursion bound is
-persisted on Work Item state and checked at land time; see the
+`fluent merge-candidate land`, exactly like any other candidate.
+The fix-depth recursion bound is persisted on Work Item state
+and checked at land time; see the
 "Post-merge forward-fix landing" area for details.
 Untestable: Requires end-to-end post-merge review with LLM reviewers and auto-fix
 
@@ -2871,7 +2872,7 @@ ID nor `--all`,
 THE SYSTEM SHALL exit non-zero with a clear error.
 Test: tests/binary.rs (auto_merge_with_neither_flag_set_errors)
 
-### B14
+### B15
 
 WHEN `fluent auto-merge` runs and a Merge Candidate
 satisfies the ready conditions on multiple consecutive ticks,
@@ -2881,14 +2882,14 @@ transition to `merged` (on success); subsequent ticks observe
 the new state and do not re-fire.
 Untestable: Emergent from merge success transitioning status to `merged` and merge failure setting `auto_merge_skipped`, both of which prevent re-fire on the next tick
 
-### B15
+### B16
 
 WHEN `MergeCandidateMergeState` is deserialized from JSON that
 does not contain `auto_merge_skipped`,
 THE SYSTEM SHALL default the field to `None` (backward-compatible).
 Test: src/work_model.rs (legacy_merge_state_json_deserializes_with_none_skipped)
 
-### B16
+### B17
 
 WHEN `MergeCandidateMergeState` is serialized with
 `auto_merge_skipped == None`,
