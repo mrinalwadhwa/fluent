@@ -5335,7 +5335,8 @@ exit 1
         .env("FLUENT_MAX_TASK_RETRIES", "2")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("401"));
+        .stderr(predicate::str::contains("401"))
+        .stderr(predicate::str::contains("re-authenticate"));
 
     let invocations: u32 = fs::read_to_string(&counter_file)
         .unwrap()
@@ -5857,7 +5858,8 @@ exit 1
         .env("FLUENT_MAX_TASK_RETRIES", "2")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("401"));
+        .stderr(predicate::str::contains("401"))
+        .stderr(predicate::str::contains("re-authenticate"));
 
     let invocations: u32 = fs::read_to_string(&counter_file)
         .unwrap()

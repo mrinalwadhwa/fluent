@@ -2282,14 +2282,6 @@ mod tests {
     }
 
     #[test]
-    fn auth_suspend_posts_reauth_notification() {
-        crate::notify::notify(
-            "Fluent",
-            "Auth token expired. Run 'claude /login' to re-authenticate, then 'fluent attempt run'.",
-        );
-    }
-
-    #[test]
     fn budget_exhaustion_records_round_cap_pause_kind() {
         let tmp = tempfile::TempDir::new().unwrap();
         let (store, _) =

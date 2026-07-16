@@ -196,6 +196,7 @@ impl Coder for SandboxedClaudeCode {
                 cmd
             },
             transcript_file,
+            &crate::notify::notify,
         )
     }
 
@@ -279,6 +280,7 @@ impl Coder for BareClaudeCode {
                 cmd
             },
             transcript_file,
+            &crate::notify::notify,
         )
     }
 
@@ -331,6 +333,7 @@ impl Coder for CodexCode {
                 cmd
             },
             transcript_file,
+            &crate::notify::notify,
         )
     }
 
@@ -443,6 +446,7 @@ impl Coder for PiCode {
                 cmd
             },
             transcript_file,
+            &crate::notify::notify,
         )
     }
 
@@ -705,7 +709,11 @@ pub fn transcript_indicates_rate_limit(transcript_path: &Path) -> bool {
 /// timing from the transcript, apply per-run jitter, and sleep before
 /// retrying. Falls back to the configured fixed wait when no structured
 /// timing is available. Fires notifications on rate-limit state transitions.
-fn run_with_transcript_retrying<F>(build_cmd: F, transcript_file: Option<&Path>) -> Result<i32>
+fn run_with_transcript_retrying<F>(
+    build_cmd: F,
+    transcript_file: Option<&Path>,
+    notify_fn: &dyn Fn(&str, &str),
+) -> Result<i32>
 where
     F: Fn() -> Command,
 {
@@ -717,11 +725,11 @@ where
         let exit = run_with_transcript(build_cmd(), transcript_file)?;
         if exit == 0 {
             if auth_refreshed {
-                crate::notify::notify("Fluent", "Recovered after credential refresh.");
+                notify_fn("Fluent", "Recovered after credential refresh.");
                 eprintln!("  Credential refresh resolved the auth issue — continuing.");
             }
             if matches!(rl_state, RateLimitState::RateLimited) {
-                crate::notify::notify("Fluent", "Fluent resumed after rate-limit pause.");
+                notify_fn("Fluent", "Fluent resumed after rate-limit pause.");
                 eprintln!("  Rate-limit cleared — resuming.");
             }
             return Ok(exit);
@@ -771,8 +779,7 @@ where
         };
 
         let retry_at = SystemTime::now() + wait;
-        rl_state =
-            transition_rate_limit_state(&rl_state, &reason, retry_at, &crate::notify::notify);
+        rl_state = transition_rate_limit_state(&rl_state, &reason, retry_at, notify_fn);
 
         eprintln!(
             "  Rate-limit detected on attempt {} ({reason}); sleeping {}s before retry.",
@@ -1333,6 +1340,7 @@ mod model_default_tests {
 #[cfg(test)]
 mod auth_refresh_tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     fn make_401_script(counter_path: &Path, succeed_on_call: Option<u32>) -> String {
         let counter = counter_path.display();
@@ -1365,6 +1373,7 @@ exit 1"#
                 cmd
             },
             Some(&transcript),
+            &crate::notify::notify,
         );
 
         let count: u32 = std::fs::read_to_string(&counter)
@@ -1389,6 +1398,7 @@ exit 1"#
                 cmd
             },
             Some(&transcript),
+            &crate::notify::notify,
         );
 
         assert_eq!(result.unwrap(), 0, "should succeed after retry");
@@ -1408,6 +1418,7 @@ exit 1"#
                 cmd
             },
             Some(&transcript),
+            &crate::notify::notify,
         );
 
         let err = result.unwrap_err();
@@ -1424,6 +1435,15 @@ exit 1"#
         let counter = dir.path().join("counter");
         let script = make_401_script(&counter, Some(2));
 
+        let calls: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let calls_clone = Arc::clone(&calls);
+        let notify = move |title: &str, body: &str| {
+            calls_clone
+                .lock()
+                .unwrap()
+                .push((title.to_string(), body.to_string()));
+        };
+
         let result = run_with_transcript_retrying(
             move || {
                 let mut cmd = Command::new("/bin/sh");
@@ -1431,17 +1451,17 @@ exit 1"#
                 cmd
             },
             Some(&transcript),
+            &notify,
         );
 
         assert_eq!(result.unwrap(), 0);
-        let count: u32 = std::fs::read_to_string(&counter)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        assert_eq!(
-            count, 2,
-            "recovery path requires exactly 2 invocations (401 then success)"
+        let notifications = calls.lock().unwrap();
+        assert_eq!(notifications.len(), 1, "should post exactly one notification");
+        assert_eq!(notifications[0].0, "Fluent");
+        assert!(
+            notifications[0].1.contains("credential refresh"),
+            "notification should mention credential refresh: {}",
+            notifications[0].1
         );
     }
 }
