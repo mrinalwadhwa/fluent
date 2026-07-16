@@ -55,6 +55,7 @@ fn documented_work_item() -> WorkItem {
                 completed_at: None,
             }],
             review_state: Some(AttemptReviewState::Passed),
+            pause_kind: None,
             artifacts: Vec::new(),
             created_at: None,
             completed_at: None,

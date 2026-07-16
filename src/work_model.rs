@@ -231,6 +231,7 @@ impl WorkItem {
                 completed_at: None,
             }],
             review_state: None,
+            pause_kind: None,
             artifacts: Vec::new(),
             created_at: Some(now_iso8601()),
             completed_at: None,
@@ -352,6 +353,7 @@ impl WorkItem {
             coder_mapping: CoderMapping::default(),
             tasks,
             review_state: Some(AttemptReviewState::NotReviewed),
+            pause_kind: None,
             artifacts: Vec::new(),
             created_at: Some(now_iso8601()),
             completed_at: None,
@@ -464,6 +466,7 @@ impl WorkItem {
             coder_mapping: CoderMapping::default(),
             tasks,
             review_state: Some(AttemptReviewState::NotReviewed),
+            pause_kind: None,
             artifacts: Vec::new(),
             created_at: Some(now_iso8601()),
             completed_at: None,
@@ -1153,6 +1156,8 @@ pub struct Attempt {
     pub tasks: Vec<Task>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub review_state: Option<AttemptReviewState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_kind: Option<PauseKind>,
     #[serde(default)]
     pub artifacts: Vec<ArtifactRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1367,6 +1372,15 @@ impl AttemptKind {
 
 fn attempt_kind_is_write(kind: &AttemptKind) -> bool {
     *kind == AttemptKind::Write
+}
+
+/// Why an Attempt suspended to `NeedsUser`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PauseKind {
+    Auth,
+    Uncertain,
+    RoundCap,
 }
 
 /// Coarse attempt lifecycle state.
@@ -1837,6 +1851,23 @@ pub fn set_attempt_terminal(attempt: &mut Attempt, status: AttemptStatus) {
     attempt.completed_at.get_or_insert_with(now_iso8601);
 }
 
+pub fn suspend_attempt(attempt: &mut Attempt, kind: PauseKind) {
+    attempt.status = AttemptStatus::NeedsUser;
+    attempt.pause_kind = Some(kind);
+    attempt.completed_at.get_or_insert_with(now_iso8601);
+}
+
+pub fn reopen_attempt(attempt: &mut Attempt) {
+    attempt.status = AttemptStatus::Planned;
+    attempt.pause_kind = None;
+    attempt.completed_at = None;
+    for task in &mut attempt.tasks {
+        if task.status != TaskStatus::Complete {
+            task.status = TaskStatus::Planned;
+        }
+    }
+}
+
 pub fn mark_merge_candidate_started(candidate: &mut MergeCandidate) {
     candidate.started_at.get_or_insert_with(now_iso8601);
 }
@@ -2282,6 +2313,8 @@ struct AttemptRecord {
     coder_mapping: CoderMapping,
     #[serde(skip_serializing_if = "Option::is_none")]
     review_state: Option<AttemptReviewState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pause_kind: Option<PauseKind>,
     #[serde(default)]
     artifacts: Vec<ArtifactRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2336,6 +2369,7 @@ impl AttemptRecord {
             status: attempt.status.clone(),
             coder_mapping: attempt.coder_mapping.clone(),
             review_state: attempt.review_state.clone(),
+            pause_kind: attempt.pause_kind.clone(),
             artifacts: attempt.artifacts.clone(),
             created_at: attempt.created_at.clone(),
             completed_at: attempt.completed_at.clone(),
@@ -2353,6 +2387,7 @@ impl From<AttemptRecord> for Attempt {
             coder_mapping: record.coder_mapping,
             tasks: Vec::new(),
             review_state: record.review_state,
+            pause_kind: record.pause_kind,
             artifacts: record.artifacts,
             created_at: record.created_at,
             completed_at: record.completed_at,
@@ -3858,6 +3893,7 @@ mod tests {
                     completed_at: None,
                 }],
                 review_state: None,
+                pause_kind: None,
                 artifacts: Vec::new(),
                 created_at: None,
                 completed_at: None,
@@ -4177,6 +4213,7 @@ mod tests {
                     completed_write_task("attempt-1-write-2", "followup"),
                 ],
                 review_state: Some(AttemptReviewState::Failed),
+                pause_kind: None,
                 artifacts: Vec::new(),
                 created_at: None,
                 completed_at: None,
@@ -4473,6 +4510,7 @@ mod tests {
                     completed_write_task("attempt-1-write-2", "followup"),
                 ],
                 review_state: Some(AttemptReviewState::NotReviewed),
+                pause_kind: None,
                 artifacts: Vec::new(),
                 created_at: None,
                 completed_at: None,
@@ -4507,6 +4545,7 @@ mod tests {
                 coder_mapping: CoderMapping::default(),
                 tasks: vec![task(TaskKind::Write, vec![workspace("candidate")])],
                 review_state: Some(AttemptReviewState::Passed),
+                pause_kind: None,
                 artifacts: vec![ArtifactRef {
                     producer_id: "task-1".to_string(),
                     path: ".fluent/tasks/task-1/report.md".to_string(),
@@ -4547,6 +4586,7 @@ mod tests {
                     completed_write_task("attempt-1-write-2", "followup"),
                 ],
                 review_state: Some(AttemptReviewState::Passed),
+                pause_kind: None,
                 artifacts: Vec::new(),
                 created_at: None,
                 completed_at: None,
@@ -4593,6 +4633,7 @@ mod tests {
                 coder_mapping: CoderMapping::default(),
                 tasks: vec![completed_write_task("attempt-1-write-1", "original")],
                 review_state: Some(AttemptReviewState::Passed),
+                pause_kind: None,
                 artifacts: Vec::new(),
                 created_at: None,
                 completed_at: None,
@@ -4629,6 +4670,7 @@ mod tests {
                 coder_mapping: CoderMapping::default(),
                 tasks: vec![completed_write_task("attempt-1-write-1", "original")],
                 review_state: Some(AttemptReviewState::Passed),
+                pause_kind: None,
                 artifacts: Vec::new(),
                 created_at: None,
                 completed_at: None,
@@ -4667,6 +4709,7 @@ mod tests {
                 coder_mapping: CoderMapping::default(),
                 tasks: vec![completed_write_task("attempt-1-write-1", "original")],
                 review_state: Some(AttemptReviewState::Uncertain),
+                pause_kind: None,
                 artifacts: Vec::new(),
                 created_at: None,
                 completed_at: None,
@@ -4720,6 +4763,7 @@ mod tests {
                 coder_mapping: CoderMapping::default(),
                 tasks: vec![completed_write_task("attempt-1-write-1", "original")],
                 review_state: Some(AttemptReviewState::Passed),
+                pause_kind: None,
                 artifacts: Vec::new(),
                 created_at: None,
                 completed_at: None,
@@ -4773,6 +4817,7 @@ mod tests {
                 coder_mapping: CoderMapping::default(),
                 tasks: vec![completed_write_task("attempt-1-write-1", "original")],
                 review_state: Some(AttemptReviewState::Failed),
+                pause_kind: None,
                 artifacts: Vec::new(),
                 created_at: None,
                 completed_at: None,
@@ -4827,6 +4872,7 @@ mod tests {
                 coder_mapping: CoderMapping::default(),
                 tasks: vec![completed_write_task("attempt-1-write-1", "original")],
                 review_state: Some(AttemptReviewState::Passed),
+                pause_kind: None,
                 artifacts: Vec::new(),
                 created_at: None,
                 completed_at: None,
@@ -4880,6 +4926,7 @@ mod tests {
             coder_mapping: CoderMapping::default(),
             tasks: Vec::new(),
             review_state: Some(AttemptReviewState::Uncertain),
+            pause_kind: None,
             artifacts: Vec::new(),
             created_at: None,
             completed_at: None,
@@ -4986,6 +5033,7 @@ mod tests {
                     completed_write_task("attempt-1-write-2", "followup"),
                 ],
                 review_state: Some(AttemptReviewState::NotReviewed),
+                pause_kind: None,
                 artifacts: Vec::new(),
                 created_at: None,
                 completed_at: None,
@@ -5066,6 +5114,7 @@ mod tests {
                     ..completed_write_task("attempt-1-write-1", "initial")
                 }],
                 review_state: Some(AttemptReviewState::NotReviewed),
+                pause_kind: None,
                 artifacts: Vec::new(),
                 created_at: None,
                 completed_at: None,
@@ -5205,6 +5254,7 @@ mod tests {
             coder_mapping: CoderMapping::default(),
             tasks: vec![completed_write_task("attempt-1-write-1", "first")],
             review_state: Some(AttemptReviewState::Passed),
+            pause_kind: None,
             artifacts: Vec::new(),
             created_at: None,
             completed_at: None,
@@ -5371,6 +5421,7 @@ mod tests {
             coder_mapping: CoderMapping::default(),
             tasks: Vec::new(),
             review_state: None,
+            pause_kind: None,
             artifacts: Vec::new(),
             created_at: Some("2026-06-12T10:00:00+00:00".to_string()),
             completed_at: Some("2026-06-12T10:05:00+00:00".to_string()),
@@ -5521,6 +5572,7 @@ mod tests {
             coder_mapping: CoderMapping::default(),
             tasks: Vec::new(),
             review_state: None,
+            pause_kind: None,
             artifacts: Vec::new(),
             created_at: None,
             completed_at: None,
@@ -5715,6 +5767,7 @@ mod tests {
             },
             tasks: Vec::new(),
             review_state: None,
+            pause_kind: None,
             artifacts: Vec::new(),
             created_at: None,
             completed_at: None,
@@ -5806,6 +5859,123 @@ mod tests {
         store.create_work_item(&item).unwrap();
         let read = store.read_work_item("fix-depth-rt").unwrap();
         assert_eq!(read.post_merge_review_fix_depth, Some(3));
+    }
+
+    #[test]
+    fn attempt_pause_kind_round_trips_through_storage() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem {
+            id: "work-pause".to_string(),
+            title: "Pause kind round-trip".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            post_merge_review_fix_depth: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        suspend_attempt(&mut item.attempts[0], PauseKind::Auth);
+        item.attempts[0].tasks[0].status = TaskStatus::NeedsUser;
+        store.create_work_item(&item).unwrap();
+
+        let read = store.read_work_item("work-pause").unwrap();
+        assert_eq!(read.attempts[0].status, AttemptStatus::NeedsUser);
+        assert_eq!(read.attempts[0].pause_kind, Some(PauseKind::Auth));
+        assert!(read.attempts[0].completed_at.is_some());
+    }
+
+    #[test]
+    fn reopen_attempt_resets_incomplete_tasks_and_clears_completed_at() {
+        let mut item = WorkItem {
+            id: "work-reopen".to_string(),
+            title: "Reopen attempt".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            post_merge_review_fix_depth: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+
+        let attempt = &mut item.attempts[0];
+        attempt.tasks[0].status = TaskStatus::Complete;
+        attempt.tasks[0].output = Some(TaskOutput {
+            workspace_id: "candidate".to_string(),
+            workspace_path: "../work-1-candidate".to_string(),
+            source_branch: "main".to_string(),
+            commit: "abc123".to_string(),
+        });
+        item.add_review_tasks("attempt-1", &["tests"]).unwrap();
+        let attempt = &mut item.attempts[0];
+        attempt.tasks[1].status = TaskStatus::Complete;
+        attempt.tasks[2].status = TaskStatus::Failed;
+
+        suspend_attempt(attempt, PauseKind::Auth);
+        assert_eq!(attempt.status, AttemptStatus::NeedsUser);
+        assert_eq!(attempt.pause_kind, Some(PauseKind::Auth));
+        assert!(attempt.completed_at.is_some());
+
+        reopen_attempt(attempt);
+        assert_eq!(attempt.status, AttemptStatus::Planned);
+        assert_eq!(attempt.pause_kind, None);
+        assert!(attempt.completed_at.is_none());
+        assert_eq!(attempt.tasks[0].status, TaskStatus::Complete, "writer stays complete");
+        assert_eq!(attempt.tasks[1].status, TaskStatus::Complete, "tester stays complete");
+        assert_eq!(attempt.tasks[2].status, TaskStatus::Planned, "failed review resets to planned");
+    }
+
+    #[test]
+    fn suspend_attempt_records_pause_kind_and_sets_completed_at() {
+        let mut item = WorkItem {
+            id: "work-suspend".to_string(),
+            title: "Suspend test".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            post_merge_review_fix_depth: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+
+        let attempt = &mut item.attempts[0];
+        assert!(attempt.completed_at.is_none());
+
+        suspend_attempt(attempt, PauseKind::RoundCap);
+        assert_eq!(attempt.status, AttemptStatus::NeedsUser);
+        assert_eq!(attempt.pause_kind, Some(PauseKind::RoundCap));
+        assert!(attempt.completed_at.is_some());
+    }
+
+    #[test]
+    fn pause_kind_omitted_from_json_when_none() {
+        let mut item = WorkItem {
+            id: "work-omit".to_string(),
+            title: "Omit test".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            post_merge_review_fix_depth: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        store.create_work_item(&item).unwrap();
+
+        let attempt_path = store
+            .work_attempt_path("work-omit", "attempt-1")
+            .unwrap();
+        let raw = std::fs::read_to_string(attempt_path).unwrap();
+        assert!(
+            !raw.contains("pause_kind"),
+            "pause_kind should be omitted when None: {raw}"
+        );
     }
 
     #[test]

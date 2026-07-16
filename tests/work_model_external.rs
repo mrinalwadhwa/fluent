@@ -60,6 +60,7 @@ fn work_item() -> WorkItem {
             coder_mapping: CoderMapping::default(),
             tasks: vec![task(TaskKind::Write)],
             review_state: Some(AttemptReviewState::Passed),
+            pause_kind: None,
             artifacts: Vec::new(),
             created_at: None,
             completed_at: None,
