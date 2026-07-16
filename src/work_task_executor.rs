@@ -1732,7 +1732,7 @@ fn run_seed_project_model(
 
     let workspace_resolver = ContentResolver::new(Some(workspace_path));
     let system_prompt = workspace_resolver
-        .resolve_content("prompts/write-system.md")
+        .resolve_content("prompts/seed-system.md")
         .unwrap_or_default();
 
     let expertise_dir = workspace_path.join(".fluent/expertise");
@@ -1799,7 +1799,7 @@ pub fn run_capture_learnings(
 
     let workspace_resolver = ContentResolver::new(Some(workspace_path));
     let system_prompt = workspace_resolver
-        .resolve_content("prompts/write-system.md")
+        .resolve_content("prompts/capture-system.md")
         .unwrap_or_default();
 
     let learnings_dir = workspace_path.join(".fluent/expertise/learnings");
@@ -3897,6 +3897,59 @@ mod tests {
         let workspace = tmp.path();
         assert!(!should_seed_project_model(TaskKind::Review, workspace));
         assert!(!should_seed_project_model(TaskKind::Tester, workspace));
+    }
+
+    #[test]
+    fn seed_session_uses_non_writer_system_prompt() {
+        let resolver = ContentResolver::new(None);
+        let seed_prompt = resolver
+            .resolve_content("prompts/seed-system.md")
+            .expect("seed-system.md must resolve");
+        let write_prompt = resolver
+            .resolve_content("prompts/write-system.md")
+            .expect("write-system.md must resolve");
+
+        assert_ne!(
+            seed_prompt, write_prompt,
+            "seed session must not reuse the writer's system prompt"
+        );
+        assert!(
+            !seed_prompt.contains("Fluent Writer"),
+            "seed system prompt must not identify as a Fluent Writer"
+        );
+    }
+
+    #[test]
+    fn capture_session_uses_non_writer_system_prompt() {
+        let resolver = ContentResolver::new(None);
+        let capture_prompt = resolver
+            .resolve_content("prompts/capture-system.md")
+            .expect("capture-system.md must resolve");
+        let write_prompt = resolver
+            .resolve_content("prompts/write-system.md")
+            .expect("write-system.md must resolve");
+
+        assert_ne!(
+            capture_prompt, write_prompt,
+            "capture session must not reuse the writer's system prompt"
+        );
+        assert!(
+            !capture_prompt.contains("Fluent Writer"),
+            "capture system prompt must not identify as a Fluent Writer"
+        );
+    }
+
+    #[test]
+    fn writer_session_uses_write_system_prompt() {
+        let resolver = ContentResolver::new(None);
+        let write_prompt = resolver
+            .resolve_content("prompts/write-system.md")
+            .expect("write-system.md must resolve");
+
+        assert!(
+            write_prompt.contains("Fluent Writer"),
+            "writer system prompt must identify as Fluent Writer"
+        );
     }
 
     #[test]
