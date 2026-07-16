@@ -591,6 +591,15 @@ fn next_review_roles(attempt: &Attempt) -> Vec<&'static str> {
     }
 }
 
+fn should_capture(attempt: &Attempt) -> bool {
+    attempt
+        .tasks
+        .iter()
+        .filter(|t| t.kind == TaskKind::Write && t.status == TaskStatus::Complete)
+        .count()
+        > 1
+}
+
 fn completed_review_tasks_after_latest_write(tasks: &[Task]) -> impl Iterator<Item = &Task> {
     let start = tasks
         .iter()
@@ -791,6 +800,9 @@ fn interpret_reviews(
     if item.attempts[attempt_index].kind.is_review_only_like() {
         store.write_work_item(&item)?;
         return Ok(WorkAttemptRunOutcome::ReviewOnlyComplete);
+    }
+    if should_capture(&item.attempts[attempt_index]) {
+        // Capture learnings — session wired in Step 2
     }
     let candidate_id = item.create_or_get_merge_candidate(attempt_id)?;
     store.write_work_item(&item)?;
@@ -1908,6 +1920,40 @@ mod tests {
         assert!(
             !matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
             "tester error must block even when baseline also errored; got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn should_capture_when_reviews_pass_with_findings() {
+        let attempt = attempt_with_tasks(vec![
+            write_task("attempt-1-write-1", Vec::new()),
+            review_task("attempt-1-review-1-tests", "tests"),
+            write_task(
+                "attempt-1-write-2",
+                vec![ArtifactRef {
+                    producer_id: "attempt-1-review-1-tests".to_string(),
+                    path: ".fluent/work/artifacts/work-1/attempt-1/review.md".to_string(),
+                }],
+            ),
+            review_task("attempt-1-review-2-tests", "tests"),
+        ]);
+
+        assert!(
+            should_capture(&attempt),
+            "attempt with multiple write rounds has findings and should trigger capture"
+        );
+    }
+
+    #[test]
+    fn should_not_capture_when_no_findings() {
+        let attempt = attempt_with_tasks(vec![
+            write_task("attempt-1-write-1", Vec::new()),
+            review_task("attempt-1-review-1-tests", "tests"),
+        ]);
+
+        assert!(
+            !should_capture(&attempt),
+            "single-round attempt with no findings should skip capture"
         );
     }
 }
