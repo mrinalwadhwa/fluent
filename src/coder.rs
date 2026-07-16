@@ -1507,4 +1507,29 @@ exit 1"#
             "should invoke refresh exactly once"
         );
     }
+
+    /// Exercise the real credential-refresh path end-to-end.
+    /// Requires a valid Anthropic session; run with:
+    ///   cargo nextest run --run-ignored -E 'test(real_credential_refresh)'
+    #[test]
+    #[ignore]
+    fn real_credential_refresh_through_retry_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let counter = dir.path().join("counter");
+        let script = make_401_script(&counter, Some(2));
+
+        let result = run_with_transcript_retrying(
+            move || {
+                let mut cmd = Command::new("/bin/sh");
+                cmd.arg("-c").arg(&script);
+                cmd
+            },
+            Some(&transcript),
+            &|_, _| {},
+            &real_credential_refresh,
+        );
+
+        assert_eq!(result.unwrap(), 0, "should succeed after real refresh");
+    }
 }
