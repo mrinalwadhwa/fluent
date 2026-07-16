@@ -4460,3 +4460,55 @@ THEN THE SYSTEM SHALL log a warning and proceed with the writer
 without a project model — degrading to the pre-seed behavior — rather
 than aborting the Attempt.
 Test: tests/binary.rs (seed_failure_does_not_abort_attempt)
+
+## Learning capture
+
+### B1
+
+WHEN an Attempt's reviews pass and produce a ready Merge Candidate, and
+the Attempt raised at least one review finding across its rounds,
+THE SYSTEM SHALL run the capture step; an Attempt that passed with no
+findings SHALL skip capture.
+Test: src/work_attempt_loop.rs (should_capture_when_reviews_pass_with_findings)
+Test: src/work_attempt_loop.rs (should_not_capture_when_no_findings)
+
+### B2
+
+WHEN the capture step runs,
+THE SYSTEM SHALL read the review findings raised across the Attempt's
+review rounds and the change the Attempt produced.
+Test: src/work_task_executor.rs (capture_prompt_includes_findings_and_diff_inputs)
+
+### B3
+
+WHEN the capture step identifies a durable, project-level learning,
+THE SYSTEM SHALL merge it into `.fluent/expertise/`, refining or adding
+entries without duplicating existing ones and without altering the
+project's own docs.
+Untestable: The distilled learning is LLM-generated; content cannot be
+asserted from a test. The deterministic scaffolding (inputs and the
+`.fluent/expertise/` target) is covered by B1/B2.
+
+### B4
+
+WHEN the capture step evaluates a run,
+THE SYSTEM SHALL record only durable, project-level learnings, not
+one-off details of the specific change.
+Untestable: Judgment of what is durable vs. one-off is LLM-made and
+cannot be asserted from a test.
+
+### B5
+
+WHERE the capture step finds no durable learning,
+THE SYSTEM SHALL leave `.fluent/expertise/` unchanged (no spurious edits
+or commits).
+Test: src/work_attempt_loop.rs (capture_makes_no_commit_when_expertise_unchanged)
+
+### B6
+
+IF the capture step fails,
+THEN THE SYSTEM SHALL log a warning and complete the run unaffected —
+the Merge Candidate and land proceed as if capture had not run.
+Test: tests/binary.rs (capture_failure_does_not_abort_run)
+Derived: Mirrors the seed step's non-fatal contract and Project
+initialization:B7.

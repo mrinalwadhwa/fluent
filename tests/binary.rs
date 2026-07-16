@@ -9571,7 +9571,7 @@ fn no_legacy_prompt_files_in_prompts_dir() {
         "Legacy prompts/author.md should not exist"
     );
 
-    let allowed_prefixes = ["write-", "review-", "rebase-", "seed-"];
+    let allowed_prefixes = ["write-", "review-", "rebase-", "seed-", "capture-"];
     for entry in fs::read_dir(&prompts_dir).unwrap() {
         let entry = entry.unwrap();
         let name = entry.file_name().to_string_lossy().to_string();
