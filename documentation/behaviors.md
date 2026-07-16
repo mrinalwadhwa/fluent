@@ -4331,6 +4331,46 @@ Test: tests/binary.rs (init_succeeds_when_skill_installation_fails)
 
 ---
 
+## Init seeds operator craft
+
+### B1
+
+WHEN `fluent init` runs and `AGENTS.md` and/or `CLAUDE.md` exist,
+THE SYSTEM SHALL append the craft section (as a managed block) to each
+such file that does not already contain it.
+Test: tests/binary.rs (init_appends_craft_section_to_existing_agents_md)
+
+### B2
+
+WHEN `fluent init` runs and neither `AGENTS.md` nor `CLAUDE.md` exists,
+THE SYSTEM SHALL create `AGENTS.md` containing the craft section.
+Test: tests/binary.rs (init_creates_agents_md_with_craft_section_when_none)
+
+### B3
+
+WHEN the managed block already exists between its markers,
+THE SYSTEM SHALL update the craft section in place without duplicating
+it, leaving all content outside the markers unchanged.
+Test: tests/binary.rs (init_updates_craft_section_in_place_idempotently)
+
+### B4
+
+WHEN the craft section is written,
+THE SYSTEM SHALL name the fluent skill as the authoritative source and
+summarize the lifecycle (brief → behaviors → approach → plan → execute →
+review → land), capturing learnings as observations, and pausing to
+`needs-user` when a decision needs a human.
+Test: tests/binary.rs (craft_section_names_skill_and_lifecycle_stages)
+
+### B5
+
+IF an agent-instructions file cannot be written,
+THEN THE SYSTEM SHALL print a warning and continue so `fluent init`
+still succeeds.
+Test: tests/binary.rs (init_succeeds_when_craft_section_write_fails)
+
+---
+
 ## Skill installation
 
 ### B1
