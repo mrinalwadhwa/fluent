@@ -1,5 +1,8 @@
 use std::env;
 
+use crate::work_attempt_loop::WorkAttemptRunOutcome;
+use crate::work_model::PauseKind;
+
 pub fn guidance_enabled() -> bool {
     match env::var("FLUENT_QUIET") {
         Ok(val) => !matches!(val.as_str(), "1" | "true" | "yes"),
@@ -11,6 +14,47 @@ pub fn after_work_item_create() -> &'static str {
     "\n→ Next: fluent attempt create <work-item-id>"
 }
 
+pub fn after_attempt_create() -> &'static str {
+    "\n→ Next: fluent attempt run <work-item-id>"
+}
+
+pub fn after_attempt_run(
+    outcome: &WorkAttemptRunOutcome,
+    pause_kind: Option<&PauseKind>,
+) -> Option<&'static str> {
+    match outcome {
+        WorkAttemptRunOutcome::MergeCandidateReady { .. } => {
+            Some("\n→ Next: fluent merge-candidate show <work-item-id>, then fluent merge-candidate land <work-item-id>")
+        }
+        WorkAttemptRunOutcome::PlannedWriteRound { .. } => {
+            Some("\n→ Next: fluent attempt run <work-item-id>")
+        }
+        WorkAttemptRunOutcome::NeedsUser { .. } => match pause_kind {
+            Some(PauseKind::Auth) => {
+                Some("\n→ Next: re-authenticate (claude /login), then fluent attempt run <work-item-id>")
+            }
+            _ => Some("\n→ Next: resolve the issue, then fluent attempt run <work-item-id>"),
+        },
+        WorkAttemptRunOutcome::ReviewOnlyComplete => {
+            Some("\n→ Next: review complete; proceed with the next step in the lifecycle")
+        }
+        WorkAttemptRunOutcome::ReviewOnlyFailed => {
+            Some("\n→ Next: inspect the review artifacts and address the failures")
+        }
+        WorkAttemptRunOutcome::RanTask { .. } | WorkAttemptRunOutcome::PlannedReviews { .. } => {
+            None
+        }
+    }
+}
+
+pub fn after_merge_candidate_show() -> &'static str {
+    "\n→ Next: assess the candidate, then fluent merge-candidate land <work-item-id>"
+}
+
+pub fn after_merge_candidate_land() -> &'static str {
+    "\n→ Next: fluent cleanup <work-item-id>"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -19,5 +63,70 @@ mod tests {
     fn after_work_item_create_names_attempt_create() {
         let hint = after_work_item_create();
         assert!(hint.contains("attempt create"));
+    }
+
+    #[test]
+    fn after_attempt_create_names_attempt_run() {
+        let hint = after_attempt_create();
+        assert!(hint.contains("attempt run"));
+    }
+
+    #[test]
+    fn after_attempt_run_merge_candidate_ready_names_merge_candidate() {
+        let outcome = WorkAttemptRunOutcome::MergeCandidateReady {
+            candidate_id: "mc-1".to_string(),
+        };
+        let hint = after_attempt_run(&outcome, None).unwrap();
+        assert!(hint.contains("merge-candidate"));
+    }
+
+    #[test]
+    fn after_attempt_run_planned_write_round_names_attempt_run() {
+        let outcome = WorkAttemptRunOutcome::PlannedWriteRound {
+            task_id: "t-1".to_string(),
+        };
+        let hint = after_attempt_run(&outcome, None).unwrap();
+        assert!(hint.contains("attempt run"));
+    }
+
+    #[test]
+    fn after_attempt_run_needs_user_auth_names_reauth() {
+        let outcome = WorkAttemptRunOutcome::NeedsUser {
+            handoff_path: "path".to_string(),
+        };
+        let hint = after_attempt_run(&outcome, Some(&PauseKind::Auth)).unwrap();
+        assert!(hint.contains("re-authenticate"));
+        assert!(hint.contains("attempt run"));
+    }
+
+    #[test]
+    fn after_attempt_run_needs_user_non_auth_names_resolve() {
+        let outcome = WorkAttemptRunOutcome::NeedsUser {
+            handoff_path: "path".to_string(),
+        };
+        let hint = after_attempt_run(&outcome, Some(&PauseKind::Uncertain)).unwrap();
+        assert!(hint.contains("resolve"));
+        assert!(hint.contains("attempt run"));
+    }
+
+    #[test]
+    fn after_attempt_run_ran_task_returns_none() {
+        let outcome = WorkAttemptRunOutcome::RanTask {
+            task_id: "t-1".to_string(),
+            output: "out".to_string(),
+        };
+        assert!(after_attempt_run(&outcome, None).is_none());
+    }
+
+    #[test]
+    fn after_merge_candidate_show_names_land() {
+        let hint = after_merge_candidate_show();
+        assert!(hint.contains("merge-candidate land"));
+    }
+
+    #[test]
+    fn after_merge_candidate_land_names_cleanup() {
+        let hint = after_merge_candidate_land();
+        assert!(hint.contains("cleanup"));
     }
 }

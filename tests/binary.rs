@@ -11864,13 +11864,14 @@ fn work_item_create_output_names_attempt_create_next() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stdout.contains("Created Work Item"),
-        "result line should be present"
+        "result line should be on stdout"
     );
     assert!(
-        stdout.contains("attempt create"),
-        "next-action should name attempt create"
+        stderr.contains("attempt create"),
+        "next-action should name attempt create on stderr"
     );
 }
 
@@ -11893,12 +11894,13 @@ fn quiet_mode_omits_next_action_hints() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stdout.contains("Created Work Item"),
-        "result line should still be present"
+        "result line should still be on stdout"
     );
     assert!(
-        !stdout.contains("attempt create"),
+        !stderr.contains("attempt create"),
         "next-action should be suppressed in quiet mode"
     );
 }
@@ -11921,10 +11923,154 @@ fn next_action_is_appended_not_interleaved_into_result() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let result_pos = stdout.find("Created Work Item").expect("result line present");
-    let hint_pos = stdout.find("attempt create").expect("next-action present");
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        hint_pos > result_pos,
-        "next-action should appear after the result line"
+        stdout.contains("Created Work Item"),
+        "result should be on stdout"
+    );
+    assert!(
+        !stdout.contains("attempt create"),
+        "next-action should not be interleaved into stdout result"
+    );
+    assert!(
+        stderr.contains("attempt create"),
+        "next-action should appear on stderr"
+    );
+}
+
+#[test]
+fn attempt_create_output_names_attempt_run_next() {
+    let tmp = TempDir::new().unwrap();
+    write_work_item_json(tmp.path(), "work-g1", "Guidance");
+
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["attempt", "create", "work-g1", "attempt-1"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("Created Attempt"),
+        "result line should be on stdout"
+    );
+    assert!(
+        stderr.contains("attempt run"),
+        "next-action should name attempt run on stderr"
+    );
+}
+
+#[test]
+#[serial]
+fn attempt_run_output_names_next_action_for_merge_candidate_ready() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Guidance MC"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-guidance-pass");
+    write_mock_claude(&bin_dir, &loop_mock_script("pass"));
+
+    let output = fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("merge-candidate"),
+        "next-action for MergeCandidateReady should name merge-candidate on stderr; got:\n{stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn attempt_run_output_names_next_action_for_failed() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Guidance fail"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-guidance-fail");
+    write_mock_claude(&bin_dir, &stateful_loop_mock_script("fail"));
+
+    let output = fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_MAX_TOTAL_WRITE_ROUNDS", "1")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("resolve") || stderr.contains("attempt run"),
+        "next-action for failed/needs-user should name recovery on stderr; got:\n{stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn needs_user_auth_output_names_reauth_and_attempt_run() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Auth pause"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-guidance-auth");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+HAS_PROMPT=0
+for arg in "$@"; do
+  if [ "$arg" = "-p" ]; then HAS_PROMPT=1; break; fi
+done
+if [ "$HAS_PROMPT" = 0 ]; then exit 0; fi
+echo '{"type":"result","api_error_status":401,"request_id":"req-test-auth"}'
+exit 1
+"##,
+    );
+
+    let output = fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("re-authenticate") && stderr.contains("attempt run"),
+        "auth pause next-action should name re-authenticate and attempt run on stderr; got:\n{stderr}"
     );
 }

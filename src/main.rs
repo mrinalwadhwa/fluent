@@ -268,7 +268,7 @@ fn cmd_work_item(project_root: &Path, command: WorkItemCommands) -> Result<()> {
             store.create_work_item(&item)?;
             println!("Created Work Item {}", item.id);
             if guidance::guidance_enabled() {
-                println!("{}", guidance::after_work_item_create());
+                eprintln!("{}", guidance::after_work_item_create());
             }
         }
         WorkItemCommands::List => {
@@ -341,6 +341,9 @@ fn cmd_attempt(
             item.add_initial_attempt(attempt_id.clone())?;
             store.write_work_item(&item)?;
             println!("Created Attempt {attempt_id} for Work Item {work_item_id}");
+            if guidance::guidance_enabled() {
+                eprintln!("{}", guidance::after_attempt_create());
+            }
         }
         AttemptCommands::List { work_item_id } => {
             let item = match store.read_work_item(&work_item_id) {
@@ -466,7 +469,16 @@ fn cmd_attempt(
                 extra_args: &extra_args,
                 no_sandbox: no_sandbox || global_no_sandbox,
             })?;
-            for outcome in result.outcomes {
+            let pause_kind = store
+                .read_work_item(&work_item_id)
+                .ok()
+                .and_then(|item| {
+                    item.attempts
+                        .iter()
+                        .find(|a| a.id == attempt_id)
+                        .and_then(|a| a.pause_kind.clone())
+                });
+            for outcome in &result.outcomes {
                 match outcome {
                     WorkAttemptRunOutcome::RanTask { task_id, output } => {
                         println!("Completed Task {task_id} at {output}");
@@ -496,6 +508,13 @@ fn cmd_attempt(
                     }
                     WorkAttemptRunOutcome::ReviewOnlyFailed => {
                         println!("Review-only Attempt {attempt_id} failed");
+                    }
+                }
+                if guidance::guidance_enabled() {
+                    if let Some(hint) =
+                        guidance::after_attempt_run(outcome, pause_kind.as_ref())
+                    {
+                        eprintln!("{hint}");
                     }
                 }
             }
@@ -581,6 +600,9 @@ fn cmd_merge_candidate(
                         )
                     })?;
                 print!("{}", to_json_pretty(candidate)?);
+                if guidance::guidance_enabled() {
+                    eprintln!("{}", guidance::after_merge_candidate_show());
+                }
             }
             Err(WorkModelStorageError::ReadFile { source, .. })
                 if source.kind() == ErrorKind::NotFound =>
@@ -651,6 +673,9 @@ fn cmd_merge_candidate(
                 "Merged Merge Candidate {} at {}",
                 result.merge_candidate_id, result.merged_commit
             );
+            if guidance::guidance_enabled() {
+                eprintln!("{}", guidance::after_merge_candidate_land());
+            }
         }
         MergeCandidateCommands::Pull {
             work_item_id,
