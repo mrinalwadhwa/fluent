@@ -708,15 +708,15 @@ pub fn transcript_indicates_rate_limit(transcript_path: &Path) -> bool {
     false
 }
 
+fn real_credential_refresh() {
+    let _ = crate::credential::refresh_credentials();
+}
+
 /// Run a Coder command with rate-limit-aware retry. After a non-zero exit
 /// whose transcript contains a rate-limit marker, parse the retry-after
 /// timing from the transcript, apply per-run jitter, and sleep before
 /// retrying. Falls back to the configured fixed wait when no structured
 /// timing is available. Fires notifications on rate-limit state transitions.
-fn real_credential_refresh() {
-    let _ = crate::credential::refresh_credentials();
-}
-
 fn run_with_transcript_retrying<F>(
     build_cmd: F,
     transcript_file: Option<&Path>,
