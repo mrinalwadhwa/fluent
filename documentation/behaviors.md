@@ -4642,6 +4642,30 @@ Test: tests/binary.rs (capture_failure_does_not_abort_run)
 Derived: Mirrors the seed step's non-fatal contract and Project
 initialization:B7.
 
+### B7
+
+WHEN the capture step produces a commit whose changes are confined to
+`.fluent/expertise/`,
+THE SYSTEM SHALL record that commit as the Merge Candidate's commit.
+Test: src/work_attempt_loop.rs (capture_commit_within_expertise_is_accepted)
+
+### B8
+
+WHEN the capture step produces a commit that changes any path outside
+`.fluent/expertise/`,
+THE SYSTEM SHALL discard that capture commit, retain the pre-capture
+commit as the Merge Candidate, and log a warning naming the
+out-of-bounds path(s); the run and land proceed unaffected.
+Test: src/work_attempt_loop.rs (capture_commit_touching_source_is_discarded)
+
+### B9
+
+WHERE the capture step runs sandboxed,
+THE SYSTEM SHALL grant it write access only to `.fluent/expertise/` and
+the git directory it needs to commit, and read-only access to the rest
+of the worktree.
+Test: src/work_task_executor.rs (capture_sandbox_writable_root_is_expertise_only)
+
 ---
 
 ## Primary-flow command guidance
