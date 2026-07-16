@@ -1793,6 +1793,95 @@ exit 0
 }
 
 #[test]
+fn capture_failure_does_not_abort_run() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Capture fail test"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-capture-fail");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then
+    PROMPT="$arg"
+    break
+  fi
+  if [ "$arg" = "-p" ]; then
+    NEXT_IS_PROMPT=1
+  fi
+done
+if [ -z "$PROMPT" ]; then exit 0; fi
+
+case "$PWD" in
+  */work-6-work-1-attempt-1)
+    if printf '%s' "$PROMPT" | grep -q "capturing learnings"; then
+      exit 1
+    fi
+    count_file="$PWD/.fluent-loop-write-count"
+    if [ -f "$count_file" ]; then
+      count="$(cat "$count_file")"
+    else
+      count=0
+    fi
+    count="$((count + 1))"
+    printf '%s\n' "$count" > "$count_file"
+    printf 'loop output %s\n' "$count" > "loop-output-$count.txt"
+    git add "$count_file" "loop-output-$count.txt"
+    git commit -m "Add loop output $count" >/dev/null
+    ;;
+  *)
+    if printf '%s' "$PWD" | grep -q 'review-[0-9]'; then
+      printf 'Verdict: pass\n\nReview passed.\n' > review.md
+    else
+      printf 'Verdict: fail\n\nReview failed.\n' > review.md
+    fi
+    ;;
+esac
+exit 0
+"##,
+    );
+
+    let output = fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "run should succeed despite capture failure: stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("capture learnings failed"),
+        "stderr should warn about capture failure; got:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("Merge Candidate attempt-1-merge-candidate is ready"),
+        "merge candidate should be created despite capture failure; got:\n{stdout}"
+    );
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    assert_eq!(value["merge_candidates"].as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn write_task_transcript_persists_after_failed_attempt() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);

@@ -2052,6 +2052,103 @@ mod tests {
         );
     }
 
+    fn make_multi_round_fixture(
+        project_root: &Path,
+    ) -> (WorkModelStore, WorkItem) {
+        let store = WorkModelStore::new(project_root);
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Test item".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            post_merge_review_fix_depth: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+
+        let attempt = &mut item.attempts[0];
+        attempt.tasks[0].status = TaskStatus::Complete;
+        attempt.tasks[0].output = Some(TaskOutput {
+            workspace_id: "candidate".to_string(),
+            workspace_path: "../work-1-candidate".to_string(),
+            source_branch: "main".to_string(),
+            commit: "abc123".to_string(),
+        });
+
+        let review1_artifact_path =
+            work_artifact_path("work-1", "attempt-1", "attempt-1-review-1-tests");
+        attempt.tasks.push(review_task_with_artifact(
+            "attempt-1-review-1-tests",
+            "tests",
+            &review1_artifact_path,
+        ));
+
+        let review1_dir = project_root.join(&review1_artifact_path);
+        fs::create_dir_all(&review1_dir).unwrap();
+        fs::write(review1_dir.join("review.md"), "Verdict: fail\n").unwrap();
+
+        attempt.tasks.push(Task {
+            id: "attempt-1-write-2".to_string(),
+            kind: TaskKind::Write,
+            status: TaskStatus::Complete,
+            output: Some(TaskOutput {
+                workspace_id: "candidate".to_string(),
+                workspace_path: "../work-1-candidate".to_string(),
+                source_branch: "main".to_string(),
+                commit: "def456".to_string(),
+            }),
+            input_artifacts: vec![ArtifactRef {
+                producer_id: "attempt-1-review-1-tests".to_string(),
+                path: format!("{}/review.md", review1_artifact_path),
+            }],
+            ..write_task("attempt-1-write-2", Vec::new())
+        });
+
+        let review2_artifact_path =
+            work_artifact_path("work-1", "attempt-1", "attempt-1-review-2-tests");
+        attempt.tasks.push(review_task_with_artifact(
+            "attempt-1-review-2-tests",
+            "tests",
+            &review2_artifact_path,
+        ));
+
+        let review2_dir = project_root.join(&review2_artifact_path);
+        fs::create_dir_all(&review2_dir).unwrap();
+        fs::write(review2_dir.join("review.md"), "Verdict: pass\n").unwrap();
+
+        store.create_work_item(&item).unwrap();
+        (store, item)
+    }
+
+    #[test]
+    fn capture_makes_no_commit_when_expertise_unchanged() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, _) = make_multi_round_fixture(tmp.path());
+
+        let item = store.read_work_item("work-1").unwrap();
+        assert!(
+            should_capture(&item.attempts[0]),
+            "multi-round attempt should trigger capture"
+        );
+
+        let outcome =
+            interpret_reviews(tmp.path(), &store, item, "attempt-1", true, None).unwrap();
+
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
+            "reviews passed — merge candidate should be ready; got {outcome:?}"
+        );
+
+        let stored = store.read_work_item("work-1").unwrap();
+        let candidate = &stored.merge_candidates[0];
+        assert_eq!(
+            candidate.candidate_commit, "def456",
+            "candidate commit should match the last write output (no capture commit)"
+        );
+    }
+
     #[test]
     fn should_not_capture_when_no_findings() {
         let attempt = attempt_with_tasks(vec![
