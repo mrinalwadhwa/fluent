@@ -693,10 +693,16 @@ Check item {{ITEM_ID}}.
     #[test]
     fn bundled_content_resolves_seed_and_capture_system_prompts() {
         let seed = bundled_content("prompts/seed-system.md").unwrap();
-        assert!(!seed.contains("Fluent Writer"), "seed system prompt must not reuse writer identity");
+        assert!(
+            !seed.contains("Fluent Writer"),
+            "seed system prompt must not reuse writer identity"
+        );
 
         let capture = bundled_content("prompts/capture-system.md").unwrap();
-        assert!(!capture.contains("Fluent Writer"), "capture system prompt must not reuse writer identity");
+        assert!(
+            !capture.contains("Fluent Writer"),
+            "capture system prompt must not reuse writer identity"
+        );
     }
 
     #[test]
