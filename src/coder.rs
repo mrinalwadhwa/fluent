@@ -197,6 +197,7 @@ impl Coder for SandboxedClaudeCode {
             },
             transcript_file,
             &crate::notify::notify,
+            &real_credential_refresh,
         )
     }
 
@@ -281,6 +282,7 @@ impl Coder for BareClaudeCode {
             },
             transcript_file,
             &crate::notify::notify,
+            &real_credential_refresh,
         )
     }
 
@@ -334,6 +336,7 @@ impl Coder for CodexCode {
             },
             transcript_file,
             &crate::notify::notify,
+            &real_credential_refresh,
         )
     }
 
@@ -447,6 +450,7 @@ impl Coder for PiCode {
             },
             transcript_file,
             &crate::notify::notify,
+            &real_credential_refresh,
         )
     }
 
@@ -709,10 +713,15 @@ pub fn transcript_indicates_rate_limit(transcript_path: &Path) -> bool {
 /// timing from the transcript, apply per-run jitter, and sleep before
 /// retrying. Falls back to the configured fixed wait when no structured
 /// timing is available. Fires notifications on rate-limit state transitions.
+fn real_credential_refresh() {
+    let _ = crate::credential::refresh_credentials();
+}
+
 fn run_with_transcript_retrying<F>(
     build_cmd: F,
     transcript_file: Option<&Path>,
     notify_fn: &dyn Fn(&str, &str),
+    refresh_fn: &dyn Fn(),
 ) -> Result<i32>
 where
     F: Fn() -> Command,
@@ -743,7 +752,7 @@ where
             if !auth_refreshed {
                 auth_refreshed = true;
                 eprintln!("  Auth 401 detected — refreshing credentials and retrying.");
-                let _ = crate::credential::refresh_credentials();
+                refresh_fn();
                 continue;
             }
             return Err(anyhow::Error::new(auth_err));
@@ -1374,6 +1383,7 @@ exit 1"#
             },
             Some(&transcript),
             &crate::notify::notify,
+            &real_credential_refresh,
         );
 
         let count: u32 = std::fs::read_to_string(&counter)
@@ -1402,6 +1412,7 @@ exit 1"#
             },
             Some(&transcript),
             &crate::notify::notify,
+            &real_credential_refresh,
         );
 
         assert_eq!(result.unwrap(), 0, "should succeed after retry");
@@ -1422,6 +1433,7 @@ exit 1"#
             },
             Some(&transcript),
             &crate::notify::notify,
+            &real_credential_refresh,
         );
 
         let err = result.unwrap_err();
@@ -1456,6 +1468,7 @@ exit 1"#
             },
             Some(&transcript),
             &notify,
+            &real_credential_refresh,
         );
 
         assert_eq!(result.unwrap(), 0);
