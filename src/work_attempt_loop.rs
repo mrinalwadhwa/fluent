@@ -2520,9 +2520,7 @@ mod tests {
         assert!(is_capture_path_in_bounds(
             ".fluent/expertise/learnings/INDEX.md"
         ));
-        assert!(is_capture_path_in_bounds(
-            ".fluent/expertise/decisions.md"
-        ));
+        assert!(is_capture_path_in_bounds(".fluent/expertise/decisions.md"));
     }
 
     #[test]
@@ -2541,9 +2539,7 @@ mod tests {
         assert!(!is_capture_path_in_bounds(".fluent/expertise"));
     }
 
-    fn make_capture_git_fixture(
-        project_root: &Path,
-    ) -> (WorkModelStore, WorkItem, PathBuf) {
+    fn make_capture_git_fixture(project_root: &Path) -> (WorkModelStore, WorkItem, PathBuf) {
         let store = WorkModelStore::new(project_root);
         let mut item = WorkItem {
             id: "work-1".to_string(),
@@ -2564,19 +2560,25 @@ mod tests {
         let workspace = project_root.join("workspace");
         fs::create_dir_all(&workspace).unwrap();
         git::run(&workspace, &["init", "--initial-branch=main"], "init").unwrap();
-        git::run(&workspace, &["config", "user.email", "test@test.com"], "config email").unwrap();
+        git::run(
+            &workspace,
+            &["config", "user.email", "test@test.com"],
+            "config email",
+        )
+        .unwrap();
         git::run(&workspace, &["config", "user.name", "Test"], "config name").unwrap();
-        git::run(&workspace, &["config", "commit.gpgsign", "false"], "config gpgsign").unwrap();
+        git::run(
+            &workspace,
+            &["config", "commit.gpgsign", "false"],
+            "config gpgsign",
+        )
+        .unwrap();
         fs::write(workspace.join("src.rs"), "fn main() {}").unwrap();
         git::run(&workspace, &["add", "."], "add").unwrap();
         git::run(&workspace, &["commit", "-m", "initial"], "commit").unwrap();
 
-        let base_commit = git::run_stdout(
-            &workspace,
-            &["rev-parse", "HEAD"],
-            "base commit",
-        )
-        .unwrap();
+        let base_commit =
+            git::run_stdout(&workspace, &["rev-parse", "HEAD"], "base commit").unwrap();
 
         attempt.tasks[0].output = Some(TaskOutput {
             workspace_id: "candidate".to_string(),
@@ -2638,10 +2640,21 @@ mod tests {
         let expertise_dir = workspace.join(".fluent/expertise");
         fs::create_dir_all(&expertise_dir).unwrap();
         fs::write(expertise_dir.join("learning.md"), "# Learning").unwrap();
-        git::run(&workspace, &["add", ".fluent/expertise/learning.md"], "add expertise").unwrap();
-        git::run(&workspace, &["commit", "-m", "capture learning"], "commit capture").unwrap();
+        git::run(
+            &workspace,
+            &["add", ".fluent/expertise/learning.md"],
+            "add expertise",
+        )
+        .unwrap();
+        git::run(
+            &workspace,
+            &["commit", "-m", "capture learning"],
+            "commit capture",
+        )
+        .unwrap();
 
-        let capture_head = git::run_stdout(&workspace, &["rev-parse", "HEAD"], "capture head").unwrap();
+        let capture_head =
+            git::run_stdout(&workspace, &["rev-parse", "HEAD"], "capture head").unwrap();
         let write_output = item.attempts[0].tasks[2].output.clone().unwrap();
         assert_ne!(capture_head, write_output.commit);
 
@@ -2666,7 +2679,12 @@ mod tests {
         fs::write(expertise_dir.join("learning.md"), "# Learning").unwrap();
         fs::write(workspace.join("src.rs"), "fn main() { /* modified */ }").unwrap();
         git::run(&workspace, &["add", "."], "add all").unwrap();
-        git::run(&workspace, &["commit", "-m", "straying capture"], "commit stray").unwrap();
+        git::run(
+            &workspace,
+            &["commit", "-m", "straying capture"],
+            "commit stray",
+        )
+        .unwrap();
 
         assert_ne!(
             git::run_stdout(&workspace, &["rev-parse", "HEAD"], "check").unwrap(),
