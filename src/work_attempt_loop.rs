@@ -699,14 +699,30 @@ fn try_capture(
         &diff_command,
     )?;
 
-    let new_head = git::run_stdout(
+    apply_capture_confinement(
         &workspace_path,
+        item,
+        attempt_index,
+        write_task_index,
+        &write_output,
+    )
+}
+
+fn apply_capture_confinement(
+    workspace_path: &Path,
+    item: &mut WorkItem,
+    attempt_index: usize,
+    write_task_index: usize,
+    write_output: &TaskOutput,
+) -> Result<()> {
+    let new_head = git::run_stdout(
+        workspace_path,
         &["rev-parse", "HEAD"],
         "resolve post-capture HEAD",
     )?;
     if new_head != write_output.commit {
         let changed = git::run_stdout(
-            &workspace_path,
+            workspace_path,
             &["diff", "--name-only", &write_output.commit, &new_head],
             "list capture changed paths",
         )?;
@@ -717,14 +733,14 @@ fn try_capture(
         if out_of_bounds.is_empty() {
             item.attempts[attempt_index].tasks[write_task_index].output = Some(TaskOutput {
                 commit: new_head,
-                ..write_output
+                ..write_output.clone()
             });
         } else {
             for path in &out_of_bounds {
                 eprintln!("  Warning: capture changed out-of-bounds path: {path}");
             }
             git::run(
-                &workspace_path,
+                workspace_path,
                 &["reset", "--hard", &write_output.commit],
                 "discard out-of-bounds capture commit",
             )?;
@@ -2617,106 +2633,22 @@ mod tests {
     #[test]
     fn capture_commit_within_expertise_is_accepted() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let (_store, mut item, workspace) =
-            make_capture_git_fixture(tmp.path());
+        let (_store, mut item, workspace) = make_capture_git_fixture(tmp.path());
 
-        let base_commit = item.attempts[0].tasks[0]
-            .output
-            .as_ref()
-            .unwrap()
-            .commit
-            .clone();
-
-        // Simulate capture: add a file under .fluent/expertise/ and commit
         let expertise_dir = workspace.join(".fluent/expertise");
         fs::create_dir_all(&expertise_dir).unwrap();
         fs::write(expertise_dir.join("learning.md"), "# Learning").unwrap();
         git::run(&workspace, &["add", ".fluent/expertise/learning.md"], "add expertise").unwrap();
         git::run(&workspace, &["commit", "-m", "capture learning"], "commit capture").unwrap();
 
-        let capture_head = git::run_stdout(
-            &workspace,
-            &["rev-parse", "HEAD"],
-            "capture head",
-        )
-        .unwrap();
+        let capture_head = git::run_stdout(&workspace, &["rev-parse", "HEAD"], "capture head").unwrap();
+        let write_output = item.attempts[0].tasks[2].output.clone().unwrap();
+        assert_ne!(capture_head, write_output.commit);
 
-        // Manually run the backstop logic via try_capture's path
-        let changed = git::run_stdout(
-            &workspace,
-            &["diff", "--name-only", &base_commit, &capture_head],
-            "list changed",
-        )
-        .unwrap();
-        let out_of_bounds: Vec<&str> = changed
-            .lines()
-            .filter(|line| !line.is_empty() && !is_capture_path_in_bounds(line))
-            .collect();
-
-        assert!(
-            out_of_bounds.is_empty(),
-            "expertise-only changes should be in-bounds; got out-of-bounds: {out_of_bounds:?}"
-        );
-
-        // Verify the actual try_capture function accepts it
-        let attempt_index = 0;
-        // Set up the write task output commit to the base
-        item.attempts[attempt_index].tasks[0].output = Some(TaskOutput {
-            commit: base_commit.clone(),
-            workspace_path: "workspace".to_string(),
-            workspace_id: "candidate".to_string(),
-            source_branch: "main".to_string(),
-        });
-        // Also set write-2's commit to match
-        item.attempts[attempt_index].tasks[2].output = Some(TaskOutput {
-            commit: base_commit.clone(),
-            workspace_path: "workspace".to_string(),
-            workspace_id: "candidate".to_string(),
-            source_branch: "main".to_string(),
-        });
-
-        // After try_capture-like logic, the write task output should be updated
-        // to the capture head
-        let new_head = git::run_stdout(
-            &workspace,
-            &["rev-parse", "HEAD"],
-            "post-capture HEAD",
-        )
-        .unwrap();
-        assert_eq!(new_head, capture_head);
-
-        // The last completed write task should get updated
-        let write_task_index = 2;
-        let write_output = item.attempts[attempt_index].tasks[write_task_index]
-            .output
-            .as_ref()
-            .unwrap()
-            .clone();
-        if new_head != write_output.commit {
-            let changed = git::run_stdout(
-                &workspace,
-                &["diff", "--name-only", &write_output.commit, &new_head],
-                "check",
-            )
-            .unwrap();
-            let oob: Vec<&str> = changed
-                .lines()
-                .filter(|l| !l.is_empty() && !is_capture_path_in_bounds(l))
-                .collect();
-            assert!(oob.is_empty());
-            item.attempts[attempt_index].tasks[write_task_index].output =
-                Some(TaskOutput {
-                    commit: new_head.clone(),
-                    ..write_output
-                });
-        }
+        apply_capture_confinement(&workspace, &mut item, 0, 2, &write_output).unwrap();
 
         assert_eq!(
-            item.attempts[attempt_index].tasks[write_task_index]
-                .output
-                .as_ref()
-                .unwrap()
-                .commit,
+            item.attempts[0].tasks[2].output.as_ref().unwrap().commit,
             capture_head,
             "in-bounds capture commit should be recorded as the output commit"
         );
@@ -2725,18 +2657,10 @@ mod tests {
     #[test]
     fn capture_commit_touching_source_is_discarded() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let (_store, mut item, workspace) =
-            make_capture_git_fixture(tmp.path());
+        let (_store, mut item, workspace) = make_capture_git_fixture(tmp.path());
 
-        let base_commit = item.attempts[0].tasks[0]
-            .output
-            .as_ref()
-            .unwrap()
-            .commit
-            .clone();
+        let write_output = item.attempts[0].tasks[2].output.clone().unwrap();
 
-        // Simulate a straying capture: add a file under .fluent/expertise/ AND
-        // modify a source file
         let expertise_dir = workspace.join(".fluent/expertise");
         fs::create_dir_all(&expertise_dir).unwrap();
         fs::write(expertise_dir.join("learning.md"), "# Learning").unwrap();
@@ -2744,78 +2668,21 @@ mod tests {
         git::run(&workspace, &["add", "."], "add all").unwrap();
         git::run(&workspace, &["commit", "-m", "straying capture"], "commit stray").unwrap();
 
-        let attempt_index = 0;
-        let write_task_index = 2;
-        item.attempts[attempt_index].tasks[write_task_index].output =
-            Some(TaskOutput {
-                commit: base_commit.clone(),
-                workspace_path: "workspace".to_string(),
-                workspace_id: "candidate".to_string(),
-                source_branch: "main".to_string(),
-            });
-
-        let new_head = git::run_stdout(
-            &workspace,
-            &["rev-parse", "HEAD"],
-            "post-capture HEAD",
-        )
-        .unwrap();
-        assert_ne!(new_head, base_commit);
-
-        let write_output = item.attempts[attempt_index].tasks[write_task_index]
-            .output
-            .as_ref()
-            .unwrap()
-            .clone();
-
-        let changed = git::run_stdout(
-            &workspace,
-            &["diff", "--name-only", &write_output.commit, &new_head],
-            "check",
-        )
-        .unwrap();
-        let out_of_bounds: Vec<&str> = changed
-            .lines()
-            .filter(|l| !l.is_empty() && !is_capture_path_in_bounds(l))
-            .collect();
-
-        assert!(
-            !out_of_bounds.is_empty(),
-            "source file change should be out-of-bounds"
-        );
-        assert!(
-            out_of_bounds.contains(&"src.rs"),
-            "src.rs should be in the out-of-bounds list"
+        assert_ne!(
+            git::run_stdout(&workspace, &["rev-parse", "HEAD"], "check").unwrap(),
+            write_output.commit
         );
 
-        // Reset like try_capture does
-        git::run(
-            &workspace,
-            &["reset", "--hard", &write_output.commit],
-            "discard",
-        )
-        .unwrap();
+        apply_capture_confinement(&workspace, &mut item, 0, 2, &write_output).unwrap();
 
-        // Verify HEAD was reset
-        let head_after_reset = git::run_stdout(
-            &workspace,
-            &["rev-parse", "HEAD"],
-            "after reset",
-        )
-        .unwrap();
+        let head_after = git::run_stdout(&workspace, &["rev-parse", "HEAD"], "after").unwrap();
         assert_eq!(
-            head_after_reset, base_commit,
+            head_after, write_output.commit,
             "HEAD should be reset to the pre-capture commit"
         );
-
-        // Output commit should NOT be updated
         assert_eq!(
-            item.attempts[attempt_index].tasks[write_task_index]
-                .output
-                .as_ref()
-                .unwrap()
-                .commit,
-            base_commit,
+            item.attempts[0].tasks[2].output.as_ref().unwrap().commit,
+            write_output.commit,
             "out-of-bounds capture should not update the output commit"
         );
     }
