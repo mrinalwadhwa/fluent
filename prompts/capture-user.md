@@ -74,6 +74,6 @@ If `{{expertise_index_path}}` does not already contain a row pointing to the lea
 
 ## After writing
 
-If you identified any learnings and wrote or updated files, commit with the message "Capture learnings from review run". Do not commit anything else.
+If you identified any learnings and wrote or updated files, commit with the message "Update expertise". Do not commit anything else.
 
 If you found no durable learnings worth recording, do not commit. Do not create empty files or placeholder entries.
