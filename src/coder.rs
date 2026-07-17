@@ -6,13 +6,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
-const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-4-6";
 const DEFAULT_PI_MODEL: &str = "qwen3.6-35b-a3b";
 
-fn claude_model() -> String {
+fn claude_model() -> Option<String> {
     std::env::var("FLUENT_CLAUDE_MODEL")
         .or_else(|_| std::env::var("FLUENT_MODEL"))
-        .unwrap_or_else(|_| DEFAULT_CLAUDE_MODEL.to_string())
+        .ok()
 }
 
 fn codex_model() -> Option<String> {
@@ -100,8 +99,8 @@ impl CoderKind {
 
     pub fn default_model(&self) -> String {
         match self {
-            Self::Claude => claude_model(),
-            Self::Codex => codex_model().unwrap_or_else(|| "o3".to_string()),
+            Self::Claude => claude_model().unwrap_or_default(),
+            Self::Codex => codex_model().unwrap_or_default(),
             Self::Pi => pi_model(),
         }
     }
@@ -219,8 +218,8 @@ impl Coder for SandboxedClaudeCode {
 }
 
 impl SandboxedClaudeCode {
-    fn effective_model(&self) -> String {
-        self.model_override.clone().unwrap_or_else(claude_model)
+    fn effective_model(&self) -> Option<String> {
+        self.model_override.clone().or_else(claude_model)
     }
 
     fn build_command(&self, working_dir: &Path) -> Command {
@@ -230,7 +229,9 @@ impl SandboxedClaudeCode {
             cmd.args(["-f", profile]);
             cmd.arg("claude");
             cmd.arg("--dangerously-skip-permissions");
-            cmd.args(["--model", &model]);
+            if let Some(ref m) = model {
+                cmd.args(["--model", m]);
+            }
             cmd.current_dir(working_dir);
             cmd
         } else {
@@ -247,8 +248,8 @@ pub struct BareClaudeCode {
 }
 
 impl BareClaudeCode {
-    fn effective_model(&self) -> String {
-        self.model_override.clone().unwrap_or_else(claude_model)
+    fn effective_model(&self) -> Option<String> {
+        self.model_override.clone().or_else(claude_model)
     }
 }
 
@@ -271,7 +272,9 @@ impl Coder for BareClaudeCode {
                 cmd.current_dir(working_dir);
                 apply_coder_env(&mut cmd, extra_env);
                 cmd.args(["--dangerously-skip-permissions"]);
-                cmd.args(["--model", &model]);
+                if let Some(ref m) = model {
+                    cmd.args(["--model", m]);
+                }
                 if want_transcript {
                     cmd.args(["--verbose", "--output-format", "stream-json"]);
                 }
@@ -1342,6 +1345,85 @@ mod model_default_tests {
             envs.iter()
                 .any(|(k, v)| *k == OsStr::new("GIT_EDITOR") && *v == Some(OsStr::new("vim"))),
             "caller override of GIT_EDITOR should win"
+        );
+    }
+
+    fn cmd_has_arg(cmd: &Command, arg: &str) -> bool {
+        cmd.get_args().any(|a| a == OsStr::new(arg))
+    }
+
+    #[test]
+    fn claude_command_omits_model_when_unset() {
+        let coder = SandboxedClaudeCode {
+            sandbox_profile: Some("/tmp/profile".to_string()),
+            model_override: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = coder.build_command(dir.path());
+        assert!(
+            !cmd_has_arg(&cmd, "--model"),
+            "should not pass --model when no model is configured"
+        );
+    }
+
+    #[test]
+    fn claude_command_passes_model_when_set() {
+        let coder = SandboxedClaudeCode {
+            sandbox_profile: Some("/tmp/profile".to_string()),
+            model_override: Some("claude-sonnet-4-6".to_string()),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = coder.build_command(dir.path());
+        assert!(
+            cmd_has_arg(&cmd, "--model"),
+            "should pass --model when model is configured"
+        );
+        assert!(
+            cmd_has_arg(&cmd, "claude-sonnet-4-6"),
+            "should pass the configured model"
+        );
+    }
+
+    #[test]
+    fn bare_claude_command_omits_model_when_unset() {
+        let coder = BareClaudeCode {
+            model_override: None,
+        };
+        assert!(
+            coder.effective_model().is_none(),
+            "effective_model should be None when no model is configured"
+        );
+    }
+
+    #[test]
+    fn codex_command_omits_model_when_unset() {
+        let coder = CodexCode {
+            sandbox_profile: None,
+            model_override: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = coder.build_command(dir.path(), true);
+        assert!(
+            !cmd_has_arg(&cmd, "--model"),
+            "codex should not pass --model when no model is configured"
+        );
+    }
+
+    #[test]
+    fn codex_command_passes_model_when_set() {
+        let coder = CodexCode {
+            sandbox_profile: None,
+            model_override: Some("gpt-4o".to_string()),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = coder.build_command(dir.path(), true);
+        assert!(
+            cmd_has_arg(&cmd, "--model"),
+            "codex should pass --model when model is configured"
+        );
+        assert!(
+            cmd_has_arg(&cmd, "gpt-4o"),
+            "codex should pass the configured model"
         );
     }
 }

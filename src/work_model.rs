@@ -5813,7 +5813,10 @@ mod tests {
         assert_eq!(mapping.write.coder, CoderKind::Claude);
         assert_eq!(mapping.review.coder, CoderKind::Claude);
         assert_eq!(mapping.behavior_tests.coder, CoderKind::Claude);
-        assert!(!mapping.write.model.is_empty());
+        assert!(
+            mapping.write.model.is_empty(),
+            "model should be empty when nothing is configured"
+        );
     }
 
     #[test]
@@ -5991,20 +5994,16 @@ mod tests {
 
     #[test]
     fn resolve_coder_mapping_stores_resolved_model_at_creation() {
-        let inputs = CoderMappingInputs::default();
+        let inputs = CoderMappingInputs {
+            write_model: Some("custom-write-model".to_string()),
+            review_model: Some("custom-review-model".to_string()),
+            behavior_tests_model: Some("custom-bt-model".to_string()),
+            ..Default::default()
+        };
         let mapping = resolve_coder_mapping(&inputs).unwrap();
-        assert!(
-            !mapping.write.model.is_empty(),
-            "model should be resolved at creation"
-        );
-        assert!(
-            !mapping.review.model.is_empty(),
-            "model should be resolved at creation"
-        );
-        assert!(
-            !mapping.behavior_tests.model.is_empty(),
-            "model should be resolved at creation"
-        );
+        assert_eq!(mapping.write.model, "custom-write-model");
+        assert_eq!(mapping.review.model, "custom-review-model");
+        assert_eq!(mapping.behavior_tests.model, "custom-bt-model");
     }
 
     #[test]
