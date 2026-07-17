@@ -1108,10 +1108,7 @@ fn init_output_notes_fluent_tracks_its_state() {
         .arg("init")
         .assert()
         .success()
-        .stderr(
-            predicate::str::contains(".fluent/")
-                .and(predicate::str::contains("commits")),
-        );
+        .stderr(predicate::str::contains(".fluent/").and(predicate::str::contains("commits")));
 
     // Already initialized
     fluent_cmd()
@@ -1119,10 +1116,7 @@ fn init_output_notes_fluent_tracks_its_state() {
         .arg("init")
         .assert()
         .success()
-        .stderr(
-            predicate::str::contains(".fluent/")
-                .and(predicate::str::contains("commits")),
-        );
+        .stderr(predicate::str::contains(".fluent/").and(predicate::str::contains("commits")));
 }
 
 #[test]
