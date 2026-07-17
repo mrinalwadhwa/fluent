@@ -425,7 +425,7 @@ fn cmd_attempt(
                 }
             };
             let coder_mapping = work_model::resolve_coder_mapping(
-                &work_model::CoderMappingInputs::from_env().merge_cli(
+                &fluent::config::from_config(project_root).merge(work_model::CoderMappingInputs::from_env()).merge_cli(
                     write_coder,
                     write_model,
                     review_coder,
@@ -798,7 +798,7 @@ fn cmd_task(
             extra_args,
         } => {
             let coder_mapping = work_model::resolve_coder_mapping(
-                &work_model::CoderMappingInputs::from_env().merge_cli(
+                &fluent::config::from_config(project_root).merge(work_model::CoderMappingInputs::from_env()).merge_cli(
                     write_coder,
                     write_model,
                     review_coder,

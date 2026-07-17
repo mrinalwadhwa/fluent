@@ -4,6 +4,7 @@ pub mod claude_auth;
 pub mod cleanup;
 pub mod cli;
 pub mod coder;
+pub mod config;
 pub mod content;
 pub mod credential;
 pub mod dashboard;

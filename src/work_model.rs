@@ -1049,10 +1049,13 @@ impl CoderMapping {
 pub struct CoderMappingInputs {
     pub write_coder: Option<String>,
     pub write_model: Option<String>,
+    pub write_effort: Option<String>,
     pub review_coder: Option<String>,
     pub review_model: Option<String>,
+    pub review_effort: Option<String>,
     pub behavior_tests_coder: Option<String>,
     pub behavior_tests_model: Option<String>,
+    pub behavior_tests_effort: Option<String>,
     pub global_coder: Option<String>,
 }
 
@@ -1061,11 +1064,31 @@ impl CoderMappingInputs {
         Self {
             write_coder: std::env::var("FLUENT_WRITE_CODER").ok(),
             write_model: std::env::var("FLUENT_WRITE_MODEL").ok(),
+            write_effort: std::env::var("FLUENT_WRITE_EFFORT").ok(),
             review_coder: std::env::var("FLUENT_REVIEW_CODER").ok(),
             review_model: std::env::var("FLUENT_REVIEW_MODEL").ok(),
+            review_effort: std::env::var("FLUENT_REVIEW_EFFORT").ok(),
             behavior_tests_coder: std::env::var("FLUENT_BEHAVIOR_TESTS_CODER").ok(),
             behavior_tests_model: std::env::var("FLUENT_BEHAVIOR_TESTS_MODEL").ok(),
+            behavior_tests_effort: std::env::var("FLUENT_BEHAVIOR_TESTS_EFFORT").ok(),
             global_coder: std::env::var("FLUENT_CODER").ok(),
+        }
+    }
+
+    /// Overlay `other` onto `self`: fields set in `other` win; unset fields
+    /// fall through to `self`.
+    pub fn merge(self, other: Self) -> Self {
+        Self {
+            write_coder: other.write_coder.or(self.write_coder),
+            write_model: other.write_model.or(self.write_model),
+            write_effort: other.write_effort.or(self.write_effort),
+            review_coder: other.review_coder.or(self.review_coder),
+            review_model: other.review_model.or(self.review_model),
+            review_effort: other.review_effort.or(self.review_effort),
+            behavior_tests_coder: other.behavior_tests_coder.or(self.behavior_tests_coder),
+            behavior_tests_model: other.behavior_tests_model.or(self.behavior_tests_model),
+            behavior_tests_effort: other.behavior_tests_effort.or(self.behavior_tests_effort),
+            global_coder: other.global_coder.or(self.global_coder),
         }
     }
 
@@ -5816,6 +5839,60 @@ mod tests {
         assert!(
             mapping.write.model.is_empty(),
             "model should be empty when nothing is configured"
+        );
+    }
+
+    #[test]
+    fn resolve_coder_mapping_precedence_flag_env_config() {
+        let config = CoderMappingInputs {
+            write_model: Some("config-model".to_string()),
+            review_model: Some("config-review-model".to_string()),
+            behavior_tests_model: Some("config-bt-model".to_string()),
+            ..Default::default()
+        };
+        let env = CoderMappingInputs {
+            review_model: Some("env-review-model".to_string()),
+            ..Default::default()
+        };
+        let inputs = config
+            .merge(env)
+            .merge_cli(None, None, None, None, None, None, None);
+        let mapping = resolve_coder_mapping(&inputs).unwrap();
+        assert_eq!(
+            mapping.write.model, "config-model",
+            "config model used when env and CLI are unset"
+        );
+        assert_eq!(
+            mapping.review.model, "env-review-model",
+            "env overrides config"
+        );
+        assert_eq!(
+            mapping.behavior_tests.model, "config-bt-model",
+            "config model used when env is unset"
+        );
+
+        let config2 = CoderMappingInputs {
+            write_model: Some("config-model".to_string()),
+            review_model: Some("config-review-model".to_string()),
+            ..Default::default()
+        };
+        let env2 = CoderMappingInputs {
+            review_model: Some("env-review-model".to_string()),
+            ..Default::default()
+        };
+        let inputs2 = config2.merge(env2).merge_cli(
+            None,
+            None,
+            None,
+            Some("cli-review-model".to_string()),
+            None,
+            None,
+            None,
+        );
+        let mapping2 = resolve_coder_mapping(&inputs2).unwrap();
+        assert_eq!(
+            mapping2.review.model, "cli-review-model",
+            "CLI overrides env and config"
         );
     }
 
