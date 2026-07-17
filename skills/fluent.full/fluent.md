@@ -38,6 +38,10 @@ If `fluent status` shows a pending Merge Candidate, inspect it with `fluent merg
 
 If nothing needs attention, ask the user what they want to build.
 
+## fluent tracks its own state in the repo
+
+fluent git-tracks its durable state in `.fluent/` — its learned project model (`expertise/`) and test config (`tester.yaml`, `extract-tester-results`) — and commits it alongside the user's changes so it persists across runs. On a repo's first run, tell the user this is expected, so they aren't surprised to see `.fluent/` files land in their history.
+
 ## Interactive stages (user present)
 
 Follow the four stage procedures in order. Each is a reference file in this skill — read it when entering that stage. Each writes into `.fluent/drafts/<draft-id>/` — don't create planning files outside that directory:
