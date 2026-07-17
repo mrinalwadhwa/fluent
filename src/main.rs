@@ -1307,6 +1307,12 @@ fn cmd_init(cwd: &Path) -> Result<()> {
         eprintln!("  warning: could not seed agent instructions: {e}");
     }
 
+    eprintln!();
+    eprintln!(
+        "  fluent keeps its learned project notes and test config in .fluent/ and"
+    );
+    eprintln!("  commits them alongside your changes, so they persist across runs.");
+
     if cwd.file_name().and_then(|n| n.to_str()) != Some("main") {
         eprintln!();
         eprintln!("  Tip: place your repo at <project>/main/ so attempt worktrees");

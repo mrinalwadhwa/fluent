@@ -1099,6 +1099,33 @@ fn init_gitignore_does_not_allowlist_observations() {
 }
 
 #[test]
+fn init_output_notes_fluent_tracks_its_state() {
+    let tmp = TempDir::new().unwrap();
+
+    // Fresh init
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .arg("init")
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains(".fluent/")
+                .and(predicate::str::contains("commits")),
+        );
+
+    // Already initialized
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .arg("init")
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains(".fluent/")
+                .and(predicate::str::contains("commits")),
+        );
+}
+
+#[test]
 fn init_prints_layout_tip_when_dir_not_named_main() {
     let tmp = TempDir::new().unwrap();
 
