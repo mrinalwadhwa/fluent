@@ -4730,3 +4730,13 @@ WHEN a primary-flow command prints a next-action line,
 THE SYSTEM SHALL keep the command result itself readable and unchanged in meaning, with
 the next-action additive and visually distinct (not interleaved into the result).
 Test: tests/binary.rs (next_action_is_appended_not_interleaved_into_result)
+
+## Fluent state tracking
+
+### B1
+
+WHEN `fluent init` runs (whether it initializes a fresh `.fluent/` or finds an
+existing one),
+THE SYSTEM SHALL print a heads-up that fluent keeps its learned project notes and
+test config in `.fluent/` and commits them alongside the user's changes.
+Test: tests/binary.rs (init_output_notes_fluent_tracks_its_state)
