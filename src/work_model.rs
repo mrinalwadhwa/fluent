@@ -1002,7 +1002,7 @@ fn push_planning_section(sections: &mut Vec<String>, title: &str, content: &Opti
     }
 }
 
-/// A (CoderKind, model name) pair for one Task kind in a coder mapping.
+/// Coder, model, and optional effort for one Task kind in a coder mapping.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoderModelPair {
     pub coder: CoderKind,
@@ -1095,6 +1095,9 @@ impl CoderMappingInputs {
         }
     }
 
+    /// Overlay CLI flags onto the accumulated inputs. Per-role flags win
+    /// over globals; `global_model` and `global_effort` expand to every role
+    /// that has no explicit per-role value.
     pub fn merge_cli(
         mut self,
         write_coder: Option<String>,

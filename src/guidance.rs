@@ -18,6 +18,7 @@ pub fn after_attempt_create() -> &'static str {
     "\n→ Next: fluent attempt run <work-item-id>"
 }
 
+/// Format the resolved coder mapping as a multi-line plan for stderr output.
 pub fn format_coder_plan(mapping: &CoderMapping) -> String {
     fn role_line(label: &str, coder: &str, model: &str, effort: Option<&str>) -> String {
         let model_part = if model.is_empty() {
