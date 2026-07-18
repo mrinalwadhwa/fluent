@@ -4541,6 +4541,46 @@ Test: src/work_model.rs (work_item_fix_depth_round_trips_through_storage)
 
 ---
 
+## Post-merge review daemon
+
+A per-target-branch singleton lease bounds the post-merge review daemon
+to one live process. A land still enqueues its review job
+unconditionally; the drain-all-on-wake behavior is unchanged. These
+statements add the singleton guard that stops each land from leaking a
+new sleeping daemon.
+
+### B1
+
+WHEN a land completes and enqueues a post-merge review job, and a live
+post-merge review daemon already holds the singleton lease for the
+target branch,
+THE SYSTEM SHALL NOT spawn another daemon; the running daemon drains the
+job on its next wake.
+Test: src/post_merge_review.rs (skips_spawn_when_daemon_lease_held_live)
+
+### B2
+
+WHEN a post-merge review daemon starts and a live daemon already holds
+the lease,
+THE SYSTEM SHALL exit immediately without draining.
+Test: src/post_merge_review.rs (second_daemon_exits_when_lease_held)
+
+### B3
+
+WHERE the singleton lease is held by a process that is no longer
+running,
+THE SYSTEM SHALL treat it as free so a land or daemon can acquire it and
+proceed.
+Test: src/post_merge_review.rs (stale_lease_is_treated_as_free)
+
+### B4
+
+WHEN the post-merge review daemon exits,
+THE SYSTEM SHALL release the singleton lease.
+Test: src/post_merge_review.rs (daemon_releases_lease_on_exit)
+
+---
+
 ## Install script
 
 ### B1
