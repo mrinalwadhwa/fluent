@@ -12220,13 +12220,7 @@ exit 0
 
     let quiet_output = fluent_cmd()
         .current_dir(&main_dir)
-        .args([
-            "attempt",
-            "run",
-            "plan-print",
-            "attempt-2",
-            "--no-sandbox",
-        ])
+        .args(["attempt", "run", "plan-print", "attempt-2", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
         .env("FLUENT_QUIET", "1")
         .output()
@@ -12255,7 +12249,13 @@ fn attempt_coder_model_flags_override_config() {
 
     fluent_cmd()
         .current_dir(&main_dir)
-        .args(["work-item", "create", "override-test", "--title", "Override"])
+        .args([
+            "work-item",
+            "create",
+            "override-test",
+            "--title",
+            "Override",
+        ])
         .assert()
         .success();
 

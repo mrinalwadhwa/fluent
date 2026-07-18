@@ -65,10 +65,7 @@ pub fn from_config(project_root: &Path) -> CoderMappingInputs {
     let user = user_config_path().and_then(|p| read_config(&p));
     let project = read_config(&project_config_path(project_root));
 
-    let base = user
-        .as_ref()
-        .map(config_to_inputs)
-        .unwrap_or_default();
+    let base = user.as_ref().map(config_to_inputs).unwrap_or_default();
 
     match project {
         Some(ref proj) => {
@@ -99,11 +96,17 @@ coders:
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.coders.writer.coder.as_deref(), Some("claude"));
-        assert_eq!(config.coders.writer.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(
+            config.coders.writer.model.as_deref(),
+            Some("claude-sonnet-4-6")
+        );
         assert_eq!(config.coders.writer.effort.as_deref(), Some("high"));
         assert_eq!(config.coders.reviewer.coder.as_deref(), Some("codex"));
         assert_eq!(config.coders.reviewer.model.as_deref(), Some("o3"));
-        assert_eq!(config.coders.behavior_tests.coder.as_deref(), Some("claude"));
+        assert_eq!(
+            config.coders.behavior_tests.coder.as_deref(),
+            Some("claude")
+        );
         assert!(config.coders.behavior_tests.model.is_none());
     }
 
@@ -116,7 +119,10 @@ coders:
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert!(config.coders.writer.coder.is_none());
-        assert_eq!(config.coders.writer.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(
+            config.coders.writer.model.as_deref(),
+            Some("claude-sonnet-4-6")
+        );
         assert!(config.coders.reviewer.coder.is_none());
     }
 
@@ -152,7 +158,10 @@ coders:
         assert_eq!(inputs.review_coder.as_deref(), Some("codex"));
         assert_eq!(inputs.review_model.as_deref(), Some("o3"));
         assert_eq!(inputs.behavior_tests_coder.as_deref(), Some("claude"));
-        assert_eq!(inputs.behavior_tests_model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(
+            inputs.behavior_tests_model.as_deref(),
+            Some("claude-opus-4-6")
+        );
         assert_eq!(inputs.behavior_tests_effort.as_deref(), Some("low"));
     }
 

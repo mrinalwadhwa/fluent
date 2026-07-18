@@ -1210,8 +1210,16 @@ pub fn resolve_coder_mapping(inputs: &CoderMappingInputs) -> Result<CoderMapping
     };
 
     Ok(CoderMapping {
-        write: resolve_pair(&inputs.write_coder, &inputs.write_model, &inputs.write_effort)?,
-        review: resolve_pair(&inputs.review_coder, &inputs.review_model, &inputs.review_effort)?,
+        write: resolve_pair(
+            &inputs.write_coder,
+            &inputs.write_model,
+            &inputs.write_effort,
+        )?,
+        review: resolve_pair(
+            &inputs.review_coder,
+            &inputs.review_model,
+            &inputs.review_effort,
+        )?,
         behavior_tests: resolve_pair(
             &inputs.behavior_tests_coder,
             &inputs.behavior_tests_model,
@@ -5918,9 +5926,9 @@ mod tests {
             review_model: Some("env-review-model".to_string()),
             ..Default::default()
         };
-        let inputs = config
-            .merge(env)
-            .merge_cli(None, None, None, None, None, None, None, None, None, None, None, None);
+        let inputs = config.merge(env).merge_cli(
+            None, None, None, None, None, None, None, None, None, None, None, None,
+        );
         let mapping = resolve_coder_mapping(&inputs).unwrap();
         assert_eq!(
             mapping.write.model, "config-model",

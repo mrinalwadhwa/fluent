@@ -1506,9 +1506,9 @@ mod model_default_tests {
         let dir = tempfile::tempdir().unwrap();
         let cmd = coder.build_command(dir.path(), true);
         let args: Vec<_> = cmd.get_args().collect();
-        let has_effort = args.iter().any(|a| {
-            a.to_string_lossy().contains("model_reasoning_effort")
-        });
+        let has_effort = args
+            .iter()
+            .any(|a| a.to_string_lossy().contains("model_reasoning_effort"));
         assert!(!has_effort, "codex should not pass effort when unset");
     }
 }

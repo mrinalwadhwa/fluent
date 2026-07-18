@@ -465,20 +465,22 @@ fn cmd_attempt(
                 }
             };
             let coder_mapping = work_model::resolve_coder_mapping(
-                &fluent::config::from_config(project_root).merge(work_model::CoderMappingInputs::from_env()).merge_cli(
-                    write_coder,
-                    write_model,
-                    review_coder,
-                    review_model,
-                    behavior_tests_coder,
-                    behavior_tests_model,
-                    coder.or_else(|| global_coder.map(str::to_string)),
-                    model,
-                    write_effort,
-                    review_effort,
-                    behavior_tests_effort,
-                    effort,
-                ),
+                &fluent::config::from_config(project_root)
+                    .merge(work_model::CoderMappingInputs::from_env())
+                    .merge_cli(
+                        write_coder,
+                        write_model,
+                        review_coder,
+                        review_model,
+                        behavior_tests_coder,
+                        behavior_tests_model,
+                        coder.or_else(|| global_coder.map(str::to_string)),
+                        model,
+                        write_effort,
+                        review_effort,
+                        behavior_tests_effort,
+                        effort,
+                    ),
             )?;
             let runtime = runtime.unwrap_or_else(|| "local".to_string());
             match runtime.as_str() {
@@ -852,20 +854,22 @@ fn cmd_task(
             extra_args,
         } => {
             let coder_mapping = work_model::resolve_coder_mapping(
-                &fluent::config::from_config(project_root).merge(work_model::CoderMappingInputs::from_env()).merge_cli(
-                    write_coder,
-                    write_model,
-                    review_coder,
-                    review_model,
-                    behavior_tests_coder,
-                    behavior_tests_model,
-                    coder.or_else(|| global_coder.map(str::to_string)),
-                    model,
-                    write_effort,
-                    review_effort,
-                    behavior_tests_effort,
-                    effort,
-                ),
+                &fluent::config::from_config(project_root)
+                    .merge(work_model::CoderMappingInputs::from_env())
+                    .merge_cli(
+                        write_coder,
+                        write_model,
+                        review_coder,
+                        review_model,
+                        behavior_tests_coder,
+                        behavior_tests_model,
+                        coder.or_else(|| global_coder.map(str::to_string)),
+                        model,
+                        write_effort,
+                        review_effort,
+                        behavior_tests_effort,
+                        effort,
+                    ),
             )?;
 
             // Store the resolved mapping on the Attempt before running.
