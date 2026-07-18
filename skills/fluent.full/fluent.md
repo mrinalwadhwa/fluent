@@ -94,7 +94,7 @@ or `~/.config/fluent/config.yaml` (user):
 coders:
   writer:
     coder: claude
-    model: claude-opus-4-6
+    # model: optional — omit to use the coder's own default
     effort: high
   reviewer:
     coder: claude
