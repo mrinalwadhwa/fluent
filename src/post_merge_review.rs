@@ -142,8 +142,15 @@ pub fn daemon_lease_held(project_root: &Path, target_branch: &str) -> bool {
 ///
 /// The `fix_depth` parameter controls recursion bounding: when it
 /// reaches the cap, the spawn is skipped entirely.
+///
+/// The spawn is also skipped when a live daemon already holds the
+/// singleton lease for `target_branch`: the job is already enqueued and
+/// the running daemon drains it on its next wake. This pre-check is an
+/// optimization; the daemon's own acquire-or-exit is the real guarantee
+/// that at most one daemon drains.
 pub fn spawn_detached_runner(
     project_root: &Path,
+    target_branch: &str,
     debounce_secs: u64,
     fix_depth: u64,
 ) -> Result<()> {
@@ -151,6 +158,12 @@ pub fn spawn_detached_runner(
         eprintln!(
             "  Skipping post-merge review spawn: fix depth {fix_depth} >= cap {}",
             max_post_merge_review_fix_depth()
+        );
+        return Ok(());
+    }
+    if daemon_lease_held(project_root, target_branch) {
+        eprintln!(
+            "  Skipping post-merge review spawn: a live daemon already holds the lease for {target_branch}"
         );
         return Ok(());
     }
@@ -172,6 +185,8 @@ pub fn spawn_detached_runner(
     cmd.current_dir(project_root)
         .args([
             "post-merge-review",
+            "--target",
+            target_branch,
             "--debounce-seconds",
             &debounce_secs.to_string(),
         ])
@@ -669,8 +684,9 @@ pub fn queue_and_spawn(
     debounce_secs: u64,
     fix_depth: u64,
 ) -> Result<()> {
+    let target_branch = entry.target_branch.clone();
     append_entry(project_root, entry)?;
-    spawn_detached_runner(project_root, debounce_secs, fix_depth)
+    spawn_detached_runner(project_root, &target_branch, debounce_secs, fix_depth)
 }
 
 #[cfg(test)]
@@ -742,6 +758,23 @@ mod tests {
             acquire_lease_eventually(tmp.path(), "main").is_some(),
             "a later daemon can acquire the lease the exited daemon released"
         );
+    }
+
+    #[test]
+    fn skips_spawn_when_daemon_lease_held_live() {
+        let tmp = TempDir::new().unwrap();
+        // A live daemon already holds the singleton lease for the branch.
+        let held = crate::lease::acquire(&post_merge_daemon_lock_path(tmp.path(), "main")).unwrap();
+        assert!(daemon_lease_held(tmp.path(), "main"));
+        // The land skips spawning another daemon; the enqueue is separate and
+        // unconditional. The skip short-circuits before any spawn machinery,
+        // so no post-merge review log is opened.
+        spawn_detached_runner(tmp.path(), "main", 0, 0).unwrap();
+        assert!(
+            !tmp.path().join(".fluent/work/post-merge-review.log").exists(),
+            "a spawn was skipped, so no daemon was launched and no log created"
+        );
+        drop(held);
     }
 
     #[test]
