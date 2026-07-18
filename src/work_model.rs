@@ -6344,6 +6344,84 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn from_env_maps_all_env_vars_to_fields() {
+        let vars = [
+            ("FLUENT_WRITE_CODER", "write-c"),
+            ("FLUENT_WRITE_MODEL", "write-m"),
+            ("FLUENT_WRITE_EFFORT", "write-e"),
+            ("FLUENT_REVIEW_CODER", "review-c"),
+            ("FLUENT_REVIEW_MODEL", "review-m"),
+            ("FLUENT_REVIEW_EFFORT", "review-e"),
+            ("FLUENT_BEHAVIOR_TESTS_CODER", "bt-c"),
+            ("FLUENT_BEHAVIOR_TESTS_MODEL", "bt-m"),
+            ("FLUENT_BEHAVIOR_TESTS_EFFORT", "bt-e"),
+            ("FLUENT_CODER", "global-c"),
+        ];
+        // SAFETY: test is serialized via #[serial_test::serial]; no other
+        // threads read these env vars concurrently.
+        unsafe {
+            for (key, val) in &vars {
+                std::env::set_var(key, val);
+            }
+        }
+
+        let inputs = CoderMappingInputs::from_env();
+
+        unsafe {
+            for (key, _) in &vars {
+                std::env::remove_var(key);
+            }
+        }
+
+        assert_eq!(inputs.write_coder.as_deref(), Some("write-c"));
+        assert_eq!(inputs.write_model.as_deref(), Some("write-m"));
+        assert_eq!(inputs.write_effort.as_deref(), Some("write-e"));
+        assert_eq!(inputs.review_coder.as_deref(), Some("review-c"));
+        assert_eq!(inputs.review_model.as_deref(), Some("review-m"));
+        assert_eq!(inputs.review_effort.as_deref(), Some("review-e"));
+        assert_eq!(inputs.behavior_tests_coder.as_deref(), Some("bt-c"));
+        assert_eq!(inputs.behavior_tests_model.as_deref(), Some("bt-m"));
+        assert_eq!(inputs.behavior_tests_effort.as_deref(), Some("bt-e"));
+        assert_eq!(inputs.global_coder.as_deref(), Some("global-c"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn from_env_returns_none_when_vars_unset() {
+        let vars = [
+            "FLUENT_WRITE_CODER",
+            "FLUENT_WRITE_MODEL",
+            "FLUENT_WRITE_EFFORT",
+            "FLUENT_REVIEW_CODER",
+            "FLUENT_REVIEW_MODEL",
+            "FLUENT_REVIEW_EFFORT",
+            "FLUENT_BEHAVIOR_TESTS_CODER",
+            "FLUENT_BEHAVIOR_TESTS_MODEL",
+            "FLUENT_BEHAVIOR_TESTS_EFFORT",
+            "FLUENT_CODER",
+        ];
+        // SAFETY: test is serialized; no concurrent env var readers.
+        unsafe {
+            for key in &vars {
+                std::env::remove_var(key);
+            }
+        }
+
+        let inputs = CoderMappingInputs::from_env();
+        assert!(inputs.write_coder.is_none());
+        assert!(inputs.write_model.is_none());
+        assert!(inputs.write_effort.is_none());
+        assert!(inputs.review_coder.is_none());
+        assert!(inputs.review_model.is_none());
+        assert!(inputs.review_effort.is_none());
+        assert!(inputs.behavior_tests_coder.is_none());
+        assert!(inputs.behavior_tests_model.is_none());
+        assert!(inputs.behavior_tests_effort.is_none());
+        assert!(inputs.global_coder.is_none());
+    }
+
+    #[test]
     fn merge_cli_per_role_effort_wins_over_global() {
         let base = CoderMappingInputs::default();
         let merged = base.merge_cli(
