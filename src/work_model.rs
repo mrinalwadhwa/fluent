@@ -6228,4 +6228,147 @@ mod tests {
         assert_eq!(mapping.review.effort.as_deref(), Some("medium"));
         assert!(mapping.behavior_tests.effort.is_none());
     }
+
+    #[test]
+    fn merge_overlays_set_fields_and_preserves_unset() {
+        let base = CoderMappingInputs {
+            write_coder: Some("claude".to_string()),
+            write_model: Some("base-model".to_string()),
+            review_model: Some("base-review".to_string()),
+            behavior_tests_effort: Some("low".to_string()),
+            ..Default::default()
+        };
+        let overlay = CoderMappingInputs {
+            write_model: Some("overlay-model".to_string()),
+            review_coder: Some("codex".to_string()),
+            ..Default::default()
+        };
+        let merged = base.merge(overlay);
+        assert_eq!(
+            merged.write_coder.as_deref(),
+            Some("claude"),
+            "base field preserved when overlay is None"
+        );
+        assert_eq!(
+            merged.write_model.as_deref(),
+            Some("overlay-model"),
+            "overlay wins when both set"
+        );
+        assert_eq!(
+            merged.review_coder.as_deref(),
+            Some("codex"),
+            "overlay fills in when base is None"
+        );
+        assert_eq!(
+            merged.review_model.as_deref(),
+            Some("base-review"),
+            "base field preserved when overlay is None"
+        );
+        assert_eq!(
+            merged.behavior_tests_effort.as_deref(),
+            Some("low"),
+            "base effort preserved when overlay is None"
+        );
+        assert!(
+            merged.behavior_tests_coder.is_none(),
+            "both None remains None"
+        );
+    }
+
+    #[test]
+    fn merge_cli_global_model_fills_unset_roles() {
+        let base = CoderMappingInputs::default();
+        let merged = base.merge_cli(
+            None,
+            Some("per-role-write".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("global-model".to_string()),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            merged.write_model.as_deref(),
+            Some("per-role-write"),
+            "per-role CLI model wins over global"
+        );
+        assert_eq!(
+            merged.review_model.as_deref(),
+            Some("global-model"),
+            "global fills review when no per-role CLI flag"
+        );
+        assert_eq!(
+            merged.behavior_tests_model.as_deref(),
+            Some("global-model"),
+            "global fills behavior-tests when no per-role CLI flag"
+        );
+    }
+
+    #[test]
+    fn merge_cli_global_effort_fills_unset_roles() {
+        let base = CoderMappingInputs::default();
+        let merged = base.merge_cli(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("per-role-review".to_string()),
+            None,
+            Some("high".to_string()),
+        );
+        assert_eq!(
+            merged.write_effort.as_deref(),
+            Some("high"),
+            "global fills write effort when no per-role CLI flag"
+        );
+        assert_eq!(
+            merged.review_effort.as_deref(),
+            Some("per-role-review"),
+            "per-role CLI effort wins over global"
+        );
+        assert_eq!(
+            merged.behavior_tests_effort.as_deref(),
+            Some("high"),
+            "global fills behavior-tests effort when no per-role CLI flag"
+        );
+    }
+
+    #[test]
+    fn merge_cli_per_role_effort_wins_over_global() {
+        let base = CoderMappingInputs::default();
+        let merged = base.merge_cli(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("write-effort".to_string()),
+            None,
+            None,
+            Some("global-effort".to_string()),
+        );
+        assert_eq!(
+            merged.write_effort.as_deref(),
+            Some("write-effort"),
+            "per-role effort wins over global"
+        );
+        assert_eq!(
+            merged.review_effort.as_deref(),
+            Some("global-effort"),
+            "global fills unset role"
+        );
+    }
 }
