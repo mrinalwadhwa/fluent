@@ -1104,7 +1104,19 @@ impl CoderMappingInputs {
         behavior_tests_coder: Option<String>,
         behavior_tests_model: Option<String>,
         global_coder: Option<String>,
+        global_model: Option<String>,
+        write_effort: Option<String>,
+        review_effort: Option<String>,
+        behavior_tests_effort: Option<String>,
+        global_effort: Option<String>,
     ) -> Self {
+        let has_write_model = write_model.is_some();
+        let has_review_model = review_model.is_some();
+        let has_bt_model = behavior_tests_model.is_some();
+        let has_write_effort = write_effort.is_some();
+        let has_review_effort = review_effort.is_some();
+        let has_bt_effort = behavior_tests_effort.is_some();
+
         if write_coder.is_some() {
             self.write_coder = write_coder;
         }
@@ -1125,6 +1137,37 @@ impl CoderMappingInputs {
         }
         if global_coder.is_some() {
             self.global_coder = global_coder;
+        }
+        if let Some(ref m) = global_model {
+            if !has_write_model {
+                self.write_model = Some(m.clone());
+            }
+            if !has_review_model {
+                self.review_model = Some(m.clone());
+            }
+            if !has_bt_model {
+                self.behavior_tests_model = Some(m.clone());
+            }
+        }
+        if has_write_effort {
+            self.write_effort = write_effort;
+        }
+        if has_review_effort {
+            self.review_effort = review_effort;
+        }
+        if has_bt_effort {
+            self.behavior_tests_effort = behavior_tests_effort;
+        }
+        if let Some(ref e) = global_effort {
+            if !has_write_effort {
+                self.write_effort = Some(e.clone());
+            }
+            if !has_review_effort {
+                self.review_effort = Some(e.clone());
+            }
+            if !has_bt_effort {
+                self.behavior_tests_effort = Some(e.clone());
+            }
         }
         self
     }
@@ -5877,7 +5920,7 @@ mod tests {
         };
         let inputs = config
             .merge(env)
-            .merge_cli(None, None, None, None, None, None, None);
+            .merge_cli(None, None, None, None, None, None, None, None, None, None, None, None);
         let mapping = resolve_coder_mapping(&inputs).unwrap();
         assert_eq!(
             mapping.write.model, "config-model",
@@ -5906,6 +5949,11 @@ mod tests {
             None,
             None,
             Some("cli-review-model".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
             None,
             None,
             None,

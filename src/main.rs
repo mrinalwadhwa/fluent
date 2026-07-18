@@ -330,6 +330,18 @@ fn cmd_attempt(
         AttemptCommands::Create {
             work_item_id,
             attempt_id,
+            coder,
+            model,
+            effort,
+            write_coder,
+            write_model,
+            write_effort,
+            review_coder,
+            review_model,
+            review_effort,
+            behavior_tests_coder,
+            behavior_tests_model,
+            behavior_tests_effort,
         } => {
             let mut item = match store.read_work_item(&work_item_id) {
                 Ok(item) => item,
@@ -342,6 +354,29 @@ fn cmd_attempt(
             };
             let attempt_id = attempt_id.unwrap_or_else(|| item.next_attempt_id());
             item.add_initial_attempt(attempt_id.clone())?;
+
+            let coder_mapping = work_model::resolve_coder_mapping(
+                &fluent::config::from_config(project_root)
+                    .merge(work_model::CoderMappingInputs::from_env())
+                    .merge_cli(
+                        write_coder,
+                        write_model,
+                        review_coder,
+                        review_model,
+                        behavior_tests_coder,
+                        behavior_tests_model,
+                        coder.or_else(|| global_coder.map(str::to_string)),
+                        model,
+                        write_effort,
+                        review_effort,
+                        behavior_tests_effort,
+                        effort,
+                    ),
+            )?;
+            if let Some(attempt) = item.attempts.iter_mut().find(|a| a.id == attempt_id) {
+                attempt.coder_mapping = coder_mapping;
+            }
+
             store.write_work_item(&item)?;
             println!("Created Attempt {attempt_id} for Work Item {work_item_id}");
             if guidance::guidance_enabled() {
@@ -396,12 +431,17 @@ fn cmd_attempt(
             attempt_id,
             no_sandbox,
             coder,
+            model,
+            effort,
             write_coder,
             write_model,
+            write_effort,
             review_coder,
             review_model,
+            review_effort,
             behavior_tests_coder,
             behavior_tests_model,
+            behavior_tests_effort,
             runtime,
             extra_args,
         } => {
@@ -433,6 +473,11 @@ fn cmd_attempt(
                     behavior_tests_coder,
                     behavior_tests_model,
                     coder.or_else(|| global_coder.map(str::to_string)),
+                    model,
+                    write_effort,
+                    review_effort,
+                    behavior_tests_effort,
+                    effort,
                 ),
             )?;
             let runtime = runtime.unwrap_or_else(|| "local".to_string());
@@ -789,12 +834,17 @@ fn cmd_task(
             task_id,
             no_sandbox,
             coder,
+            model,
+            effort,
             write_coder,
             write_model,
+            write_effort,
             review_coder,
             review_model,
+            review_effort,
             behavior_tests_coder,
             behavior_tests_model,
+            behavior_tests_effort,
             extra_args,
         } => {
             let coder_mapping = work_model::resolve_coder_mapping(
@@ -806,6 +856,11 @@ fn cmd_task(
                     behavior_tests_coder,
                     behavior_tests_model,
                     coder.or_else(|| global_coder.map(str::to_string)),
+                    model,
+                    write_effort,
+                    review_effort,
+                    behavior_tests_effort,
+                    effort,
                 ),
             )?;
 

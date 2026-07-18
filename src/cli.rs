@@ -269,6 +269,54 @@ pub enum AttemptCommands {
 
         /// Attempt ID (auto-assigned if omitted)
         attempt_id: Option<String>,
+
+        /// Coding agent to launch: claude, codex, or pi
+        #[arg(long)]
+        coder: Option<String>,
+
+        /// Model to use for all roles
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Reasoning effort to use for all roles
+        #[arg(long)]
+        effort: Option<String>,
+
+        /// Coder for write Tasks: claude, codex, or pi
+        #[arg(long)]
+        write_coder: Option<String>,
+
+        /// Model for write Tasks
+        #[arg(long)]
+        write_model: Option<String>,
+
+        /// Effort for write Tasks
+        #[arg(long)]
+        write_effort: Option<String>,
+
+        /// Coder for review Tasks: claude, codex, or pi
+        #[arg(long)]
+        review_coder: Option<String>,
+
+        /// Model for review Tasks
+        #[arg(long)]
+        review_model: Option<String>,
+
+        /// Effort for review Tasks
+        #[arg(long)]
+        review_effort: Option<String>,
+
+        /// Coder for behavior-tests Tasks: claude, codex, or pi
+        #[arg(long)]
+        behavior_tests_coder: Option<String>,
+
+        /// Model for behavior-tests Tasks
+        #[arg(long)]
+        behavior_tests_model: Option<String>,
+
+        /// Effort for behavior-tests Tasks
+        #[arg(long)]
+        behavior_tests_effort: Option<String>,
     },
 
     /// List Attempts for a Work Item
@@ -302,6 +350,14 @@ pub enum AttemptCommands {
         #[arg(long)]
         coder: Option<String>,
 
+        /// Model to use for all roles
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Reasoning effort to use for all roles
+        #[arg(long)]
+        effort: Option<String>,
+
         /// Coder for write Tasks: claude, codex, or pi
         #[arg(long)]
         write_coder: Option<String>,
@@ -309,6 +365,10 @@ pub enum AttemptCommands {
         /// Model for write Tasks
         #[arg(long)]
         write_model: Option<String>,
+
+        /// Effort for write Tasks
+        #[arg(long)]
+        write_effort: Option<String>,
 
         /// Coder for review Tasks: claude, codex, or pi
         #[arg(long)]
@@ -318,6 +378,10 @@ pub enum AttemptCommands {
         #[arg(long)]
         review_model: Option<String>,
 
+        /// Effort for review Tasks
+        #[arg(long)]
+        review_effort: Option<String>,
+
         /// Coder for behavior-tests Tasks: claude, codex, or pi
         #[arg(long)]
         behavior_tests_coder: Option<String>,
@@ -325,6 +389,10 @@ pub enum AttemptCommands {
         /// Model for behavior-tests Tasks
         #[arg(long)]
         behavior_tests_model: Option<String>,
+
+        /// Effort for behavior-tests Tasks
+        #[arg(long)]
+        behavior_tests_effort: Option<String>,
 
         /// Execution runtime: local (default) or fargate
         #[arg(long)]
@@ -490,6 +558,14 @@ pub enum TaskCommands {
         #[arg(long)]
         coder: Option<String>,
 
+        /// Model to use for all roles
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Reasoning effort to use for all roles
+        #[arg(long)]
+        effort: Option<String>,
+
         /// Coder for write Tasks: claude, codex, or pi
         #[arg(long)]
         write_coder: Option<String>,
@@ -497,6 +573,10 @@ pub enum TaskCommands {
         /// Model for write Tasks
         #[arg(long)]
         write_model: Option<String>,
+
+        /// Effort for write Tasks
+        #[arg(long)]
+        write_effort: Option<String>,
 
         /// Coder for review Tasks: claude, codex, or pi
         #[arg(long)]
@@ -506,6 +586,10 @@ pub enum TaskCommands {
         #[arg(long)]
         review_model: Option<String>,
 
+        /// Effort for review Tasks
+        #[arg(long)]
+        review_effort: Option<String>,
+
         /// Coder for behavior-tests Tasks: claude, codex, or pi
         #[arg(long)]
         behavior_tests_coder: Option<String>,
@@ -513,6 +597,10 @@ pub enum TaskCommands {
         /// Model for behavior-tests Tasks
         #[arg(long)]
         behavior_tests_model: Option<String>,
+
+        /// Effort for behavior-tests Tasks
+        #[arg(long)]
+        behavior_tests_effort: Option<String>,
 
         /// Extra args passed through to the agent
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]

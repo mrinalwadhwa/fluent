@@ -12154,3 +12154,67 @@ fn empty_work_item_list_primes_planning_stages() {
         "empty list should print planning primer on stderr; got:\n{stderr}"
     );
 }
+
+#[test]
+fn attempt_coder_model_flags_override_config() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    // Write a project config that sets writer to codex with a specific model.
+    let config_dir = main_dir.join(".fluent");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.yaml"),
+        "coders:\n  writer:\n    coder: codex\n    model: config-model\n    effort: low\n",
+    )
+    .unwrap();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "override-test", "--title", "Override"])
+        .assert()
+        .success();
+
+    // Create attempt with CLI flags that override the config.
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "attempt",
+            "create",
+            "override-test",
+            "attempt-1",
+            "--write-model",
+            "cli-model",
+            "--effort",
+            "high",
+        ])
+        .assert()
+        .success();
+
+    let value = work_item_value(&main_dir, "override-test");
+    let mapping = &value["attempts"][0]["coder_mapping"];
+
+    // --write-model should override the config model for write.
+    assert_eq!(
+        mapping["write"]["model"], "cli-model",
+        "CLI --write-model should override config"
+    );
+    // Coder should still come from config since no CLI coder override.
+    assert_eq!(
+        mapping["write"]["coder"], "codex",
+        "config coder used when CLI does not override"
+    );
+    // --effort (global) should apply to all roles.
+    assert_eq!(
+        mapping["write"]["effort"], "high",
+        "CLI --effort should override config effort for write"
+    );
+    assert_eq!(
+        mapping["review"]["effort"], "high",
+        "CLI --effort should apply to review"
+    );
+    assert_eq!(
+        mapping["behavior-tests"]["effort"], "high",
+        "CLI --effort should apply to behavior-tests"
+    );
+}
