@@ -508,6 +508,10 @@ fn cmd_attempt(
                 store.write_work_item(&item)?;
             }
 
+            if guidance::guidance_enabled() {
+                eprintln!("{}", guidance::format_coder_plan(&coder_mapping));
+            }
+
             let result = work_attempt_loop::run_attempt(WorkAttemptRunConfig {
                 project_root,
                 store: &store,

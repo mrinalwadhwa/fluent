@@ -1,7 +1,7 @@
 use std::env;
 
 use crate::work_attempt_loop::WorkAttemptRunOutcome;
-use crate::work_model::PauseKind;
+use crate::work_model::{CoderMapping, PauseKind};
 
 pub fn guidance_enabled() -> bool {
     match env::var("FLUENT_QUIET") {
@@ -16,6 +16,41 @@ pub fn after_work_item_create() -> &'static str {
 
 pub fn after_attempt_create() -> &'static str {
     "\n→ Next: fluent attempt run <work-item-id>"
+}
+
+pub fn format_coder_plan(mapping: &CoderMapping) -> String {
+    fn role_line(label: &str, coder: &str, model: &str, effort: Option<&str>) -> String {
+        let model_part = if model.is_empty() {
+            "(default)".to_string()
+        } else {
+            model.to_string()
+        };
+        match effort {
+            Some(e) => format!("  {label:<20} {coder} / {model_part} / effort={e}"),
+            None => format!("  {label:<20} {coder} / {model_part}"),
+        }
+    }
+
+    let mut lines = vec!["  Coder plan:".to_string()];
+    lines.push(role_line(
+        "writer",
+        mapping.write.coder.as_str(),
+        &mapping.write.model,
+        mapping.write.effort.as_deref(),
+    ));
+    lines.push(role_line(
+        "reviewer",
+        mapping.review.coder.as_str(),
+        &mapping.review.model,
+        mapping.review.effort.as_deref(),
+    ));
+    lines.push(role_line(
+        "behavior-tests",
+        mapping.behavior_tests.coder.as_str(),
+        &mapping.behavior_tests.model,
+        mapping.behavior_tests.effort.as_deref(),
+    ));
+    lines.join("\n")
 }
 
 pub fn after_attempt_run(

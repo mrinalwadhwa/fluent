@@ -12156,6 +12156,90 @@ fn empty_work_item_list_primes_planning_stages() {
 }
 
 #[test]
+fn attempt_run_prints_resolved_coder_plan() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+printf 'task output\n' > task-output.txt
+git add task-output.txt
+git commit -m "Add task output" >/dev/null
+exit 0
+"##,
+    );
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "plan-print", "--title", "Plan print"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "plan-print", "attempt-1"])
+        .assert()
+        .success();
+
+    let output = fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "attempt",
+            "run",
+            "plan-print",
+            "--no-sandbox",
+            "--write-model",
+            "my-model",
+            "--effort",
+            "high",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Coder plan:"),
+        "should print coder plan header; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("writer") && stderr.contains("my-model"),
+        "should show writer model; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("effort=high"),
+        "should show effort; stderr:\n{stderr}"
+    );
+
+    // Verify FLUENT_QUIET suppresses it.
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "plan-print", "attempt-2"])
+        .assert()
+        .success();
+
+    let quiet_output = fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "attempt",
+            "run",
+            "plan-print",
+            "attempt-2",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_QUIET", "1")
+        .output()
+        .unwrap();
+
+    let quiet_stderr = String::from_utf8_lossy(&quiet_output.stderr);
+    assert!(
+        !quiet_stderr.contains("Coder plan:"),
+        "FLUENT_QUIET should suppress coder plan; stderr:\n{quiet_stderr}"
+    );
+}
+
+#[test]
 fn attempt_coder_model_flags_override_config() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
