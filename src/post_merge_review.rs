@@ -19,6 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::content::ContentResolver;
 use crate::git;
+use crate::lease::{self, TaskLease};
 use crate::review;
 use crate::work_attempt_loop::{self, WorkAttemptRunConfig, WorkAttemptRunOutcome};
 use crate::work_model::{
@@ -106,6 +107,33 @@ pub fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Path to the singleton lock that bounds the post-merge review daemon
+/// to one live process per target branch. Lands and daemons key off the
+/// same path so they observe the same lease.
+pub fn post_merge_daemon_lock_path(project_root: &Path, target_branch: &str) -> PathBuf {
+    project_root
+        .join(".fluent/work/locks/post-merge-review")
+        .join(format!("{}.lock", target_branch.replace('/', "-")))
+}
+
+/// Acquire the singleton daemon lease for `target_branch`. Returns
+/// `Some(lease)` when this process now holds it — hold it for the whole
+/// run; it releases on drop when the daemon exits. Returns `None` when a
+/// live daemon already holds the lease, in which case the caller exits
+/// immediately without draining: the running daemon drains the enqueued
+/// jobs on its next wake. A lease held by a crashed process reads as
+/// free, so a stale lock never blocks future reviews.
+pub fn acquire_daemon_lease(project_root: &Path, target_branch: &str) -> Option<TaskLease> {
+    lease::acquire(&post_merge_daemon_lock_path(project_root, target_branch)).ok()
+}
+
+/// True when a live post-merge review daemon already holds the singleton
+/// lease for `target_branch`. A lease held by a crashed process reads as
+/// free.
+pub fn daemon_lease_held(project_root: &Path, target_branch: &str) -> bool {
+    lease::is_leased(&post_merge_daemon_lock_path(project_root, target_branch))
 }
 
 /// Spawn a detached Fluent subprocess that will run the post-merge
@@ -649,6 +677,72 @@ pub fn queue_and_spawn(
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    // Retry acquisition to tolerate macOS flock's release-visibility latency:
+    // after a holder's descriptor closes, a fresh acquire on another
+    // descriptor can briefly still see the lock held under the thread-per-test
+    // harness's concurrent load. This models the real world, where a later
+    // daemon acquires the lease shortly after the previous one exits. Separate
+    // processes (production and nextest) release synchronously and succeed on
+    // the first try.
+    fn acquire_lease_eventually(project_root: &Path, target_branch: &str) -> Option<TaskLease> {
+        for _ in 0..50 {
+            if let Some(lease) = acquire_daemon_lease(project_root, target_branch) {
+                return Some(lease);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        None
+    }
+
+    #[test]
+    fn second_daemon_exits_when_lease_held() {
+        let tmp = TempDir::new().unwrap();
+        // A live daemon holds the singleton lease for the target branch.
+        let held = crate::lease::acquire(&post_merge_daemon_lock_path(tmp.path(), "main")).unwrap();
+        // A second daemon starting for the same branch cannot acquire the
+        // lease, so acquire-or-exit returns None and it exits without draining.
+        assert!(
+            acquire_daemon_lease(tmp.path(), "main").is_none(),
+            "a second daemon must not acquire the lease while a live daemon holds it"
+        );
+        drop(held);
+    }
+
+    #[test]
+    fn stale_lease_is_treated_as_free() {
+        let tmp = TempDir::new().unwrap();
+        let path = post_merge_daemon_lock_path(tmp.path(), "main");
+        // Simulate a crashed daemon: the lock file is left on disk, but no
+        // live process holds the flock (the holder's handle is dropped).
+        {
+            let _held = crate::lease::acquire(&path).unwrap();
+        }
+        assert!(path.exists(), "the stale lock file remains on disk");
+        // A stale lock reads as free, so a new daemon can acquire it.
+        assert!(
+            acquire_lease_eventually(tmp.path(), "main").is_some(),
+            "a lease held by a dead process must be treated as free"
+        );
+    }
+
+    #[test]
+    fn daemon_releases_lease_on_exit() {
+        let tmp = TempDir::new().unwrap();
+        let lease = acquire_daemon_lease(tmp.path(), "main");
+        assert!(lease.is_some(), "the first daemon acquires the lease");
+        // While the daemon runs, a second daemon cannot acquire the lease.
+        assert!(
+            acquire_daemon_lease(tmp.path(), "main").is_none(),
+            "the lease is held while the daemon runs"
+        );
+        // Dropping the lease models the daemon exiting.
+        drop(lease);
+        assert!(
+            acquire_lease_eventually(tmp.path(), "main").is_some(),
+            "a later daemon can acquire the lease the exited daemon released"
+        );
+    }
 
     #[test]
     fn append_and_load_round_trip() {

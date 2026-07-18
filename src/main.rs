@@ -1097,6 +1097,22 @@ fn cmd_post_merge_review(
     target: Option<String>,
 ) -> Result<()> {
     let secs = debounce_seconds.unwrap_or_else(post_merge_review::debounce_seconds);
+    // Bound the daemon to one live process per target branch: acquire the
+    // singleton lease before draining and exit immediately if a live daemon
+    // already holds it. The lease is held for the whole run (including the
+    // debounce sleep) and releases on drop when this process exits.
+    let _lease = match target.as_deref() {
+        Some(branch) => match post_merge_review::acquire_daemon_lease(project_root, branch) {
+            Some(lease) => Some(lease),
+            None => {
+                println!(
+                    "Post-merge review: a live daemon already holds the lease for {branch}; exiting"
+                );
+                return Ok(());
+            }
+        },
+        None => None,
+    };
     let outcome = post_merge_review::run(project_root, secs, target.as_deref())?;
     println!(
         "Post-merge review: reviewed {} branch(es), {} errors",
