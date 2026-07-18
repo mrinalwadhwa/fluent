@@ -771,7 +771,9 @@ mod tests {
         // so no post-merge review log is opened.
         spawn_detached_runner(tmp.path(), "main", 0, 0).unwrap();
         assert!(
-            !tmp.path().join(".fluent/work/post-merge-review.log").exists(),
+            !tmp.path()
+                .join(".fluent/work/post-merge-review.log")
+                .exists(),
             "a spawn was skipped, so no daemon was launched and no log created"
         );
         drop(held);
