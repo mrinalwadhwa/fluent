@@ -18,3 +18,7 @@ Every test run writes per-case stdout and stderr to `tests/output/`:
 The `tests/output/` directory is gitignored — it exists only on disk. After a failure, open the log directly instead of rerunning.
 
 Set `FLUENT_TESTS_SKIP_LOG=1` to disable per-case log writing (useful for CI workers that manage their own artifact capture).
+
+## Patterns
+
+- [flock-lease-tests-under-libtest](testing/patterns/flock-lease-tests-under-libtest.md) — read when writing unit tests for `lease`-based singletons that must also pass under `cargo test` (libtest threads), not just nextest.
