@@ -683,6 +683,7 @@ fn try_capture(
     } else {
         Some(mapping_pair.model.as_str())
     };
+    let effort = mapping_pair.effort.as_deref();
 
     let diff_range = format!("{}...HEAD", write_output.source_branch);
     let diff_command =
@@ -695,6 +696,7 @@ fn try_capture(
         coder_kind,
         config.no_sandbox,
         model,
+        effort,
         &review_artifact_paths,
         &diff_command,
     )?;

@@ -53,10 +53,11 @@ pub fn run_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     } else {
         Some(mapping_pair.model.as_str())
     };
+    let effort = mapping_pair.effort.as_deref();
 
     match task_kind {
-        TaskKind::Write => run_write_task(config, coder_kind, model),
-        TaskKind::Review => run_review_task(config, coder_kind, model),
+        TaskKind::Write => run_write_task(config, coder_kind, model, effort),
+        TaskKind::Review => run_review_task(config, coder_kind, model, effort),
         TaskKind::BehaviorTests => {
             bail!("BehaviorTests tasks are retired; use Tester tasks instead")
         }
@@ -72,6 +73,7 @@ fn run_write_task(
     config: WorkTaskRunConfig<'_>,
     coder_kind: CoderKind,
     model: Option<&str>,
+    effort: Option<&str>,
 ) -> Result<WorkTaskRunResult> {
     let mut item = read_work_item_or_not_found(config.store, config.work_item_id)?;
     let attempt_index = item
@@ -169,6 +171,7 @@ fn run_write_task(
         coder_kind,
         config.no_sandbox,
         model,
+        effort,
     );
     let mut retries = 0;
     while run_result.is_err() && !is_auth_error(&run_result) && retries < max_task_retries() {
@@ -190,6 +193,7 @@ fn run_write_task(
             coder_kind,
             config.no_sandbox,
             model,
+            effort,
         );
     }
 
@@ -289,6 +293,7 @@ fn run_review_task(
     config: WorkTaskRunConfig<'_>,
     coder_kind: CoderKind,
     model: Option<&str>,
+    effort: Option<&str>,
 ) -> Result<WorkTaskRunResult> {
     let lock_path =
         crate::lease::task_lock_path(config.project_root, config.work_item_id, config.task_id);
@@ -465,6 +470,7 @@ fn run_review_task(
         coder_kind,
         config.no_sandbox,
         model,
+        effort,
     );
     let mut retries = 0;
     while run_result.is_err() && !is_auth_error(&run_result) && retries < max_task_retries() {
@@ -489,6 +495,7 @@ fn run_review_task(
             coder_kind,
             config.no_sandbox,
             model,
+            effort,
         );
     }
 
@@ -1394,6 +1401,7 @@ fn run_task_coder(
     coder_kind: CoderKind,
     no_sandbox: bool,
     model: Option<&str>,
+    effort: Option<&str>,
 ) -> Result<()> {
     if !no_sandbox {
         os::check_prerequisites_for(coder_kind)?;
@@ -1418,6 +1426,7 @@ fn run_task_coder(
             coder_kind,
             no_sandbox,
             model,
+            effort,
         ) {
             eprintln!(
                 "  Warning: seed project model failed, continuing without project expertise: {err}"
@@ -1485,6 +1494,9 @@ fn run_task_coder(
     eprintln!("  Task              {task_id}");
     eprintln!("  Coder             {}", coder_kind.as_str());
     eprintln!("  Model             {effective_model}");
+    if let Some(e) = effort {
+        eprintln!("  Effort            {e}");
+    }
     eprintln!("  Worktree          {}", workspace_path.display());
 
     if let Some(ref tp) = transcript_path {
@@ -1493,7 +1505,7 @@ fn run_task_coder(
         }
     }
 
-    let coder = coder_kind.boxed_with_model(sandbox, model);
+    let coder = coder_kind.boxed_with_model(sandbox, model, effort);
     let exit_code = coder.run(
         &prompt,
         &system_prompt,
@@ -1741,6 +1753,7 @@ fn run_seed_project_model(
     coder_kind: CoderKind,
     no_sandbox: bool,
     model: Option<&str>,
+    effort: Option<&str>,
 ) -> Result<()> {
     eprintln!("  Seeding project expertise model…");
 
@@ -1779,7 +1792,7 @@ fn run_seed_project_model(
         )?
     };
 
-    let coder = coder_kind.boxed_with_model(sandbox, model);
+    let coder = coder_kind.boxed_with_model(sandbox, model, effort);
     let exit_code = coder.run(
         &prompt,
         &system_prompt,
@@ -1806,6 +1819,7 @@ pub fn run_capture_learnings(
     coder_kind: CoderKind,
     no_sandbox: bool,
     model: Option<&str>,
+    effort: Option<&str>,
     review_artifact_paths: &[PathBuf],
     diff_command: &str,
 ) -> Result<()> {
@@ -1877,7 +1891,7 @@ pub fn run_capture_learnings(
         )?
     };
 
-    let coder = coder_kind.boxed_with_model(sandbox, model);
+    let coder = coder_kind.boxed_with_model(sandbox, model, effort);
     let exit_code = coder.run(
         &prompt,
         &system_prompt,
@@ -2027,6 +2041,7 @@ fn run_review_coder(
     coder_kind: CoderKind,
     no_sandbox: bool,
     model: Option<&str>,
+    effort: Option<&str>,
 ) -> Result<()> {
     if !no_sandbox {
         os::check_prerequisites_for(coder_kind)?;
@@ -2081,7 +2096,7 @@ fn run_review_coder(
     capture_coder_info(coder_kind, &effective_model, artifact_dir);
 
     let transcript_path = artifact_dir.join("transcript.jsonl");
-    let coder = coder_kind.boxed_with_model(sandbox, model);
+    let coder = coder_kind.boxed_with_model(sandbox, model, effort);
     let exit_code = coder.run(
         &prompts.review_prompt,
         &prompts.system_prompt,

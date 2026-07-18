@@ -1007,6 +1007,8 @@ fn push_planning_section(sections: &mut Vec<String>, title: &str, content: &Opti
 pub struct CoderModelPair {
     pub coder: CoderKind,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 /// Per-Task-kind coder mapping stored on each Attempt.
@@ -1023,6 +1025,7 @@ impl Default for CoderMapping {
         let default_pair = CoderModelPair {
             coder: CoderKind::Claude,
             model: String::new(),
+            effort: None,
         };
         Self {
             write: default_pair.clone(),
@@ -1141,7 +1144,8 @@ pub fn resolve_coder_mapping(inputs: &CoderMappingInputs) -> Result<CoderMapping
         .transpose()?;
 
     let resolve_pair = |task_coder: &Option<String>,
-                        task_model: &Option<String>|
+                        task_model: &Option<String>,
+                        task_effort: &Option<String>|
      -> Result<CoderModelPair, anyhow::Error> {
         let coder = if let Some(c) = task_coder {
             CoderKind::resolve(Some(c))?
@@ -1155,13 +1159,21 @@ pub fn resolve_coder_mapping(inputs: &CoderMappingInputs) -> Result<CoderMapping
             coder.default_model()
         };
 
-        Ok(CoderModelPair { coder, model })
+        Ok(CoderModelPair {
+            coder,
+            model,
+            effort: task_effort.clone(),
+        })
     };
 
     Ok(CoderMapping {
-        write: resolve_pair(&inputs.write_coder, &inputs.write_model)?,
-        review: resolve_pair(&inputs.review_coder, &inputs.review_model)?,
-        behavior_tests: resolve_pair(&inputs.behavior_tests_coder, &inputs.behavior_tests_model)?,
+        write: resolve_pair(&inputs.write_coder, &inputs.write_model, &inputs.write_effort)?,
+        review: resolve_pair(&inputs.review_coder, &inputs.review_model, &inputs.review_effort)?,
+        behavior_tests: resolve_pair(
+            &inputs.behavior_tests_coder,
+            &inputs.behavior_tests_model,
+            &inputs.behavior_tests_effort,
+        )?,
     })
 }
 
@@ -5743,14 +5755,17 @@ mod tests {
             write: CoderModelPair {
                 coder: CoderKind::Pi,
                 model: "qwen3.6-35b-a3b".to_string(),
+                effort: None,
             },
             review: CoderModelPair {
                 coder: CoderKind::Claude,
                 model: "claude-opus-4-6".to_string(),
+                effort: None,
             },
             behavior_tests: CoderModelPair {
                 coder: CoderKind::Codex,
                 model: "o3".to_string(),
+                effort: None,
             },
         };
         let json = serde_json::to_string(&mapping).unwrap();
@@ -5779,14 +5794,17 @@ mod tests {
                 write: CoderModelPair {
                     coder: CoderKind::Pi,
                     model: "qwen3.6-35b-a3b".to_string(),
+                    effort: None,
                 },
                 review: CoderModelPair {
                     coder: CoderKind::Claude,
                     model: "claude-opus-4-6".to_string(),
+                    effort: None,
                 },
                 behavior_tests: CoderModelPair {
                     coder: CoderKind::Claude,
                     model: "claude-opus-4-6".to_string(),
+                    effort: None,
                 },
             },
             tasks: Vec::new(),
@@ -5808,14 +5826,17 @@ mod tests {
             write: CoderModelPair {
                 coder: CoderKind::Pi,
                 model: "write-model".to_string(),
+                effort: None,
             },
             review: CoderModelPair {
                 coder: CoderKind::Claude,
                 model: "review-model".to_string(),
+                effort: None,
             },
             behavior_tests: CoderModelPair {
                 coder: CoderKind::Codex,
                 model: "bt-model".to_string(),
+                effort: None,
             },
         };
         assert_eq!(mapping.for_task_kind(TaskKind::Write).coder, CoderKind::Pi);
@@ -6098,5 +6119,54 @@ mod tests {
         }"#;
         let candidate: MergeCandidate = serde_json::from_str(json).unwrap();
         assert_eq!(candidate.merge_review_state, MergeReviewState::Pending);
+    }
+
+    #[test]
+    fn coder_model_pair_deserializes_without_effort_field() {
+        let json = r#"{"coder":"claude","model":"opus-4"}"#;
+        let pair: CoderModelPair = serde_json::from_str(json).unwrap();
+        assert_eq!(pair.coder, CoderKind::Claude);
+        assert_eq!(pair.model, "opus-4");
+        assert!(pair.effort.is_none(), "effort defaults to None");
+    }
+
+    #[test]
+    fn coder_model_pair_round_trips_with_effort() {
+        let pair = CoderModelPair {
+            coder: CoderKind::Claude,
+            model: "opus-4".to_string(),
+            effort: Some("high".to_string()),
+        };
+        let json = serde_json::to_string(&pair).unwrap();
+        assert!(json.contains("\"effort\":\"high\""));
+        let deserialized: CoderModelPair = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.effort, Some("high".to_string()));
+    }
+
+    #[test]
+    fn coder_model_pair_omits_effort_when_none() {
+        let pair = CoderModelPair {
+            coder: CoderKind::Claude,
+            model: "opus-4".to_string(),
+            effort: None,
+        };
+        let json = serde_json::to_string(&pair).unwrap();
+        assert!(
+            !json.contains("effort"),
+            "effort field should be omitted from serialized JSON"
+        );
+    }
+
+    #[test]
+    fn resolve_coder_mapping_threads_effort() {
+        let inputs = CoderMappingInputs {
+            write_effort: Some("high".to_string()),
+            review_effort: Some("medium".to_string()),
+            ..Default::default()
+        };
+        let mapping = resolve_coder_mapping(&inputs).unwrap();
+        assert_eq!(mapping.write.effort.as_deref(), Some("high"));
+        assert_eq!(mapping.review.effort.as_deref(), Some("medium"));
+        assert!(mapping.behavior_tests.effort.is_none());
     }
 }

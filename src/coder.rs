@@ -106,18 +106,25 @@ impl CoderKind {
     }
 
     pub fn boxed(&self, sandbox: CoderSandbox) -> Box<dyn Coder> {
-        self.boxed_with_model(sandbox, None)
+        self.boxed_with_model(sandbox, None, None)
     }
 
-    pub fn boxed_with_model(&self, sandbox: CoderSandbox, model: Option<&str>) -> Box<dyn Coder> {
+    pub fn boxed_with_model(
+        &self,
+        sandbox: CoderSandbox,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> Box<dyn Coder> {
         match self {
             Self::Claude => match sandbox {
                 CoderSandbox::SeatbeltProfile(profile) => Box::new(SandboxedClaudeCode {
                     sandbox_profile: Some(profile),
                     model_override: model.map(str::to_string),
+                    effort: effort.map(str::to_string),
                 }),
                 _ => Box::new(BareClaudeCode {
                     model_override: model.map(str::to_string),
+                    effort: effort.map(str::to_string),
                 }),
             },
             Self::Codex => Box::new(CodexCode {
@@ -126,6 +133,7 @@ impl CoderKind {
                     _ => None,
                 },
                 model_override: model.map(str::to_string),
+                effort: effort.map(str::to_string),
             }),
             Self::Pi => Box::new(PiCode {
                 sandbox_profile: match &sandbox {
@@ -168,6 +176,7 @@ pub trait Coder: Send + Sync {
 pub struct SandboxedClaudeCode {
     pub sandbox_profile: Option<String>,
     pub model_override: Option<String>,
+    pub effort: Option<String>,
 }
 
 impl Coder for SandboxedClaudeCode {
@@ -232,6 +241,9 @@ impl SandboxedClaudeCode {
             if let Some(ref m) = model {
                 cmd.args(["--model", m]);
             }
+            if let Some(ref e) = self.effort {
+                cmd.args(["--effort", e]);
+            }
             cmd.current_dir(working_dir);
             cmd
         } else {
@@ -245,6 +257,7 @@ impl SandboxedClaudeCode {
 /// Bare Claude Code (no sandbox, for Fargate/Linux/--no-sandbox).
 pub struct BareClaudeCode {
     pub model_override: Option<String>,
+    pub effort: Option<String>,
 }
 
 impl BareClaudeCode {
@@ -266,6 +279,7 @@ impl Coder for BareClaudeCode {
         ensure_not_expired_with_refresh()?;
         let want_transcript = transcript_file.is_some();
         let model = self.effective_model();
+        let effort = self.effort.clone();
         run_with_transcript_retrying(
             || {
                 let mut cmd = Command::new("claude");
@@ -274,6 +288,9 @@ impl Coder for BareClaudeCode {
                 cmd.args(["--dangerously-skip-permissions"]);
                 if let Some(ref m) = model {
                     cmd.args(["--model", m]);
+                }
+                if let Some(ref e) = effort {
+                    cmd.args(["--effort", e]);
                 }
                 if want_transcript {
                     cmd.args(["--verbose", "--output-format", "stream-json"]);
@@ -312,6 +329,7 @@ impl Coder for BareClaudeCode {
 pub struct CodexCode {
     pub sandbox_profile: Option<String>,
     pub model_override: Option<String>,
+    pub effort: Option<String>,
 }
 
 impl Coder for CodexCode {
@@ -390,6 +408,9 @@ impl CodexCode {
         cmd.args(["--dangerously-bypass-approvals-and-sandbox"]);
         if let Some(model) = self.effective_model() {
             cmd.args(["--model", &model]);
+        }
+        if let Some(ref effort) = self.effort {
+            cmd.args(["-c", &format!("model_reasoning_effort={effort}")]);
         }
         cmd.current_dir(working_dir);
         cmd
@@ -1357,6 +1378,7 @@ mod model_default_tests {
         let coder = SandboxedClaudeCode {
             sandbox_profile: Some("/tmp/profile".to_string()),
             model_override: None,
+            effort: None,
         };
         let dir = tempfile::tempdir().unwrap();
         let cmd = coder.build_command(dir.path());
@@ -1371,6 +1393,7 @@ mod model_default_tests {
         let coder = SandboxedClaudeCode {
             sandbox_profile: Some("/tmp/profile".to_string()),
             model_override: Some("claude-sonnet-4-6".to_string()),
+            effort: None,
         };
         let dir = tempfile::tempdir().unwrap();
         let cmd = coder.build_command(dir.path());
@@ -1388,6 +1411,7 @@ mod model_default_tests {
     fn bare_claude_command_omits_model_when_unset() {
         let coder = BareClaudeCode {
             model_override: None,
+            effort: None,
         };
         assert!(
             coder.effective_model().is_none(),
@@ -1400,6 +1424,7 @@ mod model_default_tests {
         let coder = CodexCode {
             sandbox_profile: None,
             model_override: None,
+            effort: None,
         };
         let dir = tempfile::tempdir().unwrap();
         let cmd = coder.build_command(dir.path(), true);
@@ -1414,6 +1439,7 @@ mod model_default_tests {
         let coder = CodexCode {
             sandbox_profile: None,
             model_override: Some("gpt-4o".to_string()),
+            effort: None,
         };
         let dir = tempfile::tempdir().unwrap();
         let cmd = coder.build_command(dir.path(), true);
@@ -1425,6 +1451,65 @@ mod model_default_tests {
             cmd_has_arg(&cmd, "gpt-4o"),
             "codex should pass the configured model"
         );
+    }
+
+    #[test]
+    fn claude_effort_passed_when_set() {
+        let coder = SandboxedClaudeCode {
+            sandbox_profile: Some("/tmp/profile".to_string()),
+            model_override: None,
+            effort: Some("high".to_string()),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = coder.build_command(dir.path());
+        assert!(cmd_has_arg(&cmd, "--effort"), "should pass --effort flag");
+        assert!(cmd_has_arg(&cmd, "high"), "should pass effort value");
+    }
+
+    #[test]
+    fn claude_effort_omitted_when_unset() {
+        let coder = SandboxedClaudeCode {
+            sandbox_profile: Some("/tmp/profile".to_string()),
+            model_override: None,
+            effort: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = coder.build_command(dir.path());
+        assert!(
+            !cmd_has_arg(&cmd, "--effort"),
+            "should not pass --effort when unset"
+        );
+    }
+
+    #[test]
+    fn codex_effort_passed_as_config_flag() {
+        let coder = CodexCode {
+            sandbox_profile: None,
+            model_override: None,
+            effort: Some("medium".to_string()),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = coder.build_command(dir.path(), true);
+        assert!(
+            cmd_has_arg(&cmd, "model_reasoning_effort=medium"),
+            "codex should pass effort via -c flag"
+        );
+    }
+
+    #[test]
+    fn codex_effort_omitted_when_unset() {
+        let coder = CodexCode {
+            sandbox_profile: None,
+            model_override: None,
+            effort: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = coder.build_command(dir.path(), true);
+        let args: Vec<_> = cmd.get_args().collect();
+        let has_effort = args.iter().any(|a| {
+            a.to_string_lossy().contains("model_reasoning_effort")
+        });
+        assert!(!has_effort, "codex should not pass effort when unset");
     }
 }
 
