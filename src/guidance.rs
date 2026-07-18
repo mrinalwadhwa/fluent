@@ -191,4 +191,105 @@ mod tests {
         assert!(hint.contains("fluent skill"));
         assert!(hint.contains("capture-brief"));
     }
+
+    #[test]
+    fn format_coder_plan_includes_all_roles_and_models() {
+        use crate::coder::CoderKind;
+        use crate::work_model::{CoderMapping, CoderModelPair};
+
+        let mapping = CoderMapping {
+            write: CoderModelPair {
+                coder: CoderKind::Claude,
+                model: "claude-sonnet-4-6".to_string(),
+                effort: None,
+            },
+            review: CoderModelPair {
+                coder: CoderKind::Codex,
+                model: "o3".to_string(),
+                effort: None,
+            },
+            behavior_tests: CoderModelPair {
+                coder: CoderKind::Pi,
+                model: "pi-model".to_string(),
+                effort: None,
+            },
+        };
+        let plan = format_coder_plan(&mapping);
+        assert!(plan.contains("writer"));
+        assert!(plan.contains("claude"));
+        assert!(plan.contains("claude-sonnet-4-6"));
+        assert!(plan.contains("reviewer"));
+        assert!(plan.contains("codex"));
+        assert!(plan.contains("o3"));
+        assert!(plan.contains("behavior-tests"));
+        assert!(plan.contains("pi"));
+        assert!(!plan.contains("effort="));
+    }
+
+    #[test]
+    fn format_coder_plan_shows_default_when_model_empty() {
+        use crate::coder::CoderKind;
+        use crate::work_model::{CoderMapping, CoderModelPair};
+
+        let mapping = CoderMapping {
+            write: CoderModelPair {
+                coder: CoderKind::Claude,
+                model: String::new(),
+                effort: None,
+            },
+            review: CoderModelPair {
+                coder: CoderKind::Claude,
+                model: String::new(),
+                effort: None,
+            },
+            behavior_tests: CoderModelPair {
+                coder: CoderKind::Claude,
+                model: String::new(),
+                effort: None,
+            },
+        };
+        let plan = format_coder_plan(&mapping);
+        assert!(
+            plan.contains("(default)"),
+            "empty model should show (default); got:\n{plan}"
+        );
+    }
+
+    #[test]
+    fn format_coder_plan_shows_effort_when_set() {
+        use crate::coder::CoderKind;
+        use crate::work_model::{CoderMapping, CoderModelPair};
+
+        let mapping = CoderMapping {
+            write: CoderModelPair {
+                coder: CoderKind::Claude,
+                model: "model-w".to_string(),
+                effort: Some("high".to_string()),
+            },
+            review: CoderModelPair {
+                coder: CoderKind::Claude,
+                model: "model-r".to_string(),
+                effort: None,
+            },
+            behavior_tests: CoderModelPair {
+                coder: CoderKind::Claude,
+                model: "model-bt".to_string(),
+                effort: Some("low".to_string()),
+            },
+        };
+        let plan = format_coder_plan(&mapping);
+        assert!(
+            plan.contains("effort=high"),
+            "writer effort should appear; got:\n{plan}"
+        );
+        assert!(
+            plan.contains("effort=low"),
+            "behavior-tests effort should appear; got:\n{plan}"
+        );
+        let reviewer_line = plan.lines().find(|l| l.contains("reviewer")).unwrap();
+        assert!(
+            !reviewer_line.contains("effort="),
+            "reviewer line should not show effort when unset; got: {reviewer_line}"
+        );
+    }
 }
