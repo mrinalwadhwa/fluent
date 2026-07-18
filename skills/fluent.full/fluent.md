@@ -81,6 +81,27 @@ For unrelated work that can proceed in parallel, create independent Work Items.
 
 For codebase, module, or area review-only work, create a Work Item, run `fluent review codebase <work-item-id> <attempt-id>`, then `fluent attempt run <work-item-id> <attempt-id>`.
 
+### Coder selection
+
+`fluent attempt run` prints the resolved coder, model, and effort for each role
+(writer, reviewer, behavior-tests) before the first round. Before launching an
+expensive run, present this plan to the user and confirm. Override per-run with
+`--coder`, `--model`, `--effort`, or per-role variants (`--write-model`,
+`--review-effort`, etc.). Configure defaults in `.fluent/config.yaml` (project)
+or `~/.config/fluent/config.yaml` (user):
+
+```yaml
+coders:
+  writer:
+    coder: claude
+    model: claude-opus-4-6
+    effort: high
+  reviewer:
+    coder: claude
+  behavior-tests:
+    coder: claude
+```
+
 ## Writer testing contract
 
 The writer produces tests alongside code. When committing a candidate:

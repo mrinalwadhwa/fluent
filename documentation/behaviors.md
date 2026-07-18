@@ -3675,6 +3675,38 @@ Coders SHALL list `pi`.
 Test: src/coder.rs (coder_kind_resolves_pi)
 Test: src/coder.rs (coder_kind_serializes_pi_as_kebab_case)
 
+## Coder selection
+
+### B1
+
+WHEN fluent resolves the coder, model, and reasoning effort for a role (writer,
+reviewer, or behavior-tests),
+THE SYSTEM SHALL take each from the first source that provides it: a per-run
+`--coder`/`--model` override, then an env var, then the project
+`.fluent/config.yaml`, then the user `~/.config/fluent/config.yaml`.
+Test: src/work_model.rs (resolve_coder_mapping_precedence_flag_env_config)
+
+### B2
+
+WHEN `fluent attempt create` or `fluent attempt run` is given `--coder <kind>` or
+`--model <model>`,
+THE SYSTEM SHALL apply it to that attempt, overriding config and env.
+Test: tests/binary.rs (attempt_coder_model_flags_override_config)
+
+### B3
+
+WHEN an attempt is about to launch its first round,
+THE SYSTEM SHALL print the resolved coder and model (and effort, when set) for each
+role before any coder starts. It SHALL suppress this under `FLUENT_QUIET`.
+Test: tests/binary.rs (attempt_run_prints_resolved_coder_plan)
+
+### B4
+
+WHERE no model is configured or overridden for a role,
+THE SYSTEM SHALL NOT pass a model to that coder; the coder CLI uses its own default.
+Test: src/coder.rs (claude_command_omits_model_when_unset)
+Test: src/coder.rs (codex_command_omits_model_when_unset)
+
 ## Per-Attempt coder mapping
 
 ### B1
