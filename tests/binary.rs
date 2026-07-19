@@ -12173,6 +12173,176 @@ fn status_names_next_action_for_actionable_state() {
 }
 
 #[test]
+#[serial]
+fn side_commands_name_next_action() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Side"])
+        .assert()
+        .success();
+
+    let list = fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "list"])
+        .output()
+        .unwrap();
+    assert!(list.status.success());
+    let list_stderr = String::from_utf8_lossy(&list.stderr);
+    assert!(
+        list_stderr.contains("fluent status") || list_stderr.contains("work-item show"),
+        "non-empty work-item list should name a next step; got:\n{list_stderr}"
+    );
+
+    let obs = fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["observation", "create", "A note to remember."])
+        .output()
+        .unwrap();
+    assert!(obs.status.success());
+    let obs_stderr = String::from_utf8_lossy(&obs.stderr);
+    assert!(
+        obs_stderr.contains("observation list"),
+        "observation create should name a next step; got:\n{obs_stderr}"
+    );
+
+    let clean = fluent_cmd()
+        .current_dir(&main_dir)
+        .arg("cleanup")
+        .output()
+        .unwrap();
+    assert!(clean.status.success());
+    let clean_stderr = String::from_utf8_lossy(&clean.stderr);
+    assert!(
+        clean_stderr.contains("fluent status"),
+        "cleanup should name a next step; got:\n{clean_stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn needs_user_generic_output_names_handoff_file() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+
+    let bin_dir = tmp.path().join("bin-generic-needs-user");
+    write_mock_claude(&bin_dir, &loop_mock_script("uncertain"));
+
+    let output = fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("handoff") && stderr.contains("needs-user.md"),
+        "generic needs-user next-action should name the handoff file; got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("attempt run"),
+        "generic needs-user next-action should still name attempt run; got:\n{stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn needs_user_auth_output_is_coder_aware() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Auth pause"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-auth-coder-aware");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+HAS_PROMPT=0
+for arg in "$@"; do
+  if [ "$arg" = "-p" ]; then HAS_PROMPT=1; break; fi
+done
+if [ "$HAS_PROMPT" = 0 ]; then exit 0; fi
+echo '{"type":"result","api_error_status":401,"request_id":"req-test-auth"}'
+exit 1
+"##,
+    );
+
+    let output = fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("claude /login"),
+        "auth pause next-action should name the Claude re-auth step; got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("attempt run"),
+        "auth pause next-action should name attempt run; got:\n{stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn attempt_run_review_only_names_artifact() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Review codebase"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "review",
+            "codebase",
+            "work-1",
+            "attempt-review",
+            "--from-working-tree",
+        ])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-review-only-artifact");
+    write_mock_claude(&bin_dir, &review_only_mock_script("fail"));
+
+    let output = fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-review", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("review.md"),
+        "review-only next-action should name a review artifact; got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("proceed with the next step"),
+        "review-only next-action must not be the generic phrasing; got:\n{stderr}"
+    );
+}
+
+#[test]
 fn empty_work_item_list_primes_planning_stages() {
     let tmp = TempDir::new().unwrap();
 

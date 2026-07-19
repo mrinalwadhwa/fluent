@@ -1017,6 +1017,22 @@ fn latest_review_artifacts(
         .collect()
 }
 
+/// Relative paths of the latest review round's completed review artifacts, for
+/// next-action guidance hints. Empty when no completed reviews exist.
+pub fn latest_review_artifact_relpaths(
+    project_root: &Path,
+    attempt: &crate::work_model::Attempt,
+) -> Vec<String> {
+    latest_review_artifacts(project_root, attempt)
+        .map(|artifacts| {
+            artifacts
+                .into_iter()
+                .map(|artifact| artifact.artifact.path)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn all_review_artifact_paths(
     project_root: &Path,
     attempt: &crate::work_model::Attempt,

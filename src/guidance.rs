@@ -55,28 +55,64 @@ pub fn format_coder_plan(mapping: &CoderMapping) -> String {
     lines.join("\n")
 }
 
+/// Runtime context an `attempt run` outcome needs to name a concrete next action:
+/// why the Attempt paused, which coder to re-authenticate, and where the review
+/// verdicts live.
+#[derive(Default)]
+pub struct AttemptRunContext<'a> {
+    pub pause_kind: Option<&'a PauseKind>,
+    pub coder: Option<&'a str>,
+    pub review_artifact: Option<&'a str>,
+}
+
+/// Name the coder-specific re-authentication step, falling back to a coder-agnostic
+/// phrase when the coder can't be determined.
+pub fn coder_reauth_step(coder: Option<&str>) -> String {
+    match coder {
+        Some("claude") => "re-authenticate (claude /login)".to_string(),
+        Some("codex") => "re-authenticate (codex login)".to_string(),
+        _ => "re-authenticate your coder".to_string(),
+    }
+}
+
+fn review_only_hint(review_artifact: Option<&str>, passed: bool) -> String {
+    match (passed, review_artifact) {
+        (true, Some(path)) => format!("\n→ Next: reviews passed; read the verdicts in {path}"),
+        (true, None) => "\n→ Next: reviews passed; read the review verdicts".to_string(),
+        (false, Some(path)) => {
+            format!("\n→ Next: inspect the review verdicts in {path}, then address the failures")
+        }
+        (false, None) => {
+            "\n→ Next: inspect the review verdicts, then address the failures".to_string()
+        }
+    }
+}
+
 pub fn after_attempt_run(
     outcome: &WorkAttemptRunOutcome,
-    pause_kind: Option<&PauseKind>,
-) -> Option<&'static str> {
+    ctx: &AttemptRunContext,
+) -> Option<String> {
     match outcome {
         WorkAttemptRunOutcome::MergeCandidateReady { .. } => Some(
-            "\n→ Next: fluent merge-candidate show <work-item-id>, then fluent merge-candidate land <work-item-id>",
+            "\n→ Next: fluent merge-candidate show <work-item-id>, then fluent merge-candidate land <work-item-id>".to_string(),
         ),
         WorkAttemptRunOutcome::PlannedWriteRound { .. } => {
-            Some("\n→ Next: fluent attempt run <work-item-id>")
+            Some("\n→ Next: fluent attempt run <work-item-id>".to_string())
         }
-        WorkAttemptRunOutcome::NeedsUser { .. } => match pause_kind {
-            Some(PauseKind::Auth) => Some(
-                "\n→ Next: re-authenticate (claude /login), then fluent attempt run <work-item-id>",
-            ),
-            _ => Some("\n→ Next: resolve the issue, then fluent attempt run <work-item-id>"),
+        WorkAttemptRunOutcome::NeedsUser { handoff_path } => match ctx.pause_kind {
+            Some(PauseKind::Auth) => Some(format!(
+                "\n→ Next: {}, then fluent attempt run <work-item-id>",
+                coder_reauth_step(ctx.coder)
+            )),
+            _ => Some(format!(
+                "\n→ Next: read the handoff {handoff_path}, then fluent attempt run <work-item-id>"
+            )),
         },
         WorkAttemptRunOutcome::ReviewOnlyComplete => {
-            Some("\n→ Next: review complete; proceed with the next step in the lifecycle")
+            Some(review_only_hint(ctx.review_artifact, true))
         }
         WorkAttemptRunOutcome::ReviewOnlyFailed => {
-            Some("\n→ Next: inspect the review artifacts and address the failures")
+            Some(review_only_hint(ctx.review_artifact, false))
         }
         WorkAttemptRunOutcome::RanTask { .. } | WorkAttemptRunOutcome::PlannedReviews { .. } => {
             None
@@ -90,6 +126,18 @@ pub fn after_merge_candidate_show() -> &'static str {
 
 pub fn after_merge_candidate_land() -> &'static str {
     "\n→ Next: fluent cleanup <work-item-id>"
+}
+
+pub fn after_work_item_list() -> &'static str {
+    "\n→ Next: fluent status to see what needs attention, or fluent work-item show <work-item-id>"
+}
+
+pub fn after_cleanup() -> &'static str {
+    "\n→ Next: fluent status to see remaining work"
+}
+
+pub fn after_observation_create() -> &'static str {
+    "\n→ Next: recorded; fluent observation list to review open observations"
 }
 
 pub fn empty_status_primer() -> &'static str {
@@ -152,7 +200,7 @@ mod tests {
         let outcome = WorkAttemptRunOutcome::MergeCandidateReady {
             candidate_id: "mc-1".to_string(),
         };
-        let hint = after_attempt_run(&outcome, None).unwrap();
+        let hint = after_attempt_run(&outcome, &AttemptRunContext::default()).unwrap();
         assert!(hint.contains("merge-candidate"));
     }
 
@@ -161,28 +209,70 @@ mod tests {
         let outcome = WorkAttemptRunOutcome::PlannedWriteRound {
             task_id: "t-1".to_string(),
         };
-        let hint = after_attempt_run(&outcome, None).unwrap();
+        let hint = after_attempt_run(&outcome, &AttemptRunContext::default()).unwrap();
         assert!(hint.contains("attempt run"));
     }
 
     #[test]
-    fn after_attempt_run_needs_user_auth_names_reauth() {
+    fn after_attempt_run_needs_user_auth_is_coder_aware() {
         let outcome = WorkAttemptRunOutcome::NeedsUser {
             handoff_path: "path".to_string(),
         };
-        let hint = after_attempt_run(&outcome, Some(&PauseKind::Auth)).unwrap();
+        let ctx = AttemptRunContext {
+            pause_kind: Some(&PauseKind::Auth),
+            coder: Some("codex"),
+            review_artifact: None,
+        };
+        let hint = after_attempt_run(&outcome, &ctx).unwrap();
         assert!(hint.contains("re-authenticate"));
+        assert!(hint.contains("codex login"));
         assert!(hint.contains("attempt run"));
     }
 
     #[test]
-    fn after_attempt_run_needs_user_non_auth_names_resolve() {
+    fn after_attempt_run_needs_user_generic_names_handoff_file() {
         let outcome = WorkAttemptRunOutcome::NeedsUser {
-            handoff_path: "path".to_string(),
+            handoff_path: ".fluent/work/artifacts/work-1/attempt-1/needs-user.md".to_string(),
         };
-        let hint = after_attempt_run(&outcome, Some(&PauseKind::Uncertain)).unwrap();
-        assert!(hint.contains("resolve"));
+        let ctx = AttemptRunContext {
+            pause_kind: Some(&PauseKind::Uncertain),
+            ..AttemptRunContext::default()
+        };
+        let hint = after_attempt_run(&outcome, &ctx).unwrap();
+        assert!(hint.contains("handoff"));
+        assert!(hint.contains("needs-user.md"));
         assert!(hint.contains("attempt run"));
+    }
+
+    #[test]
+    fn after_attempt_run_review_only_failed_names_artifact() {
+        let outcome = WorkAttemptRunOutcome::ReviewOnlyFailed;
+        let ctx = AttemptRunContext {
+            review_artifact: Some(".fluent/work/.../review.md"),
+            ..AttemptRunContext::default()
+        };
+        let hint = after_attempt_run(&outcome, &ctx).unwrap();
+        assert!(hint.contains("review.md"), "should name the artifact; got: {hint}");
+        assert!(
+            !hint.contains("proceed with the next step"),
+            "must not be the generic phrasing; got: {hint}"
+        );
+    }
+
+    #[test]
+    fn after_attempt_run_review_only_complete_names_verdicts() {
+        let outcome = WorkAttemptRunOutcome::ReviewOnlyComplete;
+        let hint = after_attempt_run(&outcome, &AttemptRunContext::default()).unwrap();
+        assert!(hint.contains("verdict"));
+        assert!(!hint.contains("proceed with the next step"));
+    }
+
+    #[test]
+    fn coder_reauth_step_is_coder_specific() {
+        assert!(coder_reauth_step(Some("claude")).contains("claude /login"));
+        assert!(coder_reauth_step(Some("codex")).contains("codex login"));
+        assert!(coder_reauth_step(Some("pi")).contains("re-authenticate your coder"));
+        assert!(coder_reauth_step(None).contains("re-authenticate your coder"));
     }
 
     #[test]
@@ -191,7 +281,14 @@ mod tests {
             task_id: "t-1".to_string(),
             output: "out".to_string(),
         };
-        assert!(after_attempt_run(&outcome, None).is_none());
+        assert!(after_attempt_run(&outcome, &AttemptRunContext::default()).is_none());
+    }
+
+    #[test]
+    fn side_command_hints_name_next_step() {
+        assert!(after_work_item_list().contains("fluent status"));
+        assert!(after_cleanup().contains("fluent status"));
+        assert!(after_observation_create().contains("observation list"));
     }
 
     #[test]

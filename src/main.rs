@@ -283,6 +283,9 @@ fn cmd_work_item(project_root: &Path, command: WorkItemCommands) -> Result<()> {
                 for item in items {
                     println!("{:<24} {}", item.id, item.title);
                 }
+                if guidance::guidance_enabled() {
+                    eprintln!("{}", guidance::after_work_item_list());
+                }
             }
         }
         WorkItemCommands::Show { id } => match store.read_work_item(&id) {
@@ -323,6 +326,25 @@ fn cmd_work_item(project_root: &Path, command: WorkItemCommands) -> Result<()> {
 // -------------------------------------------------------------------------
 // Attempt
 // -------------------------------------------------------------------------
+
+/// Resolve the coder to name in an auth-recovery hint: the coder that ran the
+/// Attempt's paused task. Returns `None` when no paused task is present.
+fn resolve_paused_coder(attempt: &work_model::Attempt) -> Option<String> {
+    let task = attempt.tasks.iter().find(|task| {
+        matches!(
+            task.status,
+            work_model::TaskStatus::Failed | work_model::TaskStatus::NeedsUser
+        )
+    })?;
+    let pair = match task.kind {
+        work_model::TaskKind::Review => &attempt.coder_mapping.review,
+        work_model::TaskKind::Tester | work_model::TaskKind::BehaviorTests => {
+            &attempt.coder_mapping.behavior_tests
+        }
+        _ => &attempt.coder_mapping.write,
+    };
+    Some(pair.coder.as_str().to_string())
+}
 
 fn cmd_attempt(
     project_root: &Path,
@@ -529,12 +551,29 @@ fn cmd_attempt(
                 extra_args: &extra_args,
                 no_sandbox: no_sandbox || global_no_sandbox,
             })?;
-            let pause_kind = store.read_work_item(&work_item_id).ok().and_then(|item| {
-                item.attempts
-                    .iter()
-                    .find(|a| a.id == attempt_id)
-                    .and_then(|a| a.pause_kind.clone())
-            });
+            // Resolve the runtime context the guidance hints need — why the
+            // Attempt paused, which coder to re-authenticate, and where its latest
+            // review verdicts live — from the persisted Attempt.
+            let (pause_kind, auth_coder, review_artifact) = {
+                let item = store.read_work_item(&work_item_id).ok();
+                let attempt = item
+                    .as_ref()
+                    .and_then(|item| item.attempts.iter().find(|a| a.id == attempt_id));
+                (
+                    attempt.and_then(|a| a.pause_kind.clone()),
+                    attempt.and_then(resolve_paused_coder),
+                    attempt.and_then(|a| {
+                        work_attempt_loop::latest_review_artifact_relpaths(project_root, a)
+                            .into_iter()
+                            .next()
+                    }),
+                )
+            };
+            let hint_ctx = guidance::AttemptRunContext {
+                pause_kind: pause_kind.as_ref(),
+                coder: auth_coder.as_deref(),
+                review_artifact: review_artifact.as_deref(),
+            };
             for outcome in &result.outcomes {
                 match outcome {
                     WorkAttemptRunOutcome::RanTask { task_id, output } => {
@@ -568,7 +607,7 @@ fn cmd_attempt(
                     }
                 }
                 if guidance::guidance_enabled() {
-                    if let Some(hint) = guidance::after_attempt_run(outcome, pause_kind.as_ref()) {
+                    if let Some(hint) = guidance::after_attempt_run(outcome, &hint_ctx) {
                         eprintln!("{hint}");
                     }
                 }
@@ -1143,7 +1182,13 @@ fn cmd_post_merge_review(
 
 fn cmd_observation(project_root: &Path, command: ObservationCommands) -> Result<()> {
     match command {
-        ObservationCommands::Create { content } => observations::add(project_root, content),
+        ObservationCommands::Create { content } => {
+            observations::add(project_root, content)?;
+            if guidance::guidance_enabled() {
+                eprintln!("{}", guidance::after_observation_create());
+            }
+            Ok(())
+        }
         ObservationCommands::Resolve { id, resolution } => {
             observations::resolve(project_root, &id, resolution)
         }
@@ -1191,6 +1236,9 @@ fn cmd_cleanup(search_root: &Path, apply: bool, prune_all_review_worktrees: bool
 
     if !has_work && !has_reviewers && !has_prune {
         println!("No cleanup candidates found.");
+        if guidance::guidance_enabled() {
+            eprintln!("{}", guidance::after_cleanup());
+        }
         return Ok(());
     }
 
@@ -1326,6 +1374,10 @@ fn cmd_cleanup(search_root: &Path, apply: bool, prune_all_review_worktrees: bool
                 );
             }
         }
+    }
+
+    if guidance::guidance_enabled() {
+        eprintln!("{}", guidance::after_cleanup());
     }
 
     Ok(())
