@@ -12133,6 +12133,46 @@ fn planning_primer_points_to_fluent_skill() {
 }
 
 #[test]
+fn status_names_next_action_for_actionable_state() {
+    let tmp = TempDir::new().unwrap();
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["work-item", "create", "work-1", "--title", "Actionable"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let status = fluent_cmd()
+        .current_dir(tmp.path())
+        .arg("status")
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    let status_stderr = String::from_utf8_lossy(&status.stderr);
+    assert!(
+        status_stderr.contains("fluent attempt run work-1"),
+        "populated status should name the runnable attempt on stderr; got:\n{status_stderr}"
+    );
+
+    let show = fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["work-item", "show", "work-1"])
+        .output()
+        .unwrap();
+    assert!(show.status.success());
+    let show_stderr = String::from_utf8_lossy(&show.stderr);
+    assert!(
+        show_stderr.contains("fluent attempt run work-1"),
+        "work-item show should name the runnable attempt on stderr; got:\n{show_stderr}"
+    );
+}
+
+#[test]
 fn empty_work_item_list_primes_planning_stages() {
     let tmp = TempDir::new().unwrap();
 

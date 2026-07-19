@@ -288,6 +288,12 @@ fn cmd_work_item(project_root: &Path, command: WorkItemCommands) -> Result<()> {
         WorkItemCommands::Show { id } => match store.read_work_item(&id) {
             Ok(item) => {
                 print!("{}", to_json_pretty(&item)?);
+                if guidance::guidance_enabled() {
+                    let row = work_status::summarize_work_item(&item, Some(project_root));
+                    if let Some(hint) = guidance::next_action_for_action(&row.action, &row.id) {
+                        eprintln!("{hint}");
+                    }
+                }
             }
             Err(WorkModelStorageError::ReadFile { source, .. })
                 if source.kind() == ErrorKind::NotFound =>
@@ -1358,8 +1364,12 @@ fn cmd_status(search_root: &Path) -> Result<()> {
     let work_status = work_status::load_work_status(search_root)?;
     let is_empty = work_status.is_empty();
     print!("{}", work_status::format_work_status(&work_status));
-    if is_empty && guidance::guidance_enabled() {
-        eprintln!("{}", guidance::empty_status_primer());
+    if guidance::guidance_enabled() {
+        if is_empty {
+            eprintln!("{}", guidance::empty_status_primer());
+        } else if let Some(hint) = guidance::status_next_action(&work_status) {
+            eprintln!("{hint}");
+        }
     }
     Ok(())
 }

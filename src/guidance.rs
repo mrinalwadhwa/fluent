@@ -2,6 +2,7 @@ use std::env;
 
 use crate::work_attempt_loop::WorkAttemptRunOutcome;
 use crate::work_model::{CoderMapping, PauseKind};
+use crate::work_status::WorkStatus;
 
 pub fn guidance_enabled() -> bool {
     match env::var("FLUENT_QUIET") {
@@ -95,6 +96,35 @@ pub fn empty_status_primer() -> &'static str {
     "\n→ Next: capture a brief, then define behaviors, design an approach, and plan execution, then fluent work-item create\n  (fluent skill: capture-brief)"
 }
 
+/// Map a board-state `action` (from `work_status`) to the single most-actionable
+/// next command for the Work Item `id`. Returns `None` when the state has no
+/// operator command to name (transient or terminal states).
+pub fn next_action_for_action(action: &str, id: &str) -> Option<String> {
+    match action {
+        "needs-user" => Some(format!(
+            "\n→ Next: {id} is paused for you; read its handoff, then fluent attempt run {id}"
+        )),
+        "merge-ready" => Some(format!(
+            "\n→ Next: fluent merge-candidate show {id}, then fluent merge-candidate land {id}"
+        )),
+        "task-ready" => Some(format!("\n→ Next: fluent attempt run {id}")),
+        _ => None,
+    }
+}
+
+/// Name the next command for the most-actionable Work Item on a populated board.
+/// Priority follows `work_status`: needs-user > merge-ready > task-ready. Returns
+/// `None` when nothing on the board is actionable.
+pub fn status_next_action(status: &WorkStatus) -> Option<String> {
+    const PRIORITY: [&str; 3] = ["needs-user", "merge-ready", "task-ready"];
+    for action in PRIORITY {
+        if let Some(row) = status.rows.iter().find(|row| row.action == action) {
+            return next_action_for_action(&row.action, &row.id);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,6 +204,82 @@ mod tests {
     fn after_merge_candidate_land_names_cleanup() {
         let hint = after_merge_candidate_land();
         assert!(hint.contains("cleanup"));
+    }
+
+    fn status_row(id: &str, action: &str) -> crate::work_status::WorkItemStatus {
+        crate::work_status::WorkItemStatus {
+            id: id.to_string(),
+            title: "Title".to_string(),
+            attempt: "-".to_string(),
+            task: "-".to_string(),
+            review: "-".to_string(),
+            merge_candidate: "-".to_string(),
+            merge: "-".to_string(),
+            action: action.to_string(),
+        }
+    }
+
+    #[test]
+    fn next_action_for_task_ready_names_attempt_run() {
+        let hint = next_action_for_action("task-ready", "work-7").unwrap();
+        assert!(hint.contains("fluent attempt run work-7"));
+    }
+
+    #[test]
+    fn next_action_for_merge_ready_names_land() {
+        let hint = next_action_for_action("merge-ready", "work-7").unwrap();
+        assert!(hint.contains("fluent merge-candidate land work-7"));
+    }
+
+    #[test]
+    fn next_action_for_needs_user_names_handoff_and_attempt_run() {
+        let hint = next_action_for_action("needs-user", "work-7").unwrap();
+        assert!(hint.contains("handoff"));
+        assert!(hint.contains("fluent attempt run work-7"));
+    }
+
+    #[test]
+    fn next_action_for_transient_or_terminal_action_is_none() {
+        assert!(next_action_for_action("executing", "work-7").is_none());
+        assert!(next_action_for_action("merged", "work-7").is_none());
+        assert!(next_action_for_action("abandoned", "work-7").is_none());
+    }
+
+    #[test]
+    fn status_next_action_prioritizes_needs_user_over_merge_and_task_ready() {
+        let status = WorkStatus {
+            rows: vec![
+                status_row("work-a", "merge-ready"),
+                status_row("work-b", "needs-user"),
+                status_row("work-c", "task-ready"),
+            ],
+            errors: Vec::new(),
+        };
+        let hint = status_next_action(&status).unwrap();
+        assert!(hint.contains("work-b"), "needs-user item should win; got: {hint}");
+        assert!(hint.contains("attempt run"));
+    }
+
+    #[test]
+    fn status_next_action_names_merge_ready_over_task_ready() {
+        let status = WorkStatus {
+            rows: vec![
+                status_row("work-a", "task-ready"),
+                status_row("work-b", "merge-ready"),
+            ],
+            errors: Vec::new(),
+        };
+        let hint = status_next_action(&status).unwrap();
+        assert!(hint.contains("fluent merge-candidate land work-b"), "got: {hint}");
+    }
+
+    #[test]
+    fn status_next_action_is_none_when_nothing_actionable() {
+        let status = WorkStatus {
+            rows: vec![status_row("work-a", "executing"), status_row("work-b", "merged")],
+            errors: Vec::new(),
+        };
+        assert!(status_next_action(&status).is_none());
     }
 
     #[test]
