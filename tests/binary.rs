@@ -6806,9 +6806,17 @@ fn work_list_outputs_stored_work_items() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(output.stderr, b"");
 
     let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stdout.contains("→ Next:"),
+        "the list result must stay on stdout without the next-action hint: {stdout}"
+    );
+    assert!(
+        stderr.contains("→ Next:"),
+        "a populated work-item list should print a next-action hint on stderr: {stderr}"
+    );
     assert!(stdout.contains("ID"));
     assert!(stdout.contains("TITLE"));
     assert!(stdout.contains("work-alpha"));
