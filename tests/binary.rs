@@ -1292,6 +1292,106 @@ fn craft_section_names_skill_and_lifecycle_stages() {
     }
 }
 
+fn craft_section_content(tmp: &TempDir) -> String {
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .current_dir(&project)
+        .arg("init")
+        .assert()
+        .success();
+
+    fs::read_to_string(project.join("AGENTS.md")).unwrap()
+}
+
+#[test]
+fn craft_section_is_self_sufficient_for_skilless_operator() {
+    let tmp = TempDir::new().unwrap();
+    let content = craft_section_content(&tmp);
+
+    assert!(
+        content.contains("user conversation"),
+        "craft section must state the first stages are a user conversation"
+    );
+    assert!(
+        content.contains("→ Next:") || content.to_lowercase().contains("next-action"),
+        "craft section must tell the operator to follow the next-action line"
+    );
+    assert!(
+        content.to_lowercase().contains("question"),
+        "craft section must teach how to ask the user questions"
+    );
+}
+
+#[test]
+fn craft_section_states_scaffolding_is_committed() {
+    let tmp = TempDir::new().unwrap();
+    let content = craft_section_content(&tmp);
+
+    assert!(
+        content.contains(".fluent/"),
+        "craft section must mention the .fluent/ scaffolding"
+    );
+    assert!(
+        content.to_lowercase().contains("commit"),
+        "craft section must state the scaffolding is committed"
+    );
+}
+
+#[test]
+fn craft_section_presents_question_format() {
+    let tmp = TempDir::new().unwrap();
+    let content = craft_section_content(&tmp);
+
+    assert!(
+        content.contains("Decision"),
+        "craft section must name the Decision archetype"
+    );
+    assert!(
+        content.contains("Confirm gate"),
+        "craft section must name the Confirm gate archetype"
+    );
+    assert!(
+        content.contains("yes (y)"),
+        "craft section must state the yes (y) confirm convention"
+    );
+    assert!(
+        content.contains("(recommended"),
+        "craft section must mark the recommended option"
+    );
+    assert!(
+        content.to_lowercase().contains("one question at a time"),
+        "craft section must state one question at a time"
+    );
+}
+
+#[test]
+fn craft_section_stays_summary_names_skill() {
+    let tmp = TempDir::new().unwrap();
+    let content = craft_section_content(&tmp);
+
+    assert!(
+        content.contains("fluent skill"),
+        "craft section must name the fluent skill as the deep reference"
+    );
+    assert!(
+        content.to_lowercase().contains("summary") || content.to_lowercase().contains("reference"),
+        "craft section must present itself as a summary that defers to the skill"
+    );
+
+    let begin = content.find("<!-- BEGIN fluent -->").unwrap();
+    let end = content.find("<!-- END fluent -->").unwrap();
+    let block_lines = content[begin..end].lines().count();
+    assert!(
+        block_lines < 60,
+        "craft section should stay a concise summary, not inline the stage procedures; got {block_lines} lines"
+    );
+}
+
 #[test]
 fn init_succeeds_when_craft_section_write_fails() {
     let tmp = TempDir::new().unwrap();

@@ -1474,19 +1474,36 @@ const CRAFT_SECTION: &str = "\
 ## Driving fluent
 
 This project uses **fluent** to build changes through a structured, reviewed lifecycle.
-Drive it through the **fluent skill** — your authoritative reference; invoke it for the
-full procedure. This section is a summary.
+The **fluent skill** is the deep reference — invoke it for the full stage procedures.
+This section is the always-loaded summary and is enough to drive fluent on its own.
 
 - **Lifecycle:** capture a brief → define behaviors → design an approach → plan, then
-  autonomous execute → review → land. The first four stages are a conversation with the
-  user — don't skip them.
+  autonomous execute → review → land. The first four stages are a user conversation —
+  work through them one question at a time; don't skip them.
 - **Work model:** a Work Item holds the plan; an Attempt runs writer → tester → reviewers
   in rounds; a passing Attempt yields a Merge Candidate to land.
+- **Follow the next-action line:** every fluent command prints a `→ Next:` next-action line
+  to stderr naming the command to run next. Run `fluent status` at session start and after
+  any gap to see what needs attention, then follow the `→ Next:` line it prints.
 - **Observations:** capture durable lessons and future work with `fluent observation
   create`; list them with `fluent observation list`.
 - **Pause for the user:** when a decision genuinely needs a human, fluent sets
-  `needs-user` and pauses; resume with `fluent attempt run` once resolved.
-- **On session start:** run `fluent status` to see what needs attention.
+  `needs-user` and pauses; read the named handoff file, then resume with `fluent attempt
+  run` once resolved.
+- **Committed scaffolding:** fluent commits its `.fluent/` notes and test config alongside
+  your code changes, so its learned project state persists across runs.
+
+### Ask the user easy-to-answer questions
+
+One question at a time; leave a blank line after the question stem. Use two shapes:
+
+- **Decision** — pick one option. Label the options (a)/(b)/(c), each self-contained; put
+  the recommended option first and mark it `(recommended: <why>)`. The answer is a single
+  letter.
+- **Confirm gate** — approve or route back: \"Reply **yes (y)**, or name what to revise:
+  (a).../(b).../(c)...\". The default is yes; a bare `y` is accepted.
+
+Avoid the anti-pattern: an unlabeled \"X or Y?\" that forces the user to re-describe an option.
 
 See the fluent skill for the full brief/behaviors/approach/plan procedure.
 <!-- END fluent -->
