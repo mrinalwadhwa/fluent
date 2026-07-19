@@ -12447,7 +12447,13 @@ fn attempt_run_review_only_names_artifact() {
     let main_dir = setup_git_project(&tmp);
     fluent_cmd()
         .current_dir(&main_dir)
-        .args(["work-item", "create", "work-1", "--title", "Review codebase"])
+        .args([
+            "work-item",
+            "create",
+            "work-1",
+            "--title",
+            "Review codebase",
+        ])
         .assert()
         .success();
     fluent_cmd()

@@ -256,7 +256,10 @@ mod tests {
             ..AttemptRunContext::default()
         };
         let hint = after_attempt_run(&outcome, &ctx).unwrap();
-        assert!(hint.contains("review.md"), "should name the artifact; got: {hint}");
+        assert!(
+            hint.contains("review.md"),
+            "should name the artifact; got: {hint}"
+        );
         assert!(
             !hint.contains("proceed with the next step"),
             "must not be the generic phrasing; got: {hint}"
@@ -357,7 +360,10 @@ mod tests {
             errors: Vec::new(),
         };
         let hint = status_next_action(&status).unwrap();
-        assert!(hint.contains("work-b"), "needs-user item should win; got: {hint}");
+        assert!(
+            hint.contains("work-b"),
+            "needs-user item should win; got: {hint}"
+        );
         assert!(hint.contains("attempt run"));
     }
 
@@ -371,13 +377,19 @@ mod tests {
             errors: Vec::new(),
         };
         let hint = status_next_action(&status).unwrap();
-        assert!(hint.contains("fluent merge-candidate land work-b"), "got: {hint}");
+        assert!(
+            hint.contains("fluent merge-candidate land work-b"),
+            "got: {hint}"
+        );
     }
 
     #[test]
     fn status_next_action_is_none_when_nothing_actionable() {
         let status = WorkStatus {
-            rows: vec![status_row("work-a", "executing"), status_row("work-b", "merged")],
+            rows: vec![
+                status_row("work-a", "executing"),
+                status_row("work-b", "merged"),
+            ],
             errors: Vec::new(),
         };
         assert!(status_next_action(&status).is_none());
