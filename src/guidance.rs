@@ -96,9 +96,9 @@ pub fn after_attempt_run(
         WorkAttemptRunOutcome::MergeCandidateReady { .. } => Some(
             "\n→ Next: fluent merge-candidate show <work-item-id>, then fluent merge-candidate land <work-item-id>".to_string(),
         ),
-        WorkAttemptRunOutcome::PlannedWriteRound { .. } => {
-            Some("\n→ Next: fluent attempt run <work-item-id>".to_string())
-        }
+        WorkAttemptRunOutcome::PlannedWriteRound { .. } => Some(
+            "\n→ Next: a follow-up write round was planned from failed reviewers; fluent attempt run <work-item-id> to keep iterating".to_string(),
+        ),
         WorkAttemptRunOutcome::NeedsUser { handoff_path } => match ctx.pause_kind {
             Some(PauseKind::Auth) => Some(format!(
                 "\n→ Next: {}, then fluent attempt run <work-item-id>",
@@ -205,12 +205,16 @@ mod tests {
     }
 
     #[test]
-    fn after_attempt_run_planned_write_round_names_attempt_run() {
+    fn after_attempt_run_planned_write_round_conveys_iteration() {
         let outcome = WorkAttemptRunOutcome::PlannedWriteRound {
             task_id: "t-1".to_string(),
         };
         let hint = after_attempt_run(&outcome, &AttemptRunContext::default()).unwrap();
         assert!(hint.contains("attempt run"));
+        assert!(
+            hint.contains("follow-up") || hint.contains("iterat"),
+            "write-round hint should read as iterating, not stuck; got: {hint}"
+        );
     }
 
     #[test]

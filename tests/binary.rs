@@ -12223,6 +12223,40 @@ fn side_commands_name_next_action() {
 
 #[test]
 #[serial]
+fn attempt_run_write_round_conveys_iteration() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Iterating"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-write-round-iteration");
+    write_mock_claude(&bin_dir, &stateful_loop_mock_script("fail"));
+
+    let output = fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("follow-up") || stderr.contains("keep iterating"),
+        "a planned write round should read as iterating, not stuck; got:\n{stderr}"
+    );
+}
+
+#[test]
+#[serial]
 fn needs_user_generic_output_names_handoff_file() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
