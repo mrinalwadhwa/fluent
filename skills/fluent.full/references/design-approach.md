@@ -78,7 +78,7 @@ Leave internal structure to the executing agent unless a specific piece has to b
 
 Once every decision is agreed, write `approach.md` to `.fluent/drafts/<draft-id>/approach.md` and show it to the user:
 
-> "Confirm the approach and move to planning? Reply **yes**, or name what to revise: (a) a decision, (b) structure, (c) a risk."
+> "Confirm the approach and move to planning? Reply **yes (y)**, or name what to revise: (a) a decision, (b) structure, (c) a risk."
 
 Check that the vocabulary matches the behaviors diff, that no decision quietly contradicts a recorded choice in `.fluent/expertise/decisions.md`, and that each key decision names what it gave up. If something needs changing, name which part — a specific decision, the structure section, or a risk — and re-enter that step. Don't re-run the whole walk-through.
 
@@ -125,6 +125,11 @@ Omit sections with no content. A minimal approach for a mechanical change may be
 
 ## Rules
 
-- Label options as (a), (b), (c), or ask a yes/no with an obvious default. Avoid unlabeled "X or Y?" forms.
+- Ask one question at a time, with a blank line after the question stem. Use two archetypes:
+  - **Decision** — pick one option. Label the options (a)/(b)/(c), each self-contained; put the
+    recommended option first and mark it `(recommended: <why>)`. The answer is a single letter.
+  - **Confirm gate** — approve or route back: "Reply **yes (y)**, or name what to revise:
+    (a).../(b).../(c)...". The default is yes; a bare `y` is accepted.
+  Avoid the anti-pattern: an unlabeled "X or Y?" that forces the user to re-describe an option.
 - Every choice names what it gives up. If nothing was given up, no real decision was made.
 - Fit the existing architecture. If the approach changes it, say so explicitly and name what changes.

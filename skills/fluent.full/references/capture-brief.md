@@ -73,7 +73,7 @@ Write to `.fluent/drafts/<draft-id>/brief.md` in the format below.
 
 Show the brief and ask:
 
-> "Confirm the brief and move to behaviors? Reply **yes**, or name what to revise: (a) Listen, (b) Sharpen, (c) Ground."
+> "Confirm the brief and move to behaviors? Reply **yes (y)**, or name what to revise: (a) Listen, (b) Sharpen, (c) Ground."
 
 If a part is fuzzy, name which part and re-enter the relevant step (Listen, Sharpen, or Ground). Do not start over.
 
@@ -131,5 +131,10 @@ Omit sections with no content — a clear bug fix might only need *What* and *Wh
 ## Rules
 
 - Capture what the user said and what the codebase shows. Don't rephrase into formal language, invent terminology, or add details you weren't given.
-- Label options as (a), (b), (c), or ask a yes/no with an obvious default. Avoid unlabeled "Do you want X or Y?" forms.
+- Ask one question at a time, with a blank line after the question stem. Use two archetypes:
+  - **Decision** — pick one option. Label the options (a)/(b)/(c), each self-contained; put the
+    recommended option first and mark it `(recommended: <why>)`. The answer is a single letter.
+  - **Confirm gate** — approve or route back: "Reply **yes (y)**, or name what to revise:
+    (a).../(b).../(c)...". The default is yes; a bare `y` is accepted.
+  Avoid the anti-pattern: an unlabeled "X or Y?" that forces the user to re-describe an option.
 - Record unknowns explicitly. "I don't know how auth should work" is more useful than omitting auth.

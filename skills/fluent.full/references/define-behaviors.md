@@ -85,7 +85,7 @@ Don't silently resolve unknowns. Don't make solution choices here.
 
 Once every area is agreed, write `behaviors.diff.md` to `.fluent/drafts/<draft-id>/behaviors.diff.md` and show it to the user:
 
-> "Confirm the behaviors diff and move to approach? Reply **yes**, or name what to revise: (a) vocabulary, (b) a statement, (c) an unknown."
+> "Confirm the behaviors diff and move to approach? Reply **yes (y)**, or name what to revise: (a) vocabulary, (b) a statement, (c) an unknown."
 
 Check that terms are used consistently, no two statements contradict, and no two statements say the same thing in different words. If something needs changing, name which part — vocabulary, an area's statements, or an unresolved unknown — and re-enter that step. Don't re-run the whole area-by-area review.
 
@@ -130,6 +130,11 @@ Omit sections with no content. Reference existing statements when a new one depe
 
 ## Rules
 
-- Label options as (a), (b), (c), or ask a yes/no with an obvious default. Avoid unlabeled "X or Y?" forms.
+- Ask one question at a time, with a blank line after the question stem. Use two archetypes:
+  - **Decision** — pick one option. Label the options (a)/(b)/(c), each self-contained; put the
+    recommended option first and mark it `(recommended: <why>)`. The answer is a single letter.
+  - **Confirm gate** — approve or route back: "Reply **yes (y)**, or name what to revise:
+    (a).../(b).../(c)...". The default is yes; a bare `y` is accepted.
+  Avoid the anti-pattern: an unlabeled "X or Y?" that forces the user to re-describe an option.
 - Every new EARS statement carries either a `Test:` reference or an `Untestable:` marker with a one-line reason. The test usually doesn't exist yet — name the intended test path in the project's style (inspect nearby tests to match the naming convention); the writer creates it during execution. Use `Untestable:` only when the behavior genuinely can't be observed from a test.
 - Number each area's statements as `### B1`, `### B2`, ... in reading order. IDs restart at `B1` in each area, so a reference like `B2` is always relative to its area.

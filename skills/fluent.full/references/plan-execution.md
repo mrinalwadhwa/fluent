@@ -59,7 +59,7 @@ Then handle the rest one at a time or in small groups. For each step, agree on f
 
 After discussing each step or group of steps, ask:
 
-> "Ordering hold? Reply **yes**, or name a step to reorder or split."
+> "Ordering hold? Reply **yes (y)**, or name a step to reorder or split."
 
 If a step reveals a gap in the approach or the behaviors — a missing decision, a case that wasn't specified — stop and return to `design-approach` or `define-behaviors` rather than papering over it here.
 
@@ -98,7 +98,7 @@ For multiple Work Items, write one plan per Work Item to `.fluent/drafts/<draft-
 
 Show the assembled plan(s) to the user:
 
-> "Confirm the plan and move to Work Item creation? Reply **yes**, or name what to revise: (a) a step, (b) a Work Item's scope, (c) a sync point."
+> "Confirm the plan and move to Work Item creation? Reply **yes (y)**, or name what to revise: (a) a step, (b) a Work Item's scope, (c) a sync point."
 
 Check that every behavior in the diff has a home, that verification is named for every step, and that the ordering respects the dependencies you found. When the plan splits, check that behaviors are partitioned across Work Items with no gaps or overlaps, and that pinned contracts match. If something needs changing, name which part — a specific step, a Work Item's scope, a sync point — and re-enter that step. Don't re-run the walkthrough.
 
@@ -170,7 +170,12 @@ Brief: [one-line summary from the brief]
 
 ## Rules
 
-- Label options as (a), (b), (c), or ask a yes/no with an obvious default. Avoid unlabeled "X or Y?" forms.
+- Ask one question at a time, with a blank line after the question stem. Use two archetypes:
+  - **Decision** — pick one option. Label the options (a)/(b)/(c), each self-contained; put the
+    recommended option first and mark it `(recommended: <why>)`. The answer is a single letter.
+  - **Confirm gate** — approve or route back: "Reply **yes (y)**, or name what to revise:
+    (a).../(b).../(c)...". The default is yes; a bare `y` is accepted.
+  Avoid the anti-pattern: an unlabeled "X or Y?" that forces the user to re-describe an option.
 - Each step is a state the system reaches, not an activity to perform.
 - Behavior references are area-qualified — `Feed:B1`, not `B1` — because IDs restart per area.
 - When the plan splits, each Work Item's plan lives at `.fluent/drafts/<draft-id>/items/<slug>/plan.md` and its `<work-item-id>` is `<draft-id>-<slug>`.

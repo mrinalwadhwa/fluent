@@ -10,7 +10,15 @@ SKILLS=(
   "$ROOT/skills/fluent.full/references/plan-execution.md"
 )
 
+# The always-loaded craft section (seeded by `fluent init`) is a rule surface too.
+CRAFT_SURFACE="$ROOT/src/main.rs"
+
 failures=0
+
+fail() {
+  echo "FAIL: $1" >&2
+  failures=$((failures + 1))
+}
 
 # --- Negative checks: open-ended confirm phrasings must be absent ---
 OPEN_ENDED_PATTERNS=(
@@ -25,38 +33,44 @@ for skill in "${SKILLS[@]}"; do
   label="$(basename "$skill" .md)"
   for pattern in "${OPEN_ENDED_PATTERNS[@]}"; do
     if grep -Fqi "$pattern" "$skill"; then
-      echo "FAIL: ${label} contains open-ended confirm phrasing: '${pattern}'" >&2
-      failures=$((failures + 1))
+      fail "${label} contains open-ended confirm phrasing: '${pattern}'"
     fi
   done
 done
 
-# --- Positive checks: each stage procedure's confirm prompt uses easy-to-answer form ---
-# Anchor on stable markers: a "yes" reply and at least one labeled "(a)" option
-# in the confirm-step blockquote sections.
-
+# --- The stale loose two-pattern rule wording must be gone ---
+STALE_RULE="Label options as (a), (b), (c), or ask a yes/no with an obvious default."
 for skill in "${SKILLS[@]}"; do
   label="$(basename "$skill" .md)"
-  if ! grep -q '\*\*yes\*\*' "$skill"; then
-    echo "FAIL: ${label} confirm prompt missing **yes** reply option" >&2
-    failures=$((failures + 1))
-  fi
-  if ! grep -q '(a)' "$skill"; then
-    echo "FAIL: ${label} confirm prompt missing labeled option (a)" >&2
-    failures=$((failures + 1))
+  if grep -Fq "$STALE_RULE" "$skill"; then
+    fail "${label} still carries the old loose two-pattern rule"
   fi
 done
 
-# --- Rule wording: each stage procedure states the easy-to-answer rule ---
-RULE_TEXT="Label options as (a), (b), (c), or ask a yes/no with an obvious default."
+# --- Each surface names both archetypes and their conventions ---
+# Structural, not exact-string: assert the two archetype names plus the
+# yes (y) convention and the marked recommendation, so the rule survives
+# rewrites while a broken rule still fails.
+assert_expresses_rule() {
+  surface="$1"
+  label="$2"
+  grep -Fq "Decision" "$surface" || fail "${label} does not name the Decision archetype"
+  grep -Fq "Confirm gate" "$surface" || fail "${label} does not name the Confirm gate archetype"
+  grep -Fq "yes (y)" "$surface" || fail "${label} does not state the yes (y) confirm convention"
+  grep -Fq "(recommended" "$surface" || fail "${label} does not mark the recommended option"
+}
 
 for skill in "${SKILLS[@]}"; do
   label="$(basename "$skill" .md)"
-  if ! grep -Fq "$RULE_TEXT" "$skill"; then
-    echo "FAIL: ${label} missing rule: ${RULE_TEXT}" >&2
-    failures=$((failures + 1))
-  fi
+  assert_expresses_rule "$skill" "$label"
+  # A labeled option and the named anti-pattern must be present in each reference.
+  grep -Fq "(a)" "$skill" || fail "${label} confirm prompt missing labeled option (a)"
+  grep -Fqi "re-describe" "$skill" ||
+    fail "${label} does not name the unlabeled-option anti-pattern"
 done
+
+# --- Cross-surface: the seeded craft section expresses the same rule ---
+assert_expresses_rule "$CRAFT_SURFACE" "craft-section"
 
 if [ "$failures" -gt 0 ]; then
   echo "${failures} failure(s)" >&2
