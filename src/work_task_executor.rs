@@ -1530,6 +1530,15 @@ fn run_task_coder(
     }
 }
 
+/// The immutable execution context a derived corrective Work Item hands
+/// identically to the Writer, every reviewer, and the Tester. Returns `None`
+/// for ordinary Work, which carries planning artifacts instead.
+fn corrective_execution_context(item: &WorkItem) -> Option<String> {
+    item.corrective_context
+        .as_ref()
+        .map(|context| context.to_execution_context())
+}
+
 #[cfg(test)]
 fn build_write_task_prompt(
     item: &WorkItem,
@@ -1611,6 +1620,12 @@ fn build_write_task_prompt_with_workspace(
     } else {
         ""
     };
+    let corrective_context = corrective_execution_context(item).unwrap_or_default();
+    let is_corrective_value = if corrective_context.is_empty() {
+        ""
+    } else {
+        "yes"
+    };
 
     let template = ContentResolver::new(workspace_path)
         .resolve_content("prompts/write-user.md")
@@ -1630,6 +1645,8 @@ fn build_write_task_prompt_with_workspace(
             ("prior_reviews_list", &prior_reviews_list),
             ("progress_md_path", &progress_md_path),
             ("task_json", &task_json),
+            ("is_corrective", is_corrective_value),
+            ("corrective_context", &corrective_context),
             ("bootstrap_anything", bootstrap_anything_value),
             ("bootstrap_tester_yaml", bootstrap_yaml_value),
             ("bootstrap_extract_script", bootstrap_extract_value),
@@ -2247,6 +2264,13 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
 
     let resolver = ContentResolver::new(input.readable_workspaces.first().map(|p| p.as_path()));
 
+    let corrective_context = corrective_execution_context(input.item).unwrap_or_default();
+    let is_corrective_value = if corrective_context.is_empty() {
+        ""
+    } else {
+        "yes"
+    };
+
     let user_template_name = if input.review_only {
         "prompts/review-only-user.md"
     } else {
@@ -2261,6 +2285,8 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
             ("work_item_id", &input.item.id),
             ("work_item_title", &input.item.title),
             ("role", &task.role),
+            ("is_corrective", is_corrective_value),
+            ("corrective_context", &corrective_context),
             ("brief_path", &brief_path),
             ("behaviors_path", &behaviors_path),
             ("approach_path", &approach_path),
@@ -2837,7 +2863,10 @@ fn current_branch(project_root: &Path) -> Result<String> {
 mod tests {
     use super::*;
     use crate::content::ContentResolver;
-    use crate::work_model::{TaskOutput, TaskStatus, WorkItem, WorkItemAbandonment};
+    use crate::work_model::{
+        CorrectiveContext, DerivedProvenance, ExecutionAuthority, TaskOutput, TaskStatus, WorkItem,
+        WorkItemAbandonment, WorkLineage,
+    };
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
     use std::sync::{Arc, Mutex};
@@ -2915,6 +2944,109 @@ mod tests {
         assert!(stored.abandonment.is_some());
         assert_eq!(stored.attempts[0].status, AttemptStatus::Planned);
         assert_eq!(stored.attempts[0].tasks[0].status, TaskStatus::Planned);
+    }
+
+    fn corrective_review_item(role: &str) -> WorkItem {
+        let context = CorrectiveContext {
+            objective: "Restore the retry guard".to_string(),
+            requirement: "Retries stop after the configured cap".to_string(),
+            evidence: "Merged commit abc123 removed the cap check".to_string(),
+            included_scope: "src/retry.rs".to_string(),
+            excluded_scope: "unrelated backoff tuning".to_string(),
+            verification: "cargo test retry::cap_is_enforced".to_string(),
+        };
+        let mut item = WorkItem::derived_corrective(
+            "work-1",
+            "Restore the retry guard",
+            DerivedProvenance::default(),
+            context,
+            WorkLineage::descendant_of("root-1", None),
+            Some(ExecutionAuthority::Automatic),
+        )
+        .unwrap();
+        item.add_initial_attempt("attempt-1").unwrap();
+        let attempt = item.attempts.first_mut().unwrap();
+        let task = attempt.tasks.first_mut().unwrap();
+        let workspace = task.workspace_access.writes.first().unwrap().clone();
+        task.status = TaskStatus::Complete;
+        task.output = Some(TaskOutput {
+            workspace_id: workspace.id,
+            workspace_path: workspace.path,
+            source_branch: "main".to_string(),
+            commit: "abc123".to_string(),
+        });
+        item.add_review_tasks("attempt-1", &[role]).unwrap();
+        item
+    }
+
+    #[test]
+    fn corrective_attempt_roles_receive_same_execution_context() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let workspace = tmp.path().join("work-6-work-1-attempt-1");
+        fs::create_dir_all(&workspace).unwrap();
+
+        let item = corrective_review_item("tests");
+        let context = item
+            .corrective_context
+            .as_ref()
+            .unwrap()
+            .to_execution_context();
+
+        // The Writer receives the corrective execution context verbatim.
+        let write_prompt = build_write_task_prompt_with_workspace(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            &[],
+            Some(&workspace),
+            Some(project_root),
+        );
+
+        // Every reviewer receives the same corrective execution context.
+        let artifact_dir =
+            project_root.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests");
+        let review_path = artifact_dir.join("review.md");
+        let prompts = build_work_review_prompts(WorkReviewPromptInput {
+            item: &item,
+            attempt_id: "attempt-1",
+            task_id: "attempt-1-review-tests",
+            project_root,
+            artifact_dir: &artifact_dir,
+            review_path: &review_path,
+            readable_workspaces: std::slice::from_ref(&workspace),
+            input_artifacts: &[],
+            review_only: false,
+        })
+        .unwrap();
+
+        assert!(
+            write_prompt.contains(&context),
+            "writer prompt must contain the corrective execution context"
+        );
+        assert!(
+            prompts.review_prompt.contains(&context),
+            "reviewer prompt must contain the same corrective execution context"
+        );
+        for probe in [
+            "Restore the retry guard",
+            "Retries stop after the configured cap",
+            "cargo test retry::cap_is_enforced",
+        ] {
+            assert!(write_prompt.contains(probe), "writer missing {probe:?}");
+            assert!(
+                prompts.review_prompt.contains(probe),
+                "reviewer missing {probe:?}"
+            );
+        }
+
+        // The Tester Task retains the same context while running normal checks.
+        let tester = item.attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.kind == TaskKind::Tester)
+            .expect("corrective Attempt has a Tester Task");
+        assert_eq!(tester.instructions.as_deref(), Some(context.as_str()));
     }
 
     #[test]

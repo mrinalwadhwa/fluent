@@ -503,6 +503,12 @@ impl WorkItem {
             path: crate::review_only_worktree::review_only_worktree_path(&source_ref),
         };
         let review_task_instructions = self.write_task_instructions();
+        // A corrective Attempt's Tester retains the same immutable execution
+        // context as the Writer and reviewers while running the normal checks.
+        let tester_instructions = self
+            .corrective_context
+            .as_ref()
+            .map(|context| context.to_execution_context());
         let mut task_ids = Vec::new();
         let mut tasks = Vec::new();
 
@@ -513,7 +519,7 @@ impl WorkItem {
             kind: TaskKind::Tester,
             status: TaskStatus::Planned,
             role: "tester".to_string(),
-            instructions: None,
+            instructions: tester_instructions.clone(),
             work_item_id: self.id.clone(),
             attempt_id: Some(attempt_id.clone()),
             workspace_access: WorkspaceAccess::read_only(vec![source.clone()]),
@@ -670,6 +676,12 @@ impl WorkItem {
             id: write_output.workspace_id.clone(),
             path: write_output.workspace_path.clone(),
         };
+        // A corrective Attempt's Tester retains the same immutable execution
+        // context as the Writer and reviewers while running the normal checks.
+        let tester_instructions = self
+            .corrective_context
+            .as_ref()
+            .map(|context| context.to_execution_context());
         let mut task_ids = Vec::new();
 
         let tester_task_id = {
@@ -686,7 +698,7 @@ impl WorkItem {
                 kind: TaskKind::Tester,
                 status: TaskStatus::Planned,
                 role: "tester".to_string(),
-                instructions: None,
+                instructions: tester_instructions.clone(),
                 work_item_id: self.id.clone(),
                 attempt_id: Some(attempt_id.to_string()),
                 workspace_access: WorkspaceAccess::read_only(vec![candidate.clone()]),
@@ -7017,5 +7029,72 @@ mod tests {
         assert!(restored.authorization.is_proposed());
         assert_eq!(restored.lineage.root_id.as_deref(), Some("root-1"));
         assert_eq!(restored.lineage.descendant_limit, Some(10));
+    }
+
+    #[test]
+    fn lineage_charge_occurs_only_when_work_first_becomes_ready() {
+        // A derived Work Item created proposed is not yet charged.
+        let mut item = WorkItem::derived_corrective(
+            "work-fix-1",
+            "Restore the retry guard",
+            DerivedProvenance::default(),
+            complete_corrective_context(),
+            WorkLineage::descendant_of("root-1", None),
+            None,
+        )
+        .unwrap();
+        assert!(item.authorization.is_proposed());
+        assert!(
+            !item.lineage.charged,
+            "proposed Work must not charge the lineage"
+        );
+
+        // The charge happens exactly when it first becomes execution-ready.
+        item.authorize_execution(ExecutionAuthority::Automatic)
+            .unwrap();
+        assert!(item.authorization.is_execution_ready());
+        assert!(item.lineage.charged, "becoming ready charges the lineage");
+
+        // Re-authorizing already-ready Work does not charge again.
+        item.authorize_execution(ExecutionAuthority::Automatic)
+            .unwrap();
+        assert!(item.lineage.charged);
+
+        // Derived Work created ready charges once at creation, not later.
+        let created_ready = WorkItem::derived_corrective(
+            "work-fix-2",
+            "Restore the retry guard",
+            DerivedProvenance::default(),
+            complete_corrective_context(),
+            WorkLineage::descendant_of("root-1", None),
+            Some(ExecutionAuthority::Automatic),
+        )
+        .unwrap();
+        assert!(created_ready.lineage.charged);
+
+        // An ordinary planned root is never charged.
+        let mut planned = WorkItem::planned("root-1", "Planned root");
+        planned
+            .authorize_execution(ExecutionAuthority::Human)
+            .unwrap();
+        assert!(
+            !planned.lineage.charged,
+            "a planned root never charges the lineage"
+        );
+    }
+
+    #[test]
+    fn default_lineage_limit_allows_ten_automatic_descendants() {
+        let limit = crate::config::DEFAULT_DESCENDANT_LIMIT;
+        assert_eq!(limit, 10);
+        // Ten descendants may each be charged; the eleventh is refused.
+        for already_charged in 0..limit {
+            assert!(
+                WorkLineage::can_authorize_descendant(already_charged, limit),
+                "descendant {} of {limit} must be allowed",
+                already_charged + 1
+            );
+        }
+        assert!(!WorkLineage::can_authorize_descendant(limit, limit));
     }
 }

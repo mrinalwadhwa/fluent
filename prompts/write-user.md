@@ -1,5 +1,13 @@
 Work on this Work Item: {{work_item_id}} - {{work_item_title}}.
 
+{{#if is_corrective}}
+## Corrective execution context
+
+This is derived corrective Work. There is no brief, behaviors, approach, or plan to read — the block below is the complete, authoritative execution input. You, every reviewer, and the Tester all work from exactly this context. Skip the planning-artifact reading in Phase 1 and treat the deterministic verification as the definition of done.
+
+{{corrective_context}}
+
+{{/if}}
 {{#if bootstrap_anything}}
 ## Phase 0 — Bootstrap
 

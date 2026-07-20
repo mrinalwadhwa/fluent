@@ -10,6 +10,7 @@ pub mod credential;
 pub mod dashboard;
 pub mod fargate;
 pub mod fargate_bootstrap;
+pub mod follow_up;
 pub mod git;
 pub mod guidance;
 pub mod hooks;

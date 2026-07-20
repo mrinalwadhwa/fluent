@@ -1,5 +1,13 @@
 Work Item: {{work_item_id}} - {{work_item_title}}
 
+{{#if is_corrective}}
+## Corrective execution context
+
+This is derived corrective Work with no brief, behaviors, approach, or plan. The block below is the complete, authoritative execution input — the same one the Writer and the Tester received. Judge the change against this objective, requirement, scope, and deterministic verification.
+
+{{corrective_context}}
+
+{{/if}}
 Review the codebase at {{candidate_workspace_path}}.
 
 ## Phase 1 — Understand the Work Item
