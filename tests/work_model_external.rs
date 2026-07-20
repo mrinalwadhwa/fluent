@@ -66,6 +66,7 @@ fn work_item() -> WorkItem {
             completed_at: None,
         }],
         merge_candidates: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -211,6 +212,7 @@ fn work_model_store_preserves_attempt_append_order() {
         post_merge_review_fix_depth: None,
         attempts: Vec::new(),
         merge_candidates: Vec::new(),
+        ..Default::default()
     };
 
     work_item.add_initial_attempt("attempt-2").unwrap();
@@ -708,6 +710,7 @@ fn work_item_add_initial_attempt_creates_scheduler_facing_write_task() {
         post_merge_review_fix_depth: None,
         attempts: Vec::new(),
         merge_candidates: Vec::new(),
+        ..Default::default()
     };
 
     work_item.add_initial_attempt("attempt-1").unwrap();
@@ -780,6 +783,7 @@ fn work_item_add_initial_attempt_rejects_duplicate_attempt_id() {
         post_merge_review_fix_depth: None,
         attempts: Vec::new(),
         merge_candidates: Vec::new(),
+        ..Default::default()
     };
 
     work_item.add_initial_attempt("attempt-1").unwrap();
@@ -804,6 +808,7 @@ fn work_item_add_initial_attempt_rejects_invalid_attempt_id() {
         post_merge_review_fix_depth: None,
         attempts: Vec::new(),
         merge_candidates: Vec::new(),
+        ..Default::default()
     };
 
     assert_eq!(

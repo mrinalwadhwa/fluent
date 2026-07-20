@@ -170,17 +170,134 @@ pub struct WorkItem {
     pub abandonment: Option<WorkItemAbandonment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_merge_review_fix_depth: Option<u64>,
+    /// How this Work Item came to exist. Legacy and ordinary planned Work are
+    /// lineage roots; derived Work carries its originating provenance.
+    #[serde(default, skip_serializing_if = "WorkOrigin::is_planned")]
+    pub origin: WorkOrigin,
+    /// Whether this Work Item may execute, and the authority that authorized it.
+    /// Legacy Work with no stored authorization is treated as execution-ready.
+    #[serde(
+        default,
+        skip_serializing_if = "ExecutionAuthorization::is_unattributed_ready"
+    )]
+    pub authorization: ExecutionAuthorization,
+    /// The lineage this Work Item belongs to and whether it has been charged as
+    /// an autonomous descendant. A default lineage marks an uncharged root.
+    #[serde(default, skip_serializing_if = "WorkLineage::is_uncharged_root")]
+    pub lineage: WorkLineage,
+    /// Immutable corrective execution input for derived corrective Work created
+    /// without brief, behaviors, approach, or plan artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corrective_context: Option<CorrectiveContext>,
     #[serde(default)]
     pub attempts: Vec<Attempt>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub merge_candidates: Vec<MergeCandidate>,
 }
 
+impl Default for WorkItem {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            title: String::new(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            post_merge_review_fix_depth: None,
+            origin: WorkOrigin::default(),
+            authorization: ExecutionAuthorization::default(),
+            lineage: WorkLineage::default(),
+            corrective_context: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+        }
+    }
+}
+
 impl WorkItem {
+    /// Create a Work Item through the ordinary human-approved planning flow:
+    /// execution-ready as an uncharged lineage root with no corrective context.
+    pub fn planned(id: impl Into<String>, title: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            authorization: ExecutionAuthorization::execution_ready(ExecutionAuthority::Human),
+            ..Self::default()
+        }
+    }
+
+    /// Create derived corrective Work from an immutable corrective context,
+    /// without brief, behaviors, approach, or plan artifacts. When
+    /// `ready_authority` is `Some`, the Work is created execution-ready and its
+    /// lineage is charged once at that point; otherwise it is created proposed.
+    pub fn derived_corrective(
+        id: impl Into<String>,
+        title: impl Into<String>,
+        provenance: DerivedProvenance,
+        context: CorrectiveContext,
+        lineage: WorkLineage,
+        ready_authority: Option<ExecutionAuthority>,
+    ) -> Result<Self, WorkModelError> {
+        context.validate()?;
+        let mut item = Self {
+            id: id.into(),
+            title: title.into(),
+            origin: WorkOrigin::Derived { provenance },
+            authorization: ExecutionAuthorization::Proposed,
+            lineage,
+            corrective_context: Some(context),
+            ..Self::default()
+        };
+        if let Some(authority) = ready_authority {
+            item.mark_execution_ready(authority);
+        }
+        item.validate()?;
+        Ok(item)
+    }
+
+    /// The complete execution input every role of this Work Item receives.
+    /// Derived corrective Work hands over its corrective context in place of
+    /// fabricated planning-artifact references.
     pub fn write_task_instructions(&self) -> Option<String> {
+        if let Some(context) = self.corrective_context.as_ref() {
+            return Some(context.to_execution_context());
+        }
         self.instructions
             .clone()
             .or_else(|| self.planning_context.as_ref()?.to_instructions())
+    }
+
+    /// Reject Attempt creation or execution while the Work is proposed, reporting
+    /// that human authorization is required.
+    pub fn ensure_execution_ready(&self) -> Result<(), WorkModelError> {
+        if self.authorization.is_proposed() {
+            return Err(WorkModelError::WorkNotExecutionReady {
+                work_item_id: self.id.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Authorize proposed Work to execute, charging its lineage exactly once the
+    /// first time derived Work becomes execution-ready. Re-authorizing already
+    /// execution-ready Work does not charge the lineage again.
+    pub fn authorize_execution(
+        &mut self,
+        authority: ExecutionAuthority,
+    ) -> Result<(), WorkModelError> {
+        self.ensure_not_abandoned()?;
+        self.mark_execution_ready(authority);
+        self.validate()?;
+        Ok(())
+    }
+
+    /// Mark the Work execution-ready and charge its lineage the first time
+    /// derived Work reaches that state. Idempotent with respect to the charge.
+    fn mark_execution_ready(&mut self, authority: ExecutionAuthority) {
+        self.authorization = ExecutionAuthorization::execution_ready(authority);
+        if self.origin.is_derived() && !self.lineage.charged {
+            self.lineage.charged = true;
+        }
     }
 
     pub fn add_initial_attempt(
@@ -188,6 +305,7 @@ impl WorkItem {
         attempt_id: impl Into<String>,
     ) -> Result<(), WorkModelError> {
         self.ensure_not_abandoned()?;
+        self.ensure_execution_ready()?;
         let attempt_id = attempt_id.into();
         validate_id("work item", &self.id)?;
         validate_id("attempt", &attempt_id)?;
@@ -994,6 +1112,231 @@ fn non_empty_clone(value: &Option<String>) -> Option<String> {
         .as_ref()
         .filter(|value| !value.trim().is_empty())
         .cloned()
+}
+
+// -------------------------------------------------------------------------
+// Follow-up contracts: origin, authorization, lineage, corrective context
+// -------------------------------------------------------------------------
+
+/// How a Work Item came to exist.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum WorkOrigin {
+    /// Created through the ordinary human-approved planning flow.
+    #[default]
+    Planned,
+    /// Derived from a learner handoff Observation or a post-merge correction.
+    Derived {
+        #[serde(flatten)]
+        provenance: DerivedProvenance,
+    },
+}
+
+impl WorkOrigin {
+    pub fn is_planned(&self) -> bool {
+        matches!(self, Self::Planned)
+    }
+
+    pub fn is_derived(&self) -> bool {
+        matches!(self, Self::Derived { .. })
+    }
+
+    pub fn provenance(&self) -> Option<&DerivedProvenance> {
+        match self {
+            Self::Derived { provenance } => Some(provenance),
+            Self::Planned => None,
+        }
+    }
+}
+
+/// Where a derived Work Item traces back to: its originating Observation, Work
+/// Item, Attempt, Merge Candidate, and merged commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DerivedProvenance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_candidate_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_commit: Option<String>,
+}
+
+/// The authority that authorized a Work Item to execute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecutionAuthority {
+    Human,
+    Automatic,
+}
+
+/// Whether a Work Item may execute, independent of queue and landing state.
+///
+/// Legacy Work with no stored authorization deserializes as execution-ready so
+/// the new model does not strand previously created Work Items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum ExecutionAuthorization {
+    /// Visible Work that has not been authorized to execute.
+    Proposed,
+    /// Work whose execution has been authorized.
+    ExecutionReady {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        authority: Option<ExecutionAuthority>,
+    },
+}
+
+impl Default for ExecutionAuthorization {
+    fn default() -> Self {
+        Self::ExecutionReady { authority: None }
+    }
+}
+
+impl ExecutionAuthorization {
+    /// An execution-ready authorization attributed to `authority`.
+    pub fn execution_ready(authority: ExecutionAuthority) -> Self {
+        Self::ExecutionReady {
+            authority: Some(authority),
+        }
+    }
+
+    pub fn is_execution_ready(&self) -> bool {
+        matches!(self, Self::ExecutionReady { .. })
+    }
+
+    pub fn is_proposed(&self) -> bool {
+        matches!(self, Self::Proposed)
+    }
+
+    pub fn authority(&self) -> Option<ExecutionAuthority> {
+        match self {
+            Self::ExecutionReady { authority } => *authority,
+            Self::Proposed => None,
+        }
+    }
+
+    /// Whether this is the unattributed execution-ready default — the state
+    /// legacy Work with no stored authorization takes. Such Work does not need
+    /// its authorization persisted.
+    pub fn is_unattributed_ready(&self) -> bool {
+        matches!(self, Self::ExecutionReady { authority: None })
+    }
+}
+
+/// The lineage a Work Item belongs to and whether it has been charged as an
+/// autonomous descendant of that lineage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WorkLineage {
+    /// The root Work Item id of this lineage. Absent means this Work Item is the
+    /// lineage root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_id: Option<String>,
+    /// Whether this Work Item has been charged against its lineage's autonomous
+    /// descendant budget.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub charged: bool,
+    /// The autonomous descendant limit for this lineage. Absent means the
+    /// resolved built-in default applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub descendant_limit: Option<u32>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+impl WorkLineage {
+    /// A lineage rooted at `root_id` with an optional explicit descendant limit.
+    pub fn descendant_of(root_id: impl Into<String>, descendant_limit: Option<u32>) -> Self {
+        Self {
+            root_id: Some(root_id.into()),
+            charged: false,
+            descendant_limit,
+        }
+    }
+
+    /// The root Work Item id of this lineage, given the owning Work Item's id.
+    pub fn root_id<'a>(&'a self, own_id: &'a str) -> &'a str {
+        self.root_id.as_deref().unwrap_or(own_id)
+    }
+
+    pub fn is_root(&self) -> bool {
+        self.root_id.is_none()
+    }
+
+    /// An uncharged root with no explicit limit — the default lineage that does
+    /// not need to be persisted.
+    pub fn is_uncharged_root(&self) -> bool {
+        self.root_id.is_none() && !self.charged && self.descendant_limit.is_none()
+    }
+
+    /// Whether a lineage that has already charged `charged_descendants` may
+    /// charge one more, given its `limit`.
+    pub fn can_authorize_descendant(charged_descendants: u32, limit: u32) -> bool {
+        charged_descendants < limit
+    }
+}
+
+/// Immutable corrective execution input for derived corrective Work created
+/// without brief, behaviors, approach, or plan artifacts. It stands in for the
+/// planning artifacts as the complete execution input every role receives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorrectiveContext {
+    /// What the corrective Work must accomplish.
+    pub objective: String,
+    /// The single authoritative requirement the result must satisfy.
+    pub requirement: String,
+    /// Evidence that motivated the correction.
+    pub evidence: String,
+    /// What is in scope for this correction.
+    pub included_scope: String,
+    /// What is explicitly out of scope.
+    pub excluded_scope: String,
+    /// The deterministic verification that decides whether the result is done.
+    pub verification: String,
+}
+
+impl CorrectiveContext {
+    /// A corrective context is a valid execution input only when every field is
+    /// present, so it can wholly replace planning artifacts.
+    pub fn validate(&self) -> Result<(), WorkModelError> {
+        for (field, value) in [
+            ("objective", &self.objective),
+            ("requirement", &self.requirement),
+            ("evidence", &self.evidence),
+            ("included_scope", &self.included_scope),
+            ("excluded_scope", &self.excluded_scope),
+            ("verification", &self.verification),
+        ] {
+            if value.trim().is_empty() {
+                return Err(WorkModelError::CorrectiveContextIncomplete { field });
+            }
+        }
+        Ok(())
+    }
+
+    /// Render the corrective context as the shared, authoritative execution
+    /// block handed identically to the Writer, every reviewer, and the Tester.
+    pub fn to_execution_context(&self) -> String {
+        format!(
+            "# Corrective execution context\n\n\
+             ## Objective\n{}\n\n\
+             ## Authoritative requirement\n{}\n\n\
+             ## Evidence\n{}\n\n\
+             ## In scope\n{}\n\n\
+             ## Out of scope\n{}\n\n\
+             ## Deterministic verification\n{}",
+            self.objective.trim(),
+            self.requirement.trim(),
+            self.evidence.trim(),
+            self.included_scope.trim(),
+            self.excluded_scope.trim(),
+            self.verification.trim(),
+        )
+    }
 }
 
 fn push_planning_section(sections: &mut Vec<String>, title: &str, content: &Option<String>) {
@@ -2079,6 +2422,12 @@ pub enum WorkModelError {
         work_item_id: String,
         reason: String,
     },
+    WorkNotExecutionReady {
+        work_item_id: String,
+    },
+    CorrectiveContextIncomplete {
+        field: &'static str,
+    },
 }
 
 impl fmt::Display for WorkModelError {
@@ -2251,6 +2600,18 @@ impl fmt::Display for WorkModelError {
                     "Work Item {work_item_id:?} cannot be abandoned: {reason}"
                 )
             }
+            Self::WorkNotExecutionReady { work_item_id } => {
+                write!(
+                    f,
+                    "Work Item {work_item_id:?} is proposed; human authorization is required before an Attempt can be created or run"
+                )
+            }
+            Self::CorrectiveContextIncomplete { field } => {
+                write!(
+                    f,
+                    "corrective context is incomplete: field {field:?} must not be empty"
+                )
+            }
         }
     }
 }
@@ -2388,6 +2749,17 @@ struct WorkItemRecord {
     abandonment: Option<WorkItemAbandonment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     post_merge_review_fix_depth: Option<u64>,
+    #[serde(default, skip_serializing_if = "WorkOrigin::is_planned")]
+    origin: WorkOrigin,
+    #[serde(
+        default,
+        skip_serializing_if = "ExecutionAuthorization::is_unattributed_ready"
+    )]
+    authorization: ExecutionAuthorization,
+    #[serde(default, skip_serializing_if = "WorkLineage::is_uncharged_root")]
+    lineage: WorkLineage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    corrective_context: Option<CorrectiveContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2430,6 +2802,10 @@ impl From<&WorkItem> for WorkItemRecord {
             instructions: work_item.instructions.clone(),
             abandonment: work_item.abandonment.clone(),
             post_merge_review_fix_depth: work_item.post_merge_review_fix_depth,
+            origin: work_item.origin.clone(),
+            authorization: work_item.authorization,
+            lineage: work_item.lineage.clone(),
+            corrective_context: work_item.corrective_context.clone(),
         }
     }
 }
@@ -2443,6 +2819,10 @@ impl From<WorkItemRecord> for WorkItem {
             instructions: record.instructions,
             abandonment: record.abandonment,
             post_merge_review_fix_depth: record.post_merge_review_fix_depth,
+            origin: record.origin,
+            authorization: record.authorization,
+            lineage: record.lineage,
+            corrective_context: record.corrective_context,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         }
@@ -3429,6 +3809,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         work_item
             .add_review_only_attempt("attempt-review", &["tests"], "main", "abc123", true)
@@ -3459,6 +3840,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         work_item.add_initial_attempt("attempt-1").unwrap();
         work_item.attempts[0].status = AttemptStatus::NeedsUser;
@@ -3485,6 +3867,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         work_item.add_initial_attempt("attempt-1").unwrap();
         work_item.attempts[0].status = AttemptStatus::Executing;
@@ -3512,6 +3895,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         work_item.add_initial_attempt("attempt-1").unwrap();
         work_item.attempts[0].status = AttemptStatus::Reviewing;
@@ -3538,6 +3922,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         work_item.add_initial_attempt("attempt-1").unwrap();
         work_item.attempts[0].status = AttemptStatus::Failed;
@@ -3578,6 +3963,7 @@ mod tests {
                 started_at: None,
                 completed_at: None,
             }],
+            ..Default::default()
         };
 
         let error = work_item
@@ -3617,6 +4003,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
 
         let error = work_item.add_initial_attempt("attempt-1").unwrap_err();
@@ -3637,6 +4024,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
 
         let error = work_item
@@ -3989,6 +4377,7 @@ mod tests {
                 completed_at: None,
             }],
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
 
         let result = work_item.add_next_review_tasks("attempt-1", &["tests"]);
@@ -4049,6 +4438,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         work_item.add_initial_attempt("attempt-1").unwrap();
 
@@ -4174,6 +4564,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
 
         work_item
@@ -4309,6 +4700,7 @@ mod tests {
                 completed_at: None,
             }],
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
 
         work_item
@@ -4606,6 +4998,7 @@ mod tests {
                 completed_at: None,
             }],
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
 
         let task_ids = work_item
@@ -4644,6 +5037,7 @@ mod tests {
                 completed_at: None,
             }],
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
 
         let json = to_json_pretty(&work_item).unwrap();
@@ -4682,6 +5076,7 @@ mod tests {
                 completed_at: None,
             }],
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
 
         let candidate_id = work_item
@@ -4729,6 +5124,7 @@ mod tests {
                 completed_at: None,
             }],
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
 
         let first = work_item
@@ -4766,6 +5162,7 @@ mod tests {
                 completed_at: None,
             }],
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         work_item
             .create_or_get_merge_candidate("attempt-1")
@@ -4805,6 +5202,7 @@ mod tests {
                 completed_at: None,
             }],
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         work_item.merge_candidates.push(MergeCandidate {
             id: "attempt-1-merge-candidate".to_string(),
@@ -4859,6 +5257,7 @@ mod tests {
                 completed_at: None,
             }],
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         work_item.merge_candidates.push(MergeCandidate {
             id: "attempt-1-merge-candidate".to_string(),
@@ -4913,6 +5312,7 @@ mod tests {
                 completed_at: None,
             }],
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         work_item.merge_candidates.push(MergeCandidate {
             id: "attempt-1-merge-candidate".to_string(),
@@ -4968,6 +5368,7 @@ mod tests {
                 completed_at: None,
             }],
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         work_item.merge_candidates.push(MergeCandidate {
             id: "attempt-1-merge-candidate".to_string(),
@@ -5053,6 +5454,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         work_item.add_initial_attempt("attempt-1").unwrap();
         store.create_work_item(&work_item).unwrap();
@@ -5129,6 +5531,7 @@ mod tests {
                 completed_at: None,
             }],
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         work_item
             .add_review_tasks_with_round("attempt-1", &["tests"], Some(2))
@@ -5210,6 +5613,7 @@ mod tests {
                 completed_at: None,
             }],
             merge_candidates: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -5236,6 +5640,7 @@ mod tests {
                         post_merge_review_fix_depth: None,
                         attempts: Vec::new(),
                         merge_candidates: Vec::new(),
+                        ..Default::default()
                     };
                     item.add_initial_attempt("attempt-1").unwrap();
                     store.create_work_item(&item)?;
@@ -5276,6 +5681,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -5369,6 +5775,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         let task_ids = item
             .add_post_merge_review_attempt(
@@ -5424,6 +5831,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_post_merge_review_attempt("attempt-1", &["skills"], "main", "abc123", None)
             .unwrap();
@@ -5726,6 +6134,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         work_item.add_initial_attempt("attempt-1").unwrap();
         let attempt = &work_item.attempts[0];
@@ -6015,6 +6424,7 @@ mod tests {
             post_merge_review_fix_depth: Some(3),
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
         store.create_work_item(&item).unwrap();
@@ -6035,6 +6445,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
         suspend_attempt(&mut item.attempts[0], PauseKind::Auth);
@@ -6058,6 +6469,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
 
@@ -6111,6 +6523,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
 
@@ -6134,6 +6547,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
 
@@ -6448,5 +6862,160 @@ mod tests {
             Some("global-effort"),
             "global fills unset role"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Follow-up contracts: origin, authorization, lineage, corrective context
+    // -------------------------------------------------------------------------
+
+    fn complete_corrective_context() -> CorrectiveContext {
+        CorrectiveContext {
+            objective: "Restore the retry guard".to_string(),
+            requirement: "Retries stop after the configured cap".to_string(),
+            evidence: "Merged commit abc123 removed the cap check".to_string(),
+            included_scope: "src/retry.rs".to_string(),
+            excluded_scope: "unrelated backoff tuning".to_string(),
+            verification: "cargo test retry::cap_is_enforced".to_string(),
+        }
+    }
+
+    #[test]
+    fn legacy_work_without_authorization_remains_execution_ready() {
+        // Work persisted before execution-authorization state carries no
+        // `authorization` field. It must deserialize as execution-ready so the
+        // new model does not strand it.
+        let legacy = r#"{ "id": "work-1", "title": "Legacy work" }"#;
+        let record: WorkItemRecord = from_json(legacy).unwrap();
+        let item = WorkItem::from(record);
+
+        assert!(item.authorization.is_execution_ready());
+        assert!(item.origin.is_planned());
+        assert!(item.lineage.is_uncharged_root());
+        item.ensure_execution_ready()
+            .expect("legacy Work must be executable");
+    }
+
+    #[test]
+    fn corrective_context_is_valid_execution_input_without_fake_planning() {
+        let provenance = DerivedProvenance {
+            observation_id: Some("obs-1".to_string()),
+            work_item_id: Some("root-1".to_string()),
+            ..Default::default()
+        };
+        let item = WorkItem::derived_corrective(
+            "work-fix-1",
+            "Restore the retry guard",
+            provenance,
+            complete_corrective_context(),
+            WorkLineage::descendant_of("root-1", None),
+            Some(ExecutionAuthority::Automatic),
+        )
+        .expect("a complete corrective context is a valid execution input");
+
+        // The corrective context stands in for planning artifacts: no brief,
+        // behaviors, approach, or plan is fabricated.
+        assert!(item.planning_context.is_none());
+        assert!(item.instructions.is_none());
+        let context = item
+            .corrective_context
+            .as_ref()
+            .expect("corrective context is persisted");
+        let instructions = item
+            .write_task_instructions()
+            .expect("corrective Work has execution input");
+        assert_eq!(instructions, context.to_execution_context());
+        assert!(instructions.contains("Restore the retry guard"));
+        assert!(instructions.contains("Retries stop after the configured cap"));
+
+        // An incomplete corrective context is rejected rather than persisted.
+        let mut incomplete = complete_corrective_context();
+        incomplete.verification = "   ".to_string();
+        let error = WorkItem::derived_corrective(
+            "work-fix-2",
+            "Missing verification",
+            DerivedProvenance::default(),
+            incomplete,
+            WorkLineage::descendant_of("root-1", None),
+            Some(ExecutionAuthority::Automatic),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            WorkModelError::CorrectiveContextIncomplete {
+                field: "verification"
+            }
+        );
+    }
+
+    #[test]
+    fn proposed_work_rejects_attempt_creation_at_the_model() {
+        let mut item = WorkItem::derived_corrective(
+            "work-fix-1",
+            "Restore the retry guard",
+            DerivedProvenance::default(),
+            complete_corrective_context(),
+            WorkLineage::descendant_of("root-1", None),
+            None,
+        )
+        .unwrap();
+        assert!(item.authorization.is_proposed());
+
+        let error = item.add_initial_attempt("attempt-1").unwrap_err();
+        assert_eq!(
+            error,
+            WorkModelError::WorkNotExecutionReady {
+                work_item_id: "work-fix-1".to_string()
+            }
+        );
+        assert!(item.attempts.is_empty());
+
+        // Once authorized, the same Work accepts an Attempt.
+        item.authorize_execution(ExecutionAuthority::Human).unwrap();
+        item.add_initial_attempt("attempt-1")
+            .expect("execution-ready Work accepts an Attempt");
+        assert_eq!(item.attempts.len(), 1);
+    }
+
+    #[test]
+    fn planned_work_is_execution_ready_uncharged_root() {
+        let item = WorkItem::planned("work-1", "Ordinary planned work");
+
+        assert!(item.origin.is_planned());
+        assert!(item.authorization.is_execution_ready());
+        assert_eq!(
+            item.authorization.authority(),
+            Some(ExecutionAuthority::Human)
+        );
+        assert!(item.lineage.is_uncharged_root());
+        assert!(item.corrective_context.is_none());
+    }
+
+    #[test]
+    fn derived_work_round_trips_authorization_and_provenance() {
+        let provenance = DerivedProvenance {
+            observation_id: Some("obs-1".to_string()),
+            work_item_id: Some("root-1".to_string()),
+            attempt_id: Some("attempt-2".to_string()),
+            merge_candidate_id: Some("candidate-1".to_string()),
+            merged_commit: Some("abc123".to_string()),
+        };
+        let item = WorkItem::derived_corrective(
+            "work-fix-1",
+            "Restore the retry guard",
+            provenance.clone(),
+            complete_corrective_context(),
+            WorkLineage::descendant_of("root-1", Some(10)),
+            None,
+        )
+        .unwrap();
+
+        let json = to_json_pretty(&WorkItemRecord::from(&item)).unwrap();
+        let record: WorkItemRecord = from_json(&json).unwrap();
+        let restored = WorkItem::from(record);
+
+        assert_eq!(restored.origin.provenance(), Some(&provenance));
+        assert!(restored.authorization.is_proposed());
+        assert_eq!(restored.lineage.root_id.as_deref(), Some("root-1"));
+        assert_eq!(restored.lineage.descendant_limit, Some(10));
     }
 }

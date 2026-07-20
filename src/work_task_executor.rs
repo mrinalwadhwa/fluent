@@ -2856,6 +2856,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
         let attempt = item.attempts.first_mut().unwrap();
@@ -2885,6 +2886,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
         item.abandonment = Some(WorkItemAbandonment {
@@ -3081,6 +3083,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_post_merge_review_attempt(
             "attempt-1",
@@ -4056,6 +4059,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
         store.create_work_item(&item).unwrap();
@@ -4107,6 +4111,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
         store.create_work_item(&item).unwrap();

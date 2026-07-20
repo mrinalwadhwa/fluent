@@ -1135,6 +1135,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
         item.abandonment = Some(WorkItemAbandonment {
@@ -1725,6 +1726,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
 
@@ -2168,6 +2170,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
 
@@ -2497,6 +2500,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
         crate::work_model::suspend_attempt(&mut item.attempts[0], PauseKind::Uncertain);
@@ -2568,6 +2572,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
 

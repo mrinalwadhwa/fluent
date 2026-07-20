@@ -302,6 +302,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_initial_attempt(format!("{id}-attempt")).unwrap();
         WorkModelStore::new(project_root)

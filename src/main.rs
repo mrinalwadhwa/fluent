@@ -256,14 +256,9 @@ fn cmd_work_item(project_root: &Path, command: WorkItemCommands) -> Result<()> {
                 plan_file,
             )?;
             let item = WorkItem {
-                id,
-                title,
                 planning_context,
                 instructions,
-                abandonment: None,
-                post_merge_review_fix_depth: None,
-                attempts: Vec::new(),
-                merge_candidates: Vec::new(),
+                ..WorkItem::planned(id, title)
             };
             store.create_work_item(&item)?;
             println!("Created Work Item {}", item.id);
@@ -467,6 +462,18 @@ fn cmd_attempt(
             runtime,
             extra_args,
         } => {
+            // Reject execution while the Work Item is proposed, before resolving
+            // an Attempt to run, so proposed Work reports that human
+            // authorization is required rather than that it has no Attempts.
+            match store.read_work_item(&work_item_id) {
+                Ok(item) => item.ensure_execution_ready()?,
+                Err(WorkModelStorageError::ReadFile { source, .. })
+                    if source.kind() == ErrorKind::NotFound =>
+                {
+                    bail!("Work Item {work_item_id:?} not found");
+                }
+                Err(error) => return Err(error.into()),
+            }
             let attempt_id = match attempt_id {
                 Some(id) => id,
                 None => {

@@ -61,6 +61,7 @@ fn documented_work_item() -> WorkItem {
             completed_at: None,
         }],
         merge_candidates: Vec::new(),
+        ..Default::default()
     }
 }
 

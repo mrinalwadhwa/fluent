@@ -1594,6 +1594,151 @@ fn work_create_item_is_visible_through_list_and_show() {
         .stdout(predicate::str::contains("  \"attempts\": []"));
 }
 
+// -------------------------------------------------------------------------
+// Follow-up contracts: Work authorization and provenance
+// -------------------------------------------------------------------------
+
+fn write_raw_work_item(project_root: &Path, id: &str, value: &serde_json::Value) {
+    let items_dir = project_root.join(".fluent/work/items");
+    fs::create_dir_all(&items_dir).unwrap();
+    write_json_path(&items_dir.join(format!("{id}.json")), value);
+}
+
+fn proposed_corrective_work_item(id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "title": "Restore the retry guard",
+        "origin": {
+            "kind": "derived",
+            "observation_id": "obs-1",
+            "work_item_id": "root-1"
+        },
+        "authorization": { "state": "proposed" },
+        "lineage": { "root_id": "root-1" },
+        "corrective_context": {
+            "objective": "Restore the retry guard",
+            "requirement": "Retries stop after the configured cap",
+            "evidence": "Merged commit abc123 removed the cap check",
+            "included_scope": "src/retry.rs",
+            "excluded_scope": "unrelated backoff tuning",
+            "verification": "cargo test retry::cap_is_enforced"
+        }
+    })
+}
+
+#[test]
+fn proposed_work_rejects_attempt_create() {
+    let tmp = TempDir::new().unwrap();
+    write_raw_work_item(
+        tmp.path(),
+        "work-fix-1",
+        &proposed_corrective_work_item("work-fix-1"),
+    );
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["attempt", "create", "work-fix-1", "attempt-1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("human authorization is required"));
+
+    let value = work_item_value(tmp.path(), "work-fix-1");
+    assert!(value["attempts"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn proposed_work_rejects_attempt_run() {
+    let tmp = TempDir::new().unwrap();
+    write_raw_work_item(
+        tmp.path(),
+        "work-fix-1",
+        &proposed_corrective_work_item("work-fix-1"),
+    );
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["attempt", "run", "work-fix-1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("human authorization is required"));
+}
+
+#[test]
+fn derived_work_show_exposes_authorization_and_provenance() {
+    let tmp = TempDir::new().unwrap();
+    let value = serde_json::json!({
+        "id": "work-fix-1",
+        "title": "Restore the retry guard",
+        "origin": {
+            "kind": "derived",
+            "observation_id": "obs-1",
+            "work_item_id": "root-1",
+            "attempt_id": "attempt-2",
+            "merge_candidate_id": "candidate-1",
+            "merged_commit": "abc123"
+        },
+        "authorization": { "state": "execution-ready", "authority": "automatic" },
+        "lineage": { "root_id": "root-1", "charged": true, "descendant_limit": 10 }
+    });
+    write_raw_work_item(tmp.path(), "work-fix-1", &value);
+
+    let shown = work_item_value(tmp.path(), "work-fix-1");
+    assert_eq!(shown["authorization"]["state"], "execution-ready");
+    assert_eq!(shown["authorization"]["authority"], "automatic");
+    assert_eq!(shown["origin"]["kind"], "derived");
+    assert_eq!(shown["origin"]["observation_id"], "obs-1");
+    assert_eq!(shown["origin"]["work_item_id"], "root-1");
+    assert_eq!(shown["origin"]["attempt_id"], "attempt-2");
+    assert_eq!(shown["origin"]["merge_candidate_id"], "candidate-1");
+    assert_eq!(shown["origin"]["merged_commit"], "abc123");
+    assert_eq!(shown["lineage"]["root_id"], "root-1");
+    assert_eq!(shown["lineage"]["charged"], true);
+}
+
+#[test]
+fn planned_work_is_execution_ready_lineage_root() {
+    let tmp = TempDir::new().unwrap();
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["work-item", "create", "work-1", "--title", "Planned work"])
+        .assert()
+        .success();
+
+    let shown = work_item_value(tmp.path(), "work-1");
+    assert_eq!(shown["authorization"]["state"], "execution-ready");
+    // A lineage root carries no stored lineage and no corrective context, and it
+    // does not require an originating Observation.
+    assert!(shown.get("lineage").is_none());
+    assert!(shown.get("corrective_context").is_none());
+    assert!(shown.get("origin").is_none());
+}
+
+#[test]
+fn attempt_create_accepts_execution_ready_work() {
+    let tmp = TempDir::new().unwrap();
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["work-item", "create", "work-1", "--title", "Planned work"])
+        .assert()
+        .success();
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Created Attempt attempt-1 for Work Item work-1",
+        ));
+
+    let shown = work_item_value(tmp.path(), "work-1");
+    let attempt = &shown["attempts"][0];
+    assert_eq!(attempt["id"], "attempt-1");
+    assert_eq!(attempt["status"], "planned");
+    assert_eq!(attempt["tasks"][0]["id"], "attempt-1-write-1");
+    assert_eq!(attempt["tasks"][0]["kind"], "write");
+}
+
 #[test]
 fn work_attempt_adds_planned_attempt_with_initial_write_task() {
     let tmp = TempDir::new().unwrap();

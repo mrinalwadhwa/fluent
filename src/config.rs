@@ -132,27 +132,25 @@ struct ConfigLayer {
     doc: Option<serde_yaml::Value>,
 }
 
-fn load_layer(
-    source: ConfigSource,
-    path: PathBuf,
-) -> Result<ConfigLayer, FollowUpConfigError> {
-    let doc = match std::fs::read_to_string(&path) {
-        Ok(text) => Some(serde_yaml::from_str::<serde_yaml::Value>(&text).map_err(|source| {
-            FollowUpConfigError {
-                path: path.clone(),
-                key: "<document>".to_string(),
-                detail: format!("could not parse YAML: {source}"),
+fn load_layer(source: ConfigSource, path: PathBuf) -> Result<ConfigLayer, FollowUpConfigError> {
+    let doc =
+        match std::fs::read_to_string(&path) {
+            Ok(text) => Some(serde_yaml::from_str::<serde_yaml::Value>(&text).map_err(
+                |source| FollowUpConfigError {
+                    path: path.clone(),
+                    key: "<document>".to_string(),
+                    detail: format!("could not parse YAML: {source}"),
+                },
+            )?),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => {
+                return Err(FollowUpConfigError {
+                    path: path.clone(),
+                    key: "<document>".to_string(),
+                    detail: format!("could not read file: {err}"),
+                });
             }
-        })?),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-        Err(err) => {
-            return Err(FollowUpConfigError {
-                path: path.clone(),
-                key: "<document>".to_string(),
-                detail: format!("could not read file: {err}"),
-            });
-        }
-    };
+        };
     Ok(ConfigLayer { source, path, doc })
 }
 
@@ -328,7 +326,10 @@ fn load_policy_layers(
     project_path: &Path,
     user_path: Option<&Path>,
 ) -> Result<Vec<ConfigLayer>, FollowUpConfigError> {
-    let mut layers = vec![load_layer(ConfigSource::Project, project_path.to_path_buf())?];
+    let mut layers = vec![load_layer(
+        ConfigSource::Project,
+        project_path.to_path_buf(),
+    )?];
     if let Some(user_path) = user_path {
         layers.push(load_layer(ConfigSource::User, user_path.to_path_buf())?);
     }
@@ -546,11 +547,7 @@ coders:
         let dir = tempfile::tempdir().unwrap();
         // Project fixes the mode; user fixes the descendant limit; priorities
         // fall through to the built-in defaults.
-        let project = write_yaml(
-            dir.path(),
-            "project.yaml",
-            "follow-up:\n  mode: execute\n",
-        );
+        let project = write_yaml(dir.path(), "project.yaml", "follow-up:\n  mode: execute\n");
         let user = write_yaml(
             dir.path(),
             "user.yaml",
@@ -588,7 +585,10 @@ coders:
         let scheduler = resolve_scheduler_config_from(&project, None).unwrap();
 
         assert_eq!(scheduler.max_local_concurrency.value, 4);
-        assert_eq!(scheduler.max_local_concurrency.source, ConfigSource::Default);
+        assert_eq!(
+            scheduler.max_local_concurrency.source,
+            ConfigSource::Default
+        );
     }
 
     #[test]
@@ -678,8 +678,7 @@ coders:
         );
 
         let from_project = resolve_follow_up_policy_from(&all_project, None).unwrap();
-        let from_layers =
-            resolve_follow_up_policy_from(&split_project, Some(&split_user)).unwrap();
+        let from_layers = resolve_follow_up_policy_from(&split_project, Some(&split_user)).unwrap();
 
         assert_eq!(from_project.digest, from_layers.digest);
     }

@@ -334,6 +334,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
 
@@ -356,6 +357,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
         let attempt = item.attempts.last_mut().unwrap();
@@ -399,6 +401,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
         item.attempts[0].tasks[0].status = TaskStatus::NeedsUser;
@@ -420,6 +423,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
         item.attempts[0].status = AttemptStatus::NeedsUser;
@@ -492,6 +496,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
         let attempt = item.attempts.last_mut().unwrap();

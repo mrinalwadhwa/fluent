@@ -421,6 +421,7 @@ fn review_one(project_root: &Path, entry: &QueueEntry, fix_depth: u64) -> Result
         post_merge_review_fix_depth: None,
         attempts: Vec::new(),
         merge_candidates: Vec::new(),
+        ..Default::default()
     };
     let attempt_id = "attempt-1";
     let base_commit = if entry.base_commit.is_empty() {
@@ -656,6 +657,7 @@ pub fn create_post_merge_review_fix_work_item(
         post_merge_review_fix_depth: Some(fix_depth + 1),
         attempts: Vec::new(),
         merge_candidates: Vec::new(),
+        ..Default::default()
     };
     item.add_initial_attempt("attempt-1")
         .map_err(|e| anyhow::anyhow!("post-merge-review-fix add_initial_attempt: {e}"))?;
@@ -895,6 +897,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
         store.create_work_item(&item).unwrap();
@@ -939,6 +942,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
         store.create_work_item(&item).unwrap();
@@ -983,6 +987,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
         store.create_work_item(&item).unwrap();
@@ -1067,6 +1072,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
         store.create_work_item(&item).unwrap();
@@ -1122,6 +1128,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
+            ..Default::default()
         };
         assert_eq!(fix_depth_for(&wi), 0);
     }

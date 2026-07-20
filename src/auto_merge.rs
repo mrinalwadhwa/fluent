@@ -272,6 +272,7 @@ mod tests {
                 completed_at: None,
             }],
             merge_candidates: vec![],
+            ..Default::default()
         };
         item.merge_candidates.push(MergeCandidate {
             id: "attempt-1-merge-candidate".to_string(),
@@ -414,6 +415,7 @@ mod tests {
             post_merge_review_fix_depth: None,
             attempts: vec![],
             merge_candidates: vec![],
+            ..Default::default()
         };
         assert!(find_ready_candidate(&wi).is_none());
     }
