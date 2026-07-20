@@ -260,6 +260,16 @@ mod tests {
             hint.contains("review.md"),
             "should name the artifact; got: {hint}"
         );
+        // Pin the failing semantics so the pass/fail bodies cannot be swapped
+        // without a test failing.
+        assert!(
+            hint.contains("address the failures"),
+            "failed hint must direct the operator to address failures; got: {hint}"
+        );
+        assert!(
+            !hint.contains("passed"),
+            "failed hint must not claim reviews passed; got: {hint}"
+        );
         assert!(
             !hint.contains("proceed with the next step"),
             "must not be the generic phrasing; got: {hint}"
@@ -271,7 +281,40 @@ mod tests {
         let outcome = WorkAttemptRunOutcome::ReviewOnlyComplete;
         let hint = after_attempt_run(&outcome, &AttemptRunContext::default()).unwrap();
         assert!(hint.contains("verdict"));
+        // Pin the passing semantics — the counterpart to the failed hint.
+        assert!(
+            hint.contains("passed"),
+            "complete hint must state the reviews passed; got: {hint}"
+        );
+        assert!(
+            !hint.contains("address the failures"),
+            "complete hint must not direct the operator to failures; got: {hint}"
+        );
         assert!(!hint.contains("proceed with the next step"));
+    }
+
+    #[test]
+    fn after_attempt_run_review_only_complete_names_artifact() {
+        // Exercise the passed-with-artifact arm: the hint states the reviews
+        // passed and points at the verdict file.
+        let outcome = WorkAttemptRunOutcome::ReviewOnlyComplete;
+        let ctx = AttemptRunContext {
+            review_artifact: Some(".fluent/work/.../review.md"),
+            ..AttemptRunContext::default()
+        };
+        let hint = after_attempt_run(&outcome, &ctx).unwrap();
+        assert!(
+            hint.contains("passed"),
+            "passed-with-artifact hint must state the reviews passed; got: {hint}"
+        );
+        assert!(
+            hint.contains("review.md"),
+            "passed-with-artifact hint must name the verdict file; got: {hint}"
+        );
+        assert!(
+            !hint.contains("address the failures"),
+            "passed hint must not direct the operator to failures; got: {hint}"
+        );
     }
 
     #[test]

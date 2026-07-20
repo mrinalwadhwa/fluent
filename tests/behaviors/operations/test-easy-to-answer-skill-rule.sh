@@ -50,12 +50,15 @@ done
 # --- Each surface names both archetypes and their conventions ---
 # Structural, not exact-string: assert the two archetype names plus the
 # yes (y) convention and the marked recommendation, so the rule survives
-# rewrites while a broken rule still fails.
+# rewrites while a broken rule still fails. The archetype names are matched
+# in their bold `**Decision**` / `**Confirm gate**` form so a bare "Decision"
+# heading in the approach-format template cannot satisfy the check.
 assert_expresses_rule() {
   surface="$1"
   label="$2"
-  grep -Fq "Decision" "$surface" || fail "${label} does not name the Decision archetype"
-  grep -Fq "Confirm gate" "$surface" || fail "${label} does not name the Confirm gate archetype"
+  grep -Fq "**Decision**" "$surface" || fail "${label} does not name the Decision archetype"
+  grep -Fq "**Confirm gate**" "$surface" ||
+    fail "${label} does not name the Confirm gate archetype"
   grep -Fq "yes (y)" "$surface" || fail "${label} does not state the yes (y) confirm convention"
   grep -Fq "(recommended" "$surface" || fail "${label} does not mark the recommended option"
 }
