@@ -336,13 +336,7 @@ fn resolve_paused_coder(attempt: &work_model::Attempt) -> Option<String> {
             work_model::TaskStatus::Failed | work_model::TaskStatus::NeedsUser
         )
     })?;
-    let pair = match task.kind {
-        work_model::TaskKind::Review => &attempt.coder_mapping.review,
-        work_model::TaskKind::Tester | work_model::TaskKind::BehaviorTests => {
-            &attempt.coder_mapping.behavior_tests
-        }
-        _ => &attempt.coder_mapping.write,
-    };
+    let pair = attempt.coder_mapping.for_task_kind(task.kind);
     Some(pair.coder.as_str().to_string())
 }
 
@@ -1873,4 +1867,86 @@ fn kill_existing_claude() -> Result<()> {
         eprintln!("  Existing Claude Code stopped.");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fluent::coder::CoderKind;
+    use fluent::work_model::{
+        Attempt, AttemptKind, AttemptStatus, CoderMapping, CoderModelPair, Task, TaskKind,
+        TaskStatus, WorkspaceAccess,
+    };
+
+    /// Build an Attempt whose single task is paused, with a distinct coder in
+    /// each mapping slot so the resolved coder identifies which slot was used.
+    fn attempt_with_paused_task(kind: TaskKind) -> Attempt {
+        let pair = |coder: CoderKind| CoderModelPair {
+            coder,
+            model: String::new(),
+            effort: None,
+        };
+        Attempt {
+            id: "a1".to_string(),
+            work_item_id: "w1".to_string(),
+            kind: AttemptKind::Write,
+            status: AttemptStatus::NeedsUser,
+            coder_mapping: CoderMapping {
+                write: pair(CoderKind::Pi),
+                review: pair(CoderKind::Claude),
+                behavior_tests: pair(CoderKind::Codex),
+            },
+            tasks: vec![Task {
+                id: "a1-task-1".to_string(),
+                kind,
+                status: TaskStatus::NeedsUser,
+                role: "author".to_string(),
+                instructions: None,
+                work_item_id: "w1".to_string(),
+                attempt_id: Some("a1".to_string()),
+                workspace_access: WorkspaceAccess {
+                    reads: Vec::new(),
+                    writes: Vec::new(),
+                },
+                artifact_area: None,
+                review_context: None,
+                input_artifacts: Vec::new(),
+                depends_on: None,
+                output: None,
+                created_at: None,
+                started_at: None,
+                completed_at: None,
+            }],
+            review_state: None,
+            pause_kind: None,
+            artifacts: Vec::new(),
+            created_at: None,
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn resolve_paused_coder_routes_through_canonical_mapping() {
+        // A paused Tester task resolves to the write coder — the canonical
+        // `for_task_kind` mapping, not the behavior-tests slot.
+        assert_eq!(
+            resolve_paused_coder(&attempt_with_paused_task(TaskKind::Tester)).as_deref(),
+            Some("pi")
+        );
+        assert_eq!(
+            resolve_paused_coder(&attempt_with_paused_task(TaskKind::BehaviorTests)).as_deref(),
+            Some("codex")
+        );
+        assert_eq!(
+            resolve_paused_coder(&attempt_with_paused_task(TaskKind::Review)).as_deref(),
+            Some("claude")
+        );
+    }
+
+    #[test]
+    fn resolve_paused_coder_none_without_paused_task() {
+        let mut attempt = attempt_with_paused_task(TaskKind::Write);
+        attempt.tasks[0].status = TaskStatus::Complete;
+        assert_eq!(resolve_paused_coder(&attempt), None);
+    }
 }
