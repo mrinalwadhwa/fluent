@@ -9,4 +9,5 @@ Load expertise files on demand based on what your task involves.
 | documentation.md | Fluent-specific documentation naming conventions | Writing or reviewing expertise files and procedural docs |
 | skills.md | Skill conversation design patterns for interactive flows | Creating or modifying interactive skills |
 | testing.md | Test types, output locations, and test configuration | Writing tests or debugging test failures |
+| work-model.md | Work model storage shape and patterns for extending it | Adding or changing fields on WorkItem or other split-stored model types |
 | learnings/INDEX.md | Durable learnings captured from review runs | When orienting to project conventions or checking known gotchas |
