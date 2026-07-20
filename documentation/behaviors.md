@@ -4771,10 +4771,14 @@ Test: tests/binary.rs (attempt_run_output_names_next_action_for_failed)
 
 ### B3
 
-WHEN an Attempt is `needs-user`,
-THE SYSTEM SHALL print the recovery command for the pause reason — for an auth pause,
-re-authenticate then `fluent attempt run`.
+WHEN an Attempt is `needs-user` for an auth pause,
+THE SYSTEM SHALL print the coder-specific re-authentication step (`claude /login` for
+Claude, `codex login` for Codex, and a coder-agnostic phrase when the coder is unknown),
+then `fluent attempt run`.
 Test: tests/binary.rs (needs_user_auth_output_names_reauth_and_attempt_run)
+Test: tests/binary.rs (needs_user_auth_output_is_coder_aware)
+Test: src/guidance.rs (after_attempt_run_needs_user_auth_is_coder_aware)
+Test: src/guidance.rs (coder_reauth_step_is_coder_specific)
 
 ### B4
 
@@ -4802,6 +4806,47 @@ WHEN a primary-flow command prints a next-action line,
 THE SYSTEM SHALL keep the command result itself readable and unchanged in meaning, with
 the next-action additive and visually distinct (not interleaved into the result).
 Test: tests/binary.rs (next_action_is_appended_not_interleaved_into_result)
+
+### B8
+
+WHEN an Attempt is `needs-user` for a non-auth pause,
+THE SYSTEM SHALL print a next-action line naming the handoff file to read, then
+`fluent attempt run`.
+Test: tests/binary.rs (needs_user_generic_output_names_handoff_file)
+Test: src/guidance.rs (after_attempt_run_needs_user_generic_names_handoff_file)
+
+### B9
+
+WHEN `fluent status` or `fluent work-item show <id>` runs with at least one actionable
+Work Item on the board,
+THE SYSTEM SHALL print a next-action line naming the `fluent` command for the
+most-actionable Work Item, choosing it by priority needs-user > merge-ready > task-ready,
+and SHALL print no next-action line when no Work Item is actionable.
+Test: tests/binary.rs (status_names_next_action_for_actionable_state)
+Test: src/guidance.rs (status_next_action_prioritizes_needs_user_over_merge_and_task_ready)
+Test: src/guidance.rs (status_next_action_names_merge_ready_over_task_ready)
+Test: src/guidance.rs (status_next_action_is_none_when_nothing_actionable)
+
+### B10
+
+WHEN a read or side command completes — a populated `fluent work-item list`,
+`fluent observation create`, or `fluent cleanup` —
+THE SYSTEM SHALL print a next-action line pointing at the natural follow-up
+(`fluent status` or `fluent work-item show` for the list and cleanup,
+`fluent observation list` for a recorded observation).
+Test: tests/binary.rs (side_commands_name_next_action)
+Test: src/guidance.rs (side_command_hints_name_next_step)
+
+### B11
+
+WHEN a review-only Attempt completes or fails and the latest review artifact path is
+known,
+THE SYSTEM SHALL name that artifact path in the next-action line — pointing at the passing
+verdicts to read, or at the failing verdicts to inspect before addressing them — and SHALL
+fall back to a path-less phrasing when no artifact path is available.
+Test: src/guidance.rs (after_attempt_run_review_only_complete_names_artifact)
+Test: src/guidance.rs (after_attempt_run_review_only_failed_names_artifact)
+Test: src/guidance.rs (after_attempt_run_review_only_complete_names_verdicts)
 
 ## Fluent state tracking
 
