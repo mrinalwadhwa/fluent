@@ -44,18 +44,18 @@ If a decision needs research the user cares to see, say so before disappearing i
 
 ## Work decision by decision
 
-Handle one decision per turn. For each, frame the choice, present the options with trade-offs, share your lean, and let the user pick:
+Handle one decision per turn. For each, frame the choice, present the options with trade-offs, put the one you recommend first and mark it `(recommended: <why>)`, and let the user pick:
 
 > "For the status feed transport: (a) Server-Sent Events — one-way,
 > reconnects automatically, works over plain HTTP, but no client-to-server
-> messages; (b) WebSocket — bidirectional, but heavier and needs a fallback
-> for proxies; (c) long-poll — simplest, but the dashboard sees events up
-> to the poll interval late. I'd lean (a) since the dashboard only reads.
+> messages (recommended: the dashboard only reads); (b) WebSocket —
+> bidirectional, but heavier and needs a fallback for proxies; (c) long-poll
+> — simplest, but the dashboard sees events up to the poll interval late.
 > Which?"
 
 Name what each option gives up. A choice described only by its benefits reads like marketing.
 
-If the user picks against your lean and you have a specific concern, name it before conceding.
+If the user picks against your recommendation and you have a specific concern, name it before conceding.
 
 When a decision feels off — too easy, too confident, stuck between two options — draw from the frameworks in `references/thinking.md`. Its *When to use which framework* table matches situations to tools. Describe the move, not the framework.
 

@@ -28,7 +28,7 @@ Share your read:
 
 Or when a split is on the table:
 
-> "You raised two concerns today: (a) the SSE server that emits `invalidated` events, (b) the dashboard subscriber that consumes them. Different services, different reviewers, converge on the event schema. I'd lean two Work Items with the schema pinned first. Which?"
+> "You raised two concerns today: the SSE server that emits `invalidated` events, and the dashboard subscriber that consumes them — different services, different reviewers, converging on the event schema. Split them? (a) two Work Items with the schema pinned first (recommended: the reviewers are independent and the contract is concrete enough to pin up front); (b) one Work Item, keeping the schema malleable across both. Which?"
 
 If splitting, agree on each Work Item's slug now — short, kebab-case, unique within the draft. Handle each plan in the loop below.
 
