@@ -1476,9 +1476,10 @@ This section is the always-loaded summary and is enough to drive fluent on its o
   work through them one question at a time; don't skip them.
 - **Work model:** a Work Item holds the plan; an Attempt runs writer → tester → reviewers
   in rounds; a passing Attempt yields a Merge Candidate to land.
-- **Follow the next-action line:** every fluent command prints a `→ Next:` next-action line
-  to stderr naming the command to run next. Run `fluent status` at session start and after
-  any gap to see what needs attention, then follow the `→ Next:` line it prints.
+- **Follow the next-action line:** most fluent commands print a `→ Next:` next-action line
+  to stderr naming the command to run next; a state with no actionable step prints none.
+  Run `fluent status` at session start and after any gap to see what needs attention, then
+  follow the `→ Next:` line when it prints.
 - **Observations:** capture durable lessons and future work with `fluent observation
   create`; list them with `fluent observation list`.
 - **Pause for the user:** when a decision genuinely needs a human, fluent sets
