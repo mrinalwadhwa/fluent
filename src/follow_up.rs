@@ -712,7 +712,7 @@ pub fn record_post_land_operation(
     // Recording and replay share one per-operation lock. Validate an existing
     // immutable identity before replacing any referenced bytes, so a
     // conflicting or concurrent re-record cannot corrupt the accepted batch.
-    let _lock = lock_operation(&dir)?;
+    let _lock = lock_operation(&dir, &operation_id, "RECORD")?;
 
     let op_path = dir.join("operation.json");
     if op_path.exists() {
@@ -755,7 +755,7 @@ pub fn replay_post_land_operation(
     let dir = operation_dir(project_root, operation_id);
     // Serialize the full read/validate/replay snapshot with recording and other
     // processors of this operation.
-    let _lock = lock_operation(&dir)?;
+    let _lock = lock_operation(&dir, operation_id, "REPLAY")?;
     let op_path = dir.join("operation.json");
     let operation: PendingPostLandOperationV1 = serde_json::from_slice(
         &fs::read(&op_path)
@@ -1285,17 +1285,48 @@ fn count_charged_descendants(
 
 /// Take a blocking exclusive lock on a post-land operation so concurrent
 /// processors serialize and converge on the same effects.
-fn lock_operation(dir: &Path) -> Result<File> {
+fn lock_operation(dir: &Path, operation_id: &str, actor: &str) -> Result<File> {
     let path = dir.join("operation.lock");
     let file = OpenOptions::new()
         .create(true)
         .write(true)
         .open(&path)
         .with_context(|| format!("open operation lock {}", path.display()))?;
-    flock(&file, FlockOperation::LockExclusive)
-        .map_err(std::io::Error::from)
-        .with_context(|| format!("lock operation {}", path.display()))?;
+    match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => {}
+        Err(error) => {
+            let error = std::io::Error::from(error);
+            if error.kind() != std::io::ErrorKind::WouldBlock {
+                return Err(error).with_context(|| format!("lock operation {}", path.display()));
+            }
+            operation_lock_test_phase(operation_id, actor, "BLOCKED")?;
+            flock(&file, FlockOperation::LockExclusive)
+                .map_err(std::io::Error::from)
+                .with_context(|| format!("lock operation {}", path.display()))?;
+        }
+    }
+    operation_lock_test_phase(operation_id, actor, "ACQUIRED")?;
     Ok(file)
+}
+
+fn operation_lock_test_phase(operation_id: &str, actor: &str, phase: &str) -> Result<()> {
+    if std::env::var("FLUENT_TEST_OPERATION_ID").as_deref() != Ok(operation_id) {
+        return Ok(());
+    }
+    let path_key = format!("FLUENT_TEST_{actor}_OPERATION_{phase}_PATH");
+    if let Ok(path) = std::env::var(path_key) {
+        fs::write(path, format!("{phase}\n"))?;
+    }
+    if phase == "ACQUIRED" {
+        let release_key = format!("FLUENT_TEST_{actor}_OPERATION_RELEASE_PATH");
+        if let Ok(path) = std::env::var(release_key) {
+            let path = PathBuf::from(path);
+            while !path.exists() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Hash identity components into a filename-safe value. Canonical JSON keeps
@@ -1564,24 +1595,57 @@ mod tests {
     }
 
     #[test]
-    fn record_waits_for_the_operation_lock() {
+    fn replay_and_conflicting_record_serialize_at_the_operation_boundary() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let batch = batch_with(vec![draft("fu-1", "one")]);
-        let operation_id = operation_id_for(&batch.origin);
-        let dir = operation_dir(tmp.path(), &operation_id);
-        fs::create_dir_all(&dir).unwrap();
-        let held = lock_operation(&dir).unwrap();
+        let mut original = batch_with(vec![draft("fu-1", "accepted")]);
+        original.origin.work_item_id = "operation-lock-race-root".to_string();
+        let operation = record_post_land_operation(tmp.path(), &original, None).unwrap();
+        let batch_path = tmp.path().join(&operation.batch_ref.path);
+        let accepted_bytes = fs::read(&batch_path).unwrap();
+        let mut conflicting = original.clone();
+        conflicting.follow_ups[0].summary = "conflicting".to_string();
 
-        let root = tmp.path().to_path_buf();
-        let handle = std::thread::spawn(move || record_post_land_operation(&root, &batch, None));
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        assert!(
-            !handle.is_finished(),
-            "recording must serialize with operation replay and re-record"
-        );
+        let replay_acquired = tmp.path().join("replay-acquired");
+        let replay_release = tmp.path().join("replay-release");
+        let record_blocked = tmp.path().join("record-blocked");
+        unsafe {
+            std::env::set_var("FLUENT_TEST_OPERATION_ID", &operation.operation_id);
+            std::env::set_var("FLUENT_TEST_REPLAY_OPERATION_ACQUIRED_PATH", &replay_acquired);
+            std::env::set_var("FLUENT_TEST_REPLAY_OPERATION_RELEASE_PATH", &replay_release);
+            std::env::set_var("FLUENT_TEST_RECORD_OPERATION_BLOCKED_PATH", &record_blocked);
+        }
 
-        drop(held);
-        handle.join().unwrap().unwrap();
+        std::thread::scope(|scope| {
+            let replay = scope.spawn(|| replay_post_land_operation(tmp.path(), &operation.operation_id));
+            for _ in 0..500 {
+                if replay_acquired.exists() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let record = scope.spawn(|| record_post_land_operation(tmp.path(), &conflicting, None));
+            for _ in 0..500 {
+                if record_blocked.exists() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let contended = replay_acquired.exists() && record_blocked.exists();
+            assert_eq!(fs::read(&batch_path).unwrap(), accepted_bytes);
+            fs::write(&replay_release, "release\n").unwrap();
+            replay.join().unwrap().unwrap();
+            let error = record.join().unwrap().unwrap_err();
+            assert!(error.to_string().contains("conflicting identity"));
+            assert!(contended, "replay and conflicting record met at the real lock boundary");
+        });
+
+        unsafe {
+            std::env::remove_var("FLUENT_TEST_OPERATION_ID");
+            std::env::remove_var("FLUENT_TEST_REPLAY_OPERATION_ACQUIRED_PATH");
+            std::env::remove_var("FLUENT_TEST_REPLAY_OPERATION_RELEASE_PATH");
+            std::env::remove_var("FLUENT_TEST_RECORD_OPERATION_BLOCKED_PATH");
+        }
+        assert_eq!(fs::read(batch_path).unwrap(), accepted_bytes);
     }
 
     #[test]
