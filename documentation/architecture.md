@@ -393,6 +393,11 @@ A Learner run that failed before its candidate landed recovers through
 has already merged, that retry runs in handoff-only mode: it serializes
 against land on the land lock, denies expertise writes, and discards any
 commit it makes, so the merged commit and target branch stay unchanged.
+After taking the lock, retry re-reads the Attempt and candidate and skips the
+coder when another retry has already persisted success. It resets the retained
+candidate worktree and index to the candidate's stored `merged_commit` before
+launch, so an interrupted unrecorded Learner commit cannot become the next
+retry's baseline.
 Its sandbox exposes the shared Git directory read-only. After the coder exits,
 Fluent compares protected refs plus the target checkout's HEAD, index, and
 non-Fluent status; it restores and rejects any mutation. Candidate commits,

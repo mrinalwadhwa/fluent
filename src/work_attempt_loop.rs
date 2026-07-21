@@ -146,15 +146,46 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                     .attempts
                     .iter()
                     .position(|a| a.id == config.attempt_id)
-                    .expect("attempt exists");
-                let merged_commit = item
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Attempt {:?} disappeared during retry", config.attempt_id)
+                    })?;
+                let retry_still_eligible = item.attempts[attempt_index]
+                    .learning
+                    .as_ref()
+                    .map(|learning| learning.is_failed())
+                    .unwrap_or(true);
+                if !retry_still_eligible {
+                    outcomes.push(WorkAttemptRunOutcome::MergeCandidateReady { candidate_id });
+                    return Ok(WorkAttemptRunResult { outcomes });
+                }
+                if item.attempts[attempt_index].status != AttemptStatus::Complete
+                    || item.attempts[attempt_index].review_state
+                        != Some(AttemptReviewState::Passed)
+                {
+                    bail!("Attempt {:?} is no longer eligible for Learner retry", config.attempt_id);
+                }
+                let candidate = item
                     .merge_candidates
                     .iter()
                     .find(|candidate| candidate.id == candidate_id)
-                    .filter(|candidate| {
-                        candidate.merge_state.status == MergeCandidateMergeStatus::Merged
-                    })
-                    .and_then(|candidate| candidate.merge_state.merged_commit.clone());
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Merge Candidate {:?} disappeared during Learner retry",
+                            candidate_id
+                        )
+                    })?;
+                let merged_commit = if candidate.merge_state.status
+                    == MergeCandidateMergeStatus::Merged
+                {
+                    Some(candidate.merge_state.merged_commit.clone().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "merged candidate {:?} has no persisted merged commit",
+                            candidate_id
+                        )
+                    })?)
+                } else {
+                    None
+                };
                 let handoff_only =
                     work_task_executor::learner_is_handoff_only(merged_commit.is_some());
 
@@ -812,6 +843,34 @@ fn try_learn(
         &write_output.workspace_path,
         "learner workspace",
     )?;
+
+    // A prior process may have committed and crashed before it could persist a
+    // Learner result or run confinement. Post-land recovery always starts from
+    // the candidate's durable merged commit, never from the worktree's current
+    // (possibly unauthorized) HEAD or index.
+    if handoff_only {
+        let merged_commit = item
+            .merge_candidates
+            .iter()
+            .find(|candidate| candidate.id == candidate_id)
+            .filter(|candidate| {
+                candidate.merge_state.status == MergeCandidateMergeStatus::Merged
+            })
+            .and_then(|candidate| candidate.merge_state.merged_commit.as_deref())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "handoff-only Learner retry has no persisted merged commit for {:?}",
+                    candidate_id
+                )
+            })?;
+        let candidate_head = symbolic_head(&workspace_path)?;
+        restore_checkout(
+            &workspace_path,
+            candidate_head.as_deref(),
+            merged_commit,
+            false,
+        )?;
+    }
 
     let review_artifact_paths = all_review_artifact_paths(project_root, attempt);
     let tester_artifact_paths = all_tester_artifact_paths(project_root, attempt);

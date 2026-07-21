@@ -2700,11 +2700,13 @@ if printf '%s' "$PROMPT" | grep -q "Rebase the candidate branch"; then
   exit $?
 fi
 if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
+  printf 'run\n' >> "{counter}.invocations"
   printf '%s' "$PROMPT" > "{prompt_log}"
   if [ ! -f "{counter}" ]; then
     touch "{counter}"
     exit 1
   fi
+  git rev-parse HEAD > "{counter}.head"
   DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
   if [ -n "$DRAFT" ]; then
     mkdir -p "$(dirname "$DRAFT")"
@@ -3757,6 +3759,93 @@ fn post_land_handoff_only_restores_hostile_git_mutations() {
             == "failed",
         "a protected Git mutation rejects the Learner result"
     );
+}
+
+#[test]
+fn concurrent_post_land_retries_run_the_learner_once() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let counter = tmp.path().join("learner-counter-concurrent-retry");
+    let bin_dir = tmp.path().join("bin-concurrent-retry");
+    write_mock_claude(
+        &bin_dir,
+        &post_land_learner_mock_script(
+            &counter,
+            r#"{"learning_summary":"one retry","follow_ups":[]}"#,
+            false,
+        ),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+
+    let spawn_retry = || {
+        std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
+            .current_dir(&main_dir)
+            .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+            .env("PATH", mock_path(&bin_dir))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let first = spawn_retry();
+    let second = spawn_retry();
+    let first_output = first.wait_with_output().unwrap();
+    let second_output = second.wait_with_output().unwrap();
+    assert!(first_output.status.success());
+    assert!(second_output.status.success());
+
+    let invocations = fs::read_to_string(format!("{}.invocations", counter.display())).unwrap();
+    assert_eq!(
+        invocations.lines().count(),
+        2,
+        "one initial failure plus exactly one post-land retry"
+    );
+}
+
+#[test]
+fn post_land_retry_resets_interrupted_candidate_commit_to_merged_commit() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let counter = tmp.path().join("learner-counter-crash-window");
+    let bin_dir = tmp.path().join("bin-crash-window");
+    write_mock_claude(
+        &bin_dir,
+        &post_land_learner_mock_script(
+            &counter,
+            r#"{"learning_summary":"anchored retry","follow_ups":[]}"#,
+            false,
+        ),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+    let merged = merged_commit_of(&main_dir);
+    let candidate = main_dir.join("../work-6-work-1-attempt-1");
+    fs::write(candidate.join("interrupted.txt"), "unauthorized\n").unwrap();
+    git::run(&candidate, &["add", "interrupted.txt"], "stage interrupted commit").unwrap();
+    git::run(
+        &candidate,
+        &["commit", "-m", "Interrupted Learner commit"],
+        "create interrupted commit",
+    )
+    .unwrap();
+
+    rerun_learner_attempt(&main_dir, &bin_dir);
+
+    assert_eq!(
+        fs::read_to_string(format!("{}.head", counter.display()))
+            .unwrap()
+            .trim(),
+        merged,
+        "the coder starts from the durable merged commit"
+    );
+    assert_eq!(
+        git::run_stdout(&candidate, &["rev-parse", "HEAD"], "candidate HEAD").unwrap(),
+        merged
+    );
+    assert!(!candidate.join("interrupted.txt").exists());
 }
 
 #[test]
