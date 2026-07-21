@@ -344,8 +344,12 @@ Observation and its originating lineage root. In `propose` mode the Work
 stays proposed with no queue entry; in `execute` mode it is authorized
 automatically and enqueued on the regular Work Queue while lineage budget
 remains, and stays proposed once the budget is exhausted. Concurrent
-processors of the same operation serialize on an operation lock so the
-Observation, Work Item, lineage charge, and queue entry each converge
+processors of the same operation serialize on an operation lock. Every
+automatic promotion and human authorization also takes a lock keyed by the
+root lineage before it counts or records charges, so different operations
+cannot overspend one lineage. The lock order is follow-up operation, root
+lineage, then Work Item; callers release model locks before touching the queue.
+The Observation, Work Item, lineage charge, and queue entry each converge
 exactly once.
 
 `fluent work-item authorize <work-item-id>` transitions a proposed Work
@@ -1208,6 +1212,7 @@ fluent/main/
     git.rs                   ← Git command wrapper
     hooks.rs                 ← Project hook execution (.fluent/hooks/<name>)
     keep_awake.rs            ← macOS idle-sleep prevention toggle
+    lineage_lock.rs          ← Root-lineage serialization for corrective Work charges
     notify.rs                ← Push notification delivery
     observations.rs          ← Observation CRUD and lifecycle
     os.rs                    ← Seatbelt sandbox rendering, prerequisites

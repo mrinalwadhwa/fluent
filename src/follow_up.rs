@@ -793,6 +793,7 @@ fn process_one_follow_up(
     if journal.follow_ups[index].derived_work_item_id.is_none() {
         let created = ensure_derived_work(
             store,
+            project_root,
             &operation.origin,
             &observation_id,
             &derived_id,
@@ -969,6 +970,7 @@ fn ensure_receipt(
 /// Returns whether a new Work Item was created.
 fn ensure_derived_work(
     store: &WorkModelStore,
+    project_root: &Path,
     origin: &PostLandOrigin,
     observation_id: &str,
     derived_id: &str,
@@ -1000,6 +1002,22 @@ fn ensure_derived_work(
     let origin_item = store.read_work_item(&origin.work_item_id)?;
     let root_id = origin_item.lineage.root_id(&origin_item.id).to_string();
     let lineage = WorkLineage::descendant_of(root_id.clone(), Some(policy.descendant_limit));
+
+    // Distinct operations can target the same root lineage. Serialize the
+    // count/authorize/create decision across them so every contender observes
+    // the latest durable charges. The operation lock is already held; release
+    // this root lock before the later queue stage.
+    let _lineage_lock = crate::lineage_lock::acquire(project_root, &root_id)
+        .with_context(|| format!("lock corrective Work lineage {root_id:?}"))?;
+
+    // Recheck after taking the shared lineage lock in case another operation
+    // created this identity while this processor waited.
+    match store.read_work_item(derived_id) {
+        Ok(_) => return Ok(false),
+        Err(WorkModelStorageError::ReadFile { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
 
     // Execute mode authorizes automatically while lineage budget remains;
     // otherwise the descendant stays proposed for an explicit human decision.
@@ -1967,6 +1985,74 @@ mod tests {
         let derived = store.read_work_item(DERIVED_ID).unwrap();
         assert!(derived.authorization.is_proposed());
         assert!(!derived.lineage.charged);
+    }
+
+    #[test]
+    fn different_operations_share_one_root_lineage_lock() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        seed_root_work_item(tmp.path());
+        write_project_policy(
+            tmp.path(),
+            "follow-up:\n  mode: execute\n  descendant-limit: 1\n",
+        );
+        let authority = fresh_expertise_authority(tmp.path());
+        let first = corrective_batch(FollowUpSource::Learner, Some(authority.clone()));
+        let mut second = corrective_batch(FollowUpSource::PostMerge, Some(authority));
+        second.origin.attempt_id = "attempt-2".to_string();
+        second.origin.merge_candidate_id = "attempt-2-merge-candidate".to_string();
+
+        // Hold the root lock before either distinct operation starts. Production
+        // processing must stop before count/authorize/create until it can take
+        // this same lock; a per-operation lock would not block either thread.
+        let root_lock = crate::lineage_lock::acquire(tmp.path(), "work-1").unwrap();
+        std::thread::scope(|scope| {
+            let first_run = scope.spawn(|| process_landed_batch(tmp.path(), &first, None));
+            let second_run = scope.spawn(|| process_landed_batch(tmp.path(), &second, None));
+
+            let store = WorkModelStore::new(tmp.path());
+            let mut both_waiting_at_work = false;
+            for _ in 0..100 {
+                if first_incomplete_stage(
+                    tmp.path(),
+                    "work-1-attempt-1-merge-candidate",
+                ) == Some("work".to_string())
+                    && first_incomplete_stage(
+                        tmp.path(),
+                        "work-1-attempt-2-merge-candidate",
+                    ) == Some("work".to_string())
+                {
+                    both_waiting_at_work = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(
+                both_waiting_at_work,
+                "both distinct operations reach the shared lineage lock"
+            );
+            assert_eq!(
+                store.list_work_items().unwrap().len(),
+                1,
+                "both operations wait at the shared root-lineage boundary"
+            );
+
+            drop(root_lock);
+            first_run.join().unwrap().unwrap();
+            second_run.join().unwrap().unwrap();
+        });
+
+        let descendants: Vec<WorkItem> = WorkModelStore::new(tmp.path())
+            .list_work_items()
+            .unwrap()
+            .into_iter()
+            .filter(|item| item.origin.is_derived())
+            .collect();
+        assert_eq!(descendants.len(), 2);
+        assert_eq!(
+            descendants.iter().filter(|item| item.lineage.charged).count(),
+            1,
+            "different operations cannot overspend the one-slot lineage"
+        );
     }
 
     #[test]

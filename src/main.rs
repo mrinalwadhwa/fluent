@@ -329,10 +329,23 @@ fn cmd_work_item(project_root: &Path, command: WorkItemCommands) -> Result<()> {
 /// authorization and lineage charge and repairs a missing dispatch without
 /// reviving terminal or canceled history. This never authorizes landing.
 fn cmd_work_item_authorize(project_root: &Path, store: &WorkModelStore, id: &str) -> Result<()> {
-    // One locked Work mutation: hold the Work Item lock across the read, the
-    // transition, and the write. Release it before touching the queue lock.
+    // Resolve the immutable lineage root, then follow the shared lock order:
+    // root lineage before Work Item. Re-read under both locks before mutating.
+    let initial = match store.read_work_item(id) {
+        Ok(item) => item,
+        Err(WorkModelStorageError::ReadFile { source, .. })
+            if source.kind() == ErrorKind::NotFound =>
+        {
+            bail!("Work Item {id:?} not found");
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let root_id = initial.lineage.root_id(&initial.id).to_string();
+    let lineage_lock = fluent::lineage_lock::acquire(project_root, &root_id)
+        .with_context(|| format!("acquire lineage lock for {root_id:?}"))?;
+
     let lock_path = work_item_authorize_lock_path(project_root, id);
-    let _lock = fluent::lease::acquire(&lock_path)
+    let work_lock = fluent::lease::acquire(&lock_path)
         .with_context(|| format!("acquire authorization lock for Work Item {id:?}"))?;
 
     let mut item = match store.read_work_item(id) {
@@ -366,7 +379,8 @@ fn cmd_work_item_authorize(project_root: &Path, store: &WorkModelStore, id: &str
         .expect("enqueue intent was just ensured");
 
     store.write_work_item(&item)?;
-    drop(_lock);
+    drop(work_lock);
+    drop(lineage_lock);
 
     // Reconcile exactly one regular-queue dispatch. `ensure_dispatch` is
     // idempotent and never restores a canceled or terminal disposition.
