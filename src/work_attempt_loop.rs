@@ -121,6 +121,44 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
         {
             let mut item = item;
             let candidate_id = item.create_or_get_merge_candidate(config.attempt_id)?;
+            // Retry only the Learner when its record is failed or missing, without
+            // rerunning the Writer, Tester, or reviewers.
+            let attempt_index = item
+                .attempts
+                .iter()
+                .position(|a| a.id == config.attempt_id)
+                .expect("attempt exists");
+            let learner_pending = item.attempts[attempt_index]
+                .learning
+                .as_ref()
+                .map(|learning| learning.is_failed())
+                .unwrap_or(true);
+            if learner_pending {
+                let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+                    work_task_executor::run_learner(work_task_executor::LearnerRunInputs {
+                        workspace_path: request.workspace_path,
+                        resolver: config.resolver,
+                        extra_args: config.extra_args,
+                        coder_kind: request.coder_kind,
+                        no_sandbox: config.no_sandbox,
+                        model: request.model,
+                        effort: request.effort,
+                        review_artifact_paths: request.review_artifact_paths,
+                        tester_artifact_paths: request.tester_artifact_paths,
+                        diff_command: request.diff_command,
+                        handoff_dir: request.handoff_dir,
+                    })
+                };
+                run_learner_step(
+                    config.project_root,
+                    &mut item,
+                    attempt_index,
+                    &candidate_id,
+                    &LearnerConfig {
+                        run_coder: &run_coder,
+                    },
+                );
+            }
             config.store.write_work_item(&item)?;
             outcomes.push(WorkAttemptRunOutcome::MergeCandidateReady { candidate_id });
             return Ok(WorkAttemptRunResult { outcomes });

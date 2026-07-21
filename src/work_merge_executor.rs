@@ -925,6 +925,13 @@ fn regenerate_provenance(
         .find(|a| a.id == attempt_id)
         .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", attempt_id))?;
 
+    let write_task_ids: std::collections::HashSet<String> = attempt
+        .tasks
+        .iter()
+        .filter(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+        .map(|task| task.id.clone())
+        .collect();
+
     for task in &mut attempt.tasks {
         if task.kind == TaskKind::Write && task.status == TaskStatus::Complete {
             if let Some(ref mut output) = task.output {
@@ -933,8 +940,13 @@ fn regenerate_provenance(
         }
     }
 
+    // Only artifact references that represent Write output commits move to the
+    // new tip. Learner handoff, Tester, reviewer, and other non-Write references
+    // are preserved: rewriting them would corrupt pointers that are not commits.
     for artifact in &mut attempt.artifacts {
-        artifact.path = new_tip.to_string();
+        if write_task_ids.contains(&artifact.producer_id) {
+            artifact.path = new_tip.to_string();
+        }
     }
 
     let candidate = item
@@ -1435,6 +1447,69 @@ mod tests {
             .find(|c| c.id == candidate_id)
             .unwrap();
         assert_eq!(candidate.candidate_commit, "new-tip-sha");
+    }
+
+    #[test]
+    fn regenerate_provenance_updates_write_commit_artifacts_only() {
+        let (_tmp, store, _item, candidate_id) = completed_write_item();
+
+        // A non-Write artifact reference — e.g. a Tester result — is not a commit.
+        let mut item = store.read_work_item("work-1").unwrap();
+        item.attempts[0].artifacts.push(ArtifactRef {
+            producer_id: "attempt-1-tester".to_string(),
+            path: ".fluent/work/artifacts/work-1/attempt-1/attempt-1-tester/tester-results.json"
+                .to_string(),
+        });
+        store.write_work_item(&item).unwrap();
+
+        regenerate_provenance(&store, "work-1", &candidate_id, "attempt-1", "new-tip-sha").unwrap();
+
+        let item = store.read_work_item("work-1").unwrap();
+        let artifacts = &item.attempts[0].artifacts;
+        for artifact in artifacts {
+            if artifact.producer_id.contains("-write-") {
+                assert_eq!(
+                    artifact.path, "new-tip-sha",
+                    "write-commit artifact {} moves to the new tip",
+                    artifact.producer_id
+                );
+            }
+        }
+        let tester = artifacts
+            .iter()
+            .find(|a| a.producer_id == "attempt-1-tester")
+            .unwrap();
+        assert_eq!(
+            tester.path,
+            ".fluent/work/artifacts/work-1/attempt-1/attempt-1-tester/tester-results.json",
+            "a non-Write artifact reference is preserved"
+        );
+    }
+
+    #[test]
+    fn regenerate_provenance_preserves_learner_handoff_reference() {
+        let (_tmp, store, _item, candidate_id) = completed_write_item();
+
+        let handoff = crate::follow_up::ArtifactRef {
+            path: ".fluent/work/artifacts/work-1/attempt-1/learner/handoff.json".to_string(),
+            digest: "sha256:abc".to_string(),
+        };
+        let mut item = store.read_work_item("work-1").unwrap();
+        item.attempts[0].learning = Some(crate::work_model::AttemptLearning::succeeded(
+            1,
+            handoff.clone(),
+        ));
+        store.write_work_item(&item).unwrap();
+
+        regenerate_provenance(&store, "work-1", &candidate_id, "attempt-1", "new-tip-sha").unwrap();
+
+        let item = store.read_work_item("work-1").unwrap();
+        let learning = item.attempts[0].learning.as_ref().unwrap();
+        assert_eq!(
+            learning.handoff.as_ref().unwrap(),
+            &handoff,
+            "the learner handoff reference survives a rebase unchanged"
+        );
     }
 
     #[test]

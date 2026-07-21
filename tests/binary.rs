@@ -2243,20 +2243,46 @@ exit 0
     assert!(String::from_utf8_lossy(&output.stdout).contains("Completed Task attempt-1-write-1"));
 }
 
+
+/// A mock coder that drives write and review rounds like `loop_mock_script`, but
+/// makes the Learner invocation fail by exiting non-zero.
+fn learner_failing_mock_script() -> String {
+    r##"#!/bin/bash
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
+done
+if [ -z "$PROMPT" ]; then exit 0; fi
+if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
+  exit 1
+fi
+case "$PWD" in
+  */work-6-work-1-attempt-1)
+    printf 'loop output\n' > loop-output.txt
+    git add loop-output.txt
+    git commit -m "Add loop output" >/dev/null 2>&1
+    ;;
+  *)
+    printf 'Verdict: pass\n\nLoop review.\n' > review.md
+    ;;
+esac
+exit 0
+"##
+    .to_string()
+}
+
 #[test]
-fn capture_failure_does_not_abort_run() {
+fn learner_failure_is_retryable_and_does_not_block_candidate() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-learner-fail");
+    write_mock_claude(&bin_dir, &learner_failing_mock_script());
 
     fluent_cmd()
         .current_dir(&main_dir)
-        .args([
-            "work-item",
-            "create",
-            "work-1",
-            "--title",
-            "Capture fail test",
-        ])
+        .args(["work-item", "create", "work-1", "--title", "Learner"])
         .assert()
         .success();
     fluent_cmd()
@@ -2265,77 +2291,142 @@ fn capture_failure_does_not_abort_run() {
         .assert()
         .success();
 
-    let bin_dir = tmp.path().join("bin-capture-fail");
-    write_mock_claude(
-        &bin_dir,
-        r##"#!/bin/bash
-PROMPT=""
-NEXT_IS_PROMPT=0
-for arg in "$@"; do
-  if [ "$NEXT_IS_PROMPT" = 1 ]; then
-    PROMPT="$arg"
-    break
-  fi
-  if [ "$arg" = "-p" ]; then
-    NEXT_IS_PROMPT=1
-  fi
-done
-if [ -z "$PROMPT" ]; then exit 0; fi
-
-case "$PWD" in
-  */work-6-work-1-attempt-1)
-    if printf '%s' "$PROMPT" | grep -q "capturing learnings"; then
-      exit 1
-    fi
-    count_file="$PWD/.fluent-loop-write-count"
-    if [ -f "$count_file" ]; then
-      count="$(cat "$count_file")"
-    else
-      count=0
-    fi
-    count="$((count + 1))"
-    printf '%s\n' "$count" > "$count_file"
-    printf 'loop output %s\n' "$count" > "loop-output-$count.txt"
-    git add "$count_file" "loop-output-$count.txt"
-    git commit -m "Add loop output $count" >/dev/null
-    ;;
-  *)
-    if printf '%s' "$PWD" | grep -q 'review-[0-9]'; then
-      printf 'Verdict: pass\n\nReview passed.\n' > review.md
-    else
-      printf 'Verdict: fail\n\nReview failed.\n' > review.md
-    fi
-    ;;
-esac
-exit 0
-"##,
-    );
-
     let output = fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
         .output()
         .unwrap();
-
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(
         output.status.success(),
-        "run should succeed despite capture failure: stdout={stdout} stderr={stderr}"
-    );
-    assert!(
-        stderr.contains("capture learnings failed"),
-        "stderr should warn about capture failure; got:\n{stderr}"
+        "run should succeed despite learner failure: stdout={stdout} stderr={stderr}"
     );
     assert!(
         stdout.contains("Merge Candidate attempt-1-merge-candidate is ready"),
-        "merge candidate should be created despite capture failure; got:\n{stdout}"
+        "candidate is produced despite the learner failure; got:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("learner failed"),
+        "operator is warned about the learner failure; got:\n{stderr}"
     );
 
     let value = read_work_show_json(&main_dir, "work-1");
+    assert_eq!(value["attempts"][0]["learning"]["status"], "failed");
     assert_eq!(value["merge_candidates"].as_array().unwrap().len(), 1);
+    assert!(
+        !main_dir
+            .join(".fluent/work/artifacts/work-1/attempt-1/learner/handoff.json")
+            .exists(),
+        "a failed learner run persists no handoff"
+    );
+}
+
+#[test]
+fn learner_retry_completes_existing_record_idempotently() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-learner-retry");
+    write_mock_claude(&bin_dir, &learner_failing_mock_script());
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Learner"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let failed = read_work_show_json(&main_dir, "work-1");
+    assert_eq!(failed["attempts"][0]["learning"]["status"], "failed");
+
+    // A successful retry completes the same record with one handoff.
+    write_mock_claude(
+        &bin_dir,
+        &learner_mock_script(
+            r#"{"learning_summary":"learned","follow_ups":[{"id":"fu-1","summary":"Follow up","corrective":false}]}"#,
+        ),
+    );
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    assert_eq!(value["attempts"][0]["learning"]["status"], "succeeded");
+    assert_eq!(value["attempts"][0]["learning"]["runs"], 2);
+
+    let handoff = read_json_path(
+        &main_dir.join(".fluent/work/artifacts/work-1/attempt-1/learner/handoff.json"),
+    );
+    let follow_ups = handoff["follow_ups"].as_array().unwrap();
+    assert_eq!(follow_ups.len(), 1, "one accepted follow-up, not duplicated");
+    assert_eq!(follow_ups[0]["id"], "fu-1");
+}
+
+#[test]
+fn attempt_run_retries_only_failed_learner() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-learner-only");
+    write_mock_claude(&bin_dir, &learner_failing_mock_script());
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Learner"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let before = read_work_show_json(&main_dir, "work-1");
+    let tasks_before = before["attempts"][0]["tasks"].as_array().unwrap().len();
+    let commit_before = before["merge_candidates"][0]["candidate_commit"].clone();
+
+    write_mock_claude(
+        &bin_dir,
+        &learner_mock_script(r#"{"learning_summary":"x","follow_ups":[]}"#),
+    );
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    let after = read_work_show_json(&main_dir, "work-1");
+    assert_eq!(
+        after["attempts"][0]["tasks"].as_array().unwrap().len(),
+        tasks_before,
+        "retry adds no Writer, Tester, or reviewer Tasks"
+    );
+    assert_eq!(
+        after["merge_candidates"][0]["candidate_commit"], commit_before,
+        "retry does not rerun the Writer"
+    );
+    assert_eq!(after["attempts"][0]["learning"]["status"], "succeeded");
 }
 
 /// A mock coder that drives write and review rounds like `loop_mock_script`, and
