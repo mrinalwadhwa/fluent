@@ -3577,6 +3577,9 @@ impl WorkModelStore {
             }
         })?;
         work_item_file_name(expected)?;
+        if !path.exists() && !self.work_transaction_path(expected)?.exists() {
+            return self.read_work_item_file_unlocked(path, validate);
+        }
         let _lock = self.lock_work_item_model(expected)?;
         self.recover_work_item_transaction(expected)?;
         self.read_work_item_file_unlocked(path, validate)
@@ -6402,6 +6405,21 @@ mod tests {
 
         assert_eq!(fs::read(&path).unwrap(), before);
         assert_eq!(item.storage_revision.get(), Some(0));
+    }
+
+    #[test]
+    fn missing_work_read_does_not_create_model_lock() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+
+        assert!(store.read_work_item("missing-work").is_err());
+
+        assert!(
+            !tmp
+                .path()
+                .join(".fluent/work/locks/missing-work/model.lock")
+                .exists()
+        );
     }
 
     #[test]
