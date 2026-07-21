@@ -16,8 +16,9 @@ use crate::atomic_write::atomic_write;
 use crate::config::{self, CorrectionSource, FrozenFollowUpPolicy};
 use crate::observations::{self, LEARNER_FOLLOW_UP_KIND, ObservationFrontmatter};
 use crate::work_model::{
-    CorrectiveContext, DerivedProvenance, ExecutionAuthority, WorkItem, WorkLineage, WorkModelStore,
-    WorkModelStorageError,
+    CorrectiveAuditContext, CorrectiveAuthorityReference, CorrectiveContext,
+    CorrectiveEvidenceReference, DerivedProvenance, ExecutionAuthority, WorkItem, WorkLineage,
+    WorkModelStore, WorkModelStorageError,
 };
 
 /// Content-addressed pointer to a file within a learner handoff. The path is
@@ -710,6 +711,7 @@ pub fn replay_post_land_operation(
             project_root,
             &operation,
             batch.source,
+            &batch.learning_summary,
             follow_up,
             &journal_path,
             &mut journal,
@@ -751,6 +753,7 @@ fn process_one_follow_up(
     project_root: &Path,
     operation: &PendingPostLandOperationV1,
     source: FollowUpSource,
+    learning_summary: &str,
     follow_up: &FollowUpDraftV1,
     journal_path: &Path,
     journal: &mut PostLandJournal,
@@ -807,6 +810,8 @@ fn process_one_follow_up(
             &operation.origin,
             &observation_id,
             &derived_id,
+            source,
+            learning_summary,
             follow_up,
             &policy,
         )?;
@@ -990,6 +995,8 @@ fn ensure_derived_work(
     origin: &PostLandOrigin,
     observation_id: &str,
     derived_id: &str,
+    source: FollowUpSource,
+    learning_summary: &str,
     follow_up: &FollowUpDraftV1,
     policy: &FrozenFollowUpPolicy,
 ) -> Result<bool> {
@@ -1042,6 +1049,40 @@ fn ensure_derived_work(
     // descendant enqueues now and a proposed one enqueues on human
     // authorization, both keyed by the same stable origin.
     item.set_enqueue_intent(policy.priority, derived_id.to_string());
+    let authority = follow_up
+        .authority
+        .as_ref()
+        .context("corrective follow-up lost its trusted authority before Work creation")?;
+    item.corrective_audit = Some(CorrectiveAuditContext {
+        follow_up_id: follow_up.id.clone(),
+        source: match source {
+            FollowUpSource::Learner => "learner",
+            FollowUpSource::PostMerge => "post-merge",
+        }
+        .to_string(),
+        learning_summary: learning_summary.to_string(),
+        expected_result: follow_up.expected_result.clone(),
+        unresolved_decisions: follow_up.unresolved_decisions.clone(),
+        authority: CorrectiveAuthorityReference {
+            kind: match authority.kind {
+                AuthorityKind::BehaviorStatement => "behavior-statement",
+                AuthorityKind::AgentsInstruction => "agents-instruction",
+                AuthorityKind::ExpertiseEntry => "expertise-entry",
+            }
+            .to_string(),
+            path: authority.path.clone(),
+            anchor: authority.anchor.clone(),
+            digest: authority.digest.clone(),
+        },
+        evidence: follow_up
+            .evidence
+            .iter()
+            .map(|item| CorrectiveEvidenceReference {
+                path: item.path.clone(),
+                digest: item.digest.clone(),
+            })
+            .collect(),
+    });
 
     // Recheck only after computing the complete expected identity under the
     // lineage lock. Reuse requires every immutable intake decision to match;
@@ -1065,6 +1106,7 @@ fn verify_reusable_derived_work(existing: &WorkItem, expected: &WorkItem) -> Res
         || existing.title != expected.title
         || existing.origin != expected.origin
         || existing.corrective_context != expected.corrective_context
+        || existing.corrective_audit != expected.corrective_audit
         || existing.lineage != expected.lineage
         || existing.authorization != expected.authorization
         || existing.pending_enqueue != expected.pending_enqueue
@@ -2034,6 +2076,39 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn derived_work_retains_complete_audit_context_without_origin_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        seed_root_work_item(tmp.path());
+        let authority = fresh_expertise_authority(tmp.path());
+        let mut batch = corrective_batch(FollowUpSource::PostMerge, Some(authority));
+        batch.follow_ups[0].evidence.push(ArtifactRef {
+            path: "artifacts/review.md".to_string(),
+            digest: "sha256:evidence".to_string(),
+        });
+
+        process_landed_batch(tmp.path(), &batch, None).unwrap();
+        fs::remove_dir_all(follow_ups_root(tmp.path())).unwrap();
+
+        let derived = WorkModelStore::new(tmp.path()).read_work_item(DERIVED_ID).unwrap();
+        let audit = derived.corrective_audit.as_ref().expect("accepted audit context");
+        assert_eq!(audit.follow_up_id, "fu-1");
+        assert_eq!(audit.source, "post-merge");
+        assert_eq!(audit.learning_summary, "learned");
+        assert_eq!(audit.expected_result, "The retry cap is enforced again");
+        assert!(audit.unresolved_decisions.is_empty());
+        assert_eq!(audit.authority.path, ".fluent/expertise/retry.md");
+        assert_eq!(audit.authority.anchor, "Cap enforcement belongs in retry.rs");
+        assert_eq!(audit.evidence[0].path, "artifacts/review.md");
+        assert_eq!(audit.evidence[0].digest, "sha256:evidence");
+
+        let instructions = derived.write_task_instructions().unwrap();
+        assert!(instructions.contains("## Expected result\nThe retry cap is enforced again"));
+        assert!(instructions.contains("## Trusted authority"));
+        assert!(instructions.contains(".fluent/expertise/retry.md"));
+        assert!(instructions.contains("artifacts/review.md (sha256:evidence)"));
     }
 
     #[test]

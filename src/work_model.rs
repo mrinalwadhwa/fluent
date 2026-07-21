@@ -189,6 +189,10 @@ pub struct WorkItem {
     /// without brief, behaviors, approach, or plan artifacts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corrective_context: Option<CorrectiveContext>,
+    /// Accepted proposal details that make derived corrective Work auditable
+    /// after its originating handoff and post-land journal are cleaned up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corrective_audit: Option<CorrectiveAuditContext>,
     /// A durable intent to enqueue this Work on the regular Work Queue once its
     /// execution is authorized. Recorded so an authorization that crashes before
     /// the queue write can be reconciled on retry.
@@ -213,6 +217,7 @@ impl Default for WorkItem {
             authorization: ExecutionAuthorization::default(),
             lineage: WorkLineage::default(),
             corrective_context: None,
+            corrective_audit: None,
             pending_enqueue: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
@@ -266,7 +271,12 @@ impl WorkItem {
     /// fabricated planning-artifact references.
     pub fn write_task_instructions(&self) -> Option<String> {
         if let Some(context) = self.corrective_context.as_ref() {
-            return Some(context.to_execution_context());
+            let mut instructions = context.to_execution_context();
+            if let Some(audit) = self.corrective_audit.as_ref() {
+                instructions.push_str("\n\n");
+                instructions.push_str(&audit.to_execution_context());
+            }
+            return Some(instructions);
         }
         self.instructions
             .clone()
@@ -528,10 +538,7 @@ impl WorkItem {
         let review_task_instructions = self.write_task_instructions();
         // A corrective Attempt's Tester retains the same immutable execution
         // context as the Writer and reviewers while running the normal checks.
-        let tester_instructions = self
-            .corrective_context
-            .as_ref()
-            .map(|context| context.to_execution_context());
+        let tester_instructions = self.write_task_instructions();
         let mut task_ids = Vec::new();
         let mut tasks = Vec::new();
 
@@ -668,6 +675,7 @@ impl WorkItem {
         round: Option<usize>,
     ) -> Result<Vec<String>, WorkModelError> {
         self.ensure_not_abandoned()?;
+        let tester_instructions = self.write_task_instructions();
         let Some(attempt) = self
             .attempts
             .iter_mut()
@@ -702,10 +710,6 @@ impl WorkItem {
         };
         // A corrective Attempt's Tester retains the same immutable execution
         // context as the Writer and reviewers while running the normal checks.
-        let tester_instructions = self
-            .corrective_context
-            .as_ref()
-            .map(|context| context.to_execution_context());
         let mut task_ids = Vec::new();
 
         let tester_task_id = {
@@ -1373,6 +1377,82 @@ impl CorrectiveContext {
             self.verification.trim(),
         )
     }
+}
+
+/// The complete accepted proposal retained beside a derived Work Item's
+/// corrective execution context. These fields preserve the decision's audit
+/// trail after Fluent removes the originating handoff and journal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorrectiveAuditContext {
+    pub follow_up_id: String,
+    /// Normalized proposal source, such as `learner` or `post-merge`.
+    pub source: String,
+    pub learning_summary: String,
+    pub expected_result: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_decisions: Vec<String>,
+    pub authority: CorrectiveAuthorityReference,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<CorrectiveEvidenceReference>,
+}
+
+impl CorrectiveAuditContext {
+    /// Render the accepted result, authority, and evidence into the execution
+    /// input shared by every role on derived corrective Work.
+    pub fn to_execution_context(&self) -> String {
+        let evidence = if self.evidence.is_empty() {
+            "none".to_string()
+        } else {
+            self.evidence
+                .iter()
+                .map(|item| format!("- {} ({})", item.path, item.digest))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let unresolved = if self.unresolved_decisions.is_empty() {
+            "none".to_string()
+        } else {
+            self.unresolved_decisions
+                .iter()
+                .map(|decision| format!("- {decision}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        format!(
+            "# Corrective proposal audit\n\n\
+             ## Expected result\n{}\n\n\
+             ## Trusted authority\nKind: {}\nPath: {}\nAnchor: {}\nDigest: {}\n\n\
+             ## Supporting evidence\n{}\n\n\
+             ## Unresolved decisions\n{}\n\n\
+             ## Follow-up source\nSource: {}\nFollow-up: {}\nLearning summary: {}",
+            self.expected_result.trim(),
+            self.authority.kind,
+            self.authority.path,
+            self.authority.anchor,
+            self.authority.digest,
+            evidence,
+            unresolved,
+            self.source,
+            self.follow_up_id,
+            self.learning_summary.trim(),
+        )
+    }
+}
+
+/// The exact committed authority accepted by the corrective host gate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorrectiveAuthorityReference {
+    pub kind: String,
+    pub path: String,
+    pub anchor: String,
+    pub digest: String,
+}
+
+/// One digest-bearing supporting artifact from the accepted follow-up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorrectiveEvidenceReference {
+    pub path: String,
+    pub digest: String,
 }
 
 /// A durable intent to enqueue a Work Item on the regular Work Queue. Recorded
@@ -2919,6 +2999,8 @@ struct WorkItemRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     corrective_context: Option<CorrectiveContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    corrective_audit: Option<CorrectiveAuditContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_enqueue: Option<EnqueueIntent>,
 }
 
@@ -2968,6 +3050,7 @@ impl From<&WorkItem> for WorkItemRecord {
             authorization: work_item.authorization,
             lineage: work_item.lineage.clone(),
             corrective_context: work_item.corrective_context.clone(),
+            corrective_audit: work_item.corrective_audit.clone(),
             pending_enqueue: work_item.pending_enqueue.clone(),
         }
     }
@@ -2986,6 +3069,7 @@ impl From<WorkItemRecord> for WorkItem {
             authorization: record.authorization,
             lineage: record.lineage,
             corrective_context: record.corrective_context,
+            corrective_audit: record.corrective_audit,
             pending_enqueue: record.pending_enqueue,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),

@@ -349,8 +349,12 @@ frozen decision even after configuration changes. It then derives one
 corrective Work Item keyed by a deterministic id and linked to the
 Observation and its originating lineage root. Reusing that id requires the
 stored Work to match the complete expected provenance, corrective context,
-lineage, authorization, and enqueue intent; unrelated Work is rejected. In
-`propose` mode the Work
+lineage, authorization, and enqueue intent; unrelated Work is rejected. The
+derived Work also retains the accepted expected result, trusted authority,
+supporting evidence, unresolved-decision set, follow-up source, and learning
+summary. Fluent includes this audit package in corrective task instructions,
+so the Work stays executable and inspectable after cleanup removes its origin
+handoff and post-land journal. In `propose` mode the Work
 stays proposed with no queue entry; in `execute` mode it is authorized
 automatically and enqueued on the regular Work Queue while lineage budget
 remains, and stays proposed once the budget is exhausted. Concurrent
