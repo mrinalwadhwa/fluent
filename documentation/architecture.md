@@ -432,19 +432,19 @@ candidate's rebase reflog to recover the exact target tip; this includes every
 accepted candidate and merge-fix commit while excluding target-only history.
 Only repositories whose reflog predates that sequence fall back to compatible
 first-parent reconstruction.
-Its sandbox exposes the shared Git directory read-only, strips the common
-profile's broad temporary-tree write grants, and explicitly denies candidate
-and shared-Git writes. This remains effective when managed worktrees themselves
-live below macOS's temporary tree. After the coder exits, Fluent compares
-protected refs plus the target checkout's HEAD, complete raw index, and
-non-Fluent status. It restores refs with compare-and-swap, restores captured
-index bytes and only changed checkout paths, and reapplies pre-existing staged,
-unstaged, untracked, and index-flag state instead of globally resetting target.
+Before invoking the coder, Fluent clones the merged repository without hard
+links into a disposable directory and creates a sibling temporary project for
+the draft. The prompt, diff command, current directory, and draft path name only
+those isolated paths. This keeps the live target checkout, refs, index, dirty
+files, and retained candidate worktree outside the Learner's writable surface
+even when the caller uses `--no-sandbox`; after a successful run, Fluent imports
+only a regular `follow-up-draft.json` into the managed handoff directory. The
+Seatbelt profile adds another boundary: it exposes the isolated Git directory
+read-only, strips broad temporary-tree write grants, and explicitly denies the
+isolated candidate and Git metadata while allowing the isolated draft path.
 Candidate commits, staged files, unstaged files, and untracked files are
-collected as denied paths, then the candidate branch, index, and worktree reset
-to the merged commit. Raw candidate HEAD and index metadata restore before
-inspection, so cleanup still runs after hostile corruption or a nonzero coder
-exit.
+collected as denied paths inside the disposable clone, which is removed after
+the host stamps the handoff.
 Land takes that lock before it reads or mutates candidate state, resolves
 workspaces, or checks cleanliness, and holds it through merge finalization and
 follow-up recovery. A retry therefore cannot make land observe its transient

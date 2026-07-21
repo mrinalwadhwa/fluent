@@ -949,45 +949,48 @@ fn try_learn(
     } else {
         write_output.commit.as_str()
     };
+    let isolated_workspace = handoff_only
+        .then(|| {
+            HandoffOnlyWorkspace::create(
+                project_root,
+                &work_item_id,
+                &attempt_id,
+                &baseline_commit,
+            )
+        })
+        .transpose()?;
+    let learner_workspace_path = isolated_workspace
+        .as_ref()
+        .map(|isolated| isolated.workspace_path.as_path())
+        .unwrap_or(workspace_path.as_path());
+    let real_handoff_dir =
+        project_root.join(crate::learner::handoff_dir_rel(&work_item_id, &attempt_id));
+    let handoff_dir = isolated_workspace
+        .as_ref()
+        .map(|isolated| isolated.handoff_dir.as_path())
+        .unwrap_or(real_handoff_dir.as_path());
     let diff_range = format!("{accepted_base}...{accepted_tip}");
     let diff_command =
-        review_diff_command::render_review_diff_command(&workspace_path, &diff_range);
-
-    let handoff_dir =
-        project_root.join(crate::learner::handoff_dir_rel(&work_item_id, &attempt_id));
-
-    let git_guard = if handoff_only {
-        Some(HandoffOnlyGitGuard::capture(
-            project_root,
-            &workspace_path,
-            &baseline_commit,
-        )?)
-    } else {
-        None
-    };
+        review_diff_command::render_review_diff_command(learner_workspace_path, &diff_range);
 
     let coder_result = (config.run_coder)(&LearnerCoderRequest {
-        workspace_path: &workspace_path,
+        workspace_path: learner_workspace_path,
         review_artifact_paths: &review_artifact_paths,
         tester_artifact_paths: &tester_artifact_paths,
         diff_command: &diff_command,
-        handoff_dir: &handoff_dir,
+        handoff_dir,
         coder_kind,
         model: model.as_deref(),
         effort: effort.as_deref(),
         handoff_only,
     });
-    let guard_result = git_guard.map_or(Ok(()), |guard| {
-        guard.verify_and_restore(project_root, &workspace_path, &baseline_commit)
-    });
-
     // Confine the Learner's commit. In the normal case an expertise commit is
     // accepted and advances the Merge Candidate tip. In a post-land handoff-only
     // run any mutation is denied and discarded, leaving the merged commit and
     // target branch untouched; the denied paths are recorded so the missed
     // expertise can be captured as non-corrective follow-ups.
     let confinement_result = apply_learner_confinement(
-        &workspace_path,
+        learner_workspace_path,
         item,
         attempt_index,
         write_task_index,
@@ -996,12 +999,14 @@ fn try_learn(
         handoff_only,
         &baseline_commit,
     );
-    // Always attempt both protected-state verification and candidate cleanup,
-    // even when the coder or either cleanup surface fails. Report protected
-    // mutations first, then confinement failures, then the coder failure.
-    guard_result?;
+    // Always attempt candidate cleanup, even when the coder fails. Handoff-only
+    // cleanup acts on the disposable clone, so no restoration can overwrite
+    // live target or shared-Git changes from another actor.
     let confinement = confinement_result?;
     coder_result?;
+    if let Some(isolated) = &isolated_workspace {
+        isolated.publish_draft(project_root, &work_item_id, &attempt_id)?;
+    }
 
     let mut draft = crate::learner::read_draft(project_root, &work_item_id, &attempt_id)?;
     for path in &confinement.denied_paths {
@@ -1084,234 +1089,80 @@ struct LearnerConfinement {
     denied_paths: Vec<String>,
 }
 
-struct CheckoutSnapshot {
-    head_path: PathBuf,
-    head_bytes: Vec<u8>,
-    index_path: PathBuf,
-    index_bytes: Vec<u8>,
-    unstaged_patch: Vec<u8>,
-    untracked: Vec<(PathBuf, Vec<u8>)>,
+/// A disposable repository and handoff surface for a post-land Learner.
+///
+/// Even when the caller requests `--no-sandbox`, hostile Git and checkout
+/// writes land only in this temporary copy. The host imports the one managed
+/// draft after the coder and confinement checks succeed.
+struct HandoffOnlyWorkspace {
+    _temp: tempfile::TempDir,
+    workspace_path: PathBuf,
+    handoff_dir: PathBuf,
 }
 
-impl CheckoutSnapshot {
-    fn capture(repo: &Path) -> Result<Self> {
-        let head_path = git_metadata_path(repo, "HEAD")?;
-        let index_path = git_metadata_path(repo, "index")?;
-        let unstaged = git::run_raw(
-            repo,
-            &["diff", "--binary", "--", ".", ":(exclude).fluent"],
-        )?;
-        if !unstaged.status.success() {
-            bail!("failed to snapshot target unstaged changes");
-        }
-        let untracked = snapshot_untracked(repo)?;
-        Ok(Self {
-            head_bytes: fs::read(&head_path)?,
-            index_bytes: fs::read(&index_path)?,
-            head_path,
-            index_path,
-            unstaged_patch: unstaged.stdout,
-            untracked,
-        })
-    }
-
-    fn metadata_matches(&self) -> Result<bool> {
-        Ok(fs::read(&self.head_path).ok().as_deref() == Some(self.head_bytes.as_slice())
-            && fs::read(&self.index_path).ok().as_deref() == Some(self.index_bytes.as_slice()))
-    }
-
-    fn restore(&self, repo: &Path) -> Result<()> {
-        replace_file_if_unchanged(&self.head_path, &self.head_bytes)?;
-        replace_file_if_unchanged(&self.index_path, &self.index_bytes)?;
+impl HandoffOnlyWorkspace {
+    fn create(
+        project_root: &Path,
+        work_item_id: &str,
+        attempt_id: &str,
+        baseline_commit: &str,
+    ) -> Result<Self> {
+        let temp = tempfile::Builder::new()
+            .prefix("fluent-handoff-only-")
+            .tempdir()?;
+        let workspace_path = temp.path().join("candidate");
+        let source = project_root
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("project root is not UTF-8"))?;
+        let destination = workspace_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("isolated Learner path is not UTF-8"))?;
         git::run(
-            repo,
-            &["checkout-index", "-a", "-f"],
-            "restore target files from captured index",
+            project_root,
+            &["clone", "--quiet", "--no-hardlinks", source, destination],
+            "clone isolated handoff-only workspace",
         )?;
-        apply_git_patch(repo, &self.unstaged_patch)?;
+        git::run(
+            &workspace_path,
+            &["checkout", "--quiet", "--detach", baseline_commit],
+            "check out merged commit in isolated handoff-only workspace",
+        )?;
+        let workspace_path = fs::canonicalize(workspace_path)?;
 
-        let expected: HashSet<&Path> = self.untracked.iter().map(|(path, _)| path.as_path()).collect();
-        for (path, _) in snapshot_untracked(repo)? {
-            if !expected.contains(path.as_path()) {
-                let full = repo.join(path);
-                if full.is_dir() {
-                    fs::remove_dir_all(full)?;
-                } else if full.exists() || full.is_symlink() {
-                    fs::remove_file(full)?;
-                }
-            }
-        }
-        for (path, bytes) in &self.untracked {
-            let full = repo.join(path);
-            if let Some(parent) = full.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::write(full, bytes)?;
-        }
-        Ok(())
-    }
-}
-
-fn replace_file_if_unchanged(path: &Path, expected: &[u8]) -> Result<()> {
-    let observed = fs::read(path).ok();
-    if observed.as_deref() == Some(expected) {
-        return Ok(());
-    }
-    if fs::read(path).ok() != observed {
-        bail!("Git metadata {} changed concurrently during restoration", path.display());
-    }
-    fs::write(path, expected)?;
-    Ok(())
-}
-
-fn git_metadata_path(repo: &Path, name: &str) -> Result<PathBuf> {
-    Ok(PathBuf::from(git::run_stdout(
-        repo,
-        &["rev-parse", "--path-format=absolute", "--git-path", name],
-        "resolve Git metadata path",
-    )?))
-}
-
-fn snapshot_untracked(repo: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>> {
-    let output = git::run_raw(
-        repo,
-        &[
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "-z",
-            "--",
-            ".",
-            ":(exclude).fluent",
-        ],
-    )?;
-    if !output.status.success() {
-        bail!("failed to snapshot target untracked files");
-    }
-    let mut files = Vec::new();
-    for raw in output.stdout.split(|byte| *byte == 0).filter(|path| !path.is_empty()) {
-        let path = PathBuf::from(String::from_utf8(raw.to_vec())?);
-        files.push((path.clone(), fs::read(repo.join(path))?));
-    }
-    Ok(files)
-}
-
-fn apply_git_patch(repo: &Path, patch: &[u8]) -> Result<()> {
-    if patch.is_empty() {
-        return Ok(());
-    }
-    git::run_with_stdin(
-        repo,
-        &["apply", "--binary", "--whitespace=nowarn"],
-        patch,
-        "restore target unstaged patch",
-    )
-}
-
-/// Git state outside the candidate branch that a handoff-only Learner may read
-/// but never mutate. Candidate-branch commits are handled separately by
-/// `apply_learner_confinement`, which records denied paths before resetting.
-struct HandoffOnlyGitGuard {
-    target_head: String,
-    target_symbolic_head: Option<String>,
-    target_checkout: CheckoutSnapshot,
-    target_status: Vec<String>,
-    candidate_symbolic_head: Option<String>,
-    candidate_head_path: PathBuf,
-    candidate_head_bytes: Vec<u8>,
-    candidate_index_path: PathBuf,
-    candidate_index_bytes: Vec<u8>,
-    protected_refs: Vec<(String, String)>,
-}
-
-impl HandoffOnlyGitGuard {
-    fn capture(project_root: &Path, workspace_path: &Path, baseline_commit: &str) -> Result<Self> {
-        let candidate_symbolic_head = symbolic_head(workspace_path)?;
-        let candidate_head_path = git_metadata_path(workspace_path, "HEAD")?;
-        let candidate_index_path = git_metadata_path(workspace_path, "index")?;
-        let protected_refs = git_ref_snapshot(project_root, candidate_symbolic_head.as_deref())?;
-        let target_head = git::run_stdout(project_root, &["rev-parse", "HEAD"], "snapshot target HEAD")?;
-        if target_head != baseline_commit {
-            bail!(
-                "post-land Learner baseline {baseline_commit} does not match target HEAD {target_head}"
-            );
-        }
+        let handoff_dir = temp
+            .path()
+            .join("project")
+            .join(crate::learner::handoff_dir_rel(work_item_id, attempt_id));
+        fs::create_dir_all(&handoff_dir)?;
+        let handoff_dir = fs::canonicalize(handoff_dir)?;
         Ok(Self {
-            target_head,
-            target_symbolic_head: symbolic_head(project_root)?,
-            target_checkout: CheckoutSnapshot::capture(project_root)?,
-            target_status: protected_target_status(project_root)?,
-            candidate_symbolic_head,
-            candidate_head_bytes: fs::read(&candidate_head_path)?,
-            candidate_index_bytes: fs::read(&candidate_index_path)?,
-            candidate_head_path,
-            candidate_index_path,
-            protected_refs,
+            _temp: temp,
+            workspace_path,
+            handoff_dir,
         })
     }
 
-    fn verify_and_restore(
+    fn publish_draft(
         &self,
         project_root: &Path,
-        workspace_path: &Path,
-        baseline_commit: &str,
+        work_item_id: &str,
+        attempt_id: &str,
     ) -> Result<()> {
-        // Restore raw candidate metadata first so later inspection and cleanup
-        // still work after a hostile coder corrupts HEAD or the complete index.
-        if fs::read(&self.candidate_head_path).ok().as_deref()
-            != Some(self.candidate_head_bytes.as_slice())
-        {
-            replace_file_if_unchanged(&self.candidate_head_path, &self.candidate_head_bytes)?;
-        }
-        if fs::read(&self.candidate_index_path).ok().as_deref()
-            != Some(self.candidate_index_bytes.as_slice())
-        {
-            replace_file_if_unchanged(&self.candidate_index_path, &self.candidate_index_bytes)?;
-        }
-        let mut violations = Vec::new();
-        if symbolic_head(project_root)? != self.target_symbolic_head {
-            violations.push("target symbolic HEAD changed");
-        }
-        if git::run_stdout(project_root, &["rev-parse", "HEAD"], "verify target HEAD")?
-            != self.target_head
-        {
-            violations.push("target HEAD changed");
-        }
-        if !self.target_checkout.metadata_matches()? {
-            violations.push("target index changed");
-        }
-        if protected_target_status(project_root)? != self.target_status {
-            violations.push("target worktree changed");
-        }
-        if symbolic_head(workspace_path)? != self.candidate_symbolic_head {
-            violations.push("candidate symbolic HEAD changed");
-        }
-        if git_ref_snapshot(project_root, self.candidate_symbolic_head.as_deref())?
-            != self.protected_refs
-        {
-            violations.push("protected Git refs changed");
-        }
-
-        if violations.is_empty() {
+        let source = self.handoff_dir.join(crate::learner::DRAFT_FILE_NAME);
+        if !source.exists() {
             return Ok(());
         }
-
-        restore_git_refs(
-            project_root,
-            self.candidate_symbolic_head.as_deref(),
-            &self.protected_refs,
-        )?;
-        self.target_checkout.restore(project_root)?;
-        restore_checkout(
-            workspace_path,
-            self.candidate_symbolic_head.as_deref(),
-            baseline_commit,
-            false,
-        )?;
-        bail!(
-            "handoff-only Learner mutated protected Git state: {}",
-            violations.join(", ")
-        )
+        let metadata = fs::symlink_metadata(&source)?;
+        if !metadata.file_type().is_file() {
+            bail!("handoff-only Learner draft is not a regular file");
+        }
+        let target = project_root.join(crate::learner::draft_path_rel(work_item_id, attempt_id));
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let bytes = fs::read(&source)?;
+        crate::atomic_write::atomic_write(&target, &bytes)?;
+        Ok(())
     }
 }
 
@@ -1326,71 +1177,6 @@ fn symbolic_head(repo: &Path) -> Result<Option<String>> {
             String::from_utf8_lossy(&output.stderr)
         ),
     }
-}
-
-fn git_ref_snapshot(repo: &Path, excluded: Option<&str>) -> Result<Vec<(String, String)>> {
-    let output = git::run_stdout(
-        repo,
-        &["for-each-ref", "--format=%(refname) %(objectname)"],
-        "snapshot Git refs",
-    )?;
-    let mut refs: Vec<(String, String)> = output
-        .lines()
-        .filter_map(|line| line.split_once(' '))
-        .filter(|(name, _)| Some(*name) != excluded)
-        .map(|(name, oid)| (name.to_string(), oid.to_string()))
-        .collect();
-    refs.sort();
-    Ok(refs)
-}
-
-fn protected_target_status(repo: &Path) -> Result<Vec<String>> {
-    let output = git::run_stdout(
-        repo,
-        &[
-            "status",
-            "--porcelain",
-            "--untracked-files=all",
-            "--",
-            ".",
-            ":(exclude).fluent",
-        ],
-        "snapshot target worktree",
-    )?;
-    Ok(output.lines().map(str::to_string).collect())
-}
-
-fn restore_git_refs(
-    repo: &Path,
-    excluded: Option<&str>,
-    expected: &[(String, String)],
-) -> Result<()> {
-    let current = git_ref_snapshot(repo, excluded)?;
-    for (name, current_oid) in &current {
-        if !expected.iter().any(|(expected_name, _)| expected_name == name) {
-            git::run(
-                repo,
-                &["update-ref", "-d", name, current_oid],
-                "delete unauthorized Git ref with compare-and-swap",
-            )?;
-        }
-    }
-    for (name, oid) in expected {
-        match current.iter().find(|(current_name, _)| current_name == name) {
-            Some((_, current_oid)) if current_oid != oid => git::run(
-                repo,
-                &["update-ref", name, oid, current_oid],
-                "restore protected Git ref with compare-and-swap",
-            )?,
-            None => git::run(
-                repo,
-                &["update-ref", name, oid, &"0".repeat(40)],
-                "restore missing protected Git ref with compare-and-swap",
-            )?,
-            _ => {}
-        }
-    }
-    Ok(())
 }
 
 fn restore_checkout(
@@ -1959,6 +1745,41 @@ mod tests {
     use crate::work_model::AttemptKind;
     use crate::work_model::WorkItemAbandonment;
     use crate::work_model::{Attempt, CoderMapping, TaskArtifactArea, WorkspaceAccess};
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_only_draft_import_rejects_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let isolated_root = tempfile::TempDir::new().unwrap();
+        let handoff_dir = isolated_root.path().join("handoff");
+        fs::create_dir_all(&handoff_dir).unwrap();
+        let outside = isolated_root.path().join("outside.json");
+        fs::write(
+            &outside,
+            r#"{"learning_summary":"escaped","follow_ups":[]}"#,
+        )
+        .unwrap();
+        symlink(&outside, handoff_dir.join(crate::learner::DRAFT_FILE_NAME)).unwrap();
+        let isolated = HandoffOnlyWorkspace {
+            workspace_path: isolated_root.path().join("candidate"),
+            handoff_dir,
+            _temp: isolated_root,
+        };
+        let project = tempfile::TempDir::new().unwrap();
+
+        let error = isolated
+            .publish_draft(project.path(), "work-1", "attempt-1")
+            .unwrap_err();
+
+        assert!(error.to_string().contains("not a regular file"));
+        assert!(
+            !project
+                .path()
+                .join(crate::learner::draft_path_rel("work-1", "attempt-1"))
+                .exists()
+        );
+    }
 
     #[test]
     fn run_attempt_rejects_abandoned_work_item_without_mutating_state() {

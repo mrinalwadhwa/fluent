@@ -2808,14 +2808,20 @@ if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
   if [ ! -f "{}" ]; then touch "{}"; exit 1; fi
   DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
   PROJECT=${{DRAFT%%/.fluent/*}}
-  printf 'hostile target write\n' > "$PROJECT/target-mutated.txt"
-  git -C "$PROJECT" add target-mutated.txt
-  git -C "$PROJECT" commit -m "Move target" >/dev/null 2>&1
-  git update-ref refs/heads/unauthorized HEAD
-  printf 'hostile candidate index\n' > candidate-index.txt
-  git add candidate-index.txt
   mkdir -p "$(dirname "$DRAFT")"
-  printf '%s\n' '{{"learning_summary":"hostile","follow_ups":[]}}' > "$DRAFT"
+  printf 'hostile target write\n' > "$PROJECT/target-mutated.txt" 2>/dev/null
+  TARGET_WRITE=$?
+  git -C "$PROJECT" add target-mutated.txt >/dev/null 2>&1
+  TARGET_INDEX=$?
+  git update-ref refs/heads/unauthorized HEAD >/dev/null 2>&1
+  REF_WRITE=$?
+  printf 'hostile candidate index\n' > candidate-index.txt 2>/dev/null
+  CANDIDATE_WRITE=$?
+  git add candidate-index.txt >/dev/null 2>&1
+  CANDIDATE_INDEX=$?
+  printf '{{"learning_summary":"hostile project=%s target_write=%s target_index=%s ref_write=%s candidate_write=%s candidate_index=%s","follow_ups":[]}}\n' \
+    "$PROJECT" "$TARGET_WRITE" "$TARGET_INDEX" "$REF_WRITE" "$CANDIDATE_WRITE" "$CANDIDATE_INDEX" \
+    > "$DRAFT"
   exit 0
 fi
 case "$PWD" in
@@ -2891,6 +2897,7 @@ exit 0
 
 /// Re-run the completed Attempt to retry a failed Learner.
 fn rerun_learner_attempt(main_dir: &Path, bin_dir: &Path) {
+    fs::remove_file(bin_dir.join("sandbox-exec")).unwrap();
     fluent_cmd()
         .current_dir(main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
@@ -2900,6 +2907,7 @@ fn rerun_learner_attempt(main_dir: &Path, bin_dir: &Path) {
 }
 
 fn rerun_learner_attempt_sandboxed(main_dir: &Path, bin_dir: &Path) {
+    fs::remove_file(bin_dir.join("sandbox-exec")).unwrap();
     fluent_cmd()
         .current_dir(main_dir)
         .args(["attempt", "run", "work-1", "attempt-1"])
@@ -2907,6 +2915,18 @@ fn rerun_learner_attempt_sandboxed(main_dir: &Path, bin_dir: &Path) {
         .env("CLAUDE_CODE_OAUTH_TOKEN", "mock-token")
         .assert()
         .success();
+}
+
+fn real_sandbox_exec_is_usable() -> bool {
+    std::process::Command::new("/usr/bin/sandbox-exec")
+        .args([
+            "-p",
+            "(version 1)(allow default)",
+            "/usr/bin/true",
+        ])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 fn merged_commit_of(main_dir: &Path) -> String {
@@ -3936,7 +3956,7 @@ fn concurrent_learner_retry_and_land_never_mutate_after_merge() {
 }
 
 #[test]
-fn post_land_handoff_only_restores_hostile_git_mutations() {
+fn post_land_handoff_only_isolates_git_without_sandbox() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     let counter = tmp.path().join("learner-counter-hostile");
@@ -3957,6 +3977,23 @@ fn post_land_handoff_only_restores_hostile_git_mutations() {
     )
     .unwrap();
     fs::write(main_dir.join("preexisting-untracked.txt"), "untracked before retry\n").unwrap();
+    let executable = main_dir.join("preexisting-executable");
+    fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let outside = tmp.path().join("outside-symlink-target");
+        fs::write(&outside, "outside stays unchanged\n").unwrap();
+        symlink(&outside, main_dir.join("preexisting-link")).unwrap();
+        fs::create_dir_all(main_dir.join(".fluent")).unwrap();
+        let non_utf_path = main_dir
+            .join(".fluent")
+            .join(std::ffi::OsString::from_vec(b"non-utf8-\xff".to_vec()));
+        let _ = fs::write(non_utf_path, b"non-UTF-8 path stays unchanged\n");
+    }
     fs::write(main_dir.join("README.md"), "# Test\n\nunstaged before retry\n").unwrap();
     git::run(
         &main_dir,
@@ -3978,25 +4015,41 @@ fn post_land_handoff_only_restores_hostile_git_mutations() {
     .unwrap();
     rerun_learner_attempt(&main_dir, &bin_dir);
 
+    let handoff: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(main_dir.join(fluent::learner::handoff_path_rel(
+            "work-1",
+            "attempt-1",
+        )))
+        .unwrap(),
+    )
+    .unwrap();
+    let sandbox_results = handoff["learning"]["summary"].as_str().unwrap();
+    assert!(sandbox_results.contains("hostile project="));
+    assert!(!sandbox_results.contains(&format!("project={}", main_dir.display())));
+    for operation in [
+        "target_write",
+        "ref_write",
+        "candidate_write",
+        "candidate_index",
+    ] {
+        assert!(
+            sandbox_results.contains(&format!("{operation}=0")),
+            "the hostile Learner must exercise {operation} in its isolated copy: {sandbox_results}"
+        );
+    }
+    assert!(sandbox_results.contains("target_index="));
+
     assert_eq!(
         git::run_stdout(&main_dir, &["rev-parse", "HEAD"], "target HEAD").unwrap(),
         merged
     );
     let candidate = main_dir.join("../work-6-work-1-attempt-1");
     assert_eq!(
-        git::run_stdout(&candidate, &["rev-parse", "HEAD"], "candidate HEAD").unwrap(),
-        merged
+        work_item_value(&main_dir, "work-1")["merge_candidates"][0]["candidate_commit"],
+        merged,
+        "the persisted candidate commit remains the merged commit"
     );
-    assert!(
-        git::run_stdout(
-            &candidate,
-            &["status", "--porcelain", "--untracked-files=all"],
-            "candidate status",
-        )
-        .unwrap()
-        .is_empty(),
-        "candidate index and worktree are restored"
-    );
+    assert!(!candidate.exists(), "successful recovery removes the isolated origin worktree");
     assert!(!main_dir.join("target-mutated.txt").exists());
     assert_eq!(
         git::run_stdout(
@@ -4006,7 +4059,7 @@ fn post_land_handoff_only_restores_hostile_git_mutations() {
         )
         .unwrap(),
         target_status_before,
-        "the guard preserves staged, unstaged, and untracked target state"
+        "isolation preserves staged, unstaged, and untracked target state"
     );
     assert_eq!(
         git::run_stdout(
@@ -4016,9 +4069,25 @@ fn post_land_handoff_only_restores_hostile_git_mutations() {
         )
         .unwrap(),
         index_flags_before,
-        "the guard preserves complete index flags"
+        "isolation preserves complete index flags"
     );
-    assert!(!candidate.join("candidate-index.txt").exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::fs::PermissionsExt;
+
+        assert_eq!(fs::read_link(main_dir.join("preexisting-link")).unwrap(), tmp.path().join("outside-symlink-target"));
+        assert_eq!(fs::metadata(&executable).unwrap().permissions().mode() & 0o777, 0o755);
+        let non_utf_path = main_dir
+            .join(".fluent")
+            .join(std::ffi::OsString::from_vec(b"non-utf8-\xff".to_vec()));
+        if non_utf_path.exists() {
+            assert_eq!(
+                fs::read(non_utf_path).unwrap(),
+                b"non-UTF-8 path stays unchanged\n"
+            );
+        }
+    }
     assert!(
         !git::run_raw(
             &main_dir,
@@ -4031,13 +4100,17 @@ fn post_land_handoff_only_restores_hostile_git_mutations() {
     );
     assert!(
         work_item_value(&main_dir, "work-1")["attempts"][0]["learning"]["status"]
-            == "failed",
-        "a protected Git mutation rejects the Learner result"
+            == "succeeded",
+        "the denied hostile writes must not discard the managed handoff"
     );
 }
 
 #[test]
-fn sandboxed_post_land_coder_cannot_mutate_candidate_or_shared_git() {
+fn sandboxed_post_land_coder_runs_and_is_denied() {
+    if !real_sandbox_exec_is_usable() {
+        eprintln!("skipping real Seatbelt assertion: this process cannot create a nested sandbox");
+        return;
+    }
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     let counter = tmp.path().join("learner-counter-sandbox-hostile");
@@ -4052,11 +4125,37 @@ fn sandboxed_post_land_coder_cannot_mutate_candidate_or_shared_git() {
     let merged = merged_commit_of(&main_dir);
     rerun_learner_attempt_sandboxed(&main_dir, &bin_dir);
 
+    let handoff: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(main_dir.join(fluent::learner::handoff_path_rel(
+            "work-1",
+            "attempt-1",
+        )))
+        .unwrap(),
+    )
+    .unwrap();
+    let sandbox_results = handoff["learning"]["summary"].as_str().unwrap();
+    assert!(sandbox_results.contains("hostile project="));
+    for operation in [
+        "target_write",
+        "target_index",
+        "ref_write",
+        "candidate_write",
+        "candidate_index",
+    ] {
+        assert!(
+            !sandbox_results.contains(&format!("{operation}=0")),
+            "the real handoff-only sandbox must deny {operation}: {sandbox_results}"
+        );
+    }
+
     let candidate = main_dir.join("../work-6-work-1-attempt-1");
     assert_eq!(git_head(&main_dir), merged);
-    assert_eq!(git_head(&candidate), merged);
+    assert_eq!(
+        work_item_value(&main_dir, "work-1")["merge_candidates"][0]["candidate_commit"],
+        merged
+    );
+    assert!(!candidate.exists());
     assert!(!main_dir.join("target-mutated.txt").exists());
-    assert!(!candidate.join("candidate-index.txt").exists());
     assert!(
         !git::run_raw(
             &main_dir,
