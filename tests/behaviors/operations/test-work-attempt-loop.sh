@@ -347,7 +347,7 @@ test_attempt_loop_stops_after_task_executor_failure() {
   return $RESULT
 }
 
-test_attempt_loop_invalid_or_terminal_request_leaves_state_unchanged() {
+test_attempt_loop_invalid_request_preserves_state_and_terminal_retry_records_learning() {
   setup_test_project
   trap cleanup_test_project RETURN
   write_mock_claude pass
@@ -361,10 +361,12 @@ test_attempt_loop_invalid_or_terminal_request_leaves_state_unchanged() {
   [ "$(cat .fluent/work/items/work-1.json)" = "$BEFORE" ] || RESULT=1
 
   run_attempt_loop > "$TEST_DIR/stdout" || RESULT=1
-  TERMINAL="$(cat .fluent/work/items/work-1.json)"
+  TERMINAL_REVISION="$(jq -r '.storage_revision' .fluent/work/items/work-1.json)"
+  TERMINAL_RUNS="$(json_value '.attempts[0].learning.runs')"
   run_attempt_loop > "$TEST_DIR/rerun-stdout" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/rerun-stdout")" "Merge Candidate attempt-1-merge-candidate is ready" || RESULT=1
-  [ "$(cat .fluent/work/items/work-1.json)" = "$TERMINAL" ] || RESULT=1
+  [ "$(jq -r '.storage_revision' .fluent/work/items/work-1.json)" -gt "$TERMINAL_REVISION" ] || RESULT=1
+  [ "$(json_value '.attempts[0].learning.runs')" -eq "$((TERMINAL_RUNS + 1))" ] || RESULT=1
   return $RESULT
 }
 
@@ -379,6 +381,6 @@ run_test "attempt loop counts preplanned follow-up against budget" test_attempt_
 run_test "attempt loop marks uncertain reviews needs-user" test_attempt_loop_marks_uncertain_reviews_needs_user
 run_test "attempt loop marks missing verdict needs-user" test_attempt_loop_marks_missing_verdict_needs_user
 run_test "attempt loop stops after Task executor failure" test_attempt_loop_stops_after_task_executor_failure
-run_test "attempt loop invalid or terminal request leaves state unchanged" test_attempt_loop_invalid_or_terminal_request_leaves_state_unchanged
+run_test "attempt loop preserves invalid state and records terminal Learning retries" test_attempt_loop_invalid_request_preserves_state_and_terminal_retry_records_learning
 
 summarize_and_exit
