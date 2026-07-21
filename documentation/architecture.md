@@ -1707,12 +1707,20 @@ queue time and changes priority only when an explicit `--priority` is
 given.
 
 Automatic promotion enqueues through `ensure_dispatch`, which reconciles
-or creates one dispatch without reviving terminal history — a replayed
-promotion, materialization, or enqueue reuses the existing disposition
-rather than restoring canceled or terminal Work or charging lineage
-again. Automatic dispatch and claim paths apply the same lifecycle checks as
-explicit queueing, so proposed, abandoned, suspended, or land-pending Work
-cannot enter or resume execution through replay.
+or creates one origin-bound dispatch without reviving terminal history. A
+receipt-loss replay recognizes its own durable dispatch by operation id even
+after Work lifecycle advances, and reports that it created no new dispatch.
+An active, canceled, or terminal dispatch from another origin fails closed;
+it cannot satisfy the automatic operation's completion proof. Automatic
+dispatch and claim paths apply the same lifecycle checks as explicit queueing,
+so proposed, abandoned, suspended, or land-pending Work cannot enter or resume
+execution through replay.
+
+Queue creation and claim acquire the Work Item's aggregate model lock before
+the project queue lock. They read lifecycle state while holding that Work lock
+and retain it through the ledger mutation, so abandonment or another Work
+lifecycle change cannot land between eligibility and dispatch state. No path
+acquires a Work-model lock while already holding the queue lock.
 
 `fluent queue list` prints each Work Item's active dispatch sorted by
 priority descending, then `queued_at` ascending, showing priority,

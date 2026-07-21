@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use rustix::fs::{FlockOperation, flock};
 
-use crate::work_model::{AttemptStatus, WorkModelStore};
+use crate::work_model::{AttemptStatus, WorkItem, WorkModelStore};
 
 /// Execution status of a single dispatch.
 ///
@@ -140,6 +140,15 @@ pub struct DispatchToken {
     pub generation: u64,
     pub bound_attempt_id: String,
     pub priority: i64,
+}
+
+/// Result of reconciling an automatic enqueue intent with the durable ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnsureDispatchOutcome {
+    /// This call created the operation's dispatch.
+    Created,
+    /// The operation's matching dispatch was already durable.
+    ExistingMatching,
 }
 
 /// A per-Work-Item ledger: terminal dispatch history plus at most one active
@@ -311,8 +320,10 @@ pub fn add(project_root: &Path, id: &str, priority: Option<i64>) -> Result<()> {
     if !work_item_exists(project_root, id) {
         bail!("Work Item {id:?} not found");
     }
-
-    ensure_lifecycle_eligible(project_root, id)?;
+    let store = WorkModelStore::new(project_root);
+    let _model_lock = store.lock_work_item_model(id)?;
+    let item = store.read_work_item(id)?;
+    ensure_lifecycle_eligible(&item, id)?;
 
     let _lock = lock_queue(project_root)?;
     let mut ledger = read_ledger(project_root, id)?.unwrap_or_else(|| DispatchLedger::empty(id));
@@ -339,19 +350,22 @@ pub fn add(project_root: &Path, id: &str, priority: Option<i64>) -> Result<()> {
 }
 
 /// Idempotently enqueue an execution-ready Work Item on behalf of automatic
-/// promotion. Reuses an existing active dispatch without changing its
-/// origin-derived priority, recognizes its own earlier dispatch by
-/// `origin_operation_id`, and never restores a canceled or terminal dispatch.
+/// promotion. Recognizes its own earlier dispatch by `origin_operation_id` for
+/// receipt-loss replay. An unrelated active or terminal dispatch fails closed
+/// because it cannot prove this operation's required queue effect.
 pub fn ensure_dispatch(
     project_root: &Path,
     id: &str,
     origin_operation_id: &str,
     priority: i64,
-) -> Result<()> {
+) -> Result<EnsureDispatchOutcome> {
     if !work_item_exists(project_root, id) {
         bail!("Work Item {id:?} not found");
     }
-    ensure_lifecycle_eligible(project_root, id)?;
+    let store = WorkModelStore::new(project_root);
+    let _model_lock = store.lock_work_item_model(id)?;
+    let item = store.read_work_item(id)?;
+    let eligibility = ensure_lifecycle_eligible(&item, id);
 
     let _lock = lock_queue(project_root)?;
     let mut ledger = read_ledger(project_root, id)?.unwrap_or_else(|| DispatchLedger::empty(id));
@@ -363,19 +377,19 @@ pub fn ensure_dispatch(
         .iter()
         .any(|d| d.origin_operation_id.as_deref() == Some(origin_operation_id))
     {
-        return Ok(());
+        return Ok(EnsureDispatchOutcome::ExistingMatching);
     }
 
-    // A dispatch is already active from another origin: reuse its disposition
-    // without changing its priority.
-    if ledger.active().is_some() {
-        return Ok(());
-    }
+    eligibility?;
 
-    // The latest dispatch reached a terminal disposition: automatic enqueue
-    // never restores terminal or canceled Work.
-    if ledger.latest().is_some() {
-        return Ok(());
+    // Another dispatch cannot prove this automatic operation's required
+    // effect, regardless of whether that dispatch is active or terminal.
+    if let Some(existing) = ledger.latest() {
+        bail!(
+            "Work Item {id:?} dispatch {:?} ({}) does not match automatic operation {origin_operation_id:?}",
+            existing.dispatch_id,
+            existing.status
+        );
     }
 
     let sequence = ledger.next_sequence();
@@ -386,7 +400,7 @@ pub fn ensure_dispatch(
         sequence,
     ));
     write_ledger(project_root, &ledger)?;
-    Ok(())
+    Ok(EnsureDispatchOutcome::Created)
 }
 
 /// List each Work Item's active dispatch, ordered by priority descending then
@@ -476,10 +490,7 @@ pub fn remove(project_root: &Path, id: &str) -> Result<()> {
 // Lifecycle eligibility for explicit queue add
 // -------------------------------------------------------------------------
 
-fn ensure_lifecycle_eligible(project_root: &Path, id: &str) -> Result<()> {
-    let store = WorkModelStore::new(project_root);
-    let item = store.read_work_item(id)?;
-
+fn ensure_lifecycle_eligible(item: &WorkItem, id: &str) -> Result<()> {
     item.ensure_not_abandoned()?;
     item.ensure_execution_ready()?;
 
@@ -531,7 +542,20 @@ pub fn claim(
     work_item_id: &str,
     bound_attempt_id: &str,
 ) -> Result<Option<DispatchToken>> {
-    ensure_lifecycle_eligible(project_root, work_item_id)?;
+    if !work_item_exists(project_root, work_item_id) {
+        bail!("Work Item {work_item_id:?} not found");
+    }
+    let store = WorkModelStore::new(project_root);
+    let _model_lock = store.lock_work_item_model(work_item_id)?;
+    let item = store.read_work_item(work_item_id)?;
+    ensure_lifecycle_eligible(&item, work_item_id)?;
+    #[cfg(test)]
+    crate::test_lock_probe::reach(
+        "queue-lifecycle",
+        work_item_id,
+        "claim",
+        "ELIGIBLE",
+    );
     let _lock = lock_queue(project_root)?;
     let mut ledger = match read_ledger(project_root, work_item_id)? {
         Some(ledger) => ledger,
@@ -732,9 +756,11 @@ mod tests {
     }
 
     fn write_work_item_json(tmp: &Path, id: &str, extra_fields: &str) {
+        let json = format!(r#"{{"id": "{id}", "title": "Test"{extra_fields}}}"#);
+        serde_json::from_str::<WorkItem>(&json).expect("fixture must be a valid Work record");
         fs::write(
             tmp.join(format!(".fluent/work/items/{id}.json")),
-            format!(r#"{{"id": "{id}", "title": "Test"{extra_fields}}}"#),
+            json,
         )
         .unwrap();
     }
@@ -903,12 +929,18 @@ mod tests {
         write_work_item_json(
             dir.path(),
             "wi-proposed",
-            r#",\"authorization\":{\"state\":\"proposed\"}"#,
+            r#","authorization":{"state":"proposed"}"#,
         );
-        write_work_item_json(dir.path(), "wi-abandoned", r#",\"abandonment\":{}"#);
+        write_work_item_json(dir.path(), "wi-abandoned", r#","abandonment":{}"#);
 
-        assert!(ensure_dispatch(dir.path(), "wi-proposed", "op-proposed", 1).is_err());
-        assert!(ensure_dispatch(dir.path(), "wi-abandoned", "op-abandoned", 1).is_err());
+        let proposed = ensure_dispatch(dir.path(), "wi-proposed", "op-proposed", 1)
+            .unwrap_err()
+            .to_string();
+        let abandoned = ensure_dispatch(dir.path(), "wi-abandoned", "op-abandoned", 1)
+            .unwrap_err()
+            .to_string();
+        assert!(proposed.contains("is proposed; human authorization is required"));
+        assert_eq!(abandoned, "Work Item \"wi-abandoned\" is abandoned");
         assert!(read_ledger(dir.path(), "wi-proposed").unwrap().is_none());
         assert!(read_ledger(dir.path(), "wi-abandoned").unwrap().is_none());
     }
@@ -919,11 +951,127 @@ mod tests {
         setup_project(dir.path());
         write_ready_work_item(dir.path(), "wi-abandoned");
         add(dir.path(), "wi-abandoned", None).unwrap();
-        write_work_item_json(dir.path(), "wi-abandoned", r#",\"abandonment\":{}"#);
+        write_work_item_json(dir.path(), "wi-abandoned", r#","abandonment":{}"#);
 
-        assert!(claim(dir.path(), "wi-abandoned", "attempt-1").is_err());
+        assert_eq!(
+            claim(dir.path(), "wi-abandoned", "attempt-1")
+                .unwrap_err()
+                .to_string(),
+            "Work Item \"wi-abandoned\" is abandoned"
+        );
         let ledger = read_ledger(dir.path(), "wi-abandoned").unwrap().unwrap();
         assert_eq!(ledger.active().unwrap().status, DispatchStatus::Queued);
+    }
+
+    #[test]
+    fn matching_automatic_dispatch_survives_lifecycle_changes_on_receipt_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        write_ready_work_item(dir.path(), "wi-1");
+        ensure_dispatch(dir.path(), "wi-1", "operation-1", 7).unwrap();
+        let ledger_before = fs::read(queue_file(dir.path(), "wi-1")).unwrap();
+        write_work_item_json(dir.path(), "wi-1", r#","abandonment":{}"#);
+
+        ensure_dispatch(dir.path(), "wi-1", "operation-1", 99).unwrap();
+
+        assert_eq!(fs::read(queue_file(dir.path(), "wi-1")).unwrap(), ledger_before);
+    }
+
+    #[test]
+    fn unrelated_active_and_terminal_dispatches_do_not_satisfy_automatic_enqueue() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        for (id, status) in [
+            ("wi-active", DispatchStatus::Queued),
+            ("wi-terminal", DispatchStatus::Canceled),
+        ] {
+            write_ready_work_item(dir.path(), id);
+            let mut dispatch = Dispatch::new_queued(id, 3, None, 1);
+            dispatch.status = status;
+            put_ledger(
+                dir.path(),
+                &DispatchLedger {
+                    work_item_id: id.to_string(),
+                    dispatches: vec![dispatch],
+                },
+            );
+            let before = fs::read(queue_file(dir.path(), id)).unwrap();
+
+            let error = ensure_dispatch(dir.path(), id, "automatic-operation", 8)
+                .unwrap_err()
+                .to_string();
+
+            assert!(error.contains("does not match automatic operation"));
+            assert_eq!(fs::read(queue_file(dir.path(), id)).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn claim_holds_the_work_boundary_until_its_queue_mutation_finishes() {
+        use crate::work_model::WorkItemAbandonment;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        write_ready_work_item(dir.path(), "wi-race");
+        add(dir.path(), "wi-race", None).unwrap();
+        let queue_lock = lock_queue(dir.path()).unwrap();
+        let probe = crate::test_lock_probe::ScopedLockProbe::install(
+            "queue-lifecycle",
+            "wi-race",
+            None,
+        );
+        let claim_root = dir.path().to_path_buf();
+        let claim_thread = std::thread::spawn(move || {
+            claim(&claim_root, "wi-race", "attempt-1")
+        });
+        assert!(probe.wait_for("claim", "ELIGIBLE"));
+
+        let store = WorkModelStore::new(dir.path());
+        let mut abandoned = store.read_work_item("wi-race").unwrap();
+        abandoned.abandonment = Some(WorkItemAbandonment {
+            reason: Some("race winner".to_string()),
+        });
+        let abandon_root = dir.path().to_path_buf();
+        let (abandoned_tx, abandoned_rx) = mpsc::channel();
+        let abandon_thread = std::thread::spawn(move || {
+            let result = WorkModelStore::new(abandon_root).write_work_item(&abandoned);
+            abandoned_tx.send(result).unwrap();
+        });
+
+        let early_abandonment = abandoned_rx.recv_timeout(Duration::from_millis(150));
+        let abandonment_blocked = matches!(
+            early_abandonment,
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+        drop(queue_lock);
+        assert!(claim_thread.join().unwrap().unwrap().is_some());
+        let abandonment = match early_abandonment {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                abandoned_rx.recv_timeout(Duration::from_secs(2)).unwrap()
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("abandonment writer disconnected")
+            }
+        };
+        assert!(abandonment.is_ok());
+        abandon_thread.join().unwrap();
+
+        assert!(
+            abandonment_blocked,
+            "abandonment changed lifecycle after claim validated but before it mutated the queue"
+        );
+        let ledger = read_ledger(dir.path(), "wi-race").unwrap().unwrap();
+        assert_eq!(ledger.latest().unwrap().status, DispatchStatus::Claimed);
+        assert!(
+            WorkModelStore::new(dir.path())
+                .read_work_item("wi-race")
+                .unwrap()
+                .abandonment
+                .is_some()
+        );
     }
 
     #[test]
@@ -987,7 +1135,7 @@ mod tests {
         assert!(ledger.active().is_none(), "canceled entry is not active");
 
         // Replayed automatic promotion must not restore the canceled dispatch.
-        ensure_dispatch(dir.path(), "wi-1", "op-1", 100).unwrap();
+        assert!(ensure_dispatch(dir.path(), "wi-1", "op-1", 100).is_err());
         let after = read_ledger(dir.path(), "wi-1").unwrap().unwrap();
         assert_eq!(after.dispatches.len(), 1);
         assert_eq!(after.latest().unwrap().status, DispatchStatus::Canceled);
@@ -1095,7 +1243,7 @@ mod tests {
                 },
             );
 
-            ensure_dispatch(dir.path(), id, "op-replay", 100).unwrap();
+            assert!(ensure_dispatch(dir.path(), id, "op-replay", 100).is_err());
 
             let ledger = read_ledger(dir.path(), id).unwrap().unwrap();
             assert_eq!(ledger.dispatches.len(), 1, "no new dispatch for {id}");

@@ -3397,7 +3397,11 @@ impl WorkModelStore {
         self.write_work_item_file_unchecked(work_item, create_new)
     }
 
-    fn lock_work_item_model(&self, id: &str) -> Result<File, WorkModelStorageError> {
+    /// Lock one Work Item's aggregate model before coordinating a mutation in
+    /// another subsystem. Callers must acquire this before their subsystem
+    /// lock and release the subsystem lock first.
+    pub(crate) fn lock_work_item_model(&self, id: &str) -> Result<File, WorkModelStorageError> {
+        self.work_item_path(id)?;
         let path = self
             .project_root
             .join(".fluent/work/locks")

@@ -956,13 +956,15 @@ fn process_one_follow_up(
                 journal.follow_ups[index].queue_expected = true;
                 write_journal(journal_path, journal)?;
             }
-            crate::queue::ensure_dispatch(
+            let dispatch = crate::queue::ensure_dispatch(
                 project_root,
                 &derived_id,
                 &intent.origin_operation_id,
                 intent.priority,
             )?;
-            totals.work_items_queued += 1;
+            if dispatch == crate::queue::EnsureDispatchOutcome::Created {
+                totals.work_items_queued += 1;
+            }
             journal.follow_ups[index].queued = true;
             write_journal(journal_path, journal)?;
         }
@@ -3046,6 +3048,84 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(ledger.dispatches.len(), 1, "exactly one queue entry survives replay");
+    }
+
+    #[test]
+    fn receipt_loss_replay_accepts_its_durable_dispatch_after_abandonment() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        seed_root_work_item(tmp.path());
+        write_project_policy(tmp.path(), "follow-up:\n  mode: execute\n");
+        let authority = fresh_expertise_authority(tmp.path());
+        let batch = corrective_batch(tmp.path(), FollowUpSource::Learner, Some(authority));
+        let operation = record_post_land_operation(tmp.path(), &batch, None).unwrap();
+        replay_post_land_operation(tmp.path(), &operation.operation_id).unwrap();
+
+        let journal_path = operation_dir(tmp.path(), &operation.operation_id).join("journal.json");
+        let mut journal = read_journal(&journal_path, &operation.operation_id).unwrap();
+        journal.follow_ups[0].queued = false;
+        write_journal(&journal_path, &journal).unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut derived = store.read_work_item(DERIVED_ID).unwrap();
+        let expected_origin = derived
+            .pending_enqueue
+            .as_ref()
+            .unwrap()
+            .origin_operation_id
+            .clone();
+        derived.abandonment = Some(crate::work_model::WorkItemAbandonment {
+            reason: Some("advanced after durable dispatch".to_string()),
+        });
+        store.write_work_item(&derived).unwrap();
+
+        let replay = replay_post_land_operation(tmp.path(), &operation.operation_id).unwrap();
+
+        assert_eq!(replay.work_items_queued, 0, "replay created no dispatch");
+        let journal = read_journal(&journal_path, &operation.operation_id).unwrap();
+        assert!(journal.follow_ups[0].queued);
+        let ledger = crate::queue::read_ledger(tmp.path(), DERIVED_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger.dispatches.len(), 1);
+        assert_eq!(
+            ledger.dispatches[0].origin_operation_id.as_deref(),
+            Some(expected_origin.as_str())
+        );
+    }
+
+    #[test]
+    fn explicit_dispatch_cannot_be_stamped_as_the_automatic_queue_effect() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        seed_root_work_item(tmp.path());
+        write_project_policy(tmp.path(), "follow-up:\n  mode: execute\n");
+        let authority = fresh_expertise_authority(tmp.path());
+        let batch = corrective_batch(tmp.path(), FollowUpSource::Learner, Some(authority));
+        let operation = record_post_land_operation(tmp.path(), &batch, None).unwrap();
+        replay_post_land_operation(tmp.path(), &operation.operation_id).unwrap();
+        let journal_path = operation_dir(tmp.path(), &operation.operation_id).join("journal.json");
+        let mut journal = read_journal(&journal_path, &operation.operation_id).unwrap();
+        journal.follow_ups[0].queued = false;
+        write_journal(&journal_path, &journal).unwrap();
+
+        fs::remove_file(
+            tmp.path()
+                .join(".fluent/work/queue")
+                .join(format!("{DERIVED_ID}.json")),
+        )
+        .unwrap();
+        crate::queue::add(tmp.path(), DERIVED_ID, Some(42)).unwrap();
+        let unrelated = crate::queue::read_ledger(tmp.path(), DERIVED_ID)
+            .unwrap()
+            .unwrap();
+        assert!(unrelated.latest().unwrap().origin_operation_id.is_none());
+
+        let error = replay_post_land_operation(tmp.path(), &operation.operation_id)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("does not match automatic operation"));
+        let journal = read_journal(&journal_path, &operation.operation_id).unwrap();
+        assert!(!journal.follow_ups[0].queued);
+        assert!(!post_land_operation_complete(tmp.path(), &operation.origin).unwrap());
     }
 
     #[test]
