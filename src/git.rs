@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
+use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, SystemTime};
 
 const LOCK_RETRY_MAX_ATTEMPTS: usize = 8;
@@ -109,6 +110,32 @@ pub fn run_raw(cwd: &Path, args: &[&str]) -> Result<Output> {
     run_with_lock_retry(|| build_command(cwd, args))
 }
 
+/// Run `git <args>` with byte input on stdin and check the exit status.
+pub fn run_with_stdin(cwd: &Path, args: &[&str], input: &[u8], action: &str) -> Result<()> {
+    let mut child = build_command(cwd, args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("Failed to invoke git")?;
+    child
+        .stdin
+        .take()
+        .context("Failed to open git stdin")?
+        .write_all(input)?;
+    let output = child.wait_with_output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    bail!(
+        "git {} failed (exit {}) while {action}\n  cwd: {}\n{}",
+        args.join(" "),
+        exit_code_display(&output),
+        cwd.display(),
+        format_output(&output)
+    )
+}
+
 fn exit_code_display(output: &Output) -> String {
     output
         .status
@@ -209,6 +236,27 @@ mod tests {
         assert!(
             err.contains(&tmp.path().display().to_string()),
             "Error should contain cwd: {err}"
+        );
+    }
+
+    #[test]
+    fn run_with_stdin_applies_patch_input() {
+        let tmp = TempDir::new().unwrap();
+        run(tmp.path(), &["init"], "initialize repository").unwrap();
+        std::fs::write(tmp.path().join("sample.txt"), "before\n").unwrap();
+        let patch = b"diff --git a/sample.txt b/sample.txt\n\
+index 90be1a7..38f8e88 100644\n\
+--- a/sample.txt\n\
++++ b/sample.txt\n\
+@@ -1 +1 @@\n\
+-before\n\
++after\n";
+
+        run_with_stdin(tmp.path(), &["apply"], patch, "apply test patch").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("sample.txt")).unwrap(),
+            "after\n"
         );
     }
 

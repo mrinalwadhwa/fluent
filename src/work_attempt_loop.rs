@@ -1200,20 +1200,12 @@ fn apply_git_patch(repo: &Path, patch: &[u8]) -> Result<()> {
     if patch.is_empty() {
         return Ok(());
     }
-    let mut child = std::process::Command::new("git")
-        .args(["apply", "--binary", "--whitespace=nowarn"])
-        .current_dir(repo)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-    use std::io::Write;
-    child.stdin.take().unwrap().write_all(patch)?;
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
-        bail!("restore target unstaged patch: {}", String::from_utf8_lossy(&output.stderr));
-    }
-    Ok(())
+    git::run_with_stdin(
+        repo,
+        &["apply", "--binary", "--whitespace=nowarn"],
+        patch,
+        "restore target unstaged patch",
+    )
 }
 
 /// Git state outside the candidate branch that a handoff-only Learner may read

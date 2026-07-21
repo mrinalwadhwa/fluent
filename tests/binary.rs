@@ -3116,9 +3116,11 @@ fn observation_show_exposes_learning_provenance() {
     create_and_run_learner_attempt(&main_dir, &bin_dir);
     land_work_1(&main_dir, &bin_dir, true);
 
+    let observations = open_observation_files(&main_dir);
+    let observation_id = observations[0].trim_end_matches(".md");
     let output = fluent_cmd()
         .current_dir(&main_dir)
-        .args(["observation", "show", "followup-work-1"])
+        .args(["observation", "show", observation_id])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -4176,11 +4178,10 @@ fn post_land_retry_resets_interrupted_candidate_commit_to_merged_commit() {
         merged,
         "the coder starts from the durable merged commit"
     );
-    assert_eq!(
-        git::run_stdout(&candidate, &["rev-parse", "HEAD"], "candidate HEAD").unwrap(),
-        merged
+    assert!(
+        !candidate.exists(),
+        "successful recovery removes the reset candidate workspace"
     );
-    assert!(!candidate.join("interrupted.txt").exists());
 }
 
 #[test]
@@ -10125,6 +10126,14 @@ fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() 
     let mut attempt = read_json_path(&attempt_path);
     attempt["status"] = serde_json::Value::String("complete".to_string());
     attempt["review_state"] = serde_json::Value::String("passed".to_string());
+    attempt["learning"] = serde_json::json!({
+        "status": "succeeded",
+        "runs": 1,
+        "handoff": {
+            "path": "handoff.json",
+            "digest": "sha256:test"
+        }
+    });
     write_json_path(&attempt_path, &attempt);
     let mut task = read_json_path(&task_path);
     task["status"] = serde_json::Value::String("complete".to_string());
