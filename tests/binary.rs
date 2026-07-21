@@ -4607,6 +4607,323 @@ fn post_land_handoff_only_ignores_no_sandbox_and_preserves_live_git() {
     }
 }
 
+/// Write a mock `security` that answers the Claude Code Keychain lookup with a
+/// non-expiring credential carrying `token`, and refuses every other service.
+fn write_mock_security(bin_dir: &Path, token: &str) {
+    fs::create_dir_all(bin_dir).unwrap();
+    let script = format!(
+        r##"#!/bin/bash
+case "$*" in
+  *"Claude Code-credentials"*)
+    printf '%s' '{{"claudeAiOauth":{{"accessToken":"{token}","expiresAt":9999999999999}}}}'
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+"##
+    );
+    let path = bin_dir.join("security");
+    fs::write(&path, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+/// Run the completed Attempt's failed Learner as an effectively sandboxed
+/// handoff-only retry, with a stripped credential environment so only host-side
+/// injection can supply a token. Removes the failing `sandbox-exec` stub so the
+/// trusted system launcher is used.
+fn rerun_learner_trusted(
+    main_dir: &Path,
+    bin_dir: &Path,
+    extra_env: &[(&str, &str)],
+) -> std::process::Output {
+    let _ = fs::remove_file(bin_dir.join("sandbox-exec"));
+    let mut cmd = fluent_cmd();
+    cmd.current_dir(main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(bin_dir))
+        .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
+        .env_remove("ANTHROPIC_API_KEY");
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
+    cmd.output().unwrap()
+}
+
+/// A learner mock that fails its pre-land run (recording the counter while
+/// unsandboxed), then on the trusted handoff-only retry reports the
+/// `CLAUDE_CODE_OAUTH_TOKEN` it received into the draft's learning summary.
+fn credential_probe_learner_mock_script(counter: &Path) -> String {
+    format!(
+        r##"#!/bin/bash
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
+done
+if [ -z "$PROMPT" ]; then exit 0; fi
+if [ "$PROMPT" = "ok" ]; then exit 0; fi
+if printf '%s' "$PROMPT" | grep -q "Rebase the candidate branch"; then
+  TARGET=$(printf '%s' "$PROMPT" | grep -o 'onto `[^`]*`' | sed 's/onto `//;s/`//')
+  git rebase "$TARGET" 2>/dev/null
+  exit $?
+fi
+if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
+  if [ ! -f "{counter}" ]; then touch "{counter}"; exit 1; fi
+  DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
+  mkdir -p "$(dirname "$DRAFT")"
+  TOKEN="${{CLAUDE_CODE_OAUTH_TOKEN:-MISSING}}"
+  printf '{{"learning_summary":"oauth=%s","follow_ups":[]}}\n' "$TOKEN" > "$DRAFT"
+  exit 0
+fi
+case "$PWD" in
+  */work-6-work-1-attempt-1)
+    printf 'loop output\n' > loop-output.txt
+    git add loop-output.txt
+    git commit -m "Add loop output" >/dev/null 2>&1
+    ;;
+  *) printf 'Verdict: pass\n\nLoop review.\n' > review.md ;;
+esac
+exit 0
+"##,
+        counter = counter.display()
+    )
+}
+
+/// A learner mock whose trusted handoff-only retry probes its temp access: it
+/// writes to `$TMPDIR` (the private scratch) and to shared `/private/tmp`, then
+/// reports both outcomes and the `$TMPDIR` path into the learning summary.
+fn temp_probe_learner_mock_script(counter: &Path) -> String {
+    format!(
+        r##"#!/bin/bash
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
+done
+if [ -z "$PROMPT" ]; then exit 0; fi
+if [ "$PROMPT" = "ok" ]; then exit 0; fi
+if printf '%s' "$PROMPT" | grep -q "Rebase the candidate branch"; then
+  TARGET=$(printf '%s' "$PROMPT" | grep -o 'onto `[^`]*`' | sed 's/onto `//;s/`//')
+  git rebase "$TARGET" 2>/dev/null
+  exit $?
+fi
+if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
+  if [ ! -f "{counter}" ]; then touch "{counter}"; exit 1; fi
+  DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
+  mkdir -p "$(dirname "$DRAFT")"
+  printf 'private\n' > "$TMPDIR/probe.txt" 2>/dev/null; PRIVATE=$?
+  printf 'shared\n' > "/private/tmp/fluent-b2-$$.txt" 2>/dev/null; SHARED=$?
+  printf '{{"learning_summary":"tmpdir=%s private=%s shared=%s","follow_ups":[]}}\n' \
+    "$TMPDIR" "$PRIVATE" "$SHARED" > "$DRAFT"
+  exit 0
+fi
+case "$PWD" in
+  */work-6-work-1-attempt-1)
+    printf 'loop output\n' > loop-output.txt
+    git add loop-output.txt
+    git commit -m "Add loop output" >/dev/null 2>&1
+    ;;
+  *) printf 'Verdict: pass\n\nLoop review.\n' > review.md ;;
+esac
+exit 0
+"##,
+        counter = counter.display()
+    )
+}
+
+/// A learner mock whose trusted handoff-only retry emits a 401 result on its
+/// first attempt (recording a marker in the writable private scratch so it
+/// persists across the one-refresh retry) and then succeeds on the retry.
+fn auth_401_learner_mock_script(counter: &Path) -> String {
+    format!(
+        r##"#!/bin/bash
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
+done
+if [ -z "$PROMPT" ]; then exit 0; fi
+if [ "$PROMPT" = "ok" ]; then exit 0; fi
+if printf '%s' "$PROMPT" | grep -q "Rebase the candidate branch"; then
+  TARGET=$(printf '%s' "$PROMPT" | grep -o 'onto `[^`]*`' | sed 's/onto `//;s/`//')
+  git rebase "$TARGET" 2>/dev/null
+  exit $?
+fi
+if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
+  if [ ! -f "{counter}" ]; then touch "{counter}"; exit 1; fi
+  MARK="$TMPDIR/auth-401-seen"
+  if [ ! -f "$MARK" ]; then
+    printf 'seen\n' > "$MARK"
+    printf '{{"type":"result","api_error_status":401,"request_id":"req-learner-401"}}\n'
+    exit 1
+  fi
+  DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
+  mkdir -p "$(dirname "$DRAFT")"
+  printf '{{"type":"result","api_error_status":0,"request_id":"req-learner-ok"}}\n'
+  printf '{{"learning_summary":"recovered after refresh","follow_ups":[]}}\n' > "$DRAFT"
+  exit 0
+fi
+case "$PWD" in
+  */work-6-work-1-attempt-1)
+    printf 'loop output\n' > loop-output.txt
+    git add loop-output.txt
+    git commit -m "Add loop output" >/dev/null 2>&1
+    ;;
+  *) printf 'Verdict: pass\n\nLoop review.\n' > review.md ;;
+esac
+exit 0
+"##,
+        counter = counter.display()
+    )
+}
+
+#[test]
+fn trusted_learner_hydrates_credentials_before_sandbox() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let counter = tmp.path().join("learner-counter-credentials");
+    let bin_dir = tmp.path().join("bin-learner-credentials");
+    write_mock_claude(&bin_dir, &credential_probe_learner_mock_script(&counter));
+    write_mock_security(&bin_dir, "injected-oauth-b1");
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+
+    let retry_output = rerun_learner_trusted(&main_dir, &bin_dir, &[]);
+    if !real_sandbox_exec_is_usable() {
+        assert!(!retry_output.status.success());
+        return;
+    }
+    assert!(
+        retry_output.status.success(),
+        "trusted credential retry failed: {}",
+        String::from_utf8_lossy(&retry_output.stderr)
+    );
+
+    let handoff: serde_json::Value = read_json_path(
+        &main_dir.join(fluent::learner::handoff_path_rel("work-1", "attempt-1")),
+    );
+    let summary = handoff["learning"]["summary"].as_str().unwrap();
+    assert!(
+        summary.contains("oauth=injected-oauth-b1"),
+        "the sandboxed coder must receive the host-injected credential, got: {summary}"
+    );
+    assert!(
+        !summary.contains("oauth=MISSING"),
+        "credentials must be hydrated before the sandbox: {summary}"
+    );
+}
+
+#[test]
+fn trusted_learner_has_private_temp_without_shared_temp_access() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let counter = tmp.path().join("learner-counter-temp");
+    let bin_dir = tmp.path().join("bin-learner-temp");
+    write_mock_claude(&bin_dir, &temp_probe_learner_mock_script(&counter));
+    write_mock_security(&bin_dir, "temp-probe-token");
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+
+    let retry_output = rerun_learner_trusted(&main_dir, &bin_dir, &[]);
+    if !real_sandbox_exec_is_usable() {
+        assert!(!retry_output.status.success());
+        return;
+    }
+    assert!(
+        retry_output.status.success(),
+        "trusted temp retry failed: {}",
+        String::from_utf8_lossy(&retry_output.stderr)
+    );
+
+    let handoff: serde_json::Value = read_json_path(
+        &main_dir.join(fluent::learner::handoff_path_rel("work-1", "attempt-1")),
+    );
+    let summary = handoff["learning"]["summary"].as_str().unwrap();
+    assert!(
+        summary.contains("private=0"),
+        "the coder must have a writable private scratch dir: {summary}"
+    );
+    assert!(
+        !summary.contains("shared=0"),
+        "shared /private/tmp must stay non-writable: {summary}"
+    );
+    assert!(
+        summary.contains("/scratch"),
+        "the private temp must live beneath the managed Learner surface: {summary}"
+    );
+}
+
+#[test]
+fn trusted_learner_auth_401_refreshes_from_transcript() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let counter = tmp.path().join("learner-counter-auth");
+    let bin_dir = tmp.path().join("bin-learner-auth");
+    write_mock_claude(&bin_dir, &auth_401_learner_mock_script(&counter));
+    write_mock_security(&bin_dir, "auth-probe-token");
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+
+    let retry_output =
+        rerun_learner_trusted(&main_dir, &bin_dir, &[("CLAUDE_CODE_OAUTH_TOKEN", "auth-probe-token")]);
+    if !real_sandbox_exec_is_usable() {
+        assert!(!retry_output.status.success());
+        return;
+    }
+    let stderr = String::from_utf8_lossy(&retry_output.stderr);
+    assert!(
+        retry_output.status.success(),
+        "trusted auth retry failed: {stderr}"
+    );
+    assert!(
+        stderr.contains("Auth 401 detected"),
+        "the one-refresh policy must fire on a 401: {stderr}"
+    );
+    assert!(
+        stderr.contains("Recovered after credential refresh"),
+        "the Learner must continue automatically after one refresh: {stderr}"
+    );
+
+    let transcript = main_dir.join(".fluent/work/artifacts/work-1/attempt-1/learner/transcript.jsonl");
+    assert!(transcript.exists(), "a transcript must be preserved");
+    assert!(
+        !fs::read_to_string(&transcript).unwrap().trim().is_empty(),
+        "the preserved transcript must capture the coder session"
+    );
+    // The refreshing retry truncates the live transcript, so the session-ending
+    // 401 is preserved in an immutable per-phase sibling artifact.
+    let preserved =
+        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/learner/transcript.0.jsonl");
+    assert!(
+        preserved.exists(),
+        "the pre-refresh transcript phase must be preserved as an immutable artifact"
+    );
+    assert!(
+        fs::read_to_string(&preserved)
+            .unwrap()
+            .contains("req-learner-401"),
+        "the preserved phase must capture the session-ending 401"
+    );
+
+    let handoff: serde_json::Value = read_json_path(
+        &main_dir.join(fluent::learner::handoff_path_rel("work-1", "attempt-1")),
+    );
+    assert_eq!(
+        handoff["learning"]["summary"], "recovered after refresh",
+        "the Learner must continue automatically after the refresh"
+    );
+}
+
 #[test]
 fn sandboxed_post_land_coder_runs_and_is_denied() {
     let tmp = TempDir::new().unwrap();

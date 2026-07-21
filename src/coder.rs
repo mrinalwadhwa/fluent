@@ -837,6 +837,33 @@ fn real_credential_refresh() {
     let _ = crate::credential::refresh_credentials();
 }
 
+/// Preserve the transcript of a just-finished attempt as an immutable sibling
+/// before the next attempt truncates the live path. Each retried phase (a 401
+/// refresh or a rate-limit wait) leaves its own durable `.<n>.jsonl` artifact,
+/// so a session-ending 401 is not overwritten by the attempt that recovers it.
+fn preserve_transcript_phase(transcript_file: Option<&Path>, phase: &mut u32) {
+    if let Some(path) = transcript_file {
+        let preserved = phase_transcript_path(path, *phase);
+        let _ = std::fs::copy(path, &preserved);
+        *phase += 1;
+    }
+}
+
+/// The immutable per-phase transcript path derived from a live transcript path:
+/// `run.jsonl` becomes `run.<phase>.jsonl`.
+fn phase_transcript_path(path: &Path, phase: u32) -> PathBuf {
+    let mut name = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_default();
+    name.push_str(&format!(".{phase}"));
+    if let Some(ext) = path.extension() {
+        name.push('.');
+        name.push_str(&ext.to_string_lossy());
+    }
+    path.with_file_name(name)
+}
+
 /// Run a Coder command with rate-limit-aware retry. After a non-zero exit
 /// whose transcript contains a rate-limit marker, parse the retry-after
 /// timing from the transcript, apply per-run jitter, and sleep before
@@ -854,6 +881,7 @@ where
     let mut attempt: u32 = 0;
     let mut rl_state = RateLimitState::Normal;
     let mut auth_refreshed = false;
+    let mut phase: u32 = 0;
 
     loop {
         let exit = run_with_transcript(build_cmd(), transcript_file)?;
@@ -877,6 +905,7 @@ where
             if !auth_refreshed {
                 auth_refreshed = true;
                 eprintln!("  Auth 401 detected — refreshing credentials and retrying.");
+                preserve_transcript_phase(transcript_file, &mut phase);
                 refresh_fn();
                 continue;
             }
@@ -920,6 +949,7 @@ where
             attempt + 1,
             wait.as_secs()
         );
+        preserve_transcript_phase(transcript_file, &mut phase);
         std::thread::sleep(wait);
         attempt += 1;
     }
@@ -1809,6 +1839,59 @@ exit 1"#
             err.downcast_ref::<crate::claude_auth::AuthError>()
                 .is_some(),
             "should return AuthError, got: {err}"
+        );
+    }
+
+    #[test]
+    fn phase_transcript_path_inserts_phase_before_extension() {
+        let base = Path::new("/tmp/learner/transcript.jsonl");
+        assert_eq!(
+            phase_transcript_path(base, 0),
+            Path::new("/tmp/learner/transcript.0.jsonl")
+        );
+        assert_eq!(
+            phase_transcript_path(base, 3),
+            Path::new("/tmp/learner/transcript.3.jsonl")
+        );
+        let no_ext = Path::new("/tmp/learner/transcript");
+        assert_eq!(
+            phase_transcript_path(no_ext, 1),
+            Path::new("/tmp/learner/transcript.1")
+        );
+    }
+
+    #[test]
+    fn auth_refresh_preserves_prior_transcript_phase() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let counter = dir.path().join("counter");
+        // First call emits a session-ending 401; the refreshed retry exits 0
+        // with no output, truncating the live transcript.
+        let script = make_401_script(&counter, Some(2));
+
+        let result = run_with_transcript_retrying(
+            move || {
+                let mut cmd = Command::new("/bin/sh");
+                cmd.arg("-c").arg(&script);
+                cmd
+            },
+            Some(&transcript),
+            &|_, _| {},
+            &|| {},
+        );
+        assert_eq!(result.unwrap(), 0, "should recover after refresh");
+
+        // The recovering run truncates the live transcript, but the
+        // session-ending 401 stays captured in an immutable per-phase sibling.
+        let preserved = dir.path().join("transcript.0.jsonl");
+        assert!(
+            preserved.exists(),
+            "the pre-refresh transcript phase must be preserved"
+        );
+        let body = std::fs::read_to_string(&preserved).unwrap();
+        assert!(
+            body.contains("\"api_error_status\":401"),
+            "the preserved phase must capture the session-ending 401: {body}"
         );
     }
 

@@ -481,6 +481,7 @@ fn default_learner_run_coder(
         tester_artifact_paths: request.tester_artifact_paths,
         diff_command: request.diff_command,
         handoff_dir: request.handoff_dir,
+        transcript_path: Some(request.transcript_path),
         handoff_only: request.handoff_only,
         denied_write_roots: request.denied_write_roots,
     })
@@ -853,6 +854,7 @@ struct LearnerCoderRequest<'a> {
     tester_artifact_paths: &'a [PathBuf],
     diff_command: &'a str,
     handoff_dir: &'a Path,
+    transcript_path: &'a Path,
     denied_write_roots: &'a [PathBuf],
     coder_kind: CoderKind,
     model: Option<&'a str>,
@@ -1017,6 +1019,10 @@ fn try_learn(
         .unwrap_or(workspace_path.as_path());
     let real_handoff_dir =
         project_root.join(crate::learner::handoff_dir_rel(&work_item_id, &attempt_id));
+    // The transcript lives on the durable managed surface even for an isolated
+    // handoff-only run: the host writes it outside the sandbox, so it survives
+    // the disposable clone and lets the one-refresh auth policy classify a 401.
+    let transcript_path = real_handoff_dir.join("transcript.jsonl");
     let handoff_dir = isolated_workspace
         .as_ref()
         .map(|isolated| isolated.handoff_dir.as_path())
@@ -1048,6 +1054,7 @@ fn try_learn(
         tester_artifact_paths: learner_tester_artifact_paths,
         diff_command: &diff_command,
         handoff_dir,
+        transcript_path: &transcript_path,
         denied_write_roots: &denied_write_roots,
         coder_kind,
         model: model.as_deref(),

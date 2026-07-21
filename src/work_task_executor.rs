@@ -1849,6 +1849,11 @@ pub struct LearnerRunInputs<'a> {
     pub diff_command: &'a str,
     /// The managed handoff surface where the coder writes its untrusted draft.
     pub handoff_dir: &'a Path,
+    /// Durable path, on the managed Learner artifact surface, where the host
+    /// captures the coder transcript. The host writes it outside the sandbox, so
+    /// it survives an isolated handoff-only run and lets the one-refresh auth
+    /// policy classify a session-ending 401.
+    pub transcript_path: Option<&'a Path>,
     /// Live repository roots that a handoff-only retry must never write.
     pub denied_write_roots: &'a [PathBuf],
     /// Whether the Learner runs post-land in handoff-only mode: after its
@@ -1956,20 +1961,53 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
     fs::create_dir_all(&expertise_dir)?;
     fs::create_dir_all(inputs.handoff_dir)?;
 
+    let effectively_sandboxed = !(inputs.no_sandbox && !inputs.handoff_only);
+
+    // The managed Learner surface is the last trusted host boundary before
+    // environment filtering and Seatbelt. When the coder launches effectively
+    // sandboxed, resolve the coder's supported credentials on the host — where
+    // the sandbox denies the credential store — and give the coder a unique
+    // private writable scratch directory beneath its managed surface. The
+    // shared macOS temp trees and live project roots stay non-writable, so a
+    // coder tool that needs temporary files uses its own confined scratch.
+    let mut extra_env: Vec<(String, String)> = Vec::new();
+    let mut private_temp_roots: Vec<PathBuf> = Vec::new();
+    if effectively_sandboxed {
+        os::check_prerequisites_for(inputs.coder_kind)?;
+        credential::inject_credentials()?;
+        credential::setup_git_signing();
+
+        let scratch = inputs.handoff_dir.join("scratch");
+        if scratch.exists() {
+            fs::remove_dir_all(&scratch).with_context(|| {
+                format!("clear Learner scratch dir at {}", scratch.display())
+            })?;
+        }
+        fs::create_dir_all(&scratch)
+            .with_context(|| format!("create Learner scratch dir at {}", scratch.display()))?;
+        let scratch_str = scratch.to_string_lossy().to_string();
+        extra_env.push(("TMPDIR".to_string(), scratch_str.clone()));
+        extra_env.push(("TMP".to_string(), scratch_str.clone()));
+        extra_env.push(("TEMP".to_string(), scratch_str));
+        private_temp_roots.push(scratch);
+    }
+
     // A post-land retry handles persisted merged state, so `--no-sandbox`
     // cannot weaken its boundary. It always uses the trusted system Seatbelt
     // launcher and fails closed when the host cannot apply that profile.
-    let (sandbox, _sandbox_profile) = if inputs.no_sandbox && !inputs.handoff_only {
+    let (sandbox, _sandbox_profile) = if !effectively_sandboxed {
         (CoderSandbox::None, None)
     } else {
         let common_git_dir = worktree::git_common_dir(workspace_path)?;
         readable_roots.push(workspace_path.to_path_buf());
         if learner_expertise_writable(inputs.handoff_only) {
+            let mut writable = vec![inputs.handoff_dir.to_path_buf(), common_git_dir];
+            writable.extend(private_temp_roots.iter().cloned());
             build_coder_sandbox_with_writable_and_read_only_roots(
                 inputs.coder_kind,
                 inputs.resolver,
                 &expertise_dir,
-                &[inputs.handoff_dir.to_path_buf(), common_git_dir],
+                &writable,
                 &readable_roots,
             )?
         } else {
@@ -1983,10 +2021,12 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
             denied.extend(inputs.denied_write_roots.iter().cloned());
             denied.sort();
             denied.dedup();
+            let mut writable = vec![inputs.handoff_dir.to_path_buf()];
+            writable.extend(private_temp_roots.iter().cloned());
             let profile = os::render_profile_for_access_for_coder_with_denied_writes(
                 inputs.resolver,
                 &home,
-                &[inputs.handoff_dir.to_path_buf()],
+                &writable,
                 &readable_roots,
                 &denied,
                 inputs.coder_kind,
@@ -1997,6 +2037,13 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
         }
     };
 
+    if let Some(transcript_path) = inputs.transcript_path
+        && let Some(parent) = transcript_path.parent()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create Learner transcript dir at {}", parent.display()))?;
+    }
+
     let coder = inputs
         .coder_kind
         .boxed_with_model(sandbox, inputs.model, inputs.effort);
@@ -2005,8 +2052,8 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
         &system_prompt,
         workspace_path,
         inputs.extra_args,
-        &[],
-        None,
+        &extra_env,
+        inputs.transcript_path,
     )?;
     if exit_code != 0 {
         bail!("Learner coder exited with code {exit_code}");
