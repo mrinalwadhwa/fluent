@@ -400,11 +400,7 @@ impl WorkItem {
     /// `priority`, keyed by `origin_operation_id`. Set when derived corrective
     /// Work is created so automatic promotion or human authorization can
     /// reconcile exactly one dispatch even across a crash.
-    pub fn set_enqueue_intent(
-        &mut self,
-        priority: i64,
-        origin_operation_id: impl Into<String>,
-    ) {
+    pub fn set_enqueue_intent(&mut self, priority: i64, origin_operation_id: impl Into<String>) {
         self.pending_enqueue = Some(EnqueueIntent {
             priority,
             origin_operation_id: origin_operation_id.into(),
@@ -3557,10 +3553,7 @@ impl WorkModelStore {
             target_revision,
             work_item: work_item.clone(),
         };
-        write_json_file(
-            &self.work_transaction_path(&work_item.id)?,
-            &transaction,
-        )?;
+        write_json_file(&self.work_transaction_path(&work_item.id)?, &transaction)?;
         self.apply_work_item_transaction(&transaction)?;
         work_item.storage_revision.set(target_revision);
         Ok(())
@@ -3571,11 +3564,12 @@ impl WorkModelStore {
         path: &Path,
         validate: bool,
     ) -> Result<WorkItem, WorkModelStorageError> {
-        let expected = path.file_stem().and_then(|stem| stem.to_str()).ok_or_else(|| {
-            WorkModelStorageError::InvalidWorkItemId {
+        let expected = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .ok_or_else(|| WorkModelStorageError::InvalidWorkItemId {
                 id: path.display().to_string(),
-            }
-        })?;
+            })?;
         work_item_file_name(expected)?;
         if !path.exists() && !self.work_transaction_path(expected)?.exists() {
             return self.read_work_item_file_unlocked(path, validate);
@@ -3649,12 +3643,13 @@ impl WorkModelStore {
                 },
             });
         }
-        transaction.work_item.validate().map_err(|source| {
-            WorkModelStorageError::InvalidModel {
+        transaction
+            .work_item
+            .validate()
+            .map_err(|source| WorkModelStorageError::InvalidModel {
                 path: path.clone(),
                 source,
-            }
-        })?;
+            })?;
         Ok(Some(transaction))
     }
 
@@ -6283,11 +6278,8 @@ mod tests {
         let path = store.work_item_path("work-1").unwrap();
         let mut record = WorkItemRecord::from(&updated);
         record.storage_revision = 1;
-        crate::atomic_write::atomic_write(
-            &path,
-            to_json_pretty(&record).unwrap().as_bytes(),
-        )
-        .unwrap();
+        crate::atomic_write::atomic_write(&path, to_json_pretty(&record).unwrap().as_bytes())
+            .unwrap();
 
         let (sender, receiver) = mpsc::channel();
         let reader = Arc::clone(&store);
@@ -6301,7 +6293,10 @@ mod tests {
 
         store.write_attempt_records(&updated).unwrap();
         drop(model_lock);
-        let observed = receiver.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        let observed = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
         handle.join().unwrap();
         assert_eq!(observed.title, "Committed snapshot");
         assert_eq!(observed.attempts[0].coder_mapping.write.model, "new-model");
@@ -6326,12 +6321,13 @@ mod tests {
         fs::create_dir_all(&candidate_path).unwrap();
 
         assert!(store.write_work_item(&updated).is_err());
-        let transaction_path = tmp
-            .path()
-            .join(".fluent/work/transactions/work-1.json");
-        assert!(transaction_path.is_file(), "the retry snapshot must remain durable");
-        let top_level: WorkItemRecord = read_json_file(&store.work_item_path("work-1").unwrap())
-            .unwrap();
+        let transaction_path = tmp.path().join(".fluent/work/transactions/work-1.json");
+        assert!(
+            transaction_path.is_file(),
+            "the retry snapshot must remain durable"
+        );
+        let top_level: WorkItemRecord =
+            read_json_file(&store.work_item_path("work-1").unwrap()).unwrap();
         assert_eq!(top_level.storage_revision, 0, "publish the revision last");
 
         fs::remove_dir(&candidate_path).unwrap();
@@ -6351,8 +6347,7 @@ mod tests {
         let store = WorkModelStore::new(tmp.path());
         let mut item = work_item_with_completed_write("work-1");
         item.attempts[0].review_state = Some(AttemptReviewState::Passed);
-        item.merge_candidates
-            .push(candidate_for_completed_write());
+        item.merge_candidates.push(candidate_for_completed_write());
         let candidate_path = store
             .work_merge_candidate_path("work-1", "attempt-1-merge-candidate")
             .unwrap();
@@ -6387,7 +6382,10 @@ mod tests {
             error,
             WorkModelStorageError::StorageRevisionExhausted { .. }
         ));
-        assert_ne!(store.read_work_item("work-1").unwrap().title, "must not publish");
+        assert_ne!(
+            store.read_work_item("work-1").unwrap().title,
+            "must not publish"
+        );
     }
 
     #[test]
@@ -6415,8 +6413,7 @@ mod tests {
         assert!(store.read_work_item("missing-work").is_err());
 
         assert!(
-            !tmp
-                .path()
+            !tmp.path()
                 .join(".fluent/work/locks/missing-work/model.lock")
                 .exists()
         );
@@ -6787,7 +6784,11 @@ mod tests {
         }"#;
         let output: TaskOutput = serde_json::from_str(legacy).unwrap();
         assert!(output.base_commit.is_none());
-        assert!(!serde_json::to_string(&output).unwrap().contains("base_commit"));
+        assert!(
+            !serde_json::to_string(&output)
+                .unwrap()
+                .contains("base_commit")
+        );
 
         let mut persisted = output;
         persisted.base_commit = Some("base123".to_string());
@@ -7956,9 +7957,15 @@ mod tests {
         // preserved; no replacement is created.
         assert_eq!(item.id, "child-1");
         assert!(item.authorization.is_execution_ready());
-        assert_eq!(item.authorization.authority(), Some(ExecutionAuthority::Human));
+        assert_eq!(
+            item.authorization.authority(),
+            Some(ExecutionAuthority::Human)
+        );
         assert_eq!(item.origin.provenance().cloned(), provenance_before);
-        assert!(item.lineage.charged, "authorization charges the lineage once");
+        assert!(
+            item.lineage.charged,
+            "authorization charges the lineage once"
+        );
     }
 
     #[test]
@@ -8053,7 +8060,10 @@ mod tests {
             .collect();
 
         assert_eq!(winners, vec!["d1".to_string(), "d2".to_string()]);
-        assert_eq!(winners, winners_again, "the recorded winners are stable on retry");
+        assert_eq!(
+            winners, winners_again,
+            "the recorded winners are stable on retry"
+        );
         assert!(contenders[2].authorization.is_proposed());
     }
 }

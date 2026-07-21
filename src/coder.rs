@@ -1458,12 +1458,14 @@ mod model_default_tests {
                     && *v == Some(OsStr::new("false"))),
             "GIT_SEQUENCE_EDITOR default missing"
         );
-        assert!(envs.iter().any(|(k, v)| {
-            *k == OsStr::new("PWD") && *v == Some(dir.path().as_os_str())
-        }));
-        assert!(envs
-            .iter()
-            .any(|(k, v)| *k == OsStr::new("OLDPWD") && v.is_none()));
+        assert!(
+            envs.iter()
+                .any(|(k, v)| { *k == OsStr::new("PWD") && *v == Some(dir.path().as_os_str()) })
+        );
+        assert!(
+            envs.iter()
+                .any(|(k, v)| *k == OsStr::new("OLDPWD") && v.is_none())
+        );
     }
 
     #[test]
@@ -1500,7 +1502,10 @@ mod model_default_tests {
             .current_dir(dir.path());
 
         assert_eq!(run_with_transcript(command, None).unwrap(), 0);
-        assert!(launched_path.exists(), "hostile descendant actually executed");
+        assert!(
+            launched_path.exists(),
+            "hostile descendant actually executed"
+        );
         let pid = std::fs::read_to_string(pid_path).unwrap();
         let status = Command::new("/bin/kill")
             .args(["-0", pid.trim()])
@@ -1508,7 +1513,10 @@ mod model_default_tests {
             .stderr(Stdio::null())
             .status()
             .unwrap();
-        assert!(!status.success(), "background descendant survived coder return");
+        assert!(
+            !status.success(),
+            "background descendant survived coder return"
+        );
         std::thread::sleep(Duration::from_millis(300));
         assert!(
             !denied_path.exists(),

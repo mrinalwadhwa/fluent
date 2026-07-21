@@ -550,12 +550,7 @@ pub fn claim(
     let item = store.read_work_item_under_model_lock(work_item_id)?;
     ensure_lifecycle_eligible(&item, work_item_id)?;
     #[cfg(test)]
-    crate::test_lock_probe::reach(
-        "queue-lifecycle",
-        work_item_id,
-        "claim",
-        "ELIGIBLE",
-    );
+    crate::test_lock_probe::reach("queue-lifecycle", work_item_id, "claim", "ELIGIBLE");
     let _lock = lock_queue(project_root)?;
     let mut ledger = match read_ledger(project_root, work_item_id)? {
         Some(ledger) => ledger,
@@ -758,11 +753,7 @@ mod tests {
     fn write_work_item_json(tmp: &Path, id: &str, extra_fields: &str) {
         let json = format!(r#"{{"id": "{id}", "title": "Test"{extra_fields}}}"#);
         serde_json::from_str::<WorkItem>(&json).expect("fixture must be a valid Work record");
-        fs::write(
-            tmp.join(format!(".fluent/work/items/{id}.json")),
-            json,
-        )
-        .unwrap();
+        fs::write(tmp.join(format!(".fluent/work/items/{id}.json")), json).unwrap();
     }
 
     /// Overwrite a ledger directly so a test can start from an arbitrary
@@ -974,7 +965,10 @@ mod tests {
 
         ensure_dispatch(dir.path(), "wi-1", "operation-1", 99).unwrap();
 
-        assert_eq!(fs::read(queue_file(dir.path(), "wi-1")).unwrap(), ledger_before);
+        assert_eq!(
+            fs::read(queue_file(dir.path(), "wi-1")).unwrap(),
+            ledger_before
+        );
     }
 
     #[test]
@@ -1022,15 +1016,10 @@ mod tests {
             reason: Some("race winner".to_string()),
         });
         let queue_lock = lock_queue(dir.path()).unwrap();
-        let probe = crate::test_lock_probe::ScopedLockProbe::install(
-            "queue-lifecycle",
-            "wi-race",
-            None,
-        );
+        let probe =
+            crate::test_lock_probe::ScopedLockProbe::install("queue-lifecycle", "wi-race", None);
         let claim_root = dir.path().to_path_buf();
-        let claim_thread = std::thread::spawn(move || {
-            claim(&claim_root, "wi-race", "attempt-1")
-        });
+        let claim_thread = std::thread::spawn(move || claim(&claim_root, "wi-race", "attempt-1"));
         assert!(probe.wait_for("claim", "ELIGIBLE"));
 
         let abandon_root = dir.path().to_path_buf();
@@ -1041,10 +1030,7 @@ mod tests {
         });
 
         let early_abandonment = abandoned_rx.recv_timeout(Duration::from_millis(150));
-        let abandonment_blocked = matches!(
-            early_abandonment,
-            Err(mpsc::RecvTimeoutError::Timeout)
-        );
+        let abandonment_blocked = matches!(early_abandonment, Err(mpsc::RecvTimeoutError::Timeout));
         drop(queue_lock);
         assert!(claim_thread.join().unwrap().unwrap().is_some());
         let abandonment = match early_abandonment {

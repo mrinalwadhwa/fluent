@@ -33,8 +33,7 @@ use fluent::version;
 use fluent::work_attempt_loop::{self, WorkAttemptRunConfig, WorkAttemptRunOutcome};
 use fluent::work_merge_executor::{self, WorkMergeConfig};
 use fluent::work_model::{
-    self, PlanningContext, WorkItem, WorkModelStorageError, WorkModelStore,
-    to_json_pretty,
+    self, PlanningContext, WorkItem, WorkModelStorageError, WorkModelStore, to_json_pretty,
 };
 use fluent::work_status;
 use fluent::work_task_executor::{self, WorkTaskRunConfig};

@@ -17,7 +17,7 @@ use crate::observations::{self, LEARNER_FOLLOW_UP_KIND, ObservationFrontmatter};
 use crate::work_model::{
     CorrectiveAuditContext, CorrectiveAuthorityReference, CorrectiveContext,
     CorrectiveEvidenceReference, DerivedProvenance, ExecutionAuthority, WorkItem, WorkLineage,
-    WorkModelStore, WorkModelStorageError,
+    WorkModelStorageError, WorkModelStore,
 };
 
 /// Content-addressed pointer to a file within a learner handoff. The path is
@@ -312,7 +312,9 @@ fn committed_tree_entry(
     let output = crate::git::run_raw(project_root, &["ls-tree", "-z", revision, "--", path])
         .map_err(|_| format!("inspect committed path {path:?} at {revision}"))?;
     if !output.status.success() {
-        return Err(format!("revision {revision:?} is not available for authority validation"));
+        return Err(format!(
+            "revision {revision:?} is not available for authority validation"
+        ));
     }
     if output.stdout.is_empty() {
         return Ok(None);
@@ -322,7 +324,9 @@ fn committed_tree_entry(
         return Err(format!("committed path {path:?} has an invalid tree entry"));
     };
     if &entry[tab + 1..] != path.as_bytes() {
-        return Err(format!("committed tree entry does not exactly match {path:?}"));
+        return Err(format!(
+            "committed tree entry does not exactly match {path:?}"
+        ));
     }
     let header = String::from_utf8(entry[..tab].to_vec())
         .map_err(|_| format!("committed path {path:?} has a non-UTF-8 tree entry"))?;
@@ -336,12 +340,18 @@ fn committed_tree_entry(
     Ok(Some((mode, kind, object)))
 }
 
-fn committed_regular_blob(project_root: &Path, revision: &str, path: &str) -> Result<Vec<u8>, String> {
+fn committed_regular_blob(
+    project_root: &Path,
+    revision: &str,
+    path: &str,
+) -> Result<Vec<u8>, String> {
     let Some((mode, kind, object)) = committed_tree_entry(project_root, revision, path)? else {
         return Err(format!("authority {path:?} is not committed at {revision}"));
     };
     if kind != "blob" || (mode != "100644" && mode != "100755") {
-        return Err(format!("authority {path:?} is not a committed regular file at {revision}"));
+        return Err(format!(
+            "authority {path:?} is not a committed regular file at {revision}"
+        ));
     }
     let output = crate::git::run_raw(project_root, &["cat-file", "blob", &object])
         .map_err(|_| format!("read committed authority {path:?} at {revision}"))?;
@@ -366,11 +376,12 @@ fn applicable_agents_path(
         let candidate_text = candidate
             .to_str()
             .ok_or_else(|| "AGENTS.md candidate path is not UTF-8".to_string())?;
-        if let Some((mode, kind, _)) =
-            committed_tree_entry(project_root, revision, candidate_text)?
+        if let Some((mode, kind, _)) = committed_tree_entry(project_root, revision, candidate_text)?
         {
             if kind != "blob" || (mode != "100644" && mode != "100755") {
-                return Err(format!("applicable authority {candidate_text:?} is not a regular file"));
+                return Err(format!(
+                    "applicable authority {candidate_text:?} is not a regular file"
+                ));
             }
             return Ok(Some(candidate));
         }
@@ -712,10 +723,8 @@ fn discover_recorded_operation_id(
         }
         if batch_path.exists() {
             has_evidence = true;
-            let batch: NormalizedFollowUpBatchV1 =
-                serde_json::from_slice(&fs::read(&batch_path)?).with_context(|| {
-                    format!("parse recorded batch {}", batch_path.display())
-                })?;
+            let batch: NormalizedFollowUpBatchV1 = serde_json::from_slice(&fs::read(&batch_path)?)
+                .with_context(|| format!("parse recorded batch {}", batch_path.display()))?;
             if batch.schema_version != NormalizedFollowUpBatchV1::SCHEMA_VERSION
                 || batch.origin != *origin
             {
@@ -724,10 +733,8 @@ fn discover_recorded_operation_id(
         }
         if journal_path.exists() {
             has_evidence = true;
-            let journal: PostLandJournal =
-                serde_json::from_slice(&fs::read(&journal_path)?).with_context(|| {
-                    format!("parse recorded journal {}", journal_path.display())
-                })?;
+            let journal: PostLandJournal = serde_json::from_slice(&fs::read(&journal_path)?)
+                .with_context(|| format!("parse recorded journal {}", journal_path.display()))?;
             if journal.schema_version != PostLandJournal::SCHEMA_VERSION
                 || journal.operation_id != *operation_id
             {
@@ -797,8 +804,7 @@ fn collect_effect_operation_evidence(
         };
         if provenance.work_item_id.as_deref() == Some(origin.work_item_id.as_str())
             && provenance.attempt_id.as_deref() == Some(origin.attempt_id.as_str())
-            && provenance.merge_candidate_id.as_deref()
-                == Some(origin.merge_candidate_id.as_str())
+            && provenance.merge_candidate_id.as_deref() == Some(origin.merge_candidate_id.as_str())
             && provenance.merged_commit.as_deref() == Some(origin.merged_commit.as_str())
             && let Some(operation_id) = classify(&item.id, "derived Work Item")?
         {
@@ -915,9 +921,7 @@ pub fn record_post_land_operation(
     if batch_path.exists() {
         let existing = fs::read(&batch_path)?;
         if content_digest(&existing) != operation.batch_ref.digest || existing != batch_bytes {
-            bail!(
-                "post-land operation {operation_id} has conflicting durable batch evidence"
-            );
+            bail!("post-land operation {operation_id} has conflicting durable batch evidence");
         }
     }
 
@@ -1059,7 +1063,8 @@ fn process_one_follow_up(
     // lineage, priority, or queue decision. A retry reuses the recorded policy
     // even after configuration changes.
     if journal.follow_ups[index].resolved_policy.is_none() {
-        let policy = config::resolve_follow_up_policy(project_root)?.freeze(correction_source(source));
+        let policy =
+            config::resolve_follow_up_policy(project_root)?.freeze(correction_source(source));
         journal.follow_ups[index].resolved_policy = Some(policy);
         write_journal(journal_path, journal)?;
     }
@@ -1193,9 +1198,8 @@ pub fn post_land_operation_complete(
     };
     let dir = operation_dir(project_root, &operation_id);
     let _lock = lock_operation(&dir, &operation_id, "CLEANUP")?;
-    let operation: PendingPostLandOperationV1 = serde_json::from_slice(
-        &fs::read(dir.join("operation.json"))?,
-    )?;
+    let operation: PendingPostLandOperationV1 =
+        serde_json::from_slice(&fs::read(dir.join("operation.json"))?)?;
     if operation.schema_version != PendingPostLandOperationV1::SCHEMA_VERSION
         || operation.operation_id != operation_id
         || operation.origin != *expected_origin
@@ -1209,9 +1213,7 @@ pub fn post_land_operation_complete(
     {
         bail!("normalized batch does not match its post-land operation");
     }
-    let journal: PostLandJournal = serde_json::from_slice(
-        &fs::read(dir.join("journal.json"))?,
-    )?;
+    let journal: PostLandJournal = serde_json::from_slice(&fs::read(dir.join("journal.json"))?)?;
     if journal.schema_version != PostLandJournal::SCHEMA_VERSION
         || journal.operation_id != operation_id
         || !journal.completed
@@ -1275,14 +1277,14 @@ pub fn post_land_operation_complete(
             let work_item = match store.read_work_item(&expected_work_id) {
                 Ok(item) => item,
                 Err(WorkModelStorageError::ReadFile { source, .. })
-                    if source.kind() == std::io::ErrorKind::NotFound => incomplete!("missing work"),
+                    if source.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    incomplete!("missing work")
+                }
                 Err(error) => return Err(error.into()),
             };
             let origin_item = store.read_work_item(&expected_origin.work_item_id)?;
-            let root_id = origin_item
-                .lineage
-                .root_id(&origin_item.id)
-                .to_string();
+            let root_id = origin_item.lineage.root_id(&origin_item.id).to_string();
             let expected_work = expected_derived_work(
                 expected_origin,
                 &observation_id,
@@ -1318,7 +1320,8 @@ pub fn post_land_operation_complete(
                 incomplete!("queue receipt");
             }
             if queue_required {
-                let Some(ledger) = crate::queue::read_ledger(project_root, &expected_work_id)? else {
+                let Some(ledger) = crate::queue::read_ledger(project_root, &expected_work_id)?
+                else {
                     incomplete!("missing queue ledger");
                 };
                 if !ledger.dispatches.iter().any(|dispatch| {
@@ -1833,7 +1836,10 @@ fn load_verified_batch(
     reference: &ArtifactRef,
 ) -> Result<NormalizedFollowUpBatchV1> {
     if !reference.is_relative() {
-        bail!("normalized batch reference {:?} is not relative", reference.path);
+        bail!(
+            "normalized batch reference {:?} is not relative",
+            reference.path
+        );
     }
     let path = project_root.join(&reference.path);
     let bytes =
@@ -2124,7 +2130,8 @@ mod tests {
                 &operation.operation_id,
                 Some(("REPLAY", "ACQUIRED")),
             );
-            let replay = scope.spawn(|| replay_post_land_operation(tmp.path(), &operation.operation_id));
+            let replay =
+                scope.spawn(|| replay_post_land_operation(tmp.path(), &operation.operation_id));
             assert!(probe.wait_for("REPLAY", "ACQUIRED"));
             let record = scope.spawn(|| record_post_land_operation(tmp.path(), &conflicting, None));
             assert!(probe.wait_for("RECORD", "BLOCKED"));
@@ -2201,7 +2208,10 @@ mod tests {
         let journal_path = operation_dir(tmp.path(), &outcome.operation_id).join("journal.json");
         let journal: PostLandJournal =
             serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
-        assert!(journal.completed, "an empty batch still marks the journal complete");
+        assert!(
+            journal.completed,
+            "an empty batch still marks the journal complete"
+        );
         assert!(journal.follow_ups.is_empty());
     }
 
@@ -2239,7 +2249,11 @@ mod tests {
 
         // Alter the persisted batch so it no longer matches the reference digest.
         let batch_path = tmp.path().join(&operation.batch_ref.path);
-        fs::write(&batch_path, b"{\"schema_version\":1,\"source\":\"learner\"}").unwrap();
+        fs::write(
+            &batch_path,
+            b"{\"schema_version\":1,\"source\":\"learner\"}",
+        )
+        .unwrap();
 
         let err = replay_post_land_operation(tmp.path(), &operation.operation_id).unwrap_err();
         assert!(
@@ -2314,8 +2328,12 @@ mod tests {
         if root.join(".git").exists() {
             return;
         }
-        crate::git::run(root, &["init", "-q"], "initialize authority test repository")
-            .unwrap();
+        crate::git::run(
+            root,
+            &["init", "-q"],
+            "initialize authority test repository",
+        )
+        .unwrap();
         crate::git::run(
             root,
             &["config", "user.email", "test@example.com"],
@@ -2406,7 +2424,10 @@ mod tests {
             .expect("prompt example cites an authority");
         // The example digest is self-consistent, so a Learner copying the shape
         // and recomputing over its own anchor produces a matching locator.
-        assert_eq!(authority.digest, content_digest(authority.anchor.as_bytes()));
+        assert_eq!(
+            authority.digest,
+            content_digest(authority.anchor.as_bytes())
+        );
 
         // Materialize the committed authority the example points at and confirm
         // the production gate classifies the prompt's example as corrective.
@@ -2465,11 +2486,7 @@ mod tests {
             ".fluent/expertise/retry\n.md",
             ".fluent/expertise/retry\u{7f}.md",
         ] {
-            let authority = locator(
-                AuthorityKind::ExpertiseEntry,
-                authority_path,
-                anchor,
-            );
+            let authority = locator(AuthorityKind::ExpertiseEntry, authority_path, anchor);
             let reason = verify_authority(
                 tmp.path(),
                 "HEAD",
@@ -2607,18 +2624,17 @@ mod tests {
     fn gate_rejects_inapplicable_nested_agents_instruction() {
         let tmp = tempfile::TempDir::new().unwrap();
         let anchor = "Always enforce the configured retry cap";
-        write_authority(
-            tmp.path(),
-            "src/AGENTS.md",
-            &format!("- {anchor}\n"),
-        );
+        write_authority(tmp.path(), "src/AGENTS.md", &format!("- {anchor}\n"));
         let mut follow_up = corrective_follow_up(Some(locator(
             AuthorityKind::AgentsInstruction,
             "src/AGENTS.md",
             anchor,
         )));
-        follow_up.corrective_context.as_mut().unwrap().included_scope =
-            "tests/retry.rs".to_string();
+        follow_up
+            .corrective_context
+            .as_mut()
+            .unwrap()
+            .included_scope = "tests/retry.rs".to_string();
         follow_up.target_paths = vec!["tests/retry.rs".to_string()];
 
         assert!(!classify_follow_up(tmp.path(), &follow_up).is_corrective());
@@ -2680,7 +2696,11 @@ mod tests {
             anchor,
         )));
         follow_up.corrective_context.as_mut().unwrap().requirement = anchor.to_string();
-        follow_up.corrective_context.as_mut().unwrap().included_scope = "src".to_string();
+        follow_up
+            .corrective_context
+            .as_mut()
+            .unwrap()
+            .included_scope = "src".to_string();
         follow_up.target_paths = vec!["src/retry.rs".to_string(), "src/net/client.rs".to_string()];
 
         assert!(classify_follow_up(tmp.path(), &follow_up).is_corrective());
@@ -2702,7 +2722,8 @@ mod tests {
             ".fluent/expertise/retry.md",
             "replacement without the accepted anchor\n",
         );
-        let mut accepted_batch = corrective_batch(accepted.path(), FollowUpSource::Learner, Some(authority));
+        let mut accepted_batch =
+            corrective_batch(accepted.path(), FollowUpSource::Learner, Some(authority));
         accepted_batch.origin.merged_commit = landed_with_authority;
         assert_eq!(
             process_landed_batch(accepted.path(), &accepted_batch, None)
@@ -2726,7 +2747,8 @@ mod tests {
             ".fluent/expertise/retry.md",
             "Cap enforcement belongs in retry.rs\n",
         );
-        let mut rejected_batch = corrective_batch(rejected.path(), FollowUpSource::Learner, Some(authority));
+        let mut rejected_batch =
+            corrective_batch(rejected.path(), FollowUpSource::Learner, Some(authority));
         rejected_batch.origin.merged_commit = landed_without_authority;
         assert_eq!(
             process_landed_batch(rejected.path(), &rejected_batch, None)
@@ -2789,7 +2811,11 @@ mod tests {
     fn gate_downgrades_missing_expected_result_and_unresolved_decisions() {
         let tmp = tempfile::TempDir::new().unwrap();
         write_authority(tmp.path(), ".fluent/expertise/retry.md", "anchor text");
-        let base = locator(AuthorityKind::ExpertiseEntry, ".fluent/expertise/retry.md", "anchor text");
+        let base = locator(
+            AuthorityKind::ExpertiseEntry,
+            ".fluent/expertise/retry.md",
+            "anchor text",
+        );
 
         let mut no_result = corrective_follow_up(Some(base.clone()));
         no_result.expected_result = "   ".to_string();
@@ -2817,7 +2843,11 @@ mod tests {
         assert!(!classify_follow_up(tmp.path(), &missing).is_corrective());
 
         // File present but the anchor has drifted away (stale).
-        write_authority(tmp.path(), ".fluent/expertise/retry.md", "# Retry\n\nunrelated text\n");
+        write_authority(
+            tmp.path(),
+            ".fluent/expertise/retry.md",
+            "# Retry\n\nunrelated text\n",
+        );
         let stale = corrective_follow_up(Some(locator(
             AuthorityKind::ExpertiseEntry,
             ".fluent/expertise/retry.md",
@@ -2826,7 +2856,11 @@ mod tests {
         assert!(!classify_follow_up(tmp.path(), &stale).is_corrective());
 
         // Digest does not match the anchor (tampered in transport).
-        write_authority(tmp.path(), ".fluent/expertise/retry.md", &format!("{anchor}\n"));
+        write_authority(
+            tmp.path(),
+            ".fluent/expertise/retry.md",
+            &format!("{anchor}\n"),
+        );
         let mut tampered = corrective_follow_up(Some(locator(
             AuthorityKind::ExpertiseEntry,
             ".fluent/expertise/retry.md",
@@ -2877,7 +2911,11 @@ mod tests {
     fn fresh_expertise_authority(root: &Path) -> AuthorityLocator {
         let anchor = "Cap enforcement belongs in retry.rs";
         write_authority(root, ".fluent/expertise/retry.md", &format!("{anchor}\n"));
-        locator(AuthorityKind::ExpertiseEntry, ".fluent/expertise/retry.md", anchor)
+        locator(
+            AuthorityKind::ExpertiseEntry,
+            ".fluent/expertise/retry.md",
+            anchor,
+        )
     }
 
     fn write_project_policy(root: &Path, yaml: &str) {
@@ -2990,7 +3028,10 @@ mod tests {
             error.to_string().contains("conflicting derived Work Item"),
             "unexpected error: {error:#}"
         );
-        assert_eq!(store.read_work_item(DERIVED_ID).unwrap().title, "Unrelated valid work");
+        assert_eq!(
+            store.read_work_item(DERIVED_ID).unwrap().title,
+            "Unrelated valid work"
+        );
     }
 
     #[test]
@@ -3079,8 +3120,11 @@ mod tests {
         let current = operation_id_for(&batch.origin);
         let current_dir = operation_dir(tmp.path(), &current);
         fs::create_dir_all(&current_dir).unwrap();
-        write_journal(&current_dir.join("journal.json"), &PostLandJournal::empty(&current))
-            .unwrap();
+        write_journal(
+            &current_dir.join("journal.json"),
+            &PostLandJournal::empty(&current),
+        )
+        .unwrap();
 
         let error = record_post_land_operation(tmp.path(), &batch, None)
             .unwrap_err()
@@ -3285,8 +3329,15 @@ mod tests {
         assert!(derived.origin.is_derived());
         assert_eq!(derived.lineage.root_id.as_deref(), Some("work-1"));
         assert_eq!(
-            derived.origin.provenance().unwrap().observation_id.as_deref(),
-            Some("followup-land-a1478b19201ae32c3d73895587323e1200206c0803f6469558d8b376c53c3a43-a0eebf1952dae493547552e76655314a612b44205eec110b5745ccbbf378b4eb")
+            derived
+                .origin
+                .provenance()
+                .unwrap()
+                .observation_id
+                .as_deref(),
+            Some(
+                "followup-land-a1478b19201ae32c3d73895587323e1200206c0803f6469558d8b376c53c3a43-a0eebf1952dae493547552e76655314a612b44205eec110b5745ccbbf378b4eb"
+            )
         );
         assert!(
             crate::queue::read_ledger(tmp.path(), DERIVED_ID)
@@ -3309,15 +3360,23 @@ mod tests {
         process_landed_batch(tmp.path(), &batch, None).unwrap();
         fs::remove_dir_all(follow_ups_root(tmp.path())).unwrap();
 
-        let derived = WorkModelStore::new(tmp.path()).read_work_item(DERIVED_ID).unwrap();
-        let audit = derived.corrective_audit.as_ref().expect("accepted audit context");
+        let derived = WorkModelStore::new(tmp.path())
+            .read_work_item(DERIVED_ID)
+            .unwrap();
+        let audit = derived
+            .corrective_audit
+            .as_ref()
+            .expect("accepted audit context");
         assert_eq!(audit.follow_up_id, "fu-1");
         assert_eq!(audit.source, "post-merge");
         assert_eq!(audit.learning_summary, "learned");
         assert_eq!(audit.expected_result, "The retry cap is enforced again");
         assert!(audit.unresolved_decisions.is_empty());
         assert_eq!(audit.authority.path, ".fluent/expertise/retry.md");
-        assert_eq!(audit.authority.anchor, "Cap enforcement belongs in retry.rs");
+        assert_eq!(
+            audit.authority.anchor,
+            "Cap enforcement belongs in retry.rs"
+        );
         assert_eq!(audit.evidence[0].path, "artifacts/review.md");
         assert_eq!(audit.evidence[0].digest, "sha256:evidence");
 
@@ -3343,12 +3402,18 @@ mod tests {
         let store = WorkModelStore::new(tmp.path());
         let derived = store.read_work_item(DERIVED_ID).unwrap();
         assert!(derived.authorization.is_execution_ready());
-        assert!(derived.lineage.charged, "an authorized descendant charges its lineage");
+        assert!(
+            derived.lineage.charged,
+            "an authorized descendant charges its lineage"
+        );
 
         let ledger = crate::queue::read_ledger(tmp.path(), DERIVED_ID)
             .unwrap()
             .unwrap();
-        assert!(ledger.active().is_some(), "execute mode enqueues the descendant");
+        assert!(
+            ledger.active().is_some(),
+            "execute mode enqueues the descendant"
+        );
     }
 
     #[test]
@@ -3380,7 +3445,10 @@ mod tests {
         let outcome = process_landed_batch(tmp.path(), &batch, None).unwrap();
 
         assert_eq!(outcome.work_items_created, 1);
-        assert_eq!(outcome.work_items_queued, 0, "an exhausted budget does not enqueue");
+        assert_eq!(
+            outcome.work_items_queued, 0,
+            "an exhausted budget does not enqueue"
+        );
         let derived = store.read_work_item(DERIVED_ID).unwrap();
         assert!(derived.authorization.is_proposed());
         assert!(!derived.lineage.charged);
@@ -3444,7 +3512,10 @@ mod tests {
             .collect();
         assert_eq!(descendants.len(), 2);
         assert_eq!(
-            descendants.iter().filter(|item| item.lineage.charged).count(),
+            descendants
+                .iter()
+                .filter(|item| item.lineage.charged)
+                .count(),
             1,
             "different operations cannot overspend the one-slot lineage"
         );
@@ -3479,8 +3550,7 @@ mod tests {
         store.create_work_item(&human).unwrap();
 
         let authority = fresh_expertise_authority(tmp.path());
-        let mut automatic =
-            corrective_batch(tmp.path(), FollowUpSource::Learner, Some(authority));
+        let mut automatic = corrective_batch(tmp.path(), FollowUpSource::Learner, Some(authority));
         automatic.origin.work_item_id = root_id.to_string();
         let automatic_id = derived_work_item_id(
             &operation_id_for(&automatic.origin),
@@ -3493,9 +3563,8 @@ mod tests {
                 root_id,
                 Some(("HUMAN", "ACQUIRED")),
             );
-            let human_run = scope.spawn(|| {
-                authorize_derived_work_item(tmp.path(), &store, "human-descendant")
-            });
+            let human_run =
+                scope.spawn(|| authorize_derived_work_item(tmp.path(), &store, "human-descendant"));
             assert!(probe.wait_for("HUMAN", "ACQUIRED"));
 
             let automatic_run = scope.spawn(|| process_landed_batch(tmp.path(), &automatic, None));
@@ -3526,13 +3595,23 @@ mod tests {
         assert_eq!(first.work_items_queued, 1);
 
         let second = replay_post_land_operation(tmp.path(), &operation.operation_id).unwrap();
-        assert_eq!(second.work_items_created, 0, "replay derives no duplicate Work");
-        assert_eq!(second.work_items_queued, 0, "replay adds no duplicate dispatch");
+        assert_eq!(
+            second.work_items_created, 0,
+            "replay derives no duplicate Work"
+        );
+        assert_eq!(
+            second.work_items_queued, 0,
+            "replay adds no duplicate dispatch"
+        );
 
         let ledger = crate::queue::read_ledger(tmp.path(), DERIVED_ID)
             .unwrap()
             .unwrap();
-        assert_eq!(ledger.dispatches.len(), 1, "exactly one queue entry survives replay");
+        assert_eq!(
+            ledger.dispatches.len(),
+            1,
+            "exactly one queue entry survives replay"
+        );
     }
 
     #[test]

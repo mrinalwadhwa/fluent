@@ -66,16 +66,27 @@ pub struct WorkAttemptRunConfig<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkAttemptRunOutcome {
-    RanTask { task_id: String, output: String },
-    PlannedReviews { task_ids: Vec<String> },
-    MergeCandidateReady { candidate_id: String },
+    RanTask {
+        task_id: String,
+        output: String,
+    },
+    PlannedReviews {
+        task_ids: Vec<String>,
+    },
+    MergeCandidateReady {
+        candidate_id: String,
+    },
     FollowUpRecoveryPending {
         candidate_id: String,
         stage: String,
         next_action: String,
     },
-    PlannedWriteRound { task_id: String },
-    NeedsUser { handoff_path: String },
+    PlannedWriteRound {
+        task_id: String,
+    },
+    NeedsUser {
+        handoff_path: String,
+    },
     ReviewOnlyComplete,
     ReviewOnlyFailed,
 }
@@ -87,9 +98,8 @@ pub struct WorkAttemptRunResult {
 
 pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunResult> {
     if let Some(mapping) = config.resolved_coder_mapping {
-        let _land_lock = crate::land_lock::acquire(&crate::land_lock::lock_path(
-            config.project_root,
-        ))?;
+        let _land_lock =
+            crate::land_lock::acquire(&crate::land_lock::lock_path(config.project_root))?;
         let mut item = read_work_item_or_not_found(config.store, config.work_item_id)?;
         let attempt = item
             .attempts
@@ -171,9 +181,8 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                 // lock, read the fresh merge status: a candidate that has already
                 // merged forces the retry into handoff-only mode, which never
                 // mutates expertise or the merged branch.
-                let _land_lock = crate::land_lock::acquire(&crate::land_lock::lock_path(
-                    config.project_root,
-                ))?;
+                let _land_lock =
+                    crate::land_lock::acquire(&crate::land_lock::lock_path(config.project_root))?;
                 item = config.store.read_work_item(config.work_item_id)?;
                 let candidate_id = item.create_or_get_merge_candidate(config.attempt_id)?;
                 let attempt_index = item
@@ -189,10 +198,12 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                     .map(|learning| learning.is_failed())
                     .unwrap_or(true);
                 if item.attempts[attempt_index].status != AttemptStatus::Complete
-                    || item.attempts[attempt_index].review_state
-                        != Some(AttemptReviewState::Passed)
+                    || item.attempts[attempt_index].review_state != Some(AttemptReviewState::Passed)
                 {
-                    bail!("Attempt {:?} is no longer eligible for Learner retry", config.attempt_id);
+                    bail!(
+                        "Attempt {:?} is no longer eligible for Learner retry",
+                        config.attempt_id
+                    );
                 }
                 let candidate = item
                     .merge_candidates
@@ -204,18 +215,17 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                             candidate_id
                         )
                     })?;
-                let merged_commit = if candidate.merge_state.status
-                    == MergeCandidateMergeStatus::Merged
-                {
-                    Some(candidate.merge_state.merged_commit.clone().ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "merged candidate {:?} has no persisted merged commit",
-                            candidate_id
-                        )
-                    })?)
-                } else {
-                    None
-                };
+                let merged_commit =
+                    if candidate.merge_state.status == MergeCandidateMergeStatus::Merged {
+                        Some(candidate.merge_state.merged_commit.clone().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "merged candidate {:?} has no persisted merged commit",
+                                candidate_id
+                            )
+                        })?)
+                    } else {
+                        None
+                    };
                 let handoff_only =
                     work_task_executor::learner_is_handoff_only(merged_commit.is_some());
 
@@ -276,9 +286,7 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                             .merge_candidates
                             .iter()
                             .find(|candidate| candidate.id == candidate_id)
-                            .and_then(|candidate| {
-                                candidate.merge_state.follow_up_failure.as_ref()
-                            })
+                            .and_then(|candidate| candidate.merge_state.follow_up_failure.as_ref())
                             .ok_or_else(|| {
                                 anyhow::anyhow!(
                                     "Merge Candidate {:?} has incomplete follow-up recovery but \
@@ -943,9 +951,7 @@ fn try_learn(
         item.merge_candidates
             .iter()
             .find(|candidate| candidate.id == candidate_id)
-            .filter(|candidate| {
-                candidate.merge_state.status == MergeCandidateMergeStatus::Merged
-            })
+            .filter(|candidate| candidate.merge_state.status == MergeCandidateMergeStatus::Merged)
             .and_then(|candidate| candidate.merge_state.merged_commit.clone())
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -1074,12 +1080,14 @@ fn try_learn(
 
     let mut draft = crate::learner::read_draft(project_root, &work_item_id, &attempt_id)?;
     for path in &confinement.denied_paths {
-        draft.follow_ups.push(work_task_executor::expertise_proposal_follow_up(
-            format!("expertise-{}", sanitize_denied_path(path)),
-            format!(
-                "Capture durable project knowledge a post-land retry could not write to {path}"
-            ),
-        ));
+        draft
+            .follow_ups
+            .push(work_task_executor::expertise_proposal_follow_up(
+                format!("expertise-{}", sanitize_denied_path(path)),
+                format!(
+                    "Capture durable project knowledge a post-land retry could not write to {path}"
+                ),
+            ));
     }
     let handoff = crate::learner::stamp_handoff(
         draft,
@@ -1109,9 +1117,9 @@ fn recover_legacy_accepted_base(
         .iter()
         .filter(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
         .collect::<Vec<_>>();
-    let first_write = completed_writes.first().ok_or_else(|| {
-        anyhow::anyhow!("cannot recover accepted diff base: no completed Write")
-    })?;
+    let first_write = completed_writes
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("cannot recover accepted diff base: no completed Write"))?;
     let candidate_ref = format!(
         "refs/heads/work/{}/{}/{}",
         work_item_id, attempt.id, first_write.id
@@ -1121,11 +1129,14 @@ fn recover_legacy_accepted_base(
         .filter_map(|task| task.output.as_ref().map(|output| output.commit.as_str()))
         .collect::<HashSet<_>>();
     if completed_writes.iter().any(|task| task.output.is_none()) {
-        bail!(
-            "cannot recover accepted diff base: a completed Write has no persisted rebase tip"
-        );
+        bail!("cannot recover accepted diff base: a completed Write has no persisted rebase tip");
     }
-    let persisted_tip = match persisted_tips.iter().copied().collect::<Vec<_>>().as_slice() {
+    let persisted_tip = match persisted_tips
+        .iter()
+        .copied()
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
         [tip] if *tip == candidate_commit => *tip,
         _ => {
             bail!(
@@ -1137,7 +1148,11 @@ fn recover_legacy_accepted_base(
         .tasks
         .iter()
         .filter(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
-        .filter_map(|task| task.output.as_ref().map(|output| output.source_branch.as_str()))
+        .filter_map(|task| {
+            task.output
+                .as_ref()
+                .map(|output| output.source_branch.as_str())
+        })
         .collect();
     if source_branches.len() != 1 {
         bail!(
@@ -1349,18 +1364,10 @@ impl HandoffOnlyWorkspace {
             .join(crate::learner::handoff_dir_rel(work_item_id, attempt_id));
         fs::create_dir_all(&handoff_dir)?;
         let handoff_dir = fs::canonicalize(handoff_dir)?;
-        let review_artifact_paths = copy_learner_artifacts(
-            temp.path(),
-            project_root,
-            "reviews",
-            review_artifact_paths,
-        )?;
-        let tester_artifact_paths = copy_learner_artifacts(
-            temp.path(),
-            project_root,
-            "testers",
-            tester_artifact_paths,
-        )?;
+        let review_artifact_paths =
+            copy_learner_artifacts(temp.path(), project_root, "reviews", review_artifact_paths)?;
+        let tester_artifact_paths =
+            copy_learner_artifacts(temp.path(), project_root, "testers", tester_artifact_paths)?;
         Ok(Self {
             _temp: temp,
             workspace_path,
@@ -1445,7 +1452,10 @@ fn read_confined_regular_file(
     let canonical_parent = fs::canonicalize(parent)
         .with_context(|| format!("resolve {description} parent {}", parent.display()))?;
     if !canonical_parent.starts_with(&canonical_root) {
-        bail!("{description} escapes its confined root: {}", path.display());
+        bail!(
+            "{description} escapes its confined root: {}",
+            path.display()
+        );
     }
     let name = path
         .file_name()
@@ -1459,7 +1469,10 @@ fn read_confined_regular_file(
         }
     })?;
     if !before.file_type().is_file() || before.nlink() != 1 {
-        bail!("{description} is not a regular file or has aliases: {}", path.display());
+        bail!(
+            "{description} is not a regular file or has aliases: {}",
+            path.display()
+        );
     }
     if before.len() > max_bytes {
         bail!("{description} exceeds the {max_bytes}-byte limit");
@@ -1488,10 +1501,7 @@ fn read_confined_regular_file(
         bail!("{description} exceeds the {max_bytes}-byte limit");
     }
     let after = file.metadata()?;
-    if after.dev() != opened.dev()
-        || after.ino() != opened.ino()
-        || after.len() != opened.len()
-    {
+    if after.dev() != opened.dev() || after.ino() != opened.ino() || after.len() != opened.len() {
         bail!("{description} changed while it was read");
     }
     Ok(bytes)
@@ -1534,8 +1544,7 @@ fn atomic_write_confined(root: &Path, relative: &Path, bytes: &[u8]) -> Result<(
     let expected_parent = fs::metadata(&canonical_parent)?;
     let parent = File::open(&canonical_parent)?;
     let opened_parent = parent.metadata()?;
-    if expected_parent.dev() != opened_parent.dev()
-        || expected_parent.ino() != opened_parent.ino()
+    if expected_parent.dev() != opened_parent.dev() || expected_parent.ino() != opened_parent.ino()
     {
         bail!("confined target ancestor changed while it was opened");
     }
@@ -1742,11 +1751,10 @@ fn all_tester_artifact_paths(
             let area = task.artifact_area.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("completed Tester {:?} has no artifact area", task.id)
             })?;
-            Ok(work_task_executor::resolve_managed_artifact_area_path(
-                project_root,
-                &area.path,
-            )?
-            .join("tester-results.json"))
+            Ok(
+                work_task_executor::resolve_managed_artifact_area_path(project_root, &area.path)?
+                    .join("tester-results.json"),
+            )
         })
         .collect()
 }
@@ -2042,11 +2050,10 @@ fn all_review_artifact_paths(
             let area = task.artifact_area.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("completed review {:?} has no artifact area", task.id)
             })?;
-            Ok(work_task_executor::resolve_managed_artifact_area_path(
-                project_root,
-                &area.path,
-            )?
-            .join("review.md"))
+            Ok(
+                work_task_executor::resolve_managed_artifact_area_path(project_root, &area.path)?
+                    .join("review.md"),
+            )
         })
         .collect()
 }
@@ -2149,13 +2156,8 @@ mod tests {
         );
 
         assert_eq!(
-            parse_exact_rebase_base(
-                reflog,
-                "refs/heads/work/candidate",
-                "main",
-                "rebased",
-            )
-            .unwrap(),
+            parse_exact_rebase_base(reflog, "refs/heads/work/candidate", "main", "rebased",)
+                .unwrap(),
             ("base".to_string(), "rebased".to_string())
         );
     }
@@ -2169,13 +2171,8 @@ mod tests {
             "base-1\trebase (start): checkout main\n",
         );
 
-        let error = parse_exact_rebase_base(
-            reflog,
-            "refs/heads/work/candidate",
-            "main",
-            "tip-2",
-        )
-        .unwrap_err();
+        let error = parse_exact_rebase_base(reflog, "refs/heads/work/candidate", "main", "tip-2")
+            .unwrap_err();
 
         assert!(error.to_string().contains("ambiguous"));
     }
@@ -2187,13 +2184,8 @@ mod tests {
             "picked\trebase (pick): Add accepted change\n",
         );
 
-        let error = parse_exact_rebase_base(
-            reflog,
-            "refs/heads/work/candidate",
-            "main",
-            "tip",
-        )
-        .unwrap_err();
+        let error = parse_exact_rebase_base(reflog, "refs/heads/work/candidate", "main", "tip")
+            .unwrap_err();
 
         assert!(error.to_string().contains("exact rebase provenance"));
     }
@@ -2206,13 +2198,8 @@ mod tests {
             "base\trebase (start): checkout main\n",
         );
 
-        let error = parse_exact_rebase_base(
-            reflog,
-            "refs/heads/work/candidate",
-            "main",
-            "tip",
-        )
-        .unwrap_err();
+        let error = parse_exact_rebase_base(reflog, "refs/heads/work/candidate", "main", "tip")
+            .unwrap_err();
 
         assert!(error.to_string().contains("structural gap"));
     }
@@ -2224,13 +2211,9 @@ mod tests {
             "base\trebase (start): checkout main\n",
         );
 
-        let error = parse_exact_rebase_base(
-            reflog,
-            "refs/heads/work/candidate",
-            "main",
-            "persisted-tip",
-        )
-        .unwrap_err();
+        let error =
+            parse_exact_rebase_base(reflog, "refs/heads/work/candidate", "main", "persisted-tip")
+                .unwrap_err();
 
         assert!(error.to_string().contains("persisted rebase tip"));
     }
@@ -2246,13 +2229,8 @@ mod tests {
                 "tip\trebase (finish): returning to refs/heads/work/candidate\n{middle}base\trebase (start): checkout main\n"
             );
             assert_eq!(
-                parse_exact_rebase_base(
-                    &reflog,
-                    "refs/heads/work/candidate",
-                    "main",
-                    "tip",
-                )
-                .unwrap(),
+                parse_exact_rebase_base(&reflog, "refs/heads/work/candidate", "main", "tip",)
+                    .unwrap(),
                 ("base".to_string(), "tip".to_string())
             );
         }
@@ -2266,26 +2244,16 @@ mod tests {
             "base\trebase (start): checkout main\n",
         );
 
-        let error = parse_exact_rebase_base(
-            reflog,
-            "refs/heads/work/candidate",
-            "main",
-            "tip",
-        )
-        .unwrap_err();
+        let error = parse_exact_rebase_base(reflog, "refs/heads/work/candidate", "main", "tip")
+            .unwrap_err();
 
         assert!(error.to_string().contains("structural gap"));
     }
 
     #[test]
     fn exact_legacy_rebase_base_rejects_expired_reflog() {
-        let error = parse_exact_rebase_base(
-            "",
-            "refs/heads/work/candidate",
-            "main",
-            "tip",
-        )
-        .unwrap_err();
+        let error =
+            parse_exact_rebase_base("", "refs/heads/work/candidate", "main", "tip").unwrap_err();
 
         assert!(error.to_string().contains("exact rebase provenance"));
     }
@@ -2439,8 +2407,14 @@ mod tests {
         let testers =
             copy_learner_artifacts(isolated.path(), live.path(), "testers", &[tester]).unwrap();
 
-        assert_eq!(fs::read_to_string(&reviews[0]).unwrap(), "review sentinel\n");
-        assert_eq!(fs::read_to_string(&testers[0]).unwrap(), "tester sentinel\n");
+        assert_eq!(
+            fs::read_to_string(&reviews[0]).unwrap(),
+            "review sentinel\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&testers[0]).unwrap(),
+            "tester sentinel\n"
+        );
         assert!(reviews[0].starts_with(isolated.path()));
         assert!(testers[0].starts_with(isolated.path()));
         assert!(!reviews[0].starts_with(live.path()));
@@ -2455,37 +2429,23 @@ mod tests {
         let live = tempfile::TempDir::new().unwrap();
         let isolated = tempfile::TempDir::new().unwrap();
         let missing = live.path().join("missing.md");
-        assert!(copy_learner_artifacts(
-            isolated.path(),
-            live.path(),
-            "reviews",
-            &[missing],
-        )
-        .is_err());
+        assert!(
+            copy_learner_artifacts(isolated.path(), live.path(), "reviews", &[missing],).is_err()
+        );
 
         let hardlinked = live.path().join("review.md");
         fs::write(&hardlinked, "review\n").unwrap();
         fs::hard_link(&hardlinked, live.path().join("review-alias.md")).unwrap();
-        let error = copy_learner_artifacts(
-            isolated.path(),
-            live.path(),
-            "reviews",
-            &[hardlinked],
-        )
-        .unwrap_err();
+        let error = copy_learner_artifacts(isolated.path(), live.path(), "reviews", &[hardlinked])
+            .unwrap_err();
         assert!(error.to_string().contains("aliases"));
 
         let outside = tempfile::TempDir::new().unwrap();
         fs::write(outside.path().join("escaped.md"), "escaped\n").unwrap();
         symlink(outside.path(), live.path().join("artifact-alias")).unwrap();
         let escaped = live.path().join("artifact-alias/escaped.md");
-        let error = copy_learner_artifacts(
-            isolated.path(),
-            live.path(),
-            "reviews",
-            &[escaped],
-        )
-        .unwrap_err();
+        let error = copy_learner_artifacts(isolated.path(), live.path(), "reviews", &[escaped])
+            .unwrap_err();
         assert!(error.to_string().contains("escapes"));
     }
 
@@ -2493,11 +2453,7 @@ mod tests {
     fn completed_missing_artifacts_reach_the_fail_closed_copy_boundary() {
         let project = tempfile::TempDir::new().unwrap();
         let isolated = tempfile::TempDir::new().unwrap();
-        let artifact_area = work_artifact_path(
-            "work-1",
-            "attempt-1",
-            "attempt-1-review-1-tests",
-        );
+        let artifact_area = work_artifact_path("work-1", "attempt-1", "attempt-1-review-1-tests");
         let attempt = attempt_with_tasks(vec![review_task_with_artifact(
             "attempt-1-review-1-tests",
             "tests",
@@ -2507,13 +2463,8 @@ mod tests {
         let declared = all_review_artifact_paths(project.path(), &attempt).unwrap();
         assert_eq!(declared.len(), 1);
         assert!(!declared[0].exists());
-        let error = copy_learner_artifacts(
-            isolated.path(),
-            project.path(),
-            "reviews",
-            &declared,
-        )
-        .unwrap_err();
+        let error = copy_learner_artifacts(isolated.path(), project.path(), "reviews", &declared)
+            .unwrap_err();
         assert!(
             error
                 .to_string()
@@ -2530,18 +2481,12 @@ mod tests {
         fs::write(project.join("tracked.txt"), "tracked\n").unwrap();
         git::run(&project, &["add", "."], "add fixture").unwrap();
         git::run(&project, &["commit", "-m", "Add fixture"], "commit fixture").unwrap();
-        let baseline = git::run_stdout(&project, &["rev-parse", "HEAD"], "resolve baseline")
-            .unwrap();
+        let baseline =
+            git::run_stdout(&project, &["rev-parse", "HEAD"], "resolve baseline").unwrap();
 
-        let isolated = HandoffOnlyWorkspace::create(
-            &project,
-            "work-1",
-            "attempt-1",
-            &baseline,
-            &[],
-            &[],
-        )
-        .unwrap();
+        let isolated =
+            HandoffOnlyWorkspace::create(&project, "work-1", "attempt-1", &baseline, &[], &[])
+                .unwrap();
         let live = project.to_string_lossy();
         let git_dir = isolated.workspace_path.join(".git");
         for entry in walk_files(&git_dir) {

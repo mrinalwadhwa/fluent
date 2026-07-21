@@ -85,7 +85,10 @@ pub fn cleanup_work_items(
         let work_item = match store.read_work_item(&work_item.id) {
             Ok(work_item)
                 if work_item_is_cleanable(&work_item)
-                    && !retains_for_follow_up_recovery(&source_root, &work_item) => work_item,
+                    && !retains_for_follow_up_recovery(&source_root, &work_item) =>
+            {
+                work_item
+            }
             _ => continue,
         };
         let plan = work_cleanup_plan(&source_root, &store, &work_item, &registered, options.apply)?;
@@ -987,7 +990,12 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let project = tmp.path().join("project");
         fs::create_dir_all(&project).unwrap();
-        git::run(&project, &["init", "-q"], "initialize cleanup test repository").unwrap();
+        git::run(
+            &project,
+            &["init", "-q"],
+            "initialize cleanup test repository",
+        )
+        .unwrap();
         git::run(
             &project,
             &["config", "user.email", "test@example.com"],
@@ -1002,7 +1010,12 @@ mod tests {
         .unwrap();
         fs::write(project.join("README.md"), "test\n").unwrap();
         git::run(&project, &["add", "README.md"], "stage cleanup fixture").unwrap();
-        git::run(&project, &["commit", "-m", "Seed"], "commit cleanup fixture").unwrap();
+        git::run(
+            &project,
+            &["commit", "-m", "Seed"],
+            "commit cleanup fixture",
+        )
+        .unwrap();
         let missing = tmp.path().join("missing-worktree");
         let missing_text = missing.to_string_lossy().into_owned();
         git::run(
@@ -1038,9 +1051,18 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let project = tmp.path().join("project");
         fs::create_dir_all(&project).unwrap();
-        git::run(&project, &["init", "-q"], "initialize locked cleanup repository").unwrap();
-        git::run(&project, &["config", "user.email", "test@example.com"], "configure email")
-            .unwrap();
+        git::run(
+            &project,
+            &["init", "-q"],
+            "initialize locked cleanup repository",
+        )
+        .unwrap();
+        git::run(
+            &project,
+            &["config", "user.email", "test@example.com"],
+            "configure email",
+        )
+        .unwrap();
         git::run(&project, &["config", "user.name", "Test"], "configure name").unwrap();
         fs::write(project.join("README.md"), "test\n").unwrap();
         git::run(&project, &["add", "README.md"], "stage fixture").unwrap();
@@ -1273,7 +1295,12 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let project = tmp.path().join("project");
         fs::create_dir_all(&project).unwrap();
-        git::run(&project, &["init", "-q"], "initialize runtime cleanup repository").unwrap();
+        git::run(
+            &project,
+            &["init", "-q"],
+            "initialize runtime cleanup repository",
+        )
+        .unwrap();
         let store = WorkModelStore::new(&project);
 
         let item = WorkItem {

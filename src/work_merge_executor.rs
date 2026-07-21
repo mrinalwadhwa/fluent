@@ -247,11 +247,12 @@ fn record_follow_up_failure(
         .iter_mut()
         .find(|candidate| candidate.id == candidate_id)
     {
-        candidate.merge_state.follow_up_failure = Some(crate::work_model::FollowUpProcessingFailure {
-            stage: stage.to_string(),
-            message: message.to_string(),
-            next_action: next_action.to_string(),
-        });
+        candidate.merge_state.follow_up_failure =
+            Some(crate::work_model::FollowUpProcessingFailure {
+                stage: stage.to_string(),
+                message: message.to_string(),
+                next_action: next_action.to_string(),
+            });
         store.write_work_item(&item)?;
     }
     Ok(())

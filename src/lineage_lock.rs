@@ -34,7 +34,11 @@ pub fn acquire_human(project_root: &Path, root_id: &str) -> io::Result<LineageLo
     acquire_for(project_root, root_id, Some("HUMAN"))
 }
 
-fn acquire_for(project_root: &Path, root_id: &str, _actor: Option<&str>) -> io::Result<LineageLock> {
+fn acquire_for(
+    project_root: &Path,
+    root_id: &str,
+    _actor: Option<&str>,
+) -> io::Result<LineageLock> {
     let path = lock_path(project_root, root_id);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;

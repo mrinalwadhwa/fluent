@@ -2677,7 +2677,11 @@ fn land_work_1(main_dir: &Path, bin_dir: &Path, no_post_merge_review: bool) {
 /// handoff-only path. On the successful run it writes `draft_json` and, when
 /// `commit_expertise` is set, commits an expertise change that a handoff-only
 /// run must discard.
-fn post_land_learner_mock_script(counter: &Path, draft_json: &str, commit_expertise: bool) -> String {
+fn post_land_learner_mock_script(
+    counter: &Path,
+    draft_json: &str,
+    commit_expertise: bool,
+) -> String {
     let counter = counter.display().to_string();
     let prompt_log = format!("{counter}.prompt");
     let expertise = if commit_expertise {
@@ -2977,11 +2981,7 @@ fn rerun_learner_attempt_sandboxed(main_dir: &Path, bin_dir: &Path) -> std::proc
 
 fn real_sandbox_exec_is_usable() -> bool {
     std::process::Command::new("/usr/bin/sandbox-exec")
-        .args([
-            "-p",
-            "(version 1)(allow default)",
-            "/usr/bin/true",
-        ])
+        .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
@@ -3105,7 +3105,10 @@ fn land_processes_handoff_after_recording_merge() {
     land_work_1(&main_dir, &bin_dir, false);
 
     let value = read_work_show_json(&main_dir, "work-1");
-    assert_eq!(value["merge_candidates"][0]["merge_state"]["status"], "merged");
+    assert_eq!(
+        value["merge_candidates"][0]["merge_state"]["status"],
+        "merged"
+    );
 
     let observations = open_observation_files(&main_dir);
     assert_eq!(
@@ -3169,7 +3172,10 @@ fn land_creates_provenance_linked_observation() {
         fs::read_to_string(main_dir.join(".fluent/observations").join(&observations[0])).unwrap();
 
     // The Observation identifies the follow-up and its full origin.
-    assert!(content.contains("follow-up-id: fu-1"), "content:\n{content}");
+    assert!(
+        content.contains("follow-up-id: fu-1"),
+        "content:\n{content}"
+    );
     assert!(content.contains("work-item-id: work-1"));
     assert!(content.contains("attempt-id: attempt-1"));
     assert!(content.contains("merge-candidate-id: attempt-1-merge-candidate"));
@@ -3203,7 +3209,10 @@ fn observation_show_exposes_learning_provenance() {
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("work-item-id: work-1"), "show output:\n{stdout}");
+    assert!(
+        stdout.contains("work-item-id: work-1"),
+        "show output:\n{stdout}"
+    );
     assert!(stdout.contains("merge-candidate-id: attempt-1-merge-candidate"));
     assert!(stdout.contains("Restore the retry cap"));
 }
@@ -3231,10 +3240,13 @@ fn land_consumes_empty_handoff_without_placeholders() {
         "an empty handoff derives no Work Item"
     );
 
-    let journal = read_json_path(
-        &main_dir.join(format!(".fluent/work/follow-ups/{OPERATION_ID}/journal.json")),
+    let journal = read_json_path(&main_dir.join(format!(
+        ".fluent/work/follow-ups/{OPERATION_ID}/journal.json"
+    )));
+    assert_eq!(
+        journal["completed"], true,
+        "an empty handoff records as processed"
     );
-    assert_eq!(journal["completed"], true, "an empty handoff records as processed");
 }
 
 #[test]
@@ -3274,8 +3286,7 @@ fn learner_followup_processing_is_idempotent() {
 
 const AUTHORITY_ANCHOR: &str = "Cap enforcement belongs in retry rs";
 const AUTHORITY_PATH: &str = ".fluent/expertise/retry.md";
-const OPERATION_ID: &str =
-    "land-a1478b19201ae32c3d73895587323e1200206c0803f6469558d8b376c53c3a43";
+const OPERATION_ID: &str = "land-a1478b19201ae32c3d73895587323e1200206c0803f6469558d8b376c53c3a43";
 const DERIVED_FU1: &str = "derived-land-a1478b19201ae32c3d73895587323e1200206c0803f6469558d8b376c53c3a43-a0eebf1952dae493547552e76655314a612b44205eec110b5745ccbbf378b4eb";
 const DERIVED_FU2: &str = "derived-land-a1478b19201ae32c3d73895587323e1200206c0803f6469558d8b376c53c3a43-bfb56c767d9eb049aff6c02810b2a650d9fb0390a4fa87d5f894e1125713a85c";
 
@@ -3286,7 +3297,12 @@ fn commit_authority(main_dir: &Path) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, format!("# Retry expertise\n\n{AUTHORITY_ANCHOR}\n")).unwrap();
     git::run(main_dir, &["add", AUTHORITY_PATH], "stage authority").unwrap();
-    git::run(main_dir, &["commit", "-m", "Add retry expertise"], "commit authority").unwrap();
+    git::run(
+        main_dir,
+        &["commit", "-m", "Add retry expertise"],
+        "commit authority",
+    )
+    .unwrap();
 }
 
 /// A corrective follow-up JSON object citing the committed expertise authority,
@@ -3347,9 +3363,17 @@ fn corrective_host_gate_requires_complete_fresh_trusted_context() {
     // Both follow-ups materialize an Observation.
     assert_eq!(open_observation_files(&main_dir).len(), 2);
     // Only the trusted follow-up derives Work.
-    assert!(main_dir.join(".fluent/work/items").join(format!("{DERIVED_FU1}.json")).exists());
     assert!(
-        !main_dir.join(".fluent/work/items").join(format!("{DERIVED_FU2}.json")).exists(),
+        main_dir
+            .join(".fluent/work/items")
+            .join(format!("{DERIVED_FU1}.json"))
+            .exists()
+    );
+    assert!(
+        !main_dir
+            .join(".fluent/work/items")
+            .join(format!("{DERIVED_FU2}.json"))
+            .exists(),
         "an untrusted corrective context stays Observation-only"
     );
 }
@@ -3395,7 +3419,8 @@ fn propose_mode_creates_linked_proposed_work_item() {
     let derived = work_item_value(&main_dir, DERIVED_FU1);
     assert_eq!(derived["authorization"]["state"], "proposed");
     assert_eq!(
-        derived["origin"]["observation_id"], "followup-land-a1478b19201ae32c3d73895587323e1200206c0803f6469558d8b376c53c3a43-a0eebf1952dae493547552e76655314a612b44205eec110b5745ccbbf378b4eb",
+        derived["origin"]["observation_id"],
+        "followup-land-a1478b19201ae32c3d73895587323e1200206c0803f6469558d8b376c53c3a43-a0eebf1952dae493547552e76655314a612b44205eec110b5745ccbbf378b4eb",
         "the proposed Work Item links back to its Observation"
     );
     assert!(
@@ -3436,7 +3461,10 @@ fn execute_mode_at_lineage_limit_retains_proposed_work() {
     let main_dir = setup_git_project(&tmp);
     commit_authority(&main_dir);
     // Execute mode with room for a single descendant in the lineage.
-    write_follow_up_policy(&main_dir, "follow-up:\n  mode: execute\n  descendant-limit: 1\n");
+    write_follow_up_policy(
+        &main_dir,
+        "follow-up:\n  mode: execute\n  descendant-limit: 1\n",
+    );
     let bin_dir = tmp.path().join("bin-limit");
     // Two corrective follow-ups compete for one lineage slot.
     write_mock_claude(
@@ -3534,7 +3562,10 @@ fn human_authorization_transitions_same_work_item() {
     authorize_work_item(&main_dir, DERIVED_FU1);
 
     let derived = work_item_value(&main_dir, DERIVED_FU1);
-    assert_eq!(derived["id"], DERIVED_FU1, "the same Work Item transitions in place");
+    assert_eq!(
+        derived["id"], DERIVED_FU1,
+        "the same Work Item transitions in place"
+    );
     assert_eq!(derived["authorization"]["state"], "execution-ready");
     assert_eq!(
         derived["authorization"]["authority"], "human",
@@ -3589,7 +3620,10 @@ fn human_authorization_can_override_exhausted_automatic_budget() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     commit_authority(&main_dir);
-    write_follow_up_policy(&main_dir, "follow-up:\n  mode: execute\n  descendant-limit: 1\n");
+    write_follow_up_policy(
+        &main_dir,
+        "follow-up:\n  mode: execute\n  descendant-limit: 1\n",
+    );
     let bin_dir = tmp.path().join("bin-override");
     write_mock_claude(
         &bin_dir,
@@ -3623,7 +3657,10 @@ fn human_authorization_can_override_exhausted_automatic_budget() {
 
     // The lineage now holds two charges against a limit of one — the human
     // override exceeded the cap while the automatic path had correctly stopped.
-    assert_eq!(work_item_value(&main_dir, DERIVED_FU1)["lineage"]["charged"], true);
+    assert_eq!(
+        work_item_value(&main_dir, DERIVED_FU1)["lineage"]["charged"],
+        true
+    );
 }
 
 #[test]
@@ -3647,7 +3684,9 @@ fn repeated_work_authorization_is_idempotent() {
 
     // Drive the dispatch to a terminal disposition; re-authorization must not
     // revive it.
-    let token = queue::claim(&main_dir, DERIVED_FU1, "attempt-x").unwrap().unwrap();
+    let token = queue::claim(&main_dir, DERIVED_FU1, "attempt-x")
+        .unwrap()
+        .unwrap();
     queue::reconcile(&main_dir, &token, DispatchStatus::Failed).unwrap();
     authorize_work_item(&main_dir, DERIVED_FU1);
     assert_eq!(
@@ -3721,11 +3760,13 @@ fn post_land_learner_retry_materializes_recovered_handoff() {
     // immediately under the land-gated rules.
     require_successful_trusted_retry!(rerun_learner_attempt(&main_dir, &bin_dir));
     let observations = open_observation_files(&main_dir);
-    assert_eq!(observations.len(), 1, "the recovered handoff materializes one Observation");
-    let observation = fs::read_to_string(
-        main_dir.join(".fluent/observations").join(&observations[0]),
-    )
-    .unwrap();
+    assert_eq!(
+        observations.len(),
+        1,
+        "the recovered handoff materializes one Observation"
+    );
+    let observation =
+        fs::read_to_string(main_dir.join(".fluent/observations").join(&observations[0])).unwrap();
     assert!(observation.contains("follow-up-id: fu-1"));
     assert!(
         !candidate_workspace.exists(),
@@ -3806,7 +3847,11 @@ fn successful_learning_resumes_failed_materialization_without_rerunning_coder() 
 
     create_and_run_learner_attempt(&main_dir, &bin_dir);
     land_work_1(&main_dir, &bin_dir, true);
-    fs::write(main_dir.join(".fluent/observations"), "block observation directory\n").unwrap();
+    fs::write(
+        main_dir.join(".fluent/observations"),
+        "block observation directory\n",
+    )
+    .unwrap();
 
     let obstructed = fluent_cmd()
         .current_dir(&main_dir)
@@ -3933,15 +3978,29 @@ fn post_land_learner_retry_preserves_merged_commit() {
     create_and_run_learner_attempt(&main_dir, &bin_dir);
     let candidate = main_dir.join("../work-6-work-1-attempt-1");
     fs::write(candidate.join("merge-fix.txt"), "accepted merge fix\n").unwrap();
-    git::run(&candidate, &["add", "merge-fix.txt"], "stage accepted merge fix").unwrap();
+    git::run(
+        &candidate,
+        &["add", "merge-fix.txt"],
+        "stage accepted merge fix",
+    )
+    .unwrap();
     git::run(
         &candidate,
         &["commit", "-m", "Apply accepted merge fix"],
         "commit accepted merge fix",
     )
     .unwrap();
-    fs::write(main_dir.join("target-only.txt"), "unrelated target change\n").unwrap();
-    git::run(&main_dir, &["add", "target-only.txt"], "stage target-only change").unwrap();
+    fs::write(
+        main_dir.join("target-only.txt"),
+        "unrelated target change\n",
+    )
+    .unwrap();
+    git::run(
+        &main_dir,
+        &["add", "target-only.txt"],
+        "stage target-only change",
+    )
+    .unwrap();
     git::run(
         &main_dir,
         &["commit", "-m", "Add target-only change"],
@@ -3957,7 +4016,10 @@ fn post_land_learner_retry_preserves_merged_commit() {
     // not fall back to the now-moving `main` source branch.
     let task_path = work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-write-1");
     let mut task = read_json_value(&task_path);
-    task["output"].as_object_mut().unwrap().remove("base_commit");
+    task["output"]
+        .as_object_mut()
+        .unwrap()
+        .remove("base_commit");
     write_json_value(&task_path, &task);
 
     let candidate_reflog = git::run_stdout(
@@ -3994,7 +4056,11 @@ fn post_land_learner_retry_preserves_merged_commit() {
     );
     let accepted_files = git::run_stdout(
         &main_dir,
-        &["diff", "--name-only", &format!("{accepted_base}...{merged_before}")],
+        &[
+            "diff",
+            "--name-only",
+            &format!("{accepted_base}...{merged_before}"),
+        ],
         "inspect accepted Attempt change",
     )
     .unwrap();
@@ -4038,7 +4104,10 @@ fn post_land_legacy_recovery_rejects_a_wrong_ref_reflog_session() {
     let candidate = main_dir.join("../work-6-work-1-attempt-1");
     let task_path = work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-write-1");
     let mut task = read_json_value(&task_path);
-    task["output"].as_object_mut().unwrap().remove("base_commit");
+    task["output"]
+        .as_object_mut()
+        .unwrap()
+        .remove("base_commit");
     write_json_value(&task_path, &task);
 
     git::run(
@@ -4047,11 +4116,21 @@ fn post_land_legacy_recovery_rejects_a_wrong_ref_reflog_session() {
         "expire retained provenance",
     )
     .unwrap();
-    let base = git::run_stdout(&candidate, &["rev-parse", "HEAD^"], "resolve wrong-ref base")
-        .unwrap();
+    let base = git::run_stdout(
+        &candidate,
+        &["rev-parse", "HEAD^"],
+        "resolve wrong-ref base",
+    )
+    .unwrap();
     git::run(
         &candidate,
-        &["update-ref", "-m", "rebase (start): checkout main", "HEAD", &base],
+        &[
+            "update-ref",
+            "-m",
+            "rebase (start): checkout main",
+            "HEAD",
+            &base,
+        ],
         "record wrong-ref start",
     )
     .unwrap();
@@ -4098,11 +4177,7 @@ fn concurrent_learner_retry_and_land_never_mutate_after_merge() {
     let bin_dir = tmp.path().join("bin-serialize");
     write_mock_claude(
         &bin_dir,
-        &contended_learner_mock_script(
-            &counter,
-            &retry_started,
-            &retry_release,
-        ),
+        &contended_learner_mock_script(&counter, &retry_started, &retry_release),
     );
 
     create_and_run_learner_attempt(&main_dir, &bin_dir);
@@ -4121,7 +4196,10 @@ fn concurrent_learner_retry_and_land_never_mutate_after_merge() {
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    assert!(retry_started.exists(), "learner retry reached its dirty window");
+    assert!(
+        retry_started.exists(),
+        "learner retry reached its dirty window"
+    );
 
     let mut land = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
         .current_dir(&main_dir)
@@ -4138,21 +4216,13 @@ fn concurrent_learner_retry_and_land_never_mutate_after_merge() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let land_lock_path =
-        fs::canonicalize(main_dir.join(".fluent/work/locks/land.lock")).unwrap();
+    let land_lock_path = fs::canonicalize(main_dir.join(".fluent/work/locks/land.lock")).unwrap();
     let land_pid = land.id().to_string();
     let land_lock_text = land_lock_path.to_string_lossy().into_owned();
     let mut land_opened_shared_boundary = false;
     for _ in 0..200 {
         let output = std::process::Command::new("/usr/sbin/lsof")
-            .args([
-                "-a",
-                "-p",
-                &land_pid,
-                "-Fn",
-                "--",
-                &land_lock_text,
-            ])
+            .args(["-a", "-p", &land_pid, "-Fn", "--", &land_lock_text])
             .output()
             .unwrap();
         let expected = format!("n{}", land_lock_path.display());
@@ -4236,7 +4306,10 @@ fn cleanup_waits_for_recovery_then_rereads_the_completed_origin() {
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    assert!(retry_started.exists(), "recovery reached its serialized mutation window");
+    assert!(
+        retry_started.exists(),
+        "recovery reached its serialized mutation window"
+    );
 
     let mut cleanup = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
         .current_dir(&main_dir)
@@ -4269,7 +4342,10 @@ fn cleanup_waits_for_recovery_then_rereads_the_completed_origin() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     fs::write(&retry_release, "release\n").unwrap();
-    assert!(cleanup_reached_lock, "cleanup reached the shared recovery boundary");
+    assert!(
+        cleanup_reached_lock,
+        "cleanup reached the shared recovery boundary"
+    );
 
     let retry_output = retry.wait_with_output().unwrap();
     let cleanup_output = cleanup.wait_with_output().unwrap();
@@ -4308,14 +4384,22 @@ fn post_land_handoff_only_ignores_no_sandbox_and_preserves_live_git() {
     create_and_run_learner_attempt(&main_dir, &bin_dir);
     land_work_1(&main_dir, &bin_dir, true);
     let merged = merged_commit_of(&main_dir);
-    fs::write(main_dir.join("preexisting-staged.txt"), "staged before retry\n").unwrap();
+    fs::write(
+        main_dir.join("preexisting-staged.txt"),
+        "staged before retry\n",
+    )
+    .unwrap();
     git::run(
         &main_dir,
         &["add", "preexisting-staged.txt"],
         "stage preexisting target file",
     )
     .unwrap();
-    fs::write(main_dir.join("preexisting-untracked.txt"), "untracked before retry\n").unwrap();
+    fs::write(
+        main_dir.join("preexisting-untracked.txt"),
+        "untracked before retry\n",
+    )
+    .unwrap();
     let executable = main_dir.join("preexisting-executable");
     fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
     #[cfg(unix)]
@@ -4333,7 +4417,11 @@ fn post_land_handoff_only_ignores_no_sandbox_and_preserves_live_git() {
             .join(std::ffi::OsString::from_vec(b"non-utf8-\xff".to_vec()));
         let _ = fs::write(non_utf_path, b"non-UTF-8 path stays unchanged\n");
     }
-    fs::write(main_dir.join("README.md"), "# Test\n\nunstaged before retry\n").unwrap();
+    fs::write(
+        main_dir.join("README.md"),
+        "# Test\n\nunstaged before retry\n",
+    )
+    .unwrap();
     git::run(
         &main_dir,
         &["update-index", "--assume-unchanged", "loop-output.txt"],
@@ -4385,10 +4473,9 @@ fn post_land_handoff_only_ignores_no_sandbox_and_preserves_live_git() {
             String::from_utf8_lossy(&retry_output.stderr)
         );
         let handoff: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(main_dir.join(fluent::learner::handoff_path_rel(
-                "work-1",
-                "attempt-1",
-            )))
+            &fs::read_to_string(
+                main_dir.join(fluent::learner::handoff_path_rel("work-1", "attempt-1")),
+            )
             .unwrap(),
         )
         .unwrap();
@@ -4479,12 +4566,18 @@ fn post_land_handoff_only_ignores_no_sandbox_and_preserves_live_git() {
         use std::os::unix::ffi::OsStringExt;
         use std::os::unix::fs::PermissionsExt;
 
-        assert_eq!(fs::read_link(main_dir.join("preexisting-link")).unwrap(), tmp.path().join("outside-symlink-target"));
+        assert_eq!(
+            fs::read_link(main_dir.join("preexisting-link")).unwrap(),
+            tmp.path().join("outside-symlink-target")
+        );
         assert_eq!(
             fs::read(tmp.path().join("outside-symlink-target")).unwrap(),
             b"outside stays unchanged\n"
         );
-        assert_eq!(fs::metadata(&executable).unwrap().permissions().mode() & 0o777, 0o755);
+        assert_eq!(
+            fs::metadata(&executable).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
         let non_utf_path = main_dir
             .join(".fluent")
             .join(std::ffi::OsString::from_vec(b"non-utf8-\xff".to_vec()));
@@ -4557,10 +4650,9 @@ fn sandboxed_post_land_coder_runs_and_is_denied() {
     );
 
     let handoff: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(main_dir.join(fluent::learner::handoff_path_rel(
-            "work-1",
-            "attempt-1",
-        )))
+        &fs::read_to_string(
+            main_dir.join(fluent::learner::handoff_path_rel("work-1", "attempt-1")),
+        )
         .unwrap(),
     )
     .unwrap();
@@ -4707,7 +4799,12 @@ fn post_land_retry_ignores_a_malformed_retained_candidate() {
     let merged = merged_commit_of(&main_dir);
     let candidate = main_dir.join("../work-6-work-1-attempt-1");
     fs::write(candidate.join("interrupted.txt"), "unauthorized\n").unwrap();
-    git::run(&candidate, &["add", "interrupted.txt"], "stage interrupted commit").unwrap();
+    git::run(
+        &candidate,
+        &["add", "interrupted.txt"],
+        "stage interrupted commit",
+    )
+    .unwrap();
     git::run(
         &candidate,
         &["commit", "-m", "Interrupted Learner commit"],
@@ -4748,7 +4845,10 @@ fn post_land_retry_ignores_a_malformed_retained_candidate() {
         merged,
         "the coder starts from the durable merged commit"
     );
-    assert!(candidate.exists(), "failed cleanup retains the workspace for recovery");
+    assert!(
+        candidate.exists(),
+        "failed cleanup retains the workspace for recovery"
+    );
 }
 
 #[test]
@@ -4773,7 +4873,11 @@ fn post_land_expertise_proposal_materializes_observation_only() {
     require_successful_trusted_retry!(rerun_learner_attempt(&main_dir, &bin_dir));
 
     let observations = open_observation_files(&main_dir);
-    assert_eq!(observations.len(), 1, "the missed expertise becomes one Observation");
+    assert_eq!(
+        observations.len(),
+        1,
+        "the missed expertise becomes one Observation"
+    );
     let content =
         fs::read_to_string(main_dir.join(".fluent/observations").join(&observations[0])).unwrap();
     assert!(
@@ -4809,7 +4913,12 @@ fn is_merged(main_dir: &Path) -> bool {
 
 /// Run a corrective learner attempt (committing its authority), leaving a
 /// verified handoff ready to land. Returns the mock bin dir.
-fn run_corrective_attempt(main_dir: &Path, tmp: &TempDir, bin_name: &str, execute: bool) -> PathBuf {
+fn run_corrective_attempt(
+    main_dir: &Path,
+    tmp: &TempDir,
+    bin_name: &str,
+    execute: bool,
+) -> PathBuf {
     commit_authority(main_dir);
     if execute {
         write_follow_up_policy(main_dir, "follow-up:\n  mode: execute\n");
@@ -4842,7 +4951,10 @@ fn invalid_learner_handoff_preserves_land_and_records_recovery() {
 
     // The merge stays successful, nothing materializes, and a retryable failure
     // is recorded with a next action.
-    assert!(is_merged(&main_dir), "a malformed handoff does not undo the land");
+    assert!(
+        is_merged(&main_dir),
+        "a malformed handoff does not undo the land"
+    );
     assert!(open_observation_files(&main_dir).is_empty());
     assert_eq!(follow_up_failure_stage(&main_dir), "validate-handoff");
     let next_action = work_item_value(&main_dir, "work-1")["merge_candidates"][0]["merge_state"]
@@ -4904,7 +5016,11 @@ fn rerun_merged_candidate_resumes_handoff_only() {
     write_mock_claude(&rerun_bin, &rebase_failing_mock_script());
     land_work_1(&main_dir, &rerun_bin, true);
 
-    assert_eq!(merged_commit_of(&main_dir), merged_before, "the merge is not repeated");
+    assert_eq!(
+        merged_commit_of(&main_dir),
+        merged_before,
+        "the merge is not repeated"
+    );
     assert_eq!(
         open_observation_files(&main_dir),
         observations_before,
@@ -4955,15 +5071,32 @@ fn cleanup_preserves_descendant_context_after_origin_removal() {
         .success()
         .stdout(predicate::str::contains("cleaned Work Item work-1"));
 
-    assert!(!origin_item.exists(), "cleanup removes the originating Work Item");
-    assert!(!origin_attempts.exists(), "cleanup removes the originating Attempt records");
-    assert!(!origin_tasks.exists(), "cleanup removes the originating Task records");
     assert!(
-        !main_dir.join(".fluent/work/merge-candidates/work-1").exists(),
+        !origin_item.exists(),
+        "cleanup removes the originating Work Item"
+    );
+    assert!(
+        !origin_attempts.exists(),
+        "cleanup removes the originating Attempt records"
+    );
+    assert!(
+        !origin_tasks.exists(),
+        "cleanup removes the originating Task records"
+    );
+    assert!(
+        !main_dir
+            .join(".fluent/work/merge-candidates/work-1")
+            .exists(),
         "cleanup removes the originating candidate records"
     );
-    assert!(!candidate_workspace.exists(), "cleanup removes the registered candidate worktree");
-    assert!(!origin_artifacts.exists(), "cleanup removes optional origin artifacts");
+    assert!(
+        !candidate_workspace.exists(),
+        "cleanup removes the registered candidate worktree"
+    );
+    assert!(
+        !origin_artifacts.exists(),
+        "cleanup removes optional origin artifacts"
+    );
 
     // The derived Work stays inspectable with self-contained corrective context
     // and provenance identifiers.
@@ -4985,7 +5118,10 @@ fn cleanup_preserves_descendant_context_after_origin_removal() {
         "Follow-up source",
         "Learning summary",
     ] {
-        assert!(execution_input.contains(field), "missing {field:?} after origin cleanup");
+        assert!(
+            execution_input.contains(field),
+            "missing {field:?} after origin cleanup"
+        );
     }
 
     // The Observation stays inspectable with its origin identifiers.
@@ -5027,7 +5163,10 @@ fn observation_failure_does_not_undo_land() {
 
     land_work_1(&main_dir, &bin_dir, true);
 
-    assert!(is_merged(&main_dir), "an Observation failure does not undo the land");
+    assert!(
+        is_merged(&main_dir),
+        "an Observation failure does not undo the land"
+    );
     assert_eq!(follow_up_failure_stage(&main_dir), "observation");
 }
 
@@ -5045,10 +5184,17 @@ fn promotion_failure_does_not_undo_land() {
 
     land_work_1(&main_dir, &bin_dir, true);
 
-    assert!(is_merged(&main_dir), "a promotion failure does not undo the land");
+    assert!(
+        is_merged(&main_dir),
+        "a promotion failure does not undo the land"
+    );
     assert_eq!(follow_up_failure_stage(&main_dir), "work");
     // The Observation stage completed before the failure.
-    assert!(main_dir.join(format!(".fluent/observations/{OBS_FU1}.md")).exists());
+    assert!(
+        main_dir
+            .join(format!(".fluent/observations/{OBS_FU1}.md"))
+            .exists()
+    );
 }
 
 #[test]
@@ -5063,7 +5209,10 @@ fn queue_failure_does_not_undo_land() {
 
     land_work_1(&main_dir, &bin_dir, true);
 
-    assert!(is_merged(&main_dir), "a queue failure does not undo the land");
+    assert!(
+        is_merged(&main_dir),
+        "a queue failure does not undo the land"
+    );
     assert_eq!(follow_up_failure_stage(&main_dir), "queue");
     // The Work stage completed: the descendant is authorized.
     assert_eq!(
@@ -5099,7 +5248,11 @@ fn followup_retry_resumes_each_partial_failure_exactly_once() {
         "execution-ready"
     );
     assert_eq!(dispatch_count(&main_dir, DERIVED_FU1), 1);
-    assert_eq!(follow_up_failure_stage(&main_dir), "", "a completed resume clears the failure");
+    assert_eq!(
+        follow_up_failure_stage(&main_dir),
+        "",
+        "a completed resume clears the failure"
+    );
 }
 
 #[test]
@@ -5143,7 +5296,10 @@ fn followup_retry_recovers_queue_dispatch_exactly_once() {
     assert_eq!(follow_up_failure_stage(&main_dir), "queue");
     assert_eq!(open_observation_files(&main_dir).len(), 1);
     assert_eq!(work_item_json_count(&main_dir), 2);
-    assert_eq!(work_item_value(&main_dir, DERIVED_FU1)["lineage"]["charged"], true);
+    assert_eq!(
+        work_item_value(&main_dir, DERIVED_FU1)["lineage"]["charged"],
+        true
+    );
 
     fs::remove_dir(&ledger_path).unwrap();
     let rerun = tmp.path().join("bin-queue-resume-norebase");
@@ -5153,7 +5309,10 @@ fn followup_retry_recovers_queue_dispatch_exactly_once() {
 
     assert_eq!(open_observation_files(&main_dir).len(), 1);
     assert_eq!(work_item_json_count(&main_dir), 2);
-    assert_eq!(work_item_value(&main_dir, DERIVED_FU1)["lineage"]["charged"], true);
+    assert_eq!(
+        work_item_value(&main_dir, DERIVED_FU1)["lineage"]["charged"],
+        true
+    );
     assert_eq!(dispatch_count(&main_dir, DERIVED_FU1), 1);
     assert_eq!(follow_up_failure_stage(&main_dir), "");
 }
@@ -5207,7 +5366,11 @@ fn concurrent_followup_materialization_converges_exactly_once() {
     // The processors converged on one Observation, one derived Work Item, and
     // one queue entry.
     assert_eq!(open_observation_files(&main_dir).len(), 1);
-    assert_eq!(work_item_json_count(&main_dir), 2, "one root plus one derived Work Item");
+    assert_eq!(
+        work_item_json_count(&main_dir),
+        2,
+        "one root plus one derived Work Item"
+    );
     assert_eq!(dispatch_count(&main_dir, DERIVED_FU1), 1);
 }
 
@@ -10488,7 +10651,13 @@ fn cleanup_apply_fails_closed_for_a_missing_locked_registration() {
     let main_dir = setup_git_project(&tmp);
     fluent_cmd()
         .current_dir(&main_dir)
-        .args(["work-item", "create", "work-locked", "--title", "Locked cleanup work"])
+        .args([
+            "work-item",
+            "create",
+            "work-locked",
+            "--title",
+            "Locked cleanup work",
+        ])
         .assert()
         .success();
     fluent_cmd()
@@ -10532,7 +10701,11 @@ fn cleanup_apply_fails_closed_for_a_missing_locked_registration() {
         .failure()
         .stderr(predicate::str::contains("remove registered worktree"));
 
-    assert!(main_dir.join(".fluent/work/items/work-locked.json").exists());
+    assert!(
+        main_dir
+            .join(".fluent/work/items/work-locked.json")
+            .exists()
+    );
     let registrations = git::run_stdout(
         &main_dir,
         &["worktree", "list", "--porcelain"],

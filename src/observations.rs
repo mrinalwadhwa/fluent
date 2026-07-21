@@ -23,7 +23,11 @@ pub const LEARNER_FOLLOW_UP_KIND: &str = "learner-follow-up";
 pub struct ObservationFrontmatter {
     /// Names the generating subsystem, e.g. `learner-follow-up`. Present marks
     /// the Observation as system-generated.
-    #[serde(rename = "fluent-observation", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "fluent-observation",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub kind: Option<String>,
     /// The follow-up within its landed batch that this Observation materializes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -384,10 +388,7 @@ pub fn provenance_observation_exists(
 /// Reject an existing Observation whose stored provenance does not match the
 /// provenance a replay expects. A body-only Observation at a reserved id is a
 /// conflict too: the id is claimed by an unrelated record.
-fn verify_provenance_matches(
-    path: &Path,
-    expected: &ObservationFrontmatter,
-) -> Result<()> {
+fn verify_provenance_matches(path: &Path, expected: &ObservationFrontmatter) -> Result<()> {
     let existing = fs::read_to_string(path)?;
     let (stored, _) = split_frontmatter(&existing);
     let Some(stored) = stored else {
@@ -887,9 +888,13 @@ mod tests {
         fs::create_dir_all(&obs_dir).unwrap();
         fs::write(obs_dir.join("followup-fu-1.md"), "a manual note\n").unwrap();
 
-        let err =
-            ensure_provenance_observation(tmp.path(), "followup-fu-1", &sample_frontmatter(), "# B")
-                .unwrap_err();
+        let err = ensure_provenance_observation(
+            tmp.path(),
+            "followup-fu-1",
+            &sample_frontmatter(),
+            "# B",
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("without provenance frontmatter"));
     }
 }

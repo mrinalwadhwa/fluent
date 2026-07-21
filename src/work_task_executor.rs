@@ -1938,10 +1938,7 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
             ),
             ("has_learnings_index", has_learnings_index),
             ("draft_path", &draft_path.display().to_string()),
-            (
-                "handoff_only",
-                if inputs.handoff_only { "yes" } else { "" },
-            ),
+            ("handoff_only", if inputs.handoff_only { "yes" } else { "" }),
         ],
     )
     .map_err(|e| anyhow::anyhow!("learner-user.md template error: {e}"))?;
@@ -1994,9 +1991,8 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
                 &denied,
                 inputs.coder_kind,
             )?;
-            let sandbox = CoderSandbox::TrustedSeatbeltProfile(
-                profile.path.to_string_lossy().to_string(),
-            );
+            let sandbox =
+                CoderSandbox::TrustedSeatbeltProfile(profile.path.to_string_lossy().to_string());
             (sandbox, Some(profile))
         }
     };
@@ -2971,8 +2967,8 @@ mod tests {
     use crate::content::ContentResolver;
     use crate::work_model::{
         CorrectiveAuditContext, CorrectiveAuthorityReference, CorrectiveContext,
-        CorrectiveEvidenceReference, DerivedProvenance, ExecutionAuthority, TaskOutput,
-        TaskStatus, WorkItem, WorkItemAbandonment, WorkLineage,
+        CorrectiveEvidenceReference, DerivedProvenance, ExecutionAuthority, TaskOutput, TaskStatus,
+        WorkItem, WorkItemAbandonment, WorkLineage,
     };
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
@@ -3319,7 +3315,13 @@ mod tests {
         seeded
             .add_review_tasks(
                 "attempt-1",
-                &["architecture", "behaviors", "documentation", "skills", "tests"],
+                &[
+                    "architecture",
+                    "behaviors",
+                    "documentation",
+                    "skills",
+                    "tests",
+                ],
             )
             .unwrap();
         store.write_work_item(&seeded).unwrap();
@@ -3396,7 +3398,10 @@ mod tests {
             "LEARNING SUMMARY: reviewer found a retry regression",
         ];
         for field in audit_fields {
-            assert!(writer.contains(field), "Writer omitted {field:?} after cleanup");
+            assert!(
+                writer.contains(field),
+                "Writer omitted {field:?} after cleanup"
+            );
         }
 
         for role in crate::review::REVIEWERS {
@@ -4626,9 +4631,7 @@ mod tests {
         // The corrective host gate keeps such a proposal Observation-only, so it
         // can never become autonomously executable Work.
         let tmp = tempfile::TempDir::new().unwrap();
-        assert!(
-            !crate::follow_up::classify_follow_up(tmp.path(), &follow_up).is_corrective()
-        );
+        assert!(!crate::follow_up::classify_follow_up(tmp.path(), &follow_up).is_corrective());
     }
 
     #[test]
@@ -4849,8 +4852,8 @@ mod tests {
             "(deny file-write* (subpath \"{}\"))",
             workspace.to_string_lossy()
         )));
-        assert!(!handoff_content.contains(
-            "(allow file-write* (subpath \"/private/var/folders\"))"
-        ));
+        assert!(
+            !handoff_content.contains("(allow file-write* (subpath \"/private/var/folders\"))")
+        );
     }
 }

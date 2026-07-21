@@ -45,12 +45,7 @@ fn acquire_for(lock_path: &Path, _actor: Option<&str>) -> io::Result<LandLock> {
     }
     #[cfg(test)]
     if let Some(actor) = _actor {
-        crate::test_lock_probe::reach(
-            "land",
-            &lock_path.display().to_string(),
-            actor,
-            "ACQUIRED",
-        );
+        crate::test_lock_probe::reach("land", &lock_path.display().to_string(), actor, "ACQUIRED");
     }
     Ok(LandLock { _file: file })
 }
@@ -81,11 +76,7 @@ mod tests {
 
         std::thread::scope(|scope| {
             let target = path.display().to_string();
-            let probe = crate::test_lock_probe::ScopedLockProbe::install(
-                "land",
-                &target,
-                None,
-            );
+            let probe = crate::test_lock_probe::ScopedLockProbe::install("land", &target, None);
             let waiter = scope.spawn(|| acquire_for(&path, Some("SECOND")));
             assert!(probe.wait_for("SECOND", "BLOCKED"));
             drop(held);

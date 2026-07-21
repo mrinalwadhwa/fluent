@@ -270,7 +270,10 @@ fn stale_retry_cannot_revert_landed_candidate() {
         fluent::work_model::MergeCandidateMergeStatus::Merged
     );
     assert_eq!(
-        stored.merge_candidates[0].merge_state.merged_commit.as_deref(),
+        stored.merge_candidates[0]
+            .merge_state
+            .merged_commit
+            .as_deref(),
         Some("merged123")
     );
 }
@@ -319,11 +322,7 @@ fn stale_task_write_cannot_revert_coder_mapping() {
     let stored = store.read_work_item("work-1").unwrap();
     assert_eq!(stored.attempts[0].coder_mapping.write.model, "new-model");
     assert_eq!(
-        stored.attempts[0].tasks[0]
-            .output
-            .as_ref()
-            .unwrap()
-            .commit,
+        stored.attempts[0].tasks[0].output.as_ref().unwrap().commit,
         "abc123"
     );
 }
@@ -343,7 +342,12 @@ fn stale_aggregate_write_cannot_prune_sibling_records() {
     assert_stale_write(store.write_work_item(&stale).unwrap_err());
     let stored = store.read_work_item("work-1").unwrap();
     assert_eq!(stored.title, "Add durable model storage");
-    assert!(stored.attempts.iter().any(|attempt| attempt.id == "attempt-2"));
+    assert!(
+        stored
+            .attempts
+            .iter()
+            .any(|attempt| attempt.id == "attempt-2")
+    );
     assert!(
         temp.path()
             .join(".fluent/work/attempts/work-1/attempt-2.json")
