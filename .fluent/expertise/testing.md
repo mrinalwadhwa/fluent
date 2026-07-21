@@ -22,3 +22,4 @@ Set `FLUENT_TESTS_SKIP_LOG=1` to disable per-case log writing (useful for CI wor
 ## Patterns
 
 - [flock-lease-tests-under-libtest](testing/patterns/flock-lease-tests-under-libtest.md) — read when writing unit tests for `lease`-based singletons that must also pass under `cargo test` (libtest threads), not just nextest.
+- [unique-ids-for-attempt-worktrees](testing/patterns/unique-ids-for-attempt-worktrees.md) — read when a binary test drives a real Attempt or `fluent scheduler run`, so its sibling worktrees in the shared temp root do not collide across runs.
