@@ -184,7 +184,7 @@ fn classify_follow_up_at_revision(
     if follow_up.target_paths.is_empty()
         || follow_up.target_paths.iter().any(|target| {
             let path = Path::new(target);
-            !path.is_relative() || !authority_path_is_normalized(path)
+            !path_is_canonical_relative(path)
         })
     {
         return ObservationOnly {
@@ -222,9 +222,18 @@ fn authority_namespace_ok(kind: AuthorityKind, path: &str) -> bool {
     }
 }
 
-fn authority_path_is_normalized(path: &Path) -> bool {
-    path.components()
-        .all(|component| matches!(component, Component::Normal(_)))
+fn path_is_canonical_relative(path: &Path) -> bool {
+    if path.as_os_str().is_empty() || !path.is_relative() {
+        return false;
+    }
+    let mut canonical = PathBuf::new();
+    for component in path.components() {
+        let Component::Normal(component) = component else {
+            return false;
+        };
+        canonical.push(component);
+    }
+    canonical.as_os_str() == path.as_os_str()
 }
 
 /// Resolve an authority locator against the project tree. It must be relative,
@@ -241,7 +250,7 @@ fn verify_authority(
     target_paths: &[String],
 ) -> Result<(), String> {
     let relative = Path::new(&authority.path);
-    if !relative.is_relative() || !authority_path_is_normalized(relative) {
+    if !path_is_canonical_relative(relative) {
         return Err(format!(
             "authority path {:?} is not a normalized relative path",
             authority.path
@@ -2287,6 +2296,55 @@ mod tests {
         follow_up.target_paths = vec!["tests/retry.rs".to_string()];
 
         assert!(!classify_follow_up(tmp.path(), &follow_up).is_corrective());
+    }
+
+    #[test]
+    fn gate_rejects_empty_and_lexically_aliased_targets() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let anchor = "Cap enforcement belongs in retry.rs";
+        write_authority(
+            tmp.path(),
+            ".fluent/expertise/retry.md",
+            &format!("{anchor}\n"),
+        );
+        let base = corrective_follow_up(Some(locator(
+            AuthorityKind::ExpertiseEntry,
+            ".fluent/expertise/retry.md",
+            anchor,
+        )));
+
+        for target in [
+            "",
+            ".",
+            "src/./retry.rs",
+            "src//retry.rs",
+            "src/retry.rs/",
+            "src/../src/retry.rs",
+        ] {
+            let mut follow_up = base.clone();
+            follow_up.target_paths = vec![target.to_string()];
+            assert!(
+                !classify_follow_up(tmp.path(), &follow_up).is_corrective(),
+                "lexically non-canonical target {target:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn gate_accepts_closest_nested_agents_authority_for_all_targets() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let anchor = "Always enforce the configured retry cap";
+        write_authority(tmp.path(), "src/AGENTS.md", &format!("- {anchor}\n"));
+        let mut follow_up = corrective_follow_up(Some(locator(
+            AuthorityKind::AgentsInstruction,
+            "src/AGENTS.md",
+            anchor,
+        )));
+        follow_up.corrective_context.as_mut().unwrap().requirement = anchor.to_string();
+        follow_up.corrective_context.as_mut().unwrap().included_scope = "src".to_string();
+        follow_up.target_paths = vec!["src/retry.rs".to_string(), "src/net/client.rs".to_string()];
+
+        assert!(classify_follow_up(tmp.path(), &follow_up).is_corrective());
     }
 
     #[test]

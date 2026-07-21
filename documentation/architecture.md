@@ -343,9 +343,12 @@ instruction in a tracked `AGENTS.md`, or a committed `.fluent/expertise/`
 entry. The gate rejects non-normal paths and committed symlinks, reads the
 authority from the regular-file blob at the operation's immutable landed
 commit, and requires the corrective requirement to equal the non-empty
-digest-matched anchor. Corrective proposals carry structured normalized target
-paths; an `AGENTS.md` authority must be the closest applicable ancestor for
-every target, including when a nested instruction overrides a root instruction.
+digest-matched anchor. Corrective proposals carry non-empty relative target
+paths whose raw spelling already matches their canonical normal components;
+absolute paths, parent/current-directory components, repeated separators, and
+trailing separators do not pass as lexical aliases. An `AGENTS.md` authority
+must be the closest applicable ancestor for every target, including when a
+nested instruction overrides a root instruction.
 Later `HEAD` movement, working-tree edits, and untracked files cannot authorize
 or invalidate corrective Work. Any incomplete,
 unsupported, unresolved, stale, or mis-namespaced context downgrades the
