@@ -418,7 +418,12 @@ After taking the lock, retry re-reads the Attempt and candidate and skips the
 coder when another retry has already persisted success. It resets the retained
 candidate worktree and index to the candidate's stored `merged_commit` before
 launch, so an interrupted unrecorded Learner commit cannot become the next
-retry's baseline.
+retry's baseline. The Learner diff uses the persisted accepted base. For a
+legacy merged TaskOutput without that field, recovery reads the retained
+candidate's rebase reflog to recover the exact target tip; this includes every
+accepted candidate and merge-fix commit while excluding target-only history.
+Only repositories whose reflog predates that sequence fall back to compatible
+first-parent reconstruction.
 Its sandbox exposes the shared Git directory read-only. After the coder exits,
 Fluent compares protected refs plus the target checkout's HEAD, index, and
 non-Fluent status; it restores and rejects any mutation. Candidate commits,

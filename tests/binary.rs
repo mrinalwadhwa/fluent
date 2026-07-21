@@ -3586,7 +3586,6 @@ fn post_land_learner_retry_preserves_merged_commit() {
     let main_dir = setup_git_project(&tmp);
     let counter = tmp.path().join("learner-counter");
     let bin_dir = tmp.path().join("bin-preserve");
-    let accepted_base = git::run_stdout(&main_dir, &["rev-parse", "HEAD"], "accepted base").unwrap();
     // The retry attempts an expertise commit, which a handoff-only run discards.
     write_mock_claude(
         &bin_dir,
@@ -3598,17 +3597,48 @@ fn post_land_learner_retry_preserves_merged_commit() {
     );
 
     create_and_run_learner_attempt(&main_dir, &bin_dir);
+    let candidate = main_dir.join("../work-6-work-1-attempt-1");
+    fs::write(candidate.join("merge-fix.txt"), "accepted merge fix\n").unwrap();
+    git::run(&candidate, &["add", "merge-fix.txt"], "stage accepted merge fix").unwrap();
+    git::run(
+        &candidate,
+        &["commit", "-m", "Apply accepted merge fix"],
+        "commit accepted merge fix",
+    )
+    .unwrap();
+    fs::write(main_dir.join("target-only.txt"), "unrelated target change\n").unwrap();
+    git::run(&main_dir, &["add", "target-only.txt"], "stage target-only change").unwrap();
+    git::run(
+        &main_dir,
+        &["commit", "-m", "Add target-only change"],
+        "commit target-only change",
+    )
+    .unwrap();
+    let accepted_base = git_head(&main_dir);
     land_work_1(&main_dir, &bin_dir, true);
     let merged_before = merged_commit_of(&main_dir);
+
+    // Simulate an already-merged legacy TaskOutput written before base_commit
+    // existed. Recovery must derive an immutable range from merge/Git state,
+    // not fall back to the now-moving `main` source branch.
+    let task_path = work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-write-1");
+    let mut task = read_json_value(&task_path);
+    task["output"].as_object_mut().unwrap().remove("base_commit");
+    write_json_value(&task_path, &task);
 
     rerun_learner_attempt(&main_dir, &bin_dir);
 
     let retry_prompt = fs::read_to_string(format!("{}.prompt", counter.display())).unwrap();
+    let candidate_reflog = git::run_stdout(
+        &candidate,
+        &["reflog", "show", "--format=%H%x09%gs", "HEAD"],
+        "inspect candidate reflog",
+    )
+    .unwrap();
     assert!(
         retry_prompt.contains(&format!("{accepted_base}...{merged_before}")),
-        "post-land retry prompt must render the persisted accepted change; prompt:\n{retry_prompt}"
+        "post-land retry prompt must render the persisted accepted change; reflog:\n{candidate_reflog}\nprompt:\n{retry_prompt}"
     );
-    let candidate = main_dir.join("../work-6-work-1-attempt-1");
     let accepted_files = git::run_stdout(
         &candidate,
         &["diff", "--name-only", &format!("{accepted_base}...{merged_before}")],
@@ -3616,6 +3646,11 @@ fn post_land_learner_retry_preserves_merged_commit() {
     )
     .unwrap();
     assert!(accepted_files.lines().any(|path| path == "loop-output.txt"));
+    assert!(accepted_files.lines().any(|path| path == "merge-fix.txt"));
+    assert!(
+        !accepted_files.lines().any(|path| path == "target-only.txt"),
+        "the immutable accepted range excludes unrelated target-only history: {accepted_files}"
+    );
 
     // The merged candidate commit is unchanged and no expertise reached main.
     assert_eq!(

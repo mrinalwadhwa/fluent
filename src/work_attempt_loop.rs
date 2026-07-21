@@ -923,7 +923,14 @@ fn try_learn(
         .filter_map(|task| task.output.as_ref()?.base_commit.as_ref())
         .next()
         .cloned()
-        .unwrap_or_else(|| write_output.source_branch.clone());
+        .map(Ok)
+        .unwrap_or_else(|| {
+            if handoff_only {
+                recover_legacy_accepted_base(&workspace_path, attempt, &baseline_commit)
+            } else {
+                Ok(write_output.source_branch.clone())
+            }
+        })?;
     let accepted_tip = if handoff_only {
         baseline_commit.as_str()
     } else {
@@ -997,6 +1004,57 @@ fn try_learn(
     let handoff_ref =
         crate::learner::write_handoff(project_root, &work_item_id, &attempt_id, &handoff)?;
     Ok(handoff_ref)
+}
+
+/// Recover the immutable accepted base for an already-merged legacy Attempt
+/// whose TaskOutput predates `base_commit`. Prefer the retained candidate
+/// branch's durable rebase reflog, whose start entry is the exact target tip;
+/// fall back to first-parent ancestry only for older repositories without that
+/// reflog sequence.
+fn recover_legacy_accepted_base(
+    workspace_path: &Path,
+    attempt: &Attempt,
+    merged_commit: &str,
+) -> Result<String> {
+    let output = git::run_raw(
+        workspace_path,
+        &["reflog", "show", "--format=%H%x09%gs", "HEAD"],
+    )?;
+    if output.status.success() {
+        let reflog = String::from_utf8_lossy(&output.stdout);
+        let mut matching_rebase = false;
+        for line in reflog.lines() {
+            let Some((commit, subject)) = line.split_once('\t') else {
+                continue;
+            };
+            if !matching_rebase
+                && commit == merged_commit
+                && subject.starts_with("rebase (finish):")
+            {
+                matching_rebase = true;
+                continue;
+            }
+            if matching_rebase && subject.starts_with("rebase (start):") {
+                return Ok(commit.to_string());
+            }
+        }
+    }
+
+    let write_commits = attempt
+        .tasks
+        .iter()
+        .filter(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+        .filter(|task| task.output.is_some())
+        .count();
+    if write_commits == 0 {
+        bail!("cannot recover accepted diff base: Attempt has no completed Write output");
+    }
+    let revision = format!("{merged_commit}~{write_commits}");
+    git::run_stdout(
+        workspace_path,
+        &["rev-parse", "--verify", &format!("{revision}^{{commit}}")],
+        "recover legacy accepted diff base",
+    )
 }
 
 /// The outcome of confining the Learner's commit: the expertise it was allowed
