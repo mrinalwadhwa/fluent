@@ -8,6 +8,7 @@
 - [keep-architecture-doc-in-sync](keep-architecture-doc-in-sync.md) — documentation/architecture.md is a living present-tense doc; subsystem changes must update its file map and subsystem sections in the same change
 - [lock-ordering-across-subsystems](lock-ordering-across-subsystems.md) — Release the queue lock before mutating the Work model; the codebase has a lock hierarchy that must not be inverted
 - [needs-user-not-terminal-for-cleanup](needs-user-not-terminal-for-cleanup.md) — NeedsUser attempts are not terminal for cleanup; only Complete and Failed are reapable
+- [prompt-file-naming-guardrail](prompt-file-naming-guardrail.md) — Adding or renaming prompt files under prompts/ requires updating the no_legacy_prompt_files_in_prompts_dir allowlist test
 - [shell-tests-invisible-to-compiler](shell-tests-invisible-to-compiler.md) — Shell behavior tests query JSON via jq and are not caught by the compiler when serialized field names change
 - [test-fixtures-use-production-state](test-fixtures-use-production-state.md) — Test fixtures must use state values that production code actually creates, not unreachable states
 - [test-names-match-assertions](test-names-match-assertions.md) — Test function names must describe the behavior the test actually asserts, not what a behavior statement claims
