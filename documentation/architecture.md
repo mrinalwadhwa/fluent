@@ -316,7 +316,10 @@ into a source-neutral batch stamped with the authoritative origin (Work
 Item, Attempt, Merge Candidate, and merged commit), records a versioned
 `PendingPostLandOperationV1` and a resumable journal under
 `.fluent/work/follow-ups/<work-item-id>-<candidate-id>/`, and replays
-that operation. Replay creates exactly one provenance-bearing Observation
+that operation. Recording and replay hold the same per-operation lock while
+they read or replace durable state. A repeated recording must match both the
+stored operation identity and its verified batch, so a conflicting retry
+cannot overwrite the accepted handoff. Replay creates exactly one provenance-bearing Observation
 per follow-up, keyed by a deterministic id, so a land retry, recovery, or
 journal replay reuses the same Observation rather than duplicating it; an
 empty handoff records as processed without a placeholder; and a resolved

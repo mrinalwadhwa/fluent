@@ -619,8 +619,6 @@ pub fn record_post_land_operation(
     let batch_bytes = canonical_json_bytes(batch)?;
     let batch_digest = content_digest(&batch_bytes);
     let batch_rel = batch_rel_path(&operation_id);
-    atomic_write(&project_root.join(&batch_rel), &batch_bytes)
-        .with_context(|| format!("write normalized batch {batch_rel}"))?;
 
     let mut operation = PendingPostLandOperationV1 {
         schema_version: PendingPostLandOperationV1::SCHEMA_VERSION,
@@ -635,18 +633,29 @@ pub fn record_post_land_operation(
     };
     operation.digest = operation_identity_digest(&operation)?;
 
+    // Recording and replay share one per-operation lock. Validate an existing
+    // immutable identity before replacing any referenced bytes, so a
+    // conflicting or concurrent re-record cannot corrupt the accepted batch.
+    let _lock = lock_operation(&dir)?;
+
     let op_path = dir.join("operation.json");
     if op_path.exists() {
         let existing: PendingPostLandOperationV1 = serde_json::from_slice(&fs::read(&op_path)?)
             .with_context(|| format!("parse recorded operation {}", op_path.display()))?;
-        if existing.digest != operation.digest {
+        if operation_identity_digest(&existing)? != existing.digest || existing != operation {
             bail!(
                 "post-land operation {operation_id} was already recorded with a conflicting \
                  identity"
             );
         }
+        load_verified_batch(project_root, &existing.batch_ref).with_context(|| {
+            format!("verify recorded operation {operation_id} batch before reuse")
+        })?;
         return Ok(existing);
     }
+
+    atomic_write(&project_root.join(&operation.batch_ref.path), &batch_bytes)
+        .with_context(|| format!("write normalized batch {}", operation.batch_ref.path))?;
 
     atomic_write(&op_path, &serde_json::to_vec_pretty(&operation)?)
         .with_context(|| format!("write operation {}", op_path.display()))?;
@@ -668,6 +677,9 @@ pub fn replay_post_land_operation(
     operation_id: &str,
 ) -> Result<ReplayOutcome> {
     let dir = operation_dir(project_root, operation_id);
+    // Serialize the full read/validate/replay snapshot with recording and other
+    // processors of this operation.
+    let _lock = lock_operation(&dir)?;
     let op_path = dir.join("operation.json");
     let operation: PendingPostLandOperationV1 = serde_json::from_slice(
         &fs::read(&op_path)
@@ -683,11 +695,6 @@ pub fn replay_post_land_operation(
     if batch.origin != operation.origin {
         bail!("normalized batch origin does not match operation {operation_id}");
     }
-
-    // Serialize concurrent processors of the same operation so each stage runs
-    // once and every processor converges on the same effects rather than racing
-    // to create a duplicate Observation, Work Item, or queue entry.
-    let _lock = lock_operation(&dir)?;
 
     let journal_path = dir.join("journal.json");
     let mut journal = read_journal(&journal_path, operation_id)?;
@@ -1331,6 +1338,50 @@ mod tests {
         // Re-recording the same origin returns the existing operation.
         let again = record_post_land_operation(tmp.path(), &batch, None).unwrap();
         assert_eq!(again, operation);
+    }
+
+    #[test]
+    fn conflicting_operation_rerecord_preserves_original_batch() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let original = batch_with(vec![draft("fu-1", "original")]);
+        let operation = record_post_land_operation(tmp.path(), &original, None).unwrap();
+        let batch_path = tmp.path().join(&operation.batch_ref.path);
+        let original_bytes = fs::read(&batch_path).unwrap();
+
+        let conflicting = batch_with(vec![draft("fu-1", "conflicting replacement")]);
+        let error = record_post_land_operation(tmp.path(), &conflicting, None).unwrap_err();
+
+        assert!(error.to_string().contains("conflicting identity"));
+        assert_eq!(
+            fs::read(&batch_path).unwrap(),
+            original_bytes,
+            "a rejected re-record cannot replace the accepted batch"
+        );
+        assert_eq!(
+            load_verified_batch(tmp.path(), &operation.batch_ref).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn record_waits_for_the_operation_lock() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let batch = batch_with(vec![draft("fu-1", "one")]);
+        let operation_id = operation_id_for(&batch.origin);
+        let dir = operation_dir(tmp.path(), &operation_id);
+        fs::create_dir_all(&dir).unwrap();
+        let held = lock_operation(&dir).unwrap();
+
+        let root = tmp.path().to_path_buf();
+        let handle = std::thread::spawn(move || record_post_land_operation(&root, &batch, None));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            !handle.is_finished(),
+            "recording must serialize with operation replay and re-record"
+        );
+
+        drop(held);
+        handle.join().unwrap().unwrap();
     }
 
     #[test]
