@@ -3617,17 +3617,40 @@ fn post_land_learner_retry_materializes_recovered_handoff() {
     // The first Learner run fails, so land materializes nothing.
     create_and_run_learner_attempt(&main_dir, &bin_dir);
     land_work_1(&main_dir, &bin_dir, true);
+    let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
+    assert!(
+        candidate_workspace.is_dir(),
+        "land retains the candidate workspace while Learning is retryable"
+    );
     assert!(
         open_observation_files(&main_dir).is_empty(),
         "a failed learner leaves nothing to materialize at land"
     );
+
+    // Applying cleanup before recovery must preserve the complete origin,
+    // including the workspace needed by the handoff-only retry.
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["cleanup", "--apply"])
+        .assert()
+        .success();
+    assert!(main_dir.join(".fluent/work/items/work-1.json").exists());
+    assert!(candidate_workspace.is_dir());
 
     // Retrying the Learner after land recovers the handoff and materializes it
     // immediately under the land-gated rules.
     rerun_learner_attempt(&main_dir, &bin_dir);
     let observations = open_observation_files(&main_dir);
     assert_eq!(observations.len(), 1, "the recovered handoff materializes one Observation");
-    assert!(observations[0].contains("fu-1"));
+    let observation = fs::read_to_string(
+        main_dir.join(".fluent/observations").join(&observations[0]),
+    )
+    .unwrap();
+    assert!(observation.contains("follow-up-id: fu-1"));
+    assert!(
+        !candidate_workspace.exists(),
+        "successful post-land recovery removes the retained candidate workspace"
+    );
 }
 
 #[test]
@@ -3729,21 +3752,22 @@ fn post_land_learner_retry_preserves_merged_commit() {
     task["output"].as_object_mut().unwrap().remove("base_commit");
     write_json_value(&task_path, &task);
 
-    rerun_learner_attempt(&main_dir, &bin_dir);
-
-    let retry_prompt = fs::read_to_string(format!("{}.prompt", counter.display())).unwrap();
     let candidate_reflog = git::run_stdout(
         &candidate,
         &["reflog", "show", "--format=%H%x09%gs", "HEAD"],
         "inspect candidate reflog",
     )
     .unwrap();
+
+    rerun_learner_attempt(&main_dir, &bin_dir);
+
+    let retry_prompt = fs::read_to_string(format!("{}.prompt", counter.display())).unwrap();
     assert!(
         retry_prompt.contains(&format!("{accepted_base}...{merged_before}")),
         "post-land retry prompt must render the persisted accepted change; reflog:\n{candidate_reflog}\nprompt:\n{retry_prompt}"
     );
     let accepted_files = git::run_stdout(
-        &candidate,
+        &main_dir,
         &["diff", "--name-only", &format!("{accepted_base}...{merged_before}")],
         "inspect accepted Attempt change",
     )

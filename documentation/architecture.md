@@ -403,12 +403,15 @@ between persisting the handoff and recording or completing its operation.
 
 `fluent cleanup` retains an origin — its Work Item, Attempt, Merge
 Candidate, worktree, and managed artifacts — while its landed-learning
-recovery is still live: any Attempt with a failed, retryable Learner
-record, or any landed candidate with an incomplete post-land journal or a
-pending imported post-land operation. Once Learning and post-land
-processing complete, cleanup may reap the origin; the derived Observations
-and Work Items stay inspectable with self-contained corrective context and
-provenance identifiers even after optional origin artifacts are gone.
+recovery is still live: a landed Attempt with a failed or legacy-missing
+Learner record, or a landed candidate with a recorded follow-up failure, an
+incomplete post-land journal, or a pending imported operation. Land retains
+the candidate worktree for the first two cases. The shared recovery boundary
+removes it after Learning and materialization complete, then clears the
+recovery failure; a workspace-cleanup failure remains retryable. Cleanup may
+then reap the origin. Derived Observations and Work Items stay inspectable with
+self-contained corrective context and provenance identifiers even after
+optional origin artifacts are gone.
 
 A Learner run that failed before its candidate landed recovers through
 `fluent attempt run`, which retries only the Learner. When the candidate

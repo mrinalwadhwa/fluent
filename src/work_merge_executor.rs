@@ -157,7 +157,35 @@ pub fn process_landed_follow_ups_at_boundary(
         merged_commit,
     ) {
         Ok(()) => {
-            // Processing completed; clear any recorded retryable failure.
+            // Processing completed. A failed or legacy-missing Learner may have
+            // caused land to retain the managed candidate workspace; remove it
+            // before clearing the recovery root so cleanup cannot lose it.
+            if let Err(error) = cleanup_recovered_candidate_workspace(
+                project_root,
+                store,
+                work_item_id,
+                candidate_id,
+            ) {
+                let stage = "cleanup-workspace";
+                let next_action = format!(
+                    "Re-run `fluent merge-candidate land {} {}` to finish cleanup.",
+                    work_item_id, candidate_id
+                );
+                record_follow_up_failure(
+                    store,
+                    work_item_id,
+                    candidate_id,
+                    stage,
+                    &error.to_string(),
+                    &next_action,
+                )?;
+                eprintln!(
+                    "  Warning: Merge Candidate {} follow-ups completed, but retained workspace \
+                     cleanup failed: {error}",
+                    candidate_id,
+                );
+                return Ok(false);
+            }
             clear_follow_up_failure(store, work_item_id, candidate_id)?;
             Ok(true)
         }
@@ -431,12 +459,51 @@ fn candidate_learning_is_retryable(
     attempt_id: &str,
 ) -> Result<bool> {
     let item = read_work_item_or_not_found(store, work_item_id)?;
-    Ok(item
+    Ok(!item
         .attempts
         .iter()
         .find(|attempt| attempt.id == attempt_id)
         .and_then(|attempt| attempt.learning.as_ref())
-        .is_some_and(|learning| learning.is_failed()))
+        .is_some_and(|learning| learning.is_succeeded()))
+}
+
+fn cleanup_recovered_candidate_workspace(
+    project_root: &Path,
+    store: &WorkModelStore,
+    work_item_id: &str,
+    candidate_id: &str,
+) -> Result<()> {
+    let item = read_work_item_or_not_found(store, work_item_id)?;
+    let candidate = item
+        .merge_candidates
+        .iter()
+        .find(|candidate| candidate.id == candidate_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Merge Candidate {:?} not found in Work Item {:?}",
+                candidate_id,
+                work_item_id
+            )
+        })?;
+    let learning_succeeded = item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == candidate.attempt_id)
+        .and_then(|attempt| attempt.learning.as_ref())
+        .is_some_and(|learning| learning.is_succeeded());
+    if !learning_succeeded {
+        return Ok(());
+    }
+    let source_workspace = resolve_managed_candidate_workspace_path(
+        project_root,
+        &candidate.source_workspace.path,
+        work_item_id,
+        &candidate.attempt_id,
+    )?;
+    if source_workspace.exists() {
+        cleanup_managed_workspace(project_root, &source_workspace)?;
+    }
+    Ok(())
 }
 
 fn finalize_merge(

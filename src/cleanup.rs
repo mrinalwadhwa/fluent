@@ -198,18 +198,23 @@ fn cleanup_work_item_candidates(project_root: &Path, work_items: Vec<WorkItem>) 
 
 /// Whether a Work Item's landed learning recovery is still live, so cleanup must
 /// retain its origin (Work Item, Attempt, Merge Candidate, worktree, and managed
-/// artifacts). Recovery is live while any Attempt has a failed, retryable Learner
-/// record, or any of its landed candidates has an incomplete post-land journal or
-/// a pending imported post-land operation.
+/// artifacts). Recovery is live while a landed Attempt has no successful Learner
+/// record, or any landed candidate has a durable failure, an incomplete post-land
+/// journal, or a pending imported post-land operation.
 fn retains_for_follow_up_recovery(project_root: &Path, work_item: &WorkItem) -> bool {
-    if work_item
-        .attempts
-        .iter()
-        .any(|attempt| attempt.learning.as_ref().is_some_and(|l| l.is_failed()))
-    {
-        return true;
-    }
     work_item.merge_candidates.iter().any(|candidate| {
+        if candidate.merge_state.status != MergeCandidateMergeStatus::Merged {
+            return false;
+        }
+        let learning_succeeded = work_item
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == candidate.attempt_id)
+            .and_then(|attempt| attempt.learning.as_ref())
+            .is_some_and(|learning| learning.is_succeeded());
+        if !learning_succeeded || candidate.merge_state.follow_up_failure.is_some() {
+            return true;
+        }
         let operation_id =
             crate::follow_up::operation_id_for_candidate(&work_item.id, &candidate.id);
         has_incomplete_post_land_operation(project_root, &operation_id)
@@ -780,7 +785,8 @@ mod tests {
 
     #[test]
     fn cleanup_retains_retryable_learning_and_post_land_origins() {
-        use crate::work_model::AttemptLearning;
+        use crate::follow_up::ArtifactRef;
+        use crate::work_model::{AttemptLearning, FollowUpProcessingFailure};
         use tempfile::TempDir;
 
         fn landed_item(id: &str) -> WorkItem {
@@ -790,6 +796,13 @@ mod tests {
             for task in &mut item.attempts[0].tasks {
                 task.status = TaskStatus::Complete;
             }
+            item.attempts[0].learning = Some(AttemptLearning::succeeded(
+                1,
+                ArtifactRef {
+                    path: "handoff.json".to_string(),
+                    digest: "sha256:test".to_string(),
+                },
+            ));
             let mut candidate = MergeCandidate {
                 id: "attempt-1-merge-candidate".to_string(),
                 attempt_id: "attempt-1".to_string(),
@@ -834,9 +847,37 @@ mod tests {
             "a retryable Learner record retains its origin"
         );
 
+        // A merged legacy Attempt without a Learning record must remain
+        // recoverable instead of losing the candidate workspace it needs.
+        let mut missing_learning = landed_item("work-missing-learning");
+        missing_learning.attempts[0].learning = None;
+        assert!(
+            cleanup_work_item_candidates(root, vec![missing_learning]).is_empty(),
+            "a missing legacy Learning record retains its origin"
+        );
+
+        // Validation can fail before an operation journal exists. The durable
+        // candidate failure alone must keep its origin available for retry.
+        let mut candidate_failure = landed_item("work-candidate-failure");
+        candidate_failure.merge_candidates[0]
+            .merge_state
+            .follow_up_failure = Some(FollowUpProcessingFailure {
+            stage: "validate-handoff".to_string(),
+            message: "handoff digest mismatch".to_string(),
+            next_action: "retry".to_string(),
+        });
+        assert!(
+            cleanup_work_item_candidates(root, vec![candidate_failure]).is_empty(),
+            "a candidate follow-up failure retains its origin before journaling"
+        );
+
         // An incomplete post-land journal retains the origin.
-        let op_dir = crate::follow_up::follow_ups_root(root)
-            .join("work-incomplete-attempt-1-merge-candidate");
+        let op_dir = crate::follow_up::follow_ups_root(root).join(
+            crate::follow_up::operation_id_for_candidate(
+                "work-incomplete",
+                "attempt-1-merge-candidate",
+            ),
+        );
         fs::create_dir_all(&op_dir).unwrap();
         fs::write(op_dir.join("operation.json"), "{}").unwrap();
         fs::write(op_dir.join("journal.json"), r#"{"completed":false}"#).unwrap();
@@ -846,8 +887,12 @@ mod tests {
         );
 
         // A pending imported operation with no journal yet retains the origin.
-        let import_dir = crate::follow_up::follow_ups_root(root)
-            .join("work-import-attempt-1-merge-candidate");
+        let import_dir = crate::follow_up::follow_ups_root(root).join(
+            crate::follow_up::operation_id_for_candidate(
+                "work-import",
+                "attempt-1-merge-candidate",
+            ),
+        );
         fs::create_dir_all(&import_dir).unwrap();
         fs::write(import_dir.join("operation.json"), "{}").unwrap();
         assert!(
