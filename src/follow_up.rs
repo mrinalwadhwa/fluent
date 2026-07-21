@@ -772,7 +772,26 @@ fn collect_effect_operation_evidence(
         }
     };
 
-    for item in WorkModelStore::new(project_root).list_work_items()? {
+    let store = WorkModelStore::new(project_root);
+    for item in store.list_work_item_results()? {
+        let item = match item {
+            Ok(item) => item,
+            Err(error) => {
+                let Some(id) = error
+                    .path()
+                    .filter(|path| path.parent() == Some(store.work_items_dir().as_path()))
+                    .and_then(|path| path.file_stem())
+                    .and_then(|stem| stem.to_str())
+                else {
+                    return Err(error.into());
+                };
+                if let Some(operation_id) = classify(id, "malformed derived Work Item")? {
+                    found.push(operation_id);
+                    continue;
+                }
+                return Err(error.into());
+            }
+        };
         let Some(provenance) = item.origin.provenance() else {
             continue;
         };
