@@ -458,6 +458,7 @@ fn default_learner_run_coder(
         diff_command: request.diff_command,
         handoff_dir: request.handoff_dir,
         handoff_only: request.handoff_only,
+        denied_write_roots: request.denied_write_roots,
     })
 }
 
@@ -828,6 +829,7 @@ struct LearnerCoderRequest<'a> {
     tester_artifact_paths: &'a [PathBuf],
     diff_command: &'a str,
     handoff_dir: &'a Path,
+    denied_write_roots: &'a [PathBuf],
     coder_kind: CoderKind,
     model: Option<&'a str>,
     effort: Option<&'a str>,
@@ -904,34 +906,6 @@ fn try_learn(
         "learner workspace",
     )?;
 
-    // A prior process may have committed and crashed before it could persist a
-    // Learner result or run confinement. Post-land recovery always starts from
-    // the candidate's durable merged commit, never from the worktree's current
-    // (possibly unauthorized) HEAD or index.
-    if handoff_only {
-        let merged_commit = item
-            .merge_candidates
-            .iter()
-            .find(|candidate| candidate.id == candidate_id)
-            .filter(|candidate| {
-                candidate.merge_state.status == MergeCandidateMergeStatus::Merged
-            })
-            .and_then(|candidate| candidate.merge_state.merged_commit.as_deref())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "handoff-only Learner retry has no persisted merged commit for {:?}",
-                    candidate_id
-                )
-            })?;
-        let candidate_head = symbolic_head(&workspace_path)?;
-        restore_checkout(
-            &workspace_path,
-            candidate_head.as_deref(),
-            merged_commit,
-            false,
-        )?;
-    }
-
     let review_artifact_paths = all_review_artifact_paths(project_root, attempt);
     let tester_artifact_paths = all_tester_artifact_paths(project_root, attempt);
 
@@ -950,11 +924,19 @@ fn try_learn(
     // baseline is the HEAD just before the Learner ran — that way only the
     // Learner's own changes, not the earlier rebase, are attributed to it.
     let baseline_commit = if handoff_only {
-        git::run_stdout(
-            &workspace_path,
-            &["rev-parse", "HEAD"],
-            "resolve pre-learner HEAD",
-        )?
+        item.merge_candidates
+            .iter()
+            .find(|candidate| candidate.id == candidate_id)
+            .filter(|candidate| {
+                candidate.merge_state.status == MergeCandidateMergeStatus::Merged
+            })
+            .and_then(|candidate| candidate.merge_state.merged_commit.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "handoff-only Learner retry has no persisted merged commit for {:?}",
+                    candidate_id
+                )
+            })?
     } else {
         write_output.commit.clone()
     };
@@ -986,6 +968,8 @@ fn try_learn(
                 &work_item_id,
                 &attempt_id,
                 &baseline_commit,
+                &review_artifact_paths,
+                &tester_artifact_paths,
             )
         })
         .transpose()?;
@@ -999,16 +983,34 @@ fn try_learn(
         .as_ref()
         .map(|isolated| isolated.handoff_dir.as_path())
         .unwrap_or(real_handoff_dir.as_path());
+    let learner_review_artifact_paths = isolated_workspace
+        .as_ref()
+        .map(|isolated| isolated.review_artifact_paths.as_slice())
+        .unwrap_or(review_artifact_paths.as_slice());
+    let learner_tester_artifact_paths = isolated_workspace
+        .as_ref()
+        .map(|isolated| isolated.tester_artifact_paths.as_slice())
+        .unwrap_or(tester_artifact_paths.as_slice());
     let diff_range = format!("{accepted_base}...{accepted_tip}");
     let diff_command =
         review_diff_command::render_review_diff_command(learner_workspace_path, &diff_range);
+    let denied_write_roots = if handoff_only {
+        let mut roots = vec![project_root.to_path_buf(), workspace_path.clone()];
+        roots.push(crate::worktree::git_common_dir(project_root)?);
+        roots.sort();
+        roots.dedup();
+        roots
+    } else {
+        Vec::new()
+    };
 
     let coder_result = (config.run_coder)(&LearnerCoderRequest {
         workspace_path: learner_workspace_path,
-        review_artifact_paths: &review_artifact_paths,
-        tester_artifact_paths: &tester_artifact_paths,
+        review_artifact_paths: learner_review_artifact_paths,
+        tester_artifact_paths: learner_tester_artifact_paths,
         diff_command: &diff_command,
         handoff_dir,
+        denied_write_roots: &denied_write_roots,
         coder_kind,
         model: model.as_deref(),
         effort: effort.as_deref(),
@@ -1181,6 +1183,8 @@ struct HandoffOnlyWorkspace {
     _temp: tempfile::TempDir,
     workspace_path: PathBuf,
     handoff_dir: PathBuf,
+    review_artifact_paths: Vec<PathBuf>,
+    tester_artifact_paths: Vec<PathBuf>,
 }
 
 impl HandoffOnlyWorkspace {
@@ -1189,6 +1193,8 @@ impl HandoffOnlyWorkspace {
         work_item_id: &str,
         attempt_id: &str,
         baseline_commit: &str,
+        review_artifact_paths: &[PathBuf],
+        tester_artifact_paths: &[PathBuf],
     ) -> Result<Self> {
         let temp = tempfile::Builder::new()
             .prefix("fluent-handoff-only-")
@@ -1210,6 +1216,11 @@ impl HandoffOnlyWorkspace {
             &["checkout", "--quiet", "--detach", baseline_commit],
             "check out merged commit in isolated handoff-only workspace",
         )?;
+        git::run(
+            &workspace_path,
+            &["remote", "remove", "origin"],
+            "remove live origin from isolated handoff-only workspace",
+        )?;
         let workspace_path = fs::canonicalize(workspace_path)?;
 
         let handoff_dir = temp
@@ -1218,10 +1229,16 @@ impl HandoffOnlyWorkspace {
             .join(crate::learner::handoff_dir_rel(work_item_id, attempt_id));
         fs::create_dir_all(&handoff_dir)?;
         let handoff_dir = fs::canonicalize(handoff_dir)?;
+        let review_artifact_paths =
+            copy_learner_artifacts(temp.path(), "reviews", review_artifact_paths)?;
+        let tester_artifact_paths =
+            copy_learner_artifacts(temp.path(), "testers", tester_artifact_paths)?;
         Ok(Self {
             _temp: temp,
             workspace_path,
             handoff_dir,
+            review_artifact_paths,
+            tester_artifact_paths,
         })
     }
 
@@ -1233,7 +1250,7 @@ impl HandoffOnlyWorkspace {
     ) -> Result<()> {
         let source = self.handoff_dir.join(crate::learner::DRAFT_FILE_NAME);
         if !source.exists() {
-            return Ok(());
+            bail!("handoff-only Learner did not produce a fresh draft");
         }
         let metadata = fs::symlink_metadata(&source)?;
         if !metadata.file_type().is_file() {
@@ -1243,10 +1260,50 @@ impl HandoffOnlyWorkspace {
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
+        if let Ok(metadata) = fs::symlink_metadata(&target) {
+            if !metadata.file_type().is_file() {
+                bail!("existing handoff-only Learner draft is not a regular file");
+            }
+        }
         let bytes = fs::read(&source)?;
         crate::atomic_write::atomic_write(&target, &bytes)?;
         Ok(())
     }
+}
+
+fn copy_learner_artifacts(
+    isolated_root: &Path,
+    category: &str,
+    sources: &[PathBuf],
+) -> Result<Vec<PathBuf>> {
+    let destination = isolated_root.join("artifacts").join(category);
+    fs::create_dir_all(&destination)?;
+    sources
+        .iter()
+        .enumerate()
+        .map(|(index, source)| {
+            let metadata = fs::symlink_metadata(source).map_err(|error| {
+                anyhow::anyhow!(
+                    "cannot inspect Learner {category} artifact {}: {error}",
+                    source.display()
+                )
+            })?;
+            if !metadata.file_type().is_file() {
+                bail!(
+                    "Learner {category} artifact is not a regular file: {}",
+                    source.display()
+                );
+            }
+            let extension = source
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| format!(".{value}"))
+                .unwrap_or_default();
+            let copied = destination.join(format!("{index:03}-artifact{extension}"));
+            fs::copy(source, &copied)?;
+            Ok(copied)
+        })
+        .collect()
 }
 
 fn symbolic_head(repo: &Path) -> Result<Option<String>> {
@@ -1260,26 +1317,6 @@ fn symbolic_head(repo: &Path) -> Result<Option<String>> {
             String::from_utf8_lossy(&output.stderr)
         ),
     }
-}
-
-fn restore_checkout(
-    repo: &Path,
-    symbolic_head: Option<&str>,
-    commit: &str,
-    preserve_fluent: bool,
-) -> Result<()> {
-    if let Some(reference) = symbolic_head {
-        git::run(repo, &["symbolic-ref", "HEAD", reference], "restore symbolic HEAD")?;
-        git::run(repo, &["reset", "--hard", commit], "restore checkout state")?;
-    } else {
-        git::run(repo, &["checkout", "--detach", "-f", commit], "restore detached HEAD")?;
-    }
-    let args = if preserve_fluent {
-        vec!["clean", "-fd", "--", ".", ":(exclude).fluent"]
-    } else {
-        vec!["clean", "-fd"]
-    };
-    git::run(repo, &args, "remove unauthorized untracked files")
 }
 
 /// Reduce a denied path to a filename-safe component for a synthesized follow-up
@@ -1938,6 +1975,8 @@ mod tests {
         let isolated = HandoffOnlyWorkspace {
             workspace_path: isolated_root.path().join("candidate"),
             handoff_dir,
+            review_artifact_paths: Vec::new(),
+            tester_artifact_paths: Vec::new(),
             _temp: isolated_root,
         };
         let project = tempfile::TempDir::new().unwrap();
@@ -1953,6 +1992,56 @@ mod tests {
                 .join(crate::learner::draft_path_rel("work-1", "attempt-1"))
                 .exists()
         );
+    }
+
+    #[test]
+    fn handoff_only_draft_import_requires_a_fresh_draft() {
+        let isolated_root = tempfile::TempDir::new().unwrap();
+        let handoff_dir = isolated_root.path().join("handoff");
+        fs::create_dir_all(&handoff_dir).unwrap();
+        let isolated = HandoffOnlyWorkspace {
+            workspace_path: isolated_root.path().join("candidate"),
+            handoff_dir,
+            review_artifact_paths: Vec::new(),
+            tester_artifact_paths: Vec::new(),
+            _temp: isolated_root,
+        };
+        let project = tempfile::TempDir::new().unwrap();
+        let stale = project
+            .path()
+            .join(crate::learner::draft_path_rel("work-1", "attempt-1"));
+        fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        fs::write(&stale, r#"{"learning_summary":"stale","follow_ups":[]}"#).unwrap();
+
+        let error = isolated
+            .publish_draft(project.path(), "work-1", "attempt-1")
+            .unwrap_err();
+
+        assert!(error.to_string().contains("did not produce a fresh draft"));
+        assert_eq!(
+            fs::read_to_string(stale).unwrap(),
+            r#"{"learning_summary":"stale","follow_ups":[]}"#
+        );
+    }
+
+    #[test]
+    fn handoff_only_artifacts_are_copied_under_the_isolated_root() {
+        let live = tempfile::TempDir::new().unwrap();
+        let review = live.path().join("review.md");
+        let tester = live.path().join("tester-results.json");
+        fs::write(&review, "review sentinel\n").unwrap();
+        fs::write(&tester, "tester sentinel\n").unwrap();
+        let isolated = tempfile::TempDir::new().unwrap();
+
+        let reviews = copy_learner_artifacts(isolated.path(), "reviews", &[review]).unwrap();
+        let testers = copy_learner_artifacts(isolated.path(), "testers", &[tester]).unwrap();
+
+        assert_eq!(fs::read_to_string(&reviews[0]).unwrap(), "review sentinel\n");
+        assert_eq!(fs::read_to_string(&testers[0]).unwrap(), "tester sentinel\n");
+        assert!(reviews[0].starts_with(isolated.path()));
+        assert!(testers[0].starts_with(isolated.path()));
+        assert!(!reviews[0].starts_with(live.path()));
+        assert!(!testers[0].starts_with(live.path()));
     }
 
     #[test]

@@ -1849,6 +1849,8 @@ pub struct LearnerRunInputs<'a> {
     pub diff_command: &'a str,
     /// The managed handoff surface where the coder writes its untrusted draft.
     pub handoff_dir: &'a Path,
+    /// Live repository roots that a handoff-only retry must never write.
+    pub denied_write_roots: &'a [PathBuf],
     /// Whether the Learner runs post-land in handoff-only mode: after its
     /// originating Merge Candidate has merged, it may not mutate expertise or the
     /// merged branch, so it only produces a handoff.
@@ -1957,7 +1959,10 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
     fs::create_dir_all(&expertise_dir)?;
     fs::create_dir_all(inputs.handoff_dir)?;
 
-    let (sandbox, _sandbox_profile) = if inputs.no_sandbox {
+    // A post-land retry handles persisted merged state, so `--no-sandbox`
+    // cannot weaken its boundary. It always uses the trusted system Seatbelt
+    // launcher and fails closed when the host cannot apply that profile.
+    let (sandbox, _sandbox_profile) = if inputs.no_sandbox && !inputs.handoff_only {
         (CoderSandbox::None, None)
     } else {
         let common_git_dir = worktree::git_common_dir(workspace_path)?;
@@ -1977,7 +1982,10 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
             readable_roots.push(expertise_dir.clone());
             readable_roots.push(common_git_dir.clone());
             let home = std::env::var("HOME").unwrap_or_default();
-            let denied = vec![workspace_path.to_path_buf(), common_git_dir];
+            let mut denied = vec![workspace_path.to_path_buf(), common_git_dir];
+            denied.extend(inputs.denied_write_roots.iter().cloned());
+            denied.sort();
+            denied.dedup();
             let profile = os::render_profile_for_access_for_coder_with_denied_writes(
                 inputs.resolver,
                 &home,
@@ -1986,7 +1994,9 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
                 &denied,
                 inputs.coder_kind,
             )?;
-            let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
+            let sandbox = CoderSandbox::TrustedSeatbeltProfile(
+                profile.path.to_string_lossy().to_string(),
+            );
             (sandbox, Some(profile))
         }
     };

@@ -8,6 +8,14 @@ use std::time::{Duration, SystemTime};
 
 const DEFAULT_PI_MODEL: &str = "qwen3.6-35b-a3b";
 
+fn trusted_sandbox_executable() -> &'static str {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("FLUENT_TEST_SYSTEM_SANDBOX").is_none() {
+        return "sandbox-exec";
+    }
+    "/usr/bin/sandbox-exec"
+}
+
 fn claude_model() -> Option<String> {
     std::env::var("FLUENT_CLAUDE_MODEL")
         .or_else(|_| std::env::var("FLUENT_MODEL"))
@@ -71,6 +79,7 @@ pub enum CoderKind {
 pub enum CoderSandbox {
     None,
     SeatbeltProfile(String),
+    TrustedSeatbeltProfile(String),
     SeatbeltRoots { writable_roots: Vec<PathBuf> },
 }
 
@@ -119,6 +128,13 @@ impl CoderKind {
             Self::Claude => match sandbox {
                 CoderSandbox::SeatbeltProfile(profile) => Box::new(SandboxedClaudeCode {
                     sandbox_profile: Some(profile),
+                    trusted_sandbox: false,
+                    model_override: model.map(str::to_string),
+                    effort: effort.map(str::to_string),
+                }),
+                CoderSandbox::TrustedSeatbeltProfile(profile) => Box::new(SandboxedClaudeCode {
+                    sandbox_profile: Some(profile),
+                    trusted_sandbox: true,
                     model_override: model.map(str::to_string),
                     effort: effort.map(str::to_string),
                 }),
@@ -129,17 +145,21 @@ impl CoderKind {
             },
             Self::Codex => Box::new(CodexCode {
                 sandbox_profile: match &sandbox {
-                    CoderSandbox::SeatbeltProfile(profile) => Some(profile.clone()),
+                    CoderSandbox::SeatbeltProfile(profile)
+                    | CoderSandbox::TrustedSeatbeltProfile(profile) => Some(profile.clone()),
                     _ => None,
                 },
+                trusted_sandbox: matches!(sandbox, CoderSandbox::TrustedSeatbeltProfile(_)),
                 model_override: model.map(str::to_string),
                 effort: effort.map(str::to_string),
             }),
             Self::Pi => Box::new(PiCode {
                 sandbox_profile: match &sandbox {
-                    CoderSandbox::SeatbeltProfile(profile) => Some(profile.clone()),
+                    CoderSandbox::SeatbeltProfile(profile)
+                    | CoderSandbox::TrustedSeatbeltProfile(profile) => Some(profile.clone()),
                     _ => None,
                 },
+                trusted_sandbox: matches!(sandbox, CoderSandbox::TrustedSeatbeltProfile(_)),
                 model_override: model.map(str::to_string),
             }),
         }
@@ -175,6 +195,7 @@ pub trait Coder: Send + Sync {
 /// Claude Code invoked via sandbox-exec.
 pub struct SandboxedClaudeCode {
     pub sandbox_profile: Option<String>,
+    pub trusted_sandbox: bool,
     pub model_override: Option<String>,
     pub effort: Option<String>,
 }
@@ -234,7 +255,11 @@ impl SandboxedClaudeCode {
     fn build_command(&self, working_dir: &Path) -> Command {
         let model = self.effective_model();
         if let Some(ref profile) = self.sandbox_profile {
-            let mut cmd = Command::new("sandbox-exec");
+            let mut cmd = Command::new(if self.trusted_sandbox {
+                trusted_sandbox_executable()
+            } else {
+                "sandbox-exec"
+            });
             cmd.args(["-f", profile]);
             cmd.arg("claude");
             cmd.arg("--dangerously-skip-permissions");
@@ -328,6 +353,7 @@ impl Coder for BareClaudeCode {
 /// OpenAI Codex CLI.
 pub struct CodexCode {
     pub sandbox_profile: Option<String>,
+    pub trusted_sandbox: bool,
     pub model_override: Option<String>,
     pub effort: Option<String>,
 }
@@ -385,7 +411,11 @@ impl CodexCode {
 
     fn build_command(&self, working_dir: &Path, exec_mode: bool) -> Command {
         let mut cmd = if let Some(profile) = &self.sandbox_profile {
-            let mut cmd = Command::new("sandbox-exec");
+            let mut cmd = Command::new(if self.trusted_sandbox {
+                trusted_sandbox_executable()
+            } else {
+                "sandbox-exec"
+            });
             cmd.args(["-f", profile]);
             cmd.arg("codex");
             if let Some(ca_bundle) = codex_ca_bundle() {
@@ -420,6 +450,7 @@ impl CodexCode {
 /// Pi (pi.dev) coding agent backed by a local vllm-mlx model.
 pub struct PiCode {
     pub sandbox_profile: Option<String>,
+    pub trusted_sandbox: bool,
     pub model_override: Option<String>,
 }
 
@@ -431,7 +462,11 @@ impl PiCode {
     fn build_command(&self, working_dir: &Path) -> Command {
         let model = self.effective_model();
         if let Some(ref profile) = self.sandbox_profile {
-            let mut cmd = Command::new("sandbox-exec");
+            let mut cmd = Command::new(if self.trusted_sandbox {
+                trusted_sandbox_executable()
+            } else {
+                "sandbox-exec"
+            });
             cmd.args(["-f", profile]);
             cmd.arg("pi");
             cmd.args(["--provider", "local-openai"]);
@@ -1377,6 +1412,7 @@ mod model_default_tests {
     fn claude_command_omits_model_when_unset() {
         let coder = SandboxedClaudeCode {
             sandbox_profile: Some("/tmp/profile".to_string()),
+            trusted_sandbox: false,
             model_override: None,
             effort: None,
         };
@@ -1392,6 +1428,7 @@ mod model_default_tests {
     fn claude_command_passes_model_when_set() {
         let coder = SandboxedClaudeCode {
             sandbox_profile: Some("/tmp/profile".to_string()),
+            trusted_sandbox: false,
             model_override: Some("claude-sonnet-4-6".to_string()),
             effort: None,
         };
@@ -1405,6 +1442,21 @@ mod model_default_tests {
             cmd_has_arg(&cmd, "claude-sonnet-4-6"),
             "should pass the configured model"
         );
+    }
+
+    #[test]
+    fn trusted_claude_sandbox_uses_the_debug_test_launcher() {
+        let coder = SandboxedClaudeCode {
+            sandbox_profile: Some("/tmp/profile".to_string()),
+            trusted_sandbox: true,
+            model_override: None,
+            effort: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+
+        let cmd = coder.build_command(dir.path());
+
+        assert_eq!(cmd.get_program(), OsStr::new("sandbox-exec"));
     }
 
     #[test]
@@ -1423,6 +1475,7 @@ mod model_default_tests {
     fn codex_command_omits_model_when_unset() {
         let coder = CodexCode {
             sandbox_profile: None,
+            trusted_sandbox: false,
             model_override: None,
             effort: None,
         };
@@ -1438,6 +1491,7 @@ mod model_default_tests {
     fn codex_command_passes_model_when_set() {
         let coder = CodexCode {
             sandbox_profile: None,
+            trusted_sandbox: false,
             model_override: Some("gpt-4o".to_string()),
             effort: None,
         };
@@ -1457,6 +1511,7 @@ mod model_default_tests {
     fn claude_effort_passed_when_set() {
         let coder = SandboxedClaudeCode {
             sandbox_profile: Some("/tmp/profile".to_string()),
+            trusted_sandbox: false,
             model_override: None,
             effort: Some("high".to_string()),
         };
@@ -1470,6 +1525,7 @@ mod model_default_tests {
     fn claude_effort_omitted_when_unset() {
         let coder = SandboxedClaudeCode {
             sandbox_profile: Some("/tmp/profile".to_string()),
+            trusted_sandbox: false,
             model_override: None,
             effort: None,
         };
@@ -1485,6 +1541,7 @@ mod model_default_tests {
     fn codex_effort_passed_as_config_flag() {
         let coder = CodexCode {
             sandbox_profile: None,
+            trusted_sandbox: false,
             model_override: None,
             effort: Some("medium".to_string()),
         };
@@ -1500,6 +1557,7 @@ mod model_default_tests {
     fn codex_effort_omitted_when_unset() {
         let coder = CodexCode {
             sandbox_profile: None,
+            trusted_sandbox: false,
             model_override: None,
             effort: None,
         };

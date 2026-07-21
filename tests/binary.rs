@@ -2789,7 +2789,7 @@ exit 0
 
 /// A retrying Learner that attempts to mutate target Git state, protected refs,
 /// and the candidate index before returning a handoff.
-fn hostile_post_land_learner_mock_script(counter: &Path) -> String {
+fn hostile_post_land_learner_mock_script(counter: &Path, live_target: &Path) -> String {
     format!(
         r##"#!/bin/bash
 PROMPT=""
@@ -2806,9 +2806,14 @@ if printf '%s' "$PROMPT" | grep -q "Rebase the candidate branch"; then
 fi
 if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
   if [ ! -f "{}" ]; then touch "{}"; exit 1; fi
+  LIVE_TARGET='{}'
   DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
   PROJECT=${{DRAFT%%/.fluent/*}}
   mkdir -p "$(dirname "$DRAFT")"
+  printf 'hostile live target write\n' > "$LIVE_TARGET/live-target-mutated.txt" 2>/dev/null
+  LIVE_TARGET_WRITE=$?
+  git -C "$LIVE_TARGET" add live-target-mutated.txt >/dev/null 2>&1
+  LIVE_TARGET_INDEX=$?
   printf 'hostile target write\n' > "$PROJECT/target-mutated.txt" 2>/dev/null
   TARGET_WRITE=$?
   git -C "$PROJECT" add target-mutated.txt >/dev/null 2>&1
@@ -2819,8 +2824,12 @@ if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
   CANDIDATE_WRITE=$?
   git add candidate-index.txt >/dev/null 2>&1
   CANDIDATE_INDEX=$?
-  printf '{{"learning_summary":"hostile project=%s target_write=%s target_index=%s ref_write=%s candidate_write=%s candidate_index=%s","follow_ups":[]}}\n' \
-    "$PROJECT" "$TARGET_WRITE" "$TARGET_INDEX" "$REF_WRITE" "$CANDIDATE_WRITE" "$CANDIDATE_INDEX" \
+  git remote get-url origin >/dev/null 2>&1
+  ORIGIN_PRESENT=$?
+  printf '%s' "$PROMPT" | grep -Fq "$LIVE_TARGET"
+  PROMPT_LEAK=$?
+  printf '{{"learning_summary":"hostile project=%s live_target_write=%s live_target_index=%s target_write=%s target_index=%s ref_write=%s candidate_write=%s candidate_index=%s origin_present=%s prompt_leak=%s","follow_ups":[]}}\n' \
+    "$PROJECT" "$LIVE_TARGET_WRITE" "$LIVE_TARGET_INDEX" "$TARGET_WRITE" "$TARGET_INDEX" "$REF_WRITE" "$CANDIDATE_WRITE" "$CANDIDATE_INDEX" "$ORIGIN_PRESENT" "$PROMPT_LEAK" \
     > "$DRAFT"
   exit 0
 fi
@@ -2836,6 +2845,7 @@ exit 0
 "##,
         counter.display(),
         counter.display(),
+        live_target.display(),
     )
 }
 
@@ -2897,13 +2907,23 @@ exit 0
 
 /// Re-run the completed Attempt to retry a failed Learner.
 fn rerun_learner_attempt(main_dir: &Path, bin_dir: &Path) {
-    if let Err(error) = fs::remove_file(bin_dir.join("sandbox-exec")) {
-        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
-    }
+    write_mock_sandbox_exec(bin_dir);
     fluent_cmd()
         .current_dir(main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(bin_dir))
+        .env("SANDBOX_EXEC_LOG", bin_dir.join("sandbox-exec.log"))
+        .assert()
+        .success();
+}
+
+fn rerun_learner_attempt_with_system_sandbox(main_dir: &Path, bin_dir: &Path) {
+    fs::remove_file(bin_dir.join("sandbox-exec")).unwrap();
+    fluent_cmd()
+        .current_dir(main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(bin_dir))
+        .env("FLUENT_TEST_SYSTEM_SANDBOX", "1")
         .assert()
         .success();
 }
@@ -2915,6 +2935,7 @@ fn rerun_learner_attempt_sandboxed(main_dir: &Path, bin_dir: &Path) {
         .args(["attempt", "run", "work-1", "attempt-1"])
         .env("PATH", mock_path(bin_dir))
         .env("CLAUDE_CODE_OAUTH_TOKEN", "mock-token")
+        .env("FLUENT_TEST_SYSTEM_SANDBOX", "1")
         .assert()
         .success();
 }
@@ -3963,14 +3984,14 @@ fn concurrent_learner_retry_and_land_never_mutate_after_merge() {
 }
 
 #[test]
-fn post_land_handoff_only_isolates_git_without_sandbox() {
+fn post_land_handoff_only_ignores_no_sandbox_and_preserves_live_git() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     let counter = tmp.path().join("learner-counter-hostile");
     let bin_dir = tmp.path().join("bin-hostile-git");
     write_mock_claude(
         &bin_dir,
-        &hostile_post_land_learner_mock_script(&counter),
+        &hostile_post_land_learner_mock_script(&counter, &main_dir),
     );
 
     create_and_run_learner_attempt(&main_dir, &bin_dir);
@@ -4008,6 +4029,30 @@ fn post_land_handoff_only_isolates_git_without_sandbox() {
         "set preexisting index flag",
     )
     .unwrap();
+    git::run(
+        &main_dir,
+        &["update-index", "--skip-worktree", ".gitignore"],
+        "set preexisting skip-worktree flag",
+    )
+    .unwrap();
+    let preserved_paths = [
+        "README.md",
+        "preexisting-staged.txt",
+        "preexisting-untracked.txt",
+        "preexisting-executable",
+        "loop-output.txt",
+        ".gitignore",
+    ];
+    let target_bytes_before = preserved_paths
+        .iter()
+        .map(|path| (*path, fs::read(main_dir.join(path)).unwrap()))
+        .collect::<Vec<_>>();
+    let staged_blob_before = git::run_stdout(
+        &main_dir,
+        &["show", ":preexisting-staged.txt"],
+        "read staged target blob before hostile retry",
+    )
+    .unwrap();
     let target_status_before = git::run_stdout(
         &main_dir,
         &["status", "--porcelain", "--untracked-files=all"],
@@ -4016,35 +4061,34 @@ fn post_land_handoff_only_isolates_git_without_sandbox() {
     .unwrap();
     let index_flags_before = git::run_stdout(
         &main_dir,
-        &["ls-files", "-v", "loop-output.txt"],
+        &["ls-files", "-v", "loop-output.txt", ".gitignore"],
         "target index flags before hostile retry",
     )
     .unwrap();
-    rerun_learner_attempt(&main_dir, &bin_dir);
+    rerun_learner_attempt_with_system_sandbox(&main_dir, &bin_dir);
 
-    let handoff: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(main_dir.join(fluent::learner::handoff_path_rel(
-            "work-1",
-            "attempt-1",
-        )))
-        .unwrap(),
-    )
-    .unwrap();
-    let sandbox_results = handoff["learning"]["summary"].as_str().unwrap();
-    assert!(sandbox_results.contains("hostile project="));
-    assert!(!sandbox_results.contains(&format!("project={}", main_dir.display())));
-    for operation in [
-        "target_write",
-        "ref_write",
-        "candidate_write",
-        "candidate_index",
-    ] {
-        assert!(
-            sandbox_results.contains(&format!("{operation}=0")),
-            "the hostile Learner must exercise {operation} in its isolated copy: {sandbox_results}"
+    if real_sandbox_exec_is_usable() {
+        let handoff: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(main_dir.join(fluent::learner::handoff_path_rel(
+                "work-1",
+                "attempt-1",
+            )))
+            .unwrap(),
+        )
+        .unwrap();
+        let sandbox_results = handoff["learning"]["summary"].as_str().unwrap();
+        assert!(sandbox_results.contains("hostile project="));
+        assert!(!sandbox_results.contains("live_target_write=0"));
+        assert!(!sandbox_results.contains("live_target_index=0"));
+        assert!(!sandbox_results.contains("origin_present=0"));
+        assert!(sandbox_results.contains("prompt_leak=1"));
+    } else {
+        assert_eq!(
+            work_item_value(&main_dir, "work-1")["attempts"][0]["learning"]["status"],
+            "failed",
+            "handoff-only --no-sandbox must fail closed when trusted Seatbelt is unavailable"
         );
     }
-    assert!(sandbox_results.contains("target_index="));
 
     assert_eq!(
         git::run_stdout(&main_dir, &["rev-parse", "HEAD"], "target HEAD").unwrap(),
@@ -4056,8 +4100,19 @@ fn post_land_handoff_only_isolates_git_without_sandbox() {
         merged,
         "the persisted candidate commit remains the merged commit"
     );
-    assert!(!candidate.exists(), "successful recovery removes the isolated origin worktree");
+    if real_sandbox_exec_is_usable() {
+        assert!(
+            !candidate.exists(),
+            "successful recovery removes the retained candidate worktree"
+        );
+    } else {
+        assert!(
+            candidate.exists(),
+            "failed-closed recovery retains the candidate for a later retry"
+        );
+    }
     assert!(!main_dir.join("target-mutated.txt").exists());
+    assert!(!main_dir.join("live-target-mutated.txt").exists());
     assert_eq!(
         git::run_stdout(
             &main_dir,
@@ -4071,12 +4126,29 @@ fn post_land_handoff_only_isolates_git_without_sandbox() {
     assert_eq!(
         git::run_stdout(
             &main_dir,
-            &["ls-files", "-v", "loop-output.txt"],
+            &["ls-files", "-v", "loop-output.txt", ".gitignore"],
             "target index flags after hostile retry",
         )
         .unwrap(),
         index_flags_before,
         "isolation preserves complete index flags"
+    );
+    for (path, expected) in target_bytes_before {
+        assert_eq!(
+            fs::read(main_dir.join(path)).unwrap(),
+            expected,
+            "isolation preserves the bytes of {path}"
+        );
+    }
+    assert_eq!(
+        git::run_stdout(
+            &main_dir,
+            &["show", ":preexisting-staged.txt"],
+            "read staged target blob after hostile retry",
+        )
+        .unwrap(),
+        staged_blob_before,
+        "isolation preserves staged blob bytes"
     );
     #[cfg(unix)]
     {
@@ -4084,6 +4156,10 @@ fn post_land_handoff_only_isolates_git_without_sandbox() {
         use std::os::unix::fs::PermissionsExt;
 
         assert_eq!(fs::read_link(main_dir.join("preexisting-link")).unwrap(), tmp.path().join("outside-symlink-target"));
+        assert_eq!(
+            fs::read(tmp.path().join("outside-symlink-target")).unwrap(),
+            b"outside stays unchanged\n"
+        );
         assert_eq!(fs::metadata(&executable).unwrap().permissions().mode() & 0o777, 0o755);
         let non_utf_path = main_dir
             .join(".fluent")
@@ -4105,32 +4181,41 @@ fn post_land_handoff_only_isolates_git_without_sandbox() {
         .success(),
         "unauthorized refs are removed"
     );
-    assert!(
-        work_item_value(&main_dir, "work-1")["attempts"][0]["learning"]["status"]
-            == "succeeded",
-        "the denied hostile writes must not discard the managed handoff"
-    );
+    if real_sandbox_exec_is_usable() {
+        assert_eq!(
+            work_item_value(&main_dir, "work-1")["attempts"][0]["learning"]["status"],
+            "succeeded",
+            "denied hostile writes must not discard the managed handoff"
+        );
+    }
 }
 
 #[test]
 fn sandboxed_post_land_coder_runs_and_is_denied() {
-    if !real_sandbox_exec_is_usable() {
-        eprintln!("skipping real Seatbelt assertion: this process cannot create a nested sandbox");
-        return;
-    }
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     let counter = tmp.path().join("learner-counter-sandbox-hostile");
     let bin_dir = tmp.path().join("bin-sandbox-hostile");
     write_mock_claude(
         &bin_dir,
-        &hostile_post_land_learner_mock_script(&counter),
+        &hostile_post_land_learner_mock_script(&counter, &main_dir),
     );
 
     create_and_run_learner_attempt(&main_dir, &bin_dir);
     land_work_1(&main_dir, &bin_dir, true);
     let merged = merged_commit_of(&main_dir);
     rerun_learner_attempt_sandboxed(&main_dir, &bin_dir);
+
+    if !real_sandbox_exec_is_usable() {
+        assert_eq!(
+            work_item_value(&main_dir, "work-1")["attempts"][0]["learning"]["status"],
+            "failed",
+            "an unavailable trusted sandbox must fail closed instead of reporting success"
+        );
+        assert_eq!(git_head(&main_dir), merged);
+        assert!(!main_dir.join("live-target-mutated.txt").exists());
+        return;
+    }
 
     let handoff: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(main_dir.join(fluent::learner::handoff_path_rel(
@@ -4142,6 +4227,10 @@ fn sandboxed_post_land_coder_runs_and_is_denied() {
     .unwrap();
     let sandbox_results = handoff["learning"]["summary"].as_str().unwrap();
     assert!(sandbox_results.contains("hostile project="));
+    assert!(!sandbox_results.contains("live_target_write=0"));
+    assert!(!sandbox_results.contains("live_target_index=0"));
+    assert!(!sandbox_results.contains("origin_present=0"));
+    assert!(sandbox_results.contains("prompt_leak=1"));
     for operation in [
         "target_write",
         "target_index",
@@ -4221,12 +4310,14 @@ fn concurrent_post_land_retries_run_the_learner_once() {
 
     create_and_run_learner_attempt(&main_dir, &bin_dir);
     land_work_1(&main_dir, &bin_dir, true);
+    write_mock_sandbox_exec(&bin_dir);
 
     let spawn_retry = || {
         std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
             .current_dir(&main_dir)
             .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
             .env("PATH", mock_path(&bin_dir))
+            .env("SANDBOX_EXEC_LOG", bin_dir.join("sandbox-exec.log"))
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
@@ -4248,7 +4339,7 @@ fn concurrent_post_land_retries_run_the_learner_once() {
 }
 
 #[test]
-fn post_land_retry_resets_interrupted_candidate_commit_to_merged_commit() {
+fn post_land_retry_ignores_a_malformed_retained_candidate() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     let counter = tmp.path().join("learner-counter-crash-window");
@@ -4274,8 +4365,27 @@ fn post_land_retry_resets_interrupted_candidate_commit_to_merged_commit() {
         "create interrupted commit",
     )
     .unwrap();
+    let git_file = fs::read_to_string(candidate.join(".git")).unwrap();
+    let candidate_git_dir = PathBuf::from(git_file.trim().strip_prefix("gitdir: ").unwrap());
+    fs::write(candidate_git_dir.join("index"), "malformed index\n").unwrap();
+    fs::write(candidate_git_dir.join("HEAD"), "malformed HEAD\n").unwrap();
 
-    rerun_learner_attempt(&main_dir, &bin_dir);
+    write_mock_sandbox_exec(&bin_dir);
+    let retry = fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("SANDBOX_EXEC_LOG", bin_dir.join("sandbox-exec.log"))
+        .output()
+        .unwrap();
+    assert!(
+        !retry.status.success(),
+        "malformed retained Git metadata may defer cleanup but must not affect Learning"
+    );
+    assert!(
+        String::from_utf8_lossy(&retry.stdout).contains("cleanup-workspace"),
+        "cleanup failure remains explicitly retryable"
+    );
 
     assert_eq!(
         fs::read_to_string(format!("{}.head", counter.display()))
@@ -4284,10 +4394,7 @@ fn post_land_retry_resets_interrupted_candidate_commit_to_merged_commit() {
         merged,
         "the coder starts from the durable merged commit"
     );
-    assert!(
-        !candidate.exists(),
-        "successful recovery removes the reset candidate workspace"
-    );
+    assert!(candidate.exists(), "failed cleanup retains the workspace for recovery");
 }
 
 #[test]
