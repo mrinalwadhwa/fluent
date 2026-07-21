@@ -134,21 +134,8 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                 .map(|learning| learning.is_failed())
                 .unwrap_or(true);
             if learner_pending {
-                let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
-                    work_task_executor::run_learner(work_task_executor::LearnerRunInputs {
-                        workspace_path: request.workspace_path,
-                        resolver: config.resolver,
-                        extra_args: config.extra_args,
-                        coder_kind: request.coder_kind,
-                        no_sandbox: config.no_sandbox,
-                        model: request.model,
-                        effort: request.effort,
-                        review_artifact_paths: request.review_artifact_paths,
-                        tester_artifact_paths: request.tester_artifact_paths,
-                        diff_command: request.diff_command,
-                        handoff_dir: request.handoff_dir,
-                    })
-                };
+                let run_coder =
+                    |request: &LearnerCoderRequest<'_>| default_learner_run_coder(&config, request);
                 run_learner_step(
                     config.project_root,
                     &mut item,
@@ -281,21 +268,8 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             && !has_open_review_round(attempt.tasks.as_slice())
         {
             let can_advance = can_advance_loop(config.project_root, attempt)?;
-            let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
-                work_task_executor::run_learner(work_task_executor::LearnerRunInputs {
-                    workspace_path: request.workspace_path,
-                    resolver: config.resolver,
-                    extra_args: config.extra_args,
-                    coder_kind: request.coder_kind,
-                    no_sandbox: config.no_sandbox,
-                    model: request.model,
-                    effort: request.effort,
-                    review_artifact_paths: request.review_artifact_paths,
-                    tester_artifact_paths: request.tester_artifact_paths,
-                    diff_command: request.diff_command,
-                    handoff_dir: request.handoff_dir,
-                })
-            };
+            let run_coder =
+                |request: &LearnerCoderRequest<'_>| default_learner_run_coder(&config, request);
             let outcome = interpret_reviews(
                 config.project_root,
                 config.store,
@@ -325,6 +299,30 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             config.attempt_id
         );
     }
+}
+
+/// Run the Learner with the run-level configuration, mapping a per-run
+/// `LearnerCoderRequest` onto the executor's `LearnerRunInputs`. Both Learner
+/// entry points in `run_attempt` — the retry fast-path and the normal
+/// review-interpretation path — share this adapter so a new input field is
+/// threaded through one place.
+fn default_learner_run_coder(
+    config: &WorkAttemptRunConfig<'_>,
+    request: &LearnerCoderRequest<'_>,
+) -> Result<()> {
+    work_task_executor::run_learner(work_task_executor::LearnerRunInputs {
+        workspace_path: request.workspace_path,
+        resolver: config.resolver,
+        extra_args: config.extra_args,
+        coder_kind: request.coder_kind,
+        no_sandbox: config.no_sandbox,
+        model: request.model,
+        effort: request.effort,
+        review_artifact_paths: request.review_artifact_paths,
+        tester_artifact_paths: request.tester_artifact_paths,
+        diff_command: request.diff_command,
+        handoff_dir: request.handoff_dir,
+    })
 }
 
 struct SlotGuard {
