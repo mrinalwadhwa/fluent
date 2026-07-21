@@ -10814,6 +10814,145 @@ fn descendant_execution_failure_preserves_land_and_reports_recovery() {
     );
 }
 
+#[test]
+fn idle_scheduler_shutdown_exits_immediately() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join(".fluent/work/items")).unwrap();
+
+    // A long poll interval would delay a naive shutdown; an idle scheduler must
+    // exit promptly on SIGTERM regardless.
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
+        .current_dir(tmp.path())
+        .args(["scheduler", "run", "--poll-seconds", "30"])
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let signalled = std::time::Instant::now();
+    send_signal(child.id(), "TERM");
+    let status = child.wait().unwrap();
+    let elapsed = signalled.elapsed();
+
+    assert!(status.success(), "idle scheduler exits cleanly");
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "idle scheduler exits without waiting the poll interval, took {elapsed:?}"
+    );
+}
+
+#[test]
+fn status_reports_queued_work_without_live_scheduler() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+    write_work_item_json(project, "wi-waiting", "Waiting Work");
+
+    fluent_cmd()
+        .current_dir(project)
+        .args(["queue", "add", "wi-waiting"])
+        .assert()
+        .success();
+
+    // No coordinator is running, so status must flag stopped execution and name
+    // the start action.
+    fluent_cmd()
+        .current_dir(project)
+        .args(["status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Execution is stopped"))
+        .stdout(predicate::str::contains("fluent scheduler run"));
+}
+
+#[test]
+fn scheduler_restart_processes_durable_waiting_work() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+    init_git_repo(project);
+
+    // One slot at a time so a second Work Item waits durably.
+    let config_dir = project.join(".fluent");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.yaml"),
+        "scheduler:\n  local-concurrency: 1\n",
+    )
+    .unwrap();
+
+    let bin_dir = project.join("mock-bin");
+    write_mock_claude(
+        &bin_dir,
+        r#"#!/bin/bash
+sleep 2
+git add -A 2>/dev/null
+git commit --allow-empty -m "mock write" 2>/dev/null
+exit 0
+"#,
+    );
+    let path_env = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    for id in ["wi-a", "wi-b"] {
+        write_work_item_json(project, id, "Restart");
+        fluent_cmd()
+            .current_dir(project)
+            .args(["queue", "add", id])
+            .assert()
+            .success();
+    }
+
+    let is_terminal = |id: &str| {
+        let s = latest_dispatch_status(project, id);
+        s == "candidate-ready" || s == "failed"
+    };
+
+    // First coordinator: processes one Work Item, then is stopped.
+    let first = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
+        .current_dir(project)
+        .env("PATH", &path_env)
+        .args(["scheduler", "run", "--poll-seconds", "1"])
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !(is_terminal("wi-a") || is_terminal("wi-b")) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "first coordinator processed nothing"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    send_signal(first.id(), "TERM");
+    let first_status = first.wait_with_output().unwrap();
+    assert!(first_status.status.success(), "first coordinator drains cleanly");
+
+    // The remaining Work stayed durably queued; a restart processes it.
+    let second = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
+        .current_dir(project)
+        .env("PATH", &path_env)
+        .args(["scheduler", "run", "--poll-seconds", "1"])
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(40);
+    while !(is_terminal("wi-a") && is_terminal("wi-b")) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "restart did not process the durable waiting Work"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    send_signal(second.id(), "TERM");
+    let _ = second.wait_with_output().unwrap();
+
+    assert!(is_terminal("wi-a") && is_terminal("wi-b"));
+}
+
 // ---------------------------------------------------------------------------
 // B1–B5: Read commands for attempts, merge candidates, and tasks
 // ---------------------------------------------------------------------------

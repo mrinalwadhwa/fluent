@@ -1417,6 +1417,16 @@ fn cmd_status(search_root: &Path) -> Result<()> {
     let work_status = work_status::load_work_status(search_root)?;
     let is_empty = work_status.is_empty();
     print!("{}", work_status::format_work_status(&work_status));
+
+    // Surface stalled execution: queued Work with no live coordinator to claim
+    // it stays queued until the scheduler is started or recovered.
+    if fluent::scheduler::execution_is_stopped(search_root)? {
+        println!(
+            "\nExecution is stopped: queued Work is waiting but no scheduler is running.\n\
+             Start or recover it with: fluent scheduler run"
+        );
+    }
+
     if guidance::guidance_enabled() {
         if is_empty {
             eprintln!("{}", guidance::empty_status_primer());

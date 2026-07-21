@@ -110,7 +110,7 @@ pub fn run(project_root: &Path, poll_seconds: u64, runner: &dyn AttemptRunner) -
         }
         CoordinatorStart::Elected(lease) => {
             let capacity = resolve_capacity(project_root)?;
-            let result = run_coordinator(project_root, poll_seconds, capacity, runner);
+            let result = run_coordinator(project_root, poll_seconds, capacity, runner, &SHUTDOWN);
             drop(lease);
             result
         }
@@ -119,19 +119,21 @@ pub fn run(project_root: &Path, poll_seconds: u64, runner: &dyn AttemptRunner) -
 
 /// Run the elected coordinator's worker pool: each poll fills free capacity with
 /// newly claimed dispatches, launching each on its own worker thread. Running
-/// Work is never interrupted; on shutdown the scope drains live workers.
+/// Work is never interrupted; once `shutdown` is set the coordinator stops
+/// claiming, and the scope drains live workers before returning.
 fn run_coordinator(
     project_root: &Path,
     poll_seconds: u64,
     capacity: usize,
     runner: &dyn AttemptRunner,
+    shutdown: &AtomicBool,
 ) -> Result<()> {
     std::thread::scope(|scope| -> Result<()> {
         let mut workers: Vec<std::thread::ScopedJoinHandle<()>> = Vec::new();
         loop {
             workers.retain(|handle| !handle.is_finished());
 
-            if shutdown_requested() {
+            if is_shutdown(shutdown) {
                 break;
             }
 
@@ -148,21 +150,38 @@ fn run_coordinator(
                 spawned = true;
             }
 
-            if shutdown_requested() {
+            if is_shutdown(shutdown) {
                 break;
             }
 
             if spawned {
                 // Re-evaluate promptly so freed capacity refills without waiting
                 // a full poll interval.
-                sleep_with_shutdown_check(Duration::from_millis(50));
+                sleep_until_shutdown(Duration::from_millis(50), shutdown);
             } else {
-                sleep_with_shutdown_check(Duration::from_secs(poll_seconds));
+                sleep_until_shutdown(Duration::from_secs(poll_seconds), shutdown);
             }
         }
+        // The scope join drains any live workers, recording their outcomes.
         Ok(())
     })?;
     Ok(())
+}
+
+/// Whether queued Work exists but no live coordinator can claim it, so
+/// execution is stopped.
+pub fn execution_is_stopped(project_root: &Path) -> Result<bool> {
+    if coordinator_is_live(project_root) {
+        return Ok(false);
+    }
+    Ok(queue::list(project_root)?
+        .iter()
+        .any(|dispatch| dispatch.status == DispatchStatus::Queued))
+}
+
+/// Whether a live coordinator currently owns this project.
+pub fn coordinator_is_live(project_root: &Path) -> bool {
+    lease::is_leased(&coordinator_lock_path(project_root))
 }
 
 fn resolve_capacity(project_root: &Path) -> Result<usize> {
@@ -505,15 +524,18 @@ fn install_signal_handler() {
     });
 }
 
-fn shutdown_requested() -> bool {
-    SHUTDOWN.load(Ordering::Acquire)
+fn is_shutdown(shutdown: &AtomicBool) -> bool {
+    shutdown.load(Ordering::Acquire)
 }
 
-fn sleep_with_shutdown_check(duration: Duration) {
+/// Sleep up to `duration`, checking the shutdown signal each second so a
+/// SIGTERM or SIGINT stops an idle coordinator without waiting the full poll
+/// interval.
+fn sleep_until_shutdown(duration: Duration, shutdown: &AtomicBool) {
     let one_second = Duration::from_secs(1);
     let mut remaining = duration;
     while remaining > Duration::ZERO {
-        if shutdown_requested() {
+        if is_shutdown(shutdown) {
             return;
         }
         let sleep_for = remaining.min(one_second);
@@ -1065,6 +1087,103 @@ mod tests {
         assert_eq!(
             active_dispatch(dir.path(), "wi-ok").status,
             DispatchStatus::Queued
+        );
+    }
+
+    #[test]
+    fn lowered_capacity_does_not_preempt_and_blocks_claims() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        for id in ["wi-r1", "wi-r2", "wi-r3", "wi-q"] {
+            write_ready_work_item(dir.path(), id);
+        }
+
+        // Three dispatches are already running.
+        let _l1 = make_running(dir.path(), "wi-r1");
+        let _l2 = make_running(dir.path(), "wi-r2");
+        let _l3 = make_running(dir.path(), "wi-r3");
+        add_queued(dir.path(), "wi-q", 0);
+
+        // The configured limit is now two — below the three already running.
+        let claims = claim_available(dir.path(), 2).unwrap();
+        assert!(claims.is_empty(), "no new Work starts above the new limit");
+
+        // Running Work is undisturbed and the queued entry stays queued.
+        for id in ["wi-r1", "wi-r2", "wi-r3"] {
+            assert_eq!(
+                active_dispatch(dir.path(), id).status,
+                DispatchStatus::Running
+            );
+        }
+        assert_eq!(
+            active_dispatch(dir.path(), "wi-q").status,
+            DispatchStatus::Queued
+        );
+    }
+
+    #[test]
+    fn shutdown_stops_claiming_and_preserves_unclaimed_work() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        write_ready_work_item(dir.path(), "wi-1");
+        add_queued(dir.path(), "wi-1", 0);
+
+        // Shutdown is already requested: the coordinator claims nothing.
+        let shutdown = AtomicBool::new(true);
+        run_coordinator(
+            dir.path(),
+            1,
+            4,
+            &MockRunner::new(AttemptOutcome::Complete),
+            &shutdown,
+        )
+        .unwrap();
+
+        assert_eq!(
+            active_dispatch(dir.path(), "wi-1").status,
+            DispatchStatus::Queued,
+            "unclaimed Work is preserved as queued"
+        );
+    }
+
+    #[test]
+    fn graceful_shutdown_drains_claimed_work() {
+        // A runner that lingers so shutdown arrives while its Attempt is live.
+        struct SlowRunner;
+        impl AttemptRunner for SlowRunner {
+            fn run(&self, _p: &Path, _wi: &str, _a: &str) -> Result<AttemptOutcome> {
+                std::thread::sleep(Duration::from_millis(300));
+                Ok(AttemptOutcome::Complete)
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        write_ready_work_item(dir.path(), "wi-1");
+        add_queued(dir.path(), "wi-1", 0);
+
+        let shutdown = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                run_coordinator(dir.path(), 1, 4, &SlowRunner, &shutdown).unwrap();
+            });
+
+            // Wait until the dispatch is live, then request shutdown mid-flight.
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                if latest_status(dir.path(), "wi-1") == DispatchStatus::Running {
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "dispatch never ran");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            shutdown.store(true, Ordering::Release);
+        });
+
+        // The in-flight Attempt was drained and its outcome recorded.
+        assert_eq!(
+            latest_status(dir.path(), "wi-1"),
+            DispatchStatus::CandidateReady
         );
     }
 

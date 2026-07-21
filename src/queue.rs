@@ -1006,6 +1006,41 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_skips_malformed_entry_without_stalling() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        write_ready_work_item(dir.path(), "wi-good");
+        add(dir.path(), "wi-good", Some(1)).unwrap();
+
+        // A malformed queue file must not abort listing the good entries.
+        let qdir = queue_dir(dir.path());
+        fs::write(qdir.join("wi-bad.json"), "{ this is not json").unwrap();
+
+        let entries = list(dir.path()).unwrap();
+        assert_eq!(entries.len(), 1, "the good entry is still listed");
+        assert_eq!(entries[0].work_item_id, "wi-good");
+    }
+
+    #[test]
+    fn scheduler_warns_and_preserves_malformed_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        let qdir = queue_dir(dir.path());
+        fs::create_dir_all(&qdir).unwrap();
+        let bad = qdir.join("wi-bad.json");
+        fs::write(&bad, "{ not valid").unwrap();
+
+        // Listing skips the malformed file rather than erroring, and leaves it
+        // on disk for operator inspection.
+        let entries = list(dir.path()).unwrap();
+        assert!(entries.is_empty());
+        assert!(bad.exists(), "the malformed entry is preserved");
+        // list_ledgers, the scheduler's read path, also skips it without error.
+        assert!(list_ledgers(dir.path()).unwrap().is_empty());
+        assert!(bad.exists());
+    }
+
+    #[test]
     fn terminal_and_blocked_dispositions_survive_automatic_replay() {
         let dir = tempfile::tempdir().unwrap();
         setup_project(dir.path());
