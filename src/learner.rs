@@ -227,6 +227,7 @@ mod tests {
                 corrective: true,
                 corrective_context: Some(corrective_context()),
                 evidence: Vec::new(),
+                ..Default::default()
             }],
         };
         let handoff = stamp_handoff(
@@ -258,6 +259,7 @@ mod tests {
                 corrective: true,
                 corrective_context: Some(context),
                 evidence: Vec::new(),
+                ..Default::default()
             }],
         };
         assert!(stamp_handoff(draft, "work-1", "attempt-1", "mc", Vec::new()).is_err());
@@ -273,6 +275,7 @@ mod tests {
                 corrective: true,
                 corrective_context: None,
                 evidence: Vec::new(),
+                ..Default::default()
             }],
         };
         assert!(stamp_handoff(draft, "work-1", "attempt-1", "mc", Vec::new()).is_err());
@@ -286,6 +289,7 @@ mod tests {
             corrective: false,
             corrective_context: None,
             evidence: Vec::new(),
+            ..Default::default()
         };
         let draft = LearnerDraftV1 {
             learning_summary: String::new(),

@@ -2947,6 +2947,234 @@ fn learner_followup_processing_is_idempotent() {
     );
 }
 
+// --- Corrective classification and Work authorization (Step 2) ---
+
+const AUTHORITY_ANCHOR: &str = "Cap enforcement belongs in retry rs";
+const AUTHORITY_PATH: &str = ".fluent/expertise/retry.md";
+const DERIVED_FU1: &str = "derived-work-1-attempt-1-merge-candidate-fu-1";
+const DERIVED_FU2: &str = "derived-work-1-attempt-1-merge-candidate-fu-2";
+
+/// Commit the trusted authority a corrective follow-up cites so the host gate
+/// resolves it fresh at land time and the worktree stays clean.
+fn commit_authority(main_dir: &Path) {
+    let path = main_dir.join(AUTHORITY_PATH);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, format!("# Retry expertise\n\n{AUTHORITY_ANCHOR}\n")).unwrap();
+    git::run(main_dir, &["add", AUTHORITY_PATH], "stage authority").unwrap();
+    git::run(main_dir, &["commit", "-m", "Add retry expertise"], "commit authority").unwrap();
+}
+
+/// A corrective follow-up JSON object citing the committed expertise authority,
+/// with a digest computed over the anchor so the gate accepts it.
+fn corrective_follow_up_json(id: &str) -> String {
+    let digest = fluent::follow_up::content_digest(AUTHORITY_ANCHOR.as_bytes());
+    format!(
+        r#"{{"id":"{id}","summary":"Restore the retry cap ({id})","corrective":true,"expected_result":"The retry cap is enforced again","corrective_context":{{"objective":"Restore the retry guard","requirement":"Retries stop after the configured cap","evidence":"Merged commit removed the cap check","included_scope":"src/retry.rs","excluded_scope":"unrelated backoff tuning","verification":"cargo test retry"}},"authority":{{"kind":"expertise-entry","path":"{AUTHORITY_PATH}","anchor":"{AUTHORITY_ANCHOR}","digest":"{digest}"}}}}"#
+    )
+}
+
+/// A corrective follow-up that cites no authority, so the gate keeps it
+/// Observation-only.
+fn untrusted_corrective_follow_up_json(id: &str) -> String {
+    format!(
+        r#"{{"id":"{id}","summary":"Untrusted change ({id})","corrective":true,"expected_result":"Something changes","corrective_context":{{"objective":"Do a thing","requirement":"The thing is done","evidence":"a hunch","included_scope":"src","excluded_scope":"tests","verification":"cargo test"}}}}"#
+    )
+}
+
+fn learner_draft(follow_ups: &[String]) -> String {
+    format!(
+        r#"{{"learning_summary":"learned","follow_ups":[{}]}}"#,
+        follow_ups.join(",")
+    )
+}
+
+/// Write a project follow-up policy. `.fluent/config.yaml` is gitignored, so it
+/// does not need committing to keep the worktree clean.
+fn write_follow_up_policy(main_dir: &Path, yaml: &str) {
+    fs::write(main_dir.join(".fluent/config.yaml"), yaml).unwrap();
+}
+
+fn queue_ledger_path(main_dir: &Path, work_item_id: &str) -> PathBuf {
+    main_dir
+        .join(".fluent/work/queue")
+        .join(format!("{work_item_id}.json"))
+}
+
+#[test]
+fn corrective_host_gate_requires_complete_fresh_trusted_context() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    commit_authority(&main_dir);
+    let bin_dir = tmp.path().join("bin-gate");
+    // fu-1 cites complete, fresh, trusted authority; fu-2 is corrective but
+    // cites no authority, so only fu-1 may promote to Work.
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(&learner_draft(&[
+            corrective_follow_up_json("fu-1"),
+            untrusted_corrective_follow_up_json("fu-2"),
+        ])),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+
+    // Both follow-ups materialize an Observation.
+    assert_eq!(open_observation_files(&main_dir).len(), 2);
+    // Only the trusted follow-up derives Work.
+    assert!(main_dir.join(".fluent/work/items").join(format!("{DERIVED_FU1}.json")).exists());
+    assert!(
+        !main_dir.join(".fluent/work/items").join(format!("{DERIVED_FU2}.json")).exists(),
+        "an untrusted corrective context stays Observation-only"
+    );
+}
+
+#[test]
+fn non_corrective_learning_remains_observation_only() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-noncorrective");
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(
+            r#"{"learning_summary":"learned","follow_ups":[{"id":"fu-1","summary":"Consider consolidating retries","corrective":false}]}"#,
+        ),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+
+    assert_eq!(open_observation_files(&main_dir).len(), 1);
+    assert_eq!(
+        work_item_json_count(&main_dir),
+        1,
+        "a non-corrective follow-up derives no Work Item"
+    );
+}
+
+#[test]
+fn propose_mode_creates_linked_proposed_work_item() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    commit_authority(&main_dir);
+    let bin_dir = tmp.path().join("bin-propose");
+    // Propose is the built-in default; no config needed.
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(&learner_draft(&[corrective_follow_up_json("fu-1")])),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+
+    let derived = work_item_value(&main_dir, DERIVED_FU1);
+    assert_eq!(derived["authorization"]["state"], "proposed");
+    assert_eq!(
+        derived["origin"]["observation_id"], "followup-work-1-attempt-1-merge-candidate-fu-1",
+        "the proposed Work Item links back to its Observation"
+    );
+    assert!(
+        !queue_ledger_path(&main_dir, DERIVED_FU1).exists(),
+        "propose mode creates no queue entry"
+    );
+}
+
+#[test]
+fn execute_mode_creates_ready_queued_corrective_work() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    commit_authority(&main_dir);
+    write_follow_up_policy(&main_dir, "follow-up:\n  mode: execute\n");
+    let bin_dir = tmp.path().join("bin-execute");
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(&learner_draft(&[corrective_follow_up_json("fu-1")])),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+
+    let derived = work_item_value(&main_dir, DERIVED_FU1);
+    assert_eq!(derived["authorization"]["state"], "execution-ready");
+    assert_eq!(derived["lineage"]["charged"], true);
+    assert_eq!(
+        latest_dispatch_status(&main_dir, DERIVED_FU1),
+        "queued",
+        "execute mode enqueues the corrective Work exactly once"
+    );
+    assert_eq!(dispatch_count(&main_dir, DERIVED_FU1), 1);
+}
+
+#[test]
+fn execute_mode_at_lineage_limit_retains_proposed_work() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    commit_authority(&main_dir);
+    // Execute mode with room for a single descendant in the lineage.
+    write_follow_up_policy(&main_dir, "follow-up:\n  mode: execute\n  descendant-limit: 1\n");
+    let bin_dir = tmp.path().join("bin-limit");
+    // Two corrective follow-ups compete for one lineage slot.
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(&learner_draft(&[
+            corrective_follow_up_json("fu-1"),
+            corrective_follow_up_json("fu-2"),
+        ])),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+
+    // The first descendant is authorized and queued; the second is retained
+    // proposed because the lineage budget is exhausted.
+    let first = work_item_value(&main_dir, DERIVED_FU1);
+    assert_eq!(first["authorization"]["state"], "execution-ready");
+    assert_eq!(latest_dispatch_status(&main_dir, DERIVED_FU1), "queued");
+
+    let second = work_item_value(&main_dir, DERIVED_FU2);
+    assert_eq!(second["authorization"]["state"], "proposed");
+    assert!(
+        !queue_ledger_path(&main_dir, DERIVED_FU2).exists(),
+        "an exhausted lineage budget does not enqueue the descendant"
+    );
+}
+
+#[test]
+fn followup_retry_does_not_reapply_changed_policy() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    commit_authority(&main_dir);
+    write_follow_up_policy(&main_dir, "follow-up:\n  mode: execute\n");
+    let bin_dir = tmp.path().join("bin-policy-drift");
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(&learner_draft(&[corrective_follow_up_json("fu-1")])),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+    assert_eq!(
+        work_item_value(&main_dir, DERIVED_FU1)["authorization"]["state"],
+        "execution-ready"
+    );
+
+    // The operator changes the policy to propose, then re-lands the already
+    // merged candidate. The frozen decision is reused, not re-applied.
+    write_follow_up_policy(&main_dir, "follow-up:\n  mode: propose\n");
+    land_work_1(&main_dir, &bin_dir, true);
+
+    let derived = work_item_value(&main_dir, DERIVED_FU1);
+    assert_eq!(
+        derived["authorization"]["state"], "execution-ready",
+        "a changed policy does not re-decide an already-promoted follow-up"
+    );
+    assert_eq!(
+        dispatch_count(&main_dir, DERIVED_FU1),
+        1,
+        "the retry adds no duplicate dispatch"
+    );
+}
+
 #[test]
 fn write_task_transcript_persists_after_failed_attempt() {
     let tmp = TempDir::new().unwrap();

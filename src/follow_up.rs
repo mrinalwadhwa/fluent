@@ -6,14 +6,19 @@
 //! on-disk format now so the scheduler and Learner branches cannot diverge.
 
 use anyhow::{Context, Result, bail};
+use rustix::fs::{FlockOperation, flock};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use crate::atomic_write::atomic_write;
+use crate::config::{self, CorrectionSource, FrozenFollowUpPolicy};
 use crate::observations::{self, LEARNER_FOLLOW_UP_KIND, ObservationFrontmatter};
-use crate::work_model::CorrectiveContext;
+use crate::work_model::{
+    CorrectiveContext, DerivedProvenance, ExecutionAuthority, WorkItem, WorkLineage, WorkModelStore,
+    WorkModelStorageError,
+};
 
 /// Content-addressed pointer to a file within a learner handoff. The path is
 /// always relative to the handoff root; the digest lets a consumer verify the
@@ -60,9 +65,163 @@ pub struct FollowUpDraftV1 {
     /// The complete corrective execution input, present when `corrective`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corrective_context: Option<CorrectiveContext>,
+    /// The result the corrective Work must produce. Required for a corrective
+    /// follow-up to pass the host gate.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub expected_result: String,
+    /// Decisions the proposal leaves open. A corrective follow-up must resolve
+    /// every one; a non-empty set forces the follow-up to stay Observation-only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_decisions: Vec<String>,
+    /// The trusted authority this corrective follow-up derives from. The host
+    /// resolves it against the project tree before accepting the follow-up as
+    /// corrective.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<AuthorityLocator>,
     /// Supporting evidence, relative and digest-bearing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<ArtifactRef>,
+}
+
+/// The trusted authority namespace a corrective follow-up cites as the basis for
+/// bypassing the usual brief, behaviors, approach, and plan conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthorityKind {
+    /// A behavior statement in `documentation/behaviors.md`.
+    BehaviorStatement,
+    /// An applicable instruction in a tracked `AGENTS.md`.
+    AgentsInstruction,
+    /// A committed entry under `.fluent/expertise/`.
+    ExpertiseEntry,
+}
+
+/// A stable, digest-matched locator to the committed authority a corrective
+/// follow-up derives from. The host resolves it against the project tree and
+/// rejects the follow-up when the cited authority is missing, moved outside its
+/// namespace, tampered with, or drifted from the anchor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorityLocator {
+    pub kind: AuthorityKind,
+    /// Path to the authoritative file, relative to the project root.
+    pub path: String,
+    /// The exact authoritative text this follow-up derives from. It must still
+    /// be present in the referenced file for the locator to be fresh.
+    pub anchor: String,
+    /// `sha256:` digest over the anchor bytes, so a transported locator is
+    /// tamper-evident and self-consistent.
+    pub digest: String,
+}
+
+/// How the corrective host gate classified a materialized follow-up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FollowUpClassification {
+    /// The follow-up satisfies every corrective-work criterion and may promote
+    /// to derived Work under policy.
+    Corrective,
+    /// The follow-up stays an Observation only, for the recorded reason.
+    ObservationOnly { reason: String },
+}
+
+impl FollowUpClassification {
+    pub fn is_corrective(&self) -> bool {
+        matches!(self, Self::Corrective)
+    }
+}
+
+/// Classify a materialized follow-up through the source-neutral corrective host
+/// gate. A follow-up is corrective only when it claims to be, carries a complete
+/// corrective context and expected result, leaves no unresolved decision, and
+/// cites a trusted authority that still resolves fresh against the project tree.
+/// Any incomplete, unsupported, unresolved, stale, or mis-namespaced context
+/// downgrades it to Observation-only. The gate is deterministic and neutral to
+/// whether the follow-up came from a Learner or a post-merge review.
+pub fn classify_follow_up(
+    project_root: &Path,
+    follow_up: &FollowUpDraftV1,
+) -> FollowUpClassification {
+    use FollowUpClassification::ObservationOnly;
+    if !follow_up.corrective {
+        return ObservationOnly {
+            reason: "follow-up is not marked corrective".to_string(),
+        };
+    }
+    let Some(context) = follow_up.corrective_context.as_ref() else {
+        return ObservationOnly {
+            reason: "corrective follow-up carries no corrective context".to_string(),
+        };
+    };
+    if let Err(error) = context.validate() {
+        return ObservationOnly {
+            reason: format!("incomplete corrective context: {error}"),
+        };
+    }
+    if follow_up.expected_result.trim().is_empty() {
+        return ObservationOnly {
+            reason: "corrective follow-up states no expected result".to_string(),
+        };
+    }
+    if !follow_up.unresolved_decisions.is_empty() {
+        return ObservationOnly {
+            reason: format!(
+                "{} unresolved decision(s) remain",
+                follow_up.unresolved_decisions.len()
+            ),
+        };
+    }
+    let Some(authority) = follow_up.authority.as_ref() else {
+        return ObservationOnly {
+            reason: "corrective follow-up cites no authority".to_string(),
+        };
+    };
+    if let Err(reason) = verify_authority(project_root, authority) {
+        return ObservationOnly { reason };
+    }
+    FollowUpClassification::Corrective
+}
+
+/// Whether an authority locator's path lives in the trusted namespace its kind
+/// requires.
+fn authority_namespace_ok(kind: AuthorityKind, path: &str) -> bool {
+    match kind {
+        AuthorityKind::BehaviorStatement => path == "documentation/behaviors.md",
+        AuthorityKind::AgentsInstruction => {
+            Path::new(path).file_name().and_then(|name| name.to_str()) == Some("AGENTS.md")
+        }
+        AuthorityKind::ExpertiseEntry => path.starts_with(".fluent/expertise/"),
+    }
+}
+
+/// Resolve an authority locator against the project tree. It must be relative,
+/// live in its kind's trusted namespace, be self-consistent with its digest, and
+/// its anchor text must still be present in the referenced file. A missing file
+/// or a vanished anchor is treated as stale — the correction can no longer point
+/// to live authority, so its follow-up stays Observation-only.
+fn verify_authority(project_root: &Path, authority: &AuthorityLocator) -> Result<(), String> {
+    if !Path::new(&authority.path).is_relative() {
+        return Err(format!("authority path {:?} is not relative", authority.path));
+    }
+    if !authority_namespace_ok(authority.kind, &authority.path) {
+        return Err(format!(
+            "authority path {:?} is not in the {:?} trusted namespace",
+            authority.path, authority.kind
+        ));
+    }
+    if authority.digest != content_digest(authority.anchor.as_bytes()) {
+        return Err("authority digest does not match its anchor".to_string());
+    }
+    let full = project_root.join(&authority.path);
+    let content = match fs::read_to_string(&full) {
+        Ok(content) => content,
+        Err(_) => return Err(format!("authority {:?} is not present", authority.path)),
+    };
+    if !content.contains(&authority.anchor) {
+        return Err(format!(
+            "authority {:?} no longer contains the cited text",
+            authority.path
+        ));
+    }
+    Ok(())
 }
 
 fn schema_version_v1() -> u32 {
@@ -272,22 +431,37 @@ impl PostLandJournal {
             completed: false,
         }
     }
-
-    fn receipt(&self, follow_up_id: &str) -> Option<&FollowUpReceipt> {
-        self.follow_ups
-            .iter()
-            .find(|r| r.follow_up_id == follow_up_id)
-    }
 }
 
-/// What one follow-up produced. Step 1 records the materialized Observation;
-/// later steps extend this with the resolved policy, derived Work Item, and queue
-/// disposition.
+/// What one follow-up produced: its materialized Observation, the corrective
+/// classification, the policy frozen when it first validated as corrective, and
+/// the derived Work Item and queue disposition it promoted into. Each field is
+/// recorded once and reused on retry so processing converges exactly once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FollowUpReceipt {
     pub follow_up_id: String,
     /// The deterministic Observation id this follow-up materialized into.
     pub observation_id: String,
+    /// Whether the corrective host gate classified this follow-up as corrective.
+    /// Recorded so a retry reuses the first classification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corrective: Option<bool>,
+    /// The follow-up policy frozen when this follow-up first validated as
+    /// corrective, recorded before any Work is created. Retries reuse it even
+    /// after configuration changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_policy: Option<FrozenFollowUpPolicy>,
+    /// The derived Work Item this corrective follow-up promoted into, once one
+    /// exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_work_item_id: Option<String>,
+    /// Whether the derived Work Item was enqueued on the regular Work Queue.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub queued: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// The result of replaying a post-land operation.
@@ -298,6 +472,12 @@ pub struct ReplayOutcome {
     pub observations_created: usize,
     /// Follow-ups the batch carries.
     pub follow_ups: usize,
+    /// Derived Work Items newly created by this replay (0 on an idempotent
+    /// re-run).
+    pub work_items_created: usize,
+    /// Derived Work Items newly enqueued by this replay (0 on an idempotent
+    /// re-run).
+    pub work_items_queued: usize,
 }
 
 /// The canonical byte encoding of a serializable value: sorted-key JSON, so an
@@ -424,30 +604,27 @@ pub fn replay_post_land_operation(
         bail!("normalized batch origin does not match operation {operation_id}");
     }
 
+    // Serialize concurrent processors of the same operation so each stage runs
+    // once and every processor converges on the same effects rather than racing
+    // to create a duplicate Observation, Work Item, or queue entry.
+    let _lock = lock_operation(&dir)?;
+
     let journal_path = dir.join("journal.json");
     let mut journal = read_journal(&journal_path, operation_id)?;
+    let store = WorkModelStore::new(project_root);
 
-    let mut created = 0usize;
+    let mut totals = ReplayTotals::default();
     for follow_up in &batch.follow_ups {
-        let observation_id = observation_id_for(operation_id, &follow_up.id);
-        let frontmatter = follow_up_frontmatter(&operation.origin, follow_up);
-        let body = follow_up_observation_body(&operation.origin, follow_up);
-        let outcome = observations::ensure_provenance_observation(
+        process_one_follow_up(
+            &store,
             project_root,
-            &observation_id,
-            &frontmatter,
-            &body,
+            &operation,
+            batch.source,
+            follow_up,
+            &journal_path,
+            &mut journal,
+            &mut totals,
         )?;
-        if outcome.created() {
-            created += 1;
-        }
-        if journal.receipt(&follow_up.id).is_none() {
-            journal.follow_ups.push(FollowUpReceipt {
-                follow_up_id: follow_up.id.clone(),
-                observation_id,
-            });
-            write_journal(&journal_path, &journal)?;
-        }
     }
 
     if !journal.completed {
@@ -457,9 +634,115 @@ pub fn replay_post_land_operation(
 
     Ok(ReplayOutcome {
         operation_id: operation_id.to_string(),
-        observations_created: created,
+        observations_created: totals.observations_created,
         follow_ups: batch.follow_ups.len(),
+        work_items_created: totals.work_items_created,
+        work_items_queued: totals.work_items_queued,
     })
+}
+
+/// Newly produced effects accumulated across a single replay, used to report an
+/// idempotent re-run as a no-op.
+#[derive(Default)]
+struct ReplayTotals {
+    observations_created: usize,
+    work_items_created: usize,
+    work_items_queued: usize,
+}
+
+/// Drive one follow-up through its ordered stages, resuming from the journal:
+/// materialize its Observation, classify it through the corrective host gate,
+/// and — when corrective — freeze the follow-up policy before deriving proposed
+/// or execution-ready Work and enqueuing it under lineage budget. Each completed
+/// stage is journaled so a retry resumes rather than repeats it.
+#[allow(clippy::too_many_arguments)]
+fn process_one_follow_up(
+    store: &WorkModelStore,
+    project_root: &Path,
+    operation: &PendingPostLandOperationV1,
+    source: FollowUpSource,
+    follow_up: &FollowUpDraftV1,
+    journal_path: &Path,
+    journal: &mut PostLandJournal,
+    totals: &mut ReplayTotals,
+) -> Result<()> {
+    let operation_id = &operation.operation_id;
+    let observation_id = observation_id_for(operation_id, &follow_up.id);
+
+    // Stage 1: materialize the provenance-linked Observation.
+    let frontmatter = follow_up_frontmatter(&operation.origin, follow_up);
+    let body = follow_up_observation_body(&operation.origin, follow_up);
+    let outcome = observations::ensure_provenance_observation(
+        project_root,
+        &observation_id,
+        &frontmatter,
+        &body,
+    )?;
+    if outcome.created() {
+        totals.observations_created += 1;
+    }
+    let index = ensure_receipt(journal, journal_path, &follow_up.id, &observation_id)?;
+
+    // Stage 2: classify through the corrective host gate. The first
+    // classification is recorded and reused on retry.
+    if journal.follow_ups[index].corrective.is_none() {
+        let corrective = classify_follow_up(project_root, follow_up).is_corrective();
+        journal.follow_ups[index].corrective = Some(corrective);
+        write_journal(journal_path, journal)?;
+    }
+    if journal.follow_ups[index].corrective != Some(true) {
+        // Non-corrective follow-ups stay Observation-only.
+        return Ok(());
+    }
+
+    // Stage 3: freeze the follow-up policy before any Work, authorization,
+    // lineage, priority, or queue decision. A retry reuses the recorded policy
+    // even after configuration changes.
+    if journal.follow_ups[index].resolved_policy.is_none() {
+        let policy = config::resolve_follow_up_policy(project_root)?.freeze(correction_source(source));
+        journal.follow_ups[index].resolved_policy = Some(policy);
+        write_journal(journal_path, journal)?;
+    }
+    let policy = journal.follow_ups[index]
+        .resolved_policy
+        .clone()
+        .expect("resolved policy was just recorded");
+
+    // Stage 4: derive proposed or execution-ready Work under lineage budget.
+    let derived_id = derived_work_item_id(operation_id, &follow_up.id);
+    if journal.follow_ups[index].derived_work_item_id.is_none() {
+        let created = ensure_derived_work(
+            store,
+            &operation.origin,
+            &observation_id,
+            &derived_id,
+            follow_up,
+            &policy,
+        )?;
+        if created {
+            totals.work_items_created += 1;
+        }
+        journal.follow_ups[index].derived_work_item_id = Some(derived_id.clone());
+        write_journal(journal_path, journal)?;
+    }
+
+    // Stage 5: enqueue an authorized execution-ready descendant exactly once.
+    if !journal.follow_ups[index].queued {
+        let item = store.read_work_item(&derived_id)?;
+        if item.authorization.is_execution_ready() {
+            crate::queue::ensure_dispatch(
+                project_root,
+                &derived_id,
+                &dispatch_origin_id(operation_id, &follow_up.id),
+                policy.priority,
+            )?;
+            totals.work_items_queued += 1;
+            journal.follow_ups[index].queued = true;
+            write_journal(journal_path, journal)?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Record and immediately replay a landed follow-up batch. This is the single
@@ -476,6 +759,153 @@ pub fn process_landed_batch(
 
 fn observation_id_for(operation_id: &str, follow_up_id: &str) -> String {
     format!("followup-{operation_id}-{}", sanitize_component(follow_up_id))
+}
+
+/// The deterministic Work Item id a corrective follow-up promotes into, so a
+/// replay reuses the same Work rather than deriving a duplicate.
+fn derived_work_item_id(operation_id: &str, follow_up_id: &str) -> String {
+    format!("derived-{operation_id}-{}", sanitize_component(follow_up_id))
+}
+
+/// The stable enqueue-origin id for a corrective follow-up's dispatch, so
+/// `ensure_dispatch` recognizes its own earlier queue entry on replay.
+fn dispatch_origin_id(operation_id: &str, follow_up_id: &str) -> String {
+    format!("followup-{operation_id}-{}", sanitize_component(follow_up_id))
+}
+
+fn correction_source(source: FollowUpSource) -> CorrectionSource {
+    match source {
+        FollowUpSource::Learner => CorrectionSource::Learner,
+        FollowUpSource::PostMerge => CorrectionSource::PostMerge,
+    }
+}
+
+/// Ensure a journal receipt exists for a follow-up and return its index. A new
+/// receipt records only the materialized Observation; later stages fill in the
+/// classification, frozen policy, derived Work, and queue disposition.
+fn ensure_receipt(
+    journal: &mut PostLandJournal,
+    journal_path: &Path,
+    follow_up_id: &str,
+    observation_id: &str,
+) -> Result<usize> {
+    if let Some(index) = journal
+        .follow_ups
+        .iter()
+        .position(|receipt| receipt.follow_up_id == follow_up_id)
+    {
+        return Ok(index);
+    }
+    journal.follow_ups.push(FollowUpReceipt {
+        follow_up_id: follow_up_id.to_string(),
+        observation_id: observation_id.to_string(),
+        corrective: None,
+        resolved_policy: None,
+        derived_work_item_id: None,
+        queued: false,
+    });
+    write_journal(journal_path, journal)?;
+    Ok(journal.follow_ups.len() - 1)
+}
+
+/// Create the derived corrective Work Item for a follow-up, or reuse an existing
+/// one. The Work joins its originating Work Item's lineage root. In execute mode
+/// it is authorized automatically while lineage budget remains, charging the
+/// lineage once; in propose mode or with the budget exhausted it stays proposed.
+/// Returns whether a new Work Item was created.
+fn ensure_derived_work(
+    store: &WorkModelStore,
+    origin: &PostLandOrigin,
+    observation_id: &str,
+    derived_id: &str,
+    follow_up: &FollowUpDraftV1,
+    policy: &FrozenFollowUpPolicy,
+) -> Result<bool> {
+    // Idempotent: an already-derived Work Item is reused as-is.
+    match store.read_work_item(derived_id) {
+        Ok(_) => return Ok(false),
+        Err(WorkModelStorageError::ReadFile { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    let context = follow_up
+        .corrective_context
+        .clone()
+        .context("corrective follow-up lost its corrective context before Work creation")?;
+
+    let provenance = DerivedProvenance {
+        observation_id: Some(observation_id.to_string()),
+        work_item_id: Some(origin.work_item_id.clone()),
+        attempt_id: Some(origin.attempt_id.clone()),
+        merge_candidate_id: Some(origin.merge_candidate_id.clone()),
+        merged_commit: Some(origin.merged_commit.clone()),
+    };
+
+    // The derived Work joins its originating Work Item's lineage root.
+    let origin_item = store.read_work_item(&origin.work_item_id)?;
+    let root_id = origin_item.lineage.root_id(&origin_item.id).to_string();
+    let lineage = WorkLineage::descendant_of(root_id.clone(), Some(policy.descendant_limit));
+
+    // Execute mode authorizes automatically while lineage budget remains;
+    // otherwise the descendant stays proposed for an explicit human decision.
+    let ready_authority = if policy.is_execute()
+        && WorkLineage::can_authorize_descendant(
+            count_charged_descendants(store, &root_id, derived_id)?,
+            policy.descendant_limit,
+        ) {
+        Some(ExecutionAuthority::Automatic)
+    } else {
+        None
+    };
+
+    let item = WorkItem::derived_corrective(
+        derived_id.to_string(),
+        follow_up.summary.trim().to_string(),
+        provenance,
+        context,
+        lineage,
+        ready_authority,
+    )?;
+    store.create_work_item(&item)?;
+    Ok(true)
+}
+
+/// Count the Work Items already charged against a lineage's autonomous
+/// descendant budget, excluding the descendant being resolved.
+fn count_charged_descendants(
+    store: &WorkModelStore,
+    root_id: &str,
+    exclude_id: &str,
+) -> Result<u32> {
+    let mut count = 0u32;
+    for item in store.list_work_items()? {
+        if item.id == exclude_id {
+            continue;
+        }
+        if item.origin.is_derived()
+            && item.lineage.charged
+            && item.lineage.root_id(&item.id) == root_id
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// Take a blocking exclusive lock on a post-land operation so concurrent
+/// processors serialize and converge on the same effects.
+fn lock_operation(dir: &Path) -> Result<File> {
+    let path = dir.join("operation.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open operation lock {}", path.display()))?;
+    flock(&file, FlockOperation::LockExclusive)
+        .map_err(std::io::Error::from)
+        .with_context(|| format!("lock operation {}", path.display()))?;
+    Ok(file)
 }
 
 /// Reduce an untrusted follow-up id to a filename-safe component without the
@@ -605,6 +1035,7 @@ mod tests {
                     path: "evidence/diff.patch".to_string(),
                     digest: "sha256:def".to_string(),
                 }],
+                ..Default::default()
             }],
         }
     }
@@ -685,6 +1116,7 @@ mod tests {
             corrective: false,
             corrective_context: None,
             evidence: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -855,5 +1287,351 @@ mod tests {
         let batch = NormalizedFollowUpBatchV1::from_learner_handoff(&handoff, origin).unwrap();
         assert_eq!(batch.source, FollowUpSource::Learner);
         assert_eq!(batch.follow_ups.len(), handoff.follow_ups.len());
+    }
+
+    // --- Corrective host gate (Step 2: B1a) ---
+
+    fn corrective_context_sample() -> CorrectiveContext {
+        CorrectiveContext {
+            objective: "Restore the retry guard".to_string(),
+            requirement: "Retries stop after the configured cap".to_string(),
+            evidence: "Merged commit abc123 removed the cap check".to_string(),
+            included_scope: "src/retry.rs".to_string(),
+            excluded_scope: "unrelated backoff tuning".to_string(),
+            verification: "cargo test retry::cap_is_enforced".to_string(),
+        }
+    }
+
+    fn locator(kind: AuthorityKind, path: &str, anchor: &str) -> AuthorityLocator {
+        AuthorityLocator {
+            kind,
+            path: path.to_string(),
+            anchor: anchor.to_string(),
+            digest: content_digest(anchor.as_bytes()),
+        }
+    }
+
+    fn corrective_follow_up(authority: Option<AuthorityLocator>) -> FollowUpDraftV1 {
+        FollowUpDraftV1 {
+            id: "fu-1".to_string(),
+            summary: "Restore the retry cap".to_string(),
+            corrective: true,
+            corrective_context: Some(corrective_context_sample()),
+            expected_result: "The retry cap is enforced again".to_string(),
+            unresolved_decisions: Vec::new(),
+            authority,
+            evidence: Vec::new(),
+        }
+    }
+
+    /// Write an authoritative file into the project tree so a locator over it
+    /// resolves.
+    fn write_authority(root: &Path, rel: &str, contents: &str) {
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn gate_accepts_complete_fresh_trusted_expertise_authority() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let anchor = "Cap enforcement belongs in retry.rs";
+        write_authority(
+            tmp.path(),
+            ".fluent/expertise/retry.md",
+            &format!("# Retry\n\n{anchor}\n"),
+        );
+        let follow_up = corrective_follow_up(Some(locator(
+            AuthorityKind::ExpertiseEntry,
+            ".fluent/expertise/retry.md",
+            anchor,
+        )));
+        assert_eq!(
+            classify_follow_up(tmp.path(), &follow_up),
+            FollowUpClassification::Corrective
+        );
+    }
+
+    #[test]
+    fn gate_accepts_behavior_and_agents_namespaces() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let behavior_anchor = "THE SYSTEM SHALL enforce the retry cap";
+        write_authority(
+            tmp.path(),
+            "documentation/behaviors.md",
+            &format!("### B1\n\n{behavior_anchor}\n"),
+        );
+        let agents_anchor = "Always enforce the configured retry cap";
+        write_authority(tmp.path(), "AGENTS.md", &format!("- {agents_anchor}\n"));
+
+        let behavior_follow_up = corrective_follow_up(Some(locator(
+            AuthorityKind::BehaviorStatement,
+            "documentation/behaviors.md",
+            behavior_anchor,
+        )));
+        let agents_follow_up = corrective_follow_up(Some(locator(
+            AuthorityKind::AgentsInstruction,
+            "AGENTS.md",
+            agents_anchor,
+        )));
+        assert!(classify_follow_up(tmp.path(), &behavior_follow_up).is_corrective());
+        assert!(classify_follow_up(tmp.path(), &agents_follow_up).is_corrective());
+    }
+
+    #[test]
+    fn gate_downgrades_non_corrective_and_incomplete_context() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut not_corrective = corrective_follow_up(None);
+        not_corrective.corrective = false;
+        assert!(!classify_follow_up(tmp.path(), &not_corrective).is_corrective());
+
+        let mut incomplete = corrective_follow_up(None);
+        incomplete.corrective_context = None;
+        assert!(!classify_follow_up(tmp.path(), &incomplete).is_corrective());
+    }
+
+    #[test]
+    fn gate_downgrades_missing_expected_result_and_unresolved_decisions() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_authority(tmp.path(), ".fluent/expertise/retry.md", "anchor text");
+        let base = locator(AuthorityKind::ExpertiseEntry, ".fluent/expertise/retry.md", "anchor text");
+
+        let mut no_result = corrective_follow_up(Some(base.clone()));
+        no_result.expected_result = "   ".to_string();
+        assert!(!classify_follow_up(tmp.path(), &no_result).is_corrective());
+
+        let mut unresolved = corrective_follow_up(Some(base));
+        unresolved.unresolved_decisions = vec!["pick a backoff curve".to_string()];
+        assert!(!classify_follow_up(tmp.path(), &unresolved).is_corrective());
+    }
+
+    #[test]
+    fn gate_downgrades_missing_stale_tampered_or_mis_namespaced_authority() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let anchor = "Cap enforcement belongs in retry.rs";
+
+        // No authority at all.
+        assert!(!classify_follow_up(tmp.path(), &corrective_follow_up(None)).is_corrective());
+
+        // Authority cited but the file is absent.
+        let missing = corrective_follow_up(Some(locator(
+            AuthorityKind::ExpertiseEntry,
+            ".fluent/expertise/retry.md",
+            anchor,
+        )));
+        assert!(!classify_follow_up(tmp.path(), &missing).is_corrective());
+
+        // File present but the anchor has drifted away (stale).
+        write_authority(tmp.path(), ".fluent/expertise/retry.md", "# Retry\n\nunrelated text\n");
+        let stale = corrective_follow_up(Some(locator(
+            AuthorityKind::ExpertiseEntry,
+            ".fluent/expertise/retry.md",
+            anchor,
+        )));
+        assert!(!classify_follow_up(tmp.path(), &stale).is_corrective());
+
+        // Digest does not match the anchor (tampered in transport).
+        write_authority(tmp.path(), ".fluent/expertise/retry.md", &format!("{anchor}\n"));
+        let mut tampered = corrective_follow_up(Some(locator(
+            AuthorityKind::ExpertiseEntry,
+            ".fluent/expertise/retry.md",
+            anchor,
+        )));
+        tampered.authority.as_mut().unwrap().digest = "sha256:0".to_string();
+        assert!(!classify_follow_up(tmp.path(), &tampered).is_corrective());
+
+        // Right anchor and digest, but the path is outside the kind's namespace.
+        write_authority(tmp.path(), "src/retry.rs", &format!("// {anchor}\n"));
+        let mis_namespaced = corrective_follow_up(Some(locator(
+            AuthorityKind::ExpertiseEntry,
+            "src/retry.rs",
+            anchor,
+        )));
+        assert!(!classify_follow_up(tmp.path(), &mis_namespaced).is_corrective());
+    }
+
+    // --- Corrective promotion into derived Work (Step 2: B2, B3, B4, B5) ---
+
+    fn seed_root_work_item(root: &Path) {
+        let store = WorkModelStore::new(root);
+        store
+            .create_work_item(&WorkItem::planned("work-1", "Root work"))
+            .unwrap();
+    }
+
+    fn corrective_batch(source: FollowUpSource, authority: Option<AuthorityLocator>) -> NormalizedFollowUpBatchV1 {
+        NormalizedFollowUpBatchV1 {
+            schema_version: NormalizedFollowUpBatchV1::SCHEMA_VERSION,
+            source,
+            origin: origin(),
+            learning_summary: "learned".to_string(),
+            follow_ups: vec![corrective_follow_up(authority)],
+        }
+    }
+
+    fn fresh_expertise_authority(root: &Path) -> AuthorityLocator {
+        let anchor = "Cap enforcement belongs in retry.rs";
+        write_authority(root, ".fluent/expertise/retry.md", &format!("{anchor}\n"));
+        locator(AuthorityKind::ExpertiseEntry, ".fluent/expertise/retry.md", anchor)
+    }
+
+    fn write_project_policy(root: &Path, yaml: &str) {
+        let dir = root.join(".fluent");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("config.yaml"), yaml).unwrap();
+    }
+
+    const DERIVED_ID: &str = "derived-work-1-attempt-1-merge-candidate-fu-1";
+
+    #[test]
+    fn non_corrective_follow_up_stays_observation_only() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        seed_root_work_item(tmp.path());
+        // A follow-up with no authority never passes the gate.
+        let batch = corrective_batch(FollowUpSource::Learner, None);
+        let outcome = process_landed_batch(tmp.path(), &batch, None).unwrap();
+        assert_eq!(outcome.observations_created, 1);
+        assert_eq!(outcome.work_items_created, 0);
+        let store = WorkModelStore::new(tmp.path());
+        assert!(store.read_work_item(DERIVED_ID).is_err());
+    }
+
+    #[test]
+    fn propose_mode_creates_proposed_unqueued_descendant() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        seed_root_work_item(tmp.path());
+        let authority = fresh_expertise_authority(tmp.path());
+        let batch = corrective_batch(FollowUpSource::Learner, Some(authority));
+
+        let outcome = process_landed_batch(tmp.path(), &batch, None).unwrap();
+        assert_eq!(outcome.work_items_created, 1);
+        assert_eq!(outcome.work_items_queued, 0);
+
+        let store = WorkModelStore::new(tmp.path());
+        let derived = store.read_work_item(DERIVED_ID).unwrap();
+        assert!(derived.authorization.is_proposed());
+        assert!(derived.origin.is_derived());
+        assert_eq!(derived.lineage.root_id.as_deref(), Some("work-1"));
+        assert_eq!(
+            derived.origin.provenance().unwrap().observation_id.as_deref(),
+            Some("followup-work-1-attempt-1-merge-candidate-fu-1")
+        );
+        assert!(
+            crate::queue::read_ledger(tmp.path(), DERIVED_ID)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn execute_mode_with_budget_creates_ready_queued_descendant() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        seed_root_work_item(tmp.path());
+        write_project_policy(tmp.path(), "follow-up:\n  mode: execute\n");
+        let authority = fresh_expertise_authority(tmp.path());
+        let batch = corrective_batch(FollowUpSource::Learner, Some(authority));
+
+        let outcome = process_landed_batch(tmp.path(), &batch, None).unwrap();
+        assert_eq!(outcome.work_items_created, 1);
+        assert_eq!(outcome.work_items_queued, 1);
+
+        let store = WorkModelStore::new(tmp.path());
+        let derived = store.read_work_item(DERIVED_ID).unwrap();
+        assert!(derived.authorization.is_execution_ready());
+        assert!(derived.lineage.charged, "an authorized descendant charges its lineage");
+
+        let ledger = crate::queue::read_ledger(tmp.path(), DERIVED_ID)
+            .unwrap()
+            .unwrap();
+        assert!(ledger.active().is_some(), "execute mode enqueues the descendant");
+    }
+
+    #[test]
+    fn execute_mode_at_lineage_limit_stays_proposed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        seed_root_work_item(tmp.path());
+        write_project_policy(
+            tmp.path(),
+            "follow-up:\n  mode: execute\n  descendant-limit: 1\n",
+        );
+        // Pre-charge the single descendant the lineage budget allows.
+        let store = WorkModelStore::new(tmp.path());
+        let existing = WorkItem::derived_corrective(
+            "derived-existing",
+            "Existing descendant",
+            DerivedProvenance {
+                work_item_id: Some("work-1".to_string()),
+                ..Default::default()
+            },
+            corrective_context_sample(),
+            WorkLineage::descendant_of("work-1", Some(1)),
+            Some(ExecutionAuthority::Automatic),
+        )
+        .unwrap();
+        store.create_work_item(&existing).unwrap();
+
+        let authority = fresh_expertise_authority(tmp.path());
+        let batch = corrective_batch(FollowUpSource::Learner, Some(authority));
+        let outcome = process_landed_batch(tmp.path(), &batch, None).unwrap();
+
+        assert_eq!(outcome.work_items_created, 1);
+        assert_eq!(outcome.work_items_queued, 0, "an exhausted budget does not enqueue");
+        let derived = store.read_work_item(DERIVED_ID).unwrap();
+        assert!(derived.authorization.is_proposed());
+        assert!(!derived.lineage.charged);
+    }
+
+    #[test]
+    fn corrective_promotion_is_idempotent_across_replay() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        seed_root_work_item(tmp.path());
+        write_project_policy(tmp.path(), "follow-up:\n  mode: execute\n");
+        let authority = fresh_expertise_authority(tmp.path());
+        let batch = corrective_batch(FollowUpSource::Learner, Some(authority));
+
+        let operation = record_post_land_operation(tmp.path(), &batch, None).unwrap();
+        let first = replay_post_land_operation(tmp.path(), &operation.operation_id).unwrap();
+        assert_eq!(first.work_items_created, 1);
+        assert_eq!(first.work_items_queued, 1);
+
+        let second = replay_post_land_operation(tmp.path(), &operation.operation_id).unwrap();
+        assert_eq!(second.work_items_created, 0, "replay derives no duplicate Work");
+        assert_eq!(second.work_items_queued, 0, "replay adds no duplicate dispatch");
+
+        let ledger = crate::queue::read_ledger(tmp.path(), DERIVED_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger.dispatches.len(), 1, "exactly one queue entry survives replay");
+    }
+
+    #[test]
+    fn corrective_retry_reuses_frozen_policy_after_config_change() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        seed_root_work_item(tmp.path());
+        write_project_policy(tmp.path(), "follow-up:\n  mode: execute\n");
+        let authority = fresh_expertise_authority(tmp.path());
+        let batch = corrective_batch(FollowUpSource::Learner, Some(authority));
+
+        let operation = record_post_land_operation(tmp.path(), &batch, None).unwrap();
+        replay_post_land_operation(tmp.path(), &operation.operation_id).unwrap();
+
+        // The operator changes the policy to propose after the first processing.
+        write_project_policy(tmp.path(), "follow-up:\n  mode: propose\n");
+        replay_post_land_operation(tmp.path(), &operation.operation_id).unwrap();
+
+        // The descendant keeps the execute-mode decision frozen on first run.
+        let store = WorkModelStore::new(tmp.path());
+        let derived = store.read_work_item(DERIVED_ID).unwrap();
+        assert!(
+            derived.authorization.is_execution_ready(),
+            "a changed policy does not re-decide an already-promoted follow-up"
+        );
+
+        // The frozen policy is recorded in the journal.
+        let journal_path = operation_dir(tmp.path(), &operation.operation_id).join("journal.json");
+        let journal: PostLandJournal =
+            serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
+        let frozen = journal.follow_ups[0].resolved_policy.as_ref().unwrap();
+        assert_eq!(frozen.mode, "execute");
     }
 }

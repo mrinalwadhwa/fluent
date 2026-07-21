@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -91,6 +91,60 @@ pub struct ResolvedFollowUpPolicy {
     pub learner_priority: ResolvedLeaf<i64>,
     pub post_merge_priority: ResolvedLeaf<i64>,
     pub digest: String,
+}
+
+/// Which corrective source a promotion resolves policy for. Learner and
+/// post-merge corrections share one policy but select a different automatic
+/// queue priority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CorrectionSource {
+    Learner,
+    PostMerge,
+}
+
+/// A follow-up policy decision frozen at the moment a corrective follow-up first
+/// validates, so later retries reuse it even after configuration changes. It
+/// captures the effective mode, lineage limit, automatic priority, and the
+/// configuration provenance of each, and is serialized into the post-land
+/// journal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrozenFollowUpPolicy {
+    pub mode: String,
+    pub descendant_limit: u32,
+    pub priority: i64,
+    pub mode_source: String,
+    pub descendant_limit_source: String,
+    pub priority_source: String,
+    pub digest: String,
+}
+
+impl FrozenFollowUpPolicy {
+    /// Whether the frozen decision authorizes execution rather than a proposal.
+    pub fn is_execute(&self) -> bool {
+        self.mode == FollowUpMode::Execute.as_str()
+    }
+}
+
+impl ResolvedFollowUpPolicy {
+    /// Freeze this resolved policy for a corrective source, selecting that
+    /// source's automatic priority. The frozen snapshot is what a promotion
+    /// records before making any authorization, lineage, priority, or queue
+    /// decision.
+    pub fn freeze(&self, source: CorrectionSource) -> FrozenFollowUpPolicy {
+        let priority = match source {
+            CorrectionSource::Learner => self.learner_priority,
+            CorrectionSource::PostMerge => self.post_merge_priority,
+        };
+        FrozenFollowUpPolicy {
+            mode: self.mode.value.as_str().to_string(),
+            descendant_limit: self.descendant_limit.value,
+            priority: priority.value,
+            mode_source: self.mode.source.as_str().to_string(),
+            descendant_limit_source: self.descendant_limit.source.as_str().to_string(),
+            priority_source: priority.source.as_str().to_string(),
+            digest: self.digest.clone(),
+        }
+    }
 }
 
 /// Local scheduler settings resolved from project, then user, then built-in
@@ -681,6 +735,41 @@ coders:
         let from_layers = resolve_follow_up_policy_from(&split_project, Some(&split_user)).unwrap();
 
         assert_eq!(from_project.digest, from_layers.digest);
+    }
+
+    #[test]
+    fn first_followup_processing_records_resolved_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        // Project fixes an execute mode and a small lineage limit; priorities
+        // fall through to the built-in defaults.
+        let project = write_yaml(
+            dir.path(),
+            "project.yaml",
+            "follow-up:\n  mode: execute\n  descendant-limit: 3\n",
+        );
+        let policy = resolve_follow_up_policy_from(&project, None).unwrap();
+
+        // Freezing records the effective mode, lineage limit, automatic
+        // priority, and the provenance of each — before any Work is created.
+        let frozen = policy.freeze(CorrectionSource::Learner);
+        assert_eq!(frozen.mode, "execute");
+        assert!(frozen.is_execute());
+        assert_eq!(frozen.descendant_limit, 3);
+        assert_eq!(frozen.priority, DEFAULT_LEARNER_PRIORITY);
+        assert_eq!(frozen.mode_source, "project");
+        assert_eq!(frozen.descendant_limit_source, "project");
+        assert_eq!(frozen.priority_source, "default");
+        assert_eq!(frozen.digest, policy.digest);
+
+        // The snapshot round-trips through JSON, as the journal stores it.
+        let json = serde_json::to_string(&frozen).unwrap();
+        let restored: FrozenFollowUpPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(frozen, restored);
+
+        // A post-merge correction reuses the same policy but its own priority.
+        let post_merge = policy.freeze(CorrectionSource::PostMerge);
+        assert_eq!(post_merge.priority, DEFAULT_POST_MERGE_PRIORITY);
+        assert_eq!(post_merge.digest, policy.digest);
     }
 
     #[test]

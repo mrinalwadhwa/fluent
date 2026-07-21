@@ -318,6 +318,29 @@ journal replay reuses the same Observation rather than duplicating it; an
 empty handoff records as processed without a placeholder; and a resolved
 Observation is never reopened. System-generated Observations carry a
 reserved YAML frontmatter block naming the follow-up and its origin.
+
+After materializing each Observation, replay classifies the follow-up
+through a source-neutral corrective host gate. A follow-up is corrective
+only when it is marked corrective, carries a complete corrective context
+and expected result, leaves no unresolved decision, and cites a trusted
+authority — a behavior statement in `documentation/behaviors.md`, an
+instruction in a tracked `AGENTS.md`, or a committed `.fluent/expertise/`
+entry — whose anchor still resolves fresh and matches its digest. Any
+incomplete, unsupported, unresolved, stale, or mis-namespaced context
+downgrades the follow-up to Observation-only. When a follow-up first
+validates as corrective, replay freezes the resolved follow-up policy
+(mode, lineage limit, automatic priority, and configuration provenance)
+into its journal receipt before creating any Work, so a retry reuses the
+frozen decision even after configuration changes. It then derives one
+corrective Work Item keyed by a deterministic id and linked to the
+Observation and its originating lineage root. In `propose` mode the Work
+stays proposed with no queue entry; in `execute` mode it is authorized
+automatically and enqueued on the regular Work Queue while lineage budget
+remains, and stays proposed once the budget is exhausted. Concurrent
+processors of the same operation serialize on an operation lock so the
+Observation, Work Item, lineage charge, and queue entry each converge
+exactly once.
+
 Follow-up processing never undoes a successful land: a failure leaves the
 merge intact and the persisted operation replayable, and re-running
 `fluent merge-candidate land` on the merged candidate resumes it without
@@ -1134,6 +1157,7 @@ fluent/main/
     dashboard.rs             ← Live TUI for Work Item activity
     fargate.rs               ← Fargate launch, watch, stop, and pull for Work execution
     fargate_bootstrap.rs     ← JIT Fargate setup (CFN, base + project image builds)
+    follow_up.rs             ← Land-gated follow-up materialization: pending operation, journal, corrective host gate, derived Work intake
     git.rs                   ← Git command wrapper
     hooks.rs                 ← Project hook execution (.fluent/hooks/<name>)
     keep_awake.rs            ← macOS idle-sleep prevention toggle
