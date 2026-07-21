@@ -2369,6 +2369,11 @@ pub struct MergeCandidateMergeState {
     pub review_artifacts: Vec<ArtifactRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_merge_skipped: Option<bool>,
+    /// A retryable follow-up-processing failure recorded after the candidate
+    /// merged. Its presence never changes the successful merge status; it names
+    /// the first incomplete stage so a retry can resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_up_failure: Option<FollowUpProcessingFailure>,
 }
 
 impl Default for MergeCandidateMergeState {
@@ -2380,8 +2385,22 @@ impl Default for MergeCandidateMergeState {
             check_artifacts: Vec::new(),
             review_artifacts: Vec::new(),
             auto_merge_skipped: None,
+            follow_up_failure: None,
         }
     }
+}
+
+/// A retryable failure recorded when processing a landed learner handoff did not
+/// complete. The merge stays successful; this only records where to resume.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FollowUpProcessingFailure {
+    /// The first stage that did not complete: e.g. `validate-handoff`,
+    /// `observation`, `work`, or `queue`.
+    pub stage: String,
+    /// The diagnostic from the failed stage.
+    pub message: String,
+    /// The concrete next action an operator or the system takes to resume.
+    pub next_action: String,
 }
 
 /// Coarse merge execution status.
@@ -4964,6 +4983,7 @@ mod tests {
                         .to_string(),
                 }],
                 auto_merge_skipped: None,
+                follow_up_failure: None,
             },
             created_at: None,
             started_at: None,
@@ -5488,6 +5508,7 @@ mod tests {
                 check_artifacts: Vec::new(),
                 review_artifacts: Vec::new(),
                 auto_merge_skipped: None,
+                follow_up_failure: None,
             },
             created_at: None,
             started_at: None,
@@ -5545,6 +5566,7 @@ mod tests {
                 check_artifacts: Vec::new(),
                 review_artifacts: Vec::new(),
                 auto_merge_skipped: None,
+                follow_up_failure: None,
             },
             created_at: None,
             started_at: None,
@@ -6326,6 +6348,7 @@ mod tests {
             check_artifacts: Vec::new(),
             review_artifacts: Vec::new(),
             auto_merge_skipped: Some(true),
+            follow_up_failure: None,
         };
         let json = serde_json::to_string(&state).unwrap();
         let parsed: MergeCandidateMergeState = serde_json::from_str(&json).unwrap();

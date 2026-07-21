@@ -76,7 +76,7 @@ pub fn cleanup_work_items(
         .iter()
         .map(|work_item| work_item.id.clone())
         .collect::<HashSet<_>>();
-    let candidates = cleanup_work_item_candidates(work_items);
+    let candidates = cleanup_work_item_candidates(&source_root, work_items);
     let registered = registered_worktrees(&source_root)?;
     let mut results = Vec::new();
 
@@ -186,11 +186,51 @@ fn cleanup_source_root(search_root: &Path) -> Result<PathBuf> {
     Ok(search_root)
 }
 
-fn cleanup_work_item_candidates(work_items: Vec<WorkItem>) -> Vec<WorkItem> {
+fn cleanup_work_item_candidates(project_root: &Path, work_items: Vec<WorkItem>) -> Vec<WorkItem> {
     work_items
         .into_iter()
-        .filter(work_item_is_cleanable)
+        .filter(|work_item| {
+            work_item_is_cleanable(work_item)
+                && !retains_for_follow_up_recovery(project_root, work_item)
+        })
         .collect()
+}
+
+/// Whether a Work Item's landed learning recovery is still live, so cleanup must
+/// retain its origin (Work Item, Attempt, Merge Candidate, worktree, and managed
+/// artifacts). Recovery is live while any Attempt has a failed, retryable Learner
+/// record, or any of its landed candidates has an incomplete post-land journal or
+/// a pending imported post-land operation.
+fn retains_for_follow_up_recovery(project_root: &Path, work_item: &WorkItem) -> bool {
+    if work_item
+        .attempts
+        .iter()
+        .any(|attempt| attempt.learning.as_ref().is_some_and(|l| l.is_failed()))
+    {
+        return true;
+    }
+    work_item.merge_candidates.iter().any(|candidate| {
+        let operation_id =
+            crate::follow_up::operation_id_for_candidate(&work_item.id, &candidate.id);
+        has_incomplete_post_land_operation(project_root, &operation_id)
+    })
+}
+
+/// Whether a recorded post-land operation exists but has not completed — an
+/// incomplete journal or a pending imported operation awaiting replay.
+fn has_incomplete_post_land_operation(project_root: &Path, operation_id: &str) -> bool {
+    let dir = crate::follow_up::follow_ups_root(project_root).join(operation_id);
+    if !dir.join("operation.json").exists() {
+        return false;
+    }
+    match fs::read(dir.join("journal.json")) {
+        Ok(bytes) => !serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|value| value.get("completed").and_then(|c| c.as_bool()))
+            .unwrap_or(false),
+        // An operation recorded without a completed journal is still pending.
+        Err(_) => true,
+    }
 }
 
 fn work_item_is_cleanable(work_item: &WorkItem) -> bool {
@@ -634,7 +674,7 @@ mod tests {
         item.attempts[0].status = AttemptStatus::NeedsUser;
         item.attempts[0].tasks[0].status = TaskStatus::NeedsUser;
 
-        let candidates = cleanup_work_item_candidates(vec![item]);
+        let candidates = cleanup_work_item_candidates(Path::new("/nonexistent"), vec![item]);
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].id, "work-stale");
@@ -661,7 +701,7 @@ mod tests {
         item.attempts[0].tasks[0].status = TaskStatus::Executing;
         item.attempts[0].tasks[0].workspace_access = WorkspaceAccess::read_only(Vec::new());
 
-        let candidates = cleanup_work_item_candidates(vec![item]);
+        let candidates = cleanup_work_item_candidates(Path::new("/nonexistent"), vec![item]);
 
         assert!(candidates.is_empty());
     }
@@ -685,7 +725,7 @@ mod tests {
         });
         item.attempts[0].status = AttemptStatus::Reviewing;
 
-        let candidates = cleanup_work_item_candidates(vec![item]);
+        let candidates = cleanup_work_item_candidates(Path::new("/nonexistent"), vec![item]);
 
         assert!(candidates.is_empty());
     }
@@ -732,10 +772,96 @@ mod tests {
                 ..Default::default()
             };
 
-            let candidates = cleanup_work_item_candidates(vec![item]);
+            let candidates = cleanup_work_item_candidates(Path::new("/nonexistent"), vec![item]);
 
             assert!(candidates.is_empty());
         }
+    }
+
+    #[test]
+    fn cleanup_retains_retryable_learning_and_post_land_origins() {
+        use crate::work_model::AttemptLearning;
+        use tempfile::TempDir;
+
+        fn landed_item(id: &str) -> WorkItem {
+            let mut item = WorkItem::planned(id, "Landed work");
+            item.add_initial_attempt("attempt-1").unwrap();
+            item.attempts[0].status = AttemptStatus::Complete;
+            for task in &mut item.attempts[0].tasks {
+                task.status = TaskStatus::Complete;
+            }
+            let mut candidate = MergeCandidate {
+                id: "attempt-1-merge-candidate".to_string(),
+                attempt_id: "attempt-1".to_string(),
+                source_workspace: crate::work_model::WorkspaceRef {
+                    id: "candidate".to_string(),
+                    path: "../work-6-work-attempt-1".to_string(),
+                },
+                target_workspace: crate::work_model::WorkspaceRef {
+                    id: "target".to_string(),
+                    path: ".".to_string(),
+                },
+                source_branch: "main".to_string(),
+                target_branch: "main".to_string(),
+                candidate_commit: "abc123".to_string(),
+                merge_review_state: MergeReviewState::Passed,
+                merge_state: crate::work_model::MergeCandidateMergeState::default(),
+                created_at: None,
+                started_at: None,
+                completed_at: None,
+            };
+            candidate.merge_state.status = MergeCandidateMergeStatus::Merged;
+            candidate.merge_state.merged_commit = Some("abc123".to_string());
+            item.merge_candidates.push(candidate);
+            item
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        // A completed landed origin with no live recovery is reapable.
+        assert_eq!(
+            cleanup_work_item_candidates(root, vec![landed_item("work-complete")]).len(),
+            1,
+            "a completed origin is reapable"
+        );
+
+        // A failed, retryable Learner record retains the origin.
+        let mut failed_learning = landed_item("work-failed-learning");
+        failed_learning.attempts[0].learning = Some(AttemptLearning::failed(1, "learner crashed"));
+        assert!(
+            cleanup_work_item_candidates(root, vec![failed_learning]).is_empty(),
+            "a retryable Learner record retains its origin"
+        );
+
+        // An incomplete post-land journal retains the origin.
+        let op_dir = crate::follow_up::follow_ups_root(root)
+            .join("work-incomplete-attempt-1-merge-candidate");
+        fs::create_dir_all(&op_dir).unwrap();
+        fs::write(op_dir.join("operation.json"), "{}").unwrap();
+        fs::write(op_dir.join("journal.json"), r#"{"completed":false}"#).unwrap();
+        assert!(
+            cleanup_work_item_candidates(root, vec![landed_item("work-incomplete")]).is_empty(),
+            "an incomplete post-land journal retains its origin"
+        );
+
+        // A pending imported operation with no journal yet retains the origin.
+        let import_dir = crate::follow_up::follow_ups_root(root)
+            .join("work-import-attempt-1-merge-candidate");
+        fs::create_dir_all(&import_dir).unwrap();
+        fs::write(import_dir.join("operation.json"), "{}").unwrap();
+        assert!(
+            cleanup_work_item_candidates(root, vec![landed_item("work-import")]).is_empty(),
+            "a pending imported post-land operation retains its origin"
+        );
+
+        // Once the journal completes, the origin becomes reapable.
+        fs::write(op_dir.join("journal.json"), r#"{"completed":true}"#).unwrap();
+        assert_eq!(
+            cleanup_work_item_candidates(root, vec![landed_item("work-incomplete")]).len(),
+            1,
+            "a completed journal no longer blocks cleanup"
+        );
     }
 
     #[test]

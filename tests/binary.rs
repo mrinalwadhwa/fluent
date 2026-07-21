@@ -2727,6 +2727,22 @@ exit 0
     )
 }
 
+/// A mock that fails any rebase request, so a code path that must not rebase is
+/// proven by its success.
+fn rebase_failing_mock_script() -> String {
+    r##"#!/bin/bash
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
+done
+if printf '%s' "$PROMPT" | grep -q "Rebase the candidate branch"; then exit 1; fi
+exit 0
+"##
+    .to_string()
+}
+
 /// Re-run the completed Attempt to retry a failed Learner.
 fn rerun_learner_attempt(main_dir: &Path, bin_dir: &Path) {
     fluent_cmd()
@@ -3556,6 +3572,314 @@ fn post_land_expertise_proposal_materializes_observation_only() {
         1,
         "an expertise proposal materializes as an Observation only"
     );
+}
+
+// --- Failure preservation, resume, cleanup (Step 5) ---
+
+const OBS_FU1: &str = "followup-work-1-attempt-1-merge-candidate-fu-1";
+const HANDOFF_PATH: &str = ".fluent/work/artifacts/work-1/attempt-1/learner/handoff.json";
+
+/// The recorded follow-up-processing failure stage for the landed candidate, or
+/// an empty string when none is recorded.
+fn follow_up_failure_stage(main_dir: &Path) -> String {
+    work_item_value(main_dir, "work-1")["merge_candidates"][0]["merge_state"]["follow_up_failure"]
+        ["stage"]
+        .as_str()
+        .unwrap_or("")
+        .to_string()
+}
+
+fn is_merged(main_dir: &Path) -> bool {
+    work_item_value(main_dir, "work-1")["merge_candidates"][0]["merge_state"]["status"] == "merged"
+}
+
+/// Run a corrective learner attempt (committing its authority), leaving a
+/// verified handoff ready to land. Returns the mock bin dir.
+fn run_corrective_attempt(main_dir: &Path, tmp: &TempDir, bin_name: &str, execute: bool) -> PathBuf {
+    commit_authority(main_dir);
+    if execute {
+        write_follow_up_policy(main_dir, "follow-up:\n  mode: execute\n");
+    }
+    let bin_dir = tmp.path().join(bin_name);
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(&learner_draft(&[corrective_follow_up_json("fu-1")])),
+    );
+    create_and_run_learner_attempt(main_dir, &bin_dir);
+    bin_dir
+}
+
+#[test]
+fn invalid_learner_handoff_preserves_land_and_records_recovery() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-invalid");
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(
+            r#"{"learning_summary":"learned","follow_ups":[{"id":"fu-1","summary":"Later","corrective":false}]}"#,
+        ),
+    );
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+
+    // Corrupt the verified handoff so it no longer matches its digest.
+    fs::write(main_dir.join(HANDOFF_PATH), b"{ not a valid handoff").unwrap();
+    land_work_1(&main_dir, &bin_dir, true);
+
+    // The merge stays successful, nothing materializes, and a retryable failure
+    // is recorded with a next action.
+    assert!(is_merged(&main_dir), "a malformed handoff does not undo the land");
+    assert!(open_observation_files(&main_dir).is_empty());
+    assert_eq!(follow_up_failure_stage(&main_dir), "validate-handoff");
+    let next_action = work_item_value(&main_dir, "work-1")["merge_candidates"][0]["merge_state"]
+        ["follow_up_failure"]["next_action"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(next_action.contains("merge-candidate land"));
+}
+
+#[test]
+fn mismatched_learner_handoff_provenance_is_rejected() {
+    use fluent::follow_up::{
+        LearnerHandoffV1, LearningRecord, NormalizedFollowUpBatchV1, PostLandOrigin,
+    };
+    // A handoff whose origin does not match the Merge Candidate being processed
+    // is rejected before any Observation or Work is produced.
+    let handoff = LearnerHandoffV1 {
+        schema_version: LearnerHandoffV1::SCHEMA_VERSION,
+        source_work_item_id: "work-1".to_string(),
+        source_attempt_id: "attempt-1".to_string(),
+        source_merge_candidate_id: Some("attempt-1-merge-candidate".to_string()),
+        learning: LearningRecord::default(),
+        follow_ups: Vec::new(),
+    };
+    let mismatched = PostLandOrigin {
+        work_item_id: "work-1".to_string(),
+        attempt_id: "attempt-1".to_string(),
+        merge_candidate_id: "a-different-candidate".to_string(),
+        merged_commit: "abc123".to_string(),
+    };
+    let error = NormalizedFollowUpBatchV1::from_learner_handoff(&handoff, mismatched).unwrap_err();
+    assert!(
+        error.to_string().contains("does not match"),
+        "an origin-mismatched handoff is rejected: {error}"
+    );
+}
+
+#[test]
+fn rerun_merged_candidate_resumes_handoff_only() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-rerun");
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(
+            r#"{"learning_summary":"learned","follow_ups":[{"id":"fu-1","summary":"Consolidate","corrective":false}]}"#,
+        ),
+    );
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+    let merged_before = merged_commit_of(&main_dir);
+    let observations_before = open_observation_files(&main_dir);
+
+    // Re-landing an already-merged candidate must resume follow-up processing
+    // without rebasing or re-merging. A mock that fails any rebase proves the
+    // resume path never rebases.
+    let rerun_bin = tmp.path().join("bin-rerun-norebase");
+    write_mock_claude(&rerun_bin, &rebase_failing_mock_script());
+    land_work_1(&main_dir, &rerun_bin, true);
+
+    assert_eq!(merged_commit_of(&main_dir), merged_before, "the merge is not repeated");
+    assert_eq!(
+        open_observation_files(&main_dir),
+        observations_before,
+        "resume reuses the same Observation"
+    );
+}
+
+#[test]
+fn cleanup_preserves_descendant_context_after_origin_removal() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = run_corrective_attempt(&main_dir, &tmp, "bin-descendant", true);
+    land_work_1(&main_dir, &bin_dir, true);
+
+    // Remove optional origin artifacts (the handoff and its artifact tree).
+    fs::remove_dir_all(main_dir.join(".fluent/work/artifacts/work-1")).unwrap();
+
+    // The derived Work stays inspectable with self-contained corrective context
+    // and provenance identifiers.
+    let derived = work_item_value(&main_dir, DERIVED_FU1);
+    assert!(derived["corrective_context"]["objective"].is_string());
+    assert_eq!(derived["origin"]["merged_commit"], merged_commit_of(&main_dir));
+    assert_eq!(derived["origin"]["observation_id"], OBS_FU1);
+
+    // The Observation stays inspectable with its origin identifiers.
+    let show = fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["observation", "show", OBS_FU1])
+        .output()
+        .unwrap();
+    assert!(show.status.success());
+    let body = String::from_utf8_lossy(&show.stdout);
+    assert!(body.contains("work-item-id: work-1"));
+    assert!(body.contains("merge-candidate-id: attempt-1-merge-candidate"));
+}
+
+/// Run a plain (non-corrective) learner attempt, leaving a verified handoff.
+fn run_plain_attempt(main_dir: &Path, tmp: &TempDir, bin_name: &str) -> PathBuf {
+    let bin_dir = tmp.path().join(bin_name);
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(
+            r#"{"learning_summary":"learned","follow_ups":[{"id":"fu-1","summary":"x","corrective":false}]}"#,
+        ),
+    );
+    create_and_run_learner_attempt(main_dir, &bin_dir);
+    bin_dir
+}
+
+#[test]
+fn observation_failure_does_not_undo_land() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = run_plain_attempt(&main_dir, &tmp, "bin-obs-fail");
+
+    // Claim the deterministic Observation id with a body-only file so the
+    // Observation stage cannot write over it.
+    let obs_dir = main_dir.join(".fluent/observations");
+    fs::create_dir_all(&obs_dir).unwrap();
+    fs::write(obs_dir.join(format!("{OBS_FU1}.md")), "a manual note\n").unwrap();
+
+    land_work_1(&main_dir, &bin_dir, true);
+
+    assert!(is_merged(&main_dir), "an Observation failure does not undo the land");
+    assert_eq!(follow_up_failure_stage(&main_dir), "observation");
+}
+
+#[test]
+fn promotion_failure_does_not_undo_land() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = run_corrective_attempt(&main_dir, &tmp, "bin-promo-fail", true);
+
+    // Claim the derived Work Item's path with unreadable content so the Work
+    // stage fails.
+    let items_dir = main_dir.join(".fluent/work/items");
+    fs::create_dir_all(&items_dir).unwrap();
+    fs::write(items_dir.join(format!("{DERIVED_FU1}.json")), "{ not json").unwrap();
+
+    land_work_1(&main_dir, &bin_dir, true);
+
+    assert!(is_merged(&main_dir), "a promotion failure does not undo the land");
+    assert_eq!(follow_up_failure_stage(&main_dir), "work");
+    // The Observation stage completed before the failure.
+    assert!(main_dir.join(format!(".fluent/observations/{OBS_FU1}.md")).exists());
+}
+
+#[test]
+fn queue_failure_does_not_undo_land() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = run_corrective_attempt(&main_dir, &tmp, "bin-queue-fail", true);
+
+    // Make the derived Work Item's queue ledger path a directory so the queue
+    // stage cannot write it.
+    fs::create_dir_all(queue_ledger_path(&main_dir, DERIVED_FU1)).unwrap();
+
+    land_work_1(&main_dir, &bin_dir, true);
+
+    assert!(is_merged(&main_dir), "a queue failure does not undo the land");
+    assert_eq!(follow_up_failure_stage(&main_dir), "queue");
+    // The Work stage completed: the descendant is authorized.
+    assert_eq!(
+        work_item_value(&main_dir, DERIVED_FU1)["authorization"]["state"],
+        "execution-ready"
+    );
+}
+
+#[test]
+fn followup_retry_resumes_each_partial_failure_exactly_once() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = run_corrective_attempt(&main_dir, &tmp, "bin-resume", true);
+
+    // First land fails at the Observation stage.
+    let obs_path = main_dir.join(format!(".fluent/observations/{OBS_FU1}.md"));
+    fs::create_dir_all(obs_path.parent().unwrap()).unwrap();
+    fs::write(&obs_path, "a manual note\n").unwrap();
+    land_work_1(&main_dir, &bin_dir, true);
+    assert_eq!(follow_up_failure_stage(&main_dir), "observation");
+
+    // Clear the obstruction and resume by re-landing the merged candidate. A
+    // rebase-failing mock proves the resume never re-merges.
+    fs::remove_file(&obs_path).unwrap();
+    let rerun = tmp.path().join("bin-resume-norebase");
+    write_mock_claude(&rerun, &rebase_failing_mock_script());
+    land_work_1(&main_dir, &rerun, true);
+
+    // Each effect is produced exactly once and the failure is cleared.
+    assert_eq!(open_observation_files(&main_dir).len(), 1);
+    assert_eq!(
+        work_item_value(&main_dir, DERIVED_FU1)["authorization"]["state"],
+        "execution-ready"
+    );
+    assert_eq!(dispatch_count(&main_dir, DERIVED_FU1), 1);
+    assert_eq!(follow_up_failure_stage(&main_dir), "", "a completed resume clears the failure");
+}
+
+#[test]
+fn concurrent_followup_materialization_converges_exactly_once() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = run_corrective_attempt(&main_dir, &tmp, "bin-concurrent", true);
+
+    // First land materializes nothing (Observation stage obstructed).
+    let obs_path = main_dir.join(format!(".fluent/observations/{OBS_FU1}.md"));
+    fs::create_dir_all(obs_path.parent().unwrap()).unwrap();
+    fs::write(&obs_path, "a manual note\n").unwrap();
+    land_work_1(&main_dir, &bin_dir, true);
+    fs::remove_file(&obs_path).unwrap();
+
+    // Two processors race to materialize the same landed follow-up for the first
+    // time; a rebase-failing mock proves neither re-merges.
+    let rerun = tmp.path().join("bin-concurrent-norebase");
+    write_mock_claude(&rerun, &rebase_failing_mock_script());
+    let bin = assert_cmd::cargo::cargo_bin("fluent");
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let bin = bin.clone();
+            let main = main_dir.clone();
+            let path = mock_path(&rerun);
+            std::thread::spawn(move || {
+                std::process::Command::new(&bin)
+                    .current_dir(&main)
+                    .args([
+                        "merge-candidate",
+                        "land",
+                        "work-1",
+                        "attempt-1-merge-candidate",
+                        "--no-sandbox",
+                        "--no-post-merge-review",
+                    ])
+                    .env("PATH", path)
+                    .env("FLUENT_NO_UPDATE_CHECK", "1")
+                    .env_remove("FLUENT_TASK_KIND")
+                    .output()
+                    .unwrap()
+            })
+        })
+        .collect();
+    for handle in handles {
+        assert!(handle.join().unwrap().status.success());
+    }
+
+    // The processors converged on one Observation, one derived Work Item, and
+    // one queue entry.
+    assert_eq!(open_observation_files(&main_dir).len(), 1);
+    assert_eq!(work_item_json_count(&main_dir), 2, "one root plus one derived Work Item");
+    assert_eq!(dispatch_count(&main_dir, DERIVED_FU1), 1);
 }
 
 #[test]

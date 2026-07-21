@@ -528,6 +528,7 @@ mod tests {
             check_artifacts: Vec::new(),
             review_artifacts: Vec::new(),
             auto_merge_skipped: None,
+            follow_up_failure: None,
         };
 
         let row = summarize_work_item(&item, None);

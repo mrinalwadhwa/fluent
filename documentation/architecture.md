@@ -361,7 +361,23 @@ landing.
 Follow-up processing never undoes a successful land: a failure leaves the
 merge intact and the persisted operation replayable, and re-running
 `fluent merge-candidate land` on the merged candidate resumes it without
-resolving workspaces, rebasing, or moving the target branch.
+resolving workspaces, rebasing, or moving the target branch. A malformed
+or origin-mismatched handoff, or a failure at any effect stage
+(Observation, Work, or queue), keeps merge status `merged`, reports the
+merged commit as successful, and records a retryable follow-up-processing
+failure on the candidate naming the first incomplete stage and a next
+action. The resumable journal preserves completed stages so a retry
+produces each Observation, Work Item, lineage charge, and queue entry at
+most once; a completed resume clears the recorded failure.
+
+`fluent cleanup` retains an origin — its Work Item, Attempt, Merge
+Candidate, worktree, and managed artifacts — while its landed-learning
+recovery is still live: any Attempt with a failed, retryable Learner
+record, or any landed candidate with an incomplete post-land journal or a
+pending imported post-land operation. Once Learning and post-land
+processing complete, cleanup may reap the origin; the derived Observations
+and Work Items stay inspectable with self-contained corrective context and
+provenance identifiers even after optional origin artifacts are gone.
 
 A Learner run that failed before its candidate landed recovers through
 `fluent attempt run`, which retries only the Learner. When the candidate

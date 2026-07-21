@@ -121,13 +121,94 @@ pub fn merge_candidate(config: WorkMergeConfig<'_>) -> Result<WorkMergeOutcome> 
 /// failure that leaves the successful land intact; the persisted operation and
 /// journal let a later `merge-candidate land` resume it.
 fn process_landed_follow_ups(config: &WorkMergeConfig<'_>, outcome: &WorkMergeOutcome) {
-    if let Err(error) = try_process_landed_follow_ups(config, outcome) {
-        eprintln!(
-            "  Warning: Merge Candidate {} landed, but learner follow-up processing did not \
-             complete: {error}",
-            outcome.merge_candidate_id,
-        );
+    match try_process_landed_follow_ups(config, outcome) {
+        Ok(()) => {
+            // Processing completed; clear any recorded retryable failure.
+            if let Err(error) = clear_follow_up_failure(
+                config.store,
+                config.work_item_id,
+                &outcome.merge_candidate_id,
+            ) {
+                eprintln!("  Warning: failed to clear follow-up-processing failure: {error}");
+            }
+        }
+        Err(error) => {
+            // The merge stays successful. Record a retryable follow-up-processing
+            // failure naming the first incomplete stage so a later land resumes.
+            let operation_id = crate::follow_up::operation_id_for_candidate(
+                config.work_item_id,
+                &outcome.merge_candidate_id,
+            );
+            let stage = crate::follow_up::first_incomplete_stage(config.project_root, &operation_id)
+                .unwrap_or_else(|| "validate-handoff".to_string());
+            let next_action = format!(
+                "Re-run `fluent merge-candidate land {} {}` to resume follow-up processing.",
+                config.work_item_id, outcome.merge_candidate_id
+            );
+            if let Err(record_error) = record_follow_up_failure(
+                config.store,
+                config.work_item_id,
+                &outcome.merge_candidate_id,
+                &stage,
+                &error.to_string(),
+                &next_action,
+            ) {
+                eprintln!(
+                    "  Warning: failed to record follow-up-processing failure: {record_error}"
+                );
+            }
+            eprintln!(
+                "  Warning: Merge Candidate {} landed, but learner follow-up processing did not \
+                 complete at stage {stage}: {error}",
+                outcome.merge_candidate_id,
+            );
+        }
     }
+}
+
+/// Record a retryable follow-up-processing failure on a landed candidate without
+/// changing its merged status.
+fn record_follow_up_failure(
+    store: &WorkModelStore,
+    work_item_id: &str,
+    candidate_id: &str,
+    stage: &str,
+    message: &str,
+    next_action: &str,
+) -> Result<()> {
+    let mut item = read_work_item_or_not_found(store, work_item_id)?;
+    if let Some(candidate) = item
+        .merge_candidates
+        .iter_mut()
+        .find(|candidate| candidate.id == candidate_id)
+    {
+        candidate.merge_state.follow_up_failure = Some(crate::work_model::FollowUpProcessingFailure {
+            stage: stage.to_string(),
+            message: message.to_string(),
+            next_action: next_action.to_string(),
+        });
+        store.write_work_item(&item)?;
+    }
+    Ok(())
+}
+
+/// Clear a recorded follow-up-processing failure once processing completes.
+fn clear_follow_up_failure(
+    store: &WorkModelStore,
+    work_item_id: &str,
+    candidate_id: &str,
+) -> Result<()> {
+    let mut item = read_work_item_or_not_found(store, work_item_id)?;
+    if let Some(candidate) = item
+        .merge_candidates
+        .iter_mut()
+        .find(|candidate| candidate.id == candidate_id)
+        && candidate.merge_state.follow_up_failure.is_some()
+    {
+        candidate.merge_state.follow_up_failure = None;
+        store.write_work_item(&item)?;
+    }
+    Ok(())
 }
 
 fn try_process_landed_follow_ups(
@@ -569,6 +650,7 @@ fn set_candidate_executing(
             check_artifacts: Vec::new(),
             review_artifacts: Vec::new(),
             auto_merge_skipped: None,
+            follow_up_failure: None,
         };
         crate::work_model::mark_merge_candidate_started(candidate);
     })
@@ -600,6 +682,7 @@ fn record_candidate_failure(
             check_artifacts,
             review_artifacts,
             auto_merge_skipped: None,
+            follow_up_failure: None,
         };
         crate::work_model::set_merge_candidate_terminal(
             candidate,
@@ -625,6 +708,7 @@ fn record_candidate_merged(
             check_artifacts,
             review_artifacts,
             auto_merge_skipped: None,
+            follow_up_failure: None,
         };
         crate::work_model::set_merge_candidate_terminal(
             candidate,
@@ -993,6 +1077,7 @@ fn record_candidate_needs_user(
             check_artifacts: Vec::new(),
             review_artifacts: Vec::new(),
             auto_merge_skipped: None,
+            follow_up_failure: None,
         };
         crate::work_model::set_merge_candidate_terminal(
             candidate,

@@ -455,6 +455,11 @@ pub struct FollowUpReceipt {
     /// exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub derived_work_item_id: Option<String>,
+    /// Whether an execution-ready derived Work Item still needs a regular-queue
+    /// dispatch. Recorded before enqueueing so an interrupted queue write is
+    /// recognized as the first incomplete stage on retry.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub queue_expected: bool,
     /// Whether the derived Work Item was enqueued on the regular Work Queue.
     #[serde(default, skip_serializing_if = "is_false")]
     pub queued: bool,
@@ -506,7 +511,12 @@ fn operation_dir(project_root: &Path, operation_id: &str) -> PathBuf {
 /// The stable operation identity for a landed origin. A Merge Candidate lands
 /// once, so the same land always resolves to the same operation.
 pub fn operation_id_for(origin: &PostLandOrigin) -> String {
-    format!("{}-{}", origin.work_item_id, origin.merge_candidate_id)
+    operation_id_for_candidate(&origin.work_item_id, &origin.merge_candidate_id)
+}
+
+/// The stable operation identity for a Work Item's landed Merge Candidate.
+pub fn operation_id_for_candidate(work_item_id: &str, merge_candidate_id: &str) -> String {
+    format!("{work_item_id}-{merge_candidate_id}")
 }
 
 fn batch_rel_path(operation_id: &str) -> String {
@@ -733,6 +743,12 @@ fn process_one_follow_up(
         if item.authorization.is_execution_ready()
             && let Some(intent) = item.pending_enqueue.as_ref()
         {
+            // Record that a dispatch is expected before writing it, so an
+            // interrupted queue write is recognized as the incomplete stage.
+            if !journal.follow_ups[index].queue_expected {
+                journal.follow_ups[index].queue_expected = true;
+                write_journal(journal_path, journal)?;
+            }
             crate::queue::ensure_dispatch(
                 project_root,
                 &derived_id,
@@ -746,6 +762,42 @@ fn process_one_follow_up(
     }
 
     Ok(())
+}
+
+/// The first stage of a recorded post-land operation that has not completed, in
+/// follow-up order: `observation`, `classify`, `policy`, `work`, or `queue`.
+/// Returns `None` when every follow-up's required stages are complete, and is
+/// used to name where a partial-failure retry resumes.
+pub fn first_incomplete_stage(project_root: &Path, operation_id: &str) -> Option<String> {
+    let dir = operation_dir(project_root, operation_id);
+    let operation: PendingPostLandOperationV1 =
+        serde_json::from_slice(&fs::read(dir.join("operation.json")).ok()?).ok()?;
+    let batch = load_verified_batch(project_root, &operation.batch_ref).ok()?;
+    let journal = read_journal(&dir.join("journal.json"), operation_id).ok()?;
+    for follow_up in &batch.follow_ups {
+        let Some(receipt) = journal
+            .follow_ups
+            .iter()
+            .find(|receipt| receipt.follow_up_id == follow_up.id)
+        else {
+            return Some("observation".to_string());
+        };
+        if receipt.corrective.is_none() {
+            return Some("classify".to_string());
+        }
+        if receipt.corrective == Some(true) {
+            if receipt.resolved_policy.is_none() {
+                return Some("policy".to_string());
+            }
+            if receipt.derived_work_item_id.is_none() {
+                return Some("work".to_string());
+            }
+            if receipt.queue_expected && !receipt.queued {
+                return Some("queue".to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Record and immediately replay a landed follow-up batch. This is the single
@@ -833,6 +885,7 @@ fn ensure_receipt(
         corrective: None,
         resolved_policy: None,
         derived_work_item_id: None,
+        queue_expected: false,
         queued: false,
     });
     write_journal(journal_path, journal)?;

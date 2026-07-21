@@ -297,6 +297,7 @@ mod tests {
                 check_artifacts: vec![],
                 review_artifacts: vec![],
                 auto_merge_skipped,
+                follow_up_failure: None,
             },
             created_at: None,
             started_at: None,
