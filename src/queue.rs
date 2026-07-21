@@ -653,6 +653,20 @@ mod tests {
         .unwrap();
     }
 
+    fn write_work_item_json(tmp: &Path, id: &str, extra_fields: &str) {
+        fs::write(
+            tmp.join(format!(".fluent/work/items/{id}.json")),
+            format!(r#"{{"id": "{id}", "title": "Test"{extra_fields}}}"#),
+        )
+        .unwrap();
+    }
+
+    /// Overwrite a ledger directly so a test can start from an arbitrary
+    /// disposition without driving the full scheduler pipeline.
+    fn put_ledger(tmp: &Path, ledger: &DispatchLedger) {
+        write_ledger(tmp, ledger).unwrap();
+    }
+
     #[test]
     fn legacy_queue_entry_migrates_to_dispatch_history() {
         let dir = tempfile::tempdir().unwrap();
@@ -757,5 +771,199 @@ mod tests {
 
         let result = reconcile(dir.path(), &token, DispatchStatus::Failed);
         assert!(result.is_err(), "stale generation must fail closed");
+    }
+
+    #[test]
+    fn repeated_add_preserves_time_and_updates_only_explicit_priority() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        write_ready_work_item(dir.path(), "wi-1");
+
+        add(dir.path(), "wi-1", Some(5)).unwrap();
+        let first = read_ledger(dir.path(), "wi-1").unwrap().unwrap();
+        let queued_at = first.active().unwrap().queued_at.clone();
+        assert_eq!(first.active().unwrap().priority, 5);
+
+        // Repeating without a priority preserves both time and priority.
+        add(dir.path(), "wi-1", None).unwrap();
+        let second = read_ledger(dir.path(), "wi-1").unwrap().unwrap();
+        assert_eq!(second.dispatches.len(), 1, "no new dispatch is created");
+        assert_eq!(second.active().unwrap().queued_at, queued_at);
+        assert_eq!(second.active().unwrap().priority, 5);
+
+        // An explicit priority updates only the priority, keeping the time.
+        add(dir.path(), "wi-1", Some(10)).unwrap();
+        let third = read_ledger(dir.path(), "wi-1").unwrap().unwrap();
+        assert_eq!(third.active().unwrap().queued_at, queued_at);
+        assert_eq!(third.active().unwrap().priority, 10);
+    }
+
+    #[test]
+    fn add_rejects_proposed_and_abandoned_work() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        write_work_item_json(dir.path(), "wi-proposed", r#","authorization":{"state":"proposed"}"#);
+        write_work_item_json(dir.path(), "wi-abandoned", r#","abandonment":{}"#);
+
+        let proposed = add(dir.path(), "wi-proposed", None);
+        assert!(proposed.is_err(), "proposed Work is rejected");
+        assert!(
+            read_ledger(dir.path(), "wi-proposed").unwrap().is_none(),
+            "no queue entry is created for proposed Work"
+        );
+
+        let abandoned = add(dir.path(), "wi-abandoned", None);
+        assert!(abandoned.is_err(), "abandoned Work is rejected");
+        assert!(
+            read_ledger(dir.path(), "wi-abandoned").unwrap().is_none(),
+            "no queue entry is created for abandoned Work"
+        );
+    }
+
+    #[test]
+    fn list_sorts_by_priority_then_queue_time() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        for id in ["wi-a", "wi-b", "wi-c"] {
+            write_ready_work_item(dir.path(), id);
+        }
+        put_ledger(
+            dir.path(),
+            &DispatchLedger {
+                work_item_id: "wi-a".to_string(),
+                dispatches: vec![Dispatch {
+                    queued_at: "2026-06-13T10:00:00Z".to_string(),
+                    priority: 5,
+                    ..Dispatch::new_queued("wi-a", 5, None, 1)
+                }],
+            },
+        );
+        put_ledger(
+            dir.path(),
+            &DispatchLedger {
+                work_item_id: "wi-b".to_string(),
+                dispatches: vec![Dispatch {
+                    queued_at: "2026-06-13T09:00:00Z".to_string(),
+                    priority: 10,
+                    ..Dispatch::new_queued("wi-b", 10, None, 1)
+                }],
+            },
+        );
+        put_ledger(
+            dir.path(),
+            &DispatchLedger {
+                work_item_id: "wi-c".to_string(),
+                dispatches: vec![Dispatch {
+                    queued_at: "2026-06-13T08:00:00Z".to_string(),
+                    priority: 5,
+                    ..Dispatch::new_queued("wi-c", 5, None, 1)
+                }],
+            },
+        );
+
+        let entries = list(dir.path()).unwrap();
+        let ids: Vec<&str> = entries.iter().map(|d| d.work_item_id.as_str()).collect();
+        // Highest priority first, then oldest queue time.
+        assert_eq!(ids, vec!["wi-b", "wi-c", "wi-a"]);
+    }
+
+    #[test]
+    fn remove_unclaimed_entry_preserves_cancellation_disposition() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        write_ready_work_item(dir.path(), "wi-1");
+        add(dir.path(), "wi-1", None).unwrap();
+
+        remove(dir.path(), "wi-1").unwrap();
+
+        let ledger = read_ledger(dir.path(), "wi-1").unwrap().unwrap();
+        assert_eq!(ledger.latest().unwrap().status, DispatchStatus::Canceled);
+        assert!(ledger.active().is_none(), "canceled entry is not active");
+
+        // Replayed automatic promotion must not restore the canceled dispatch.
+        ensure_dispatch(dir.path(), "wi-1", "op-1", 100).unwrap();
+        let after = read_ledger(dir.path(), "wi-1").unwrap().unwrap();
+        assert_eq!(after.dispatches.len(), 1);
+        assert_eq!(after.latest().unwrap().status, DispatchStatus::Canceled);
+    }
+
+    #[test]
+    fn remove_missing_entry_reports_not_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        write_ready_work_item(dir.path(), "wi-1");
+
+        let result = remove(dir.path(), "wi-1");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not queued"));
+    }
+
+    #[test]
+    fn remove_rejects_live_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        write_ready_work_item(dir.path(), "wi-1");
+        add(dir.path(), "wi-1", None).unwrap();
+        claim(dir.path(), "wi-1", "attempt-1").unwrap().unwrap();
+
+        // Hold the dispatch lease so the claim reads as live.
+        let lease =
+            crate::lease::acquire(&dispatch_lease_path(dir.path(), "wi-1")).unwrap();
+
+        let result = remove(dir.path(), "wi-1");
+        assert!(result.is_err(), "a live claim blocks removal");
+        assert!(result.unwrap_err().to_string().contains("active"));
+
+        drop(lease);
+    }
+
+    #[test]
+    fn automatic_enqueue_retry_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        write_ready_work_item(dir.path(), "wi-1");
+
+        ensure_dispatch(dir.path(), "wi-1", "op-1", 100).unwrap();
+        // A replay of the same origin operation, even with a different priority,
+        // must not create a second dispatch or change the first's priority.
+        ensure_dispatch(dir.path(), "wi-1", "op-1", 50).unwrap();
+
+        let ledger = read_ledger(dir.path(), "wi-1").unwrap().unwrap();
+        assert_eq!(ledger.dispatches.len(), 1);
+        assert_eq!(ledger.active().unwrap().priority, 100);
+    }
+
+    #[test]
+    fn terminal_and_blocked_dispositions_survive_automatic_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+
+        for (id, status) in [
+            ("wi-failed", DispatchStatus::Failed),
+            ("wi-ready", DispatchStatus::CandidateReady),
+            ("wi-blocked", DispatchStatus::Blocked),
+        ] {
+            write_ready_work_item(dir.path(), id);
+            put_ledger(
+                dir.path(),
+                &DispatchLedger {
+                    work_item_id: id.to_string(),
+                    dispatches: vec![Dispatch {
+                        status,
+                        ..Dispatch::new_queued(id, 0, None, 1)
+                    }],
+                },
+            );
+
+            ensure_dispatch(dir.path(), id, "op-replay", 100).unwrap();
+
+            let ledger = read_ledger(dir.path(), id).unwrap().unwrap();
+            assert_eq!(ledger.dispatches.len(), 1, "no new dispatch for {id}");
+            assert_eq!(
+                ledger.latest().unwrap().status,
+                status,
+                "{id} disposition survives replay"
+            );
+        }
     }
 }

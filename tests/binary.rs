@@ -10233,6 +10233,213 @@ fn work_queue_remove_unknown_errors() {
 }
 
 // =========================================================================
+// Queue command matrix (behavior-scoped)
+// =========================================================================
+
+fn latest_dispatch_status(project_root: &Path, work_item_id: &str) -> String {
+    let value = read_json_path(
+        &project_root
+            .join(".fluent/work/queue")
+            .join(format!("{work_item_id}.json")),
+    );
+    value["dispatches"]
+        .as_array()
+        .and_then(|d| d.last())
+        .and_then(|d| d["status"].as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn dispatch_count(project_root: &Path, work_item_id: &str) -> usize {
+    let value = read_json_path(
+        &project_root
+            .join(".fluent/work/queue")
+            .join(format!("{work_item_id}.json")),
+    );
+    value["dispatches"].as_array().map(|d| d.len()).unwrap_or(0)
+}
+
+#[test]
+fn explicit_queue_add_after_terminal_creates_new_dispatch() {
+    use fluent::queue::{self, DispatchStatus};
+
+    let tmp = TempDir::new().unwrap();
+    write_work_item_json(tmp.path(), "wi-term", "Requeue after terminal");
+
+    // First dispatch, driven to a terminal disposition.
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["queue", "add", "wi-term"])
+        .assert()
+        .success();
+    let token = queue::claim(tmp.path(), "wi-term", "attempt-1")
+        .unwrap()
+        .unwrap();
+    queue::reconcile(tmp.path(), &token, DispatchStatus::Failed).unwrap();
+    assert_eq!(latest_dispatch_status(tmp.path(), "wi-term"), "failed");
+
+    // An explicit re-add opens a new active dispatch while keeping history.
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["queue", "add", "wi-term"])
+        .assert()
+        .success();
+
+    assert_eq!(dispatch_count(tmp.path(), "wi-term"), 2, "history preserved");
+    assert_eq!(latest_dispatch_status(tmp.path(), "wi-term"), "queued");
+}
+
+#[test]
+fn queue_add_unknown_work_item_errors() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join(".fluent/work/items")).unwrap();
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["queue", "add", "ghost"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not found"));
+
+    assert!(
+        !tmp.path().join(".fluent/work/queue/ghost.json").exists(),
+        "no queue entry is created for an unknown Work Item"
+    );
+}
+
+#[test]
+fn queue_add_ineligible_work_errors() {
+    let tmp = TempDir::new().unwrap();
+    let items = tmp.path().join(".fluent/work/items");
+    fs::create_dir_all(&items).unwrap();
+    // A proposed Work Item is visible but not authorized to execute.
+    fs::write(
+        items.join("wi-proposed.json"),
+        r#"{"id":"wi-proposed","title":"Proposed","authorization":{"state":"proposed"}}"#,
+    )
+    .unwrap();
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["queue", "add", "wi-proposed"])
+        .assert()
+        .failure();
+
+    assert!(
+        !tmp
+            .path()
+            .join(".fluent/work/queue/wi-proposed.json")
+            .exists(),
+        "no queue entry is created for proposed Work"
+    );
+}
+
+#[test]
+fn queue_add_rejects_suspended_attempt_and_pending_candidate() {
+    use fluent::work_model::{
+        AttemptReviewState, AttemptStatus, MergeCandidateMergeStatus, TaskOutput, TaskStatus,
+        WorkItem, WorkModelStore, WorkspaceAccess, WorkspaceRef,
+    };
+
+    // A Work Item whose Attempt is suspended at needs-user.
+    let suspended = TempDir::new().unwrap();
+    {
+        let store = WorkModelStore::new(suspended.path());
+        let mut item = WorkItem::planned("wi-susp", "Suspended");
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.attempts[0].status = AttemptStatus::NeedsUser;
+        item.attempts[0].tasks[0].status = TaskStatus::NeedsUser;
+        store.create_work_item(&item).unwrap();
+    }
+    fluent_cmd()
+        .current_dir(suspended.path())
+        .args(["queue", "add", "wi-susp"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("needs-user"));
+    assert!(
+        !suspended
+            .path()
+            .join(".fluent/work/queue/wi-susp.json")
+            .exists()
+    );
+
+    // A Work Item whose Merge Candidate is pending land.
+    let pending = TempDir::new().unwrap();
+    {
+        let store = WorkModelStore::new(pending.path());
+        let mut item = WorkItem::planned("wi-pend", "Pending land");
+        item.add_initial_attempt("attempt-1").unwrap();
+        let attempt = item.attempts.last_mut().unwrap();
+        let task = attempt.tasks.last_mut().unwrap();
+        task.status = TaskStatus::Complete;
+        task.workspace_access = WorkspaceAccess {
+            reads: vec![WorkspaceRef {
+                id: "target".to_string(),
+                path: ".".to_string(),
+            }],
+            writes: vec![WorkspaceRef {
+                id: "candidate".to_string(),
+                path: "../work-wi-pend-attempt-1".to_string(),
+            }],
+        };
+        task.output = Some(TaskOutput {
+            workspace_id: "candidate".to_string(),
+            workspace_path: "../work-wi-pend-attempt-1".to_string(),
+            source_branch: "main".to_string(),
+            commit: "abc123".to_string(),
+        });
+        attempt.status = AttemptStatus::Complete;
+        attempt.review_state = Some(AttemptReviewState::Passed);
+        item.create_or_get_merge_candidate("attempt-1").unwrap();
+        assert_eq!(
+            item.merge_candidates[0].merge_state.status,
+            MergeCandidateMergeStatus::Pending
+        );
+        store.create_work_item(&item).unwrap();
+    }
+    fluent_cmd()
+        .current_dir(pending.path())
+        .args(["queue", "add", "wi-pend"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("pending land"));
+    assert!(
+        !pending
+            .path()
+            .join(".fluent/work/queue/wi-pend.json")
+            .exists()
+    );
+}
+
+#[test]
+fn queue_list_shows_priority_time_status_and_work_id() {
+    let tmp = TempDir::new().unwrap();
+    write_work_item_json(tmp.path(), "wi-list", "List format");
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["queue", "add", "wi-list", "--priority", "7"])
+        .assert()
+        .success();
+
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["queue", "list"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .find(|l| l.contains("wi-list"))
+        .expect("wi-list listed");
+    assert!(line.starts_with("7 "), "priority first: {line}");
+    assert!(line.contains('T'), "queue time present: {line}");
+    assert!(line.contains("queued"), "status present: {line}");
+    assert!(line.contains("wi-list"), "work item id present: {line}");
+}
+
+// =========================================================================
 // Scheduler CLI tests
 // =========================================================================
 
