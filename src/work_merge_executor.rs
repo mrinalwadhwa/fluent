@@ -70,10 +70,15 @@ pub fn merge_candidate(config: WorkMergeConfig<'_>) -> Result<WorkMergeOutcome> 
     if candidate.merge_state.status == MergeCandidateMergeStatus::Merged
         && let Some(merged_commit) = candidate.merge_state.merged_commit.clone()
     {
-        return Ok(WorkMergeOutcome {
+        // The candidate already landed. Do not resolve workspaces, rebase, run
+        // checks, or repeat the merge; resume any incomplete learner handoff
+        // processing so a re-invocation converges idempotently.
+        let outcome = WorkMergeOutcome {
             merge_candidate_id: candidate.id,
             merged_commit,
-        });
+        };
+        process_landed_follow_ups(&config, &outcome);
+        return Ok(outcome);
     }
 
     let source_workspace = resolve_managed_candidate_workspace_path(
@@ -102,7 +107,81 @@ pub fn merge_candidate(config: WorkMergeConfig<'_>) -> Result<WorkMergeOutcome> 
         &target_workspace,
         &artifact_dir,
     );
-    recover_landed_candidate_result(config.store, config.work_item_id, &candidate.id, result)
+    let outcome =
+        recover_landed_candidate_result(config.store, config.work_item_id, &candidate.id, result)?;
+    // The candidate is durably merged. Process its learner handoff in the source
+    // project; a failure here never undoes the successful land.
+    process_landed_follow_ups(&config, &outcome);
+    Ok(outcome)
+}
+
+/// Materialize a landed Merge Candidate's learner handoff into the local
+/// Observation backlog. Runs only once a candidate is durably merged, so nothing
+/// materializes before merge. Any failure is a retryable follow-up-processing
+/// failure that leaves the successful land intact; the persisted operation and
+/// journal let a later `merge-candidate land` resume it.
+fn process_landed_follow_ups(config: &WorkMergeConfig<'_>, outcome: &WorkMergeOutcome) {
+    if let Err(error) = try_process_landed_follow_ups(config, outcome) {
+        eprintln!(
+            "  Warning: Merge Candidate {} landed, but learner follow-up processing did not \
+             complete: {error}",
+            outcome.merge_candidate_id,
+        );
+    }
+}
+
+fn try_process_landed_follow_ups(
+    config: &WorkMergeConfig<'_>,
+    outcome: &WorkMergeOutcome,
+) -> Result<()> {
+    let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+    let candidate = item
+        .merge_candidates
+        .iter()
+        .find(|candidate| candidate.id == outcome.merge_candidate_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Merge Candidate {:?} not found in Work Item {:?}",
+                outcome.merge_candidate_id,
+                config.work_item_id
+            )
+        })?;
+    let attempt_id = candidate.attempt_id.clone();
+    let attempt = item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == attempt_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Attempt {:?} not found for Merge Candidate {:?}",
+                attempt_id,
+                outcome.merge_candidate_id
+            )
+        })?;
+
+    // Only a successful learner run leaves a handoff to materialize. A failed or
+    // absent learner run has nothing to process here; its recovery runs the
+    // Learner again.
+    let Some(learning) = attempt.learning.as_ref() else {
+        return Ok(());
+    };
+    if !learning.is_succeeded() {
+        return Ok(());
+    }
+    let Some(handoff_ref) = learning.handoff.as_ref() else {
+        return Ok(());
+    };
+
+    let handoff = crate::learner::load_verified_handoff(config.project_root, handoff_ref)?;
+    let origin = crate::follow_up::PostLandOrigin {
+        work_item_id: config.work_item_id.to_string(),
+        attempt_id,
+        merge_candidate_id: outcome.merge_candidate_id.clone(),
+        merged_commit: outcome.merged_commit.clone(),
+    };
+    let batch = crate::follow_up::NormalizedFollowUpBatchV1::from_learner_handoff(&handoff, origin)?;
+    crate::follow_up::process_landed_batch(config.project_root, &batch, None)?;
+    Ok(())
 }
 
 fn recover_landed_candidate_result(

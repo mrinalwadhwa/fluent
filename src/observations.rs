@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 use chrono::Local;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
@@ -8,6 +9,57 @@ pub enum MatchResult {
     Unique(String),
     None,
     Ambiguous(Vec<String>),
+}
+
+/// Marks the kind of a system-generated Observation in its reserved frontmatter.
+pub const LEARNER_FOLLOW_UP_KIND: &str = "learner-follow-up";
+
+/// Reserved YAML frontmatter carried by a system-generated Observation. It
+/// records the provenance an inspector needs to trace a materialized follow-up
+/// back to its origin without consulting any other artifact. Manual, body-only
+/// Observations carry no frontmatter and stay valid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct ObservationFrontmatter {
+    /// Names the generating subsystem, e.g. `learner-follow-up`. Present marks
+    /// the Observation as system-generated.
+    #[serde(rename = "fluent-observation", default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// The follow-up within its landed batch that this Observation materializes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_up_id: Option<String>,
+    /// The originating Work Item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item_id: Option<String>,
+    /// The originating Attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    /// The originating Merge Candidate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_candidate_id: Option<String>,
+    /// The commit the originating Merge Candidate landed as.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_commit: Option<String>,
+    /// The derived Work Item promoted from this Observation, once one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_work_item_id: Option<String>,
+}
+
+/// Outcome of ensuring a provenance-bearing Observation exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnsureOutcome {
+    /// A new open Observation was written.
+    Created,
+    /// An open Observation with matching provenance already existed.
+    ReusedOpen,
+    /// A resolved Observation already existed and was left resolved.
+    ReusedResolved,
+}
+
+impl EnsureOutcome {
+    pub fn created(&self) -> bool {
+        matches!(self, Self::Created)
+    }
 }
 
 pub fn slugify(text: &str) -> String {
@@ -175,12 +227,7 @@ pub fn list(project_root: &Path) -> Result<()> {
         let name_str = name.to_string_lossy();
         if let Some(id) = name_str.strip_suffix(".md") {
             let content = fs::read_to_string(entry.path())?;
-            let first_line = content
-                .lines()
-                .find(|l| !l.trim().is_empty())
-                .unwrap_or("")
-                .to_string();
-            entries.push((id.to_string(), first_line));
+            entries.push((id.to_string(), display_summary(&content)));
         }
     }
 
@@ -228,6 +275,110 @@ pub fn show(project_root: &Path, id_prefix: &str) -> Result<()> {
             bail!("No observation matching {id_prefix:?}");
         }
     }
+}
+
+// --- Provenance-bearing system Observations ---
+
+/// Split a leading YAML frontmatter block from an Observation's content. A block
+/// is `---\n...\n---\n` at the very start; anything else is treated as a
+/// body-only Observation with no frontmatter, so legacy and manual Observations
+/// stay valid.
+pub fn split_frontmatter(content: &str) -> (Option<ObservationFrontmatter>, &str) {
+    let Some(rest) = content.strip_prefix("---\n") else {
+        return (None, content);
+    };
+    let Some(end) = rest.find("\n---\n") else {
+        // An unterminated fence is not frontmatter; leave the content untouched.
+        return (None, content);
+    };
+    let yaml = &rest[..end];
+    let body = &rest[end + "\n---\n".len()..];
+    match serde_yaml::from_str::<ObservationFrontmatter>(yaml) {
+        Ok(frontmatter) => (Some(frontmatter), body),
+        Err(_) => (None, content),
+    }
+}
+
+/// Render an Observation as a reserved YAML frontmatter block followed by its
+/// human-readable body.
+fn render_with_frontmatter(frontmatter: &ObservationFrontmatter, body: &str) -> Result<String> {
+    let yaml = serde_yaml::to_string(frontmatter)?;
+    let mut out = String::from("---\n");
+    out.push_str(&yaml);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("---\n\n");
+    out.push_str(body.trim_end());
+    out.push('\n');
+    Ok(out)
+}
+
+/// The display summary of an Observation: its first non-empty body line with any
+/// frontmatter block skipped.
+pub fn display_summary(content: &str) -> String {
+    let (_, body) = split_frontmatter(content);
+    body.lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Idempotently ensure exactly one Observation with the given id and provenance.
+///
+/// A matching open Observation is reused; a resolved Observation is left resolved
+/// and never reopened; a body-only Observation at the id, or one whose stored
+/// provenance conflicts with `frontmatter`, is rejected so replay converges on a
+/// single authoritative record rather than overwriting another.
+pub fn ensure_provenance_observation(
+    project_root: &Path,
+    id: &str,
+    frontmatter: &ObservationFrontmatter,
+    body: &str,
+) -> Result<EnsureOutcome> {
+    let obs_dir = project_root.join(".fluent/observations");
+    let resolved_dir = obs_dir.join("resolved");
+
+    let resolved_path = resolved_dir.join(format!("{id}.md"));
+    if resolved_path.exists() {
+        verify_provenance_matches(&resolved_path, frontmatter)?;
+        return Ok(EnsureOutcome::ReusedResolved);
+    }
+
+    let open_path = obs_dir.join(format!("{id}.md"));
+    if open_path.exists() {
+        verify_provenance_matches(&open_path, frontmatter)?;
+        return Ok(EnsureOutcome::ReusedOpen);
+    }
+
+    fs::create_dir_all(&obs_dir)?;
+    let content = render_with_frontmatter(frontmatter, body)?;
+    crate::atomic_write::atomic_write(&open_path, content.as_bytes())?;
+    Ok(EnsureOutcome::Created)
+}
+
+/// Reject an existing Observation whose stored provenance does not match the
+/// provenance a replay expects. A body-only Observation at a reserved id is a
+/// conflict too: the id is claimed by an unrelated record.
+fn verify_provenance_matches(
+    path: &Path,
+    expected: &ObservationFrontmatter,
+) -> Result<()> {
+    let existing = fs::read_to_string(path)?;
+    let (stored, _) = split_frontmatter(&existing);
+    let Some(stored) = stored else {
+        bail!(
+            "Observation {} exists without provenance frontmatter; refusing to overwrite it",
+            path.display()
+        );
+    };
+    if &stored != expected {
+        bail!(
+            "Observation {} has provenance conflicting with the follow-up being materialized",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 // --- Migration ---
@@ -593,5 +744,128 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert!(files.contains(&"20260612-000000-same-title.md".to_string()));
         assert!(files.contains(&"20260612-000000-same-title-2.md".to_string()));
+    }
+
+    fn sample_frontmatter() -> ObservationFrontmatter {
+        ObservationFrontmatter {
+            kind: Some(LEARNER_FOLLOW_UP_KIND.to_string()),
+            follow_up_id: Some("fu-1".to_string()),
+            work_item_id: Some("work-1".to_string()),
+            attempt_id: Some("attempt-1".to_string()),
+            merge_candidate_id: Some("attempt-1-merge-candidate".to_string()),
+            merged_commit: Some("abc123".to_string()),
+            derived_work_item_id: None,
+        }
+    }
+
+    #[test]
+    fn frontmatter_round_trips_through_render_and_split() {
+        let fm = sample_frontmatter();
+        let content = render_with_frontmatter(&fm, "# Follow-up\n\nBody text.").unwrap();
+        let (parsed, body) = split_frontmatter(&content);
+        assert_eq!(parsed.as_ref(), Some(&fm));
+        assert!(body.contains("Body text."));
+    }
+
+    #[test]
+    fn body_only_content_has_no_frontmatter() {
+        let (parsed, body) = split_frontmatter("2026-06-12 \u{2014} Manual note\nDetails.\n");
+        assert!(parsed.is_none());
+        assert!(body.starts_with("2026-06-12"));
+    }
+
+    #[test]
+    fn unterminated_fence_is_not_frontmatter() {
+        let (parsed, body) = split_frontmatter("---\nnot really frontmatter\n");
+        assert!(parsed.is_none());
+        assert!(body.starts_with("---"));
+    }
+
+    #[test]
+    fn display_summary_skips_frontmatter() {
+        let content =
+            render_with_frontmatter(&sample_frontmatter(), "# Restore the retry cap").unwrap();
+        assert_eq!(display_summary(&content), "# Restore the retry cap");
+    }
+
+    #[test]
+    fn ensure_creates_then_reuses_open_observation() {
+        let tmp = TempDir::new().unwrap();
+        let fm = sample_frontmatter();
+
+        let first =
+            ensure_provenance_observation(tmp.path(), "followup-fu-1", &fm, "# Body").unwrap();
+        assert_eq!(first, EnsureOutcome::Created);
+
+        let path = tmp.path().join(".fluent/observations/followup-fu-1.md");
+        assert!(path.exists());
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("merged-commit: abc123"));
+
+        // A second ensure with the same provenance reuses the record.
+        let second =
+            ensure_provenance_observation(tmp.path(), "followup-fu-1", &fm, "# Body").unwrap();
+        assert_eq!(second, EnsureOutcome::ReusedOpen);
+
+        let count = fs::read_dir(tmp.path().join(".fluent/observations"))
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_type().unwrap().is_file())
+            .count();
+        assert_eq!(count, 1, "ensure must not duplicate the Observation");
+    }
+
+    #[test]
+    fn ensure_leaves_resolved_observation_resolved() {
+        let tmp = TempDir::new().unwrap();
+        let fm = sample_frontmatter();
+        ensure_provenance_observation(tmp.path(), "followup-fu-1", &fm, "# Body").unwrap();
+
+        // Simulate the operator resolving it.
+        resolve(tmp.path(), "followup-fu-1", Some("handled".to_string())).unwrap();
+        assert!(
+            tmp.path()
+                .join(".fluent/observations/resolved/followup-fu-1.md")
+                .exists()
+        );
+
+        // A replay must not reopen it.
+        let outcome =
+            ensure_provenance_observation(tmp.path(), "followup-fu-1", &fm, "# Body").unwrap();
+        assert_eq!(outcome, EnsureOutcome::ReusedResolved);
+        assert!(
+            !tmp.path()
+                .join(".fluent/observations/followup-fu-1.md")
+                .exists(),
+            "a resolved Observation is never reopened"
+        );
+    }
+
+    #[test]
+    fn ensure_rejects_conflicting_provenance() {
+        let tmp = TempDir::new().unwrap();
+        let fm = sample_frontmatter();
+        ensure_provenance_observation(tmp.path(), "followup-fu-1", &fm, "# Body").unwrap();
+
+        let mut other = fm.clone();
+        other.merged_commit = Some("different-commit".to_string());
+        let err = ensure_provenance_observation(tmp.path(), "followup-fu-1", &other, "# Body")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("conflicting"),
+            "conflicting provenance must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn ensure_rejects_body_only_observation_at_reserved_id() {
+        let tmp = TempDir::new().unwrap();
+        let obs_dir = tmp.path().join(".fluent/observations");
+        fs::create_dir_all(&obs_dir).unwrap();
+        fs::write(obs_dir.join("followup-fu-1.md"), "a manual note\n").unwrap();
+
+        let err =
+            ensure_provenance_observation(tmp.path(), "followup-fu-1", &sample_frontmatter(), "# B")
+                .unwrap_err();
+        assert!(err.to_string().contains("without provenance frontmatter"));
     }
 }

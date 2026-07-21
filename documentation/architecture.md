@@ -304,6 +304,25 @@ moving the target branch. Merge artifacts live under
 and the stored Merge Candidate records whether execution is pending,
 executing, failed, needs-user, or merged.
 
+Once a Merge Candidate reaches merge status `merged`, merge execution
+materializes the Attempt's successful learner handoff into the local
+Observation backlog. It does this only after the merge is durable, so
+nothing materializes before merge. It normalizes the verified handoff
+into a source-neutral batch stamped with the authoritative origin (Work
+Item, Attempt, Merge Candidate, and merged commit), records a versioned
+`PendingPostLandOperationV1` and a resumable journal under
+`.fluent/work/follow-ups/<work-item-id>-<candidate-id>/`, and replays
+that operation. Replay creates exactly one provenance-bearing Observation
+per follow-up, keyed by a deterministic id, so a land retry, recovery, or
+journal replay reuses the same Observation rather than duplicating it; an
+empty handoff records as processed without a placeholder; and a resolved
+Observation is never reopened. System-generated Observations carry a
+reserved YAML frontmatter block naming the follow-up and its origin.
+Follow-up processing never undoes a successful land: a failure leaves the
+merge intact and the persisted operation replayable, and re-running
+`fluent merge-candidate land` on the merged candidate resumes it without
+resolving workspaces, rebasing, or moving the target branch.
+
 Merge execution auto-continues through failed merge-time review
 rounds within a same-invocation budget. The merge loop iterates
 rebase → checks → reviews. If reviewers return fail (and not a
@@ -540,9 +559,12 @@ Observations are stored as one file per entry under
 `.fluent/observations/resolved/<id>.md` (resolved). The `fluent
 observations` CLI surface manages the lifecycle: `add` records a new
 observation, `resolve` appends resolution context and moves the file,
-`list` prints the open queue, and `show` prints a single entry. The
-per-file layout prevents write collisions when parallel sessions add
-or resolve observations concurrently. A one-shot `migrate` command
+`list` prints the open queue, and `show` prints a single entry. Manual
+observations are body-only Markdown; a system-generated observation adds
+a reserved YAML frontmatter block carrying its provenance, which `list`
+skips when it derives the summary line. The per-file layout prevents
+write collisions when parallel sessions add or resolve observations
+concurrently. A one-shot `migrate` command
 converted the prior monolithic `observations.md` and
 `observations-resolved.md` into the per-file layout.
 

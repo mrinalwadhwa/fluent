@@ -2607,6 +2607,346 @@ fn learner_handoff_does_not_materialize_before_land() {
     );
 }
 
+// --- Land-gated learner handoff materialization (Step 1) ---
+
+/// A mock coder that drives write and review rounds, writes a Learner follow-up
+/// draft (verbatim `draft_json`), and performs a real `git rebase` when handed
+/// the rebase prompt during a land.
+fn learner_land_mock_script(draft_json: &str) -> String {
+    format!(
+        r##"#!/bin/bash
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
+done
+if [ -z "$PROMPT" ]; then exit 0; fi
+if printf '%s' "$PROMPT" | grep -q "Rebase the candidate branch"; then
+  TARGET=$(printf '%s' "$PROMPT" | grep -o 'onto `[^`]*`' | sed 's/onto `//;s/`//')
+  git rebase "$TARGET" 2>/dev/null
+  exit $?
+fi
+if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
+  DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
+  if [ -n "$DRAFT" ]; then
+    mkdir -p "$(dirname "$DRAFT")"
+    cat > "$DRAFT" <<'DRAFTJSON'
+{draft_json}
+DRAFTJSON
+  fi
+  exit 0
+fi
+case "$PWD" in
+  */work-6-work-1-attempt-1)
+    printf 'loop output\n' > loop-output.txt
+    git add loop-output.txt
+    git commit -m "Add loop output" >/dev/null 2>&1
+    ;;
+  *)
+    printf 'Verdict: pass\n\nLoop review.\n' > review.md
+    ;;
+esac
+exit 0
+"##
+    )
+}
+
+/// Land the sole Merge Candidate of `work-1`, driving the rebase with `bin_dir`.
+fn land_work_1(main_dir: &Path, bin_dir: &Path, no_post_merge_review: bool) {
+    let mut args = vec![
+        "merge-candidate",
+        "land",
+        "work-1",
+        "attempt-1-merge-candidate",
+        "--no-sandbox",
+    ];
+    if no_post_merge_review {
+        args.push("--no-post-merge-review");
+    }
+    fluent_cmd()
+        .current_dir(main_dir)
+        .args(&args)
+        .env("PATH", mock_path(bin_dir))
+        .assert()
+        .success();
+}
+
+/// The open Observation files in a project, sorted by id.
+fn open_observation_files(main_dir: &Path) -> Vec<String> {
+    let dir = main_dir.join(".fluent/observations");
+    let mut files: Vec<String> = fs::read_dir(&dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort();
+    files
+}
+
+fn work_item_json_count(main_dir: &Path) -> usize {
+    let items_dir = main_dir.join(".fluent/work/items");
+    fs::read_dir(&items_dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().map(|x| x == "json").unwrap_or(false))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+#[test]
+fn ready_candidate_does_not_materialize_learner_handoff() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-ready");
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(
+            r#"{"learning_summary":"learned","follow_ups":[{"id":"fu-1","summary":"Later","corrective":false}]}"#,
+        ),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+
+    // The candidate is ready but has not landed: nothing is materialized.
+    assert!(
+        open_observation_files(&main_dir).is_empty(),
+        "a ready, unlanded candidate materializes no Observation"
+    );
+    assert_eq!(
+        work_item_json_count(&main_dir),
+        1,
+        "a ready, unlanded candidate derives no Work Item"
+    );
+}
+
+#[test]
+fn abandoned_candidate_never_materializes_learner_handoff() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-abandoned");
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(
+            r#"{"learning_summary":"learned","follow_ups":[{"id":"fu-1","summary":"Later","corrective":false}]}"#,
+        ),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "abandon", "work-1", "--reason", "superseded"])
+        .assert()
+        .success();
+
+    // An abandoned Work Item's candidate can never land, so its handoff never
+    // materializes.
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "merge-candidate",
+            "land",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .failure();
+
+    assert!(
+        open_observation_files(&main_dir).is_empty(),
+        "an abandoned candidate materializes no Observation"
+    );
+}
+
+#[test]
+fn land_processes_handoff_after_recording_merge() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-land-process");
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(
+            r#"{"learning_summary":"learned","follow_ups":[{"id":"fu-1","summary":"Consolidate retry handling","corrective":false}]}"#,
+        ),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, false);
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    assert_eq!(value["merge_candidates"][0]["merge_state"]["status"], "merged");
+
+    let observations = open_observation_files(&main_dir);
+    assert_eq!(
+        observations.len(),
+        1,
+        "landing a handoff with one follow-up materializes one Observation; got {observations:?}"
+    );
+
+    let operation_dir =
+        main_dir.join(".fluent/work/follow-ups/work-1-attempt-1-merge-candidate");
+    let journal = read_json_path(&operation_dir.join("journal.json"));
+    assert_eq!(journal["completed"], true, "the journal is marked complete");
+    assert_eq!(journal["follow_ups"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn no_post_merge_review_does_not_skip_learner_handoff() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-land-quiet");
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(
+            r#"{"learning_summary":"learned","follow_ups":[{"id":"fu-1","summary":"Follow up","corrective":false}]}"#,
+        ),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+
+    assert_eq!(
+        open_observation_files(&main_dir).len(),
+        1,
+        "--no-post-merge-review still processes the landed learner handoff"
+    );
+}
+
+#[test]
+fn land_creates_provenance_linked_observation() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-provenance");
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(
+            r#"{"learning_summary":"learned","follow_ups":[{"id":"fu-1","summary":"Restore the retry cap","corrective":false}]}"#,
+        ),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let merged_commit = value["merge_candidates"][0]["merge_state"]["merged_commit"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let observations = open_observation_files(&main_dir);
+    assert_eq!(observations.len(), 1);
+    let content =
+        fs::read_to_string(main_dir.join(".fluent/observations").join(&observations[0])).unwrap();
+
+    // The Observation identifies the follow-up and its full origin.
+    assert!(content.contains("follow-up-id: fu-1"), "content:\n{content}");
+    assert!(content.contains("work-item-id: work-1"));
+    assert!(content.contains("attempt-id: attempt-1"));
+    assert!(content.contains("merge-candidate-id: attempt-1-merge-candidate"));
+    assert!(
+        content.contains(&format!("merged-commit: {merged_commit}")),
+        "Observation must name the merged commit {merged_commit}; content:\n{content}"
+    );
+}
+
+#[test]
+fn observation_show_exposes_learning_provenance() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-show-prov");
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(
+            r#"{"learning_summary":"learned","follow_ups":[{"id":"fu-1","summary":"Restore the retry cap","corrective":false}]}"#,
+        ),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+
+    let output = fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["observation", "show", "followup-work-1"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("work-item-id: work-1"), "show output:\n{stdout}");
+    assert!(stdout.contains("merge-candidate-id: attempt-1-merge-candidate"));
+    assert!(stdout.contains("Restore the retry cap"));
+}
+
+#[test]
+fn land_consumes_empty_handoff_without_placeholders() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-empty-land");
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(r#"{"learning_summary":"nothing durable","follow_ups":[]}"#),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+
+    assert!(
+        open_observation_files(&main_dir).is_empty(),
+        "an empty handoff creates no placeholder Observation"
+    );
+    assert_eq!(
+        work_item_json_count(&main_dir),
+        1,
+        "an empty handoff derives no Work Item"
+    );
+
+    let journal = read_json_path(
+        &main_dir.join(".fluent/work/follow-ups/work-1-attempt-1-merge-candidate/journal.json"),
+    );
+    assert_eq!(journal["completed"], true, "an empty handoff records as processed");
+}
+
+#[test]
+fn learner_followup_processing_is_idempotent() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-idempotent");
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(
+            r#"{"learning_summary":"learned","follow_ups":[{"id":"fu-1","summary":"Consolidate retry handling","corrective":false}]}"#,
+        ),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+
+    let first = open_observation_files(&main_dir);
+    assert_eq!(first.len(), 1);
+
+    // Re-landing an already-merged candidate resumes processing idempotently.
+    land_work_1(&main_dir, &bin_dir, true);
+
+    let second = open_observation_files(&main_dir);
+    assert_eq!(
+        second, first,
+        "re-processing a landed handoff reuses the same Observation"
+    );
+    assert_eq!(
+        work_item_json_count(&main_dir),
+        1,
+        "re-processing derives no additional Work Item"
+    );
+}
+
 #[test]
 fn write_task_transcript_persists_after_failed_attempt() {
     let tmp = TempDir::new().unwrap();
