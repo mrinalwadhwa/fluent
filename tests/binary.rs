@@ -2986,8 +2986,7 @@ fn land_processes_handoff_after_recording_merge() {
         "landing a handoff with one follow-up materializes one Observation; got {observations:?}"
     );
 
-    let operation_dir =
-        main_dir.join(".fluent/work/follow-ups/work-1-attempt-1-merge-candidate");
+    let operation_dir = main_dir.join(format!(".fluent/work/follow-ups/{OPERATION_ID}"));
     let journal = read_json_path(&operation_dir.join("journal.json"));
     assert_eq!(journal["completed"], true, "the journal is marked complete");
     assert_eq!(journal["follow_ups"].as_array().unwrap().len(), 1);
@@ -3103,7 +3102,7 @@ fn land_consumes_empty_handoff_without_placeholders() {
     );
 
     let journal = read_json_path(
-        &main_dir.join(".fluent/work/follow-ups/work-1-attempt-1-merge-candidate/journal.json"),
+        &main_dir.join(format!(".fluent/work/follow-ups/{OPERATION_ID}/journal.json")),
     );
     assert_eq!(journal["completed"], true, "an empty handoff records as processed");
 }
@@ -3145,8 +3144,10 @@ fn learner_followup_processing_is_idempotent() {
 
 const AUTHORITY_ANCHOR: &str = "Cap enforcement belongs in retry rs";
 const AUTHORITY_PATH: &str = ".fluent/expertise/retry.md";
-const DERIVED_FU1: &str = "derived-work-1-attempt-1-merge-candidate-fu-1";
-const DERIVED_FU2: &str = "derived-work-1-attempt-1-merge-candidate-fu-2";
+const OPERATION_ID: &str =
+    "land-a1478b19201ae32c3d73895587323e1200206c0803f6469558d8b376c53c3a43";
+const DERIVED_FU1: &str = "derived-land-a1478b19201ae32c3d73895587323e1200206c0803f6469558d8b376c53c3a43-a0eebf1952dae493547552e76655314a612b44205eec110b5745ccbbf378b4eb";
+const DERIVED_FU2: &str = "derived-land-a1478b19201ae32c3d73895587323e1200206c0803f6469558d8b376c53c3a43-bfb56c767d9eb049aff6c02810b2a650d9fb0390a4fa87d5f894e1125713a85c";
 
 /// Commit the trusted authority a corrective follow-up cites so the host gate
 /// resolves it fresh at land time and the worktree stays clean.
@@ -3264,7 +3265,7 @@ fn propose_mode_creates_linked_proposed_work_item() {
     let derived = work_item_value(&main_dir, DERIVED_FU1);
     assert_eq!(derived["authorization"]["state"], "proposed");
     assert_eq!(
-        derived["origin"]["observation_id"], "followup-work-1-attempt-1-merge-candidate-fu-1",
+        derived["origin"]["observation_id"], "followup-land-a1478b19201ae32c3d73895587323e1200206c0803f6469558d8b376c53c3a43-a0eebf1952dae493547552e76655314a612b44205eec110b5745ccbbf378b4eb",
         "the proposed Work Item links back to its Observation"
     );
     assert!(
@@ -3887,7 +3888,7 @@ fn post_land_expertise_proposal_materializes_observation_only() {
 
 // --- Failure preservation, resume, cleanup (Step 5) ---
 
-const OBS_FU1: &str = "followup-work-1-attempt-1-merge-candidate-fu-1";
+const OBS_FU1: &str = "followup-land-a1478b19201ae32c3d73895587323e1200206c0803f6469558d8b376c53c3a43-a0eebf1952dae493547552e76655314a612b44205eec110b5745ccbbf378b4eb";
 const HANDOFF_PATH: &str = ".fluent/work/artifacts/work-1/attempt-1/learner/handoff.json";
 
 /// The recorded follow-up-processing failure stage for the landed candidate, or

@@ -316,7 +316,10 @@ into a source-neutral batch stamped with the authoritative origin (Work
 Item, Attempt, Merge Candidate, and merged commit), records a versioned
 `PendingPostLandOperationV1` and a resumable journal under
 `.fluent/work/follow-ups/<work-item-id>-<candidate-id>/`, and replays
-that operation. Recording and replay hold the same per-operation lock while
+that operation. Operation, Observation, and derived Work identities use hashes
+of canonical component arrays, so delimiters and filename normalization cannot
+collapse distinct origins or follow-ups. Recording and replay hold the same
+per-operation lock while
 they read or replace durable state. A repeated recording must match both the
 stored operation identity and its verified batch, so a conflicting retry
 cannot overwrite the accepted handoff. Replay creates exactly one provenance-bearing Observation
@@ -344,7 +347,10 @@ validates as corrective, replay freezes the resolved follow-up policy
 into its journal receipt before creating any Work, so a retry reuses the
 frozen decision even after configuration changes. It then derives one
 corrective Work Item keyed by a deterministic id and linked to the
-Observation and its originating lineage root. In `propose` mode the Work
+Observation and its originating lineage root. Reusing that id requires the
+stored Work to match the complete expected provenance, corrective context,
+lineage, authorization, and enqueue intent; unrelated Work is rejected. In
+`propose` mode the Work
 stays proposed with no queue entry; in `execute` mode it is authorized
 automatically and enqueued on the regular Work Queue while lineage budget
 remains, and stays proposed once the budget is exhausted. Concurrent

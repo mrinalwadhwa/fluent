@@ -586,7 +586,10 @@ pub fn operation_id_for(origin: &PostLandOrigin) -> String {
 
 /// The stable operation identity for a Work Item's landed Merge Candidate.
 pub fn operation_id_for_candidate(work_item_id: &str, merge_candidate_id: &str) -> String {
-    format!("{work_item_id}-{merge_candidate_id}")
+    format!(
+        "land-{}",
+        identity_digest(&[work_item_id, merge_candidate_id])
+    )
 }
 
 fn batch_rel_path(operation_id: &str) -> String {
@@ -925,13 +928,19 @@ pub fn materialize_learner_handoff(
 }
 
 fn observation_id_for(operation_id: &str, follow_up_id: &str) -> String {
-    format!("followup-{operation_id}-{}", sanitize_component(follow_up_id))
+    format!(
+        "followup-{operation_id}-{}",
+        identity_digest(&[follow_up_id])
+    )
 }
 
 /// The deterministic Work Item id a corrective follow-up promotes into, so a
 /// replay reuses the same Work rather than deriving a duplicate.
 fn derived_work_item_id(operation_id: &str, follow_up_id: &str) -> String {
-    format!("derived-{operation_id}-{}", sanitize_component(follow_up_id))
+    format!(
+        "derived-{operation_id}-{}",
+        identity_digest(&[follow_up_id])
+    )
 }
 
 fn correction_source(source: FollowUpSource) -> CorrectionSource {
@@ -984,14 +993,6 @@ fn ensure_derived_work(
     follow_up: &FollowUpDraftV1,
     policy: &FrozenFollowUpPolicy,
 ) -> Result<bool> {
-    // Idempotent: an already-derived Work Item is reused as-is.
-    match store.read_work_item(derived_id) {
-        Ok(_) => return Ok(false),
-        Err(WorkModelStorageError::ReadFile { source, .. })
-            if source.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-
     let context = follow_up
         .corrective_context
         .clone()
@@ -1017,15 +1018,6 @@ fn ensure_derived_work(
     let _lineage_lock = crate::lineage_lock::acquire(project_root, &root_id)
         .with_context(|| format!("lock corrective Work lineage {root_id:?}"))?;
 
-    // Recheck after taking the shared lineage lock in case another operation
-    // created this identity while this processor waited.
-    match store.read_work_item(derived_id) {
-        Ok(_) => return Ok(false),
-        Err(WorkModelStorageError::ReadFile { source, .. })
-            if source.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-
     // Execute mode authorizes automatically while lineage budget remains;
     // otherwise the descendant stays proposed for an explicit human decision.
     let ready_authority = if policy.is_execute()
@@ -1050,8 +1042,40 @@ fn ensure_derived_work(
     // descendant enqueues now and a proposed one enqueues on human
     // authorization, both keyed by the same stable origin.
     item.set_enqueue_intent(policy.priority, derived_id.to_string());
+
+    // Recheck only after computing the complete expected identity under the
+    // lineage lock. Reuse requires every immutable intake decision to match;
+    // a merely valid Work Item at this deterministic id is unrelated state.
+    match store.read_work_item(derived_id) {
+        Ok(existing) => {
+            verify_reusable_derived_work(&existing, &item)?;
+            return Ok(false);
+        }
+        Err(WorkModelStorageError::ReadFile { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
     store.create_work_item(&item)?;
     Ok(true)
+}
+
+fn verify_reusable_derived_work(existing: &WorkItem, expected: &WorkItem) -> Result<()> {
+    if existing.id != expected.id
+        || existing.title != expected.title
+        || existing.origin != expected.origin
+        || existing.corrective_context != expected.corrective_context
+        || existing.lineage != expected.lineage
+        || existing.authorization != expected.authorization
+        || existing.pending_enqueue != expected.pending_enqueue
+    {
+        bail!(
+            "conflicting derived Work Item {} does not match corrective provenance, context, \
+             lineage, authorization, and enqueue intent",
+            expected.id
+        );
+    }
+    Ok(())
 }
 
 /// Count the Work Items already charged against a lineage's autonomous
@@ -1091,23 +1115,16 @@ fn lock_operation(dir: &Path) -> Result<File> {
     Ok(file)
 }
 
-/// Reduce an untrusted follow-up id to a filename-safe component without the
-/// length truncation an Observation title slug applies.
-fn sanitize_component(raw: &str) -> String {
-    let mut out: String = raw
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    if out.is_empty() {
-        out.push_str("unnamed");
-    }
-    out
+/// Hash identity components into a filename-safe value. Canonical JSON keeps
+/// component boundaries and every raw byte, avoiding collisions caused by
+/// delimiter concatenation or filename normalization.
+fn identity_digest(parts: &[&str]) -> String {
+    let bytes = serde_json::to_vec(parts).expect("string identity always serializes");
+    let digest = content_digest(&bytes);
+    digest
+        .strip_prefix("sha256:")
+        .expect("content digests use the sha256 prefix")
+        .to_string()
 }
 
 fn follow_up_frontmatter(
@@ -1314,7 +1331,7 @@ mod tests {
         assert_eq!(operation, restored);
         assert_eq!(
             operation.operation_id,
-            "work-1-attempt-1-merge-candidate",
+            operation_id_for(&batch.origin),
             "operation id is deterministic from the origin"
         );
         assert!(operation.digest.starts_with("sha256:"));
@@ -1399,8 +1416,9 @@ mod tests {
             .count();
         assert_eq!(count, 2);
 
+        let operation_id = operation_id_for(&batch.origin);
         let content = fs::read_to_string(
-            obs_dir.join("followup-work-1-attempt-1-merge-candidate-fu-1.md"),
+            obs_dir.join(format!("{}.md", observation_id_for(&operation_id, "fu-1"))),
         )
         .unwrap();
         assert!(content.contains("work-item-id: work-1"));
@@ -1938,7 +1956,45 @@ mod tests {
         fs::write(dir.join("config.yaml"), yaml).unwrap();
     }
 
-    const DERIVED_ID: &str = "derived-work-1-attempt-1-merge-candidate-fu-1";
+    const DERIVED_ID: &str = "derived-land-a1478b19201ae32c3d73895587323e1200206c0803f6469558d8b376c53c3a43-a0eebf1952dae493547552e76655314a612b44205eec110b5745ccbbf378b4eb";
+
+    #[test]
+    fn deterministic_ids_keep_distinct_raw_identities_distinct() {
+        assert_ne!(
+            operation_id_for_candidate("work-a-b", "candidate-c"),
+            operation_id_for_candidate("work-a", "b-candidate-c"),
+            "component boundaries must contribute to operation identity"
+        );
+        assert_ne!(
+            observation_id_for("operation", "follow/up"),
+            observation_id_for("operation", "follow-up"),
+            "filename normalization must not collapse distinct follow-up ids"
+        );
+        assert_ne!(
+            derived_work_item_id("operation", "follow/up"),
+            derived_work_item_id("operation", "follow-up")
+        );
+    }
+
+    #[test]
+    fn unrelated_work_at_derived_identity_is_rejected() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        seed_root_work_item(tmp.path());
+        let store = WorkModelStore::new(tmp.path());
+        store
+            .create_work_item(&WorkItem::planned(DERIVED_ID, "Unrelated valid work"))
+            .unwrap();
+        let authority = fresh_expertise_authority(tmp.path());
+        let batch = corrective_batch(FollowUpSource::Learner, Some(authority));
+
+        let error = process_landed_batch(tmp.path(), &batch, None).unwrap_err();
+
+        assert!(
+            error.to_string().contains("conflicting derived Work Item"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(store.read_work_item(DERIVED_ID).unwrap().title, "Unrelated valid work");
+    }
 
     #[test]
     fn non_corrective_follow_up_stays_observation_only() {
@@ -1971,7 +2027,7 @@ mod tests {
         assert_eq!(derived.lineage.root_id.as_deref(), Some("work-1"));
         assert_eq!(
             derived.origin.provenance().unwrap().observation_id.as_deref(),
-            Some("followup-work-1-attempt-1-merge-candidate-fu-1")
+            Some("followup-land-a1478b19201ae32c3d73895587323e1200206c0803f6469558d8b376c53c3a43-a0eebf1952dae493547552e76655314a612b44205eec110b5745ccbbf378b4eb")
         );
         assert!(
             crate::queue::read_ledger(tmp.path(), DERIVED_ID)
@@ -2063,14 +2119,10 @@ mod tests {
             let store = WorkModelStore::new(tmp.path());
             let mut both_waiting_at_work = false;
             for _ in 0..100 {
-                if first_incomplete_stage(
-                    tmp.path(),
-                    "work-1-attempt-1-merge-candidate",
-                ) == Some("work".to_string())
-                    && first_incomplete_stage(
-                        tmp.path(),
-                        "work-1-attempt-2-merge-candidate",
-                    ) == Some("work".to_string())
+                if first_incomplete_stage(tmp.path(), &operation_id_for(&first.origin))
+                    == Some("work".to_string())
+                    && first_incomplete_stage(tmp.path(), &operation_id_for(&second.origin))
+                        == Some("work".to_string())
                 {
                     both_waiting_at_work = true;
                     break;
