@@ -393,6 +393,11 @@ A Learner run that failed before its candidate landed recovers through
 has already merged, that retry runs in handoff-only mode: it serializes
 against land on the land lock, denies expertise writes, and discards any
 commit it makes, so the merged commit and target branch stay unchanged.
+Its sandbox exposes the shared Git directory read-only. After the coder exits,
+Fluent compares protected refs plus the target checkout's HEAD, index, and
+non-Fluent status; it restores and rejects any mutation. Candidate commits,
+staged files, unstaged files, and untracked files are collected as denied paths,
+then the candidate branch, index, and worktree are reset to the merged commit.
 Land takes that lock before it reads or mutates candidate state, resolves
 workspaces, or checks cleanliness, and holds it through merge finalization and
 follow-up recovery. A retry therefore cannot make land observe its transient

@@ -1972,13 +1972,15 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
             )?
         } else {
             // Handoff-only: deny expertise writes. Expertise stays readable, but
-            // only the managed handoff surface is writable.
+            // only the managed handoff surface is writable. Git metadata is
+            // readable for the accepted-change diff but never writable.
             readable_roots.push(expertise_dir.clone());
+            readable_roots.push(common_git_dir);
             build_coder_sandbox_with_writable_and_read_only_roots(
                 inputs.coder_kind,
                 inputs.resolver,
                 inputs.handoff_dir,
-                &[common_git_dir],
+                &[],
                 &readable_roots,
             )?
         }
@@ -4521,5 +4523,29 @@ mod tests {
             !content.contains(&write_grant(&observations_dir)),
             "the Learner may not write the Observation backlog; profile:\n{content}"
         );
+
+        let handoff_readable_roots = vec![
+            review_dir,
+            workspace.clone(),
+            expertise_dir.clone(),
+            common_git_dir.clone(),
+        ];
+        let (_sandbox, handoff_profile) = build_coder_sandbox_with_writable_and_read_only_roots(
+            CoderKind::Claude,
+            &resolver,
+            &handoff_dir,
+            &[],
+            &handoff_readable_roots,
+        )
+        .unwrap();
+        let handoff_content =
+            fs::read_to_string(handoff_profile.expect("handoff profile").path).unwrap();
+        assert!(handoff_content.contains(&write_grant(&handoff_dir)));
+        assert!(!handoff_content.contains(&write_grant(&expertise_dir)));
+        assert!(!handoff_content.contains(&write_grant(&common_git_dir)));
+        assert!(handoff_content.contains(&format!(
+            "(allow file-read*  (subpath \"{}\"))",
+            common_git_dir.to_string_lossy()
+        )));
     }
 }

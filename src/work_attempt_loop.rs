@@ -860,7 +860,17 @@ fn try_learn(
     let handoff_dir =
         project_root.join(crate::learner::handoff_dir_rel(&work_item_id, &attempt_id));
 
-    (config.run_coder)(&LearnerCoderRequest {
+    let git_guard = if handoff_only {
+        Some(HandoffOnlyGitGuard::capture(
+            project_root,
+            &workspace_path,
+            &baseline_commit,
+        )?)
+    } else {
+        None
+    };
+
+    let coder_result = (config.run_coder)(&LearnerCoderRequest {
         workspace_path: &workspace_path,
         review_artifact_paths: &review_artifact_paths,
         tester_artifact_paths: &tester_artifact_paths,
@@ -870,7 +880,11 @@ fn try_learn(
         model: model.as_deref(),
         effort: effort.as_deref(),
         handoff_only,
-    })?;
+    });
+    if let Some(guard) = git_guard {
+        guard.verify_and_restore(project_root, &workspace_path, &baseline_commit)?;
+    }
+    coder_result?;
 
     // Confine the Learner's commit. In the normal case an expertise commit is
     // accepted and advances the Merge Candidate tip. In a post-land handoff-only
@@ -918,6 +932,180 @@ struct LearnerConfinement {
     denied_paths: Vec<String>,
 }
 
+/// Git state outside the candidate branch that a handoff-only Learner may read
+/// but never mutate. Candidate-branch commits are handled separately by
+/// `apply_learner_confinement`, which records denied paths before resetting.
+struct HandoffOnlyGitGuard {
+    target_head: String,
+    target_symbolic_head: Option<String>,
+    target_index: String,
+    target_status: Vec<String>,
+    candidate_symbolic_head: Option<String>,
+    protected_refs: Vec<(String, String)>,
+}
+
+impl HandoffOnlyGitGuard {
+    fn capture(project_root: &Path, workspace_path: &Path, baseline_commit: &str) -> Result<Self> {
+        let candidate_symbolic_head = symbolic_head(workspace_path)?;
+        let protected_refs = git_ref_snapshot(project_root, candidate_symbolic_head.as_deref())?;
+        let target_head = git::run_stdout(project_root, &["rev-parse", "HEAD"], "snapshot target HEAD")?;
+        if target_head != baseline_commit {
+            bail!(
+                "post-land Learner baseline {baseline_commit} does not match target HEAD {target_head}"
+            );
+        }
+        Ok(Self {
+            target_head,
+            target_symbolic_head: symbolic_head(project_root)?,
+            target_index: git::run_stdout(project_root, &["write-tree"], "snapshot target index")?,
+            target_status: protected_target_status(project_root)?,
+            candidate_symbolic_head,
+            protected_refs,
+        })
+    }
+
+    fn verify_and_restore(
+        &self,
+        project_root: &Path,
+        workspace_path: &Path,
+        baseline_commit: &str,
+    ) -> Result<()> {
+        let mut violations = Vec::new();
+        if symbolic_head(project_root)? != self.target_symbolic_head {
+            violations.push("target symbolic HEAD changed");
+        }
+        if git::run_stdout(project_root, &["rev-parse", "HEAD"], "verify target HEAD")?
+            != self.target_head
+        {
+            violations.push("target HEAD changed");
+        }
+        if git::run_stdout(project_root, &["write-tree"], "verify target index")?
+            != self.target_index
+        {
+            violations.push("target index changed");
+        }
+        if protected_target_status(project_root)? != self.target_status {
+            violations.push("target worktree changed");
+        }
+        if symbolic_head(workspace_path)? != self.candidate_symbolic_head {
+            violations.push("candidate symbolic HEAD changed");
+        }
+        if git_ref_snapshot(project_root, self.candidate_symbolic_head.as_deref())?
+            != self.protected_refs
+        {
+            violations.push("protected Git refs changed");
+        }
+
+        if violations.is_empty() {
+            return Ok(());
+        }
+
+        restore_git_refs(
+            project_root,
+            self.candidate_symbolic_head.as_deref(),
+            &self.protected_refs,
+        )?;
+        restore_checkout(
+            project_root,
+            self.target_symbolic_head.as_deref(),
+            &self.target_head,
+            true,
+        )?;
+        restore_checkout(
+            workspace_path,
+            self.candidate_symbolic_head.as_deref(),
+            baseline_commit,
+            false,
+        )?;
+        bail!(
+            "handoff-only Learner mutated protected Git state: {}",
+            violations.join(", ")
+        )
+    }
+}
+
+fn symbolic_head(repo: &Path) -> Result<Option<String>> {
+    let output = git::run_raw(repo, &["symbolic-ref", "-q", "HEAD"])?;
+    match output.status.code() {
+        Some(0) => Ok(Some(String::from_utf8_lossy(&output.stdout).trim().to_string())),
+        Some(1) => Ok(None),
+        _ => bail!(
+            "failed to inspect symbolic HEAD in {}: {}",
+            repo.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    }
+}
+
+fn git_ref_snapshot(repo: &Path, excluded: Option<&str>) -> Result<Vec<(String, String)>> {
+    let output = git::run_stdout(
+        repo,
+        &["for-each-ref", "--format=%(refname) %(objectname)"],
+        "snapshot Git refs",
+    )?;
+    let mut refs: Vec<(String, String)> = output
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .filter(|(name, _)| Some(*name) != excluded)
+        .map(|(name, oid)| (name.to_string(), oid.to_string()))
+        .collect();
+    refs.sort();
+    Ok(refs)
+}
+
+fn protected_target_status(repo: &Path) -> Result<Vec<String>> {
+    let output = git::run_stdout(
+        repo,
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            ".",
+            ":(exclude).fluent",
+        ],
+        "snapshot target worktree",
+    )?;
+    Ok(output.lines().map(str::to_string).collect())
+}
+
+fn restore_git_refs(
+    repo: &Path,
+    excluded: Option<&str>,
+    expected: &[(String, String)],
+) -> Result<()> {
+    let current = git_ref_snapshot(repo, excluded)?;
+    for (name, _) in &current {
+        if !expected.iter().any(|(expected_name, _)| expected_name == name) {
+            git::run(repo, &["update-ref", "-d", name], "delete unauthorized Git ref")?;
+        }
+    }
+    for (name, oid) in expected {
+        git::run(repo, &["update-ref", name, oid], "restore protected Git ref")?;
+    }
+    Ok(())
+}
+
+fn restore_checkout(
+    repo: &Path,
+    symbolic_head: Option<&str>,
+    commit: &str,
+    preserve_fluent: bool,
+) -> Result<()> {
+    if let Some(reference) = symbolic_head {
+        git::run(repo, &["symbolic-ref", "HEAD", reference], "restore symbolic HEAD")?;
+        git::run(repo, &["reset", "--hard", commit], "restore checkout state")?;
+    } else {
+        git::run(repo, &["checkout", "--detach", "-f", commit], "restore detached HEAD")?;
+    }
+    let args = if preserve_fluent {
+        vec!["clean", "-fd", "--", ".", ":(exclude).fluent"]
+    } else {
+        vec!["clean", "-fd"]
+    };
+    git::run(repo, &args, "remove unauthorized untracked files")
+}
+
 /// Reduce a denied path to a filename-safe component for a synthesized follow-up
 /// id.
 fn sanitize_denied_path(path: &str) -> String {
@@ -958,6 +1146,66 @@ fn apply_learner_confinement(
         &["rev-parse", "HEAD"],
         "resolve post-learner HEAD",
     )?;
+    let committed_changed = git::run_stdout(
+        workspace_path,
+        &["diff", "--name-only", baseline_commit, &new_head],
+        "list learner changed paths",
+    )?;
+    let mut changed_paths: Vec<String> = committed_changed
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    // A post-land retry may not mutate expertise or the merged branch. Discard
+    // committed, staged, unstaged, and untracked changes and report their paths
+    // so they become non-corrective follow-ups. Resetting and cleaning restores
+    // both the candidate branch and its index before accepting the handoff.
+    if handoff_only {
+        for args in [
+            vec!["diff", "--name-only"],
+            vec!["diff", "--cached", "--name-only"],
+            vec!["ls-files", "--others", "--exclude-standard"],
+        ] {
+            let changed = git::run_stdout(workspace_path, &args, "list denied learner changes")?;
+            changed_paths.extend(
+                changed
+                    .lines()
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_string),
+            );
+        }
+        changed_paths.sort();
+        changed_paths.dedup();
+        git::run(
+            workspace_path,
+            &["reset", "--hard", baseline_commit],
+            "discard post-land learner commit",
+        )?;
+        git::run(
+            workspace_path,
+            &["clean", "-fd"],
+            "discard untracked post-land learner changes",
+        )?;
+        let restored_head = git::run_stdout(
+            workspace_path,
+            &["rev-parse", "HEAD"],
+            "verify restored candidate HEAD",
+        )?;
+        let restored_status = git::run_stdout(
+            workspace_path,
+            &["status", "--porcelain", "--untracked-files=all"],
+            "verify restored candidate index and worktree",
+        )?;
+        if restored_head != baseline_commit || !restored_status.is_empty() {
+            bail!("handoff-only Learner candidate Git state could not be restored");
+        }
+        return Ok(LearnerConfinement {
+            expertise: Vec::new(),
+            denied_paths: changed_paths,
+        });
+    }
+
     if new_head == baseline_commit {
         return Ok(LearnerConfinement {
             expertise: Vec::new(),
@@ -965,31 +1213,9 @@ fn apply_learner_confinement(
         });
     }
 
-    let changed = git::run_stdout(
-        workspace_path,
-        &["diff", "--name-only", baseline_commit, &new_head],
-        "list learner changed paths",
-    )?;
-    let changed_paths: Vec<&str> = changed.lines().filter(|line| !line.is_empty()).collect();
-
-    // A post-land retry may not mutate expertise or the merged branch. Discard
-    // whatever it committed and report the paths so they become non-corrective
-    // follow-ups, leaving the merged candidate commit unchanged.
-    if handoff_only {
-        git::run(
-            workspace_path,
-            &["reset", "--hard", baseline_commit],
-            "discard post-land learner commit",
-        )?;
-        return Ok(LearnerConfinement {
-            expertise: Vec::new(),
-            denied_paths: changed_paths.iter().map(|path| path.to_string()).collect(),
-        });
-    }
-
     let out_of_bounds: Vec<&str> = changed_paths
         .iter()
-        .copied()
+        .map(String::as_str)
         .filter(|path| !is_learner_path_in_bounds(path))
         .collect();
     if !out_of_bounds.is_empty() {
@@ -1027,7 +1253,7 @@ fn apply_learner_confinement(
             )
             .unwrap_or_default();
             crate::follow_up::ArtifactRef {
-                path: (*path).to_string(),
+                path: path.to_string(),
                 digest: format!("git:{}", digest.trim()),
             }
         })

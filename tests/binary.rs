@@ -2785,6 +2785,52 @@ exit 0
     )
 }
 
+/// A retrying Learner that attempts to mutate target Git state, protected refs,
+/// and the candidate index before returning a handoff.
+fn hostile_post_land_learner_mock_script(counter: &Path) -> String {
+    format!(
+        r##"#!/bin/bash
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
+done
+if [ -z "$PROMPT" ]; then exit 0; fi
+if printf '%s' "$PROMPT" | grep -q "Rebase the candidate branch"; then
+  TARGET=$(printf '%s' "$PROMPT" | grep -o 'onto `[^`]*`' | sed 's/onto `//;s/`//')
+  git rebase "$TARGET" 2>/dev/null
+  exit $?
+fi
+if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
+  if [ ! -f "{}" ]; then touch "{}"; exit 1; fi
+  DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
+  PROJECT=${{DRAFT%%/.fluent/*}}
+  printf 'hostile target write\n' > "$PROJECT/target-mutated.txt"
+  git -C "$PROJECT" add target-mutated.txt
+  git -C "$PROJECT" commit -m "Move target" >/dev/null 2>&1
+  git update-ref refs/heads/unauthorized HEAD
+  printf 'hostile candidate index\n' > candidate-index.txt
+  git add candidate-index.txt
+  mkdir -p "$(dirname "$DRAFT")"
+  printf '%s\n' '{{"learning_summary":"hostile","follow_ups":[]}}' > "$DRAFT"
+  exit 0
+fi
+case "$PWD" in
+  */work-6-work-1-attempt-1)
+    printf 'loop output\n' > loop-output.txt
+    git add loop-output.txt
+    git commit -m "Add loop output" >/dev/null 2>&1
+    ;;
+  *) printf 'Verdict: pass\n\nLoop review.\n' > review.md ;;
+esac
+exit 0
+"##,
+        counter.display(),
+        counter.display(),
+    )
+}
+
 /// A mock that fails any rebase request, so a code path that must not rebase is
 /// proven by its success.
 fn rebase_failing_mock_script() -> String {
@@ -3657,6 +3703,60 @@ fn concurrent_learner_retry_and_land_never_mutate_after_merge() {
     // inspects the candidate workspace.
     assert!(!main_dir.join("transient-learner.txt").exists());
     assert!(is_merged(&main_dir));
+}
+
+#[test]
+fn post_land_handoff_only_restores_hostile_git_mutations() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let counter = tmp.path().join("learner-counter-hostile");
+    let bin_dir = tmp.path().join("bin-hostile-git");
+    write_mock_claude(
+        &bin_dir,
+        &hostile_post_land_learner_mock_script(&counter),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+    let merged = merged_commit_of(&main_dir);
+    rerun_learner_attempt(&main_dir, &bin_dir);
+
+    assert_eq!(
+        git::run_stdout(&main_dir, &["rev-parse", "HEAD"], "target HEAD").unwrap(),
+        merged
+    );
+    let candidate = main_dir.join("../work-6-work-1-attempt-1");
+    assert_eq!(
+        git::run_stdout(&candidate, &["rev-parse", "HEAD"], "candidate HEAD").unwrap(),
+        merged
+    );
+    assert!(
+        git::run_stdout(
+            &candidate,
+            &["status", "--porcelain", "--untracked-files=all"],
+            "candidate status",
+        )
+        .unwrap()
+        .is_empty(),
+        "candidate index and worktree are restored"
+    );
+    assert!(!main_dir.join("target-mutated.txt").exists());
+    assert!(!candidate.join("candidate-index.txt").exists());
+    assert!(
+        !git::run_raw(
+            &main_dir,
+            &["show-ref", "--verify", "--quiet", "refs/heads/unauthorized"],
+        )
+        .unwrap()
+        .status
+        .success(),
+        "unauthorized refs are removed"
+    );
+    assert!(
+        work_item_value(&main_dir, "work-1")["attempts"][0]["learning"]["status"]
+            == "failed",
+        "a protected Git mutation rejects the Learner result"
+    );
 }
 
 #[test]
