@@ -392,6 +392,10 @@ A Learner run that failed before its candidate landed recovers through
 has already merged, that retry runs in handoff-only mode: it serializes
 against land on the land lock, denies expertise writes, and discards any
 commit it makes, so the merged commit and target branch stay unchanged.
+Land takes that lock before it reads or mutates candidate state, resolves
+workspaces, or checks cleanliness, and holds it through merge finalization and
+follow-up recovery. A retry therefore cannot make land observe its transient
+index or worktree state.
 Durable knowledge it could not write to expertise is recorded as a
 non-corrective follow-up, which materializes as an Observation only. The
 recovered handoff is then materialized immediately under the same

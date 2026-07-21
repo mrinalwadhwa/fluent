@@ -2727,6 +2727,62 @@ exit 0
     )
 }
 
+/// A learner mock whose retry dirties the candidate, announces that state, and
+/// waits for the test to release it before committing. This makes a land/retry
+/// overlap deterministic instead of relying on scheduler timing.
+fn contended_learner_mock_script(
+    counter: &Path,
+    retry_started: &Path,
+    retry_release: &Path,
+) -> String {
+    format!(
+        r##"#!/bin/bash
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
+done
+if [ -z "$PROMPT" ]; then exit 0; fi
+if printf '%s' "$PROMPT" | grep -q "Rebase the candidate branch"; then
+  TARGET=$(printf '%s' "$PROMPT" | grep -o 'onto `[^`]*`' | sed 's/onto `//;s/`//')
+  git rebase "$TARGET" 2>/dev/null
+  exit $?
+fi
+if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
+  if [ ! -f "{}" ]; then
+    touch "{}"
+    exit 1
+  fi
+  printf 'transient learner write\n' > transient-learner.txt
+  git add transient-learner.txt
+  touch "{}"
+  while [ ! -f "{}" ]; do sleep 0.02; done
+  git commit -m "Update expertise" >/dev/null 2>&1
+  DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
+  mkdir -p "$(dirname "$DRAFT")"
+  printf '%s\n' '{{"learning_summary":"won before land","follow_ups":[]}}' > "$DRAFT"
+  exit 0
+fi
+case "$PWD" in
+  */work-6-work-1-attempt-1)
+    printf 'loop output\n' > loop-output.txt
+    git add loop-output.txt
+    git commit -m "Add loop output" >/dev/null 2>&1
+    ;;
+  *)
+    printf 'Verdict: pass\n\nLoop review.\n' > review.md
+    ;;
+esac
+exit 0
+"##,
+        counter.display(),
+        counter.display(),
+        retry_started.display(),
+        retry_release.display(),
+    )
+}
+
 /// A mock that fails any rebase request, so a code path that must not rebase is
 /// proven by its success.
 fn rebase_failing_mock_script() -> String {
@@ -3512,29 +3568,78 @@ fn concurrent_learner_retry_and_land_never_mutate_after_merge() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     let counter = tmp.path().join("learner-counter");
+    let retry_started = tmp.path().join("retry-started");
+    let retry_release = tmp.path().join("retry-release");
     let bin_dir = tmp.path().join("bin-serialize");
     write_mock_claude(
         &bin_dir,
-        &post_land_learner_mock_script(
+        &contended_learner_mock_script(
             &counter,
-            r#"{"learning_summary":"learned late","follow_ups":[{"id":"fu-1","summary":"Recovered follow-up","corrective":false}]}"#,
-            true,
+            &retry_started,
+            &retry_release,
         ),
     );
 
     create_and_run_learner_attempt(&main_dir, &bin_dir);
-    land_work_1(&main_dir, &bin_dir, true);
-    let merged_before = merged_commit_of(&main_dir);
 
-    // Land and the Learner retry serialize on the land lock; because the
-    // candidate is already merged, the retry is processed handoff-only and
-    // accepts no expertise or target-branch mutation.
-    rerun_learner_attempt(&main_dir, &bin_dir);
+    let retry = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    for _ in 0..500 {
+        if retry_started.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(retry_started.exists(), "learner retry reached its dirty window");
 
-    assert_eq!(merged_commit_of(&main_dir), merged_before);
-    assert!(!main_dir.join(".fluent/expertise/late.md").exists());
-    // The recovered handoff is still processed, as a handoff-only result.
-    assert!(!open_observation_files(&main_dir).is_empty());
+    let mut land = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
+        .current_dir(&main_dir)
+        .args([
+            "merge-candidate",
+            "land",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+            "--no-post-merge-review",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let land_status_while_retry_dirty = land.try_wait().unwrap();
+
+    fs::write(&retry_release, "release\n").unwrap();
+    let retry_output = retry.wait_with_output().unwrap();
+    let land_output = land.wait_with_output().unwrap();
+
+    assert!(
+        land_status_while_retry_dirty.is_none(),
+        "land must wait through the retry's transient dirty state; stderr={}",
+        String::from_utf8_lossy(&land_output.stderr)
+    );
+    assert!(
+        retry_output.status.success(),
+        "learner retry failed: {}",
+        String::from_utf8_lossy(&retry_output.stderr)
+    );
+    assert!(
+        land_output.status.success(),
+        "land failed after retry released the boundary: {}",
+        String::from_utf8_lossy(&land_output.stderr)
+    );
+
+    // The retry's out-of-bounds commit is confined and discarded before land
+    // inspects the candidate workspace.
+    assert!(!main_dir.join("transient-learner.txt").exists());
+    assert!(is_merged(&main_dir));
 }
 
 #[test]

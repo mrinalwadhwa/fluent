@@ -39,6 +39,13 @@ enum RebaseOutcome {
 }
 
 pub fn merge_candidate(config: WorkMergeConfig<'_>) -> Result<WorkMergeOutcome> {
+    // Serialize the full land boundary against Learner retry: durable state
+    // reads and writes, workspace resolution and cleanliness checks, rebase,
+    // merge, and post-land recovery all observe one stable candidate state.
+    let land_lock_path = crate::land_lock::lock_path(config.project_root);
+    let _land_lock = crate::land_lock::acquire(&land_lock_path)
+        .map_err(|e| anyhow::anyhow!("failed to acquire land lock: {e}"))?;
+
     let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
     item.ensure_not_abandoned()?;
     let candidate = item
@@ -299,10 +306,6 @@ fn execute_merge(
     ensure_registered_worktree(config.project_root, source_workspace)?;
     ensure_clean_worktree(source_workspace)?;
     ensure_clean_worktree(target_workspace)?;
-
-    let land_lock_path = crate::land_lock::lock_path(config.project_root);
-    let _land_lock = crate::land_lock::acquire(&land_lock_path)
-        .map_err(|e| anyhow::anyhow!("failed to acquire land lock: {e}"))?;
 
     let target_head_before = git::run_stdout(
         target_workspace,
