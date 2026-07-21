@@ -20,7 +20,19 @@ pub fn acquire(lock_path: &Path) -> io::Result<LandLock> {
         .create(true)
         .write(true)
         .open(lock_path)?;
-    flock(&file, FlockOperation::LockExclusive).map_err(io::Error::from)?;
+    match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => {}
+        Err(error) => {
+            let error = io::Error::from(error);
+            if error.kind() != io::ErrorKind::WouldBlock {
+                return Err(error);
+            }
+            if let Ok(path) = std::env::var("FLUENT_TEST_LAND_LOCK_BLOCKED_PATH") {
+                fs::write(path, b"blocked\n")?;
+            }
+            flock(&file, FlockOperation::LockExclusive).map_err(io::Error::from)?;
+        }
+    }
     Ok(LandLock { _file: file })
 }
 

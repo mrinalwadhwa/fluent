@@ -609,15 +609,6 @@ fn cmd_attempt(
                 other => bail!("Unknown runtime '{other}'. Available: local, fargate."),
             }
 
-            // Store the resolved mapping on the Attempt before running.
-            {
-                let mut item = store.read_work_item(&work_item_id)?;
-                if let Some(attempt) = item.attempts.iter_mut().find(|a| a.id == attempt_id) {
-                    attempt.coder_mapping = coder_mapping.clone();
-                }
-                store.write_work_item(&item)?;
-            }
-
             if guidance::guidance_enabled() {
                 eprintln!("{}", guidance::format_coder_plan(&coder_mapping));
             }
@@ -630,6 +621,7 @@ fn cmd_attempt(
                 resolver,
                 extra_args: &extra_args,
                 no_sandbox: no_sandbox || global_no_sandbox,
+                resolved_coder_mapping: Some(&coder_mapping),
             })?;
             // Resolve the runtime context the guidance hints need — why the
             // Attempt paused, which coder to re-authenticate, and where its latest

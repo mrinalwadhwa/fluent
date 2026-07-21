@@ -409,6 +409,9 @@ A Learner run that failed before its candidate landed recovers through
 has already merged, that retry runs in handoff-only mode: it serializes
 against land on the land lock, denies expertise writes, and discards any
 commit it makes, so the merged commit and target branch stay unchanged.
+The command persists its resolved coder mapping through a fresh field-level
+Work-model mutation under that same lock; it never writes a whole Work Item
+snapshot captured before the serialization boundary.
 After taking the lock, retry re-reads the Attempt and candidate and skips the
 coder when another retry has already persisted success. It resets the retained
 candidate worktree and index to the candidate's stored `merged_commit` before

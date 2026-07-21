@@ -13,7 +13,7 @@ use crate::review::{self, Verdict};
 use crate::review_diff_command;
 use crate::review_only_worktree;
 use crate::work_model::{
-    ArtifactRef, Attempt, AttemptLearning, AttemptReviewState, AttemptStatus,
+    ArtifactRef, Attempt, AttemptLearning, AttemptReviewState, AttemptStatus, CoderMapping,
     MergeCandidateMergeStatus, PauseKind, Task, TaskKind, TaskOutput, TaskStatus, WorkItem,
     WorkModelStorageError, WorkModelStore, resolve_managed_sibling_workspace_path,
     work_artifact_path,
@@ -59,6 +59,9 @@ pub struct WorkAttemptRunConfig<'a> {
     pub resolver: &'a ContentResolver,
     pub extra_args: &'a [String],
     pub no_sandbox: bool,
+    /// Mapping resolved by the CLI for this invocation. Persist it through a
+    /// fresh field-level mutation under the land lock, never a stale model write.
+    pub resolved_coder_mapping: Option<&'a CoderMapping>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +81,20 @@ pub struct WorkAttemptRunResult {
 }
 
 pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunResult> {
+    if let Some(mapping) = config.resolved_coder_mapping {
+        let _land_lock = crate::land_lock::acquire(&crate::land_lock::lock_path(
+            config.project_root,
+        ))?;
+        let mut item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+        let attempt = item
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.id == config.attempt_id)
+            .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", config.attempt_id))?;
+        attempt.coder_mapping = mapping.clone();
+        config.store.write_work_item(&item)?;
+    }
+
     let mut outcomes = Vec::new();
     let mut worktree_ensured = false;
 
@@ -1742,6 +1759,7 @@ mod tests {
             resolver: &resolver,
             extra_args: &[],
             no_sandbox: true,
+            resolved_coder_mapping: None,
         }) {
             Ok(_) => panic!("abandoned Work Item should reject attempt run"),
             Err(error) => error,
@@ -3220,6 +3238,7 @@ mod tests {
             resolver: &resolver,
             extra_args: &[],
             no_sandbox: true,
+            resolved_coder_mapping: None,
         })
         .unwrap_err();
 
