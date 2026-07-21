@@ -124,10 +124,6 @@ pub fn bundled_content(relative: &str) -> Option<String> {
         "prompts/rebase-user.md" => Some(include_str!("../prompts/rebase-user.md").to_string()),
         "prompts/seed-system.md" => Some(include_str!("../prompts/seed-system.md").to_string()),
         "prompts/seed-user.md" => Some(include_str!("../prompts/seed-user.md").to_string()),
-        "prompts/capture-system.md" => {
-            Some(include_str!("../prompts/capture-system.md").to_string())
-        }
-        "prompts/capture-user.md" => Some(include_str!("../prompts/capture-user.md").to_string()),
         "prompts/learner-system.md" => {
             Some(include_str!("../prompts/learner-system.md").to_string())
         }
@@ -690,22 +686,22 @@ Check item {{ITEM_ID}}.
         assert!(bundled_content("prompts/rebase-user.md").is_some());
         assert!(bundled_content("prompts/seed-system.md").is_some());
         assert!(bundled_content("prompts/seed-user.md").is_some());
-        assert!(bundled_content("prompts/capture-system.md").is_some());
-        assert!(bundled_content("prompts/capture-user.md").is_some());
+        assert!(bundled_content("prompts/learner-system.md").is_some());
+        assert!(bundled_content("prompts/learner-user.md").is_some());
     }
 
     #[test]
-    fn bundled_content_resolves_seed_and_capture_system_prompts() {
+    fn bundled_content_resolves_seed_and_learner_system_prompts() {
         let seed = bundled_content("prompts/seed-system.md").unwrap();
         assert!(
             !seed.contains("Fluent Writer"),
             "seed system prompt must not reuse writer identity"
         );
 
-        let capture = bundled_content("prompts/capture-system.md").unwrap();
+        let learner = bundled_content("prompts/learner-system.md").unwrap();
         assert!(
-            !capture.contains("Fluent Writer"),
-            "capture system prompt must not reuse writer identity"
+            !learner.contains("Fluent Writer"),
+            "learner system prompt must not reuse writer identity"
         );
     }
 

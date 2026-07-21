@@ -1829,101 +1829,6 @@ fn run_seed_project_model(
     Ok(())
 }
 
-pub fn run_capture_learnings(
-    workspace_path: &Path,
-    resolver: &ContentResolver,
-    extra_args: &[String],
-    coder_kind: CoderKind,
-    no_sandbox: bool,
-    model: Option<&str>,
-    effort: Option<&str>,
-    review_artifact_paths: &[PathBuf],
-    diff_command: &str,
-) -> Result<()> {
-    eprintln!("  Capturing learnings from review run…");
-
-    let workspace_resolver = ContentResolver::new(Some(workspace_path));
-    let system_prompt = workspace_resolver
-        .resolve_content("prompts/capture-system.md")
-        .unwrap_or_default();
-
-    let learnings_dir = workspace_path.join(".fluent/expertise/learnings");
-    let learnings_index_path = learnings_dir.join("INDEX.md");
-    let expertise_index_path = workspace_path.join(".fluent/expertise/INDEX.md");
-
-    let review_paths_rendered = review_artifact_paths
-        .iter()
-        .map(|p| format!("- {}", p.display()))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let has_learnings_index = if learnings_index_path.is_file() {
-        "yes"
-    } else {
-        ""
-    };
-
-    let template = resolver
-        .resolve_content("prompts/capture-user.md")
-        .ok_or_else(|| anyhow::anyhow!("bundled capture-user.md must resolve"))?;
-    let prompt = crate::content::render_template(
-        &template,
-        &[
-            ("review_artifact_paths", &review_paths_rendered),
-            ("diff_command", diff_command),
-            ("learnings_dir", &learnings_dir.display().to_string()),
-            (
-                "learnings_index_path",
-                &learnings_index_path.display().to_string(),
-            ),
-            (
-                "expertise_index_path",
-                &expertise_index_path.display().to_string(),
-            ),
-            ("has_learnings_index", has_learnings_index),
-        ],
-    )
-    .map_err(|e| anyhow::anyhow!("capture-user.md template error: {e}"))?;
-
-    let mut readable_roots: Vec<PathBuf> = review_artifact_paths
-        .iter()
-        .filter_map(|p| p.parent().map(|parent| parent.to_path_buf()))
-        .collect();
-    readable_roots.dedup();
-
-    let expertise_dir = workspace_path.join(".fluent/expertise");
-    fs::create_dir_all(&expertise_dir)?;
-
-    let (sandbox, _sandbox_profile) = if no_sandbox {
-        (CoderSandbox::None, None)
-    } else {
-        let common_git_dir = worktree::git_common_dir(workspace_path)?;
-        readable_roots.push(workspace_path.to_path_buf());
-        build_coder_sandbox_with_writable_and_read_only_roots(
-            coder_kind,
-            resolver,
-            &expertise_dir,
-            &[common_git_dir],
-            &readable_roots,
-        )?
-    };
-
-    let coder = coder_kind.boxed_with_model(sandbox, model, effort);
-    let exit_code = coder.run(
-        &prompt,
-        &system_prompt,
-        workspace_path,
-        extra_args,
-        &[],
-        None,
-    )?;
-    if exit_code != 0 {
-        bail!("Capture coder exited with code {exit_code}");
-    }
-
-    Ok(())
-}
-
 /// Inputs the Learner coder needs to refine expertise and write its handoff
 /// draft.
 pub struct LearnerRunInputs<'a> {
@@ -4222,22 +4127,22 @@ mod tests {
     }
 
     #[test]
-    fn capture_session_uses_non_writer_system_prompt() {
+    fn learner_session_uses_non_writer_system_prompt() {
         let resolver = ContentResolver::new(None);
-        let capture_prompt = resolver
-            .resolve_content("prompts/capture-system.md")
-            .expect("capture-system.md must resolve");
+        let learner_prompt = resolver
+            .resolve_content("prompts/learner-system.md")
+            .expect("learner-system.md must resolve");
         let write_prompt = resolver
             .resolve_content("prompts/write-system.md")
             .expect("write-system.md must resolve");
 
         assert_ne!(
-            capture_prompt, write_prompt,
-            "capture session must not reuse the writer's system prompt"
+            learner_prompt, write_prompt,
+            "the Learner session must not reuse the writer's system prompt"
         );
         assert!(
-            !capture_prompt.contains("Fluent Writer"),
-            "capture system prompt must not identify as a Fluent Writer"
+            !learner_prompt.contains("Fluent Writer"),
+            "the Learner system prompt must not identify as a Fluent Writer"
         );
     }
 
@@ -4255,25 +4160,28 @@ mod tests {
     }
 
     #[test]
-    fn capture_prompt_includes_findings_and_diff_inputs() {
+    fn learner_prompt_includes_attempt_diff_and_all_review_artifacts() {
         let tmp = tempfile::TempDir::new().unwrap();
         let workspace = tmp.path();
         let resolver = ContentResolver::new(None);
         let template = resolver
-            .resolve_content("prompts/capture-user.md")
-            .expect("capture-user.md must resolve");
+            .resolve_content("prompts/learner-user.md")
+            .expect("learner-user.md must resolve");
 
         let learnings_dir = workspace.join(".fluent/expertise/learnings");
         let learnings_index_path = learnings_dir.join("INDEX.md");
         let expertise_index_path = workspace.join(".fluent/expertise/INDEX.md");
 
         let review_paths = "- /tmp/review-1/review.md\n- /tmp/review-2/review.md";
+        let tester_paths = "- /tmp/tester-1/tester-results.json\n- /tmp/tester-2/tester-results.json";
         let diff_command = "git -C '/tmp/workspace' diff 'main...HEAD'";
+        let draft_path = "/tmp/learner/follow-up-draft.json";
 
         let rendered = crate::content::render_template(
             &template,
             &[
                 ("review_artifact_paths", review_paths),
+                ("tester_artifact_paths", tester_paths),
                 ("diff_command", diff_command),
                 ("learnings_dir", &learnings_dir.display().to_string()),
                 (
@@ -4285,30 +4193,51 @@ mod tests {
                     &expertise_index_path.display().to_string(),
                 ),
                 ("has_learnings_index", ""),
+                ("draft_path", draft_path),
             ],
         )
-        .expect("capture template must render");
+        .expect("learner template must render");
 
         assert!(
-            rendered.contains("/tmp/review-1/review.md"),
-            "rendered capture prompt should include first review artifact path"
-        );
-        assert!(
-            rendered.contains("/tmp/review-2/review.md"),
-            "rendered capture prompt should include second review artifact path"
-        );
-        assert!(
             rendered.contains(diff_command),
-            "rendered capture prompt should include the diff command"
+            "the learner prompt must include the complete-change diff command"
         );
         assert!(
-            rendered.contains(&learnings_dir.display().to_string()),
-            "rendered capture prompt should include the learnings directory path"
+            rendered.contains("/tmp/review-1/review.md")
+                && rendered.contains("/tmp/review-2/review.md"),
+            "the learner prompt must include every review round's reviewer artifacts"
         );
         assert!(
-            rendered.contains(&expertise_index_path.display().to_string()),
-            "rendered capture prompt should include the expertise index path"
+            rendered.contains("/tmp/tester-1/tester-results.json")
+                && rendered.contains("/tmp/tester-2/tester-results.json"),
+            "the learner prompt must include every review round's tester artifacts"
         );
+        assert!(
+            rendered.contains(draft_path),
+            "the learner prompt must name the draft path"
+        );
+    }
+
+    #[test]
+    fn learner_prompt_requires_bounded_authoritative_corrective_context() {
+        let resolver = ContentResolver::new(None);
+        let template = resolver
+            .resolve_content("prompts/learner-user.md")
+            .expect("learner-user.md must resolve");
+
+        for required in [
+            "authoritative",
+            "violated",
+            "evidence is concrete",
+            "scope is bounded",
+            "verification is deterministic",
+            "No consequential product, interface, architecture, security, or permission",
+        ] {
+            assert!(
+                template.contains(required),
+                "corrective criteria must instruct on {required:?}; prompt:\n{template}"
+            );
+        }
     }
 
     #[test]
@@ -4410,7 +4339,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_sandbox_writable_root_is_expertise_only() {
+    fn learner_sandbox_confines_expertise_handoff_and_git_writes() {
         let tmp = tempfile::TempDir::new().unwrap();
         let workspace = tmp.path().join("workspace");
         let expertise_dir = workspace.join(".fluent/expertise");
@@ -4420,45 +4349,64 @@ mod tests {
         let common_git_dir = workspace.join(".git");
         fs::create_dir_all(&common_git_dir).unwrap();
 
+        // The managed handoff surface lives under the project's work area, not
+        // in the candidate workspace.
+        let handoff_dir = tmp
+            .path()
+            .join(".fluent/work/artifacts/work-1/attempt-1/learner");
+        fs::create_dir_all(&handoff_dir).unwrap();
+        let work_model_dir = tmp.path().join(".fluent/work/items");
+        let observations_dir = tmp.path().join(".fluent/observations");
+
         let review_dir = tmp.path().join("reviews");
         fs::create_dir_all(&review_dir).unwrap();
-        let readable_roots = vec![review_dir.clone()];
-
-        let mut capture_readable = readable_roots.clone();
-        capture_readable.push(workspace.clone());
+        let readable_roots = vec![review_dir.clone(), workspace.clone()];
 
         let (_sandbox, profile) = build_coder_sandbox_with_writable_and_read_only_roots(
             CoderKind::Claude,
             &resolver,
             &expertise_dir,
-            &[common_git_dir.clone()],
-            &capture_readable,
+            &[handoff_dir.clone(), common_git_dir.clone()],
+            &readable_roots,
         )
         .unwrap();
 
         let profile = profile.expect("sandbox profile should be present");
         let content = fs::read_to_string(&profile.path).unwrap();
 
-        let expertise_str = expertise_dir.to_string_lossy();
-        let workspace_str = workspace.to_string_lossy();
+        let write_grant =
+            |p: &Path| format!("(allow file-write* (subpath \"{}\"))", p.to_string_lossy());
 
         assert!(
-            content.contains(&format!(
-                "(allow file-write* (subpath \"{expertise_str}\"))"
-            )),
-            "sandbox should grant write access to .fluent/expertise; profile:\n{content}"
+            content.contains(&write_grant(&expertise_dir)),
+            "the Learner may write .fluent/expertise; profile:\n{content}"
+        );
+        assert!(
+            content.contains(&write_grant(&handoff_dir)),
+            "the Learner may write the managed handoff surface; profile:\n{content}"
+        );
+        assert!(
+            content.contains(&write_grant(&common_git_dir)),
+            "the Learner may write Git metadata; profile:\n{content}"
         );
         assert!(
             content.contains(&format!(
-                "(allow file-read*  (subpath \"{workspace_str}\"))"
+                "(allow file-read*  (subpath \"{}\"))",
+                workspace.to_string_lossy()
             )),
-            "sandbox should grant read access to the workspace; profile:\n{content}"
+            "the Learner may read the workspace; profile:\n{content}"
         );
         assert!(
-            !content.contains(&format!(
-                "(allow file-write* (subpath \"{workspace_str}\"))"
-            )),
-            "sandbox should NOT grant write access to the full workspace; profile:\n{content}"
+            !content.contains(&write_grant(&workspace)),
+            "the Learner may not write the whole workspace; profile:\n{content}"
+        );
+        assert!(
+            !content.contains(&write_grant(&work_model_dir)),
+            "the Learner may not write the Work model; profile:\n{content}"
+        );
+        assert!(
+            !content.contains(&write_grant(&observations_dir)),
+            "the Learner may not write the Observation backlog; profile:\n{content}"
         );
     }
 }
