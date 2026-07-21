@@ -3581,6 +3581,59 @@ fn post_land_learner_retry_materializes_recovered_handoff() {
 }
 
 #[test]
+fn successful_learning_resumes_failed_materialization_without_rerunning_coder() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let counter = tmp.path().join("learner-counter-materialization");
+    let bin_dir = tmp.path().join("bin-materialization-resume");
+    write_mock_claude(
+        &bin_dir,
+        &post_land_learner_mock_script(
+            &counter,
+            r#"{"learning_summary":"learned late","follow_ups":[{"id":"fu-1","summary":"Recovered follow-up","corrective":false}]}"#,
+            false,
+        ),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+    fs::write(main_dir.join(".fluent/observations"), "block observation directory\n").unwrap();
+
+    rerun_learner_attempt(&main_dir, &bin_dir);
+    let failed = work_item_value(&main_dir, "work-1");
+    assert_eq!(
+        failed["merge_candidates"][0]["merge_state"]["follow_up_failure"]["stage"],
+        "observation"
+    );
+    assert_eq!(
+        fs::read_to_string(format!("{}.invocations", counter.display()))
+            .unwrap()
+            .lines()
+            .count(),
+        2,
+        "one initial failure and one successful Learner retry"
+    );
+
+    fs::remove_file(main_dir.join(".fluent/observations")).unwrap();
+    rerun_learner_attempt(&main_dir, &bin_dir);
+
+    assert_eq!(open_observation_files(&main_dir).len(), 1);
+    let recovered = work_item_value(&main_dir, "work-1");
+    assert!(
+        recovered["merge_candidates"][0]["merge_state"]["follow_up_failure"].is_null(),
+        "successful resume clears the durable failure"
+    );
+    assert_eq!(
+        fs::read_to_string(format!("{}.invocations", counter.display()))
+            .unwrap()
+            .lines()
+            .count(),
+        2,
+        "materialization recovery must not rerun a successful Learner"
+    );
+}
+
+#[test]
 fn post_land_learner_retry_preserves_merged_commit() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);

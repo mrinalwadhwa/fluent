@@ -128,47 +128,66 @@ pub fn merge_candidate(config: WorkMergeConfig<'_>) -> Result<WorkMergeOutcome> 
 /// failure that leaves the successful land intact; the persisted operation and
 /// journal let a later `merge-candidate land` resume it.
 fn process_landed_follow_ups(config: &WorkMergeConfig<'_>, outcome: &WorkMergeOutcome) {
-    match try_process_landed_follow_ups(config, outcome) {
+    if let Err(error) = process_landed_follow_ups_at_boundary(
+        config.project_root,
+        config.store,
+        config.work_item_id,
+        &outcome.merge_candidate_id,
+        &outcome.merged_commit,
+    ) {
+        eprintln!("  Warning: failed to update follow-up-processing recovery state: {error}");
+    }
+}
+
+/// Process one landed handoff through the shared durable recovery boundary used
+/// by both land and `attempt run`. Returns whether materialization completed;
+/// an effect failure records candidate recovery state and returns `Ok(false)`.
+pub fn process_landed_follow_ups_at_boundary(
+    project_root: &Path,
+    store: &WorkModelStore,
+    work_item_id: &str,
+    candidate_id: &str,
+    merged_commit: &str,
+) -> Result<bool> {
+    match try_process_landed_follow_ups(
+        project_root,
+        store,
+        work_item_id,
+        candidate_id,
+        merged_commit,
+    ) {
         Ok(()) => {
             // Processing completed; clear any recorded retryable failure.
-            if let Err(error) = clear_follow_up_failure(
-                config.store,
-                config.work_item_id,
-                &outcome.merge_candidate_id,
-            ) {
-                eprintln!("  Warning: failed to clear follow-up-processing failure: {error}");
-            }
+            clear_follow_up_failure(store, work_item_id, candidate_id)?;
+            Ok(true)
         }
         Err(error) => {
             // The merge stays successful. Record a retryable follow-up-processing
             // failure naming the first incomplete stage so a later land resumes.
             let operation_id = crate::follow_up::operation_id_for_candidate(
-                config.work_item_id,
-                &outcome.merge_candidate_id,
+                work_item_id,
+                candidate_id,
             );
-            let stage = crate::follow_up::first_incomplete_stage(config.project_root, &operation_id)
+            let stage = crate::follow_up::first_incomplete_stage(project_root, &operation_id)
                 .unwrap_or_else(|| "validate-handoff".to_string());
             let next_action = format!(
                 "Re-run `fluent merge-candidate land {} {}` to resume follow-up processing.",
-                config.work_item_id, outcome.merge_candidate_id
+                work_item_id, candidate_id
             );
-            if let Err(record_error) = record_follow_up_failure(
-                config.store,
-                config.work_item_id,
-                &outcome.merge_candidate_id,
+            record_follow_up_failure(
+                store,
+                work_item_id,
+                candidate_id,
                 &stage,
                 &error.to_string(),
                 &next_action,
-            ) {
-                eprintln!(
-                    "  Warning: failed to record follow-up-processing failure: {record_error}"
-                );
-            }
+            )?;
             eprintln!(
                 "  Warning: Merge Candidate {} landed, but learner follow-up processing did not \
                  complete at stage {stage}: {error}",
-                outcome.merge_candidate_id,
+                candidate_id,
             );
+            Ok(false)
         }
     }
 }
@@ -219,19 +238,22 @@ fn clear_follow_up_failure(
 }
 
 fn try_process_landed_follow_ups(
-    config: &WorkMergeConfig<'_>,
-    outcome: &WorkMergeOutcome,
+    project_root: &Path,
+    store: &WorkModelStore,
+    work_item_id: &str,
+    candidate_id: &str,
+    merged_commit: &str,
 ) -> Result<()> {
-    let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+    let item = read_work_item_or_not_found(store, work_item_id)?;
     let candidate = item
         .merge_candidates
         .iter()
-        .find(|candidate| candidate.id == outcome.merge_candidate_id)
+        .find(|candidate| candidate.id == candidate_id)
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "Merge Candidate {:?} not found in Work Item {:?}",
-                outcome.merge_candidate_id,
-                config.work_item_id
+                candidate_id,
+                work_item_id
             )
         })?;
     let attempt_id = candidate.attempt_id.clone();
@@ -243,7 +265,7 @@ fn try_process_landed_follow_ups(
             anyhow::anyhow!(
                 "Attempt {:?} not found for Merge Candidate {:?}",
                 attempt_id,
-                outcome.merge_candidate_id
+                candidate_id
             )
         })?;
 
@@ -251,11 +273,11 @@ fn try_process_landed_follow_ups(
     // absent learner run has nothing to process here; its recovery runs the
     // Learner again and materializes the recovered handoff itself.
     crate::follow_up::materialize_learner_handoff(
-        config.project_root,
-        config.work_item_id,
+        project_root,
+        work_item_id,
         attempt,
-        &outcome.merge_candidate_id,
-        &outcome.merged_commit,
+        candidate_id,
+        merged_commit,
     )
 }
 

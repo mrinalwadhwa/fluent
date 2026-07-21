@@ -396,6 +396,10 @@ failure on the candidate naming the first incomplete stage and a next
 action. The resumable journal preserves completed stages so a retry
 produces each Observation, Work Item, lineage charge, and queue entry at
 most once; a completed resume clears the recorded failure.
+Land and post-land `attempt run` both call this same durable failure boundary.
+If Learning already succeeded, `attempt run` resumes materialization
+idempotently instead of rerunning the Learner; this closes the crash window
+between persisting the handoff and recording or completing its operation.
 
 `fluent cleanup` retains an origin — its Work Item, Attempt, Merge
 Candidate, worktree, and managed artifacts — while its landed-learning

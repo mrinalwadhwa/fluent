@@ -149,7 +149,18 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                 .as_ref()
                 .map(|learning| learning.is_failed())
                 .unwrap_or(true);
-            if learner_pending {
+            let landed_success = item
+                .merge_candidates
+                .iter()
+                .find(|candidate| candidate.id == candidate_id)
+                .is_some_and(|candidate| {
+                    candidate.merge_state.status == MergeCandidateMergeStatus::Merged
+                        && item.attempts[attempt_index]
+                            .learning
+                            .as_ref()
+                            .is_some_and(|learning| learning.is_succeeded())
+                });
+            if learner_pending || landed_success {
                 // Serialize the retry against a concurrent land on the same
                 // project so the two cannot both mutate the candidate. Under the
                 // lock, read the fresh merge status: a candidate that has already
@@ -159,6 +170,7 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                     config.project_root,
                 ))?;
                 item = config.store.read_work_item(config.work_item_id)?;
+                let candidate_id = item.create_or_get_merge_candidate(config.attempt_id)?;
                 let attempt_index = item
                     .attempts
                     .iter()
@@ -166,15 +178,11 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                     .ok_or_else(|| {
                         anyhow::anyhow!("Attempt {:?} disappeared during retry", config.attempt_id)
                     })?;
-                let retry_still_eligible = item.attempts[attempt_index]
+                let learner_still_pending = item.attempts[attempt_index]
                     .learning
                     .as_ref()
                     .map(|learning| learning.is_failed())
                     .unwrap_or(true);
-                if !retry_still_eligible {
-                    outcomes.push(WorkAttemptRunOutcome::MergeCandidateReady { candidate_id });
-                    return Ok(WorkAttemptRunResult { outcomes });
-                }
                 if item.attempts[attempt_index].status != AttemptStatus::Complete
                     || item.attempts[attempt_index].review_state
                         != Some(AttemptReviewState::Passed)
@@ -206,32 +214,37 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                 let handoff_only =
                     work_task_executor::learner_is_handoff_only(merged_commit.is_some());
 
-                let run_coder =
-                    |request: &LearnerCoderRequest<'_>| default_learner_run_coder(&config, request);
-                run_learner_step(
-                    config.project_root,
-                    &mut item,
-                    attempt_index,
-                    &candidate_id,
-                    handoff_only,
-                    &LearnerConfig {
-                        run_coder: &run_coder,
-                    },
-                );
-                config.store.write_work_item(&item)?;
+                if learner_still_pending {
+                    let run_coder = |request: &LearnerCoderRequest<'_>| {
+                        default_learner_run_coder(&config, request)
+                    };
+                    run_learner_step(
+                        config.project_root,
+                        &mut item,
+                        attempt_index,
+                        &candidate_id,
+                        handoff_only,
+                        &LearnerConfig {
+                            run_coder: &run_coder,
+                        },
+                    );
+                    config.store.write_work_item(&item)?;
+                }
 
-                // A recovered post-land handoff lands immediately under the same
-                // land-gated, idempotent rules the land hook uses.
+                // A successful post-land handoff always passes through the same
+                // durable boundary as land. This also resumes a success that
+                // crashed or failed after Learning persisted but before effects
+                // completed, without invoking the coder again.
                 if let Some(merged_commit) = merged_commit
                     && item.attempts[attempt_index]
                         .learning
                         .as_ref()
                         .is_some_and(|learning| learning.is_succeeded())
                 {
-                    crate::follow_up::materialize_learner_handoff(
+                    crate::work_merge_executor::process_landed_follow_ups_at_boundary(
                         config.project_root,
+                        config.store,
                         config.work_item_id,
-                        &item.attempts[attempt_index],
                         &candidate_id,
                         &merged_commit,
                     )?;
