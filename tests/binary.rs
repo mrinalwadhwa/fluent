@@ -10304,7 +10304,7 @@ fn no_legacy_prompt_files_in_prompts_dir() {
         "Legacy prompts/author.md should not exist"
     );
 
-    let allowed_prefixes = ["write-", "review-", "rebase-", "seed-", "capture-"];
+    let allowed_prefixes = ["write-", "review-", "rebase-", "seed-", "learner-"];
     for entry in fs::read_dir(&prompts_dir).unwrap() {
         let entry = entry.unwrap();
         let name = entry.file_name().to_string_lossy().to_string();
@@ -10315,7 +10315,7 @@ fn no_legacy_prompt_files_in_prompts_dir() {
             allowed_prefixes
                 .iter()
                 .any(|prefix| name.starts_with(prefix)),
-            "Unexpected prompt file: {name}. Only work-* and review-* prompts should exist."
+            "Unexpected prompt file: {name}. Only write-*, review-*, rebase-*, seed-*, and learner-* prompts should exist."
         );
     }
 }
