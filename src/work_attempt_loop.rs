@@ -22,7 +22,10 @@ const DEFAULT_MAX_PARALLEL_REVIEWERS: usize = 5;
 const DEFAULT_MAX_TOTAL_WRITE_ROUNDS: usize = 10;
 const DEFAULT_MAX_NO_PROGRESS_ROUNDS: usize = 2;
 
-fn max_parallel_reviewers() -> usize {
+/// The reviewer-parallelism limit applied within a single Attempt. This is
+/// independent of the local scheduler's Work-Item concurrency: one scheduled
+/// Attempt is one Work slot regardless of how many reviewers run inside it.
+pub fn max_parallel_reviewers() -> usize {
     std::env::var("FLUENT_MAX_PARALLEL_REVIEWERS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())

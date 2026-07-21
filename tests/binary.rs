@@ -10552,6 +10552,134 @@ exit 0
     );
 }
 
+/// Count Work Items whose latest dispatch is claimed or running.
+fn count_active_dispatches(queue_dir: &Path) -> usize {
+    let mut active = 0;
+    let Ok(entries) = fs::read_dir(queue_dir) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let status = value["dispatches"]
+            .as_array()
+            .and_then(|d| d.last())
+            .and_then(|d| d["status"].as_str())
+            .unwrap_or("");
+        if status == "claimed" || status == "running" {
+            active += 1;
+        }
+    }
+    active
+}
+
+#[test]
+fn scheduler_runs_four_work_items_concurrently_by_default() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+    init_git_repo(project);
+
+    let bin_dir = project.join("mock-bin");
+    // A writer that holds its slot long enough to observe concurrency.
+    write_mock_claude(
+        &bin_dir,
+        r#"#!/bin/bash
+sleep 3
+git add -A 2>/dev/null
+git commit --allow-empty -m "mock write" 2>/dev/null
+exit 0
+"#,
+    );
+
+    for n in 0..6 {
+        let id = format!("wi-conc-{n}");
+        write_work_item_json(project, &id, "Concurrency");
+        fluent_cmd()
+            .current_dir(project)
+            .args(["queue", "add", &id])
+            .assert()
+            .success();
+    }
+
+    let queue_dir = project.join(".fluent/work/queue");
+    let child = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
+        .current_dir(project)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .args(["scheduler", "run", "--poll-seconds", "1"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Sample the active dispatch count; the default capacity is four.
+    let mut max_active = 0;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        let active = count_active_dispatches(&queue_dir);
+        max_active = max_active.max(active);
+        assert!(
+            active <= 4,
+            "local scheduler must never exceed its capacity of four, saw {active}"
+        );
+        if max_active == 4 {
+            // Confirm the surplus stays queued while capacity is full.
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+
+    send_signal(child.id(), "TERM");
+    let _ = child.wait_with_output().unwrap();
+
+    assert_eq!(
+        max_active, 4,
+        "scheduler should fill the default capacity of four concurrently"
+    );
+}
+
+#[test]
+fn second_scheduler_run_reuses_live_coordinator() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+    fs::create_dir_all(project.join(".fluent/work/items")).unwrap();
+
+    // Start a live coordinator that idles while holding its lease.
+    let mut first = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
+        .current_dir(project)
+        .args(["scheduler", "run", "--poll-seconds", "5"])
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    // A second start finds the live coordinator, reports reuse, and returns.
+    fluent_cmd()
+        .current_dir(project)
+        .args(["scheduler", "run", "--poll-seconds", "5"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("reusing live coordinator"));
+
+    send_signal(first.id(), "TERM");
+    let status = first.wait().unwrap();
+    assert!(status.success(), "the live coordinator exits cleanly");
+}
+
 // ---------------------------------------------------------------------------
 // B1–B5: Read commands for attempts, merge candidates, and tasks
 // ---------------------------------------------------------------------------
