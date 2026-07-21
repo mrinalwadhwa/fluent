@@ -1,12 +1,14 @@
 ---
 name: production-lock-test-hooks
-description: FLUENT_TEST lock handshakes execute in normal builds and can stall a real process while waiting for sentinel files
+description: Keep lock-contention pause hooks test-only, scoped, bounded, and panic-safe
 metadata:
   type: gotcha
 ---
 
-The real land, lineage, and follow-up operation lock paths include environment-controlled test handshakes so cross-process concurrency tests can coordinate without timing sleeps. `lineage_lock::test_phase` and `follow_up::operation_lock_test_phase` can wait indefinitely for release sentinel files; `land_lock` can write a blocked sentinel. These hooks are not compiled only under `#[cfg(test)]`, so release binaries still inspect the corresponding `FLUENT_TEST_*` variables.
+Lock-contention tests need deterministic phase handshakes, but a production lock path must not consult ambient variables that can pause it. Release-reachable `FLUENT_TEST_*` waits let any caller that controls the environment hold a lineage or operation lock forever.
 
-Treat these variables as production-reachable behavior. Never set them in normal Fluent execution, keep their activation scoped to the expected lineage root or operation id, and account for the possibility of an indefinite stall when diagnosing a blocked lock. When changing this machinery, prefer isolating it behind a dedicated debug/test-hook boundary while retaining real-process coverage of the lock acquisition path.
+Compile in-process probes only under `#[cfg(test)]`. Key each probe to the exact lock channel and identity, give every wait a timeout, and let the scoped probe release blocked workers in `Drop`. Install the probe inside the `std::thread::scope` closure so panic unwinding releases it before the scope joins worker threads. Tests still call the real lock acquisition path; only the phase notification disappears from release builds.
+
+Cross-process tests that cannot use a unit-only probe should observe real public effects or nonblocking contention. A write-only marker may report a phase, but production code must never wait for a test-created release file.
 
 Related: [[lock-ordering-across-subsystems]]

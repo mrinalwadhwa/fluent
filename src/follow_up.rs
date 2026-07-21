@@ -1285,7 +1285,7 @@ fn count_charged_descendants(
 
 /// Take a blocking exclusive lock on a post-land operation so concurrent
 /// processors serialize and converge on the same effects.
-fn lock_operation(dir: &Path, operation_id: &str, actor: &str) -> Result<File> {
+fn lock_operation(dir: &Path, _operation_id: &str, _actor: &str) -> Result<File> {
     let path = dir.join("operation.lock");
     let file = OpenOptions::new()
         .create(true)
@@ -1299,34 +1299,16 @@ fn lock_operation(dir: &Path, operation_id: &str, actor: &str) -> Result<File> {
             if error.kind() != std::io::ErrorKind::WouldBlock {
                 return Err(error).with_context(|| format!("lock operation {}", path.display()));
             }
-            operation_lock_test_phase(operation_id, actor, "BLOCKED")?;
+            #[cfg(test)]
+            crate::test_lock_probe::reach("operation", _operation_id, _actor, "BLOCKED");
             flock(&file, FlockOperation::LockExclusive)
                 .map_err(std::io::Error::from)
                 .with_context(|| format!("lock operation {}", path.display()))?;
         }
     }
-    operation_lock_test_phase(operation_id, actor, "ACQUIRED")?;
+    #[cfg(test)]
+    crate::test_lock_probe::reach("operation", _operation_id, _actor, "ACQUIRED");
     Ok(file)
-}
-
-fn operation_lock_test_phase(operation_id: &str, actor: &str, phase: &str) -> Result<()> {
-    if std::env::var("FLUENT_TEST_OPERATION_ID").as_deref() != Ok(operation_id) {
-        return Ok(());
-    }
-    let path_key = format!("FLUENT_TEST_{actor}_OPERATION_{phase}_PATH");
-    if let Ok(path) = std::env::var(path_key) {
-        fs::write(path, format!("{phase}\n"))?;
-    }
-    if phase == "ACQUIRED" {
-        let release_key = format!("FLUENT_TEST_{actor}_OPERATION_RELEASE_PATH");
-        if let Ok(path) = std::env::var(release_key) {
-            let path = PathBuf::from(path);
-            while !path.exists() {
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Hash identity components into a filename-safe value. Canonical JSON keeps
@@ -1605,46 +1587,22 @@ mod tests {
         let mut conflicting = original.clone();
         conflicting.follow_ups[0].summary = "conflicting".to_string();
 
-        let replay_acquired = tmp.path().join("replay-acquired");
-        let replay_release = tmp.path().join("replay-release");
-        let record_blocked = tmp.path().join("record-blocked");
-        unsafe {
-            std::env::set_var("FLUENT_TEST_OPERATION_ID", &operation.operation_id);
-            std::env::set_var("FLUENT_TEST_REPLAY_OPERATION_ACQUIRED_PATH", &replay_acquired);
-            std::env::set_var("FLUENT_TEST_REPLAY_OPERATION_RELEASE_PATH", &replay_release);
-            std::env::set_var("FLUENT_TEST_RECORD_OPERATION_BLOCKED_PATH", &record_blocked);
-        }
-
         std::thread::scope(|scope| {
+            let probe = crate::test_lock_probe::ScopedLockProbe::install(
+                "operation",
+                &operation.operation_id,
+                Some(("REPLAY", "ACQUIRED")),
+            );
             let replay = scope.spawn(|| replay_post_land_operation(tmp.path(), &operation.operation_id));
-            for _ in 0..500 {
-                if replay_acquired.exists() {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
+            assert!(probe.wait_for("REPLAY", "ACQUIRED"));
             let record = scope.spawn(|| record_post_land_operation(tmp.path(), &conflicting, None));
-            for _ in 0..500 {
-                if record_blocked.exists() {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            let contended = replay_acquired.exists() && record_blocked.exists();
+            assert!(probe.wait_for("RECORD", "BLOCKED"));
             assert_eq!(fs::read(&batch_path).unwrap(), accepted_bytes);
-            fs::write(&replay_release, "release\n").unwrap();
+            probe.release();
             replay.join().unwrap().unwrap();
             let error = record.join().unwrap().unwrap_err();
             assert!(error.to_string().contains("conflicting identity"));
-            assert!(contended, "replay and conflicting record met at the real lock boundary");
         });
-
-        unsafe {
-            std::env::remove_var("FLUENT_TEST_OPERATION_ID");
-            std::env::remove_var("FLUENT_TEST_REPLAY_OPERATION_ACQUIRED_PATH");
-            std::env::remove_var("FLUENT_TEST_REPLAY_OPERATION_RELEASE_PATH");
-            std::env::remove_var("FLUENT_TEST_RECORD_OPERATION_BLOCKED_PATH");
-        }
         assert_eq!(fs::read(batch_path).unwrap(), accepted_bytes);
     }
 
@@ -2574,47 +2532,23 @@ mod tests {
             &automatic.follow_ups[0].id,
         );
 
-        let human_acquired = tmp.path().join("human-lineage-acquired");
-        let human_release = tmp.path().join("human-lineage-release");
-        let automatic_blocked = tmp.path().join("automatic-lineage-blocked");
-        unsafe {
-            std::env::set_var("FLUENT_TEST_LINEAGE_ROOT", root_id);
-            std::env::set_var("FLUENT_TEST_HUMAN_LINEAGE_ACQUIRED_PATH", &human_acquired);
-            std::env::set_var("FLUENT_TEST_HUMAN_LINEAGE_RELEASE_PATH", &human_release);
-            std::env::set_var("FLUENT_TEST_AUTOMATIC_LINEAGE_BLOCKED_PATH", &automatic_blocked);
-        }
-
         std::thread::scope(|scope| {
+            let probe = crate::test_lock_probe::ScopedLockProbe::install(
+                "lineage",
+                root_id,
+                Some(("HUMAN", "ACQUIRED")),
+            );
             let human_run = scope.spawn(|| {
                 authorize_derived_work_item(tmp.path(), &store, "human-descendant")
             });
-            for _ in 0..500 {
-                if human_acquired.exists() {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
+            assert!(probe.wait_for("HUMAN", "ACQUIRED"));
 
             let automatic_run = scope.spawn(|| process_landed_batch(tmp.path(), &automatic, None));
-            for _ in 0..500 {
-                if automatic_blocked.exists() {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            let contended = human_acquired.exists() && automatic_blocked.exists();
-            fs::write(&human_release, "release\n").unwrap();
+            assert!(probe.wait_for("AUTOMATIC", "BLOCKED"));
+            probe.release();
             human_run.join().unwrap().unwrap();
             automatic_run.join().unwrap().unwrap();
-            assert!(contended, "both authorization paths reached the shared critical boundary");
         });
-
-        unsafe {
-            std::env::remove_var("FLUENT_TEST_LINEAGE_ROOT");
-            std::env::remove_var("FLUENT_TEST_HUMAN_LINEAGE_ACQUIRED_PATH");
-            std::env::remove_var("FLUENT_TEST_HUMAN_LINEAGE_RELEASE_PATH");
-            std::env::remove_var("FLUENT_TEST_AUTOMATIC_LINEAGE_BLOCKED_PATH");
-        }
 
         let human = store.read_work_item("human-descendant").unwrap();
         let automatic = store.read_work_item(&automatic_id).unwrap();

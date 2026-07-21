@@ -10,7 +10,7 @@
 - [lock-ordering-across-subsystems](lock-ordering-across-subsystems.md) — Release the queue lock before mutating the Work model; the codebase has a lock hierarchy that must not be inverted
 - [needs-user-not-terminal-for-cleanup](needs-user-not-terminal-for-cleanup.md) — NeedsUser attempts are not terminal for cleanup; only Complete and Failed are reapable
 - [post-land-effects-are-idempotent-and-land-safe](post-land-effects-are-idempotent-and-land-safe.md) — A completed land is durable; post-land side effects run only after merge, replay at-most-once via deterministic ids, and never undo the land on failure
-- [production-lock-test-hooks](production-lock-test-hooks.md) — FLUENT_TEST lock handshakes execute in normal builds and can stall a real process while waiting for sentinel files
+- [production-lock-test-hooks](production-lock-test-hooks.md) — Lock-contention pause hooks must stay test-only, scoped, bounded, and panic-safe
 - [prompt-file-naming-guardrail](prompt-file-naming-guardrail.md) — Adding or renaming prompt files under prompts/ requires updating the no_legacy_prompt_files_in_prompts_dir allowlist test
 - [record-divergence-in-decisions-md](record-divergence-in-decisions-md.md) — Deliberate divergences from approach.md belong in decisions.md (durable), not just progress.md (round-scoped)
 - [sandbox-denials-track-template-grants](sandbox-denials-track-template-grants.md) — Handoff-only sandbox confinement depends on stripping exact shared-temp grant strings from the rendered profile

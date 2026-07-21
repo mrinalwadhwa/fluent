@@ -39,6 +39,8 @@ pub mod worktree;
 pub mod observations;
 pub mod queue;
 pub mod scheduler;
+#[cfg(test)]
+pub(crate) mod test_lock_probe;
 pub mod tester;
 pub mod update;
 pub mod usage;
