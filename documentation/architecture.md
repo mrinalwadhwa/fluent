@@ -315,7 +315,8 @@ nothing materializes before merge. It normalizes the verified handoff
 into a source-neutral batch stamped with the authoritative origin (Work
 Item, Attempt, Merge Candidate, and merged commit), records a versioned
 `PendingPostLandOperationV1` and a resumable journal under
-`.fluent/work/follow-ups/<work-item-id>-<candidate-id>/`, and replays
+`.fluent/work/follow-ups/land-<digest>/`, where the digest identifies the Work
+Item and Merge Candidate, and replays
 that operation. Operation, Observation, and derived Work identities use hashes
 of canonical component arrays, so delimiters and filename normalization cannot
 collapse distinct origins or follow-ups. Recording and replay hold the same
