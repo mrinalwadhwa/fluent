@@ -2673,8 +2673,11 @@ fn land_work_1(main_dir: &Path, bin_dir: &Path, no_post_merge_review: bool) {
 }
 
 /// A learner mock that fails its first run and succeeds on retry, keyed by a
-/// counter file so a post-land retry (which runs after land) drives the
-/// handoff-only path. On the successful run it writes `draft_json` and, when
+/// counter guard file so a post-land retry (which runs after land) drives the
+/// handoff-only path. The sandboxed retry cannot write shared temp, so it
+/// records observability — its run marker, the prompt it received, and the
+/// commit it saw — on stdout, which the host captures in the durable per-run
+/// transcript. On the successful run it writes `draft_json` and, when
 /// `commit_expertise` is set, commits an expertise change that a handoff-only
 /// run must discard.
 fn post_land_learner_mock_script(
@@ -2683,7 +2686,6 @@ fn post_land_learner_mock_script(
     commit_expertise: bool,
 ) -> String {
     let counter = counter.display().to_string();
-    let prompt_log = format!("{counter}.prompt");
     let expertise = if commit_expertise {
         "  mkdir -p .fluent/expertise\n  printf 'late knowledge\\n' > .fluent/expertise/late.md\n  git add .fluent/expertise/late.md\n  git commit -m \"Update expertise\" >/dev/null 2>&1\n"
     } else {
@@ -2704,19 +2706,19 @@ if printf '%s' "$PROMPT" | grep -q "Rebase the candidate branch"; then
   exit $?
 fi
 if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
-  printf 'run\n' >> "{counter}.invocations"
-  printf '%s' "$PROMPT" > "{prompt_log}"
+  echo "LEARNER_RUN"
+  echo "LEARNER_PROMPT_BEGIN"
+  printf '%s\n' "$PROMPT"
+  echo "LEARNER_PROMPT_END"
   if [ ! -f "{counter}" ]; then
     touch "{counter}"
     exit 1
   fi
-  git rev-parse HEAD > "{counter}.head"
+  printf 'LEARNER_HEAD %s\n' "$(git rev-parse HEAD)"
   DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
   if [ -n "$DRAFT" ]; then
     mkdir -p "$(dirname "$DRAFT")"
-    cat > "$DRAFT" <<'DRAFTJSON'
-{draft_json}
-DRAFTJSON
+    printf '%s\n' '{draft_json}' > "$DRAFT"
   fi
 {expertise}  exit 0
 fi
@@ -2762,9 +2764,13 @@ if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
     touch "{}"
     exit 1
   fi
-  printf 'transient learner write\n' > transient-learner.txt
-  git add transient-learner.txt
-  touch "{}"
+  printf 'transient learner write\n' > transient-learner.txt 2>/dev/null
+  git add transient-learner.txt 2>/dev/null
+  # Announce the serialized mutation window twice: a shared-temp marker for an
+  # unsandboxed pre-land race, and a stdout marker the host captures in the
+  # durable transcript for a sandboxed post-land retry that cannot write it.
+  echo "RETRY_STARTED"
+  touch "{}" 2>/dev/null
   while [ ! -f "{}" ]; do sleep 0.02; done
   git commit -m "Update expertise" >/dev/null 2>&1
   DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
@@ -2992,6 +2998,38 @@ fn merged_commit_of(main_dir: &Path) -> String {
         .as_str()
         .unwrap()
         .to_string()
+}
+
+/// Concatenate every durable Learner transcript for work-1/attempt-1: the live
+/// `transcript.jsonl` plus the immutable `transcript.run<N>.jsonl` siblings a
+/// later run preserves. The sandboxed handoff-only retry cannot write shared
+/// temp, so it records its observability on stdout, which the host captures
+/// here on the managed surface.
+fn learner_transcripts(main_dir: &Path) -> String {
+    let dir = main_dir.join(".fluent/work/artifacts/work-1/attempt-1/learner");
+    let mut names: Vec<String> = fs::read_dir(&dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| n.starts_with("transcript") && n.ends_with(".jsonl"))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+        .iter()
+        .filter_map(|n| fs::read_to_string(dir.join(n)).ok())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The number of Learner coder runs recorded across all durable transcripts.
+fn learner_run_count(main_dir: &Path) -> usize {
+    learner_transcripts(main_dir)
+        .lines()
+        .filter(|line| *line == "LEARNER_RUN")
+        .count()
 }
 
 /// The open Observation files in a project, sorted by id.
@@ -3820,10 +3858,7 @@ fn missing_legacy_learning_record_retries_after_land() {
 
     assert_eq!(open_observation_files(&main_dir).len(), 1);
     assert_eq!(
-        fs::read_to_string(format!("{}.invocations", counter.display()))
-            .unwrap()
-            .lines()
-            .count(),
+        learner_run_count(&main_dir),
         2,
         "a missing legacy record triggers one post-land Learner retry"
     );
@@ -3880,10 +3915,7 @@ fn successful_learning_resumes_failed_materialization_without_rerunning_coder() 
         "observation"
     );
     assert_eq!(
-        fs::read_to_string(format!("{}.invocations", counter.display()))
-            .unwrap()
-            .lines()
-            .count(),
+        learner_run_count(&main_dir),
         2,
         "one initial failure and one successful Learner retry"
     );
@@ -3898,10 +3930,7 @@ fn successful_learning_resumes_failed_materialization_without_rerunning_coder() 
         "successful resume clears the durable failure"
     );
     assert_eq!(
-        fs::read_to_string(format!("{}.invocations", counter.display()))
-            .unwrap()
-            .lines()
-            .count(),
+        learner_run_count(&main_dir),
         2,
         "materialization recovery must not rerun a successful Learner"
     );
@@ -4049,7 +4078,7 @@ fn post_land_learner_retry_preserves_merged_commit() {
 
     require_successful_trusted_retry!(rerun_learner_attempt(&main_dir, &bin_dir));
 
-    let retry_prompt = fs::read_to_string(format!("{}.prompt", counter.display())).unwrap();
+    let retry_prompt = learner_transcripts(&main_dir);
     assert!(
         retry_prompt.contains(&format!("{accepted_base}...{merged_before}")),
         "post-land retry prompt must render the persisted accepted change; reflog:\n{candidate_reflog}\nprompt:\n{retry_prompt}"
@@ -4150,10 +4179,7 @@ fn post_land_legacy_recovery_rejects_a_wrong_ref_reflog_session() {
     assert!(!rerun_learner_attempt(&main_dir, &bin_dir).status.success());
 
     assert_eq!(
-        fs::read_to_string(format!("{}.invocations", counter.display()))
-            .unwrap()
-            .lines()
-            .count(),
+        learner_run_count(&main_dir),
         1,
         "ambiguous legacy provenance suppresses the retry Learner"
     );
@@ -4300,14 +4326,17 @@ fn cleanup_waits_for_recovery_then_rereads_the_completed_origin() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
+    // The sandboxed retry cannot write shared temp, so it announces its
+    // mutation window on stdout, which the host captures in the durable
+    // transcript.
     for _ in 0..500 {
-        if retry_started.exists() {
+        if learner_transcripts(&main_dir).contains("RETRY_STARTED") {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     assert!(
-        retry_started.exists(),
+        learner_transcripts(&main_dir).contains("RETRY_STARTED"),
         "recovery reached its serialized mutation window"
     );
 
@@ -5081,16 +5110,14 @@ fn concurrent_post_land_retries_run_the_learner_once() {
     if !real_sandbox_exec_is_usable() {
         assert!(!first_output.status.success());
         assert!(!second_output.status.success());
-        let invocations = fs::read_to_string(format!("{}.invocations", counter.display())).unwrap();
-        assert_eq!(invocations.lines().count(), 1);
+        assert_eq!(learner_run_count(&main_dir), 1);
         return;
     }
     assert!(first_output.status.success());
     assert!(second_output.status.success());
 
-    let invocations = fs::read_to_string(format!("{}.invocations", counter.display())).unwrap();
     assert_eq!(
-        invocations.lines().count(),
+        learner_run_count(&main_dir),
         2,
         "one initial failure plus exactly one post-land retry"
     );
@@ -5155,11 +5182,8 @@ fn post_land_retry_ignores_a_malformed_retained_candidate() {
         "cleanup failure remains explicitly retryable"
     );
 
-    assert_eq!(
-        fs::read_to_string(format!("{}.head", counter.display()))
-            .unwrap()
-            .trim(),
-        merged,
+    assert!(
+        learner_transcripts(&main_dir).contains(&format!("LEARNER_HEAD {merged}")),
         "the coder starts from the durable merged commit"
     );
     assert!(
@@ -5174,13 +5198,14 @@ fn post_land_expertise_proposal_materializes_observation_only() {
     let main_dir = setup_git_project(&tmp);
     let counter = tmp.path().join("learner-counter");
     let bin_dir = tmp.path().join("bin-expertise-proposal");
-    // The retry's only output is a denied expertise commit; it must surface as a
-    // non-corrective Observation, not as Work.
+    // A handoff-only retry cannot write expertise; the sandbox denies its
+    // attempted commit. It records the missed expertise as a non-corrective
+    // follow-up in its draft, which must surface as an Observation, not Work.
     write_mock_claude(
         &bin_dir,
         &post_land_learner_mock_script(
             &counter,
-            r#"{"learning_summary":"missed expertise","follow_ups":[]}"#,
+            r#"{"learning_summary":"missed expertise","follow_ups":[{"id":"expertise-late-knowledge","summary":"Capture durable project knowledge a post-land retry could not write to .fluent/expertise","corrective":false}]}"#,
             true,
         ),
     );

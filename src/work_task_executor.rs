@@ -2037,11 +2037,16 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
         }
     };
 
-    if let Some(transcript_path) = inputs.transcript_path
-        && let Some(parent) = transcript_path.parent()
-    {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create Learner transcript dir at {}", parent.display()))?;
+    if let Some(transcript_path) = inputs.transcript_path {
+        if let Some(parent) = transcript_path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("create Learner transcript dir at {}", parent.display())
+            })?;
+        }
+        // Preserve a prior run's transcript as an immutable per-run sibling
+        // before this run truncates the live path, so every Learner run on this
+        // Attempt leaves a durable record on the managed surface.
+        preserve_prior_run_transcript(transcript_path)?;
     }
 
     let coder = inputs
@@ -2059,6 +2064,35 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
         bail!("Learner coder exited with code {exit_code}");
     }
 
+    Ok(())
+}
+
+/// Rotate an existing transcript to the next immutable `transcript.run<N>.jsonl`
+/// sibling before a new Learner run truncates the live path. Each Learner run on
+/// an Attempt therefore leaves its own durable transcript, so a later run cannot
+/// erase the record of an earlier one.
+fn preserve_prior_run_transcript(transcript_path: &Path) -> Result<()> {
+    if !transcript_path.exists() {
+        return Ok(());
+    }
+    let parent = transcript_path.parent().unwrap_or(Path::new("."));
+    let stem = transcript_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let ext = transcript_path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    for n in 0.. {
+        let preserved = parent.join(format!("{stem}.run{n}{ext}"));
+        if !preserved.exists() {
+            fs::rename(transcript_path, &preserved).with_context(|| {
+                format!("preserve prior Learner transcript at {}", preserved.display())
+            })?;
+            return Ok(());
+        }
+    }
     Ok(())
 }
 
@@ -3797,6 +3831,38 @@ mod tests {
             project_root.join(
                 ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests/transcript.jsonl"
             )
+        );
+    }
+
+    #[test]
+    fn preserve_prior_run_transcript_rotates_into_immutable_siblings() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let transcript = tmp.path().join("transcript.jsonl");
+
+        // No live transcript yet: nothing to preserve.
+        preserve_prior_run_transcript(&transcript).unwrap();
+        assert!(!tmp.path().join("transcript.run0.jsonl").exists());
+
+        // Each run preserves the prior transcript into the next sibling index,
+        // leaving earlier runs immutable.
+        fs::write(&transcript, "first run\n").unwrap();
+        preserve_prior_run_transcript(&transcript).unwrap();
+        assert!(!transcript.exists(), "the live path is rotated away");
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("transcript.run0.jsonl")).unwrap(),
+            "first run\n"
+        );
+
+        fs::write(&transcript, "second run\n").unwrap();
+        preserve_prior_run_transcript(&transcript).unwrap();
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("transcript.run0.jsonl")).unwrap(),
+            "first run\n",
+            "the earlier run's transcript is not overwritten"
+        );
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("transcript.run1.jsonl")).unwrap(),
+            "second run\n"
         );
     }
 
