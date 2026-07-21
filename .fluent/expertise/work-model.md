@@ -8,3 +8,4 @@ attempts, tasks, and merge candidates persist as separate records.
 ## Patterns
 
 - [extend-work-item-backward-compatibly](work-model/patterns/extend-work-item-backward-compatibly.md) — read when adding a field to WorkItem or another split-stored model type
+- [serialize-aggregate-work-writes](work-model/patterns/serialize-aggregate-work-writes.md) — read when adding code that rewrites a WorkItem and its split child records

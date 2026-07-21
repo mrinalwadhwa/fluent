@@ -2,10 +2,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+use rustix::fs::{FlockOperation, flock};
 
 use crate::coder::CoderKind;
 
@@ -157,6 +160,65 @@ impl fmt::Display for ManagedWorkspacePathError {
 
 impl Error for ManagedWorkspacePathError {}
 
+/// The persisted revision a store read observed. Aggregate writes compare it
+/// under the Work Item's model lock before replacing any split records.
+pub struct StorageRevision {
+    observed: AtomicBool,
+    value: AtomicU64,
+}
+
+impl StorageRevision {
+    fn persisted(value: u64) -> Self {
+        Self {
+            observed: AtomicBool::new(true),
+            value: AtomicU64::new(value),
+        }
+    }
+
+    fn get(&self) -> Option<u64> {
+        self.observed
+            .load(Ordering::SeqCst)
+            .then(|| self.value.load(Ordering::SeqCst))
+    }
+
+    fn set(&self, revision: u64) {
+        self.value.store(revision, Ordering::SeqCst);
+        self.observed.store(true, Ordering::SeqCst);
+    }
+}
+
+impl Default for StorageRevision {
+    fn default() -> Self {
+        Self {
+            observed: AtomicBool::new(false),
+            value: AtomicU64::new(0),
+        }
+    }
+}
+
+impl Clone for StorageRevision {
+    fn clone(&self) -> Self {
+        match self.get() {
+            Some(revision) => Self::persisted(revision),
+            None => Self::default(),
+        }
+    }
+}
+
+impl fmt::Debug for StorageRevision {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.get().fmt(formatter)
+    }
+}
+
+impl PartialEq for StorageRevision {
+    fn eq(&self, other: &Self) -> bool {
+        self.get() == other.get()
+    }
+}
+
+impl Eq for StorageRevision {}
+
 /// Durable unit of planned Fluent work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkItem {
@@ -198,6 +260,10 @@ pub struct WorkItem {
     /// the queue write can be reconciled on retry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_enqueue: Option<EnqueueIntent>,
+    /// Store-managed optimistic revision for aggregate split-record writes.
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub storage_revision: StorageRevision,
     #[serde(default)]
     pub attempts: Vec<Attempt>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -219,6 +285,7 @@ impl Default for WorkItem {
             corrective_context: None,
             corrective_audit: None,
             pending_enqueue: None,
+            storage_revision: StorageRevision::default(),
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         }
@@ -2889,6 +2956,12 @@ pub enum WorkModelStorageError {
         path: PathBuf,
         id: String,
     },
+    StaleWorkItem {
+        path: PathBuf,
+        id: String,
+        expected_revision: Option<u64>,
+        actual_revision: u64,
+    },
     ParseFile {
         path: PathBuf,
         source: serde_json::Error,
@@ -2913,6 +2986,7 @@ impl WorkModelStorageError {
             | Self::ReadFile { path, .. }
             | Self::WriteFile { path, .. }
             | Self::WorkItemAlreadyExists { path, .. }
+            | Self::StaleWorkItem { path, .. }
             | Self::ParseFile { path, .. }
             | Self::WorkItemIdMismatch { path, .. }
             | Self::InvalidModel { path, .. } => Some(path),
@@ -2940,6 +3014,18 @@ impl fmt::Display for WorkModelStorageError {
             }
             Self::WorkItemAlreadyExists { id, .. } => {
                 write!(f, "Work Item {id:?} already exists")
+            }
+            Self::StaleWorkItem {
+                id,
+                expected_revision,
+                actual_revision,
+                ..
+            } => {
+                write!(
+                    f,
+                    "Work Item {id:?} changed after it was read (expected storage revision \
+                     {expected_revision:?}, found {actual_revision}); reload before writing"
+                )
             }
             Self::ParseFile { path, source } => {
                 write!(f, "failed to parse {}: {source}", path.display())
@@ -2971,6 +3057,7 @@ impl Error for WorkModelStorageError {
             | Self::ReadFile { source, .. }
             | Self::WriteFile { source, .. } => Some(source),
             Self::WorkItemAlreadyExists { .. } => None,
+            Self::StaleWorkItem { .. } => None,
             Self::ParseFile { source, .. } => Some(source),
             Self::WorkItemIdMismatch { .. } => None,
             Self::InvalidModel { source, .. } => Some(source),
@@ -2987,6 +3074,8 @@ pub struct WorkModelStore {
 struct WorkItemRecord {
     id: String,
     title: String,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    storage_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     planning_context: Option<PlanningContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3010,6 +3099,10 @@ struct WorkItemRecord {
     corrective_audit: Option<CorrectiveAuditContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_enqueue: Option<EnqueueIntent>,
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3050,6 +3143,7 @@ impl From<&WorkItem> for WorkItemRecord {
         Self {
             id: work_item.id.clone(),
             title: work_item.title.clone(),
+            storage_revision: work_item.storage_revision.get().unwrap_or(0),
             planning_context: work_item.planning_context.clone(),
             instructions: work_item.instructions.clone(),
             abandonment: work_item.abandonment.clone(),
@@ -3069,6 +3163,7 @@ impl From<WorkItemRecord> for WorkItem {
         Self {
             id: record.id,
             title: record.title,
+            storage_revision: StorageRevision::persisted(record.storage_revision),
             planning_context: record.planning_context,
             instructions: record.instructions,
             abandonment: record.abandonment,
@@ -3294,7 +3389,36 @@ impl WorkModelStore {
                 source,
             })?;
 
+        let _lock = self.lock_work_item_model(&work_item.id)?;
         self.write_work_item_file_unchecked(work_item, create_new)
+    }
+
+    fn lock_work_item_model(&self, id: &str) -> Result<File, WorkModelStorageError> {
+        let path = self
+            .project_root
+            .join(".fluent/work/locks")
+            .join(id)
+            .join("model.lock");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|source| {
+                WorkModelStorageError::CreateDirectory {
+                    path: parent.to_path_buf(),
+                    source,
+                }
+            })?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&path)
+            .map_err(|source| WorkModelStorageError::WriteFile {
+                path: path.clone(),
+                source,
+            })?;
+        flock(&file, FlockOperation::LockExclusive)
+            .map_err(io::Error::from)
+            .map_err(|source| WorkModelStorageError::WriteFile { path, source })?;
+        Ok(file)
     }
 
     fn write_work_item_file_unchecked(
@@ -3307,7 +3431,20 @@ impl WorkModelStore {
         fs::create_dir_all(&dir)
             .map_err(|source| WorkModelStorageError::CreateDirectory { path: dir, source })?;
 
-        let record = WorkItemRecord::from(work_item);
+        let mut record = WorkItemRecord::from(work_item);
+        if !create_new && path.exists() {
+            let current: WorkItemRecord = read_json_file(&path)?;
+            let expected_revision = work_item.storage_revision.get();
+            if expected_revision != Some(current.storage_revision) {
+                return Err(WorkModelStorageError::StaleWorkItem {
+                    path,
+                    id: work_item.id.clone(),
+                    expected_revision,
+                    actual_revision: current.storage_revision,
+                });
+            }
+            record.storage_revision = current.storage_revision.saturating_add(1);
+        }
         let json = to_json_pretty(&record).map_err(|source| WorkModelStorageError::ParseFile {
             path: path.clone(),
             source,
@@ -3346,6 +3483,7 @@ impl WorkModelStore {
 
         self.write_attempt_records(work_item)?;
         self.write_merge_candidate_records(work_item)?;
+        work_item.storage_revision.set(record.storage_revision);
         Ok(())
     }
 

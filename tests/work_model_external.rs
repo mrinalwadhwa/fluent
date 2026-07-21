@@ -89,6 +89,20 @@ fn merge_candidate() -> MergeCandidate {
     }
 }
 
+fn assert_stale_write(error: WorkModelStorageError) {
+    match error {
+        WorkModelStorageError::StaleWorkItem {
+            expected_revision,
+            actual_revision,
+            ..
+        } => {
+            assert_eq!(expected_revision, Some(0));
+            assert_eq!(actual_revision, 1);
+        }
+        other => panic!("expected stale aggregate write, got {other}"),
+    }
+}
+
 #[test]
 fn documented_task_kinds_parse_from_json() {
     let content = include_str!("fixtures/core-work-model/task-kinds.json");
@@ -231,6 +245,137 @@ fn work_model_store_preserves_attempt_append_order() {
     assert!(stored_attempt.contains(r#""order": 1"#));
     assert_eq!(read.attempts[0].id, "attempt-2");
     assert_eq!(read.attempts[1].id, "attempt-10");
+}
+
+#[test]
+fn stale_retry_cannot_revert_landed_candidate() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    let mut initial = work_item();
+    initial.merge_candidates.push(merge_candidate());
+    store.write_work_item(&initial).unwrap();
+    let mut land = store.read_work_item("work-1").unwrap();
+    let mut retry = store.read_work_item("work-1").unwrap();
+
+    land.merge_candidates[0].merge_state.status =
+        fluent::work_model::MergeCandidateMergeStatus::Merged;
+    land.merge_candidates[0].merge_state.merged_commit = Some("merged123".to_string());
+    store.write_work_item(&land).unwrap();
+    retry.attempts[0].learning = Some(fluent::work_model::AttemptLearning::failed(1, "retry"));
+
+    assert_stale_write(store.write_work_item(&retry).unwrap_err());
+    let stored = store.read_work_item("work-1").unwrap();
+    assert_eq!(
+        stored.merge_candidates[0].merge_state.status,
+        fluent::work_model::MergeCandidateMergeStatus::Merged
+    );
+    assert_eq!(
+        stored.merge_candidates[0].merge_state.merged_commit.as_deref(),
+        Some("merged123")
+    );
+}
+
+#[test]
+fn stale_retry_cannot_replace_competing_retry_result() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    store.write_work_item(&work_item()).unwrap();
+    let mut first = store.read_work_item("work-1").unwrap();
+    let mut second = store.read_work_item("work-1").unwrap();
+
+    first.attempts[0].learning = Some(fluent::work_model::AttemptLearning::failed(1, "first"));
+    second.attempts[0].learning = Some(fluent::work_model::AttemptLearning::failed(1, "second"));
+    store.write_work_item(&first).unwrap();
+
+    assert_stale_write(store.write_work_item(&second).unwrap_err());
+    assert_eq!(
+        store.read_work_item("work-1").unwrap().attempts[0]
+            .learning
+            .as_ref()
+            .unwrap()
+            .last_failure
+            .as_deref(),
+        Some("first")
+    );
+}
+
+#[test]
+fn stale_task_write_cannot_revert_coder_mapping() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    store.write_work_item(&work_item()).unwrap();
+    let mut mapping = store.read_work_item("work-1").unwrap();
+    let mut task_update = store.read_work_item("work-1").unwrap();
+
+    mapping.attempts[0].coder_mapping.write.model = "new-model".to_string();
+    task_update.attempts[0].tasks[0]
+        .output
+        .as_mut()
+        .unwrap()
+        .commit = "task-update".to_string();
+    store.write_work_item(&mapping).unwrap();
+
+    assert_stale_write(store.write_work_item(&task_update).unwrap_err());
+    let stored = store.read_work_item("work-1").unwrap();
+    assert_eq!(stored.attempts[0].coder_mapping.write.model, "new-model");
+    assert_eq!(
+        stored.attempts[0].tasks[0]
+            .output
+            .as_ref()
+            .unwrap()
+            .commit,
+        "abc123"
+    );
+}
+
+#[test]
+fn stale_aggregate_write_cannot_prune_sibling_records() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    store.write_work_item(&work_item()).unwrap();
+    let mut sibling_update = store.read_work_item("work-1").unwrap();
+    let mut stale = store.read_work_item("work-1").unwrap();
+
+    sibling_update.add_initial_attempt("attempt-2").unwrap();
+    store.write_work_item(&sibling_update).unwrap();
+    stale.title = "stale title".to_string();
+
+    assert_stale_write(store.write_work_item(&stale).unwrap_err());
+    let stored = store.read_work_item("work-1").unwrap();
+    assert_eq!(stored.title, "Add durable model storage");
+    assert!(stored.attempts.iter().any(|attempt| attempt.id == "attempt-2"));
+    assert!(
+        temp.path()
+            .join(".fluent/work/attempts/work-1/attempt-2.json")
+            .exists()
+    );
+}
+
+#[test]
+fn unobserved_aggregate_cannot_replace_competing_creation() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(temp.path());
+    let first = WorkItem::planned("work-new", "first creation");
+    let second = WorkItem::planned("work-new", "competing creation");
+
+    store.write_work_item(&first).unwrap();
+    let error = store.write_work_item(&second).unwrap_err();
+
+    match error {
+        WorkModelStorageError::StaleWorkItem {
+            expected_revision,
+            actual_revision,
+            ..
+        } => {
+            assert_eq!(expected_revision, None);
+            assert_eq!(actual_revision, 0);
+        }
+        other => panic!("expected competing creation to fail stale, got {other}"),
+    }
+    assert_eq!(
+        store.read_work_item("work-new").unwrap().title,
+        "first creation"
+    );
 }
 
 #[test]

@@ -764,6 +764,12 @@ live in `merge-candidates/<work-item-id>/<merge-candidate-id>.json`.
 `WorkModelStore` assembles those split records into the public
 `WorkItem` shape from `fluent::work_model` for `fluent work-item show`,
 status, dashboard, task execution, review, merge, and cleanup.
+Each assembled Work Item carries the storage revision observed in its top-level
+record. Aggregate writes take a per-item `model.lock`, compare that revision,
+and increment it before replacing metadata or split records. A stale writer
+fails before it can revert a concurrent field change or prune a newly added
+Attempt, Task, or Merge Candidate. Legacy top-level records omit the revision
+and read as revision zero.
 If an item file contains nested Attempts, Tasks, or Merge Candidates,
 Fluent ignores those nested operational collections and exposes only
 records from the split Attempt, Task, and Merge Candidate collections.
