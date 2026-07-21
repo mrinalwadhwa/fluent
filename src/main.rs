@@ -1020,8 +1020,8 @@ fn cmd_scheduler(project_root: &Path, command: SchedulerCommands) -> Result<()> 
     match command {
         SchedulerCommands::Run { poll_seconds } => {
             let poll = poll_seconds.unwrap_or(30);
-            let invoker = fluent::scheduler::CliAttemptInvoker;
-            fluent::scheduler::run(project_root, poll, &invoker)?;
+            let runner = fluent::scheduler::CliAttemptRunner;
+            fluent::scheduler::run(project_root, poll, &runner)?;
         }
     }
     Ok(())

@@ -10285,7 +10285,8 @@ exit 0
     assert!(queue_entry_path.exists());
     let before: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&queue_entry_path).unwrap()).unwrap();
-    assert_eq!(before["status"], "queued");
+    let before_dispatches = before["dispatches"].as_array().expect("dispatch ledger");
+    assert_eq!(before_dispatches.last().unwrap()["status"], "queued");
 
     let child = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
         .current_dir(project)
@@ -10303,13 +10304,22 @@ exit 0
         .spawn()
         .unwrap();
 
+    let latest_status = |value: &serde_json::Value| -> String {
+        value["dispatches"]
+            .as_array()
+            .and_then(|d| d.last())
+            .and_then(|d| d["status"].as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         std::thread::sleep(std::time::Duration::from_millis(500));
         let entry: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&queue_entry_path).unwrap()).unwrap();
-        let s = entry["status"].as_str().unwrap_or("");
-        if s == "done" || s == "failed" {
+        let s = latest_status(&entry);
+        if s == "candidate-ready" || s == "failed" {
             break;
         }
         assert!(
@@ -10328,9 +10338,9 @@ exit 0
 
     let after: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&queue_entry_path).unwrap()).unwrap();
-    let status = after["status"].as_str().unwrap_or("");
+    let status = latest_status(&after);
     assert!(
-        status == "done" || status == "failed",
+        status == "candidate-ready" || status == "failed",
         "queue entry should be terminal after scheduler runs, got: {status}"
     );
 }
