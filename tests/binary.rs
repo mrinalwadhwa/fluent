@@ -2833,6 +2833,46 @@ exit 0
     )
 }
 
+fn failing_dirty_post_land_learner_mock_script(counter: &Path) -> String {
+    format!(
+        r##"#!/bin/bash
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
+done
+if [ -z "$PROMPT" ]; then exit 0; fi
+if printf '%s' "$PROMPT" | grep -q "Rebase the candidate branch"; then
+  TARGET=$(printf '%s' "$PROMPT" | grep -o 'onto `[^`]*`' | sed 's/onto `//;s/`//')
+  git rebase "$TARGET" 2>/dev/null
+  exit $?
+fi
+if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
+  if [ ! -f "{}" ]; then touch "{}"; exit 1; fi
+  printf 'dirty failed retry\n' > failed-retry.txt
+  git add failed-retry.txt
+  INDEX_PATH=$(git rev-parse --path-format=absolute --git-path index)
+  HEAD_PATH=$(git rev-parse --path-format=absolute --git-path HEAD)
+  printf 'corrupt index\n' > "$INDEX_PATH"
+  printf 'ref: refs/heads/malformed-candidate\n' > "$HEAD_PATH"
+  exit 1
+fi
+case "$PWD" in
+  */work-6-work-1-attempt-1)
+    printf 'loop output\n' > loop-output.txt
+    git add loop-output.txt
+    git commit -m "Add loop output" >/dev/null 2>&1
+    ;;
+  *) printf 'Verdict: pass\n\nLoop review.\n' > review.md ;;
+esac
+exit 0
+"##,
+        counter.display(),
+        counter.display(),
+    )
+}
+
 /// A mock that fails any rebase request, so a code path that must not rebase is
 /// proven by its success.
 fn rebase_failing_mock_script() -> String {
@@ -2855,6 +2895,16 @@ fn rerun_learner_attempt(main_dir: &Path, bin_dir: &Path) {
         .current_dir(main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(bin_dir))
+        .assert()
+        .success();
+}
+
+fn rerun_learner_attempt_sandboxed(main_dir: &Path, bin_dir: &Path) {
+    fluent_cmd()
+        .current_dir(main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1"])
+        .env("PATH", mock_path(bin_dir))
+        .env("CLAUDE_CODE_OAUTH_TOKEN", "mock-token")
         .assert()
         .success();
 }
@@ -3817,6 +3867,33 @@ fn post_land_handoff_only_restores_hostile_git_mutations() {
     create_and_run_learner_attempt(&main_dir, &bin_dir);
     land_work_1(&main_dir, &bin_dir, true);
     let merged = merged_commit_of(&main_dir);
+    fs::write(main_dir.join("preexisting-staged.txt"), "staged before retry\n").unwrap();
+    git::run(
+        &main_dir,
+        &["add", "preexisting-staged.txt"],
+        "stage preexisting target file",
+    )
+    .unwrap();
+    fs::write(main_dir.join("preexisting-untracked.txt"), "untracked before retry\n").unwrap();
+    fs::write(main_dir.join("README.md"), "# Test\n\nunstaged before retry\n").unwrap();
+    git::run(
+        &main_dir,
+        &["update-index", "--assume-unchanged", "loop-output.txt"],
+        "set preexisting index flag",
+    )
+    .unwrap();
+    let target_status_before = git::run_stdout(
+        &main_dir,
+        &["status", "--porcelain", "--untracked-files=all"],
+        "target status before hostile retry",
+    )
+    .unwrap();
+    let index_flags_before = git::run_stdout(
+        &main_dir,
+        &["ls-files", "-v", "loop-output.txt"],
+        "target index flags before hostile retry",
+    )
+    .unwrap();
     rerun_learner_attempt(&main_dir, &bin_dir);
 
     assert_eq!(
@@ -3839,6 +3916,26 @@ fn post_land_handoff_only_restores_hostile_git_mutations() {
         "candidate index and worktree are restored"
     );
     assert!(!main_dir.join("target-mutated.txt").exists());
+    assert_eq!(
+        git::run_stdout(
+            &main_dir,
+            &["status", "--porcelain", "--untracked-files=all"],
+            "target status after hostile retry",
+        )
+        .unwrap(),
+        target_status_before,
+        "the guard preserves staged, unstaged, and untracked target state"
+    );
+    assert_eq!(
+        git::run_stdout(
+            &main_dir,
+            &["ls-files", "-v", "loop-output.txt"],
+            "target index flags after hostile retry",
+        )
+        .unwrap(),
+        index_flags_before,
+        "the guard preserves complete index flags"
+    );
     assert!(!candidate.join("candidate-index.txt").exists());
     assert!(
         !git::run_raw(
@@ -3855,6 +3952,68 @@ fn post_land_handoff_only_restores_hostile_git_mutations() {
             == "failed",
         "a protected Git mutation rejects the Learner result"
     );
+}
+
+#[test]
+fn sandboxed_post_land_coder_cannot_mutate_candidate_or_shared_git() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let counter = tmp.path().join("learner-counter-sandbox-hostile");
+    let bin_dir = tmp.path().join("bin-sandbox-hostile");
+    write_mock_claude(
+        &bin_dir,
+        &hostile_post_land_learner_mock_script(&counter),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+    let merged = merged_commit_of(&main_dir);
+    rerun_learner_attempt_sandboxed(&main_dir, &bin_dir);
+
+    let candidate = main_dir.join("../work-6-work-1-attempt-1");
+    assert_eq!(git_head(&main_dir), merged);
+    assert_eq!(git_head(&candidate), merged);
+    assert!(!main_dir.join("target-mutated.txt").exists());
+    assert!(!candidate.join("candidate-index.txt").exists());
+    assert!(
+        !git::run_raw(
+            &main_dir,
+            &["show-ref", "--verify", "--quiet", "refs/heads/unauthorized"],
+        )
+        .unwrap()
+        .status
+        .success(),
+        "the effective Seatbelt profile denies shared-Git ref writes"
+    );
+}
+
+#[test]
+fn failed_post_land_coder_still_restores_candidate_index_and_worktree() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let counter = tmp.path().join("learner-counter-failed-dirty");
+    let bin_dir = tmp.path().join("bin-failed-dirty");
+    write_mock_claude(
+        &bin_dir,
+        &failing_dirty_post_land_learner_mock_script(&counter),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+    rerun_learner_attempt(&main_dir, &bin_dir);
+
+    let candidate = main_dir.join("../work-6-work-1-attempt-1");
+    assert!(
+        git::run_stdout(
+            &candidate,
+            &["status", "--porcelain", "--untracked-files=all"],
+            "candidate status after failed coder",
+        )
+        .unwrap()
+        .is_empty(),
+        "cleanup runs even when the handoff-only coder exits nonzero"
+    );
+    assert!(!candidate.join("failed-retry.txt").exists());
 }
 
 #[test]

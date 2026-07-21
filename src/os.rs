@@ -57,8 +57,40 @@ pub fn render_profile_for_access_for_coder(
         home,
         writable_roots,
         readable_roots,
+        &[],
         Some(coder_kind),
     )
+}
+
+/// Render a coder profile with explicit write denials that override broad
+/// common temporary-directory grants.
+pub fn render_profile_for_access_for_coder_with_denied_writes(
+    resolver: &ContentResolver,
+    home: &str,
+    writable_roots: &[PathBuf],
+    readable_roots: &[PathBuf],
+    denied_write_roots: &[PathBuf],
+    coder_kind: CoderKind,
+) -> Result<SandboxProfile> {
+    let profile = render_profile_for_access(
+        resolver,
+        home,
+        writable_roots,
+        readable_roots,
+        denied_write_roots,
+        Some(coder_kind),
+    )?;
+    let content = std::fs::read_to_string(&profile.path)?
+        .replace(
+            "(allow file-write* (subpath \"/private/var/folders\"))",
+            "; handoff-only profiles do not grant the shared macOS temp tree",
+        )
+        .replace(
+            "(allow file-write* (subpath \"/private/tmp\"))",
+            "; handoff-only profiles do not grant shared /private/tmp",
+        );
+    std::fs::write(&profile.path, content)?;
+    Ok(profile)
 }
 
 /// Render a Seatbelt sandbox profile with common rules only (no tool overlay).
@@ -68,7 +100,7 @@ pub fn render_profile_common_only(
     writable_roots: &[PathBuf],
     readable_roots: &[PathBuf],
 ) -> Result<SandboxProfile> {
-    render_profile_for_access(resolver, home, writable_roots, readable_roots, None)
+    render_profile_for_access(resolver, home, writable_roots, readable_roots, &[], None)
 }
 
 fn render_profile_for_access(
@@ -76,6 +108,7 @@ fn render_profile_for_access(
     home: &str,
     writable_roots: &[PathBuf],
     readable_roots: &[PathBuf],
+    denied_write_roots: &[PathBuf],
     coder_kind: Option<CoderKind>,
 ) -> Result<SandboxProfile> {
     if writable_roots.is_empty() {
@@ -103,6 +136,20 @@ fn render_profile_for_access(
         combined.replace(
             "(allow file-read*  (subpath \"_SANDBOX_ROOT_\"))\n(allow file-write* (subpath \"_SANDBOX_ROOT_\"))",
             &root_rules,
+        )
+    };
+    let deny_rules = denied_write_roots
+        .iter()
+        .map(|root| format!("(deny file-write* (subpath {}))", sbpl_string(root)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let combined = if deny_rules.is_empty() {
+        combined
+    } else {
+        combined.replacen(
+            "(deny default)",
+            &format!("(deny default)\n{deny_rules}"),
+            1,
         )
     };
     let rendered = combined

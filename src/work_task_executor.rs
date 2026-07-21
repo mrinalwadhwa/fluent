@@ -1975,14 +1975,19 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
             // only the managed handoff surface is writable. Git metadata is
             // readable for the accepted-change diff but never writable.
             readable_roots.push(expertise_dir.clone());
-            readable_roots.push(common_git_dir);
-            build_coder_sandbox_with_writable_and_read_only_roots(
-                inputs.coder_kind,
+            readable_roots.push(common_git_dir.clone());
+            let home = std::env::var("HOME").unwrap_or_default();
+            let denied = vec![workspace_path.to_path_buf(), common_git_dir];
+            let profile = os::render_profile_for_access_for_coder_with_denied_writes(
                 inputs.resolver,
-                inputs.handoff_dir,
-                &[],
+                &home,
+                &[inputs.handoff_dir.to_path_buf()],
                 &readable_roots,
-            )?
+                &denied,
+                inputs.coder_kind,
+            )?;
+            let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
+            (sandbox, Some(profile))
         }
     };
 
@@ -4530,16 +4535,16 @@ mod tests {
             expertise_dir.clone(),
             common_git_dir.clone(),
         ];
-        let (_sandbox, handoff_profile) = build_coder_sandbox_with_writable_and_read_only_roots(
-            CoderKind::Claude,
+        let handoff_profile = os::render_profile_for_access_for_coder_with_denied_writes(
             &resolver,
-            &handoff_dir,
-            &[],
+            "/Users/test",
+            &[handoff_dir.clone()],
             &handoff_readable_roots,
+            &[workspace.clone(), common_git_dir.clone()],
+            CoderKind::Claude,
         )
         .unwrap();
-        let handoff_content =
-            fs::read_to_string(handoff_profile.expect("handoff profile").path).unwrap();
+        let handoff_content = fs::read_to_string(handoff_profile.path).unwrap();
         assert!(handoff_content.contains(&write_grant(&handoff_dir)));
         assert!(!handoff_content.contains(&write_grant(&expertise_dir)));
         assert!(!handoff_content.contains(&write_grant(&common_git_dir)));
@@ -4547,5 +4552,12 @@ mod tests {
             "(allow file-read*  (subpath \"{}\"))",
             common_git_dir.to_string_lossy()
         )));
+        assert!(handoff_content.contains(&format!(
+            "(deny file-write* (subpath \"{}\"))",
+            workspace.to_string_lossy()
+        )));
+        assert!(!handoff_content.contains(
+            "(allow file-write* (subpath \"/private/var/folders\"))"
+        ));
     }
 }
