@@ -87,6 +87,9 @@ The draft has this shape:
       "summary": "one-line description of the follow-up",
       "corrective": false,
       "corrective_context": null,
+      "expected_result": "",
+      "unresolved_decisions": [],
+      "authority": null,
       "evidence": []
     }
   ]
@@ -95,6 +98,10 @@ The draft has this shape:
 
 If there are no follow-ups, write `{"learning_summary": "...", "follow_ups": []}`.
 Each follow-up `id` must be stable and unique within this draft.
+
+For a non-corrective follow-up, leave `expected_result` empty, `authority`
+`null`, and `unresolved_decisions` empty (or list the open questions that keep it
+non-corrective).
 
 ### When a follow-up is corrective
 
@@ -110,22 +117,54 @@ Set `corrective` to `true` only when ALL of these hold, and otherwise leave it
 - **No consequential product, interface, architecture, security, or permission
   decision remains unresolved.**
 
-When and only when `corrective` is `true`, supply a complete `corrective_context`
-so it can stand in for a brief, behaviors, approach, and plan:
+When and only when `corrective` is `true`, the whole follow-up must be complete so
+it can stand in for a brief, behaviors, approach, and plan. A corrective follow-up
+looks like this:
 
 ```json
-"corrective_context": {
-  "objective": "what the corrective Work must accomplish",
-  "requirement": "the single authoritative requirement the result must satisfy",
-  "evidence": "the concrete evidence that motivated the correction",
-  "included_scope": "what is in scope",
-  "excluded_scope": "what is explicitly out of scope",
-  "verification": "the deterministic check that decides done"
+{
+  "id": "restore-retry-cap",
+  "summary": "Restore the retry cap check the merged change removed",
+  "corrective": true,
+  "expected_result": "The retry loop stops after the configured cap",
+  "unresolved_decisions": [],
+  "corrective_context": {
+    "objective": "what the corrective Work must accomplish",
+    "requirement": "the single authoritative requirement the result must satisfy",
+    "evidence": "the concrete evidence that motivated the correction",
+    "included_scope": "what is in scope",
+    "excluded_scope": "what is explicitly out of scope",
+    "verification": "the deterministic check that decides done"
+  },
+  "authority": {
+    "kind": "expertise-entry",
+    "path": ".fluent/expertise/retry-cap.md",
+    "anchor": "Retries must stop after the configured cap.",
+    "digest": "sha256:91128a6a0f51cf76a78f76356a8ad3af7d3f9a48a30f8fc867dd27129bdf97d4"
+  }
 }
 ```
 
-Every field is required for a corrective follow-up. If you cannot fill them all
-with concrete, bounded, deterministic content, the follow-up is not corrective.
+Fill every field:
+
+- `expected_result` — the concrete result the corrective Work must produce. It
+  must be non-empty.
+- `unresolved_decisions` — leave this an empty list. If any product, interface,
+  architecture, security, or permission decision is still open, list it here; a
+  non-empty list keeps the follow-up Observation-only rather than corrective.
+- `corrective_context` — every field is required and must be concrete, bounded,
+  and deterministic.
+- `authority` — the committed, trusted authority this correction derives from.
+  `kind` is one of `behavior-statement` (a statement in `documentation/behaviors.md`),
+  `agents-instruction` (an applicable instruction in a tracked `AGENTS.md`), or
+  `expertise-entry` (a committed file under `.fluent/expertise/`). `path` is the
+  file relative to the project root. `anchor` is the exact authoritative text,
+  copied verbatim and still present in that file. `digest` is `sha256:` over the
+  anchor bytes.
+
+If you cannot fill them all with concrete, bounded, deterministic content, or you
+cannot cite live committed authority, the follow-up is not corrective — leave
+`corrective` `false`.
 
 ## After writing
 

@@ -1440,6 +1440,62 @@ mod tests {
         );
     }
 
+    /// Extract the fenced ```json block documenting a complete corrective
+    /// follow-up — the one marked `"corrective": true` — from a prompt's
+    /// Markdown body.
+    fn corrective_example_from_prompt(prompt: &str) -> String {
+        for block in prompt.split("```json").skip(1) {
+            let Some(body) = block.split("```").next() else {
+                continue;
+            };
+            if body.contains("\"corrective\": true") {
+                return body.trim().to_string();
+            }
+        }
+        panic!("learner prompt has no corrective follow-up example");
+    }
+
+    #[test]
+    fn learner_prompt_corrective_example_passes_the_gate() {
+        // The prompt a real Learner reads must describe every field the
+        // corrective gate requires. Parse the prompt's own corrective example
+        // and run it through the production gate so the two cannot drift: if the
+        // prompt omitted a field the gate needs, the example would downgrade to
+        // Observation-only and this test would fail.
+        let prompt = crate::content::bundled_content("prompts/learner-user.md")
+            .expect("learner-user prompt is bundled");
+        let example = corrective_example_from_prompt(&prompt);
+        let follow_up: FollowUpDraftV1 = serde_json::from_str(&example)
+            .expect("prompt corrective example is a valid FollowUpDraftV1");
+
+        // Every gate-required field is present and well formed straight from the
+        // prompt, without the test supplying any of them.
+        assert!(follow_up.corrective);
+        assert!(!follow_up.expected_result.trim().is_empty());
+        assert!(follow_up.unresolved_decisions.is_empty());
+        assert!(follow_up.corrective_context.is_some());
+        let authority = follow_up
+            .authority
+            .as_ref()
+            .expect("prompt example cites an authority");
+        // The example digest is self-consistent, so a Learner copying the shape
+        // and recomputing over its own anchor produces a matching locator.
+        assert_eq!(authority.digest, content_digest(authority.anchor.as_bytes()));
+
+        // Materialize the committed authority the example points at and confirm
+        // the production gate classifies the prompt's example as corrective.
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_authority(
+            tmp.path(),
+            &authority.path,
+            &format!("# Retry cap\n\n{}\n", authority.anchor),
+        );
+        assert_eq!(
+            classify_follow_up(tmp.path(), &follow_up),
+            FollowUpClassification::Corrective
+        );
+    }
+
     #[test]
     fn gate_accepts_behavior_and_agents_namespaces() {
         let tmp = tempfile::TempDir::new().unwrap();
