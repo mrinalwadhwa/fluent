@@ -741,7 +741,7 @@ fn try_learn(
     attempt_index: usize,
     candidate_id: &str,
     config: &LearnerConfig<'_>,
-) -> Result<ArtifactRef> {
+) -> Result<crate::follow_up::ArtifactRef> {
     let work_item_id = item.id.clone();
     let attempt = &item.attempts[attempt_index];
     let attempt_id = attempt.id.clone();
@@ -1625,7 +1625,7 @@ mod tests {
             created_at: None,
             completed_at: None,
             ..Default::default()
-        }..Default::default()
+        }
     }
 
     fn write_task(id: &str, input_artifacts: Vec<ArtifactRef>) -> Task {
