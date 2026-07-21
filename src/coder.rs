@@ -9,10 +9,6 @@ use std::time::{Duration, SystemTime};
 const DEFAULT_PI_MODEL: &str = "qwen3.6-35b-a3b";
 
 fn trusted_sandbox_executable() -> &'static str {
-    #[cfg(debug_assertions)]
-    if std::env::var_os("FLUENT_TEST_SYSTEM_SANDBOX").is_none() {
-        return "sandbox-exec";
-    }
     "/usr/bin/sandbox-exec"
 }
 
@@ -40,9 +36,39 @@ fn pi_model() -> String {
 fn apply_coder_env(cmd: &mut Command, extra_env: &[(String, String)]) {
     cmd.env("GIT_EDITOR", "false");
     cmd.env("GIT_SEQUENCE_EDITOR", "false");
+    if let Some(working_dir) = cmd.get_current_dir().map(Path::to_path_buf) {
+        cmd.env("PWD", working_dir);
+    }
+    cmd.env_remove("OLDPWD");
     for (key, value) in extra_env {
         cmd.env(key, value);
     }
+}
+
+fn restrict_trusted_coder_env(cmd: &mut Command) {
+    const ALLOWED: &[&str] = &[
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "LANG",
+        "LC_ALL",
+        "TERM",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "CODEX_API_KEY",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+    ];
+    let retained = ALLOWED
+        .iter()
+        .filter_map(|key| std::env::var_os(key).map(|value| (*key, value)))
+        .collect::<Vec<_>>();
+    cmd.env_clear();
+    cmd.envs(retained);
 }
 
 fn codex_ca_bundle() -> Option<PathBuf> {
@@ -260,6 +286,9 @@ impl SandboxedClaudeCode {
             } else {
                 "sandbox-exec"
             });
+            if self.trusted_sandbox {
+                restrict_trusted_coder_env(&mut cmd);
+            }
             cmd.args(["-f", profile]);
             cmd.arg("claude");
             cmd.arg("--dangerously-skip-permissions");
@@ -416,6 +445,9 @@ impl CodexCode {
             } else {
                 "sandbox-exec"
             });
+            if self.trusted_sandbox {
+                restrict_trusted_coder_env(&mut cmd);
+            }
             cmd.args(["-f", profile]);
             cmd.arg("codex");
             if let Some(ca_bundle) = codex_ca_bundle() {
@@ -467,6 +499,9 @@ impl PiCode {
             } else {
                 "sandbox-exec"
             });
+            if self.trusted_sandbox {
+                restrict_trusted_coder_env(&mut cmd);
+            }
             cmd.args(["-f", profile]);
             cmd.arg("pi");
             cmd.args(["--provider", "local-openai"]);
@@ -534,27 +569,58 @@ impl Coder for PiCode {
 /// Run a command, optionally piping stdout to a transcript file (like `tee`).
 /// When `transcript_file` is `None`, stdout inherits from the parent process.
 fn run_with_transcript(mut cmd: Command, transcript_file: Option<&Path>) -> Result<i32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     match transcript_file {
         Some(path) => {
             cmd.stdout(Stdio::piped());
             let mut child = cmd.spawn()?;
+            let child_id = child.id();
             let stdout = child.stdout.take().expect("stdout was piped");
-            let mut file = File::create(path)?;
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                let line = line?;
-                writeln!(file, "{}", line)?;
-                eprintln!("{}", line);
-            }
+            let transcript_path = path.to_path_buf();
+            let transcript = std::thread::spawn(move || -> std::io::Result<()> {
+                let mut file = File::create(transcript_path)?;
+                let reader = BufReader::new(stdout);
+                for line in reader.lines() {
+                    let line = line?;
+                    writeln!(file, "{}", line)?;
+                    eprintln!("{}", line);
+                }
+                Ok(())
+            });
             let status = child.wait()?;
+            terminate_process_group(child_id);
+            transcript
+                .join()
+                .map_err(|_| anyhow::anyhow!("coder transcript reader panicked"))??;
             Ok(status.code().unwrap_or(1))
         }
         None => {
-            let status = cmd.status()?;
+            let mut child = cmd.spawn()?;
+            let child_id = child.id();
+            let status = child.wait()?;
+            terminate_process_group(child_id);
             Ok(status.code().unwrap_or(1))
         }
     }
 }
+
+#[cfg(unix)]
+fn terminate_process_group(leader: u32) {
+    if let Ok(process_group) = i32::try_from(leader) {
+        // The child was launched as its own process-group leader. Kill the
+        // group before returning so descendants cannot race a managed import.
+        unsafe {
+            libc::kill(-process_group, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_process_group(_leader: u32) {}
 
 // ---------------------------------------------------------------------------
 // Rate-limit parsing, jitter, and state tracking
@@ -1377,6 +1443,8 @@ mod model_default_tests {
     #[test]
     fn apply_coder_env_sets_git_editor_defaults() {
         let mut cmd = Command::new("/bin/true");
+        let dir = tempfile::tempdir().unwrap();
+        cmd.current_dir(dir.path());
         apply_coder_env(&mut cmd, &[]);
         let envs: Vec<_> = cmd.get_envs().collect();
         assert!(
@@ -1389,6 +1457,62 @@ mod model_default_tests {
                 .any(|(k, v)| *k == OsStr::new("GIT_SEQUENCE_EDITOR")
                     && *v == Some(OsStr::new("false"))),
             "GIT_SEQUENCE_EDITOR default missing"
+        );
+        assert!(envs.iter().any(|(k, v)| {
+            *k == OsStr::new("PWD") && *v == Some(dir.path().as_os_str())
+        }));
+        assert!(envs
+            .iter()
+            .any(|(k, v)| *k == OsStr::new("OLDPWD") && v.is_none()));
+    }
+
+    #[test]
+    fn trusted_sandbox_always_uses_the_system_launcher() {
+        assert_eq!(trusted_sandbox_executable(), "/usr/bin/sandbox-exec");
+    }
+
+    #[test]
+    fn trusted_coder_environment_drops_unapproved_parent_paths() {
+        let mut command = Command::new("/usr/bin/env");
+        command.env("FLUENT_LIVE_PATH_SENTINEL", "/live/project");
+        restrict_trusted_coder_env(&mut command);
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        let environment = String::from_utf8(output.stdout).unwrap();
+        assert!(!environment.contains("FLUENT_LIVE_PATH_SENTINEL"));
+        assert!(!environment.lines().any(|line| line.starts_with("PWD=")));
+        assert!(!environment.lines().any(|line| line.starts_with("OLDPWD=")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn coder_run_terminates_background_descendants_before_returning() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("descendant.pid");
+        let launched_path = dir.path().join("descendant-launched");
+        let denied_path = dir.path().join("descendant-write");
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(
+                "(echo launched > descendant-launched; sleep 0.2; echo escaped > descendant-write) & pid=$!; while [ ! -f descendant-launched ]; do :; done; echo $pid > descendant.pid",
+            )
+            .current_dir(dir.path());
+
+        assert_eq!(run_with_transcript(command, None).unwrap(), 0);
+        assert!(launched_path.exists(), "hostile descendant actually executed");
+        let pid = std::fs::read_to_string(pid_path).unwrap();
+        let status = Command::new("/bin/kill")
+            .args(["-0", pid.trim()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(!status.success(), "background descendant survived coder return");
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !denied_path.exists(),
+            "terminated descendant wrote after the coder boundary returned"
         );
     }
 
@@ -1445,7 +1569,7 @@ mod model_default_tests {
     }
 
     #[test]
-    fn trusted_claude_sandbox_uses_the_debug_test_launcher() {
+    fn trusted_claude_sandbox_uses_the_system_launcher() {
         let coder = SandboxedClaudeCode {
             sandbox_profile: Some("/tmp/profile".to_string()),
             trusted_sandbox: true,
@@ -1456,7 +1580,7 @@ mod model_default_tests {
 
         let cmd = coder.build_command(dir.path());
 
-        assert_eq!(cmd.get_program(), OsStr::new("sandbox-exec"));
+        assert_eq!(cmd.get_program(), OsStr::new("/usr/bin/sandbox-exec"));
     }
 
     #[test]

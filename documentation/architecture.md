@@ -444,10 +444,10 @@ The command persists its resolved coder mapping through a fresh field-level
 Work-model mutation under that same lock; it never writes a whole Work Item
 snapshot captured before the serialization boundary.
 After taking the lock, retry re-reads the Attempt and candidate and skips the
-coder when another retry has already persisted success. It resets the retained
-candidate worktree and index to the candidate's stored `merged_commit` before
-launch, so an interrupted unrecorded Learner commit cannot become the next
-retry's baseline. The Learner diff uses the persisted accepted base. For a
+coder when another retry has already persisted success. It never repairs or
+resets the retained candidate before isolation, so malformed or concurrently
+changed live Git state cannot be overwritten. The Learner diff uses the
+persisted accepted base. For a
 legacy merged TaskOutput without that field, recovery reads the retained
 candidate's rebase reflog only when it contains one intact session whose start
 names the recorded target branch and whose finish returns to the retained
@@ -455,16 +455,25 @@ candidate ref. Both endpoints must be ancestors of the stored merged commit,
 which includes accepted rebase rewrites and merge-fix commits while excluding
 target-only history. Missing, partial, expired, or repeated sessions fail
 closed; recovery never guesses the base by counting commits.
-Before invoking the coder, Fluent clones the merged repository without hard
-links into a disposable directory and creates a sibling temporary project for
-the draft. The prompt, diff command, current directory, and draft path name only
-those isolated paths. This keeps the live target checkout, refs, index, dirty
-files, and retained candidate worktree outside the Learner's writable surface
-even when the caller uses `--no-sandbox`; after a successful run, Fluent imports
-only a regular `follow-up-draft.json` into the managed handoff directory. The
-Seatbelt profile adds another boundary: it exposes the isolated Git directory
-read-only, strips broad temporary-tree write grants, and explicitly denies the
-isolated candidate and Git metadata while allowing the isolated draft path.
+Before invoking the coder, Fluent bundles the merged repository into a
+disposable directory, clones that bundle without hard links, removes the
+remote, and deletes clone reflogs. It creates a sibling temporary project for
+the draft. The prompt, diff command, current directory, environment, draft
+path, and readable Git metadata name only isolated paths. The live target
+checkout, refs, index, dirty files, retained candidate, and shared Git directory
+stay outside the Learner's writable surface. A handoff-only run always invokes
+the absolute system Seatbelt launcher, even when the caller uses
+`--no-sandbox`; if the host cannot enforce that profile, the command records
+failed Learning and returns a recovery-pending failure instead of reporting a
+ready candidate. The profile exposes isolated Git data read-only, strips broad
+temporary-tree write grants, and explicitly denies every live root while
+allowing only the isolated draft directory. Fluent launches the coder in its
+own process group and kills surviving descendants before it imports the draft.
+It then opens the draft without following the final component, requires one
+bounded regular inode with no hardlink aliases, and writes through a retained
+project-directory handle after rejecting symlinked ancestors. Review and Tester
+artifacts cross the isolation boundary under the same regular-file, identity,
+confinement, and size rules; a declared missing artifact fails the run.
 Candidate commits, staged files, unstaged files, and untracked files are
 collected as denied paths inside the disposable clone, which is removed after
 the host stamps the handoff.

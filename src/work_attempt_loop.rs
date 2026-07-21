@@ -1,7 +1,7 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use std::collections::HashSet;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -234,6 +234,22 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                         },
                     );
                     config.store.write_work_item(&item)?;
+                    if handoff_only
+                        && item.attempts[attempt_index]
+                            .learning
+                            .as_ref()
+                            .is_some_and(|learning| learning.is_failed())
+                    {
+                        outcomes.push(WorkAttemptRunOutcome::FollowUpRecoveryPending {
+                            candidate_id,
+                            stage: "learner".to_string(),
+                            next_action: format!(
+                                "Retry `fluent attempt run {} {}` on a host that can enforce the trusted Learner sandbox.",
+                                config.work_item_id, config.attempt_id
+                            ),
+                        });
+                        return Ok(WorkAttemptRunResult { outcomes });
+                    }
                 }
 
                 // A successful post-land handoff always passes through the same
@@ -906,8 +922,8 @@ fn try_learn(
         "learner workspace",
     )?;
 
-    let review_artifact_paths = all_review_artifact_paths(project_root, attempt);
-    let tester_artifact_paths = all_tester_artifact_paths(project_root, attempt);
+    let review_artifact_paths = all_review_artifact_paths(project_root, attempt)?;
+    let tester_artifact_paths = all_tester_artifact_paths(project_root, attempt)?;
 
     let mapping_pair = attempt.coder_mapping.for_task_kind(TaskKind::Write);
     let coder_kind = mapping_pair.coder;
@@ -1268,6 +1284,10 @@ struct HandoffOnlyWorkspace {
     tester_artifact_paths: Vec<PathBuf>,
 }
 
+const MAX_HANDOFF_DRAFT_BYTES: u64 = 1024 * 1024;
+const MAX_LEARNER_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_LEARNER_ARTIFACT_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+
 impl HandoffOnlyWorkspace {
     fn create(
         project_root: &Path,
@@ -1281,17 +1301,32 @@ impl HandoffOnlyWorkspace {
             .prefix("fluent-handoff-only-")
             .tempdir()?;
         let workspace_path = temp.path().join("candidate");
-        let source = project_root
+        let bundle_path = temp.path().join("candidate.bundle");
+        let bundle = bundle_path
             .to_str()
-            .ok_or_else(|| anyhow::anyhow!("project root is not UTF-8"))?;
+            .ok_or_else(|| anyhow::anyhow!("isolated bundle path is not UTF-8"))?;
         let destination = workspace_path
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("isolated Learner path is not UTF-8"))?;
         git::run(
             project_root,
-            &["clone", "--quiet", "--no-hardlinks", source, destination],
+            &["bundle", "create", bundle, "--all"],
+            "bundle isolated handoff-only workspace",
+        )?;
+        git::run(
+            project_root,
+            &[
+                "-c",
+                "core.logAllRefUpdates=false",
+                "clone",
+                "--quiet",
+                "--no-hardlinks",
+                bundle,
+                destination,
+            ],
             "clone isolated handoff-only workspace",
         )?;
+        fs::remove_file(&bundle_path)?;
         git::run(
             &workspace_path,
             &["checkout", "--quiet", "--detach", baseline_commit],
@@ -1302,6 +1337,10 @@ impl HandoffOnlyWorkspace {
             &["remote", "remove", "origin"],
             "remove live origin from isolated handoff-only workspace",
         )?;
+        let reflogs = workspace_path.join(".git/logs");
+        if reflogs.exists() {
+            fs::remove_dir_all(reflogs)?;
+        }
         let workspace_path = fs::canonicalize(workspace_path)?;
 
         let handoff_dir = temp
@@ -1310,10 +1349,18 @@ impl HandoffOnlyWorkspace {
             .join(crate::learner::handoff_dir_rel(work_item_id, attempt_id));
         fs::create_dir_all(&handoff_dir)?;
         let handoff_dir = fs::canonicalize(handoff_dir)?;
-        let review_artifact_paths =
-            copy_learner_artifacts(temp.path(), "reviews", review_artifact_paths)?;
-        let tester_artifact_paths =
-            copy_learner_artifacts(temp.path(), "testers", tester_artifact_paths)?;
+        let review_artifact_paths = copy_learner_artifacts(
+            temp.path(),
+            project_root,
+            "reviews",
+            review_artifact_paths,
+        )?;
+        let tester_artifact_paths = copy_learner_artifacts(
+            temp.path(),
+            project_root,
+            "testers",
+            tester_artifact_paths,
+        )?;
         Ok(Self {
             _temp: temp,
             workspace_path,
@@ -1330,50 +1377,42 @@ impl HandoffOnlyWorkspace {
         attempt_id: &str,
     ) -> Result<()> {
         let source = self.handoff_dir.join(crate::learner::DRAFT_FILE_NAME);
-        if !source.exists() {
-            bail!("handoff-only Learner did not produce a fresh draft");
-        }
-        let metadata = fs::symlink_metadata(&source)?;
-        if !metadata.file_type().is_file() {
-            bail!("handoff-only Learner draft is not a regular file");
-        }
-        let target = project_root.join(crate::learner::draft_path_rel(work_item_id, attempt_id));
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        if let Ok(metadata) = fs::symlink_metadata(&target) {
-            if !metadata.file_type().is_file() {
-                bail!("existing handoff-only Learner draft is not a regular file");
-            }
-        }
-        let bytes = fs::read(&source)?;
-        crate::atomic_write::atomic_write(&target, &bytes)?;
+        let bytes = read_confined_regular_file(
+            &self.handoff_dir,
+            &source,
+            MAX_HANDOFF_DRAFT_BYTES,
+            "handoff-only Learner draft",
+        )?;
+        let relative = crate::learner::draft_path_rel(work_item_id, attempt_id);
+        atomic_write_confined(project_root, Path::new(&relative), &bytes)?;
         Ok(())
     }
 }
 
 fn copy_learner_artifacts(
     isolated_root: &Path,
+    source_root: &Path,
     category: &str,
     sources: &[PathBuf],
 ) -> Result<Vec<PathBuf>> {
     let destination = isolated_root.join("artifacts").join(category);
     fs::create_dir_all(&destination)?;
+    let mut total = 0u64;
     sources
         .iter()
         .enumerate()
         .map(|(index, source)| {
-            let metadata = fs::symlink_metadata(source).map_err(|error| {
-                anyhow::anyhow!(
-                    "cannot inspect Learner {category} artifact {}: {error}",
-                    source.display()
-                )
-            })?;
-            if !metadata.file_type().is_file() {
-                bail!(
-                    "Learner {category} artifact is not a regular file: {}",
-                    source.display()
-                );
+            let bytes = read_confined_regular_file(
+                source_root,
+                source,
+                MAX_LEARNER_ARTIFACT_BYTES,
+                &format!("Learner {category} artifact"),
+            )?;
+            total = total
+                .checked_add(bytes.len() as u64)
+                .ok_or_else(|| anyhow::anyhow!("Learner artifacts exceed the aggregate limit"))?;
+            if total > MAX_LEARNER_ARTIFACT_TOTAL_BYTES {
+                bail!("Learner artifacts exceed the aggregate limit");
             }
             let extension = source
                 .extension()
@@ -1381,10 +1420,152 @@ fn copy_learner_artifacts(
                 .map(|value| format!(".{value}"))
                 .unwrap_or_default();
             let copied = destination.join(format!("{index:03}-artifact{extension}"));
-            fs::copy(source, &copied)?;
+            fs::write(&copied, bytes)?;
             Ok(copied)
         })
         .collect()
+}
+
+#[cfg(unix)]
+fn read_confined_regular_file(
+    root: &Path,
+    path: &Path,
+    max_bytes: u64,
+    description: &str,
+) -> Result<Vec<u8>> {
+    use rustix::fs::{Mode, OFlags, openat};
+    use std::fs::File;
+    use std::os::unix::fs::MetadataExt;
+
+    let canonical_root = fs::canonicalize(root)
+        .with_context(|| format!("resolve confined root {}", root.display()))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("{description} has no parent"))?;
+    let canonical_parent = fs::canonicalize(parent)
+        .with_context(|| format!("resolve {description} parent {}", parent.display()))?;
+    if !canonical_parent.starts_with(&canonical_root) {
+        bail!("{description} escapes its confined root: {}", path.display());
+    }
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("{description} has no file name"))?;
+    let parent_file = File::open(&canonical_parent)?;
+    let before = fs::symlink_metadata(path).map_err(|error| {
+        if error.kind() == ErrorKind::NotFound {
+            anyhow::anyhow!("{description} did not produce a fresh draft")
+        } else {
+            anyhow::anyhow!("cannot inspect {description} {}: {error}", path.display())
+        }
+    })?;
+    if !before.file_type().is_file() || before.nlink() != 1 {
+        bail!("{description} is not a regular file or has aliases: {}", path.display());
+    }
+    if before.len() > max_bytes {
+        bail!("{description} exceeds the {max_bytes}-byte limit");
+    }
+    let fd = openat(
+        &parent_file,
+        name,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+    )?;
+    let mut file = File::from(fd);
+    let opened = file.metadata()?;
+    if !opened.file_type().is_file()
+        || opened.nlink() != 1
+        || opened.dev() != before.dev()
+        || opened.ino() != before.ino()
+        || opened.len() != before.len()
+    {
+        bail!("{description} changed while it was opened");
+    }
+    let mut bytes = Vec::with_capacity(opened.len() as usize);
+    Read::by_ref(&mut file)
+        .take(max_bytes + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        bail!("{description} exceeds the {max_bytes}-byte limit");
+    }
+    let after = file.metadata()?;
+    if after.dev() != opened.dev()
+        || after.ino() != opened.ino()
+        || after.len() != opened.len()
+    {
+        bail!("{description} changed while it was read");
+    }
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn atomic_write_confined(root: &Path, relative: &Path, bytes: &[u8]) -> Result<()> {
+    use rustix::fs::{AtFlags, Mode, OFlags, openat, renameat, unlinkat};
+    use std::fs::File;
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Component;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(0);
+
+    if relative.is_absolute() {
+        bail!("confined target must be relative");
+    }
+    let canonical_root = fs::canonicalize(root)?;
+    let relative_parent = relative
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("confined target has no parent"))?;
+    let mut current = canonical_root.clone();
+    for component in relative_parent.components() {
+        let Component::Normal(component) = component else {
+            bail!("confined target contains an invalid path component");
+        };
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => bail!("confined target ancestor is not a directory"),
+            Err(error) if error.kind() == ErrorKind::NotFound => fs::create_dir(&current)?,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let canonical_parent = fs::canonicalize(&current)?;
+    if !canonical_parent.starts_with(&canonical_root) {
+        bail!("confined target ancestor escapes the project root");
+    }
+    let expected_parent = fs::metadata(&canonical_parent)?;
+    let parent = File::open(&canonical_parent)?;
+    let opened_parent = parent.metadata()?;
+    if expected_parent.dev() != opened_parent.dev()
+        || expected_parent.ino() != opened_parent.ino()
+    {
+        bail!("confined target ancestor changed while it was opened");
+    }
+    let temporary_name = format!(
+        ".fluent-handoff-{}-{}",
+        std::process::id(),
+        NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed)
+    );
+    let temporary_fd = openat(
+        &parent,
+        temporary_name.as_str(),
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )?;
+    let mut temporary = File::from(temporary_fd);
+    let target_name = relative
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("confined target has no file name"))?;
+    let write_result = (|| -> Result<()> {
+        temporary.write_all(bytes)?;
+        temporary.flush()?;
+        temporary.sync_all()?;
+        renameat(&parent, temporary_name.as_str(), &parent, target_name)?;
+        parent.sync_all()?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = unlinkat(&parent, temporary_name.as_str(), AtFlags::empty());
+    }
+    write_result
 }
 
 /// Reduce a denied path to a filename-safe component for a synthesized follow-up
@@ -1552,17 +1733,21 @@ fn is_learner_path_in_bounds(path: &str) -> bool {
 fn all_tester_artifact_paths(
     project_root: &Path,
     attempt: &crate::work_model::Attempt,
-) -> Vec<PathBuf> {
+) -> Result<Vec<PathBuf>> {
     attempt
         .tasks
         .iter()
         .filter(|task| task.kind == TaskKind::Tester && task.status == TaskStatus::Complete)
-        .filter_map(|task| task.artifact_area.as_ref())
-        .filter_map(|area| {
-            work_task_executor::resolve_managed_artifact_area_path(project_root, &area.path).ok()
+        .map(|task| {
+            let area = task.artifact_area.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("completed Tester {:?} has no artifact area", task.id)
+            })?;
+            Ok(work_task_executor::resolve_managed_artifact_area_path(
+                project_root,
+                &area.path,
+            )?
+            .join("tester-results.json"))
         })
-        .map(|dir| dir.join("tester-results.json"))
-        .filter(|path| path.is_file())
         .collect()
 }
 
@@ -1848,17 +2033,21 @@ pub fn latest_review_artifact_relpaths(
 fn all_review_artifact_paths(
     project_root: &Path,
     attempt: &crate::work_model::Attempt,
-) -> Vec<PathBuf> {
+) -> Result<Vec<PathBuf>> {
     attempt
         .tasks
         .iter()
         .filter(|task| task.kind == TaskKind::Review && task.status == TaskStatus::Complete)
-        .filter_map(|task| task.artifact_area.as_ref())
-        .filter_map(|area| {
-            work_task_executor::resolve_managed_artifact_area_path(project_root, &area.path).ok()
+        .map(|task| {
+            let area = task.artifact_area.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("completed review {:?} has no artifact area", task.id)
+            })?;
+            Ok(work_task_executor::resolve_managed_artifact_area_path(
+                project_root,
+                &area.path,
+            )?
+            .join("review.md"))
         })
-        .map(|dir| dir.join("review.md"))
-        .filter(|path| path.is_file())
         .collect()
 }
 
@@ -1933,6 +2122,22 @@ mod tests {
     use crate::work_model::AttemptKind;
     use crate::work_model::WorkItemAbandonment;
     use crate::work_model::{Attempt, CoderMapping, TaskArtifactArea, WorkspaceAccess};
+
+    fn walk_files(root: &Path) -> Vec<PathBuf> {
+        let mut pending = vec![root.to_path_buf()];
+        let mut files = Vec::new();
+        while let Some(path) = pending.pop() {
+            for entry in fs::read_dir(path).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    pending.push(entry.path());
+                } else {
+                    files.push(entry.path());
+                }
+            }
+        }
+        files
+    }
 
     #[test]
     fn exact_legacy_rebase_base_accepts_post_rebase_fix() {
@@ -2152,6 +2357,74 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn handoff_only_draft_import_rejects_hardlinks_and_oversized_files() {
+        let isolated_root = tempfile::TempDir::new().unwrap();
+        let handoff_dir = isolated_root.path().join("handoff");
+        fs::create_dir_all(&handoff_dir).unwrap();
+        let draft = handoff_dir.join(crate::learner::DRAFT_FILE_NAME);
+        fs::write(&draft, "{}\n").unwrap();
+        fs::hard_link(&draft, handoff_dir.join("alias.json")).unwrap();
+        let isolated = HandoffOnlyWorkspace {
+            workspace_path: isolated_root.path().join("candidate"),
+            handoff_dir: handoff_dir.clone(),
+            review_artifact_paths: Vec::new(),
+            tester_artifact_paths: Vec::new(),
+            _temp: isolated_root,
+        };
+        let project = tempfile::TempDir::new().unwrap();
+
+        let error = isolated
+            .publish_draft(project.path(), "work-1", "attempt-1")
+            .unwrap_err();
+        assert!(error.to_string().contains("aliases"));
+
+        fs::remove_file(handoff_dir.join("alias.json")).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&draft)
+            .unwrap()
+            .set_len(MAX_HANDOFF_DRAFT_BYTES + 1)
+            .unwrap();
+        let error = isolated
+            .publish_draft(project.path(), "work-1", "attempt-1")
+            .unwrap_err();
+        assert!(error.to_string().contains("exceeds"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_only_draft_import_rejects_a_symlinked_target_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        let isolated_root = tempfile::TempDir::new().unwrap();
+        let handoff_dir = isolated_root.path().join("handoff");
+        fs::create_dir_all(&handoff_dir).unwrap();
+        fs::write(
+            handoff_dir.join(crate::learner::DRAFT_FILE_NAME),
+            r#"{"learning_summary":"safe","follow_ups":[]}"#,
+        )
+        .unwrap();
+        let isolated = HandoffOnlyWorkspace {
+            workspace_path: isolated_root.path().join("candidate"),
+            handoff_dir,
+            review_artifact_paths: Vec::new(),
+            tester_artifact_paths: Vec::new(),
+            _temp: isolated_root,
+        };
+        let project = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        symlink(outside.path(), project.path().join(".fluent")).unwrap();
+
+        let error = isolated
+            .publish_draft(project.path(), "work-1", "attempt-1")
+            .unwrap_err();
+
+        assert!(error.to_string().contains("ancestor"));
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
+
     #[test]
     fn handoff_only_artifacts_are_copied_under_the_isolated_root() {
         let live = tempfile::TempDir::new().unwrap();
@@ -2161,8 +2434,10 @@ mod tests {
         fs::write(&tester, "tester sentinel\n").unwrap();
         let isolated = tempfile::TempDir::new().unwrap();
 
-        let reviews = copy_learner_artifacts(isolated.path(), "reviews", &[review]).unwrap();
-        let testers = copy_learner_artifacts(isolated.path(), "testers", &[tester]).unwrap();
+        let reviews =
+            copy_learner_artifacts(isolated.path(), live.path(), "reviews", &[review]).unwrap();
+        let testers =
+            copy_learner_artifacts(isolated.path(), live.path(), "testers", &[tester]).unwrap();
 
         assert_eq!(fs::read_to_string(&reviews[0]).unwrap(), "review sentinel\n");
         assert_eq!(fs::read_to_string(&testers[0]).unwrap(), "tester sentinel\n");
@@ -2170,6 +2445,113 @@ mod tests {
         assert!(testers[0].starts_with(isolated.path()));
         assert!(!reviews[0].starts_with(live.path()));
         assert!(!testers[0].starts_with(live.path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_only_artifacts_reject_missing_hardlinked_and_escaped_inputs() {
+        use std::os::unix::fs::symlink;
+
+        let live = tempfile::TempDir::new().unwrap();
+        let isolated = tempfile::TempDir::new().unwrap();
+        let missing = live.path().join("missing.md");
+        assert!(copy_learner_artifacts(
+            isolated.path(),
+            live.path(),
+            "reviews",
+            &[missing],
+        )
+        .is_err());
+
+        let hardlinked = live.path().join("review.md");
+        fs::write(&hardlinked, "review\n").unwrap();
+        fs::hard_link(&hardlinked, live.path().join("review-alias.md")).unwrap();
+        let error = copy_learner_artifacts(
+            isolated.path(),
+            live.path(),
+            "reviews",
+            &[hardlinked],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("aliases"));
+
+        let outside = tempfile::TempDir::new().unwrap();
+        fs::write(outside.path().join("escaped.md"), "escaped\n").unwrap();
+        symlink(outside.path(), live.path().join("artifact-alias")).unwrap();
+        let escaped = live.path().join("artifact-alias/escaped.md");
+        let error = copy_learner_artifacts(
+            isolated.path(),
+            live.path(),
+            "reviews",
+            &[escaped],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("escapes"));
+    }
+
+    #[test]
+    fn completed_missing_artifacts_reach_the_fail_closed_copy_boundary() {
+        let project = tempfile::TempDir::new().unwrap();
+        let isolated = tempfile::TempDir::new().unwrap();
+        let artifact_area = work_artifact_path(
+            "work-1",
+            "attempt-1",
+            "attempt-1-review-1-tests",
+        );
+        let attempt = attempt_with_tasks(vec![review_task_with_artifact(
+            "attempt-1-review-1-tests",
+            "tests",
+            &artifact_area,
+        )]);
+
+        let declared = all_review_artifact_paths(project.path(), &attempt).unwrap();
+        assert_eq!(declared.len(), 1);
+        assert!(!declared[0].exists());
+        let error = copy_learner_artifacts(
+            isolated.path(),
+            project.path(),
+            "reviews",
+            &declared,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("resolve Learner reviews artifact parent")
+        );
+    }
+
+    #[test]
+    fn handoff_only_git_metadata_does_not_disclose_the_live_repository() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project = tmp.path().join("live-project-sentinel");
+        fs::create_dir_all(&project).unwrap();
+        init_learner_repo(&project);
+        fs::write(project.join("tracked.txt"), "tracked\n").unwrap();
+        git::run(&project, &["add", "."], "add fixture").unwrap();
+        git::run(&project, &["commit", "-m", "Add fixture"], "commit fixture").unwrap();
+        let baseline = git::run_stdout(&project, &["rev-parse", "HEAD"], "resolve baseline")
+            .unwrap();
+
+        let isolated = HandoffOnlyWorkspace::create(
+            &project,
+            "work-1",
+            "attempt-1",
+            &baseline,
+            &[],
+            &[],
+        )
+        .unwrap();
+        let live = project.to_string_lossy();
+        let git_dir = isolated.workspace_path.join(".git");
+        for entry in walk_files(&git_dir) {
+            let bytes = fs::read(&entry).unwrap();
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains(live.as_ref()),
+                "Git metadata {} disclosed the live repository",
+                entry.display()
+            );
+        }
     }
 
     #[test]

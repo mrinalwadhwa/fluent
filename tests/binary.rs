@@ -2789,7 +2789,12 @@ exit 0
 
 /// A retrying Learner that attempts to mutate target Git state, protected refs,
 /// and the candidate index before returning a handoff.
-fn hostile_post_land_learner_mock_script(counter: &Path, live_target: &Path) -> String {
+fn hostile_post_land_learner_mock_script(
+    counter: &Path,
+    live_target: &Path,
+    retained_candidate: &Path,
+    shared_git: &Path,
+) -> String {
     format!(
         r##"#!/bin/bash
 PROMPT=""
@@ -2807,6 +2812,8 @@ fi
 if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
   if [ ! -f "{}" ]; then touch "{}"; exit 1; fi
   LIVE_TARGET='{}'
+  RETAINED_CANDIDATE='{}'
+  SHARED_GIT='{}'
   DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
   PROJECT=${{DRAFT%%/.fluent/*}}
   mkdir -p "$(dirname "$DRAFT")"
@@ -2814,6 +2821,12 @@ if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
   LIVE_TARGET_WRITE=$?
   git -C "$LIVE_TARGET" add live-target-mutated.txt >/dev/null 2>&1
   LIVE_TARGET_INDEX=$?
+  printf 'hostile retained candidate write\n' > "$RETAINED_CANDIDATE/retained-mutated.txt" 2>/dev/null
+  RETAINED_WRITE=$?
+  git -C "$RETAINED_CANDIDATE" add retained-mutated.txt >/dev/null 2>&1
+  RETAINED_INDEX=$?
+  git --git-dir "$SHARED_GIT" update-ref refs/heads/hostile-shared HEAD >/dev/null 2>&1
+  SHARED_REF=$?
   printf 'hostile target write\n' > "$PROJECT/target-mutated.txt" 2>/dev/null
   TARGET_WRITE=$?
   git -C "$PROJECT" add target-mutated.txt >/dev/null 2>&1
@@ -2828,8 +2841,8 @@ if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
   ORIGIN_PRESENT=$?
   printf '%s' "$PROMPT" | grep -Fq "$LIVE_TARGET"
   PROMPT_LEAK=$?
-  printf '{{"learning_summary":"hostile project=%s live_target_write=%s live_target_index=%s target_write=%s target_index=%s ref_write=%s candidate_write=%s candidate_index=%s origin_present=%s prompt_leak=%s","follow_ups":[]}}\n' \
-    "$PROJECT" "$LIVE_TARGET_WRITE" "$LIVE_TARGET_INDEX" "$TARGET_WRITE" "$TARGET_INDEX" "$REF_WRITE" "$CANDIDATE_WRITE" "$CANDIDATE_INDEX" "$ORIGIN_PRESENT" "$PROMPT_LEAK" \
+  printf '{{"learning_summary":"hostile project=%s live_target_write=%s live_target_index=%s retained_write=%s retained_index=%s shared_ref=%s target_write=%s target_index=%s ref_write=%s candidate_write=%s candidate_index=%s origin_present=%s prompt_leak=%s","follow_ups":[]}}\n' \
+    "$PROJECT" "$LIVE_TARGET_WRITE" "$LIVE_TARGET_INDEX" "$RETAINED_WRITE" "$RETAINED_INDEX" "$SHARED_REF" "$TARGET_WRITE" "$TARGET_INDEX" "$REF_WRITE" "$CANDIDATE_WRITE" "$CANDIDATE_INDEX" "$ORIGIN_PRESENT" "$PROMPT_LEAK" \
     > "$DRAFT"
   exit 0
 fi
@@ -2846,6 +2859,8 @@ exit 0
         counter.display(),
         counter.display(),
         live_target.display(),
+        retained_candidate.display(),
+        shared_git.display(),
     )
 }
 
@@ -2906,38 +2921,58 @@ exit 0
 }
 
 /// Re-run the completed Attempt to retry a failed Learner.
-fn rerun_learner_attempt(main_dir: &Path, bin_dir: &Path) {
+fn rerun_learner_attempt(main_dir: &Path, bin_dir: &Path) -> std::process::Output {
     write_mock_sandbox_exec(bin_dir);
     fluent_cmd()
         .current_dir(main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(bin_dir))
         .env("SANDBOX_EXEC_LOG", bin_dir.join("sandbox-exec.log"))
-        .assert()
-        .success();
+        .output()
+        .unwrap()
 }
 
-fn rerun_learner_attempt_with_system_sandbox(main_dir: &Path, bin_dir: &Path) {
+macro_rules! require_successful_trusted_retry {
+    ($output:expr) => {{
+        let output = $output;
+        if !real_sandbox_exec_is_usable() {
+            assert!(!output.status.success());
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("follow-up recovery remains pending")
+            );
+            return;
+        }
+        assert!(
+            output.status.success(),
+            "trusted retry failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }};
+}
+
+fn rerun_learner_attempt_with_system_sandbox(
+    main_dir: &Path,
+    bin_dir: &Path,
+) -> std::process::Output {
     fs::remove_file(bin_dir.join("sandbox-exec")).unwrap();
     fluent_cmd()
         .current_dir(main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(bin_dir))
-        .env("FLUENT_TEST_SYSTEM_SANDBOX", "1")
-        .assert()
-        .success();
+        .output()
+        .unwrap()
 }
 
-fn rerun_learner_attempt_sandboxed(main_dir: &Path, bin_dir: &Path) {
+fn rerun_learner_attempt_sandboxed(main_dir: &Path, bin_dir: &Path) -> std::process::Output {
     fs::remove_file(bin_dir.join("sandbox-exec")).unwrap();
     fluent_cmd()
         .current_dir(main_dir)
         .args(["attempt", "run", "work-1", "attempt-1"])
         .env("PATH", mock_path(bin_dir))
         .env("CLAUDE_CODE_OAUTH_TOKEN", "mock-token")
-        .env("FLUENT_TEST_SYSTEM_SANDBOX", "1")
-        .assert()
-        .success();
+        .output()
+        .unwrap()
 }
 
 fn real_sandbox_exec_is_usable() -> bool {
@@ -3684,7 +3719,7 @@ fn post_land_learner_retry_materializes_recovered_handoff() {
 
     // Retrying the Learner after land recovers the handoff and materializes it
     // immediately under the land-gated rules.
-    rerun_learner_attempt(&main_dir, &bin_dir);
+    require_successful_trusted_retry!(rerun_learner_attempt(&main_dir, &bin_dir));
     let observations = open_observation_files(&main_dir);
     assert_eq!(observations.len(), 1, "the recovered handoff materializes one Observation");
     let observation = fs::read_to_string(
@@ -3740,7 +3775,7 @@ fn missing_legacy_learning_record_retries_after_land() {
     assert!(main_dir.join(".fluent/work/items/work-1.json").exists());
     assert!(main_dir.join("../work-6-work-1-attempt-1").is_dir());
 
-    rerun_learner_attempt(&main_dir, &bin_dir);
+    require_successful_trusted_retry!(rerun_learner_attempt(&main_dir, &bin_dir));
 
     assert_eq!(open_observation_files(&main_dir).len(), 1);
     assert_eq!(
@@ -3785,6 +3820,12 @@ fn successful_learning_resumes_failed_materialization_without_rerunning_coder() 
     );
     let stdout = String::from_utf8_lossy(&obstructed.stdout);
     let stderr = String::from_utf8_lossy(&obstructed.stderr);
+    if !real_sandbox_exec_is_usable() {
+        assert!(stdout.contains("follow-up recovery is pending at learner"));
+        assert!(!stdout.contains("is ready"));
+        assert!(stderr.contains("trusted Learner sandbox"));
+        return;
+    }
     assert!(stdout.contains("follow-up recovery is pending at observation"));
     assert!(!stdout.contains("is ready"));
     assert!(stderr.contains("merge-candidate land work-1 attempt-1-merge-candidate"));
@@ -3803,7 +3844,7 @@ fn successful_learning_resumes_failed_materialization_without_rerunning_coder() 
     );
 
     fs::remove_file(main_dir.join(".fluent/observations")).unwrap();
-    rerun_learner_attempt(&main_dir, &bin_dir);
+    assert!(rerun_learner_attempt(&main_dir, &bin_dir).status.success());
 
     assert_eq!(open_observation_files(&main_dir).len(), 1);
     let recovered = work_item_value(&main_dir, "work-1");
@@ -3838,7 +3879,7 @@ fn cleanup_apply_retains_merged_origin_with_tampered_or_missing_operation_eviden
 
     create_and_run_learner_attempt(&main_dir, &bin_dir);
     land_work_1(&main_dir, &bin_dir, true);
-    rerun_learner_attempt(&main_dir, &bin_dir);
+    require_successful_trusted_retry!(rerun_learner_attempt(&main_dir, &bin_dir));
     let follow_ups_root = fluent::follow_up::follow_ups_root(&main_dir);
     let operation_dir = fs::read_dir(&follow_ups_root)
         .unwrap()
@@ -3944,7 +3985,7 @@ fn post_land_learner_retry_preserves_merged_commit() {
     )
     .unwrap();
 
-    rerun_learner_attempt(&main_dir, &bin_dir);
+    require_successful_trusted_retry!(rerun_learner_attempt(&main_dir, &bin_dir));
 
     let retry_prompt = fs::read_to_string(format!("{}.prompt", counter.display())).unwrap();
     assert!(
@@ -4027,7 +4068,7 @@ fn post_land_legacy_recovery_rejects_a_wrong_ref_reflog_session() {
     )
     .unwrap();
 
-    rerun_learner_attempt(&main_dir, &bin_dir);
+    assert!(!rerun_learner_attempt(&main_dir, &bin_dir).status.success());
 
     assert_eq!(
         fs::read_to_string(format!("{}.invocations", counter.display()))
@@ -4168,6 +4209,17 @@ fn cleanup_waits_for_recovery_then_rereads_the_completed_origin() {
 
     create_and_run_learner_attempt(&main_dir, &bin_dir);
     land_work_1(&main_dir, &bin_dir, true);
+    if !real_sandbox_exec_is_usable() {
+        let retry = rerun_learner_attempt(&main_dir, &bin_dir);
+        assert!(!retry.status.success());
+        fluent_cmd()
+            .current_dir(&main_dir)
+            .args(["cleanup", "--apply"])
+            .assert()
+            .success();
+        assert!(main_dir.join(".fluent/work/items/work-1.json").exists());
+        return;
+    }
     write_mock_sandbox_exec(&bin_dir);
     let retry = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
         .current_dir(&main_dir)
@@ -4245,7 +4297,12 @@ fn post_land_handoff_only_ignores_no_sandbox_and_preserves_live_git() {
     let bin_dir = tmp.path().join("bin-hostile-git");
     write_mock_claude(
         &bin_dir,
-        &hostile_post_land_learner_mock_script(&counter, &main_dir),
+        &hostile_post_land_learner_mock_script(
+            &counter,
+            &main_dir,
+            &main_dir.join("../work-6-work-1-attempt-1"),
+            &main_dir.join(".git"),
+        ),
     );
 
     create_and_run_learner_attempt(&main_dir, &bin_dir);
@@ -4319,9 +4376,14 @@ fn post_land_handoff_only_ignores_no_sandbox_and_preserves_live_git() {
         "target index flags before hostile retry",
     )
     .unwrap();
-    rerun_learner_attempt_with_system_sandbox(&main_dir, &bin_dir);
+    let retry_output = rerun_learner_attempt_with_system_sandbox(&main_dir, &bin_dir);
 
     if real_sandbox_exec_is_usable() {
+        assert!(
+            retry_output.status.success(),
+            "trusted sandbox retry failed: {}",
+            String::from_utf8_lossy(&retry_output.stderr)
+        );
         let handoff: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(main_dir.join(fluent::learner::handoff_path_rel(
                 "work-1",
@@ -4334,9 +4396,17 @@ fn post_land_handoff_only_ignores_no_sandbox_and_preserves_live_git() {
         assert!(sandbox_results.contains("hostile project="));
         assert!(!sandbox_results.contains("live_target_write=0"));
         assert!(!sandbox_results.contains("live_target_index=0"));
+        assert!(!sandbox_results.contains("retained_write=0"));
+        assert!(!sandbox_results.contains("retained_index=0"));
+        assert!(!sandbox_results.contains("shared_ref=0"));
         assert!(!sandbox_results.contains("origin_present=0"));
         assert!(sandbox_results.contains("prompt_leak=1"));
     } else {
+        assert!(!retry_output.status.success());
+        assert!(
+            String::from_utf8_lossy(&retry_output.stderr)
+                .contains("follow-up recovery remains pending")
+        );
         assert_eq!(
             work_item_value(&main_dir, "work-1")["attempts"][0]["learning"]["status"],
             "failed",
@@ -4452,15 +4522,25 @@ fn sandboxed_post_land_coder_runs_and_is_denied() {
     let bin_dir = tmp.path().join("bin-sandbox-hostile");
     write_mock_claude(
         &bin_dir,
-        &hostile_post_land_learner_mock_script(&counter, &main_dir),
+        &hostile_post_land_learner_mock_script(
+            &counter,
+            &main_dir,
+            &main_dir.join("../work-6-work-1-attempt-1"),
+            &main_dir.join(".git"),
+        ),
     );
 
     create_and_run_learner_attempt(&main_dir, &bin_dir);
     land_work_1(&main_dir, &bin_dir, true);
     let merged = merged_commit_of(&main_dir);
-    rerun_learner_attempt_sandboxed(&main_dir, &bin_dir);
+    let retry_output = rerun_learner_attempt_sandboxed(&main_dir, &bin_dir);
 
     if !real_sandbox_exec_is_usable() {
+        assert!(!retry_output.status.success());
+        assert!(
+            String::from_utf8_lossy(&retry_output.stderr)
+                .contains("follow-up recovery remains pending")
+        );
         assert_eq!(
             work_item_value(&main_dir, "work-1")["attempts"][0]["learning"]["status"],
             "failed",
@@ -4470,6 +4550,11 @@ fn sandboxed_post_land_coder_runs_and_is_denied() {
         assert!(!main_dir.join("live-target-mutated.txt").exists());
         return;
     }
+    assert!(
+        retry_output.status.success(),
+        "trusted sandbox retry failed: {}",
+        String::from_utf8_lossy(&retry_output.stderr)
+    );
 
     let handoff: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(main_dir.join(fluent::learner::handoff_path_rel(
@@ -4483,6 +4568,9 @@ fn sandboxed_post_land_coder_runs_and_is_denied() {
     assert!(sandbox_results.contains("hostile project="));
     assert!(!sandbox_results.contains("live_target_write=0"));
     assert!(!sandbox_results.contains("live_target_index=0"));
+    assert!(!sandbox_results.contains("retained_write=0"));
+    assert!(!sandbox_results.contains("retained_index=0"));
+    assert!(!sandbox_results.contains("shared_ref=0"));
     assert!(!sandbox_results.contains("origin_present=0"));
     assert!(sandbox_results.contains("prompt_leak=1"));
     for operation in [
@@ -4531,7 +4619,7 @@ fn failed_post_land_coder_still_restores_candidate_index_and_worktree() {
 
     create_and_run_learner_attempt(&main_dir, &bin_dir);
     land_work_1(&main_dir, &bin_dir, true);
-    rerun_learner_attempt(&main_dir, &bin_dir);
+    assert!(!rerun_learner_attempt(&main_dir, &bin_dir).status.success());
 
     let candidate = main_dir.join("../work-6-work-1-attempt-1");
     assert!(
@@ -4581,6 +4669,13 @@ fn concurrent_post_land_retries_run_the_learner_once() {
     let second = spawn_retry();
     let first_output = first.wait_with_output().unwrap();
     let second_output = second.wait_with_output().unwrap();
+    if !real_sandbox_exec_is_usable() {
+        assert!(!first_output.status.success());
+        assert!(!second_output.status.success());
+        let invocations = fs::read_to_string(format!("{}.invocations", counter.display())).unwrap();
+        assert_eq!(invocations.lines().count(), 1);
+        return;
+    }
     assert!(first_output.status.success());
     assert!(second_output.status.success());
 
@@ -4636,6 +4731,11 @@ fn post_land_retry_ignores_a_malformed_retained_candidate() {
         !retry.status.success(),
         "malformed retained Git metadata may defer cleanup but must not affect Learning"
     );
+    if !real_sandbox_exec_is_usable() {
+        assert!(String::from_utf8_lossy(&retry.stdout).contains("learner"));
+        assert!(candidate.exists());
+        return;
+    }
     assert!(
         String::from_utf8_lossy(&retry.stdout).contains("cleanup-workspace"),
         "cleanup failure remains explicitly retryable"
@@ -4670,7 +4770,7 @@ fn post_land_expertise_proposal_materializes_observation_only() {
 
     create_and_run_learner_attempt(&main_dir, &bin_dir);
     land_work_1(&main_dir, &bin_dir, true);
-    rerun_learner_attempt(&main_dir, &bin_dir);
+    require_successful_trusted_retry!(rerun_learner_attempt(&main_dir, &bin_dir));
 
     let observations = open_observation_files(&main_dir);
     assert_eq!(observations.len(), 1, "the missed expertise becomes one Observation");
