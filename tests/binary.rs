@@ -10552,6 +10552,36 @@ exit 0
     );
 }
 
+/// A per-run token, derived from the unique temp directory name, so attempt
+/// worktrees (created as `../work-*-<id>-*` siblings in the shared temp root)
+/// never collide across test runs or with orphans from a killed scheduler.
+fn run_token(tmp: &TempDir) -> String {
+    tmp.path()
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("run")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_lowercase()
+}
+
+/// Best-effort removal of the sibling attempt worktrees a scheduler run created,
+/// so a hard-killed scheduler does not leave orphans behind.
+fn remove_sibling_worktrees(project: &Path, token: &str) {
+    if let Some(parent) = project.parent() {
+        if let Ok(entries) = fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with("work-") && name.contains(token) {
+                    let _ = fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+    }
+}
+
 /// Count Work Items whose latest dispatch is claimed or running.
 fn count_active_dispatches(queue_dir: &Path) -> usize {
     let mut active = 0;
@@ -10587,20 +10617,26 @@ fn scheduler_runs_four_work_items_concurrently_by_default() {
     let project = tmp.path();
     init_git_repo(project);
 
+    // A writer that blocks until released, so the claimed set stays stable long
+    // enough to observe concurrency even under heavy parallel test load.
+    let release = project.join("release");
     let bin_dir = project.join("mock-bin");
-    // A writer that holds its slot long enough to observe concurrency.
     write_mock_claude(
         &bin_dir,
         r#"#!/bin/bash
-sleep 3
+for _ in $(seq 1 600); do
+  [ -f "$FLUENT_TEST_RELEASE" ] && break
+  sleep 0.1
+done
 git add -A 2>/dev/null
 git commit --allow-empty -m "mock write" 2>/dev/null
 exit 0
 "#,
     );
 
+    let token = run_token(&tmp);
     for n in 0..6 {
-        let id = format!("wi-conc-{n}");
+        let id = format!("wc{token}{n}");
         write_work_item_json(project, &id, "Concurrency");
         fluent_cmd()
             .current_dir(project)
@@ -10610,7 +10646,7 @@ exit 0
     }
 
     let queue_dir = project.join(".fluent/work/queue");
-    let child = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
         .current_dir(project)
         .env(
             "PATH",
@@ -10620,15 +10656,17 @@ exit 0
                 std::env::var("PATH").unwrap_or_default()
             ),
         )
+        .env("FLUENT_TEST_RELEASE", &release)
         .args(["scheduler", "run", "--poll-seconds", "1"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
 
-    // Sample the active dispatch count; the default capacity is four.
+    // The default capacity is four; the blocked writers hold their slots so the
+    // count stably reaches four and never exceeds it while two stay queued.
     let mut max_active = 0;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while std::time::Instant::now() < deadline {
         let active = count_active_dispatches(&queue_dir);
         max_active = max_active.max(active);
@@ -10637,14 +10675,16 @@ exit 0
             "local scheduler must never exceed its capacity of four, saw {active}"
         );
         if max_active == 4 {
-            // Confirm the surplus stays queued while capacity is full.
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(150));
     }
 
-    send_signal(child.id(), "TERM");
-    let _ = child.wait_with_output().unwrap();
+    // Release the blocked writers, then stop the scheduler.
+    fs::write(&release, b"go").unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+    remove_sibling_worktrees(project, &token);
 
     assert_eq!(
         max_active, 4,
@@ -10895,7 +10935,10 @@ exit 0
         std::env::var("PATH").unwrap_or_default()
     );
 
-    for id in ["wi-a", "wi-b"] {
+    let token = run_token(&tmp);
+    let wi_a = format!("wa{token}");
+    let wi_b = format!("wb{token}");
+    for id in [&wi_a, &wi_b] {
         write_work_item_json(project, id, "Restart");
         fluent_cmd()
             .current_dir(project)
@@ -10919,7 +10962,7 @@ exit 0
         .unwrap();
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while !(is_terminal("wi-a") || is_terminal("wi-b")) {
+    while !(is_terminal(&wi_a) || is_terminal(&wi_b)) {
         assert!(
             std::time::Instant::now() < deadline,
             "first coordinator processed nothing"
@@ -10940,7 +10983,7 @@ exit 0
         .unwrap();
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(40);
-    while !(is_terminal("wi-a") && is_terminal("wi-b")) {
+    while !(is_terminal(&wi_a) && is_terminal(&wi_b)) {
         assert!(
             std::time::Instant::now() < deadline,
             "restart did not process the durable waiting Work"
@@ -10949,8 +10992,9 @@ exit 0
     }
     send_signal(second.id(), "TERM");
     let _ = second.wait_with_output().unwrap();
+    remove_sibling_worktrees(project, &token);
 
-    assert!(is_terminal("wi-a") && is_terminal("wi-b"));
+    assert!(is_terminal(&wi_a) && is_terminal(&wi_b));
 }
 
 // ---------------------------------------------------------------------------
