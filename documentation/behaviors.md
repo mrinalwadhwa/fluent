@@ -4652,7 +4652,7 @@ cannot be asserted from a deterministic test.
 
 WHERE a project expertise index already exists,
 THE SYSTEM SHALL NOT run the seed step; keeping the model current is
-the capture phase's responsibility, not the seed's.
+the Learner's responsibility, not the seed's.
 Test: src/work_task_executor.rs (should_seed_project_model_false_when_index_present)
 
 ### B5
@@ -4671,81 +4671,152 @@ without a project model — degrading to the pre-seed behavior — rather
 than aborting the Attempt.
 Test: tests/binary.rs (seed_failure_does_not_abort_attempt)
 
-## Learning capture
+## Learning capture and portable handoff
+
+The **Learner** performs learning capture after a code-producing Attempt
+passes its reviews: it refines durable project expertise and describes
+possible follow-up observations. A **code-producing Attempt** has an
+accepted Write result; a review-only Attempt is not code-producing. The
+**learner handoff** is portable operational output containing zero or more
+independently identifiable follow-ups; it is not itself an Observation or
+Work Item.
 
 ### B1
 
-WHEN an Attempt's reviews pass and produce a ready Merge Candidate, and
-the Attempt raised at least one review finding across its rounds,
-THE SYSTEM SHALL run the capture step; an Attempt that passed with no
-findings SHALL skip capture.
-Test: src/work_attempt_loop.rs (should_capture_when_reviews_pass_with_findings)
-Test: src/work_attempt_loop.rs (should_not_capture_when_no_findings)
+WHEN a code-producing Attempt's reviews pass,
+THE SYSTEM SHALL run the Learner before reporting the resulting Merge
+Candidate as ready, regardless of whether any reviewer raised a finding.
+Test: src/work_attempt_loop.rs (learner_runs_after_first_pass_without_findings)
+Test: src/work_attempt_loop.rs (learner_runs_after_passing_corrective_round)
 
 ### B2
 
-WHEN the capture step runs,
-THE SYSTEM SHALL read the review findings raised across the Attempt's
-review rounds and the change the Attempt produced.
-Test: src/work_task_executor.rs (capture_prompt_includes_findings_and_diff_inputs)
+WHERE an Attempt is review-only,
+THE SYSTEM SHALL NOT run the Learner for that Attempt.
+Test: src/work_attempt_loop.rs (review_only_attempt_skips_learner)
 
 ### B3
 
-WHEN the capture step identifies a durable, project-level learning,
-THE SYSTEM SHALL merge it into `.fluent/expertise/`, refining or adding
-entries without duplicating existing ones and without altering the
-project's own docs.
-Untestable: The distilled learning is LLM-generated; content cannot be
-asserted from a test. The deterministic scaffolding (inputs and the
-`.fluent/expertise/` target) is covered by B1/B2.
+WHEN the Learner runs,
+THE SYSTEM SHALL provide it the complete change produced by the Attempt
+and the Tester and reviewer artifacts from every review round.
+Test: src/work_task_executor.rs (learner_prompt_includes_attempt_diff_and_all_review_artifacts)
 
 ### B4
 
-WHEN the capture step evaluates a run,
-THE SYSTEM SHALL record only durable, project-level learnings, not
-one-off details of the specific change.
-Untestable: Judgment of what is durable vs. one-off is LLM-made and
-cannot be asserted from a test.
+WHEN the Learner runs before land and identifies durable project
+knowledge,
+THE SYSTEM SHALL merge that knowledge into `.fluent/expertise/`, refining
+or adding entries without duplicating existing expertise or altering
+project source or documentation.
+Untestable: Whether generated knowledge is durable is an LLM judgment. The
+deterministic target, prompt inputs, and write confinement are covered by
+B3, B12, and B13.
 
 ### B5
 
-WHERE the capture step finds no durable learning,
-THE SYSTEM SHALL leave `.fluent/expertise/` unchanged (no spurious edits
-or commits).
-Test: src/work_attempt_loop.rs (capture_makes_no_commit_when_expertise_unchanged)
+WHEN the Learner evaluates project knowledge,
+THE SYSTEM SHALL record durable project-level conventions, architectural
+constraints, testing patterns, and gotchas rather than one-off details of
+the originating change.
+Untestable: Durability and project relevance are semantic judgments
+constrained by the Learner prompt.
 
 ### B6
 
-IF the capture step fails,
-THEN THE SYSTEM SHALL log a warning and complete the run unaffected —
-the Merge Candidate and land proceed as if capture had not run.
-Test: tests/binary.rs (capture_failure_does_not_abort_run)
-Derived: Mirrors the seed step's non-fatal contract and Project
-initialization:B7.
+WHERE the Learner finds no durable project knowledge,
+THE SYSTEM SHALL leave `.fluent/expertise/` unchanged without creating an
+expertise commit.
+Test: src/work_attempt_loop.rs (learner_without_expertise_change_keeps_candidate_commit)
 
 ### B7
 
-WHEN the capture step produces a commit whose changes are confined to
-`.fluent/expertise/`,
-THE SYSTEM SHALL record that commit as the Merge Candidate's commit.
-Test: src/work_attempt_loop.rs (capture_commit_within_expertise_is_accepted)
+WHEN the Learner succeeds,
+THE SYSTEM SHALL persist exactly one learner handoff associated with the
+originating Work Item, Attempt, and resulting Merge Candidate, containing
+zero or more stable, independently identifiable follow-ups.
+Test: tests/binary.rs (learner_persists_empty_handoff)
+Test: tests/binary.rs (learner_persists_followup_handoff_with_origin_provenance)
 
 ### B8
 
-WHEN the capture step produces a commit that changes any path outside
-`.fluent/expertise/`,
-THE SYSTEM SHALL discard that capture commit, retain the pre-capture
-commit as the Merge Candidate, and log a warning naming the
-out-of-bounds path(s); the run and land proceed unaffected.
-Test: src/work_attempt_loop.rs (capture_commit_touching_source_is_discarded)
+WHEN the Learner produces a handoff,
+THE SYSTEM SHALL NOT directly create an Observation, create or modify a
+derived Work Item, or add an entry to the regular Work Queue.
+Test: tests/binary.rs (learner_handoff_does_not_materialize_before_land)
 
-### B9
+### B10
 
-WHERE the capture step runs sandboxed,
-THE SYSTEM SHALL grant it write access only to `.fluent/expertise/` and
-the git directory it needs to commit, and read-only access to the rest
-of the worktree.
-Test: src/work_task_executor.rs (capture_sandbox_writable_root_is_expertise_only)
+IF the Learner fails,
+THEN THE SYSTEM SHALL record a durable, retryable learner-failure state
+associated with the originating Attempt, warn the operator, and continue
+producing the Merge Candidate without changing its land eligibility.
+Test: tests/binary.rs (learner_failure_is_retryable_and_does_not_block_candidate)
+
+### B11
+
+WHEN a failed Learner run is retried successfully,
+THE SYSTEM SHALL complete that existing learning record with one
+successful handoff without duplicating any previously accepted follow-up
+identity.
+Test: tests/binary.rs (learner_retry_completes_existing_record_idempotently)
+
+### B11a
+
+WHEN `fluent attempt run <work-item-id> <attempt-id>` is invoked for an
+otherwise complete code-producing Attempt whose learning record is failed,
+THE SYSTEM SHALL retry only the Learner and its candidate or handoff
+bookkeeping without rerunning the Writer, Tester, or reviewers.
+Test: tests/binary.rs (attempt_run_retries_only_failed_learner)
+
+### B12
+
+WHEN a pre-land Learner run produces an expertise commit whose changes are
+confined to `.fluent/expertise/`,
+THE SYSTEM SHALL record that commit as the Merge Candidate's candidate
+commit.
+Test: src/work_attempt_loop.rs (learner_expertise_commit_becomes_candidate_commit)
+
+### B13
+
+IF a Learner commit changes a path outside `.fluent/expertise/`,
+THEN THE SYSTEM SHALL discard that commit, retain the pre-Learner
+candidate commit, record the Learner run as failed and retryable, and
+leave Merge Candidate creation unblocked.
+Test: src/work_attempt_loop.rs (learner_commit_touching_source_is_discarded)
+
+### B14
+
+WHERE the Learner runs sandboxed before land,
+THE SYSTEM SHALL grant it write access only to `.fluent/expertise/`, the
+designated managed handoff surface, and Git metadata needed for an
+expertise commit; it SHALL NOT grant write access to the Observation
+backlog, Work model, or remaining workspace.
+Test: src/work_task_executor.rs (learner_sandbox_confines_expertise_handoff_and_git_writes)
+
+## Corrective classification and Work authorization
+
+### B1
+
+WHEN the Learner is asked to evaluate whether a follow-up is corrective,
+THE SYSTEM SHALL instruct it to propose corrective status only when it
+judges that an existing authoritative behavior or convention is being
+violated, the evidence is concrete, scope is bounded, verification is
+deterministic, and no consequential product, interface, architecture,
+security, or permission decision remains unresolved.
+Test: src/work_task_executor.rs (learner_prompt_requires_bounded_authoritative_corrective_context)
+
+## Merge provenance compatibility
+
+### B1
+
+WHEN rebase changes a candidate tip,
+THE SYSTEM SHALL update the Merge Candidate commit, every completed Write
+Task output commit, and only the Attempt artifact references that
+represent those Write commits; it SHALL preserve learner handoff, Tester,
+reviewer, and other non-Write artifact references.
+Test: src/work_merge_executor.rs (regenerate_provenance_updates_write_commit_artifacts_only)
+Test: src/work_merge_executor.rs (regenerate_provenance_preserves_learner_handoff_reference)
 
 ---
 
