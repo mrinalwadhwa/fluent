@@ -3822,6 +3822,58 @@ fn successful_learning_resumes_failed_materialization_without_rerunning_coder() 
 }
 
 #[test]
+fn cleanup_apply_retains_merged_origin_with_tampered_or_missing_operation_evidence() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let counter = tmp.path().join("learner-counter-cleanup-evidence");
+    let bin_dir = tmp.path().join("bin-cleanup-evidence");
+    write_mock_claude(
+        &bin_dir,
+        &post_land_learner_mock_script(
+            &counter,
+            r#"{"learning_summary":"cleanup evidence","follow_ups":[{"id":"fu-1","summary":"Observation only","corrective":false}]}"#,
+            false,
+        ),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+    rerun_learner_attempt(&main_dir, &bin_dir);
+    let follow_ups_root = fluent::follow_up::follow_ups_root(&main_dir);
+    let operation_dir = fs::read_dir(&follow_ups_root)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let journal_path = operation_dir.join("journal.json");
+    let mut journal = read_json_value(&journal_path);
+    journal["follow_ups"][0]["derived_work_item_id"] =
+        serde_json::Value::String("impossible-work".to_string());
+    journal["follow_ups"][0]["queue_expected"] = serde_json::Value::Bool(true);
+    journal["follow_ups"][0]["queued"] = serde_json::Value::Bool(true);
+    write_json_value(&journal_path, &journal);
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["cleanup", "--apply"])
+        .assert()
+        .success();
+    assert!(main_dir.join(".fluent/work/items/work-1.json").exists());
+
+    fs::remove_dir_all(&follow_ups_root).unwrap();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["cleanup", "--apply"])
+        .assert()
+        .success();
+    assert!(
+        main_dir.join(".fluent/work/items/work-1.json").exists(),
+        "successful Learning without its operation remains recoverable"
+    );
+}
+
+#[test]
 fn post_land_learner_retry_preserves_merged_commit() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
@@ -4099,6 +4151,90 @@ fn concurrent_learner_retry_and_land_never_mutate_after_merge() {
     // inspects the candidate workspace.
     assert!(!main_dir.join("transient-learner.txt").exists());
     assert!(is_merged(&main_dir));
+}
+
+#[test]
+fn cleanup_waits_for_recovery_then_rereads_the_completed_origin() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let counter = tmp.path().join("learner-counter-cleanup-race");
+    let retry_started = tmp.path().join("cleanup-race-started");
+    let retry_release = tmp.path().join("cleanup-race-release");
+    let bin_dir = tmp.path().join("bin-cleanup-race");
+    write_mock_claude(
+        &bin_dir,
+        &contended_learner_mock_script(&counter, &retry_started, &retry_release),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+    write_mock_sandbox_exec(&bin_dir);
+    let retry = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("SANDBOX_EXEC_LOG", bin_dir.join("sandbox-exec.log"))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    for _ in 0..500 {
+        if retry_started.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(retry_started.exists(), "recovery reached its serialized mutation window");
+
+    let mut cleanup = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
+        .current_dir(&main_dir)
+        .args(["cleanup", "--apply"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let lock_path = fs::canonicalize(main_dir.join(".fluent/work/locks/land.lock")).unwrap();
+    let lock_text = lock_path.to_string_lossy().into_owned();
+    let cleanup_pid = cleanup.id().to_string();
+    let mut cleanup_reached_lock = false;
+    for _ in 0..200 {
+        let output = std::process::Command::new("/usr/sbin/lsof")
+            .args(["-a", "-p", &cleanup_pid, "-Fn", "--", &lock_text])
+            .output()
+            .unwrap();
+        let expected = format!("n{}", lock_path.display());
+        if output.status.success()
+            && String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line == expected)
+        {
+            cleanup_reached_lock = true;
+            break;
+        }
+        if cleanup.try_wait().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    fs::write(&retry_release, "release\n").unwrap();
+    assert!(cleanup_reached_lock, "cleanup reached the shared recovery boundary");
+
+    let retry_output = retry.wait_with_output().unwrap();
+    let cleanup_output = cleanup.wait_with_output().unwrap();
+    assert!(
+        retry_output.status.success(),
+        "recovery failed: {}",
+        String::from_utf8_lossy(&retry_output.stderr)
+    );
+    assert!(
+        cleanup_output.status.success(),
+        "cleanup failed: {}",
+        String::from_utf8_lossy(&cleanup_output.stderr)
+    );
+    assert!(
+        !main_dir.join(".fluent/work/items/work-1.json").exists(),
+        "cleanup's locked reread observes completed recovery and removes the origin"
+    );
 }
 
 #[test]
@@ -10244,6 +10380,66 @@ fn cleanup_work_items_apply_skips_unregistered_managed_worktree() {
         fs::read_to_string(workspace_dir.join("user-file.txt")).unwrap(),
         "keep me"
     );
+}
+
+#[test]
+fn cleanup_apply_fails_closed_for_a_missing_locked_registration() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-locked", "--title", "Locked cleanup work"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-locked", "attempt-1"])
+        .assert()
+        .success();
+    let attempt_path = main_dir.join(".fluent/work/attempts/work-locked/attempt-1.json");
+    let task_path =
+        main_dir.join(".fluent/work/tasks/work-locked/attempt-1/attempt-1-write-1.json");
+    let mut attempt = read_json_path(&attempt_path);
+    attempt["status"] = serde_json::Value::String("failed".to_string());
+    write_json_path(&attempt_path, &attempt);
+    let mut task = read_json_path(&task_path);
+    task["status"] = serde_json::Value::String("failed".to_string());
+    let workspace_path = task["workspace_access"]["writes"][0]["path"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    write_json_path(&task_path, &task);
+    let workspace = main_dir.join(&workspace_path);
+    let workspace_text = workspace.to_string_lossy().into_owned();
+    git::run(
+        &main_dir,
+        &["worktree", "add", "--detach", &workspace_text, "HEAD"],
+        "register locked CLI cleanup worktree",
+    )
+    .unwrap();
+    git::run(
+        &main_dir,
+        &["worktree", "lock", "--reason", "test", &workspace_text],
+        "lock CLI cleanup worktree",
+    )
+    .unwrap();
+    fs::remove_dir_all(&workspace).unwrap();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["cleanup", "--apply"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("remove registered worktree"));
+
+    assert!(main_dir.join(".fluent/work/items/work-locked.json").exists());
+    let registrations = git::run_stdout(
+        &main_dir,
+        &["worktree", "list", "--porcelain"],
+        "inspect retained locked registration",
+    )
+    .unwrap();
+    assert!(registrations.contains(workspace.file_name().unwrap().to_str().unwrap()));
 }
 
 #[test]

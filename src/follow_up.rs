@@ -1076,11 +1076,32 @@ pub fn post_land_operation_complete(
         {
             incomplete!("observation or classification");
         }
-        if receipt.corrective == Some(true) {
-            let expected_work_id = derived_work_item_id_for_operation(&operation, &follow_up.id);
-            if receipt.resolved_policy.is_none()
-                || receipt.derived_work_item_id.as_deref() != Some(&expected_work_id)
+        let expected_corrective = classify_follow_up_at_revision(
+            project_root,
+            follow_up,
+            &operation.origin.merged_commit,
+        )
+        .is_corrective();
+        if receipt.corrective != Some(expected_corrective) {
+            bail!("post-land receipt classification does not match the validated batch");
+        }
+        if !expected_corrective {
+            if receipt.resolved_policy.is_some()
+                || receipt.derived_work_item_id.is_some()
+                || receipt.queue_expected
+                || receipt.queued
             {
+                bail!("non-corrective post-land receipt claims corrective effects");
+            }
+        } else {
+            let expected_work_id = derived_work_item_id_for_operation(&operation, &follow_up.id);
+            let Some(policy) = receipt.resolved_policy.as_ref() else {
+                incomplete!("corrective policy");
+            };
+            if policy.mode != "propose" && policy.mode != "execute" {
+                bail!("corrective post-land receipt has an invalid frozen policy mode");
+            }
+            if receipt.derived_work_item_id.as_deref() != Some(&expected_work_id) {
                 incomplete!("corrective receipt");
             }
             let work_item = match store.read_work_item(&expected_work_id) {
@@ -1099,22 +1120,25 @@ pub fn post_land_operation_complete(
             if work_item.origin.provenance() != Some(&expected_provenance) {
                 incomplete!("work provenance");
             }
-            if receipt.queue_expected {
-                if !receipt.queued {
-                    incomplete!("queue receipt");
-                }
-                let Some(enqueue_origin) = work_item
-                    .pending_enqueue
-                    .as_ref()
-                    .map(|intent| intent.origin_operation_id.as_str())
-                else {
-                    incomplete!("missing enqueue intent");
-                };
+            let Some(enqueue_intent) = work_item.pending_enqueue.as_ref() else {
+                incomplete!("missing enqueue intent");
+            };
+            if enqueue_intent.origin_operation_id != expected_work_id
+                || enqueue_intent.priority != policy.priority
+            {
+                bail!("derived Work enqueue intent does not match its frozen policy");
+            }
+            let queue_required = work_item.authorization.is_execution_ready();
+            if receipt.queue_expected != queue_required || receipt.queued != queue_required {
+                incomplete!("queue receipt");
+            }
+            if queue_required {
                 let Some(ledger) = crate::queue::read_ledger(project_root, &expected_work_id)? else {
                     incomplete!("missing queue ledger");
                 };
                 if !ledger.dispatches.iter().any(|dispatch| {
-                    dispatch.origin_operation_id.as_deref() == Some(enqueue_origin)
+                    dispatch.origin_operation_id.as_deref()
+                        == Some(enqueue_intent.origin_operation_id.as_str())
                 }) {
                     incomplete!("queue origin");
                 }
@@ -1789,6 +1813,41 @@ mod tests {
         wrong.merged_commit = "different".to_string();
 
         assert!(post_land_operation_complete(tmp.path(), &wrong).is_err());
+    }
+
+    #[test]
+    fn completed_operation_derives_required_queue_effect_from_work() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        seed_root_work_item(tmp.path());
+        write_project_policy(tmp.path(), "follow-up:\n  mode: execute\n");
+        let authority = fresh_expertise_authority(tmp.path());
+        let batch = corrective_batch(tmp.path(), FollowUpSource::Learner, Some(authority));
+        let outcome = process_landed_batch(tmp.path(), &batch, None).unwrap();
+        let journal_path = operation_dir(tmp.path(), &outcome.operation_id).join("journal.json");
+        let mut journal = read_journal(&journal_path, &outcome.operation_id).unwrap();
+        journal.follow_ups[0].queue_expected = false;
+        journal.follow_ups[0].queued = false;
+        write_journal(&journal_path, &journal).unwrap();
+
+        assert!(
+            !post_land_operation_complete(tmp.path(), &batch.origin).unwrap(),
+            "an execution-ready Work with enqueue intent requires its dispatch regardless of receipt claims"
+        );
+    }
+
+    #[test]
+    fn completed_non_corrective_receipt_rejects_impossible_effects() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let batch = batch_with(vec![draft("fu-1", "one")]);
+        let outcome = process_landed_batch(tmp.path(), &batch, None).unwrap();
+        let journal_path = operation_dir(tmp.path(), &outcome.operation_id).join("journal.json");
+        let mut journal = read_journal(&journal_path, &outcome.operation_id).unwrap();
+        journal.follow_ups[0].derived_work_item_id = Some("impossible-work".to_string());
+        journal.follow_ups[0].queue_expected = true;
+        journal.follow_ups[0].queued = true;
+        write_journal(&journal_path, &journal).unwrap();
+
+        assert!(post_land_operation_complete(tmp.path(), &batch.origin).is_err());
     }
 
     #[test]

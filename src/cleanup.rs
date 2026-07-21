@@ -434,21 +434,26 @@ fn push_unique_branch(branches: &mut Vec<WorkBranchCleanup>, cleanup: WorkBranch
 fn cleanup_managed_worktree(
     search_root: &Path,
     path: &Path,
-    registered: &[PathBuf],
+    _registered: &[PathBuf],
     apply: bool,
 ) -> Result<WorktreeCleanup> {
+    // Re-read Git's authoritative registration immediately before each
+    // decision. The plan-level snapshot is only advisory and may be stale.
+    let registered = registered_worktrees(search_root)?;
     if !path.exists() {
-        if apply && path_is_registered(path, registered) {
-            git::run(
-                search_root,
-                &["worktree", "prune", "--expire", "now"],
-                "prune missing registered worktree",
-            )?;
+        if apply && path_is_registered(path, &registered) {
+            remove_registered_worktree(search_root, path)?;
+            if path_is_registered(path, &registered_worktrees(search_root)?) {
+                anyhow::bail!(
+                    "Git still registers missing worktree {} after exact removal",
+                    path.display()
+                );
+            }
         }
         return Ok(WorktreeCleanup::Missing(path.to_path_buf()));
     }
 
-    if !path_is_registered(path, registered) {
+    if !path_is_registered(path, &registered) {
         return Ok(WorktreeCleanup::SkippedUnregistered(path.to_path_buf()));
     }
 
@@ -457,6 +462,12 @@ fn cleanup_managed_worktree(
     }
 
     remove_registered_worktree(search_root, path)?;
+    if path_is_registered(path, &registered_worktrees(search_root)?) {
+        anyhow::bail!(
+            "Git still registers worktree {} after removal",
+            path.display()
+        );
+    }
     Ok(WorktreeCleanup::Removed(path.to_path_buf()))
 }
 
@@ -636,12 +647,13 @@ fn remove_registered_worktree(search_root: &Path, path: &Path) -> Result<()> {
 }
 
 fn registered_worktrees(search_root: &Path) -> Result<Vec<PathBuf>> {
-    let output = match git::run_raw(search_root, &["worktree", "list", "--porcelain"]) {
-        Ok(o) => o,
-        Err(_) => return Ok(Vec::new()),
-    };
+    let output = git::run_raw(search_root, &["worktree", "list", "--porcelain"])
+        .context("list registered Git worktrees")?;
     if !output.status.success() {
-        return Ok(Vec::new());
+        anyhow::bail!(
+            "list registered Git worktrees failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1013,6 +1025,53 @@ mod tests {
     }
 
     #[test]
+    fn registered_worktrees_fails_closed_outside_a_git_repository() {
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        let error = registered_worktrees(tmp.path()).unwrap_err();
+
+        assert!(error.to_string().contains("list registered Git worktrees"));
+    }
+
+    #[test]
+    fn missing_locked_worktree_registration_is_retained_on_failure() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        git::run(&project, &["init", "-q"], "initialize locked cleanup repository").unwrap();
+        git::run(&project, &["config", "user.email", "test@example.com"], "configure email")
+            .unwrap();
+        git::run(&project, &["config", "user.name", "Test"], "configure name").unwrap();
+        fs::write(project.join("README.md"), "test\n").unwrap();
+        git::run(&project, &["add", "README.md"], "stage fixture").unwrap();
+        git::run(&project, &["commit", "-m", "Seed"], "commit fixture").unwrap();
+        let missing = tmp.path().join("locked-missing-worktree");
+        let missing_text = missing.to_string_lossy().into_owned();
+        git::run(
+            &project,
+            &["worktree", "add", "--detach", &missing_text, "HEAD"],
+            "register locked cleanup fixture",
+        )
+        .unwrap();
+        git::run(
+            &project,
+            &["worktree", "lock", "--reason", "test", &missing_text],
+            "lock cleanup fixture",
+        )
+        .unwrap();
+        fs::remove_dir_all(&missing).unwrap();
+        let registered = registered_worktrees(&project).unwrap();
+
+        let error = cleanup_managed_worktree(&project, &missing, &registered, true).unwrap_err();
+
+        assert!(error.to_string().contains("remove registered worktree"));
+        assert!(path_is_registered(
+            &missing,
+            &registered_worktrees(&project).unwrap()
+        ));
+    }
+
+    #[test]
     fn parse_reviewer_worktree_name_extracts_components() {
         let result = parse_reviewer_worktree_name("review-6-work-1-attempt-1-tests");
         assert_eq!(
@@ -1214,6 +1273,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let project = tmp.path().join("project");
         fs::create_dir_all(&project).unwrap();
+        git::run(&project, &["init", "-q"], "initialize runtime cleanup repository").unwrap();
         let store = WorkModelStore::new(&project);
 
         let item = WorkItem {
