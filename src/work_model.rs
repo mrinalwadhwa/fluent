@@ -266,9 +266,9 @@ impl WorkItem {
         Ok(item)
     }
 
-    /// The complete execution input every role of this Work Item receives.
-    /// Derived corrective Work hands over its corrective context in place of
-    /// fabricated planning-artifact references.
+    /// The complete input stored on corrective Tasks and rendered into Writer
+    /// and reviewer prompts. Derived corrective Work uses this context in place
+    /// of fabricated planning-artifact references.
     pub fn write_task_instructions(&self) -> Option<String> {
         if let Some(context) = self.corrective_context.as_ref() {
             let mut instructions = context.to_execution_context();
@@ -536,8 +536,8 @@ impl WorkItem {
             path: crate::review_only_worktree::review_only_worktree_path(&source_ref),
         };
         let review_task_instructions = self.write_task_instructions();
-        // A corrective Attempt's Tester retains the same immutable execution
-        // context as the Writer and reviewers while running the normal checks.
+        // Persist corrective input on the Tester Task for inspection. The
+        // Tester runner executes tester.yaml and does not consume a prompt.
         let tester_instructions = self.write_task_instructions();
         let mut task_ids = Vec::new();
         let mut tasks = Vec::new();
@@ -708,8 +708,8 @@ impl WorkItem {
             id: write_output.workspace_id.clone(),
             path: write_output.workspace_path.clone(),
         };
-        // A corrective Attempt's Tester retains the same immutable execution
-        // context as the Writer and reviewers while running the normal checks.
+        // Persist corrective input on the Tester Task for inspection. The
+        // Tester runner executes tester.yaml and does not consume a prompt.
         let mut task_ids = Vec::new();
 
         let tester_task_id = {
@@ -1322,7 +1322,7 @@ impl WorkLineage {
 
 /// Immutable corrective execution input for derived corrective Work created
 /// without brief, behaviors, approach, or plan artifacts. It stands in for the
-/// planning artifacts as the complete execution input every role receives.
+/// planning artifacts stored on Tasks and rendered for Writers and reviewers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CorrectiveContext {
     /// What the corrective Work must accomplish.
@@ -1358,8 +1358,8 @@ impl CorrectiveContext {
         Ok(())
     }
 
-    /// Render the corrective context as the shared, authoritative execution
-    /// block handed identically to the Writer, every reviewer, and the Tester.
+    /// Render the authoritative execution block stored on corrective Tasks and
+    /// included in Writer and reviewer prompts.
     pub fn to_execution_context(&self) -> String {
         format!(
             "# Corrective execution context\n\n\
@@ -1399,8 +1399,8 @@ pub struct CorrectiveAuditContext {
 }
 
 impl CorrectiveAuditContext {
-    /// Render the accepted result, authority, and evidence into the execution
-    /// input shared by every role on derived corrective Work.
+    /// Render the accepted result, authority, and evidence into the corrective
+    /// input stored on Tasks and included in Writer and reviewer prompts.
     pub fn to_execution_context(&self) -> String {
         let evidence = if self.evidence.is_empty() {
             "none".to_string()

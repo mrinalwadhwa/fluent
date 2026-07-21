@@ -1531,9 +1531,9 @@ fn run_task_coder(
     }
 }
 
-/// The immutable execution context a derived corrective Work Item hands
-/// identically to the Writer, every reviewer, and the Tester. Returns `None`
-/// for ordinary Work, which carries planning artifacts instead.
+/// The immutable execution context a derived corrective Work Item renders into
+/// Writer and reviewer prompts. Returns `None` for ordinary Work, which carries
+/// planning artifacts instead.
 fn corrective_execution_context(item: &WorkItem) -> Option<String> {
     item.corrective_context
         .as_ref()
@@ -3097,7 +3097,7 @@ mod tests {
     }
 
     #[test]
-    fn corrective_attempt_roles_receive_same_execution_context() {
+    fn corrective_prompts_and_task_records_retain_execution_context() {
         let tmp = tempfile::TempDir::new().unwrap();
         let project_root = tmp.path();
         let workspace = tmp.path().join("work-6-work-1-attempt-1");
@@ -3158,7 +3158,8 @@ mod tests {
             );
         }
 
-        // The Tester Task retains the same context while running normal checks.
+        // The Tester Task persists the same context for durable inspection, but
+        // its runner executes tester.yaml rather than consuming a prompt.
         let tester = item.attempts[0]
             .tasks
             .iter()
@@ -3170,35 +3171,199 @@ mod tests {
     #[test]
     fn writer_and_every_reviewer_prompt_retain_audit_after_origin_cleanup() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let workspace = tmp.path().join("candidate");
-        fs::create_dir_all(&workspace).unwrap();
-        let mut seeded = corrective_review_item("architecture");
-        seeded.attempts[0]
-            .tasks
-            .retain(|task| task.kind == TaskKind::Write);
+        let project_root = tmp.path().join("project");
+        fs::create_dir_all(project_root.join(".fluent/expertise")).unwrap();
+        for args in [
+            &["init", "-b", "main"] as &[&str],
+            &["config", "user.email", "test@test"],
+            &["config", "user.name", "test"],
+        ] {
+            crate::git::run(&project_root, args, "initialize prompt cleanup repository").unwrap();
+        }
+        let authority_anchor = "Retries stop after the configured cap";
+        fs::write(
+            project_root.join(".fluent/expertise/retry.md"),
+            format!("{authority_anchor}\n"),
+        )
+        .unwrap();
+        crate::git::run(
+            &project_root,
+            &["add", ".fluent/expertise/retry.md"],
+            "stage prompt cleanup authority",
+        )
+        .unwrap();
+        crate::git::run(
+            &project_root,
+            &["commit", "-m", "Seed authority"],
+            "commit prompt cleanup authority",
+        )
+        .unwrap();
+        let merged_commit = String::from_utf8(
+            crate::git::run_raw(&project_root, &["rev-parse", "HEAD"])
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        let store = WorkModelStore::new(&project_root);
+        let mut origin = WorkItem::planned("root-1", "Origin work");
+        origin.add_initial_attempt("origin-attempt").unwrap();
+        let attempt = origin.attempts.first_mut().unwrap();
+        let write = attempt.tasks.first_mut().unwrap();
+        let write_workspace = write.workspace_access.writes.first().unwrap().clone();
+        write.status = TaskStatus::Complete;
+        write.output = Some(TaskOutput {
+            workspace_id: write_workspace.id,
+            workspace_path: write_workspace.path,
+            source_branch: "main".to_string(),
+            base_commit: None,
+            commit: merged_commit.clone(),
+        });
+        attempt.status = crate::work_model::AttemptStatus::Complete;
+        attempt.review_state = Some(crate::work_model::AttemptReviewState::Passed);
+        attempt.learning = Some(crate::work_model::AttemptLearning::succeeded(
+            1,
+            crate::follow_up::ArtifactRef {
+                path: ".fluent/work/handoffs/root-1/origin-attempt/handoff.json".to_string(),
+                digest: "sha256:handoff".to_string(),
+            },
+        ));
+        let candidate_id = origin
+            .create_or_get_merge_candidate("origin-attempt")
+            .unwrap();
+        let candidate = origin
+            .merge_candidates
+            .iter_mut()
+            .find(|candidate| candidate.id == candidate_id)
+            .unwrap();
+        candidate.merge_state.status = crate::work_model::MergeCandidateMergeStatus::Merged;
+        candidate.merge_state.merged_commit = Some(merged_commit.clone());
+        store.create_work_item(&origin).unwrap();
+
+        let authority_digest = crate::follow_up::content_digest(authority_anchor.as_bytes());
+        let corrective_context = CorrectiveContext {
+            objective: "Restore the retry guard".to_string(),
+            requirement: authority_anchor.to_string(),
+            evidence: "Merged commit removed the retry cap".to_string(),
+            included_scope: "src/retry.rs".to_string(),
+            excluded_scope: "unrelated backoff tuning".to_string(),
+            verification: "cargo test retry::cap_is_enforced".to_string(),
+        };
+        let batch = crate::follow_up::NormalizedFollowUpBatchV1 {
+            schema_version: crate::follow_up::NormalizedFollowUpBatchV1::SCHEMA_VERSION,
+            source: crate::follow_up::FollowUpSource::Learner,
+            origin: crate::follow_up::PostLandOrigin {
+                work_item_id: origin.id.clone(),
+                attempt_id: "origin-attempt".to_string(),
+                merge_candidate_id: candidate_id,
+                merged_commit,
+            },
+            learning_summary: "The accepted change removed the retry cap".to_string(),
+            follow_ups: vec![crate::follow_up::FollowUpDraftV1 {
+                id: "fu-retry-cap".to_string(),
+                summary: "Restore the retry guard".to_string(),
+                corrective: true,
+                corrective_context: Some(corrective_context),
+                target_paths: vec!["src/retry.rs".to_string()],
+                expected_result: "The retry cap is enforced again".to_string(),
+                unresolved_decisions: Vec::new(),
+                authority: Some(crate::follow_up::AuthorityLocator {
+                    kind: crate::follow_up::AuthorityKind::ExpertiseEntry,
+                    path: ".fluent/expertise/retry.md".to_string(),
+                    anchor: authority_anchor.to_string(),
+                    digest: authority_digest.clone(),
+                }),
+                evidence: vec![crate::follow_up::ArtifactRef {
+                    path: "review.md".to_string(),
+                    digest: "sha256:evidence".to_string(),
+                }],
+            }],
+        };
+        crate::follow_up::process_landed_batch(&project_root, &batch, None).unwrap();
+        let origin_artifacts = project_root.join(".fluent/work/artifacts/root-1/origin-attempt");
+        fs::create_dir_all(&origin_artifacts).unwrap();
+        fs::write(origin_artifacts.join("origin.txt"), "origin artifact\n").unwrap();
+        let mut seeded = store
+            .list_work_items()
+            .unwrap()
+            .into_iter()
+            .find(|item| item.origin.is_derived())
+            .expect("landed follow-up creates derived Work");
+        seeded
+            .authorize_execution(ExecutionAuthority::Human)
+            .unwrap();
+        seeded.add_initial_attempt("attempt-1").unwrap();
+        let write = seeded.attempts[0].tasks.first_mut().unwrap();
+        let workspace_ref = write.workspace_access.writes.first().unwrap().clone();
+        write.status = TaskStatus::Complete;
+        write.output = Some(TaskOutput {
+            workspace_id: workspace_ref.id,
+            workspace_path: workspace_ref.path,
+            source_branch: "main".to_string(),
+            base_commit: None,
+            commit: batch.origin.merged_commit.clone(),
+        });
         seeded
             .add_review_tasks(
                 "attempt-1",
                 &["architecture", "behaviors", "documentation", "skills", "tests"],
             )
             .unwrap();
-        let store = WorkModelStore::new(tmp.path());
-        store.create_work_item(&seeded).unwrap();
-        let origin_candidates = store.work_merge_candidates_dir().join("root-1");
-        fs::create_dir_all(&origin_candidates).unwrap();
-        fs::write(origin_candidates.join("candidate.json"), "{}\n").unwrap();
-        fs::remove_dir_all(origin_candidates).unwrap();
-        let item = store.read_work_item("work-1").unwrap();
-        let complete = item.write_task_instructions().unwrap();
+        store.write_work_item(&seeded).unwrap();
+
+        let cleanup = crate::cleanup::cleanup_work_items(
+            &project_root,
+            &crate::cleanup::CleanupOptions { apply: true },
+        )
+        .unwrap();
+        assert!(
+            cleanup.iter().any(|result| matches!(
+                result,
+                crate::cleanup::WorkCleanupResult::WorkItem(item)
+                    if item.work_item_id == "root-1"
+            )),
+            "real cleanup removes the landed origin"
+        );
+        assert!(store.read_work_item("root-1").is_err());
+        assert!(!store.work_attempts_dir().join("root-1").exists());
+        assert!(!store.work_tasks_dir().join("root-1").exists());
+        assert!(!store.work_merge_candidates_dir().join("root-1").exists());
+        assert!(!project_root.join(".fluent/work/artifacts/root-1").exists());
+
+        let item = store.read_work_item(&seeded.id).unwrap();
+        let workspace = tmp.path().join("candidate");
+        fs::create_dir_all(&workspace).unwrap();
         let writer = build_write_task_prompt_with_workspace(
             &item,
             "attempt-1",
             "attempt-1-write-1",
             &[],
             Some(&workspace),
-            Some(tmp.path()),
+            Some(&project_root),
         );
-        assert!(writer.contains(&complete));
+        let audit_fields = [
+            "Restore the retry guard",
+            authority_anchor,
+            "Merged commit removed the retry cap",
+            "src/retry.rs",
+            "unrelated backoff tuning",
+            "cargo test retry::cap_is_enforced",
+            "The retry cap is enforced again",
+            "expertise-entry",
+            ".fluent/expertise/retry.md",
+            authority_digest.as_str(),
+            "review.md",
+            "sha256:evidence",
+            "Unresolved decisions\nnone",
+            "learner",
+            "fu-retry-cap",
+            "The accepted change removed the retry cap",
+        ];
+        for field in audit_fields {
+            assert!(writer.contains(field), "Writer omitted {field:?} after cleanup");
+        }
 
         for role in crate::review::REVIEWERS {
             let task_id = format!("attempt-1-review-{role}");
@@ -3210,7 +3375,7 @@ mod tests {
                 item: &item,
                 attempt_id: "attempt-1",
                 task_id: &task_id,
-                project_root: tmp.path(),
+                project_root: &project_root,
                 artifact_dir: &artifact_dir,
                 review_path: &artifact_dir.join("review.md"),
                 readable_workspaces: std::slice::from_ref(&workspace),
@@ -3218,10 +3383,12 @@ mod tests {
                 review_only: false,
             })
             .unwrap();
-            assert!(
-                prompts.review_prompt.contains(&complete),
-                "{role} reviewer omitted the complete corrective audit"
-            );
+            for field in audit_fields {
+                assert!(
+                    prompts.review_prompt.contains(field),
+                    "{role} reviewer omitted {field:?} after cleanup"
+                );
+            }
         }
     }
 

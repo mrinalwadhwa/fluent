@@ -364,7 +364,10 @@ derived Work also retains the accepted expected result, trusted authority,
 supporting evidence, unresolved-decision set, follow-up source, and learning
 summary. Fluent includes this audit package in corrective task instructions,
 so the Work stays executable and inspectable after cleanup removes its origin
-handoff and post-land journal. In `propose` mode the Work
+handoff and post-land journal. Writer and reviewer prompts render those
+instructions. Tester Task records retain them for inspection, while the Tester
+runner executes the commands declared in `tester.yaml` without consuming a
+prompt. In `propose` mode the Work
 stays proposed with no queue entry; in `execute` mode it is authorized
 automatically and enqueued on the regular Work Queue while lineage budget
 remains, and stays proposed once the budget is exhausted. Concurrent
