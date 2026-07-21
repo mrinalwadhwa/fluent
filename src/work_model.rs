@@ -189,6 +189,11 @@ pub struct WorkItem {
     /// without brief, behaviors, approach, or plan artifacts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corrective_context: Option<CorrectiveContext>,
+    /// A durable intent to enqueue this Work on the regular Work Queue once its
+    /// execution is authorized. Recorded so an authorization that crashes before
+    /// the queue write can be reconciled on retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_enqueue: Option<EnqueueIntent>,
     #[serde(default)]
     pub attempts: Vec<Attempt>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -208,6 +213,7 @@ impl Default for WorkItem {
             authorization: ExecutionAuthorization::default(),
             lineage: WorkLineage::default(),
             corrective_context: None,
+            pending_enqueue: None,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         }
@@ -289,6 +295,21 @@ impl WorkItem {
         self.mark_execution_ready(authority);
         self.validate()?;
         Ok(())
+    }
+
+    /// Record a durable intent to enqueue this Work on the regular Work Queue at
+    /// `priority`, keyed by `origin_operation_id`. Set when derived corrective
+    /// Work is created so automatic promotion or human authorization can
+    /// reconcile exactly one dispatch even across a crash.
+    pub fn set_enqueue_intent(
+        &mut self,
+        priority: i64,
+        origin_operation_id: impl Into<String>,
+    ) {
+        self.pending_enqueue = Some(EnqueueIntent {
+            priority,
+            origin_operation_id: origin_operation_id.into(),
+        });
     }
 
     /// Mark the Work execution-ready and charge its lineage the first time
@@ -1352,6 +1373,20 @@ impl CorrectiveContext {
             self.verification.trim(),
         )
     }
+}
+
+/// A durable intent to enqueue a Work Item on the regular Work Queue. Recorded
+/// on derived corrective Work when it is created, and consumed by automatic
+/// promotion or human authorization to reconcile exactly one dispatch — so an
+/// authorization that persists but crashes before the queue write is
+/// recoverable on retry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnqueueIntent {
+    /// The regular-queue priority for this Work.
+    pub priority: i64,
+    /// A stable origin id so a reconcile recognizes its own dispatch and never
+    /// creates a duplicate.
+    pub origin_operation_id: String,
 }
 
 /// Coarse outcome of the most recent Learner run for an Attempt.
@@ -2859,6 +2894,8 @@ struct WorkItemRecord {
     lineage: WorkLineage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     corrective_context: Option<CorrectiveContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_enqueue: Option<EnqueueIntent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2907,6 +2944,7 @@ impl From<&WorkItem> for WorkItemRecord {
             authorization: work_item.authorization,
             lineage: work_item.lineage.clone(),
             corrective_context: work_item.corrective_context.clone(),
+            pending_enqueue: work_item.pending_enqueue.clone(),
         }
     }
 }
@@ -2924,6 +2962,7 @@ impl From<WorkItemRecord> for WorkItem {
             authorization: record.authorization,
             lineage: record.lineage,
             corrective_context: record.corrective_context,
+            pending_enqueue: record.pending_enqueue,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         }
@@ -7205,5 +7244,147 @@ mod tests {
             );
         }
         assert!(!WorkLineage::can_authorize_descendant(limit, limit));
+    }
+
+    // --- Human authorization and lineage (Step 3) ---
+
+    fn derived_descendant(id: &str, root: &str) -> WorkItem {
+        WorkItem::derived_corrective(
+            id,
+            "Corrective descendant",
+            DerivedProvenance {
+                work_item_id: Some(root.to_string()),
+                ..Default::default()
+            },
+            complete_corrective_context(),
+            WorkLineage::descendant_of(root, Some(3)),
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn human_authorization_preserves_origin_provenance() {
+        let mut item = WorkItem::derived_corrective(
+            "child-1",
+            "Corrective descendant",
+            DerivedProvenance {
+                observation_id: Some("obs-1".to_string()),
+                work_item_id: Some("root-1".to_string()),
+                merged_commit: Some("abc123".to_string()),
+                ..Default::default()
+            },
+            complete_corrective_context(),
+            WorkLineage::descendant_of("root-1", Some(3)),
+            None,
+        )
+        .unwrap();
+        let provenance_before = item.origin.provenance().cloned();
+
+        item.authorize_execution(ExecutionAuthority::Human).unwrap();
+
+        // The same Work Item transitions in place: id, origin, and provenance are
+        // preserved; no replacement is created.
+        assert_eq!(item.id, "child-1");
+        assert!(item.authorization.is_execution_ready());
+        assert_eq!(item.authorization.authority(), Some(ExecutionAuthority::Human));
+        assert_eq!(item.origin.provenance().cloned(), provenance_before);
+        assert!(item.lineage.charged, "authorization charges the lineage once");
+    }
+
+    #[test]
+    fn learner_and_post_merge_descendants_share_root_lineage() {
+        let root = WorkItem::planned("root-1", "Root work");
+        assert_eq!(root.lineage.root_id(&root.id), "root-1");
+
+        // A learner-derived and a post-merge-derived descendant both compute the
+        // same root from the originating Work Item's lineage.
+        let learner_child = derived_descendant("child-learner", root.lineage.root_id(&root.id));
+        let post_merge_child =
+            derived_descendant("child-post-merge", root.lineage.root_id(&root.id));
+        assert_eq!(learner_child.lineage.root_id.as_deref(), Some("root-1"));
+        assert_eq!(post_merge_child.lineage.root_id.as_deref(), Some("root-1"));
+
+        // A grandchild derived from a descendant still roots at the same lineage.
+        let grandchild = derived_descendant(
+            "grandchild",
+            learner_child.lineage.root_id(&learner_child.id),
+        );
+        assert_eq!(grandchild.lineage.root_id.as_deref(), Some("root-1"));
+    }
+
+    /// Charge descendants across a shared lineage, refusing any promotion once
+    /// the budget is spent. Models the boundary the follow-up processor enforces
+    /// under its operation lock, recounting the charged descendants before each
+    /// decision.
+    fn run_lineage_boundary(pre_charged: &WorkItem, contenders: &mut [WorkItem], limit: u32) {
+        for i in 0..contenders.len() {
+            let charged = pre_charged.lineage.charged as u32
+                + contenders.iter().filter(|c| c.lineage.charged).count() as u32;
+            if !contenders[i].lineage.charged
+                && WorkLineage::can_authorize_descendant(charged, limit)
+            {
+                contenders[i]
+                    .authorize_execution(ExecutionAuthority::Automatic)
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn concurrent_lineage_boundary_never_exceeds_limit() {
+        let limit = 3;
+        // One descendant already holds a slot; three more compete for the rest.
+        let mut pre_charged = derived_descendant("d0", "root-1");
+        pre_charged
+            .authorize_execution(ExecutionAuthority::Automatic)
+            .unwrap();
+        let mut contenders = vec![
+            derived_descendant("d1", "root-1"),
+            derived_descendant("d2", "root-1"),
+            derived_descendant("d3", "root-1"),
+        ];
+
+        run_lineage_boundary(&mut pre_charged, &mut contenders, limit);
+
+        let charged: u32 = 1 + contenders.iter().filter(|i| i.lineage.charged).count() as u32;
+        assert_eq!(charged, limit, "charging never exceeds the limit");
+        // Exactly the two remaining slots are authorized; the rest stay proposed.
+        assert!(contenders[0].authorization.is_execution_ready());
+        assert!(contenders[1].authorization.is_execution_ready());
+        assert!(contenders[2].authorization.is_proposed());
+    }
+
+    #[test]
+    fn lineage_boundary_winners_are_stable_on_retry() {
+        let limit = 3;
+        let mut pre_charged = derived_descendant("d0", "root-1");
+        pre_charged
+            .authorize_execution(ExecutionAuthority::Automatic)
+            .unwrap();
+        let mut contenders = vec![
+            derived_descendant("d1", "root-1"),
+            derived_descendant("d2", "root-1"),
+            derived_descendant("d3", "root-1"),
+        ];
+
+        run_lineage_boundary(&mut pre_charged, &mut contenders, limit);
+        let winners: Vec<String> = contenders
+            .iter()
+            .filter(|i| i.lineage.charged)
+            .map(|i| i.id.clone())
+            .collect();
+
+        // Re-running the boundary preserves the same winners and re-charges none.
+        run_lineage_boundary(&mut pre_charged, &mut contenders, limit);
+        let winners_again: Vec<String> = contenders
+            .iter()
+            .filter(|i| i.lineage.charged)
+            .map(|i| i.id.clone())
+            .collect();
+
+        assert_eq!(winners, vec!["d1".to_string(), "d2".to_string()]);
+        assert_eq!(winners, winners_again, "the recorded winners are stable on retry");
+        assert!(contenders[2].authorization.is_proposed());
     }
 }

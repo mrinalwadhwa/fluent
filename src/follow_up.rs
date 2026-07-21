@@ -726,15 +726,18 @@ fn process_one_follow_up(
         write_journal(journal_path, journal)?;
     }
 
-    // Stage 5: enqueue an authorized execution-ready descendant exactly once.
+    // Stage 5: enqueue an authorized execution-ready descendant exactly once,
+    // through its durable enqueue intent.
     if !journal.follow_ups[index].queued {
         let item = store.read_work_item(&derived_id)?;
-        if item.authorization.is_execution_ready() {
+        if item.authorization.is_execution_ready()
+            && let Some(intent) = item.pending_enqueue.as_ref()
+        {
             crate::queue::ensure_dispatch(
                 project_root,
                 &derived_id,
-                &dispatch_origin_id(operation_id, &follow_up.id),
-                policy.priority,
+                &intent.origin_operation_id,
+                intent.priority,
             )?;
             totals.work_items_queued += 1;
             journal.follow_ups[index].queued = true;
@@ -765,12 +768,6 @@ fn observation_id_for(operation_id: &str, follow_up_id: &str) -> String {
 /// replay reuses the same Work rather than deriving a duplicate.
 fn derived_work_item_id(operation_id: &str, follow_up_id: &str) -> String {
     format!("derived-{operation_id}-{}", sanitize_component(follow_up_id))
-}
-
-/// The stable enqueue-origin id for a corrective follow-up's dispatch, so
-/// `ensure_dispatch` recognizes its own earlier queue entry on replay.
-fn dispatch_origin_id(operation_id: &str, follow_up_id: &str) -> String {
-    format!("followup-{operation_id}-{}", sanitize_component(follow_up_id))
 }
 
 fn correction_source(source: FollowUpSource) -> CorrectionSource {
@@ -859,7 +856,7 @@ fn ensure_derived_work(
         None
     };
 
-    let item = WorkItem::derived_corrective(
+    let mut item = WorkItem::derived_corrective(
         derived_id.to_string(),
         follow_up.summary.trim().to_string(),
         provenance,
@@ -867,6 +864,10 @@ fn ensure_derived_work(
         lineage,
         ready_authority,
     )?;
+    // Record the durable enqueue intent up front so an execution-ready
+    // descendant enqueues now and a proposed one enqueues on human
+    // authorization, both keyed by the same stable origin.
+    item.set_enqueue_intent(policy.priority, derived_id.to_string());
     store.create_work_item(&item)?;
     Ok(true)
 }

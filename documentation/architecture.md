@@ -341,6 +341,20 @@ processors of the same operation serialize on an operation lock so the
 Observation, Work Item, lineage charge, and queue entry each converge
 exactly once.
 
+`fluent work-item authorize <work-item-id>` transitions a proposed Work
+Item to execution-ready under human authority and reconciles its
+regular-queue dispatch. It holds a per-Work-Item lock across the read,
+the transition, and the write, persisting the authorization, the lineage
+charge — charged once even above the automatic descendant limit, so a
+human can override an exhausted budget — and a durable enqueue intent in
+one locked mutation before releasing the lock and touching the queue. If
+the process crashes between the model write and the queue write, a repeat
+authorization reconciles the missing dispatch from the durable intent.
+Repeated authorization preserves the existing authorization, lineage
+charge, and any active, terminal, or canceled queue disposition without
+duplicating or reviving it. Authorizing execution never authorizes
+landing.
+
 Follow-up processing never undoes a successful land: a failure leaves the
 merge intact and the persisted operation replayable, and re-running
 `fluent merge-candidate land` on the merged candidate resumes it without

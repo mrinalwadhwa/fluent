@@ -3175,6 +3175,183 @@ fn followup_retry_does_not_reapply_changed_policy() {
     );
 }
 
+fn authorize_work_item(main_dir: &Path, id: &str) {
+    fluent_cmd()
+        .current_dir(main_dir)
+        .args(["work-item", "authorize", id])
+        .assert()
+        .success();
+}
+
+/// Land a propose-mode corrective follow-up, leaving one proposed derived Work
+/// Item at `DERIVED_FU1`.
+fn land_one_proposed_corrective(main_dir: &Path, tmp: &TempDir, bin_name: &str) {
+    commit_authority(main_dir);
+    let bin_dir = tmp.path().join(bin_name);
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(&learner_draft(&[corrective_follow_up_json("fu-1")])),
+    );
+    create_and_run_learner_attempt(main_dir, &bin_dir);
+    land_work_1(main_dir, &bin_dir, true);
+}
+
+#[test]
+fn human_authorization_transitions_same_work_item() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    land_one_proposed_corrective(&main_dir, &tmp, "bin-authorize");
+    assert_eq!(
+        work_item_value(&main_dir, DERIVED_FU1)["authorization"]["state"],
+        "proposed"
+    );
+
+    authorize_work_item(&main_dir, DERIVED_FU1);
+
+    let derived = work_item_value(&main_dir, DERIVED_FU1);
+    assert_eq!(derived["id"], DERIVED_FU1, "the same Work Item transitions in place");
+    assert_eq!(derived["authorization"]["state"], "execution-ready");
+    assert_eq!(
+        derived["authorization"]["authority"], "human",
+        "the human authority is recorded"
+    );
+}
+
+#[test]
+fn human_authorization_immediately_enqueues_work() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    land_one_proposed_corrective(&main_dir, &tmp, "bin-authorize-enqueue");
+    assert!(!queue_ledger_path(&main_dir, DERIVED_FU1).exists());
+
+    authorize_work_item(&main_dir, DERIVED_FU1);
+
+    assert_eq!(latest_dispatch_status(&main_dir, DERIVED_FU1), "queued");
+    assert_eq!(dispatch_count(&main_dir, DERIVED_FU1), 1);
+}
+
+#[test]
+fn authorization_crash_before_queue_write_is_recoverable() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    land_one_proposed_corrective(&main_dir, &tmp, "bin-authorize-crash");
+
+    // Simulate a crash after the locked Work mutation persisted the
+    // authorization and enqueue intent but before the queue dispatch was
+    // written: the Work Item is execution-ready with its intent intact and no
+    // queue ledger.
+    let item_path = main_dir
+        .join(".fluent/work/items")
+        .join(format!("{DERIVED_FU1}.json"));
+    let mut value = read_json_path(&item_path);
+    value["authorization"] = serde_json::json!({"state": "execution-ready", "authority": "human"});
+    value["lineage"]["charged"] = serde_json::json!(true);
+    fs::write(&item_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    assert!(
+        value["pending_enqueue"]["origin_operation_id"].is_string(),
+        "the durable enqueue intent survives the crash"
+    );
+    assert!(!queue_ledger_path(&main_dir, DERIVED_FU1).exists());
+
+    // Re-invoking authorize reconciles the dispatch from the durable intent.
+    authorize_work_item(&main_dir, DERIVED_FU1);
+    assert_eq!(latest_dispatch_status(&main_dir, DERIVED_FU1), "queued");
+    assert_eq!(dispatch_count(&main_dir, DERIVED_FU1), 1);
+}
+
+#[test]
+fn human_authorization_can_override_exhausted_automatic_budget() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    commit_authority(&main_dir);
+    write_follow_up_policy(&main_dir, "follow-up:\n  mode: execute\n  descendant-limit: 1\n");
+    let bin_dir = tmp.path().join("bin-override");
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(&learner_draft(&[
+            corrective_follow_up_json("fu-1"),
+            corrective_follow_up_json("fu-2"),
+        ])),
+    );
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+
+    // Automatic promotion stopped at the single lineage slot: fu-1 authorized,
+    // fu-2 retained proposed.
+    assert_eq!(
+        work_item_value(&main_dir, DERIVED_FU1)["authorization"]["state"],
+        "execution-ready"
+    );
+    assert_eq!(
+        work_item_value(&main_dir, DERIVED_FU2)["authorization"]["state"],
+        "proposed"
+    );
+
+    // A human explicitly authorizes the proposed descendant beyond the exhausted
+    // automatic budget.
+    authorize_work_item(&main_dir, DERIVED_FU2);
+    let overridden = work_item_value(&main_dir, DERIVED_FU2);
+    assert_eq!(overridden["authorization"]["state"], "execution-ready");
+    assert_eq!(overridden["authorization"]["authority"], "human");
+    assert_eq!(overridden["lineage"]["charged"], true);
+    assert_eq!(latest_dispatch_status(&main_dir, DERIVED_FU2), "queued");
+
+    // The lineage now holds two charges against a limit of one — the human
+    // override exceeded the cap while the automatic path had correctly stopped.
+    assert_eq!(work_item_value(&main_dir, DERIVED_FU1)["lineage"]["charged"], true);
+}
+
+#[test]
+fn repeated_work_authorization_is_idempotent() {
+    use fluent::queue::{self, DispatchStatus};
+
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    land_one_proposed_corrective(&main_dir, &tmp, "bin-reauthorize");
+
+    authorize_work_item(&main_dir, DERIVED_FU1);
+    assert_eq!(latest_dispatch_status(&main_dir, DERIVED_FU1), "queued");
+
+    // Re-authorizing an already execution-ready Work Item preserves its
+    // authorization and lineage charge without duplicating the dispatch.
+    authorize_work_item(&main_dir, DERIVED_FU1);
+    let derived = work_item_value(&main_dir, DERIVED_FU1);
+    assert_eq!(derived["authorization"]["state"], "execution-ready");
+    assert_eq!(derived["lineage"]["charged"], true);
+    assert_eq!(dispatch_count(&main_dir, DERIVED_FU1), 1);
+
+    // Drive the dispatch to a terminal disposition; re-authorization must not
+    // revive it.
+    let token = queue::claim(&main_dir, DERIVED_FU1, "attempt-x").unwrap().unwrap();
+    queue::reconcile(&main_dir, &token, DispatchStatus::Failed).unwrap();
+    authorize_work_item(&main_dir, DERIVED_FU1);
+    assert_eq!(
+        latest_dispatch_status(&main_dir, DERIVED_FU1),
+        "failed",
+        "re-authorization never reactivates a terminal dispatch"
+    );
+    assert_eq!(dispatch_count(&main_dir, DERIVED_FU1), 1);
+}
+
+#[test]
+fn repeated_authorization_repairs_missing_dispatch() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    land_one_proposed_corrective(&main_dir, &tmp, "bin-repair");
+
+    authorize_work_item(&main_dir, DERIVED_FU1);
+    assert_eq!(latest_dispatch_status(&main_dir, DERIVED_FU1), "queued");
+
+    // The queue ledger is lost; a repeated authorization repairs the missing
+    // dispatch required by the durable enqueue intent.
+    fs::remove_file(queue_ledger_path(&main_dir, DERIVED_FU1)).unwrap();
+    assert!(!queue_ledger_path(&main_dir, DERIVED_FU1).exists());
+
+    authorize_work_item(&main_dir, DERIVED_FU1);
+    assert_eq!(latest_dispatch_status(&main_dir, DERIVED_FU1), "queued");
+    assert_eq!(dispatch_count(&main_dir, DERIVED_FU1), 1);
+}
+
 #[test]
 fn write_task_transcript_persists_after_failed_attempt() {
     let tmp = TempDir::new().unwrap();

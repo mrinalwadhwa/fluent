@@ -33,7 +33,8 @@ use fluent::version;
 use fluent::work_attempt_loop::{self, WorkAttemptRunConfig, WorkAttemptRunOutcome};
 use fluent::work_merge_executor::{self, WorkMergeConfig};
 use fluent::work_model::{
-    self, PlanningContext, WorkItem, WorkModelStorageError, WorkModelStore, to_json_pretty,
+    self, ExecutionAuthority, PlanningContext, WorkItem, WorkModelStorageError, WorkModelStore,
+    to_json_pretty,
 };
 use fluent::work_status;
 use fluent::work_task_executor::{self, WorkTaskRunConfig};
@@ -314,8 +315,72 @@ fn cmd_work_item(project_root: &Path, command: WorkItemCommands) -> Result<()> {
             store.write_work_item(&item)?;
             println!("Abandoned Work Item {}", item.id);
         }
+        WorkItemCommands::Authorize { id } => {
+            cmd_work_item_authorize(project_root, &store, &id)?;
+        }
     }
     Ok(())
+}
+
+/// Authorize a proposed Work Item to execute and reconcile its regular-queue
+/// dispatch. The authorization, lineage charge, and durable enqueue intent are
+/// persisted in one locked Work mutation before the queue is touched, so a crash
+/// between the two is recoverable. Repeated authorization preserves the existing
+/// authorization and lineage charge and repairs a missing dispatch without
+/// reviving terminal or canceled history. This never authorizes landing.
+fn cmd_work_item_authorize(project_root: &Path, store: &WorkModelStore, id: &str) -> Result<()> {
+    // One locked Work mutation: hold the Work Item lock across the read, the
+    // transition, and the write. Release it before touching the queue lock.
+    let lock_path = work_item_authorize_lock_path(project_root, id);
+    let _lock = fluent::lease::acquire(&lock_path)
+        .with_context(|| format!("acquire authorization lock for Work Item {id:?}"))?;
+
+    let mut item = match store.read_work_item(id) {
+        Ok(item) => item,
+        Err(WorkModelStorageError::ReadFile { source, .. })
+            if source.kind() == ErrorKind::NotFound =>
+        {
+            bail!("Work Item {id:?} not found");
+        }
+        Err(error) => return Err(error.into()),
+    };
+    item.ensure_not_abandoned()?;
+
+    // Transition a proposed Work Item to execution-ready under human authority,
+    // charging its lineage once even above the automatic descendant limit.
+    if item.authorization.is_proposed() {
+        item.authorize_execution(ExecutionAuthority::Human)?;
+    }
+
+    // Ensure a durable enqueue intent exists so the queue can be reconciled even
+    // if this process crashes before the dispatch is written.
+    if item.pending_enqueue.is_none() {
+        let priority = fluent::config::resolve_follow_up_policy(project_root)
+            .map(|policy| policy.learner_priority.value)
+            .unwrap_or(0);
+        item.set_enqueue_intent(priority, format!("authorize-{id}"));
+    }
+    let intent = item
+        .pending_enqueue
+        .clone()
+        .expect("enqueue intent was just ensured");
+
+    store.write_work_item(&item)?;
+    drop(_lock);
+
+    // Reconcile exactly one regular-queue dispatch. `ensure_dispatch` is
+    // idempotent and never restores a canceled or terminal disposition.
+    fluent::queue::ensure_dispatch(project_root, id, &intent.origin_operation_id, intent.priority)?;
+
+    println!("Authorized Work Item {id}");
+    Ok(())
+}
+
+fn work_item_authorize_lock_path(project_root: &Path, work_item_id: &str) -> PathBuf {
+    project_root
+        .join(".fluent/work/locks")
+        .join(work_item_id)
+        .join("authorize.lock")
 }
 
 // -------------------------------------------------------------------------

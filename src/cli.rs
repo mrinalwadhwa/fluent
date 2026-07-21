@@ -254,6 +254,13 @@ pub enum WorkItemCommands {
         #[arg(long)]
         reason: Option<String>,
     },
+
+    /// Authorize a proposed Work Item to execute and enqueue it. Never
+    /// authorizes landing.
+    Authorize {
+        /// Work Item ID
+        id: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
