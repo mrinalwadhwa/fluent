@@ -3057,7 +3057,7 @@ fn commit_authority(main_dir: &Path) {
 fn corrective_follow_up_json(id: &str) -> String {
     let digest = fluent::follow_up::content_digest(AUTHORITY_ANCHOR.as_bytes());
     format!(
-        r#"{{"id":"{id}","summary":"Restore the retry cap ({id})","corrective":true,"expected_result":"The retry cap is enforced again","corrective_context":{{"objective":"Restore the retry guard","requirement":"Retries stop after the configured cap","evidence":"Merged commit removed the cap check","included_scope":"src/retry.rs","excluded_scope":"unrelated backoff tuning","verification":"cargo test retry"}},"authority":{{"kind":"expertise-entry","path":"{AUTHORITY_PATH}","anchor":"{AUTHORITY_ANCHOR}","digest":"{digest}"}}}}"#
+        r#"{{"id":"{id}","summary":"Restore the retry cap ({id})","corrective":true,"expected_result":"The retry cap is enforced again","corrective_context":{{"objective":"Restore the retry guard","requirement":"{AUTHORITY_ANCHOR}","evidence":"Merged commit removed the cap check","included_scope":"src/retry.rs","excluded_scope":"unrelated backoff tuning","verification":"cargo test retry"}},"authority":{{"kind":"expertise-entry","path":"{AUTHORITY_PATH}","anchor":"{AUTHORITY_ANCHOR}","digest":"{digest}"}}}}"#
     )
 }
 

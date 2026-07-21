@@ -130,7 +130,7 @@ looks like this:
   "unresolved_decisions": [],
   "corrective_context": {
     "objective": "what the corrective Work must accomplish",
-    "requirement": "the single authoritative requirement the result must satisfy",
+    "requirement": "Retries must stop after the configured cap.",
     "evidence": "the concrete evidence that motivated the correction",
     "included_scope": "what is in scope",
     "excluded_scope": "what is explicitly out of scope",
@@ -153,7 +153,8 @@ Fill every field:
   architecture, security, or permission decision is still open, list it here; a
   non-empty list keeps the follow-up Observation-only rather than corrective.
 - `corrective_context` — every field is required and must be concrete, bounded,
-  and deterministic.
+  and deterministic. Its `requirement` must repeat the `authority.anchor`
+  exactly so the cited authority and requested correction cannot diverge.
 - `authority` — the committed, trusted authority this correction derives from.
   `kind` is one of `behavior-statement` (a statement in `documentation/behaviors.md`),
   `agents-instruction` (an applicable instruction in a tracked `AGENTS.md`), or

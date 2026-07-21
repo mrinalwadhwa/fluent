@@ -10,7 +10,7 @@ use rustix::fs::{FlockOperation, flock};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::atomic_write::atomic_write;
 use crate::config::{self, CorrectionSource, FrozenFollowUpPolicy};
@@ -174,14 +174,16 @@ pub fn classify_follow_up(
             reason: "corrective follow-up cites no authority".to_string(),
         };
     };
-    if let Err(reason) = verify_authority(project_root, authority) {
+    if let Err(reason) = verify_authority(project_root, authority, context) {
         return ObservationOnly { reason };
     }
     FollowUpClassification::Corrective
 }
 
 /// Whether an authority locator's path lives in the trusted namespace its kind
-/// requires.
+/// requires. The path must stay confined to the project, its target must be a
+/// regular file tracked in `HEAD`, and the cited text must come from that
+/// committed blob rather than an untracked or working-tree-only edit.
 fn authority_namespace_ok(kind: AuthorityKind, path: &str) -> bool {
     match kind {
         AuthorityKind::BehaviorStatement => path == "documentation/behaviors.md",
@@ -192,14 +194,28 @@ fn authority_namespace_ok(kind: AuthorityKind, path: &str) -> bool {
     }
 }
 
+fn authority_path_is_normalized(path: &Path) -> bool {
+    path.components()
+        .all(|component| matches!(component, Component::Normal(_)))
+}
+
 /// Resolve an authority locator against the project tree. It must be relative,
 /// live in its kind's trusted namespace, be self-consistent with its digest, and
-/// its anchor text must still be present in the referenced file. A missing file
-/// or a vanished anchor is treated as stale — the correction can no longer point
-/// to live authority, so its follow-up stays Observation-only.
-fn verify_authority(project_root: &Path, authority: &AuthorityLocator) -> Result<(), String> {
-    if !Path::new(&authority.path).is_relative() {
-        return Err(format!("authority path {:?} is not relative", authority.path));
+/// its anchor text must still be present in the committed file. The corrective
+/// requirement must equal that anchor so an unrelated passage cannot authorize
+/// different Work. A missing file or vanished anchor is stale, so the follow-up
+/// stays Observation-only.
+fn verify_authority(
+    project_root: &Path,
+    authority: &AuthorityLocator,
+    context: &CorrectiveContext,
+) -> Result<(), String> {
+    let relative = Path::new(&authority.path);
+    if !relative.is_relative() || !authority_path_is_normalized(relative) {
+        return Err(format!(
+            "authority path {:?} is not a normalized relative path",
+            authority.path
+        ));
     }
     if !authority_namespace_ok(authority.kind, &authority.path) {
         return Err(format!(
@@ -207,17 +223,71 @@ fn verify_authority(project_root: &Path, authority: &AuthorityLocator) -> Result
             authority.path, authority.kind
         ));
     }
+    if authority.anchor.trim().is_empty() {
+        return Err("authority anchor is empty".to_string());
+    }
+    if context.requirement.trim() != authority.anchor.trim() {
+        return Err("corrective requirement does not match its authority anchor".to_string());
+    }
     if authority.digest != content_digest(authority.anchor.as_bytes()) {
         return Err("authority digest does not match its anchor".to_string());
     }
-    let full = project_root.join(&authority.path);
-    let content = match fs::read_to_string(&full) {
-        Ok(content) => content,
-        Err(_) => return Err(format!("authority {:?} is not present", authority.path)),
-    };
-    if !content.contains(&authority.anchor) {
+
+    if authority.kind == AuthorityKind::AgentsInstruction {
+        let agents_dir = relative.parent().unwrap_or_else(|| Path::new(""));
+        let included_scope = Path::new(context.included_scope.trim());
+        if !included_scope.is_relative()
+            || !authority_path_is_normalized(included_scope)
+            || !included_scope.starts_with(agents_dir)
+        {
+            return Err(format!(
+                "authority {:?} does not apply to included scope {:?}",
+                authority.path, context.included_scope
+            ));
+        }
+    }
+
+    let canonical_root = project_root
+        .canonicalize()
+        .map_err(|_| "project root cannot be canonicalized".to_string())?;
+    let full = project_root.join(relative);
+    let canonical_full = full
+        .canonicalize()
+        .map_err(|_| format!("authority {:?} is not present", authority.path))?;
+    if !canonical_full.starts_with(&canonical_root) {
         return Err(format!(
-            "authority {:?} no longer contains the cited text",
+            "authority {:?} resolves outside the project",
+            authority.path
+        ));
+    }
+
+    let tree_entry = crate::git::run_raw(
+        project_root,
+        &["ls-tree", "HEAD", "--", &authority.path],
+    )
+    .map_err(|_| format!("authority {:?} is not committed", authority.path))?;
+    let tree_entry = String::from_utf8_lossy(&tree_entry.stdout);
+    if !tree_entry.starts_with("100644 blob ") && !tree_entry.starts_with("100755 blob ") {
+        return Err(format!(
+            "authority {:?} is not a committed regular file",
+            authority.path
+        ));
+    }
+
+    let revision_path = format!("HEAD:{}", authority.path);
+    let committed = crate::git::run_raw(project_root, &["show", &revision_path])
+        .map_err(|_| format!("authority {:?} is not committed", authority.path))?;
+    if !committed.status.success() {
+        return Err(format!("authority {:?} is not committed", authority.path));
+    }
+    let anchor = authority.anchor.as_bytes();
+    if !committed
+        .stdout
+        .windows(anchor.len())
+        .any(|candidate| candidate == anchor)
+    {
+        return Err(format!(
+            "committed authority {:?} does not contain the cited text",
             authority.path
         ));
     }
@@ -1400,11 +1470,15 @@ mod tests {
     }
 
     fn corrective_follow_up(authority: Option<AuthorityLocator>) -> FollowUpDraftV1 {
+        let mut context = corrective_context_sample();
+        if let Some(authority) = authority.as_ref() {
+            context.requirement = authority.anchor.clone();
+        }
         FollowUpDraftV1 {
             id: "fu-1".to_string(),
             summary: "Restore the retry cap".to_string(),
             corrective: true,
-            corrective_context: Some(corrective_context_sample()),
+            corrective_context: Some(context),
             expected_result: "The retry cap is enforced again".to_string(),
             unresolved_decisions: Vec::new(),
             authority,
@@ -1412,12 +1486,40 @@ mod tests {
         }
     }
 
-    /// Write an authoritative file into the project tree so a locator over it
-    /// resolves.
+    fn init_authority_repo(root: &Path) {
+        if root.join(".git").exists() {
+            return;
+        }
+        crate::git::run(root, &["init", "-q"], "initialize authority test repository")
+            .unwrap();
+        crate::git::run(
+            root,
+            &["config", "user.email", "test@example.com"],
+            "configure authority test email",
+        )
+        .unwrap();
+        crate::git::run(
+            root,
+            &["config", "user.name", "Test"],
+            "configure authority test name",
+        )
+        .unwrap();
+    }
+
+    /// Write and commit an authoritative file so a locator over it resolves at
+    /// the same revision the production gate inspects.
     fn write_authority(root: &Path, rel: &str, contents: &str) {
+        init_authority_repo(root);
         let path = root.join(rel);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, contents).unwrap();
+        crate::git::run(root, &["add", "--", rel], "stage test authority").unwrap();
+        crate::git::run(
+            root,
+            &["commit", "-q", "-m", "Add test authority"],
+            "commit test authority",
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1520,6 +1622,148 @@ mod tests {
         )));
         assert!(classify_follow_up(tmp.path(), &behavior_follow_up).is_corrective());
         assert!(classify_follow_up(tmp.path(), &agents_follow_up).is_corrective());
+    }
+
+    #[test]
+    fn gate_rejects_authority_path_traversal() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let anchor = "Retries stop after the configured cap";
+        write_authority(
+            tmp.path(),
+            ".fluent/expertise/retry.md",
+            &format!("{anchor}\n"),
+        );
+        let follow_up = corrective_follow_up(Some(locator(
+            AuthorityKind::ExpertiseEntry,
+            ".fluent/expertise/../expertise/retry.md",
+            anchor,
+        )));
+
+        assert!(!classify_follow_up(tmp.path(), &follow_up).is_corrective());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gate_rejects_authority_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        let anchor = "Retries stop after the configured cap";
+        fs::write(outside.path(), format!("{anchor}\n")).unwrap();
+        init_authority_repo(tmp.path());
+        let authority_dir = tmp.path().join(".fluent/expertise");
+        fs::create_dir_all(&authority_dir).unwrap();
+        symlink(outside.path(), authority_dir.join("retry.md")).unwrap();
+        crate::git::run(
+            tmp.path(),
+            &["add", "--", ".fluent/expertise/retry.md"],
+            "stage escaped authority symlink",
+        )
+        .unwrap();
+        crate::git::run(
+            tmp.path(),
+            &["commit", "-q", "-m", "Add authority symlink"],
+            "commit escaped authority symlink",
+        )
+        .unwrap();
+
+        let follow_up = corrective_follow_up(Some(locator(
+            AuthorityKind::ExpertiseEntry,
+            ".fluent/expertise/retry.md",
+            anchor,
+        )));
+        assert!(!classify_follow_up(tmp.path(), &follow_up).is_corrective());
+    }
+
+    #[test]
+    fn gate_rejects_untracked_or_worktree_only_authority() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_authority_repo(tmp.path());
+        fs::write(tmp.path().join("README.md"), "project\n").unwrap();
+        crate::git::run(tmp.path(), &["add", "README.md"], "stage repository seed").unwrap();
+        crate::git::run(
+            tmp.path(),
+            &["commit", "-q", "-m", "Seed repository"],
+            "commit repository seed",
+        )
+        .unwrap();
+        let anchor = "Retries stop after the configured cap";
+        let path = tmp.path().join(".fluent/expertise/retry.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, format!("{anchor}\n")).unwrap();
+        let untracked = corrective_follow_up(Some(locator(
+            AuthorityKind::ExpertiseEntry,
+            ".fluent/expertise/retry.md",
+            anchor,
+        )));
+        assert!(!classify_follow_up(tmp.path(), &untracked).is_corrective());
+
+        crate::git::run(
+            tmp.path(),
+            &["add", "--", ".fluent/expertise/retry.md"],
+            "stage original authority",
+        )
+        .unwrap();
+        crate::git::run(
+            tmp.path(),
+            &["commit", "-q", "-m", "Add original authority"],
+            "commit original authority",
+        )
+        .unwrap();
+        let replacement = "Retries use exponential backoff";
+        fs::write(&path, format!("{replacement}\n")).unwrap();
+        let worktree_only = corrective_follow_up(Some(locator(
+            AuthorityKind::ExpertiseEntry,
+            ".fluent/expertise/retry.md",
+            replacement,
+        )));
+        assert!(!classify_follow_up(tmp.path(), &worktree_only).is_corrective());
+    }
+
+    #[test]
+    fn gate_rejects_empty_or_unrelated_authority_anchor() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_authority(
+            tmp.path(),
+            ".fluent/expertise/retry.md",
+            "Retries stop after the configured cap\n",
+        );
+        let empty = corrective_follow_up(Some(locator(
+            AuthorityKind::ExpertiseEntry,
+            ".fluent/expertise/retry.md",
+            "",
+        )));
+        assert!(!classify_follow_up(tmp.path(), &empty).is_corrective());
+
+        let mut unrelated = corrective_follow_up(Some(locator(
+            AuthorityKind::ExpertiseEntry,
+            ".fluent/expertise/retry.md",
+            "Retries stop after the configured cap",
+        )));
+        unrelated.corrective_context.as_mut().unwrap().requirement =
+            "Use a different scheduling algorithm".to_string();
+        assert!(!classify_follow_up(tmp.path(), &unrelated).is_corrective());
+    }
+
+    #[test]
+    fn gate_rejects_inapplicable_nested_agents_instruction() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let anchor = "Always enforce the configured retry cap";
+        write_authority(
+            tmp.path(),
+            "src/AGENTS.md",
+            &format!("- {anchor}\n"),
+        );
+        let mut follow_up = corrective_follow_up(Some(locator(
+            AuthorityKind::AgentsInstruction,
+            "src/AGENTS.md",
+            anchor,
+        )));
+        follow_up.corrective_context.as_mut().unwrap().included_scope =
+            "tests/retry.rs".to_string();
+
+        assert!(!classify_follow_up(tmp.path(), &follow_up).is_corrective());
     }
 
     #[test]

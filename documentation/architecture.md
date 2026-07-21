@@ -328,9 +328,13 @@ only when it is marked corrective, carries a complete corrective context
 and expected result, leaves no unresolved decision, and cites a trusted
 authority — a behavior statement in `documentation/behaviors.md`, an
 instruction in a tracked `AGENTS.md`, or a committed `.fluent/expertise/`
-entry — whose anchor still resolves fresh and matches its digest. Any
-incomplete, unsupported, unresolved, stale, or mis-namespaced context
-downgrades the follow-up to Observation-only. When a follow-up first
+entry. The gate rejects non-normal paths and symlink escapes, reads the
+authority from the regular-file blob tracked in `HEAD`, requires the
+corrective requirement to equal the non-empty digest-matched anchor, and
+checks that a nested `AGENTS.md` applies to the included scope. Working-tree
+edits and untracked files cannot authorize corrective Work. Any incomplete,
+unsupported, unresolved, stale, or mis-namespaced context downgrades the
+follow-up to Observation-only. When a follow-up first
 validates as corrective, replay freezes the resolved follow-up policy
 (mode, lineage limit, automatic priority, and configuration provenance)
 into its journal receipt before creating any Work, so a retry reuses the
