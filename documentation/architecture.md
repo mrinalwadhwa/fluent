@@ -292,7 +292,10 @@ including changes under `.fluent`, and fails before merging if any
 reviewer dirtied its isolated candidate. It writes one combined review
 state after all reviewer jobs finish and cleans up reviewer worktrees
 after successful merge or failed review handling. After it records the
-merged state, it removes the managed candidate worktree. If cleanup
+merged state, it removes the managed candidate worktree — unless the
+Attempt's Learner run failed and is still retryable, in which case it
+retains the workspace so a post-land handoff-only Learner retry has a
+change to run against. If cleanup
 fails after the target branch has merged, merge execution prints a
 warning and leaves the merged Merge Candidate state intact. Running the
 command again
@@ -359,6 +362,16 @@ Follow-up processing never undoes a successful land: a failure leaves the
 merge intact and the persisted operation replayable, and re-running
 `fluent merge-candidate land` on the merged candidate resumes it without
 resolving workspaces, rebasing, or moving the target branch.
+
+A Learner run that failed before its candidate landed recovers through
+`fluent attempt run`, which retries only the Learner. When the candidate
+has already merged, that retry runs in handoff-only mode: it serializes
+against land on the land lock, denies expertise writes, and discards any
+commit it makes, so the merged commit and target branch stay unchanged.
+Durable knowledge it could not write to expertise is recorded as a
+non-corrective follow-up, which materializes as an Observation only. The
+recovered handoff is then materialized immediately under the same
+land-gated, idempotent rules the land hook uses.
 
 Merge execution auto-continues through failed merge-time review
 rounds within a same-invocation budget. The merge loop iterates

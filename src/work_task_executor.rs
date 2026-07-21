@@ -1848,6 +1848,39 @@ pub struct LearnerRunInputs<'a> {
     pub diff_command: &'a str,
     /// The managed handoff surface where the coder writes its untrusted draft.
     pub handoff_dir: &'a Path,
+    /// Whether the Learner runs post-land in handoff-only mode: after its
+    /// originating Merge Candidate has merged, it may not mutate expertise or the
+    /// merged branch, so it only produces a handoff.
+    pub handoff_only: bool,
+}
+
+/// Whether the Learner runs in handoff-only mode. A post-land retry — one whose
+/// originating Merge Candidate has already merged — is handoff-only, so it must
+/// not mutate expertise or the merged branch.
+pub fn learner_is_handoff_only(candidate_merged: bool) -> bool {
+    candidate_merged
+}
+
+/// Whether the Learner may write `.fluent/expertise/` on this run. A handoff-only
+/// post-land retry may not, so expertise stays read-only and only the managed
+/// handoff surface is writable.
+pub fn learner_expertise_writable(handoff_only: bool) -> bool {
+    !handoff_only
+}
+
+/// Encode durable project knowledge a post-land handoff-only retry could not
+/// write to expertise as a non-corrective follow-up, so it materializes as an
+/// Observation only and can never become autonomously executable Work.
+pub fn expertise_proposal_follow_up(
+    id: impl Into<String>,
+    summary: impl Into<String>,
+) -> crate::follow_up::FollowUpDraftV1 {
+    crate::follow_up::FollowUpDraftV1 {
+        id: id.into(),
+        summary: summary.into(),
+        corrective: false,
+        ..Default::default()
+    }
 }
 
 /// Run the Learner: give the coder the complete change and every reviewer and
@@ -1902,6 +1935,10 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
             ),
             ("has_learnings_index", has_learnings_index),
             ("draft_path", &draft_path.display().to_string()),
+            (
+                "handoff_only",
+                if inputs.handoff_only { "yes" } else { "" },
+            ),
         ],
     )
     .map_err(|e| anyhow::anyhow!("learner-user.md template error: {e}"))?;
@@ -1924,13 +1961,26 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
     } else {
         let common_git_dir = worktree::git_common_dir(workspace_path)?;
         readable_roots.push(workspace_path.to_path_buf());
-        build_coder_sandbox_with_writable_and_read_only_roots(
-            inputs.coder_kind,
-            inputs.resolver,
-            &expertise_dir,
-            &[inputs.handoff_dir.to_path_buf(), common_git_dir],
-            &readable_roots,
-        )?
+        if learner_expertise_writable(inputs.handoff_only) {
+            build_coder_sandbox_with_writable_and_read_only_roots(
+                inputs.coder_kind,
+                inputs.resolver,
+                &expertise_dir,
+                &[inputs.handoff_dir.to_path_buf(), common_git_dir],
+                &readable_roots,
+            )?
+        } else {
+            // Handoff-only: deny expertise writes. Expertise stays readable, but
+            // only the managed handoff surface is writable.
+            readable_roots.push(expertise_dir.clone());
+            build_coder_sandbox_with_writable_and_read_only_roots(
+                inputs.coder_kind,
+                inputs.resolver,
+                inputs.handoff_dir,
+                &[common_git_dir],
+                &readable_roots,
+            )?
+        }
     };
 
     let coder = inputs
@@ -4216,6 +4266,65 @@ mod tests {
         assert!(
             rendered.contains(draft_path),
             "the learner prompt must name the draft path"
+        );
+    }
+
+    fn learner_ctx(handoff_only: &'static str) -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("review_artifact_paths", "- (none)"),
+            ("tester_artifact_paths", "- (none)"),
+            ("diff_command", "git diff"),
+            ("learnings_dir", "/tmp/learnings"),
+            ("learnings_index_path", "/tmp/learnings/INDEX.md"),
+            ("expertise_index_path", "/tmp/expertise/INDEX.md"),
+            ("has_learnings_index", ""),
+            ("draft_path", "/tmp/draft.json"),
+            ("handoff_only", handoff_only),
+        ]
+    }
+
+    #[test]
+    fn post_land_learner_retry_is_handoff_only() {
+        // A retry whose Merge Candidate has already merged runs handoff-only, and
+        // a handoff-only run may not write expertise.
+        assert!(learner_is_handoff_only(true));
+        assert!(!learner_is_handoff_only(false));
+        assert!(
+            !learner_expertise_writable(true),
+            "handoff-only denies expertise writes"
+        );
+        assert!(
+            learner_expertise_writable(false),
+            "a pre-land run may refine expertise"
+        );
+
+        // The handoff-only branch of the learner prompt forbids commits and
+        // expertise changes; the normal branch keeps the expertise instructions.
+        let resolver = ContentResolver::new(None);
+        let template = resolver.resolve_content("prompts/learner-user.md").unwrap();
+        let handoff_only = crate::content::render_template(&template, &learner_ctx("yes")).unwrap();
+        assert!(handoff_only.contains("post-land handoff-only run"));
+        assert!(handoff_only.contains("will be discarded"));
+        let normal = crate::content::render_template(&template, &learner_ctx("")).unwrap();
+        assert!(normal.contains("Update expertise"));
+        assert!(!normal.contains("post-land handoff-only run"));
+    }
+
+    #[test]
+    fn post_land_expertise_proposal_is_non_corrective_followup() {
+        let follow_up =
+            expertise_proposal_follow_up("expertise-retry", "Capture retry cap knowledge");
+        assert!(
+            !follow_up.corrective,
+            "an expertise proposal is never corrective"
+        );
+        assert!(follow_up.corrective_context.is_none());
+
+        // The corrective host gate keeps such a proposal Observation-only, so it
+        // can never become autonomously executable Work.
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert!(
+            !crate::follow_up::classify_follow_up(tmp.path(), &follow_up).is_corrective()
         );
     }
 

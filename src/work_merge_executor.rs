@@ -161,27 +161,14 @@ fn try_process_landed_follow_ups(
 
     // Only a successful learner run leaves a handoff to materialize. A failed or
     // absent learner run has nothing to process here; its recovery runs the
-    // Learner again.
-    let Some(learning) = attempt.learning.as_ref() else {
-        return Ok(());
-    };
-    if !learning.is_succeeded() {
-        return Ok(());
-    }
-    let Some(handoff_ref) = learning.handoff.as_ref() else {
-        return Ok(());
-    };
-
-    let handoff = crate::learner::load_verified_handoff(config.project_root, handoff_ref)?;
-    let origin = crate::follow_up::PostLandOrigin {
-        work_item_id: config.work_item_id.to_string(),
-        attempt_id,
-        merge_candidate_id: outcome.merge_candidate_id.clone(),
-        merged_commit: outcome.merged_commit.clone(),
-    };
-    let batch = crate::follow_up::NormalizedFollowUpBatchV1::from_learner_handoff(&handoff, origin)?;
-    crate::follow_up::process_landed_batch(config.project_root, &batch, None)?;
-    Ok(())
+    // Learner again and materializes the recovered handoff itself.
+    crate::follow_up::materialize_learner_handoff(
+        config.project_root,
+        config.work_item_id,
+        attempt,
+        &outcome.merge_candidate_id,
+        &outcome.merged_commit,
+    )
 }
 
 fn recover_landed_candidate_result(
@@ -328,6 +315,23 @@ fn execute_merge(
     Ok(outcome)
 }
 
+/// Whether the Attempt behind a landed candidate has a retryable (failed) Learner
+/// record. When it does, the land retains the candidate workspace so a post-land
+/// handoff-only Learner retry has a workspace to run against.
+fn candidate_learning_is_retryable(
+    store: &WorkModelStore,
+    work_item_id: &str,
+    attempt_id: &str,
+) -> Result<bool> {
+    let item = read_work_item_or_not_found(store, work_item_id)?;
+    Ok(item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == attempt_id)
+        .and_then(|attempt| attempt.learning.as_ref())
+        .is_some_and(|learning| learning.is_failed()))
+}
+
 fn finalize_merge(
     config: &WorkMergeConfig<'_>,
     candidate: &crate::work_model::MergeCandidate,
@@ -371,7 +375,15 @@ fn finalize_merge(
         check_artifacts,
         review_artifacts,
     )?;
-    if let Err(error) = cleanup_managed_workspace(config.project_root, source_workspace) {
+    // Retain the workspace when the Learner is still retryable: a failed Learner
+    // run recovers post-land as a handoff-only retry against this same workspace,
+    // so removing it now would strand that documented recovery.
+    if candidate_learning_is_retryable(config.store, config.work_item_id, &candidate.attempt_id)? {
+        eprintln!(
+            "  Merge Candidate {} landed; retaining its workspace for a retryable Learner run",
+            candidate.id
+        );
+    } else if let Err(error) = cleanup_managed_workspace(config.project_root, source_workspace) {
         eprintln!(
             "  Warning: Merge Candidate {} landed, but managed workspace cleanup failed: {error}",
             candidate.id

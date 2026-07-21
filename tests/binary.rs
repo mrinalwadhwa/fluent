@@ -2672,6 +2672,78 @@ fn land_work_1(main_dir: &Path, bin_dir: &Path, no_post_merge_review: bool) {
         .success();
 }
 
+/// A learner mock that fails its first run and succeeds on retry, keyed by a
+/// counter file so a post-land retry (which runs after land) drives the
+/// handoff-only path. On the successful run it writes `draft_json` and, when
+/// `commit_expertise` is set, commits an expertise change that a handoff-only
+/// run must discard.
+fn post_land_learner_mock_script(counter: &Path, draft_json: &str, commit_expertise: bool) -> String {
+    let counter = counter.display().to_string();
+    let expertise = if commit_expertise {
+        "  mkdir -p .fluent/expertise\n  printf 'late knowledge\\n' > .fluent/expertise/late.md\n  git add .fluent/expertise/late.md\n  git commit -m \"Update expertise\" >/dev/null 2>&1\n"
+    } else {
+        ""
+    };
+    format!(
+        r##"#!/bin/bash
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
+done
+if [ -z "$PROMPT" ]; then exit 0; fi
+if printf '%s' "$PROMPT" | grep -q "Rebase the candidate branch"; then
+  TARGET=$(printf '%s' "$PROMPT" | grep -o 'onto `[^`]*`' | sed 's/onto `//;s/`//')
+  git rebase "$TARGET" 2>/dev/null
+  exit $?
+fi
+if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
+  if [ ! -f "{counter}" ]; then
+    touch "{counter}"
+    exit 1
+  fi
+  DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
+  if [ -n "$DRAFT" ]; then
+    mkdir -p "$(dirname "$DRAFT")"
+    cat > "$DRAFT" <<'DRAFTJSON'
+{draft_json}
+DRAFTJSON
+  fi
+{expertise}  exit 0
+fi
+case "$PWD" in
+  */work-6-work-1-attempt-1)
+    printf 'loop output\n' > loop-output.txt
+    git add loop-output.txt
+    git commit -m "Add loop output" >/dev/null 2>&1
+    ;;
+  *)
+    printf 'Verdict: pass\n\nLoop review.\n' > review.md
+    ;;
+esac
+exit 0
+"##
+    )
+}
+
+/// Re-run the completed Attempt to retry a failed Learner.
+fn rerun_learner_attempt(main_dir: &Path, bin_dir: &Path) {
+    fluent_cmd()
+        .current_dir(main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(bin_dir))
+        .assert()
+        .success();
+}
+
+fn merged_commit_of(main_dir: &Path) -> String {
+    work_item_value(main_dir, "work-1")["merge_candidates"][0]["merge_state"]["merged_commit"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
 /// The open Observation files in a project, sorted by id.
 fn open_observation_files(main_dir: &Path) -> Vec<String> {
     let dir = main_dir.join(".fluent/observations");
@@ -3350,6 +3422,140 @@ fn repeated_authorization_repairs_missing_dispatch() {
     authorize_work_item(&main_dir, DERIVED_FU1);
     assert_eq!(latest_dispatch_status(&main_dir, DERIVED_FU1), "queued");
     assert_eq!(dispatch_count(&main_dir, DERIVED_FU1), 1);
+}
+
+// --- Post-land Learner retry, handoff-only (Step 4) ---
+
+#[test]
+fn post_land_learner_retry_materializes_recovered_handoff() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let counter = tmp.path().join("learner-counter");
+    let bin_dir = tmp.path().join("bin-recovered");
+    write_mock_claude(
+        &bin_dir,
+        &post_land_learner_mock_script(
+            &counter,
+            r#"{"learning_summary":"learned late","follow_ups":[{"id":"fu-1","summary":"Recovered follow-up","corrective":false}]}"#,
+            false,
+        ),
+    );
+
+    // The first Learner run fails, so land materializes nothing.
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+    assert!(
+        open_observation_files(&main_dir).is_empty(),
+        "a failed learner leaves nothing to materialize at land"
+    );
+
+    // Retrying the Learner after land recovers the handoff and materializes it
+    // immediately under the land-gated rules.
+    rerun_learner_attempt(&main_dir, &bin_dir);
+    let observations = open_observation_files(&main_dir);
+    assert_eq!(observations.len(), 1, "the recovered handoff materializes one Observation");
+    assert!(observations[0].contains("fu-1"));
+}
+
+#[test]
+fn post_land_learner_retry_preserves_merged_commit() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let counter = tmp.path().join("learner-counter");
+    let bin_dir = tmp.path().join("bin-preserve");
+    // The retry attempts an expertise commit, which a handoff-only run discards.
+    write_mock_claude(
+        &bin_dir,
+        &post_land_learner_mock_script(
+            &counter,
+            r#"{"learning_summary":"learned late","follow_ups":[]}"#,
+            true,
+        ),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+    let merged_before = merged_commit_of(&main_dir);
+
+    rerun_learner_attempt(&main_dir, &bin_dir);
+
+    // The merged candidate commit is unchanged and no expertise reached main.
+    assert_eq!(
+        merged_commit_of(&main_dir),
+        merged_before,
+        "a post-land handoff-only retry leaves the merged commit unchanged"
+    );
+    assert!(
+        !main_dir.join(".fluent/expertise/late.md").exists(),
+        "a post-land handoff-only retry writes no expertise to the merged branch"
+    );
+}
+
+#[test]
+fn concurrent_learner_retry_and_land_never_mutate_after_merge() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let counter = tmp.path().join("learner-counter");
+    let bin_dir = tmp.path().join("bin-serialize");
+    write_mock_claude(
+        &bin_dir,
+        &post_land_learner_mock_script(
+            &counter,
+            r#"{"learning_summary":"learned late","follow_ups":[{"id":"fu-1","summary":"Recovered follow-up","corrective":false}]}"#,
+            true,
+        ),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+    let merged_before = merged_commit_of(&main_dir);
+
+    // Land and the Learner retry serialize on the land lock; because the
+    // candidate is already merged, the retry is processed handoff-only and
+    // accepts no expertise or target-branch mutation.
+    rerun_learner_attempt(&main_dir, &bin_dir);
+
+    assert_eq!(merged_commit_of(&main_dir), merged_before);
+    assert!(!main_dir.join(".fluent/expertise/late.md").exists());
+    // The recovered handoff is still processed, as a handoff-only result.
+    assert!(!open_observation_files(&main_dir).is_empty());
+}
+
+#[test]
+fn post_land_expertise_proposal_materializes_observation_only() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let counter = tmp.path().join("learner-counter");
+    let bin_dir = tmp.path().join("bin-expertise-proposal");
+    // The retry's only output is a denied expertise commit; it must surface as a
+    // non-corrective Observation, not as Work.
+    write_mock_claude(
+        &bin_dir,
+        &post_land_learner_mock_script(
+            &counter,
+            r#"{"learning_summary":"missed expertise","follow_ups":[]}"#,
+            true,
+        ),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+    rerun_learner_attempt(&main_dir, &bin_dir);
+
+    let observations = open_observation_files(&main_dir);
+    assert_eq!(observations.len(), 1, "the missed expertise becomes one Observation");
+    let content =
+        fs::read_to_string(main_dir.join(".fluent/observations").join(&observations[0])).unwrap();
+    assert!(
+        content.contains("follow-up-id: expertise-"),
+        "the Observation is the synthesized expertise proposal; content:\n{content}"
+    );
+    // It derives no Work: only the originating Work Item exists.
+    assert_eq!(
+        work_item_json_count(&main_dir),
+        1,
+        "an expertise proposal materializes as an Observation only"
+    );
 }
 
 #[test]

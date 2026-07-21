@@ -13,9 +13,10 @@ use crate::review::{self, Verdict};
 use crate::review_diff_command;
 use crate::review_only_worktree;
 use crate::work_model::{
-    ArtifactRef, Attempt, AttemptLearning, AttemptReviewState, AttemptStatus, PauseKind, Task,
-    TaskKind, TaskOutput, TaskStatus, WorkItem, WorkModelStorageError, WorkModelStore,
-    resolve_managed_sibling_workspace_path, work_artifact_path,
+    ArtifactRef, Attempt, AttemptLearning, AttemptReviewState, AttemptStatus,
+    MergeCandidateMergeStatus, PauseKind, Task, TaskKind, TaskOutput, TaskStatus, WorkItem,
+    WorkModelStorageError, WorkModelStore, resolve_managed_sibling_workspace_path,
+    work_artifact_path,
 };
 use crate::work_task_executor::{self, WorkTaskRunConfig};
 
@@ -121,8 +122,6 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
         {
             let mut item = item;
             let candidate_id = item.create_or_get_merge_candidate(config.attempt_id)?;
-            // Retry only the Learner when its record is failed or missing, without
-            // rerunning the Writer, Tester, or reviewers.
             let attempt_index = item
                 .attempts
                 .iter()
@@ -134,6 +133,31 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                 .map(|learning| learning.is_failed())
                 .unwrap_or(true);
             if learner_pending {
+                // Serialize the retry against a concurrent land on the same
+                // project so the two cannot both mutate the candidate. Under the
+                // lock, read the fresh merge status: a candidate that has already
+                // merged forces the retry into handoff-only mode, which never
+                // mutates expertise or the merged branch.
+                let _land_lock = crate::land_lock::acquire(&crate::land_lock::lock_path(
+                    config.project_root,
+                ))?;
+                item = config.store.read_work_item(config.work_item_id)?;
+                let attempt_index = item
+                    .attempts
+                    .iter()
+                    .position(|a| a.id == config.attempt_id)
+                    .expect("attempt exists");
+                let merged_commit = item
+                    .merge_candidates
+                    .iter()
+                    .find(|candidate| candidate.id == candidate_id)
+                    .filter(|candidate| {
+                        candidate.merge_state.status == MergeCandidateMergeStatus::Merged
+                    })
+                    .and_then(|candidate| candidate.merge_state.merged_commit.clone());
+                let handoff_only =
+                    work_task_executor::learner_is_handoff_only(merged_commit.is_some());
+
                 let run_coder =
                     |request: &LearnerCoderRequest<'_>| default_learner_run_coder(&config, request);
                 run_learner_step(
@@ -141,12 +165,32 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                     &mut item,
                     attempt_index,
                     &candidate_id,
+                    handoff_only,
                     &LearnerConfig {
                         run_coder: &run_coder,
                     },
                 );
+                config.store.write_work_item(&item)?;
+
+                // A recovered post-land handoff lands immediately under the same
+                // land-gated, idempotent rules the land hook uses.
+                if let Some(merged_commit) = merged_commit
+                    && item.attempts[attempt_index]
+                        .learning
+                        .as_ref()
+                        .is_some_and(|learning| learning.is_succeeded())
+                {
+                    crate::follow_up::materialize_learner_handoff(
+                        config.project_root,
+                        config.work_item_id,
+                        &item.attempts[attempt_index],
+                        &candidate_id,
+                        &merged_commit,
+                    )?;
+                }
+            } else {
+                config.store.write_work_item(&item)?;
             }
-            config.store.write_work_item(&item)?;
             outcomes.push(WorkAttemptRunOutcome::MergeCandidateReady { candidate_id });
             return Ok(WorkAttemptRunResult { outcomes });
         }
@@ -322,6 +366,7 @@ fn default_learner_run_coder(
         tester_artifact_paths: request.tester_artifact_paths,
         diff_command: request.diff_command,
         handoff_dir: request.handoff_dir,
+        handoff_only: request.handoff_only,
     })
 }
 
@@ -695,6 +740,7 @@ struct LearnerCoderRequest<'a> {
     coder_kind: CoderKind,
     model: Option<&'a str>,
     effort: Option<&'a str>,
+    handoff_only: bool,
 }
 
 /// The Learner's coder-run is injected so the orchestration around it — running
@@ -712,6 +758,7 @@ fn run_learner_step(
     item: &mut WorkItem,
     attempt_index: usize,
     candidate_id: &str,
+    handoff_only: bool,
     config: &LearnerConfig<'_>,
 ) {
     let runs = item.attempts[attempt_index]
@@ -720,7 +767,14 @@ fn run_learner_step(
         .map(|learning| learning.runs)
         .unwrap_or(0)
         + 1;
-    match try_learn(project_root, item, attempt_index, candidate_id, config) {
+    match try_learn(
+        project_root,
+        item,
+        attempt_index,
+        candidate_id,
+        handoff_only,
+        config,
+    ) {
         Ok(handoff_ref) => {
             item.attempts[attempt_index].learning =
                 Some(AttemptLearning::succeeded(runs, handoff_ref));
@@ -738,6 +792,7 @@ fn try_learn(
     item: &mut WorkItem,
     attempt_index: usize,
     candidate_id: &str,
+    handoff_only: bool,
     config: &LearnerConfig<'_>,
 ) -> Result<crate::follow_up::ArtifactRef> {
     let work_item_id = item.id.clone();
@@ -777,6 +832,21 @@ fn try_learn(
     let handoff_dir =
         project_root.join(crate::learner::handoff_dir_rel(&work_item_id, &attempt_id));
 
+    // The commit the confinement compares against. Normally the Learner runs
+    // right after the write task, so its baseline is the write commit. A post-
+    // land retry runs against the current (possibly rebased) worktree tip, so its
+    // baseline is the HEAD just before the Learner ran — that way only the
+    // Learner's own changes, not the earlier rebase, are attributed to it.
+    let baseline_commit = if handoff_only {
+        git::run_stdout(
+            &workspace_path,
+            &["rev-parse", "HEAD"],
+            "resolve pre-learner HEAD",
+        )?
+    } else {
+        write_output.commit.clone()
+    };
+
     (config.run_coder)(&LearnerCoderRequest {
         workspace_path: &workspace_path,
         review_artifact_paths: &review_artifact_paths,
@@ -786,32 +856,80 @@ fn try_learn(
         coder_kind,
         model: model.as_deref(),
         effort: effort.as_deref(),
+        handoff_only,
     })?;
 
-    // Accept an expertise commit only when confined to `.fluent/expertise/`,
-    // updating the Merge Candidate tip; otherwise discard it and fail so the
-    // Learner run stays retryable without moving the candidate.
-    let expertise = apply_learner_confinement(
+    // Confine the Learner's commit. In the normal case an expertise commit is
+    // accepted and advances the Merge Candidate tip. In a post-land handoff-only
+    // run any mutation is denied and discarded, leaving the merged commit and
+    // target branch untouched; the denied paths are recorded so the missed
+    // expertise can be captured as non-corrective follow-ups.
+    let confinement = apply_learner_confinement(
         &workspace_path,
         item,
         attempt_index,
         write_task_index,
         &write_output,
         candidate_id,
+        handoff_only,
+        &baseline_commit,
     )?;
 
-    let draft = crate::learner::read_draft(project_root, &work_item_id, &attempt_id)?;
-    let handoff =
-        crate::learner::stamp_handoff(draft, &work_item_id, &attempt_id, candidate_id, expertise)?;
+    let mut draft = crate::learner::read_draft(project_root, &work_item_id, &attempt_id)?;
+    for path in &confinement.denied_paths {
+        draft.follow_ups.push(work_task_executor::expertise_proposal_follow_up(
+            format!("expertise-{}", sanitize_denied_path(path)),
+            format!(
+                "Capture durable project knowledge a post-land retry could not write to {path}"
+            ),
+        ));
+    }
+    let handoff = crate::learner::stamp_handoff(
+        draft,
+        &work_item_id,
+        &attempt_id,
+        candidate_id,
+        confinement.expertise,
+    )?;
     let handoff_ref =
         crate::learner::write_handoff(project_root, &work_item_id, &attempt_id, &handoff)?;
     Ok(handoff_ref)
 }
 
-/// Validate the Learner's commit is confined to `.fluent/expertise/`. On success,
-/// promote the confined commit to the candidate tip and return references to the
-/// expertise files it changed. An out-of-bounds commit is discarded and reported
-/// as an error, retaining the pre-Learner candidate tip.
+/// The outcome of confining the Learner's commit: the expertise it was allowed
+/// to record, and, for a denied post-land run, the paths it tried to change.
+struct LearnerConfinement {
+    /// Expertise files accepted into the Merge Candidate (empty when denied).
+    expertise: Vec<crate::follow_up::ArtifactRef>,
+    /// Paths a post-land handoff-only run tried to change but were discarded.
+    denied_paths: Vec<String>,
+}
+
+/// Reduce a denied path to a filename-safe component for a synthesized follow-up
+/// id.
+fn sanitize_denied_path(path: &str) -> String {
+    let mut out: String = path
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if out.is_empty() {
+        out.push_str("unnamed");
+    }
+    out
+}
+
+/// Confine the Learner's commit. In a post-land handoff-only run, any commit is
+/// discarded and its changed paths are returned as denied, leaving the merged
+/// commit and target branch untouched. Otherwise an expertise commit confined to
+/// `.fluent/expertise/` is promoted to the candidate tip and its changed files
+/// returned; an out-of-bounds commit is discarded and reported as an error,
+/// retaining the pre-Learner candidate tip.
 fn apply_learner_confinement(
     workspace_path: &Path,
     item: &mut WorkItem,
@@ -819,22 +937,43 @@ fn apply_learner_confinement(
     write_task_index: usize,
     write_output: &TaskOutput,
     candidate_id: &str,
-) -> Result<Vec<crate::follow_up::ArtifactRef>> {
+    handoff_only: bool,
+    baseline_commit: &str,
+) -> Result<LearnerConfinement> {
     let new_head = git::run_stdout(
         workspace_path,
         &["rev-parse", "HEAD"],
         "resolve post-learner HEAD",
     )?;
-    if new_head == write_output.commit {
-        return Ok(Vec::new());
+    if new_head == baseline_commit {
+        return Ok(LearnerConfinement {
+            expertise: Vec::new(),
+            denied_paths: Vec::new(),
+        });
     }
 
     let changed = git::run_stdout(
         workspace_path,
-        &["diff", "--name-only", &write_output.commit, &new_head],
+        &["diff", "--name-only", baseline_commit, &new_head],
         "list learner changed paths",
     )?;
     let changed_paths: Vec<&str> = changed.lines().filter(|line| !line.is_empty()).collect();
+
+    // A post-land retry may not mutate expertise or the merged branch. Discard
+    // whatever it committed and report the paths so they become non-corrective
+    // follow-ups, leaving the merged candidate commit unchanged.
+    if handoff_only {
+        git::run(
+            workspace_path,
+            &["reset", "--hard", baseline_commit],
+            "discard post-land learner commit",
+        )?;
+        return Ok(LearnerConfinement {
+            expertise: Vec::new(),
+            denied_paths: changed_paths.iter().map(|path| path.to_string()).collect(),
+        });
+    }
+
     let out_of_bounds: Vec<&str> = changed_paths
         .iter()
         .copied()
@@ -880,7 +1019,10 @@ fn apply_learner_confinement(
             }
         })
         .collect();
-    Ok(expertise)
+    Ok(LearnerConfinement {
+        expertise,
+        denied_paths: Vec::new(),
+    })
 }
 
 fn is_learner_path_in_bounds(path: &str) -> bool {
@@ -1113,11 +1255,13 @@ fn interpret_reviews(
     // Run the Learner for every code-producing Attempt, whether or not a
     // reviewer raised a finding.
     if let Some(ref learner_config) = learner_config {
+        // The Learner runs before land here, so it is never handoff-only.
         run_learner_step(
             project_root,
             &mut item,
             attempt_index,
             &candidate_id,
+            false,
             learner_config,
         );
     }

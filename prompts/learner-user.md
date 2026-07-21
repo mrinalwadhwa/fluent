@@ -131,7 +131,16 @@ with concrete, bounded, deterministic content, the follow-up is not corrective.
 
 Always write the follow-up draft, even when it is empty.
 
+{{#if handoff_only}}
+This is a post-land handoff-only run: the change has already merged. Do not
+commit anything and do not modify `.fluent/expertise/` — expertise writes are
+denied and will be discarded. If you identify durable project knowledge that is
+not yet captured in expertise, describe it as a non-corrective follow-up in the
+draft so it is recorded as an Observation for a human to fold into expertise
+later.
+{{else}}
 If you refined the project's learned model, commit the expertise changes with the
 message "Update expertise". Commit nothing else — never project source, docs, or
 the follow-up draft. If you found no durable learnings, do not commit and do not
 create empty or placeholder learning files.
+{{/if}}

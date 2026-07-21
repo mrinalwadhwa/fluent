@@ -760,6 +760,40 @@ pub fn process_landed_batch(
     replay_post_land_operation(project_root, &operation.operation_id)
 }
 
+/// Materialize a merged Attempt's successful learner handoff into the local
+/// backlog under the land-gated, idempotent rules. Both the local land hook and
+/// a recovered post-land Learner retry call this, so a handoff that lands late is
+/// processed the same way as one processed at land time. A failed, absent, or
+/// handoff-less learner run has nothing to process.
+pub fn materialize_learner_handoff(
+    project_root: &Path,
+    work_item_id: &str,
+    attempt: &crate::work_model::Attempt,
+    merge_candidate_id: &str,
+    merged_commit: &str,
+) -> Result<()> {
+    let Some(learning) = attempt.learning.as_ref() else {
+        return Ok(());
+    };
+    if !learning.is_succeeded() {
+        return Ok(());
+    }
+    let Some(handoff_ref) = learning.handoff.as_ref() else {
+        return Ok(());
+    };
+
+    let handoff = crate::learner::load_verified_handoff(project_root, handoff_ref)?;
+    let origin = PostLandOrigin {
+        work_item_id: work_item_id.to_string(),
+        attempt_id: attempt.id.clone(),
+        merge_candidate_id: merge_candidate_id.to_string(),
+        merged_commit: merged_commit.to_string(),
+    };
+    let batch = NormalizedFollowUpBatchV1::from_learner_handoff(&handoff, origin)?;
+    process_landed_batch(project_root, &batch, None)?;
+    Ok(())
+}
+
 fn observation_id_for(operation_id: &str, follow_up_id: &str) -> String {
     format!("followup-{operation_id}-{}", sanitize_component(follow_up_id))
 }
