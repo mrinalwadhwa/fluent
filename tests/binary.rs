@@ -4490,6 +4490,10 @@ fn cleanup_preserves_descendant_context_after_origin_removal() {
     assert!(!origin_item.exists(), "cleanup removes the originating Work Item");
     assert!(!origin_attempts.exists(), "cleanup removes the originating Attempt records");
     assert!(!origin_tasks.exists(), "cleanup removes the originating Task records");
+    assert!(
+        !main_dir.join(".fluent/work/merge-candidates/work-1").exists(),
+        "cleanup removes the originating candidate records"
+    );
     assert!(!candidate_workspace.exists(), "cleanup removes the registered candidate worktree");
     assert!(!origin_artifacts.exists(), "cleanup removes optional origin artifacts");
 
@@ -4499,6 +4503,22 @@ fn cleanup_preserves_descendant_context_after_origin_removal() {
     assert!(derived["corrective_context"]["objective"].is_string());
     assert_eq!(derived["origin"]["merged_commit"], origin_merged_commit);
     assert_eq!(derived["origin"]["observation_id"], OBS_FU1);
+    let derived_item = fluent::work_model::WorkModelStore::new(&main_dir)
+        .read_work_item(DERIVED_FU1)
+        .unwrap();
+    let execution_input = derived_item.write_task_instructions().unwrap();
+    for field in [
+        "# Corrective execution context",
+        "# Corrective proposal audit",
+        "The retry cap is enforced again",
+        "src/retry.rs",
+        AUTHORITY_PATH,
+        AUTHORITY_ANCHOR,
+        "Follow-up source",
+        "Learning summary",
+    ] {
+        assert!(execution_input.contains(field), "missing {field:?} after origin cleanup");
+    }
 
     // The Observation stays inspectable with its origin identifiers.
     let show = fluent_cmd()

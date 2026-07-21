@@ -1537,7 +1537,7 @@ fn run_task_coder(
 fn corrective_execution_context(item: &WorkItem) -> Option<String> {
     item.corrective_context
         .as_ref()
-        .map(|context| context.to_execution_context())
+        .and_then(|_| item.write_task_instructions())
 }
 
 #[cfg(test)]
@@ -2960,8 +2960,9 @@ mod tests {
     use super::*;
     use crate::content::ContentResolver;
     use crate::work_model::{
-        CorrectiveContext, DerivedProvenance, ExecutionAuthority, TaskOutput, TaskStatus, WorkItem,
-        WorkItemAbandonment, WorkLineage,
+        CorrectiveAuditContext, CorrectiveAuthorityReference, CorrectiveContext,
+        CorrectiveEvidenceReference, DerivedProvenance, ExecutionAuthority, TaskOutput,
+        TaskStatus, WorkItem, WorkItemAbandonment, WorkLineage,
     };
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
@@ -3061,6 +3062,24 @@ mod tests {
             Some(ExecutionAuthority::Automatic),
         )
         .unwrap();
+        item.corrective_audit = Some(CorrectiveAuditContext {
+            follow_up_id: "fu-retry-cap".to_string(),
+            source: "learner".to_string(),
+            learning_summary: "The accepted change removed the retry cap".to_string(),
+            expected_result: "The retry cap is enforced again".to_string(),
+            target_paths: vec!["src/retry.rs".to_string()],
+            unresolved_decisions: Vec::new(),
+            authority: CorrectiveAuthorityReference {
+                kind: "expertise-entry".to_string(),
+                path: ".fluent/expertise/retry.md".to_string(),
+                anchor: "Retries stop after the configured cap".to_string(),
+                digest: "sha256:authority".to_string(),
+            },
+            evidence: vec![CorrectiveEvidenceReference {
+                path: "review.md".to_string(),
+                digest: "sha256:evidence".to_string(),
+            }],
+        });
         item.add_initial_attempt("attempt-1").unwrap();
         let attempt = item.attempts.first_mut().unwrap();
         let task = attempt.tasks.first_mut().unwrap();
@@ -3085,11 +3104,7 @@ mod tests {
         fs::create_dir_all(&workspace).unwrap();
 
         let item = corrective_review_item("tests");
-        let context = item
-            .corrective_context
-            .as_ref()
-            .unwrap()
-            .to_execution_context();
+        let context = item.write_task_instructions().unwrap();
 
         // The Writer receives the corrective execution context verbatim.
         let write_prompt = build_write_task_prompt_with_workspace(
@@ -3130,6 +3145,11 @@ mod tests {
             "Restore the retry guard",
             "Retries stop after the configured cap",
             "cargo test retry::cap_is_enforced",
+            "The retry cap is enforced again",
+            "src/retry.rs",
+            ".fluent/expertise/retry.md",
+            "sha256:evidence",
+            "The accepted change removed the retry cap",
         ] {
             assert!(write_prompt.contains(probe), "writer missing {probe:?}");
             assert!(
@@ -3145,6 +3165,64 @@ mod tests {
             .find(|task| task.kind == TaskKind::Tester)
             .expect("corrective Attempt has a Tester Task");
         assert_eq!(tester.instructions.as_deref(), Some(context.as_str()));
+    }
+
+    #[test]
+    fn writer_and_every_reviewer_prompt_retain_audit_after_origin_cleanup() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path().join("candidate");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut seeded = corrective_review_item("architecture");
+        seeded.attempts[0]
+            .tasks
+            .retain(|task| task.kind == TaskKind::Write);
+        seeded
+            .add_review_tasks(
+                "attempt-1",
+                &["architecture", "behaviors", "documentation", "skills", "tests"],
+            )
+            .unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        store.create_work_item(&seeded).unwrap();
+        let origin_candidates = store.work_merge_candidates_dir().join("root-1");
+        fs::create_dir_all(&origin_candidates).unwrap();
+        fs::write(origin_candidates.join("candidate.json"), "{}\n").unwrap();
+        fs::remove_dir_all(origin_candidates).unwrap();
+        let item = store.read_work_item("work-1").unwrap();
+        let complete = item.write_task_instructions().unwrap();
+        let writer = build_write_task_prompt_with_workspace(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            &[],
+            Some(&workspace),
+            Some(tmp.path()),
+        );
+        assert!(writer.contains(&complete));
+
+        for role in crate::review::REVIEWERS {
+            let task_id = format!("attempt-1-review-{role}");
+            let artifact_dir = tmp
+                .path()
+                .join(".fluent/work/artifacts/work-1/attempt-1")
+                .join(&task_id);
+            let prompts = build_work_review_prompts(WorkReviewPromptInput {
+                item: &item,
+                attempt_id: "attempt-1",
+                task_id: &task_id,
+                project_root: tmp.path(),
+                artifact_dir: &artifact_dir,
+                review_path: &artifact_dir.join("review.md"),
+                readable_workspaces: std::slice::from_ref(&workspace),
+                input_artifacts: &[],
+                review_only: false,
+            })
+            .unwrap();
+            assert!(
+                prompts.review_prompt.contains(&complete),
+                "{role} reviewer omitted the complete corrective audit"
+            );
+        }
     }
 
     #[test]
