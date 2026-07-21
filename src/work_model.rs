@@ -221,7 +221,7 @@ impl PartialEq for StorageRevision {
 impl Eq for StorageRevision {}
 
 /// Durable unit of planned Fluent work.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkItem {
     pub id: String,
     pub title: String,
@@ -270,6 +270,27 @@ pub struct WorkItem {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub merge_candidates: Vec<MergeCandidate>,
 }
+
+impl PartialEq for WorkItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.title == other.title
+            && self.planning_context == other.planning_context
+            && self.instructions == other.instructions
+            && self.abandonment == other.abandonment
+            && self.post_merge_review_fix_depth == other.post_merge_review_fix_depth
+            && self.origin == other.origin
+            && self.authorization == other.authorization
+            && self.lineage == other.lineage
+            && self.corrective_context == other.corrective_context
+            && self.corrective_audit == other.corrective_audit
+            && self.pending_enqueue == other.pending_enqueue
+            && self.attempts == other.attempts
+            && self.merge_candidates == other.merge_candidates
+    }
+}
+
+impl Eq for WorkItem {}
 
 impl Default for WorkItem {
     fn default() -> Self {
@@ -3510,6 +3531,12 @@ impl WorkModelStore {
                     actual_revision: current.storage_revision,
                 });
             }
+            if let Ok(current_item) = self.read_work_item_file_unlocked(&path, false) {
+                if aggregate_snapshot_matches(&current_item, work_item)? {
+                    work_item.storage_revision.set(current.storage_revision);
+                    return Ok(());
+                }
+            }
             Some(current.storage_revision)
         } else {
             None
@@ -6358,6 +6385,23 @@ mod tests {
             WorkModelStorageError::StorageRevisionExhausted { .. }
         ));
         assert_ne!(store.read_work_item("work-1").unwrap().title, "must not publish");
+    }
+
+    #[test]
+    fn identical_aggregate_write_preserves_bytes_and_revision() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        store
+            .create_work_item(&work_item_with_completed_write("work-1"))
+            .unwrap();
+        let path = store.work_item_path("work-1").unwrap();
+        let before = fs::read(&path).unwrap();
+        let item = store.read_work_item("work-1").unwrap();
+
+        store.write_work_item(&item).unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(item.storage_revision.get(), Some(0));
     }
 
     #[test]
