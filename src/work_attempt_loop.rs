@@ -69,6 +69,11 @@ pub enum WorkAttemptRunOutcome {
     RanTask { task_id: String, output: String },
     PlannedReviews { task_ids: Vec<String> },
     MergeCandidateReady { candidate_id: String },
+    FollowUpRecoveryPending {
+        candidate_id: String,
+        stage: String,
+        next_action: String,
+    },
     PlannedWriteRound { task_id: String },
     NeedsUser { handoff_path: String },
     ReviewOnlyComplete,
@@ -241,13 +246,37 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                         .as_ref()
                         .is_some_and(|learning| learning.is_succeeded())
                 {
-                    crate::work_merge_executor::process_landed_follow_ups_at_boundary(
-                        config.project_root,
-                        config.store,
-                        config.work_item_id,
-                        &candidate_id,
-                        &merged_commit,
-                    )?;
+                    let completed =
+                        crate::work_merge_executor::process_landed_follow_ups_at_boundary(
+                            config.project_root,
+                            config.store,
+                            config.work_item_id,
+                            &candidate_id,
+                            &merged_commit,
+                        )?;
+                    if !completed {
+                        let refreshed = config.store.read_work_item(config.work_item_id)?;
+                        let failure = refreshed
+                            .merge_candidates
+                            .iter()
+                            .find(|candidate| candidate.id == candidate_id)
+                            .and_then(|candidate| {
+                                candidate.merge_state.follow_up_failure.as_ref()
+                            })
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "Merge Candidate {:?} has incomplete follow-up recovery but \
+                                     no durable recovery state",
+                                    candidate_id
+                                )
+                            })?;
+                        outcomes.push(WorkAttemptRunOutcome::FollowUpRecoveryPending {
+                            candidate_id,
+                            stage: failure.stage.clone(),
+                            next_action: failure.next_action.clone(),
+                        });
+                        return Ok(WorkAttemptRunResult { outcomes });
+                    }
                 }
             } else {
                 config.store.write_work_item(&item)?;
@@ -388,6 +417,7 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             let should_stop = matches!(
                 outcome,
                 WorkAttemptRunOutcome::MergeCandidateReady { .. }
+                    | WorkAttemptRunOutcome::FollowUpRecoveryPending { .. }
                     | WorkAttemptRunOutcome::NeedsUser { .. }
                     | WorkAttemptRunOutcome::ReviewOnlyComplete
                     | WorkAttemptRunOutcome::ReviewOnlyFailed

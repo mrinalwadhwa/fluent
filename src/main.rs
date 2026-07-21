@@ -583,6 +583,7 @@ fn cmd_attempt(
                 coder: auth_coder.as_deref(),
                 review_artifact: review_artifact.as_deref(),
             };
+            let mut pending_recovery = None;
             for outcome in &result.outcomes {
                 match outcome {
                     WorkAttemptRunOutcome::RanTask { task_id, output } => {
@@ -602,6 +603,17 @@ fn cmd_attempt(
                             "Attempt {attempt_id} reviews passed; Merge Candidate {candidate_id} is ready"
                         );
                     }
+                    WorkAttemptRunOutcome::FollowUpRecoveryPending {
+                        candidate_id,
+                        stage,
+                        next_action,
+                    } => {
+                        println!(
+                            "Merge Candidate {candidate_id} is merged; follow-up recovery is \
+                             pending at {stage}"
+                        );
+                        pending_recovery = Some((candidate_id, next_action));
+                    }
                     WorkAttemptRunOutcome::PlannedWriteRound { task_id } => {
                         println!("Planned write Task {task_id}");
                     }
@@ -620,6 +632,12 @@ fn cmd_attempt(
                         eprintln!("{hint}");
                     }
                 }
+            }
+            if let Some((candidate_id, next_action)) = pending_recovery {
+                bail!(
+                    "Merge Candidate {candidate_id} follow-up recovery remains pending. \
+                     {next_action}"
+                );
             }
         }
         AttemptCommands::Pull {

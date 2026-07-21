@@ -96,6 +96,9 @@ pub fn after_attempt_run(
         WorkAttemptRunOutcome::MergeCandidateReady { .. } => Some(
             "\n→ Next: fluent merge-candidate show <work-item-id>, then fluent merge-candidate land <work-item-id>".to_string(),
         ),
+        WorkAttemptRunOutcome::FollowUpRecoveryPending { next_action, .. } => {
+            Some(format!("\n→ Next: {next_action}"))
+        }
         WorkAttemptRunOutcome::PlannedWriteRound { .. } => Some(
             "\n→ Next: a follow-up write round was planned from failed reviewers; fluent attempt run <work-item-id> to keep iterating".to_string(),
         ),
@@ -202,6 +205,17 @@ mod tests {
         };
         let hint = after_attempt_run(&outcome, &AttemptRunContext::default()).unwrap();
         assert!(hint.contains("merge-candidate"));
+    }
+
+    #[test]
+    fn after_attempt_run_pending_recovery_names_recorded_action() {
+        let outcome = WorkAttemptRunOutcome::FollowUpRecoveryPending {
+            candidate_id: "mc-1".to_string(),
+            stage: "observation".to_string(),
+            next_action: "Re-run `fluent merge-candidate land work-1 mc-1`.".to_string(),
+        };
+        let hint = after_attempt_run(&outcome, &AttemptRunContext::default()).unwrap();
+        assert!(hint.contains("merge-candidate land work-1 mc-1"));
     }
 
     #[test]

@@ -412,7 +412,11 @@ most once; a completed resume clears the recorded failure.
 Land and post-land `attempt run` both call this same durable failure boundary.
 If Learning already succeeded, `attempt run` resumes materialization
 idempotently instead of rerunning the Learner; this closes the crash window
-between persisting the handoff and recording or completing its operation.
+between persisting the handoff and recording or completing its operation. When
+that boundary reports incomplete recovery, `attempt run` emits a
+`FollowUpRecoveryPending` outcome instead of claiming the merged candidate is
+ready, names the persisted stage and `merge-candidate land` retry action, and
+returns a non-zero command status.
 
 `fluent cleanup` takes the same land lock as land and post-land recovery, then
 re-reads each candidate before applying its plan. It retains an origin — its

@@ -2897,7 +2897,9 @@ exit 0
 
 /// Re-run the completed Attempt to retry a failed Learner.
 fn rerun_learner_attempt(main_dir: &Path, bin_dir: &Path) {
-    fs::remove_file(bin_dir.join("sandbox-exec")).unwrap();
+    if let Err(error) = fs::remove_file(bin_dir.join("sandbox-exec")) {
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
     fluent_cmd()
         .current_dir(main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
@@ -3750,7 +3752,21 @@ fn successful_learning_resumes_failed_materialization_without_rerunning_coder() 
     land_work_1(&main_dir, &bin_dir, true);
     fs::write(main_dir.join(".fluent/observations"), "block observation directory\n").unwrap();
 
-    rerun_learner_attempt(&main_dir, &bin_dir);
+    let obstructed = fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .output()
+        .unwrap();
+    assert!(
+        !obstructed.status.success(),
+        "an incomplete recovery must return a failing command status"
+    );
+    let stdout = String::from_utf8_lossy(&obstructed.stdout);
+    let stderr = String::from_utf8_lossy(&obstructed.stderr);
+    assert!(stdout.contains("follow-up recovery is pending at observation"));
+    assert!(!stdout.contains("is ready"));
+    assert!(stderr.contains("merge-candidate land work-1 attempt-1-merge-candidate"));
     let failed = work_item_value(&main_dir, "work-1");
     assert_eq!(
         failed["merge_candidates"][0]["merge_state"]["follow_up_failure"]["stage"],
