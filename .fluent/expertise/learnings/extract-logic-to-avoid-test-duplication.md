@@ -16,4 +16,6 @@ Symptoms of the problem:
 
 The test reviewer cites this principle: "Tests must exercise the code you're trying to verify. When code is hard to reach through its public interface, it's tempting to copy the logic into the test and verify the copy instead. The test passes, but it's testing itself."
 
+**Accepted exception — model-level tests over shared primitives.** A test that drives a test-local helper reimplementing an orchestration loop (e.g. a lineage recount-and-charge loop) is acceptable *when* `behaviors.md` explicitly scopes those tests as model-level (cited against the model module such as `src/work_model.rs`), the helper exercises real production primitives (`can_authorize_descendant`, `authorize_execution`, `lineage.charged`), and real end-to-end coverage exists separately (a binary test driving the actual orchestrator). The reviewer passes this but notes the residual gap: such model tests would not catch a regression in the orchestrator's own loop. The rule still bites when there is no separate end-to-end test or the reimplemented logic *is* the thing under verification.
+
 Related: [[inject-side-effects-for-testability]], [[test-names-match-assertions]]
