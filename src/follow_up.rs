@@ -66,6 +66,10 @@ pub struct FollowUpDraftV1 {
     /// The complete corrective execution input, present when `corrective`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corrective_context: Option<CorrectiveContext>,
+    /// Structured project-relative files the corrective Work may change. The
+    /// host uses these paths to resolve applicable `AGENTS.md` authority.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_paths: Vec<String>,
     /// The result the corrective Work must produce. Required for a corrective
     /// follow-up to pass the host gate.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -141,6 +145,14 @@ pub fn classify_follow_up(
     project_root: &Path,
     follow_up: &FollowUpDraftV1,
 ) -> FollowUpClassification {
+    classify_follow_up_at_revision(project_root, follow_up, "HEAD")
+}
+
+fn classify_follow_up_at_revision(
+    project_root: &Path,
+    follow_up: &FollowUpDraftV1,
+    revision: &str,
+) -> FollowUpClassification {
     use FollowUpClassification::ObservationOnly;
     if !follow_up.corrective {
         return ObservationOnly {
@@ -170,12 +182,28 @@ pub fn classify_follow_up(
             ),
         };
     }
+    if follow_up.target_paths.is_empty()
+        || follow_up.target_paths.iter().any(|target| {
+            let path = Path::new(target);
+            !path.is_relative() || !authority_path_is_normalized(path)
+        })
+    {
+        return ObservationOnly {
+            reason: "corrective follow-up has no complete normalized target path set".to_string(),
+        };
+    }
     let Some(authority) = follow_up.authority.as_ref() else {
         return ObservationOnly {
             reason: "corrective follow-up cites no authority".to_string(),
         };
     };
-    if let Err(reason) = verify_authority(project_root, authority, context) {
+    if let Err(reason) = verify_authority(
+        project_root,
+        revision,
+        authority,
+        context,
+        &follow_up.target_paths,
+    ) {
         return ObservationOnly { reason };
     }
     FollowUpClassification::Corrective
@@ -208,8 +236,10 @@ fn authority_path_is_normalized(path: &Path) -> bool {
 /// stays Observation-only.
 fn verify_authority(
     project_root: &Path,
+    revision: &str,
     authority: &AuthorityLocator,
     context: &CorrectiveContext,
+    target_paths: &[String],
 ) -> Result<(), String> {
     let relative = Path::new(&authority.path);
     if !relative.is_relative() || !authority_path_is_normalized(relative) {
@@ -235,55 +265,20 @@ fn verify_authority(
     }
 
     if authority.kind == AuthorityKind::AgentsInstruction {
-        let agents_dir = relative.parent().unwrap_or_else(|| Path::new(""));
-        let included_scope = Path::new(context.included_scope.trim());
-        if !included_scope.is_relative()
-            || !authority_path_is_normalized(included_scope)
-            || !included_scope.starts_with(agents_dir)
-        {
-            return Err(format!(
-                "authority {:?} does not apply to included scope {:?}",
-                authority.path, context.included_scope
-            ));
+        for target in target_paths {
+            let applicable = applicable_agents_path(project_root, revision, Path::new(target))?;
+            if applicable.as_deref() != Some(relative) {
+                return Err(format!(
+                    "authority {:?} is not the applicable AGENTS.md for target {:?}",
+                    authority.path, target
+                ));
+            }
         }
     }
 
-    let canonical_root = project_root
-        .canonicalize()
-        .map_err(|_| "project root cannot be canonicalized".to_string())?;
-    let full = project_root.join(relative);
-    let canonical_full = full
-        .canonicalize()
-        .map_err(|_| format!("authority {:?} is not present", authority.path))?;
-    if !canonical_full.starts_with(&canonical_root) {
-        return Err(format!(
-            "authority {:?} resolves outside the project",
-            authority.path
-        ));
-    }
-
-    let tree_entry = crate::git::run_raw(
-        project_root,
-        &["ls-tree", "HEAD", "--", &authority.path],
-    )
-    .map_err(|_| format!("authority {:?} is not committed", authority.path))?;
-    let tree_entry = String::from_utf8_lossy(&tree_entry.stdout);
-    if !tree_entry.starts_with("100644 blob ") && !tree_entry.starts_with("100755 blob ") {
-        return Err(format!(
-            "authority {:?} is not a committed regular file",
-            authority.path
-        ));
-    }
-
-    let revision_path = format!("HEAD:{}", authority.path);
-    let committed = crate::git::run_raw(project_root, &["show", &revision_path])
-        .map_err(|_| format!("authority {:?} is not committed", authority.path))?;
-    if !committed.status.success() {
-        return Err(format!("authority {:?} is not committed", authority.path));
-    }
+    let committed = committed_regular_blob(project_root, revision, &authority.path)?;
     let anchor = authority.anchor.as_bytes();
     if !committed
-        .stdout
         .windows(anchor.len())
         .any(|candidate| candidate == anchor)
     {
@@ -293,6 +288,83 @@ fn verify_authority(
         ));
     }
     Ok(())
+}
+
+fn committed_tree_entry(
+    project_root: &Path,
+    revision: &str,
+    path: &str,
+) -> Result<Option<(String, String, String)>, String> {
+    let output = crate::git::run_raw(project_root, &["ls-tree", "-z", revision, "--", path])
+        .map_err(|_| format!("inspect committed path {path:?} at {revision}"))?;
+    if !output.status.success() {
+        return Err(format!("revision {revision:?} is not available for authority validation"));
+    }
+    if output.stdout.is_empty() {
+        return Ok(None);
+    }
+    let entry = output.stdout.strip_suffix(&[0]).unwrap_or(&output.stdout);
+    let Some(tab) = entry.iter().position(|byte| *byte == b'\t') else {
+        return Err(format!("committed path {path:?} has an invalid tree entry"));
+    };
+    if &entry[tab + 1..] != path.as_bytes() {
+        return Err(format!("committed tree entry does not exactly match {path:?}"));
+    }
+    let header = String::from_utf8(entry[..tab].to_vec())
+        .map_err(|_| format!("committed path {path:?} has a non-UTF-8 tree entry"))?;
+    let mut fields = header.split_whitespace();
+    let mode = fields.next().unwrap_or_default().to_string();
+    let kind = fields.next().unwrap_or_default().to_string();
+    let object = fields.next().unwrap_or_default().to_string();
+    if fields.next().is_some() || object.is_empty() {
+        return Err(format!("committed path {path:?} has an invalid tree entry"));
+    }
+    Ok(Some((mode, kind, object)))
+}
+
+fn committed_regular_blob(project_root: &Path, revision: &str, path: &str) -> Result<Vec<u8>, String> {
+    let Some((mode, kind, object)) = committed_tree_entry(project_root, revision, path)? else {
+        return Err(format!("authority {path:?} is not committed at {revision}"));
+    };
+    if kind != "blob" || (mode != "100644" && mode != "100755") {
+        return Err(format!("authority {path:?} is not a committed regular file at {revision}"));
+    }
+    let output = crate::git::run_raw(project_root, &["cat-file", "blob", &object])
+        .map_err(|_| format!("read committed authority {path:?} at {revision}"))?;
+    if !output.status.success() {
+        return Err(format!("read committed authority {path:?} at {revision}"));
+    }
+    Ok(output.stdout)
+}
+
+fn applicable_agents_path(
+    project_root: &Path,
+    revision: &str,
+    target: &Path,
+) -> Result<Option<PathBuf>, String> {
+    let mut directory = target.parent().unwrap_or_else(|| Path::new(""));
+    loop {
+        let candidate = if directory.as_os_str().is_empty() {
+            PathBuf::from("AGENTS.md")
+        } else {
+            directory.join("AGENTS.md")
+        };
+        let candidate_text = candidate
+            .to_str()
+            .ok_or_else(|| "AGENTS.md candidate path is not UTF-8".to_string())?;
+        if let Some((mode, kind, _)) =
+            committed_tree_entry(project_root, revision, candidate_text)?
+        {
+            if kind != "blob" || (mode != "100644" && mode != "100755") {
+                return Err(format!("applicable authority {candidate_text:?} is not a regular file"));
+            }
+            return Ok(Some(candidate));
+        }
+        if directory.as_os_str().is_empty() {
+            return Ok(None);
+        }
+        directory = directory.parent().unwrap_or_else(|| Path::new(""));
+    }
 }
 
 fn schema_version_v1() -> u32 {
@@ -779,7 +851,12 @@ fn process_one_follow_up(
     // Stage 2: classify through the corrective host gate. The first
     // classification is recorded and reused on retry.
     if journal.follow_ups[index].corrective.is_none() {
-        let corrective = classify_follow_up(project_root, follow_up).is_corrective();
+        let corrective = classify_follow_up_at_revision(
+            project_root,
+            follow_up,
+            &operation.origin.merged_commit,
+        )
+        .is_corrective();
         journal.follow_ups[index].corrective = Some(corrective);
         write_journal(journal_path, journal)?;
     }
@@ -1062,6 +1139,7 @@ fn ensure_derived_work(
         .to_string(),
         learning_summary: learning_summary.to_string(),
         expected_result: follow_up.expected_result.clone(),
+        target_paths: follow_up.target_paths.clone(),
         unresolved_decisions: follow_up.unresolved_decisions.clone(),
         authority: CorrectiveAuthorityReference {
             kind: match authority.kind {
@@ -1608,6 +1686,7 @@ mod tests {
             summary: "Restore the retry cap".to_string(),
             corrective: true,
             corrective_context: Some(context),
+            target_paths: vec!["src/retry.rs".to_string()],
             expected_result: "The retry cap is enforced again".to_string(),
             unresolved_decisions: Vec::new(),
             authority,
@@ -1891,8 +1970,96 @@ mod tests {
         )));
         follow_up.corrective_context.as_mut().unwrap().included_scope =
             "tests/retry.rs".to_string();
+        follow_up.target_paths = vec!["tests/retry.rs".to_string()];
 
         assert!(!classify_follow_up(tmp.path(), &follow_up).is_corrective());
+    }
+
+    #[test]
+    fn replay_pins_authority_to_the_landed_revision_in_both_directions() {
+        fn head(root: &Path) -> String {
+            let output = crate::git::run_raw(root, &["rev-parse", "HEAD"]).unwrap();
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        }
+
+        let accepted = tempfile::TempDir::new().unwrap();
+        seed_root_work_item(accepted.path());
+        let authority = fresh_expertise_authority(accepted.path());
+        let landed_with_authority = head(accepted.path());
+        write_authority(
+            accepted.path(),
+            ".fluent/expertise/retry.md",
+            "replacement without the accepted anchor\n",
+        );
+        let mut accepted_batch = corrective_batch(accepted.path(), FollowUpSource::Learner, Some(authority));
+        accepted_batch.origin.merged_commit = landed_with_authority;
+        assert_eq!(
+            process_landed_batch(accepted.path(), &accepted_batch, None)
+                .unwrap()
+                .work_items_created,
+            1,
+            "later HEAD drift cannot invalidate authority accepted at land"
+        );
+
+        let rejected = tempfile::TempDir::new().unwrap();
+        seed_root_work_item(rejected.path());
+        let authority = fresh_expertise_authority(rejected.path());
+        write_authority(
+            rejected.path(),
+            ".fluent/expertise/retry.md",
+            "landed revision has no accepted anchor\n",
+        );
+        let landed_without_authority = head(rejected.path());
+        write_authority(
+            rejected.path(),
+            ".fluent/expertise/retry.md",
+            "Cap enforcement belongs in retry.rs\n",
+        );
+        let mut rejected_batch = corrective_batch(rejected.path(), FollowUpSource::Learner, Some(authority));
+        rejected_batch.origin.merged_commit = landed_without_authority;
+        assert_eq!(
+            process_landed_batch(rejected.path(), &rejected_batch, None)
+                .unwrap()
+                .work_items_created,
+            0,
+            "later HEAD content cannot authorize a landed revision that lacked it"
+        );
+    }
+
+    #[test]
+    fn agents_authority_must_be_the_closest_ancestor_for_every_target() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root_anchor = "Follow project instructions";
+        let nested_anchor = "Follow retry instructions";
+        write_authority(tmp.path(), "AGENTS.md", &format!("{root_anchor}\n"));
+        write_authority(tmp.path(), "src/AGENTS.md", &format!("{nested_anchor}\n"));
+
+        let mut root = corrective_follow_up(Some(locator(
+            AuthorityKind::AgentsInstruction,
+            "AGENTS.md",
+            root_anchor,
+        )));
+        root.target_paths = vec!["docs/guide.md".to_string(), "src/retry.rs".to_string()];
+        root.corrective_context.as_mut().unwrap().included_scope = "docs and src".to_string();
+        assert!(
+            !classify_follow_up(tmp.path(), &root).is_corrective(),
+            "a closer nested instruction overrides root authority for one target"
+        );
+
+        let mut nested = corrective_follow_up(Some(locator(
+            AuthorityKind::AgentsInstruction,
+            "src/AGENTS.md",
+            nested_anchor,
+        )));
+        nested.target_paths = vec!["src/retry.rs".to_string(), "docs/guide.md".to_string()];
+        nested.corrective_context.as_mut().unwrap().included_scope = "src and docs".to_string();
+        assert!(
+            !classify_follow_up(tmp.path(), &nested).is_corrective(),
+            "nested authority cannot authorize a target outside its tree"
+        );
+
+        root.target_paths = vec!["docs/guide.md".to_string()];
+        assert!(classify_follow_up(tmp.path(), &root).is_corrective());
     }
 
     #[test]
@@ -1976,11 +2143,21 @@ mod tests {
             .unwrap();
     }
 
-    fn corrective_batch(source: FollowUpSource, authority: Option<AuthorityLocator>) -> NormalizedFollowUpBatchV1 {
+    fn corrective_batch(
+        root: &Path,
+        source: FollowUpSource,
+        authority: Option<AuthorityLocator>,
+    ) -> NormalizedFollowUpBatchV1 {
+        let mut batch_origin = origin();
+        if root.join(".git").exists() {
+            let output = crate::git::run_raw(root, &["rev-parse", "HEAD"]).unwrap();
+            batch_origin.merged_commit =
+                String::from_utf8(output.stdout).unwrap().trim().to_string();
+        }
         NormalizedFollowUpBatchV1 {
             schema_version: NormalizedFollowUpBatchV1::SCHEMA_VERSION,
             source,
-            origin: origin(),
+            origin: batch_origin,
             learning_summary: "learned".to_string(),
             follow_ups: vec![corrective_follow_up(authority)],
         }
@@ -2027,7 +2204,7 @@ mod tests {
             .create_work_item(&WorkItem::planned(DERIVED_ID, "Unrelated valid work"))
             .unwrap();
         let authority = fresh_expertise_authority(tmp.path());
-        let batch = corrective_batch(FollowUpSource::Learner, Some(authority));
+        let batch = corrective_batch(tmp.path(), FollowUpSource::Learner, Some(authority));
 
         let error = process_landed_batch(tmp.path(), &batch, None).unwrap_err();
 
@@ -2043,7 +2220,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         seed_root_work_item(tmp.path());
         // A follow-up with no authority never passes the gate.
-        let batch = corrective_batch(FollowUpSource::Learner, None);
+        let batch = corrective_batch(tmp.path(), FollowUpSource::Learner, None);
         let outcome = process_landed_batch(tmp.path(), &batch, None).unwrap();
         assert_eq!(outcome.observations_created, 1);
         assert_eq!(outcome.work_items_created, 0);
@@ -2056,7 +2233,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         seed_root_work_item(tmp.path());
         let authority = fresh_expertise_authority(tmp.path());
-        let batch = corrective_batch(FollowUpSource::Learner, Some(authority));
+        let batch = corrective_batch(tmp.path(), FollowUpSource::Learner, Some(authority));
 
         let outcome = process_landed_batch(tmp.path(), &batch, None).unwrap();
         assert_eq!(outcome.work_items_created, 1);
@@ -2083,7 +2260,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         seed_root_work_item(tmp.path());
         let authority = fresh_expertise_authority(tmp.path());
-        let mut batch = corrective_batch(FollowUpSource::PostMerge, Some(authority));
+        let mut batch = corrective_batch(tmp.path(), FollowUpSource::PostMerge, Some(authority));
         batch.follow_ups[0].evidence.push(ArtifactRef {
             path: "artifacts/review.md".to_string(),
             digest: "sha256:evidence".to_string(),
@@ -2117,7 +2294,7 @@ mod tests {
         seed_root_work_item(tmp.path());
         write_project_policy(tmp.path(), "follow-up:\n  mode: execute\n");
         let authority = fresh_expertise_authority(tmp.path());
-        let batch = corrective_batch(FollowUpSource::Learner, Some(authority));
+        let batch = corrective_batch(tmp.path(), FollowUpSource::Learner, Some(authority));
 
         let outcome = process_landed_batch(tmp.path(), &batch, None).unwrap();
         assert_eq!(outcome.work_items_created, 1);
@@ -2159,7 +2336,7 @@ mod tests {
         store.create_work_item(&existing).unwrap();
 
         let authority = fresh_expertise_authority(tmp.path());
-        let batch = corrective_batch(FollowUpSource::Learner, Some(authority));
+        let batch = corrective_batch(tmp.path(), FollowUpSource::Learner, Some(authority));
         let outcome = process_landed_batch(tmp.path(), &batch, None).unwrap();
 
         assert_eq!(outcome.work_items_created, 1);
@@ -2178,8 +2355,8 @@ mod tests {
             "follow-up:\n  mode: execute\n  descendant-limit: 1\n",
         );
         let authority = fresh_expertise_authority(tmp.path());
-        let first = corrective_batch(FollowUpSource::Learner, Some(authority.clone()));
-        let mut second = corrective_batch(FollowUpSource::PostMerge, Some(authority));
+        let first = corrective_batch(tmp.path(), FollowUpSource::Learner, Some(authority.clone()));
+        let mut second = corrective_batch(tmp.path(), FollowUpSource::PostMerge, Some(authority));
         second.origin.attempt_id = "attempt-2".to_string();
         second.origin.merge_candidate_id = "attempt-2-merge-candidate".to_string();
 
@@ -2239,7 +2416,7 @@ mod tests {
         seed_root_work_item(tmp.path());
         write_project_policy(tmp.path(), "follow-up:\n  mode: execute\n");
         let authority = fresh_expertise_authority(tmp.path());
-        let batch = corrective_batch(FollowUpSource::Learner, Some(authority));
+        let batch = corrective_batch(tmp.path(), FollowUpSource::Learner, Some(authority));
 
         let operation = record_post_land_operation(tmp.path(), &batch, None).unwrap();
         let first = replay_post_land_operation(tmp.path(), &operation.operation_id).unwrap();
@@ -2262,7 +2439,7 @@ mod tests {
         seed_root_work_item(tmp.path());
         write_project_policy(tmp.path(), "follow-up:\n  mode: execute\n");
         let authority = fresh_expertise_authority(tmp.path());
-        let batch = corrective_batch(FollowUpSource::Learner, Some(authority));
+        let batch = corrective_batch(tmp.path(), FollowUpSource::Learner, Some(authority));
 
         let operation = record_post_land_operation(tmp.path(), &batch, None).unwrap();
         replay_post_land_operation(tmp.path(), &operation.operation_id).unwrap();

@@ -3164,7 +3164,7 @@ fn commit_authority(main_dir: &Path) {
 fn corrective_follow_up_json(id: &str) -> String {
     let digest = fluent::follow_up::content_digest(AUTHORITY_ANCHOR.as_bytes());
     format!(
-        r#"{{"id":"{id}","summary":"Restore the retry cap ({id})","corrective":true,"expected_result":"The retry cap is enforced again","corrective_context":{{"objective":"Restore the retry guard","requirement":"{AUTHORITY_ANCHOR}","evidence":"Merged commit removed the cap check","included_scope":"src/retry.rs","excluded_scope":"unrelated backoff tuning","verification":"cargo test retry"}},"authority":{{"kind":"expertise-entry","path":"{AUTHORITY_PATH}","anchor":"{AUTHORITY_ANCHOR}","digest":"{digest}"}}}}"#
+        r#"{{"id":"{id}","summary":"Restore the retry cap ({id})","corrective":true,"expected_result":"The retry cap is enforced again","target_paths":["src/retry.rs"],"corrective_context":{{"objective":"Restore the retry guard","requirement":"{AUTHORITY_ANCHOR}","evidence":"Merged commit removed the cap check","included_scope":"src/retry.rs","excluded_scope":"unrelated backoff tuning","verification":"cargo test retry"}},"authority":{{"kind":"expertise-entry","path":"{AUTHORITY_PATH}","anchor":"{AUTHORITY_ANCHOR}","digest":"{digest}"}}}}"#
     )
 }
 
@@ -3172,7 +3172,7 @@ fn corrective_follow_up_json(id: &str) -> String {
 /// Observation-only.
 fn untrusted_corrective_follow_up_json(id: &str) -> String {
     format!(
-        r#"{{"id":"{id}","summary":"Untrusted change ({id})","corrective":true,"expected_result":"Something changes","corrective_context":{{"objective":"Do a thing","requirement":"The thing is done","evidence":"a hunch","included_scope":"src","excluded_scope":"tests","verification":"cargo test"}}}}"#
+        r#"{{"id":"{id}","summary":"Untrusted change ({id})","corrective":true,"expected_result":"Something changes","target_paths":["src/lib.rs"],"corrective_context":{{"objective":"Do a thing","requirement":"The thing is done","evidence":"a hunch","included_scope":"src","excluded_scope":"tests","verification":"cargo test"}}}}"#
     )
 }
 

@@ -1390,6 +1390,8 @@ pub struct CorrectiveAuditContext {
     pub learning_summary: String,
     pub expected_result: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unresolved_decisions: Vec<String>,
     pub authority: CorrectiveAuthorityReference,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1421,11 +1423,17 @@ impl CorrectiveAuditContext {
         format!(
             "# Corrective proposal audit\n\n\
              ## Expected result\n{}\n\n\
+             ## Target paths\n{}\n\n\
              ## Trusted authority\nKind: {}\nPath: {}\nAnchor: {}\nDigest: {}\n\n\
              ## Supporting evidence\n{}\n\n\
              ## Unresolved decisions\n{}\n\n\
              ## Follow-up source\nSource: {}\nFollow-up: {}\nLearning summary: {}",
             self.expected_result.trim(),
+            self.target_paths
+                .iter()
+                .map(|path| format!("- {path}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
             self.authority.kind,
             self.authority.path,
             self.authority.anchor,

@@ -335,11 +335,14 @@ only when it is marked corrective, carries a complete corrective context
 and expected result, leaves no unresolved decision, and cites a trusted
 authority — a behavior statement in `documentation/behaviors.md`, an
 instruction in a tracked `AGENTS.md`, or a committed `.fluent/expertise/`
-entry. The gate rejects non-normal paths and symlink escapes, reads the
-authority from the regular-file blob tracked in `HEAD`, requires the
-corrective requirement to equal the non-empty digest-matched anchor, and
-checks that a nested `AGENTS.md` applies to the included scope. Working-tree
-edits and untracked files cannot authorize corrective Work. Any incomplete,
+entry. The gate rejects non-normal paths and committed symlinks, reads the
+authority from the regular-file blob at the operation's immutable landed
+commit, and requires the corrective requirement to equal the non-empty
+digest-matched anchor. Corrective proposals carry structured normalized target
+paths; an `AGENTS.md` authority must be the closest applicable ancestor for
+every target, including when a nested instruction overrides a root instruction.
+Later `HEAD` movement, working-tree edits, and untracked files cannot authorize
+or invalidate corrective Work. Any incomplete,
 unsupported, unresolved, stale, or mis-namespaced context downgrades the
 follow-up to Observation-only. When a follow-up first
 validates as corrective, replay freezes the resolved follow-up policy

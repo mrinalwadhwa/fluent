@@ -87,6 +87,7 @@ The draft has this shape:
       "summary": "one-line description of the follow-up",
       "corrective": false,
       "corrective_context": null,
+      "target_paths": [],
       "expected_result": "",
       "unresolved_decisions": [],
       "authority": null,
@@ -127,6 +128,7 @@ looks like this:
   "summary": "Restore the retry cap check the merged change removed",
   "corrective": true,
   "expected_result": "The retry loop stops after the configured cap",
+  "target_paths": ["src/retry.rs", "tests/retry.rs"],
   "unresolved_decisions": [],
   "corrective_context": {
     "objective": "what the corrective Work must accomplish",
@@ -149,6 +151,9 @@ Fill every field:
 
 - `expected_result` — the concrete result the corrective Work must produce. It
   must be non-empty.
+- `target_paths` — every normalized project-relative file the corrective Work
+  may change. For `agents-instruction` authority, the cited `AGENTS.md` must be
+  the closest applicable ancestor instruction for every target.
 - `unresolved_decisions` — leave this an empty list. If any product, interface,
   architecture, security, or permission decision is still open, list it here; a
   non-empty list keeps the follow-up Observation-only rather than corrective.
