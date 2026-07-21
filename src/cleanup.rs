@@ -70,6 +70,7 @@ pub fn cleanup_work_items(
     options: &CleanupOptions,
 ) -> Result<Vec<WorkCleanupResult>> {
     let source_root = cleanup_source_root(search_root)?;
+    let _land_lock = crate::land_lock::acquire(&crate::land_lock::lock_path(&source_root))?;
     let store = WorkModelStore::new(&source_root);
     let work_items = store.list_work_items()?;
     let stored_work_item_ids = work_items
@@ -81,6 +82,12 @@ pub fn cleanup_work_items(
     let mut results = Vec::new();
 
     for work_item in candidates {
+        let work_item = match store.read_work_item(&work_item.id) {
+            Ok(work_item)
+                if work_item_is_cleanable(&work_item)
+                    && !retains_for_follow_up_recovery(&source_root, &work_item) => work_item,
+            _ => continue,
+        };
         let plan = work_cleanup_plan(&source_root, &store, &work_item, &registered, options.apply)?;
         if options.apply {
             apply_work_item_cleanup(&plan)?;
@@ -215,27 +222,20 @@ fn retains_for_follow_up_recovery(project_root: &Path, work_item: &WorkItem) -> 
         if !learning_succeeded || candidate.merge_state.follow_up_failure.is_some() {
             return true;
         }
-        let operation_id =
-            crate::follow_up::operation_id_for_candidate(&work_item.id, &candidate.id);
-        has_incomplete_post_land_operation(project_root, &operation_id)
+        let Some(merged_commit) = candidate.merge_state.merged_commit.as_ref() else {
+            return true;
+        };
+        let origin = crate::follow_up::PostLandOrigin {
+            work_item_id: work_item.id.clone(),
+            attempt_id: candidate.attempt_id.clone(),
+            merge_candidate_id: candidate.id.clone(),
+            merged_commit: merged_commit.clone(),
+        };
+        !matches!(
+            crate::follow_up::post_land_operation_complete(project_root, &origin),
+            Ok(true)
+        )
     })
-}
-
-/// Whether a recorded post-land operation exists but has not completed — an
-/// incomplete journal or a pending imported operation awaiting replay.
-fn has_incomplete_post_land_operation(project_root: &Path, operation_id: &str) -> bool {
-    let dir = crate::follow_up::follow_ups_root(project_root).join(operation_id);
-    if !dir.join("operation.json").exists() {
-        return false;
-    }
-    match fs::read(dir.join("journal.json")) {
-        Ok(bytes) => !serde_json::from_slice::<serde_json::Value>(&bytes)
-            .ok()
-            .and_then(|value| value.get("completed").and_then(|c| c.as_bool()))
-            .unwrap_or(false),
-        // An operation recorded without a completed journal is still pending.
-        Err(_) => true,
-    }
 }
 
 fn work_item_is_cleanable(work_item: &WorkItem) -> bool {
@@ -438,6 +438,13 @@ fn cleanup_managed_worktree(
     apply: bool,
 ) -> Result<WorktreeCleanup> {
     if !path.exists() {
+        if apply && path_is_registered(path, registered) {
+            git::run(
+                search_root,
+                &["worktree", "prune", "--expire", "now"],
+                "prune missing registered worktree",
+            )?;
+        }
         return Ok(WorktreeCleanup::Missing(path.to_path_buf()));
     }
 
@@ -646,16 +653,30 @@ fn registered_worktrees(search_root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn path_is_registered(path: &Path, registered: &[PathBuf]) -> bool {
-    let canonical_path = path.canonicalize().ok();
+    let canonical_path = canonicalize_allow_missing(path);
     registered.iter().any(|registered_path| {
         if registered_path == path {
             return true;
         }
-        match (&canonical_path, registered_path.canonicalize().ok()) {
+        match (&canonical_path, canonicalize_allow_missing(registered_path)) {
             (Some(path), Some(registered)) => path == &registered,
             _ => false,
         }
     })
+}
+
+fn canonicalize_allow_missing(path: &Path) -> Option<PathBuf> {
+    let mut existing = path;
+    let mut suffix = Vec::new();
+    while !existing.exists() {
+        suffix.push(existing.file_name()?.to_os_string());
+        existing = existing.parent()?;
+    }
+    let mut resolved = existing.canonicalize().ok()?;
+    for component in suffix.into_iter().rev() {
+        resolved.push(component);
+    }
+    Some(resolved)
 }
 
 #[cfg(test)]
@@ -837,10 +858,34 @@ mod tests {
             item
         }
 
+        fn record_completed_empty_operation(root: &Path, work_item_id: &str) {
+            let batch = crate::follow_up::NormalizedFollowUpBatchV1 {
+                schema_version: crate::follow_up::NormalizedFollowUpBatchV1::SCHEMA_VERSION,
+                source: crate::follow_up::FollowUpSource::Learner,
+                origin: crate::follow_up::PostLandOrigin {
+                    work_item_id: work_item_id.to_string(),
+                    attempt_id: "attempt-1".to_string(),
+                    merge_candidate_id: "attempt-1-merge-candidate".to_string(),
+                    merged_commit: "abc123".to_string(),
+                },
+                learning_summary: String::new(),
+                follow_ups: Vec::new(),
+            };
+            crate::follow_up::process_landed_batch(root, &batch, None).unwrap();
+        }
+
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
 
-        // A completed landed origin with no live recovery is reapable.
+        // Successful Learning before operation recording remains a cleanup
+        // root: the process may have crashed in that durable gap.
+        assert!(
+            cleanup_work_item_candidates(root, vec![landed_item("work-no-operation")]).is_empty(),
+            "successful Learning without a proven operation retains its origin"
+        );
+
+        // A completed landed origin with validated operation evidence is reapable.
+        record_completed_empty_operation(root, "work-complete");
         assert_eq!(
             cleanup_work_item_candidates(root, vec![landed_item("work-complete")]).len(),
             1,
@@ -908,13 +953,63 @@ mod tests {
             "a pending imported post-land operation retains its origin"
         );
 
-        // Once the journal completes, the origin becomes reapable.
+        // A bare completed bit cannot prove the operation, receipts, or effects.
         fs::write(op_dir.join("journal.json"), r#"{"completed":true}"#).unwrap();
+        assert!(
+            cleanup_work_item_candidates(root, vec![landed_item("work-incomplete")]).is_empty(),
+            "unvalidated completion evidence retains the origin"
+        );
+
+        // Once a valid operation completes, the origin becomes reapable.
+        fs::remove_dir_all(&op_dir).unwrap();
+        record_completed_empty_operation(root, "work-incomplete");
         assert_eq!(
             cleanup_work_item_candidates(root, vec![landed_item("work-incomplete")]).len(),
             1,
             "a completed journal no longer blocks cleanup"
         );
+    }
+
+    #[test]
+    fn missing_registered_worktree_is_pruned_on_apply() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        git::run(&project, &["init", "-q"], "initialize cleanup test repository").unwrap();
+        git::run(
+            &project,
+            &["config", "user.email", "test@example.com"],
+            "configure test email",
+        )
+        .unwrap();
+        git::run(
+            &project,
+            &["config", "user.name", "Test"],
+            "configure test name",
+        )
+        .unwrap();
+        fs::write(project.join("README.md"), "test\n").unwrap();
+        git::run(&project, &["add", "README.md"], "stage cleanup fixture").unwrap();
+        git::run(&project, &["commit", "-m", "Seed"], "commit cleanup fixture").unwrap();
+        let missing = tmp.path().join("missing-worktree");
+        let missing_text = missing.to_string_lossy().into_owned();
+        git::run(
+            &project,
+            &["worktree", "add", "--detach", &missing_text, "HEAD"],
+            "register cleanup fixture worktree",
+        )
+        .unwrap();
+        fs::remove_dir_all(&missing).unwrap();
+        let registered = registered_worktrees(&project).unwrap();
+        assert!(path_is_registered(&missing, &registered));
+
+        let outcome = cleanup_managed_worktree(&project, &missing, &registered, true).unwrap();
+
+        assert_eq!(outcome, WorktreeCleanup::Missing(missing.clone()));
+        assert!(!path_is_registered(
+            &missing,
+            &registered_worktrees(&project).unwrap()
+        ));
     }
 
     #[test]

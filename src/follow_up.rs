@@ -1,9 +1,8 @@
-//! Versioned, type-only contracts for the learning follow-up flywheel.
+//! Record and replay landed follow-up batches into durable local effects.
 //!
-//! These structures pin the serialized shape of a learner handoff and the
-//! follow-up drafts and learning record it carries. Producing and consuming
-//! handoffs lands in later Work Items; this module fixes the vocabulary and the
-//! on-disk format now so the scheduler and Learner branches cannot diverge.
+//! This module owns the portable handoff and operation schemas, the resumable
+//! per-operation journal, corrective validation and promotion, and completion
+//! evidence that cleanup uses to retain or release an origin.
 
 use anyhow::{Context, Result, bail};
 use rustix::fs::{FlockOperation, flock};
@@ -963,6 +962,124 @@ pub fn first_incomplete_stage(project_root: &Path, operation_id: &str) -> Option
     None
 }
 
+/// Prove that a landed origin's operation, journal, receipts, and durable
+/// effects are complete. Missing or incomplete evidence returns `false`;
+/// malformed or conflicting evidence returns an error so cleanup fails closed.
+pub fn post_land_operation_complete(
+    project_root: &Path,
+    expected_origin: &PostLandOrigin,
+) -> Result<bool> {
+    macro_rules! incomplete {
+        ($reason:literal) => {{
+            let _ = $reason;
+            return Ok(false);
+        }};
+    }
+    let operation_id = operation_id_for(expected_origin);
+    let dir = operation_dir(project_root, &operation_id);
+    if !dir.join("operation.json").exists() {
+        incomplete!("missing operation");
+    }
+    let _lock = lock_operation(&dir, &operation_id, "CLEANUP")?;
+    let operation: PendingPostLandOperationV1 = serde_json::from_slice(
+        &fs::read(dir.join("operation.json"))?,
+    )?;
+    if operation.schema_version != PendingPostLandOperationV1::SCHEMA_VERSION
+        || operation.operation_id != operation_id
+        || operation.origin != *expected_origin
+        || operation_identity_digest(&operation)? != operation.digest
+    {
+        bail!("post-land operation identity or digest does not match its landed origin");
+    }
+    let batch = load_verified_batch(project_root, &operation.batch_ref)?;
+    if batch.schema_version != NormalizedFollowUpBatchV1::SCHEMA_VERSION
+        || batch.origin != operation.origin
+    {
+        bail!("normalized batch does not match its post-land operation");
+    }
+    let journal: PostLandJournal = serde_json::from_slice(
+        &fs::read(dir.join("journal.json"))?,
+    )?;
+    if journal.schema_version != PostLandJournal::SCHEMA_VERSION
+        || journal.operation_id != operation_id
+        || !journal.completed
+        || journal.follow_ups.len() != batch.follow_ups.len()
+    {
+        incomplete!("journal header");
+    }
+
+    let store = WorkModelStore::new(project_root);
+    let mut seen = std::collections::HashSet::new();
+    for follow_up in &batch.follow_ups {
+        let Some(receipt) = journal
+            .follow_ups
+            .iter()
+            .find(|receipt| receipt.follow_up_id == follow_up.id)
+        else {
+            incomplete!("missing receipt");
+        };
+        if !seen.insert(&receipt.follow_up_id) {
+            bail!("post-land journal repeats a follow-up receipt");
+        }
+        let observation_id = observation_id_for(&operation_id, &follow_up.id);
+        if receipt.observation_id != observation_id
+            || !observations::provenance_observation_exists(
+                project_root,
+                &observation_id,
+                &follow_up_frontmatter(expected_origin, follow_up),
+            )?
+            || receipt.corrective.is_none()
+        {
+            incomplete!("observation or classification");
+        }
+        if receipt.corrective == Some(true) {
+            let expected_work_id = derived_work_item_id(&operation_id, &follow_up.id);
+            if receipt.resolved_policy.is_none()
+                || receipt.derived_work_item_id.as_deref() != Some(&expected_work_id)
+            {
+                incomplete!("corrective receipt");
+            }
+            let work_item = match store.read_work_item(&expected_work_id) {
+                Ok(item) => item,
+                Err(WorkModelStorageError::ReadFile { source, .. })
+                    if source.kind() == std::io::ErrorKind::NotFound => incomplete!("missing work"),
+                Err(error) => return Err(error.into()),
+            };
+            let expected_provenance = DerivedProvenance {
+                observation_id: Some(observation_id),
+                work_item_id: Some(expected_origin.work_item_id.clone()),
+                attempt_id: Some(expected_origin.attempt_id.clone()),
+                merge_candidate_id: Some(expected_origin.merge_candidate_id.clone()),
+                merged_commit: Some(expected_origin.merged_commit.clone()),
+            };
+            if work_item.origin.provenance() != Some(&expected_provenance) {
+                incomplete!("work provenance");
+            }
+            if receipt.queue_expected {
+                if !receipt.queued {
+                    incomplete!("queue receipt");
+                }
+                let Some(enqueue_origin) = work_item
+                    .pending_enqueue
+                    .as_ref()
+                    .map(|intent| intent.origin_operation_id.as_str())
+                else {
+                    incomplete!("missing enqueue intent");
+                };
+                let Some(ledger) = crate::queue::read_ledger(project_root, &expected_work_id)? else {
+                    incomplete!("missing queue ledger");
+                };
+                if !ledger.dispatches.iter().any(|dispatch| {
+                    dispatch.origin_operation_id.as_deref() == Some(enqueue_origin)
+                }) {
+                    incomplete!("queue origin");
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
 /// Record and immediately replay a landed follow-up batch. This is the single
 /// entry point the local land hook calls once a Merge Candidate is durably
 /// merged.
@@ -1551,6 +1668,33 @@ mod tests {
         // Re-recording the same origin returns the existing operation.
         let again = record_post_land_operation(tmp.path(), &batch, None).unwrap();
         assert_eq!(again, operation);
+    }
+
+    #[test]
+    fn completed_operation_requires_matching_receipts_and_effects() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let batch = batch_with(vec![draft("fu-1", "one")]);
+        let outcome = process_landed_batch(tmp.path(), &batch, None).unwrap();
+        assert!(post_land_operation_complete(tmp.path(), &batch.origin).unwrap());
+
+        let observation = tmp.path().join(format!(
+            ".fluent/observations/{}.md",
+            observation_id_for(&outcome.operation_id, "fu-1")
+        ));
+        fs::remove_file(observation).unwrap();
+
+        assert!(!post_land_operation_complete(tmp.path(), &batch.origin).unwrap());
+    }
+
+    #[test]
+    fn completed_operation_rejects_mismatched_origin() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let batch = batch_with(Vec::new());
+        process_landed_batch(tmp.path(), &batch, None).unwrap();
+        let mut wrong = batch.origin.clone();
+        wrong.merged_commit = "different".to_string();
+
+        assert!(post_land_operation_complete(tmp.path(), &wrong).is_err());
     }
 
     #[test]

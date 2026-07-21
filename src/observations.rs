@@ -357,6 +357,30 @@ pub fn ensure_provenance_observation(
     Ok(EnsureOutcome::Created)
 }
 
+/// Verify that an open or resolved provenance Observation exists without
+/// creating or reopening it.
+pub fn provenance_observation_exists(
+    project_root: &Path,
+    id: &str,
+    frontmatter: &ObservationFrontmatter,
+) -> Result<bool> {
+    let obs_dir = project_root.join(".fluent/observations");
+    let open = obs_dir.join(format!("{id}.md"));
+    let resolved = obs_dir.join("resolved").join(format!("{id}.md"));
+    match (open.exists(), resolved.exists()) {
+        (true, true) => bail!("Observation {id} exists as both open and resolved"),
+        (true, false) => {
+            verify_provenance_matches(&open, frontmatter)?;
+            Ok(true)
+        }
+        (false, true) => {
+            verify_provenance_matches(&resolved, frontmatter)?;
+            Ok(true)
+        }
+        (false, false) => Ok(false),
+    }
+}
+
 /// Reject an existing Observation whose stored provenance does not match the
 /// provenance a replay expects. A body-only Observation at a reserved id is a
 /// conflict too: the id is claimed by an unrelated record.

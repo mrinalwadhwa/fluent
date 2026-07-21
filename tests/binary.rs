@@ -10264,8 +10264,7 @@ fn cleanup_work_items_removes_terminal_merge_candidate_artifacts_and_worktree() 
             "candidate_commit": candidate_head,
             "review_state": "passed",
             "merge_state": {
-                "status": "merged",
-                "merged_commit": git_head(&main_dir),
+                "status": "failed",
                 "check_artifacts": [
                     {
                         "producer_id": "merge-check",

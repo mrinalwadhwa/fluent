@@ -402,17 +402,21 @@ If Learning already succeeded, `attempt run` resumes materialization
 idempotently instead of rerunning the Learner; this closes the crash window
 between persisting the handoff and recording or completing its operation.
 
-`fluent cleanup` retains an origin — its Work Item, Attempt, Merge
-Candidate, worktree, and managed artifacts — while its landed-learning
-recovery is still live: a landed Attempt with a failed or legacy-missing
-Learner record, or a landed candidate with a recorded follow-up failure, an
-incomplete post-land journal, or a pending imported operation. Land retains
-the candidate worktree for the first two cases. The shared recovery boundary
-removes it after Learning and materialization complete, then clears the
-recovery failure; a workspace-cleanup failure remains retryable. Cleanup may
-then reap the origin. Derived Observations and Work Items stay inspectable with
-self-contained corrective context and provenance identifiers even after
-optional origin artifacts are gone.
+`fluent cleanup` takes the same land lock as land and post-land recovery, then
+re-reads each candidate before applying its plan. It retains an origin — its
+Work Item, Attempt, Merge Candidate, worktree, and managed artifacts — while
+landed-learning recovery is still live. This includes a failed or
+legacy-missing Learner record, successful Learning with no recorded operation,
+a recorded follow-up failure, and any missing or incomplete operation evidence.
+A top-level completed bit is not enough: the follow-up module verifies the
+operation and batch identity and digests, journal identity, one complete receipt
+per follow-up, provenance Observation, derived Work, and required queue
+dispatch. Land retains the candidate worktree while recovery needs it. The
+shared recovery boundary removes it after Learning and materialization complete,
+then clears the recovery failure; cleanup also prunes a stale Git worktree
+registration when its checkout directory has already disappeared. Derived
+Observations and Work Items stay inspectable with self-contained corrective
+context and provenance identifiers after optional origin artifacts are gone.
 
 A Learner run that failed before its candidate landed recovers through
 `fluent attempt run`, which retries only the Learner. When the candidate
