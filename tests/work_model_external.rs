@@ -64,6 +64,7 @@ fn work_item() -> WorkItem {
             artifacts: Vec::new(),
             created_at: None,
             completed_at: None,
+            ..Default::default()
         }],
         merge_candidates: Vec::new(),
         ..Default::default()

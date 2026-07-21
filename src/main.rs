@@ -1940,7 +1940,8 @@ mod tests {
             artifacts: Vec::new(),
             created_at: None,
             completed_at: None,
-        }
+            ..Default::default()
+        }..Default::default()
     }
 
     #[test]

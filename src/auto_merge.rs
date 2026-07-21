@@ -270,6 +270,7 @@ mod tests {
                 artifacts: vec![],
                 created_at: None,
                 completed_at: None,
+                ..Default::default()
             }],
             merge_candidates: vec![],
             ..Default::default()
@@ -400,6 +401,7 @@ mod tests {
             artifacts: vec![],
             created_at: None,
             completed_at: None,
+            ..Default::default()
         });
         assert!(find_ready_candidate(&wi).is_none());
     }

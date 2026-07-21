@@ -2338,6 +2338,175 @@ exit 0
     assert_eq!(value["merge_candidates"].as_array().unwrap().len(), 1);
 }
 
+/// A mock coder that drives write and review rounds like `loop_mock_script`, and
+/// additionally writes a Learner follow-up draft (verbatim `draft_json`) to the
+/// path named in the Learner prompt.
+fn learner_mock_script(draft_json: &str) -> String {
+    format!(
+        r##"#!/bin/bash
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
+done
+if [ -z "$PROMPT" ]; then exit 0; fi
+if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
+  DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
+  if [ -n "$DRAFT" ]; then
+    mkdir -p "$(dirname "$DRAFT")"
+    cat > "$DRAFT" <<'DRAFTJSON'
+{draft_json}
+DRAFTJSON
+  fi
+  exit 0
+fi
+case "$PWD" in
+  */work-6-work-1-attempt-1)
+    printf 'loop output\n' > loop-output.txt
+    git add loop-output.txt
+    git commit -m "Add loop output" >/dev/null 2>&1
+    ;;
+  *)
+    printf 'Verdict: pass\n\nLoop review.\n' > review.md
+    ;;
+esac
+exit 0
+"##
+    )
+}
+
+fn create_and_run_learner_attempt(main_dir: &Path, bin_dir: &Path) {
+    fluent_cmd()
+        .current_dir(main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Learner"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(bin_dir))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Merge Candidate attempt-1-merge-candidate is ready",
+        ));
+}
+
+#[test]
+fn learner_persists_empty_handoff() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-learner-empty");
+    write_mock_claude(
+        &bin_dir,
+        &learner_mock_script(r#"{"learning_summary":"nothing durable","follow_ups":[]}"#),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+
+    let handoff_path =
+        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/learner/handoff.json");
+    assert!(handoff_path.exists(), "one handoff must be persisted");
+    let handoff = read_json_path(&handoff_path);
+    assert_eq!(handoff["source_work_item_id"], "work-1");
+    assert_eq!(handoff["source_attempt_id"], "attempt-1");
+    assert_eq!(
+        handoff["source_merge_candidate_id"],
+        "attempt-1-merge-candidate"
+    );
+    assert!(
+        handoff["follow_ups"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(true),
+        "an empty handoff carries no follow-ups"
+    );
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    assert_eq!(value["attempts"][0]["learning"]["status"], "succeeded");
+    assert_eq!(value["merge_candidates"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn learner_persists_followup_handoff_with_origin_provenance() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-learner-followup");
+    write_mock_claude(
+        &bin_dir,
+        &learner_mock_script(
+            r#"{"learning_summary":"learned","follow_ups":[{"id":"fu-1","summary":"Consolidate retry handling","corrective":false}]}"#,
+        ),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+
+    let handoff_path =
+        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/learner/handoff.json");
+    let handoff = read_json_path(&handoff_path);
+    let follow_ups = handoff["follow_ups"].as_array().unwrap();
+    assert_eq!(follow_ups.len(), 1);
+    assert_eq!(follow_ups[0]["id"], "fu-1");
+    // Origin provenance is stamped by the host, not the untrusted draft.
+    assert_eq!(handoff["source_work_item_id"], "work-1");
+    assert_eq!(handoff["source_attempt_id"], "attempt-1");
+    assert_eq!(
+        handoff["source_merge_candidate_id"],
+        "attempt-1-merge-candidate"
+    );
+}
+
+#[test]
+fn learner_handoff_does_not_materialize_before_land() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-learner-inert");
+    write_mock_claude(
+        &bin_dir,
+        &learner_mock_script(
+            r#"{"learning_summary":"learned","follow_ups":[{"id":"fu-1","summary":"Follow up later","corrective":false}]}"#,
+        ),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+
+    // The handoff exists but is inert: no Observation, no derived Work Item.
+    let handoff_path =
+        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/learner/handoff.json");
+    assert!(handoff_path.exists());
+
+    let items_dir = main_dir.join(".fluent/work/items");
+    let item_count = fs::read_dir(&items_dir)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.path().extension().map(|e| e == "json").unwrap_or(false))
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(item_count, 1, "the learner must not derive a Work Item");
+
+    let observations_dir = main_dir.join(".fluent/observations");
+    let observation_count = fs::read_dir(&observations_dir)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.path().extension().map(|e| e == "md").unwrap_or(false))
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(
+        observation_count, 0,
+        "the learner must not create an Observation before land"
+    );
+}
+
 #[test]
 fn write_task_transcript_persists_after_failed_attempt() {
     let tmp = TempDir::new().unwrap();

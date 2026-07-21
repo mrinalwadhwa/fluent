@@ -1924,6 +1924,139 @@ pub fn run_capture_learnings(
     Ok(())
 }
 
+/// Inputs the Learner coder needs to refine expertise and write its handoff
+/// draft.
+pub struct LearnerRunInputs<'a> {
+    /// The candidate worktree the Attempt produced.
+    pub workspace_path: &'a Path,
+    pub resolver: &'a ContentResolver,
+    pub extra_args: &'a [String],
+    pub coder_kind: CoderKind,
+    pub no_sandbox: bool,
+    pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
+    /// Reviewer `review.md` artifacts from every review round.
+    pub review_artifact_paths: &'a [PathBuf],
+    /// Tester `tester-results.json` artifacts from every review round.
+    pub tester_artifact_paths: &'a [PathBuf],
+    /// Command that renders the complete Attempt change.
+    pub diff_command: &'a str,
+    /// The managed handoff surface where the coder writes its untrusted draft.
+    pub handoff_dir: &'a Path,
+}
+
+/// Run the Learner: give the coder the complete change and every reviewer and
+/// tester artifact, instruct it with the shared corrective criteria, and let it
+/// refine durable expertise plus write one untrusted follow-up draft.
+///
+/// The coder is sandboxed to write only `.fluent/expertise/`, the designated
+/// managed handoff surface, and the Git metadata an expertise commit needs — not
+/// the Observation backlog, the Work model, or the rest of the workspace.
+pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
+    eprintln!("  Running the Learner after passing reviews…");
+
+    let workspace_path = inputs.workspace_path;
+    let workspace_resolver = ContentResolver::new(Some(workspace_path));
+    let system_prompt = workspace_resolver
+        .resolve_content("prompts/learner-system.md")
+        .unwrap_or_default();
+
+    let learnings_dir = workspace_path.join(".fluent/expertise/learnings");
+    let learnings_index_path = learnings_dir.join("INDEX.md");
+    let expertise_index_path = workspace_path.join(".fluent/expertise/INDEX.md");
+
+    let review_paths_rendered = render_path_list(inputs.review_artifact_paths);
+    let tester_paths_rendered = render_path_list(inputs.tester_artifact_paths);
+
+    let has_learnings_index = if learnings_index_path.is_file() {
+        "yes"
+    } else {
+        ""
+    };
+
+    let draft_path = inputs.handoff_dir.join(crate::learner::DRAFT_FILE_NAME);
+
+    let template = inputs
+        .resolver
+        .resolve_content("prompts/learner-user.md")
+        .ok_or_else(|| anyhow::anyhow!("bundled learner-user.md must resolve"))?;
+    let prompt = crate::content::render_template(
+        &template,
+        &[
+            ("review_artifact_paths", &review_paths_rendered),
+            ("tester_artifact_paths", &tester_paths_rendered),
+            ("diff_command", inputs.diff_command),
+            ("learnings_dir", &learnings_dir.display().to_string()),
+            (
+                "learnings_index_path",
+                &learnings_index_path.display().to_string(),
+            ),
+            (
+                "expertise_index_path",
+                &expertise_index_path.display().to_string(),
+            ),
+            ("has_learnings_index", has_learnings_index),
+            ("draft_path", &draft_path.display().to_string()),
+        ],
+    )
+    .map_err(|e| anyhow::anyhow!("learner-user.md template error: {e}"))?;
+
+    let mut readable_roots: Vec<PathBuf> = inputs
+        .review_artifact_paths
+        .iter()
+        .chain(inputs.tester_artifact_paths.iter())
+        .filter_map(|p| p.parent().map(|parent| parent.to_path_buf()))
+        .collect();
+    readable_roots.sort();
+    readable_roots.dedup();
+
+    let expertise_dir = workspace_path.join(".fluent/expertise");
+    fs::create_dir_all(&expertise_dir)?;
+    fs::create_dir_all(inputs.handoff_dir)?;
+
+    let (sandbox, _sandbox_profile) = if inputs.no_sandbox {
+        (CoderSandbox::None, None)
+    } else {
+        let common_git_dir = worktree::git_common_dir(workspace_path)?;
+        readable_roots.push(workspace_path.to_path_buf());
+        build_coder_sandbox_with_writable_and_read_only_roots(
+            inputs.coder_kind,
+            inputs.resolver,
+            &expertise_dir,
+            &[inputs.handoff_dir.to_path_buf(), common_git_dir],
+            &readable_roots,
+        )?
+    };
+
+    let coder = inputs
+        .coder_kind
+        .boxed_with_model(sandbox, inputs.model, inputs.effort);
+    let exit_code = coder.run(
+        &prompt,
+        &system_prompt,
+        workspace_path,
+        inputs.extra_args,
+        &[],
+        None,
+    )?;
+    if exit_code != 0 {
+        bail!("Learner coder exited with code {exit_code}");
+    }
+
+    Ok(())
+}
+
+fn render_path_list(paths: &[PathBuf]) -> String {
+    if paths.is_empty() {
+        return "- (none)".to_string();
+    }
+    paths
+        .iter()
+        .map(|p| format!("- {}", p.display()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn progress_md_dir(project_root: &Path, work_item_id: &str, attempt_id: &str) -> PathBuf {
     project_root
         .join(crate::work_model::WORK_PROGRESS_DIR)

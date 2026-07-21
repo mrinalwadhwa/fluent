@@ -78,6 +78,10 @@ pub struct LearnerHandoffV1 {
     pub source_work_item_id: String,
     /// The Attempt whose accepted Write result triggered learning capture.
     pub source_attempt_id: String,
+    /// The Merge Candidate this handoff was produced alongside. Stamped by the
+    /// host from the resulting candidate identity, not the untrusted draft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_merge_candidate_id: Option<String>,
     /// The learning captured from that Attempt.
     pub learning: LearningRecord,
     /// Zero or more independently identifiable follow-ups.
@@ -100,10 +104,26 @@ impl LearnerHandoffV1 {
             schema_version: Self::SCHEMA_VERSION,
             source_work_item_id: source_work_item_id.into(),
             source_attempt_id: source_attempt_id.into(),
+            source_merge_candidate_id: None,
             learning,
             follow_ups: Vec::new(),
         }
     }
+}
+
+/// The untrusted draft a Learner writes into its managed handoff surface. The
+/// host validates it, stamps authoritative provenance, and canonicalizes it into
+/// an immutable [`LearnerHandoffV1`]. The draft carries only what the Learner is
+/// trusted to describe — a learning summary and candidate follow-ups — never the
+/// source identities, which the host supplies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct LearnerDraftV1 {
+    /// Human-readable summary of what was learned.
+    #[serde(default)]
+    pub learning_summary: String,
+    /// Zero or more independently identifiable follow-ups the Learner proposes.
+    #[serde(default)]
+    pub follow_ups: Vec<FollowUpDraftV1>,
 }
 
 #[cfg(test)]
@@ -115,6 +135,7 @@ mod tests {
             schema_version: LearnerHandoffV1::SCHEMA_VERSION,
             source_work_item_id: "work-1".to_string(),
             source_attempt_id: "attempt-1".to_string(),
+            source_merge_candidate_id: Some("attempt-1-merge-candidate".to_string()),
             learning: LearningRecord {
                 summary: "Cap enforcement belongs in retry.rs".to_string(),
                 expertise: vec![ArtifactRef {

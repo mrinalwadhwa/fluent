@@ -6,14 +6,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
+use crate::coder::CoderKind;
 use crate::content::ContentResolver;
 use crate::git;
 use crate::review::{self, Verdict};
 use crate::review_diff_command;
 use crate::review_only_worktree;
 use crate::work_model::{
-    ArtifactRef, Attempt, AttemptReviewState, AttemptStatus, PauseKind, Task, TaskKind, TaskOutput,
-    TaskStatus, WorkItem, WorkModelStorageError, WorkModelStore,
+    ArtifactRef, Attempt, AttemptLearning, AttemptReviewState, AttemptStatus, PauseKind, Task,
+    TaskKind, TaskOutput, TaskStatus, WorkItem, WorkModelStorageError, WorkModelStore,
     resolve_managed_sibling_workspace_path, work_artifact_path,
 };
 use crate::work_task_executor::{self, WorkTaskRunConfig};
@@ -242,16 +243,29 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             && !has_open_review_round(attempt.tasks.as_slice())
         {
             let can_advance = can_advance_loop(config.project_root, attempt)?;
+            let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+                work_task_executor::run_learner(work_task_executor::LearnerRunInputs {
+                    workspace_path: request.workspace_path,
+                    resolver: config.resolver,
+                    extra_args: config.extra_args,
+                    coder_kind: request.coder_kind,
+                    no_sandbox: config.no_sandbox,
+                    model: request.model,
+                    effort: request.effort,
+                    review_artifact_paths: request.review_artifact_paths,
+                    tester_artifact_paths: request.tester_artifact_paths,
+                    diff_command: request.diff_command,
+                    handoff_dir: request.handoff_dir,
+                })
+            };
             let outcome = interpret_reviews(
                 config.project_root,
                 config.store,
                 item,
                 config.attempt_id,
                 can_advance,
-                Some(CaptureConfig {
-                    resolver: config.resolver,
-                    extra_args: config.extra_args,
-                    no_sandbox: config.no_sandbox,
+                Some(LearnerConfig {
+                    run_coder: &run_coder,
                 }),
             )?;
             let should_stop = matches!(
@@ -634,31 +648,65 @@ fn next_review_roles(attempt: &Attempt) -> Vec<&'static str> {
     }
 }
 
-struct CaptureConfig<'a> {
-    resolver: &'a ContentResolver,
-    extra_args: &'a [String],
-    no_sandbox: bool,
+/// Everything the Learner coder needs, assembled by the loop from the Attempt's
+/// completed change and every review round's artifacts.
+struct LearnerCoderRequest<'a> {
+    workspace_path: &'a Path,
+    review_artifact_paths: &'a [PathBuf],
+    tester_artifact_paths: &'a [PathBuf],
+    diff_command: &'a str,
+    handoff_dir: &'a Path,
+    coder_kind: CoderKind,
+    model: Option<&'a str>,
+    effort: Option<&'a str>,
 }
 
-fn run_capture_step(
+/// The Learner's coder-run is injected so the orchestration around it — running
+/// once per passing Attempt, confining commits, and persisting a handoff — can be
+/// exercised without spawning a real coder.
+struct LearnerConfig<'a> {
+    run_coder: &'a dyn Fn(&LearnerCoderRequest<'_>) -> Result<()>,
+}
+
+/// Run the Learner for a passing code-producing Attempt and record its durable,
+/// retryable outcome on the Attempt. A failure warns the operator and leaves the
+/// Merge Candidate unaffected; the record can be retried later.
+fn run_learner_step(
     project_root: &Path,
     item: &mut WorkItem,
     attempt_index: usize,
-    config: &CaptureConfig<'_>,
+    candidate_id: &str,
+    config: &LearnerConfig<'_>,
 ) {
-    let result = try_capture(project_root, item, attempt_index, config);
-    if let Err(err) = result {
-        eprintln!("  Warning: capture learnings failed, continuing without capture: {err}");
+    let runs = item.attempts[attempt_index]
+        .learning
+        .as_ref()
+        .map(|learning| learning.runs)
+        .unwrap_or(0)
+        + 1;
+    match try_learn(project_root, item, attempt_index, candidate_id, config) {
+        Ok(handoff_ref) => {
+            item.attempts[attempt_index].learning =
+                Some(AttemptLearning::succeeded(runs, handoff_ref));
+        }
+        Err(err) => {
+            eprintln!("  Warning: learner failed, continuing without handoff: {err}");
+            item.attempts[attempt_index].learning =
+                Some(AttemptLearning::failed(runs, err.to_string()));
+        }
     }
 }
 
-fn try_capture(
+fn try_learn(
     project_root: &Path,
     item: &mut WorkItem,
     attempt_index: usize,
-    config: &CaptureConfig<'_>,
-) -> Result<()> {
+    candidate_id: &str,
+    config: &LearnerConfig<'_>,
+) -> Result<ArtifactRef> {
+    let work_item_id = item.id.clone();
     let attempt = &item.attempts[attempt_index];
+    let attempt_id = attempt.id.clone();
     let (write_task_index, write_output) = attempt
         .tasks
         .iter()
@@ -671,101 +719,152 @@ fn try_capture(
     let workspace_path = resolve_managed_sibling_workspace_path(
         project_root,
         &write_output.workspace_path,
-        "capture workspace",
+        "learner workspace",
     )?;
 
     let review_artifact_paths = all_review_artifact_paths(project_root, attempt);
-    if review_artifact_paths.is_empty() {
-        return Ok(());
-    }
+    let tester_artifact_paths = all_tester_artifact_paths(project_root, attempt);
 
     let mapping_pair = attempt.coder_mapping.for_task_kind(TaskKind::Write);
     let coder_kind = mapping_pair.coder;
-    let model = if mapping_pair.model.is_empty() {
+    let model: Option<String> = if mapping_pair.model.is_empty() {
         None
     } else {
-        Some(mapping_pair.model.as_str())
+        Some(mapping_pair.model.clone())
     };
-    let effort = mapping_pair.effort.as_deref();
+    let effort: Option<String> = mapping_pair.effort.clone();
 
     let diff_range = format!("{}...HEAD", write_output.source_branch);
     let diff_command =
         review_diff_command::render_review_diff_command(&workspace_path, &diff_range);
 
-    work_task_executor::run_capture_learnings(
-        &workspace_path,
-        config.resolver,
-        config.extra_args,
-        coder_kind,
-        config.no_sandbox,
-        model,
-        effort,
-        &review_artifact_paths,
-        &diff_command,
-    )?;
+    let handoff_dir = project_root.join(crate::learner::handoff_dir_rel(&work_item_id, &attempt_id));
 
-    apply_capture_confinement(
+    (config.run_coder)(&LearnerCoderRequest {
+        workspace_path: &workspace_path,
+        review_artifact_paths: &review_artifact_paths,
+        tester_artifact_paths: &tester_artifact_paths,
+        diff_command: &diff_command,
+        handoff_dir: &handoff_dir,
+        coder_kind,
+        model: model.as_deref(),
+        effort: effort.as_deref(),
+    })?;
+
+    // Accept an expertise commit only when confined to `.fluent/expertise/`,
+    // updating the Merge Candidate tip; otherwise discard it and fail so the
+    // Learner run stays retryable without moving the candidate.
+    let expertise = apply_learner_confinement(
         &workspace_path,
         item,
         attempt_index,
         write_task_index,
         &write_output,
-    )
+        candidate_id,
+    )?;
+
+    let draft = crate::learner::read_draft(project_root, &work_item_id, &attempt_id)?;
+    let handoff =
+        crate::learner::stamp_handoff(draft, &work_item_id, &attempt_id, candidate_id, expertise)?;
+    let handoff_ref =
+        crate::learner::write_handoff(project_root, &work_item_id, &attempt_id, &handoff)?;
+    Ok(handoff_ref)
 }
 
-fn apply_capture_confinement(
+/// Validate the Learner's commit is confined to `.fluent/expertise/`. On success,
+/// promote the confined commit to the candidate tip and return references to the
+/// expertise files it changed. An out-of-bounds commit is discarded and reported
+/// as an error, retaining the pre-Learner candidate tip.
+fn apply_learner_confinement(
     workspace_path: &Path,
     item: &mut WorkItem,
     attempt_index: usize,
     write_task_index: usize,
     write_output: &TaskOutput,
-) -> Result<()> {
+    candidate_id: &str,
+) -> Result<Vec<crate::follow_up::ArtifactRef>> {
     let new_head = git::run_stdout(
         workspace_path,
         &["rev-parse", "HEAD"],
-        "resolve post-capture HEAD",
+        "resolve post-learner HEAD",
     )?;
-    if new_head != write_output.commit {
-        let changed = git::run_stdout(
-            workspace_path,
-            &["diff", "--name-only", &write_output.commit, &new_head],
-            "list capture changed paths",
-        )?;
-        let out_of_bounds: Vec<&str> = changed
-            .lines()
-            .filter(|line| !line.is_empty() && !is_capture_path_in_bounds(line))
-            .collect();
-        if out_of_bounds.is_empty() {
-            item.attempts[attempt_index].tasks[write_task_index].output = Some(TaskOutput {
-                commit: new_head,
-                ..write_output.clone()
-            });
-        } else {
-            for path in &out_of_bounds {
-                eprintln!("  Warning: capture changed out-of-bounds path: {path}");
-            }
-            git::run(
-                workspace_path,
-                &["reset", "--hard", &write_output.commit],
-                "discard out-of-bounds capture commit",
-            )?;
-        }
+    if new_head == write_output.commit {
+        return Ok(Vec::new());
     }
 
-    Ok(())
+    let changed = git::run_stdout(
+        workspace_path,
+        &["diff", "--name-only", &write_output.commit, &new_head],
+        "list learner changed paths",
+    )?;
+    let changed_paths: Vec<&str> = changed.lines().filter(|line| !line.is_empty()).collect();
+    let out_of_bounds: Vec<&str> = changed_paths
+        .iter()
+        .copied()
+        .filter(|path| !is_learner_path_in_bounds(path))
+        .collect();
+    if !out_of_bounds.is_empty() {
+        for path in &out_of_bounds {
+            eprintln!("  Warning: learner changed out-of-bounds path: {path}");
+        }
+        git::run(
+            workspace_path,
+            &["reset", "--hard", &write_output.commit],
+            "discard out-of-bounds learner commit",
+        )?;
+        bail!("learner commit changed paths outside .fluent/expertise/");
+    }
+
+    // Confined expertise commit becomes the Merge Candidate's candidate commit.
+    item.attempts[attempt_index].tasks[write_task_index].output = Some(TaskOutput {
+        commit: new_head.clone(),
+        ..write_output.clone()
+    });
+    if let Some(candidate) = item
+        .merge_candidates
+        .iter_mut()
+        .find(|candidate| candidate.id == candidate_id)
+    {
+        candidate.candidate_commit = new_head.clone();
+    }
+
+    let expertise = changed_paths
+        .iter()
+        .map(|path| {
+            let digest = git::run_stdout(
+                workspace_path,
+                &["rev-parse", &format!("{new_head}:{path}")],
+                "digest expertise blob",
+            )
+            .unwrap_or_default();
+            crate::follow_up::ArtifactRef {
+                path: (*path).to_string(),
+                digest: format!("git:{}", digest.trim()),
+            }
+        })
+        .collect();
+    Ok(expertise)
 }
 
-fn is_capture_path_in_bounds(path: &str) -> bool {
+fn is_learner_path_in_bounds(path: &str) -> bool {
     path.starts_with(".fluent/expertise/")
 }
 
-fn should_capture(attempt: &Attempt) -> bool {
+fn all_tester_artifact_paths(
+    project_root: &Path,
+    attempt: &crate::work_model::Attempt,
+) -> Vec<PathBuf> {
     attempt
         .tasks
         .iter()
-        .filter(|t| t.kind == TaskKind::Write && t.status == TaskStatus::Complete)
-        .count()
-        > 1
+        .filter(|task| task.kind == TaskKind::Tester && task.status == TaskStatus::Complete)
+        .filter_map(|task| task.artifact_area.as_ref())
+        .filter_map(|area| {
+            work_task_executor::resolve_managed_artifact_area_path(project_root, &area.path).ok()
+        })
+        .map(|dir| dir.join("tester-results.json"))
+        .filter(|path| path.is_file())
+        .collect()
 }
 
 fn completed_review_tasks_after_latest_write(tasks: &[Task]) -> impl Iterator<Item = &Task> {
@@ -866,7 +965,7 @@ fn interpret_reviews(
     mut item: WorkItem,
     attempt_id: &str,
     followup_budget_available: bool,
-    capture_config: Option<CaptureConfig<'_>>,
+    learner_config: Option<LearnerConfig<'_>>,
 ) -> Result<WorkAttemptRunOutcome> {
     let attempt_index = item
         .attempts
@@ -970,12 +1069,15 @@ fn interpret_reviews(
         store.write_work_item(&item)?;
         return Ok(WorkAttemptRunOutcome::ReviewOnlyComplete);
     }
-    if should_capture(&item.attempts[attempt_index]) {
-        if let Some(ref cc) = capture_config {
-            run_capture_step(project_root, &mut item, attempt_index, cc);
-        }
-    }
+    // Allocate the Merge Candidate identity before the Learner runs, so the
+    // handoff can reference it and a confined expertise commit can update its
+    // tip.
     let candidate_id = item.create_or_get_merge_candidate(attempt_id)?;
+    // Run the Learner for every code-producing Attempt, whether or not a
+    // reviewer raised a finding.
+    if let Some(ref learner_config) = learner_config {
+        run_learner_step(project_root, &mut item, attempt_index, &candidate_id, learner_config);
+    }
     store.write_work_item(&item)?;
     Ok(WorkAttemptRunOutcome::MergeCandidateReady { candidate_id })
 }
@@ -1278,6 +1380,7 @@ mod tests {
             artifacts: Vec::new(),
             created_at: None,
             completed_at: None,
+            ..Default::default()
         };
 
         let error = latest_review_artifacts(Path::new("/tmp/project"), &attempt)
@@ -1483,7 +1586,8 @@ mod tests {
             artifacts: Vec::new(),
             created_at: None,
             completed_at: None,
-        }
+            ..Default::default()
+        }..Default::default()
     }
 
     fn write_task(id: &str, input_artifacts: Vec<ArtifactRef>) -> Task {
@@ -2141,132 +2245,236 @@ mod tests {
         );
     }
 
-    #[test]
-    fn should_capture_when_reviews_pass_with_findings() {
-        let attempt = attempt_with_tasks(vec![
-            write_task("attempt-1-write-1", Vec::new()),
-            review_task("attempt-1-review-1-tests", "tests"),
-            write_task(
-                "attempt-1-write-2",
-                vec![ArtifactRef {
-                    producer_id: "attempt-1-review-1-tests".to_string(),
-                    path: ".fluent/work/artifacts/work-1/attempt-1/review.md".to_string(),
-                }],
-            ),
-            review_task("attempt-1-review-2-tests", "tests"),
-        ]);
-
-        assert!(
-            should_capture(&attempt),
-            "attempt with multiple write rounds has findings and should trigger capture"
-        );
+    fn init_learner_repo(path: &Path) {
+        git::run(path, &["init", "--initial-branch=main"], "init").unwrap();
+        git::run(path, &["config", "user.email", "t@t.com"], "email").unwrap();
+        git::run(path, &["config", "user.name", "Test"], "name").unwrap();
+        git::run(path, &["config", "commit.gpgsign", "false"], "gpg").unwrap();
     }
 
-    fn make_multi_round_fixture(project_root: &Path) -> (WorkModelStore, WorkItem) {
-        let store = WorkModelStore::new(project_root);
+    /// A passing code-producing Attempt over `rounds` write rounds, with a real
+    /// candidate worktree as a managed sibling of the project root so the Learner
+    /// orchestration can resolve it and inspect its Git state.
+    fn make_learner_passing_fixture(
+        tmp: &Path,
+        rounds: usize,
+    ) -> (WorkModelStore, PathBuf, PathBuf, String) {
+        let project_root = tmp.join("main");
+        fs::create_dir_all(&project_root).unwrap();
+        let store = WorkModelStore::new(&project_root);
+
+        let workspace = tmp.join("work-1-candidate");
+        fs::create_dir_all(&workspace).unwrap();
+        init_learner_repo(&workspace);
+        fs::write(workspace.join("src.rs"), "fn main() {}").unwrap();
+        git::run(&workspace, &["add", "."], "add").unwrap();
+        git::run(&workspace, &["commit", "-m", "initial"], "commit").unwrap();
+        let base = git::run_stdout(&workspace, &["rev-parse", "HEAD"], "base").unwrap();
+
         let mut item = WorkItem {
             id: "work-1".to_string(),
-            title: "Test item".to_string(),
-            planning_context: None,
-            instructions: None,
-            abandonment: None,
-            post_merge_review_fix_depth: None,
+            title: "Learner test".to_string(),
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
             ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
-
-        let attempt = &mut item.attempts[0];
-        attempt.tasks[0].status = TaskStatus::Complete;
-        attempt.tasks[0].output = Some(TaskOutput {
+        let output = TaskOutput {
             workspace_id: "candidate".to_string(),
             workspace_path: "../work-1-candidate".to_string(),
             source_branch: "main".to_string(),
-            commit: "abc123".to_string(),
-        });
+            commit: base.clone(),
+        };
 
-        let review1_artifact_path =
-            work_artifact_path("work-1", "attempt-1", "attempt-1-review-1-tests");
-        attempt.tasks.push(review_task_with_artifact(
-            "attempt-1-review-1-tests",
-            "tests",
-            &review1_artifact_path,
-        ));
+        let attempt = &mut item.attempts[0];
+        attempt.tasks[0].status = TaskStatus::Complete;
+        attempt.tasks[0].output = Some(output.clone());
 
-        let review1_dir = project_root.join(&review1_artifact_path);
+        let review1_path = work_artifact_path("work-1", "attempt-1", "attempt-1-review-1-tests");
+        attempt
+            .tasks
+            .push(review_task_with_artifact("attempt-1-review-1-tests", "tests", &review1_path));
+        let review1_dir = project_root.join(&review1_path);
         fs::create_dir_all(&review1_dir).unwrap();
-        fs::write(review1_dir.join("review.md"), "Verdict: fail\n").unwrap();
+        fs::write(review1_dir.join("review.md"), "Verdict: pass\n").unwrap();
 
-        attempt.tasks.push(Task {
-            id: "attempt-1-write-2".to_string(),
-            kind: TaskKind::Write,
-            status: TaskStatus::Complete,
-            output: Some(TaskOutput {
-                workspace_id: "candidate".to_string(),
-                workspace_path: "../work-1-candidate".to_string(),
-                source_branch: "main".to_string(),
-                commit: "def456".to_string(),
-            }),
-            input_artifacts: vec![ArtifactRef {
-                producer_id: "attempt-1-review-1-tests".to_string(),
-                path: format!("{}/review.md", review1_artifact_path),
-            }],
-            ..write_task("attempt-1-write-2", Vec::new())
-        });
-
-        let review2_artifact_path =
-            work_artifact_path("work-1", "attempt-1", "attempt-1-review-2-tests");
-        attempt.tasks.push(review_task_with_artifact(
-            "attempt-1-review-2-tests",
-            "tests",
-            &review2_artifact_path,
-        ));
-
-        let review2_dir = project_root.join(&review2_artifact_path);
-        fs::create_dir_all(&review2_dir).unwrap();
-        fs::write(review2_dir.join("review.md"), "Verdict: pass\n").unwrap();
+        if rounds >= 2 {
+            attempt.tasks.push(Task {
+                id: "attempt-1-write-2".to_string(),
+                kind: TaskKind::Write,
+                status: TaskStatus::Complete,
+                output: Some(output.clone()),
+                ..write_task("attempt-1-write-2", Vec::new())
+            });
+            let review2_path =
+                work_artifact_path("work-1", "attempt-1", "attempt-1-review-2-tests");
+            attempt.tasks.push(review_task_with_artifact(
+                "attempt-1-review-2-tests",
+                "tests",
+                &review2_path,
+            ));
+            let review2_dir = project_root.join(&review2_path);
+            fs::create_dir_all(&review2_dir).unwrap();
+            fs::write(review2_dir.join("review.md"), "Verdict: pass\n").unwrap();
+        }
 
         store.create_work_item(&item).unwrap();
-        (store, item)
+        (store, project_root, workspace, base)
+    }
+
+    /// A Learner coder stub that writes an untrusted draft into the handoff
+    /// surface and makes no expertise commit.
+    fn draft_only_coder(draft_json: &'static str) -> impl Fn(&LearnerCoderRequest<'_>) -> Result<()> {
+        move |request: &LearnerCoderRequest<'_>| {
+            fs::create_dir_all(request.handoff_dir).unwrap();
+            fs::write(
+                request.handoff_dir.join(crate::learner::DRAFT_FILE_NAME),
+                draft_json,
+            )
+            .unwrap();
+            Ok(())
+        }
     }
 
     #[test]
-    fn capture_makes_no_commit_when_expertise_unchanged() {
+    fn learner_runs_after_first_pass_without_findings() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let (store, _) = make_multi_round_fixture(tmp.path());
+        let (store, project_root, _workspace, _base) = make_learner_passing_fixture(tmp.path(), 1);
 
         let item = store.read_work_item("work-1").unwrap();
-        assert!(
-            should_capture(&item.attempts[0]),
-            "multi-round attempt should trigger capture"
-        );
-
-        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true, None).unwrap();
+        let run_coder = draft_only_coder(r#"{"learning_summary":"learned","follow_ups":[]}"#);
+        let outcome = interpret_reviews(
+            &project_root,
+            &store,
+            item,
+            "attempt-1",
+            true,
+            Some(LearnerConfig {
+                run_coder: &run_coder,
+            }),
+        )
+        .unwrap();
 
         assert!(
             matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
-            "reviews passed — merge candidate should be ready; got {outcome:?}"
+            "first-pass reviews passed — candidate ready; got {outcome:?}"
         );
-
         let stored = store.read_work_item("work-1").unwrap();
-        let candidate = &stored.merge_candidates[0];
+        let learning = stored.attempts[0]
+            .learning
+            .as_ref()
+            .expect("learner ran on first pass");
+        assert!(learning.is_succeeded());
+        let handoff_ref = learning.handoff.as_ref().expect("handoff persisted");
+        let handoff = crate::learner::load_verified_handoff(&project_root, handoff_ref).unwrap();
+        assert_eq!(handoff.source_work_item_id, "work-1");
+        assert_eq!(handoff.source_attempt_id, "attempt-1");
         assert_eq!(
-            candidate.candidate_commit, "def456",
-            "candidate commit should match the last write output (no capture commit)"
+            handoff.source_merge_candidate_id.as_deref(),
+            Some("attempt-1-merge-candidate")
         );
     }
 
     #[test]
-    fn should_not_capture_when_no_findings() {
-        let attempt = attempt_with_tasks(vec![
-            write_task("attempt-1-write-1", Vec::new()),
-            review_task("attempt-1-review-1-tests", "tests"),
-        ]);
+    fn learner_runs_after_passing_corrective_round() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, _workspace, _base) = make_learner_passing_fixture(tmp.path(), 2);
 
+        let item = store.read_work_item("work-1").unwrap();
+        let run_coder = draft_only_coder(r#"{"learning_summary":"learned","follow_ups":[]}"#);
+        let outcome = interpret_reviews(
+            &project_root,
+            &store,
+            item,
+            "attempt-1",
+            true,
+            Some(LearnerConfig {
+                run_coder: &run_coder,
+            }),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            WorkAttemptRunOutcome::MergeCandidateReady { .. }
+        ));
+        let stored = store.read_work_item("work-1").unwrap();
         assert!(
-            !should_capture(&attempt),
-            "single-round attempt with no findings should skip capture"
+            stored.attempts[0]
+                .learning
+                .as_ref()
+                .expect("learner ran after corrective round")
+                .is_succeeded()
+        );
+    }
+
+    #[test]
+    fn learner_without_expertise_change_keeps_candidate_commit() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, _workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
+
+        let item = store.read_work_item("work-1").unwrap();
+        let run_coder = draft_only_coder(r#"{"learning_summary":"","follow_ups":[]}"#);
+        interpret_reviews(
+            &project_root,
+            &store,
+            item,
+            "attempt-1",
+            true,
+            Some(LearnerConfig {
+                run_coder: &run_coder,
+            }),
+        )
+        .unwrap();
+
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(
+            stored.merge_candidates[0].candidate_commit, base,
+            "no expertise commit must leave the candidate commit unchanged"
+        );
+    }
+
+    #[test]
+    fn review_only_attempt_skips_learner() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path().join("main");
+        fs::create_dir_all(&project_root).unwrap();
+        let store = WorkModelStore::new(&project_root);
+
+        let mut item = WorkItem::planned("work-1", "Review only");
+        item.add_review_only_attempt("attempt-1", &["tests"], "main", "abc123", true)
+            .unwrap();
+        let attempt = &mut item.attempts[0];
+        for task in &mut attempt.tasks {
+            let area = task.artifact_area.as_ref().unwrap().path.clone();
+            let dir = project_root.join(&area);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("review.md"), "Verdict: pass\n").unwrap();
+            crate::work_model::set_task_terminal(task, TaskStatus::Complete);
+        }
+        store.create_work_item(&item).unwrap();
+
+        let item = store.read_work_item("work-1").unwrap();
+        let run_coder = |_: &LearnerCoderRequest<'_>| -> Result<()> {
+            panic!("the Learner must not run for a review-only Attempt")
+        };
+        let outcome = interpret_reviews(
+            &project_root,
+            &store,
+            item,
+            "attempt-1",
+            true,
+            Some(LearnerConfig {
+                run_coder: &run_coder,
+            }),
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, WorkAttemptRunOutcome::ReviewOnlyComplete));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert!(
+            stored.attempts[0].learning.is_none(),
+            "review-only Attempt records no learning"
         );
     }
 
@@ -2327,6 +2535,7 @@ mod tests {
             artifacts: Vec::new(),
             created_at: None,
             completed_at: None,
+            ..Default::default()
         };
 
         crate::work_model::suspend_attempt(&mut attempt, crate::work_model::PauseKind::Auth);
@@ -2443,6 +2652,7 @@ mod tests {
             artifacts: Vec::new(),
             created_at: None,
             completed_at: Some("2026-07-16T12:00:00Z".to_string()),
+            ..Default::default()
         };
 
         assert!(matches!(
@@ -2540,194 +2750,142 @@ mod tests {
     }
 
     #[test]
-    fn capture_path_expertise_subtree_is_in_bounds() {
-        assert!(is_capture_path_in_bounds(".fluent/expertise/overview.md"));
-        assert!(is_capture_path_in_bounds(
+    fn learner_path_expertise_subtree_is_in_bounds() {
+        assert!(is_learner_path_in_bounds(".fluent/expertise/overview.md"));
+        assert!(is_learner_path_in_bounds(
             ".fluent/expertise/learnings/INDEX.md"
         ));
-        assert!(is_capture_path_in_bounds(".fluent/expertise/decisions.md"));
+        assert!(is_learner_path_in_bounds(".fluent/expertise/decisions.md"));
     }
 
     #[test]
-    fn capture_path_outside_expertise_is_out_of_bounds() {
-        assert!(!is_capture_path_in_bounds("src/main.rs"));
-        assert!(!is_capture_path_in_bounds("README.md"));
-        assert!(!is_capture_path_in_bounds(".fluent/tester.yaml"));
-        assert!(!is_capture_path_in_bounds(
+    fn learner_path_outside_expertise_is_out_of_bounds() {
+        assert!(!is_learner_path_in_bounds("src/main.rs"));
+        assert!(!is_learner_path_in_bounds("README.md"));
+        assert!(!is_learner_path_in_bounds(".fluent/tester.yaml"));
+        assert!(!is_learner_path_in_bounds(
             ".fluent/expertise-notes/something.md"
         ));
-        assert!(!is_capture_path_in_bounds("documentation/behaviors.md"));
+        assert!(!is_learner_path_in_bounds("documentation/behaviors.md"));
     }
 
     #[test]
-    fn capture_path_expertise_without_trailing_slash_is_out_of_bounds() {
-        assert!(!is_capture_path_in_bounds(".fluent/expertise"));
+    fn learner_path_expertise_without_trailing_slash_is_out_of_bounds() {
+        assert!(!is_learner_path_in_bounds(".fluent/expertise"));
     }
 
-    fn make_capture_git_fixture(project_root: &Path) -> (WorkModelStore, WorkItem, PathBuf) {
-        let store = WorkModelStore::new(project_root);
-        let mut item = WorkItem {
-            id: "work-1".to_string(),
-            title: "Capture test".to_string(),
-            planning_context: None,
-            instructions: None,
-            abandonment: None,
-            post_merge_review_fix_depth: None,
-            attempts: Vec::new(),
-            merge_candidates: Vec::new(),
-            ..Default::default()
+    #[test]
+    fn learner_expertise_commit_becomes_candidate_commit() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
+
+        let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            let expertise = request.workspace_path.join(".fluent/expertise");
+            fs::create_dir_all(&expertise).unwrap();
+            fs::write(expertise.join("learning.md"), "# Learning").unwrap();
+            git::run(
+                request.workspace_path,
+                &["add", ".fluent/expertise/learning.md"],
+                "add expertise",
+            )
+            .unwrap();
+            git::run(
+                request.workspace_path,
+                &["commit", "-m", "Update expertise"],
+                "commit",
+            )
+            .unwrap();
+            fs::create_dir_all(request.handoff_dir).unwrap();
+            fs::write(
+                request.handoff_dir.join(crate::learner::DRAFT_FILE_NAME),
+                r#"{"learning_summary":"x","follow_ups":[]}"#,
+            )
+            .unwrap();
+            Ok(())
         };
-        item.add_initial_attempt("attempt-1").unwrap();
-
-        let attempt = &mut item.attempts[0];
-        attempt.tasks[0].status = TaskStatus::Complete;
-
-        // Set up a real git repo as the workspace
-        let workspace = project_root.join("workspace");
-        fs::create_dir_all(&workspace).unwrap();
-        git::run(&workspace, &["init", "--initial-branch=main"], "init").unwrap();
-        git::run(
-            &workspace,
-            &["config", "user.email", "test@test.com"],
-            "config email",
-        )
-        .unwrap();
-        git::run(&workspace, &["config", "user.name", "Test"], "config name").unwrap();
-        git::run(
-            &workspace,
-            &["config", "commit.gpgsign", "false"],
-            "config gpgsign",
-        )
-        .unwrap();
-        fs::write(workspace.join("src.rs"), "fn main() {}").unwrap();
-        git::run(&workspace, &["add", "."], "add").unwrap();
-        git::run(&workspace, &["commit", "-m", "initial"], "commit").unwrap();
-
-        let base_commit =
-            git::run_stdout(&workspace, &["rev-parse", "HEAD"], "base commit").unwrap();
-
-        attempt.tasks[0].output = Some(TaskOutput {
-            workspace_id: "candidate".to_string(),
-            workspace_path: "workspace".to_string(),
-            source_branch: "main".to_string(),
-            commit: base_commit,
-        });
-
-        // Add a passing review artifact
-        let review_artifact_path =
-            work_artifact_path("work-1", "attempt-1", "attempt-1-review-1-tests");
-        attempt.tasks.push(review_task_with_artifact(
-            "attempt-1-review-1-tests",
-            "tests",
-            &review_artifact_path,
-        ));
-        let review_dir = project_root.join(&review_artifact_path);
-        fs::create_dir_all(&review_dir).unwrap();
-        fs::write(review_dir.join("review.md"), "Verdict: pass\n").unwrap();
-
-        // Second write round
-        attempt.tasks.push(Task {
-            id: "attempt-1-write-2".to_string(),
-            kind: TaskKind::Write,
-            status: TaskStatus::Complete,
-            output: Some(TaskOutput {
-                workspace_id: "candidate".to_string(),
-                workspace_path: "workspace".to_string(),
-                source_branch: "main".to_string(),
-                commit: attempt.tasks[0].output.as_ref().unwrap().commit.clone(),
+        let item = store.read_work_item("work-1").unwrap();
+        interpret_reviews(
+            &project_root,
+            &store,
+            item,
+            "attempt-1",
+            true,
+            Some(LearnerConfig {
+                run_coder: &run_coder,
             }),
-            input_artifacts: vec![ArtifactRef {
-                producer_id: "attempt-1-review-1-tests".to_string(),
-                path: format!("{}/review.md", review_artifact_path),
-            }],
-            ..write_task("attempt-1-write-2", Vec::new())
-        });
-
-        let review2_artifact_path =
-            work_artifact_path("work-1", "attempt-1", "attempt-1-review-2-tests");
-        attempt.tasks.push(review_task_with_artifact(
-            "attempt-1-review-2-tests",
-            "tests",
-            &review2_artifact_path,
-        ));
-        let review2_dir = project_root.join(&review2_artifact_path);
-        fs::create_dir_all(&review2_dir).unwrap();
-        fs::write(review2_dir.join("review.md"), "Verdict: pass\n").unwrap();
-
-        store.create_work_item(&item).unwrap();
-        (store, item, workspace)
-    }
-
-    #[test]
-    fn capture_commit_within_expertise_is_accepted() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let (_store, mut item, workspace) = make_capture_git_fixture(tmp.path());
-
-        let expertise_dir = workspace.join(".fluent/expertise");
-        fs::create_dir_all(&expertise_dir).unwrap();
-        fs::write(expertise_dir.join("learning.md"), "# Learning").unwrap();
-        git::run(
-            &workspace,
-            &["add", ".fluent/expertise/learning.md"],
-            "add expertise",
-        )
-        .unwrap();
-        git::run(
-            &workspace,
-            &["commit", "-m", "capture learning"],
-            "commit capture",
         )
         .unwrap();
 
-        let capture_head =
-            git::run_stdout(&workspace, &["rev-parse", "HEAD"], "capture head").unwrap();
-        let write_output = item.attempts[0].tasks[2].output.clone().unwrap();
-        assert_ne!(capture_head, write_output.commit);
-
-        apply_capture_confinement(&workspace, &mut item, 0, 2, &write_output).unwrap();
-
+        let expertise_head =
+            git::run_stdout(&workspace, &["rev-parse", "HEAD"], "head").unwrap();
+        assert_ne!(expertise_head, base);
+        let stored = store.read_work_item("work-1").unwrap();
         assert_eq!(
-            item.attempts[0].tasks[2].output.as_ref().unwrap().commit,
-            capture_head,
-            "in-bounds capture commit should be recorded as the output commit"
+            stored.merge_candidates[0].candidate_commit, expertise_head,
+            "a confined expertise commit becomes the candidate commit"
         );
     }
 
     #[test]
-    fn capture_commit_touching_source_is_discarded() {
+    fn learner_commit_touching_source_is_discarded() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let (_store, mut item, workspace) = make_capture_git_fixture(tmp.path());
+        let (store, project_root, workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
 
-        let write_output = item.attempts[0].tasks[2].output.clone().unwrap();
-
-        let expertise_dir = workspace.join(".fluent/expertise");
-        fs::create_dir_all(&expertise_dir).unwrap();
-        fs::write(expertise_dir.join("learning.md"), "# Learning").unwrap();
-        fs::write(workspace.join("src.rs"), "fn main() { /* modified */ }").unwrap();
-        git::run(&workspace, &["add", "."], "add all").unwrap();
-        git::run(
-            &workspace,
-            &["commit", "-m", "straying capture"],
-            "commit stray",
+        let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            let expertise = request.workspace_path.join(".fluent/expertise");
+            fs::create_dir_all(&expertise).unwrap();
+            fs::write(expertise.join("learning.md"), "# Learning").unwrap();
+            fs::write(
+                request.workspace_path.join("src.rs"),
+                "fn main() { /* changed */ }",
+            )
+            .unwrap();
+            git::run(request.workspace_path, &["add", "."], "add all").unwrap();
+            git::run(
+                request.workspace_path,
+                &["commit", "-m", "straying"],
+                "commit",
+            )
+            .unwrap();
+            fs::create_dir_all(request.handoff_dir).unwrap();
+            fs::write(
+                request.handoff_dir.join(crate::learner::DRAFT_FILE_NAME),
+                r#"{"learning_summary":"x","follow_ups":[]}"#,
+            )
+            .unwrap();
+            Ok(())
+        };
+        let item = store.read_work_item("work-1").unwrap();
+        let outcome = interpret_reviews(
+            &project_root,
+            &store,
+            item,
+            "attempt-1",
+            true,
+            Some(LearnerConfig {
+                run_coder: &run_coder,
+            }),
         )
         .unwrap();
 
-        assert_ne!(
-            git::run_stdout(&workspace, &["rev-parse", "HEAD"], "check").unwrap(),
-            write_output.commit
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
+            "the candidate is still produced when the learner commit is discarded"
         );
-
-        apply_capture_confinement(&workspace, &mut item, 0, 2, &write_output).unwrap();
-
         let head_after = git::run_stdout(&workspace, &["rev-parse", "HEAD"], "after").unwrap();
+        assert_eq!(head_after, base, "an out-of-bounds learner commit is discarded");
+        let stored = store.read_work_item("work-1").unwrap();
         assert_eq!(
-            head_after, write_output.commit,
-            "HEAD should be reset to the pre-capture commit"
+            stored.merge_candidates[0].candidate_commit, base,
+            "the candidate commit stays at the pre-learner tip"
         );
-        assert_eq!(
-            item.attempts[0].tasks[2].output.as_ref().unwrap().commit,
-            write_output.commit,
-            "out-of-bounds capture should not update the output commit"
+        assert!(
+            stored.attempts[0]
+                .learning
+                .as_ref()
+                .unwrap()
+                .is_failed(),
+            "an out-of-bounds learner commit records a retryable failure"
         );
     }
 }

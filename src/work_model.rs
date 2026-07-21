@@ -353,6 +353,7 @@ impl WorkItem {
             artifacts: Vec::new(),
             created_at: Some(now_iso8601()),
             completed_at: None,
+            ..Default::default()
         });
 
         self.validate()
@@ -475,6 +476,7 @@ impl WorkItem {
             artifacts: Vec::new(),
             created_at: Some(now_iso8601()),
             completed_at: None,
+            ..Default::default()
         });
 
         self.validate()?;
@@ -594,6 +596,7 @@ impl WorkItem {
             artifacts: Vec::new(),
             created_at: Some(now_iso8601()),
             completed_at: None,
+            ..Default::default()
         });
 
         self.validate()?;
@@ -1351,6 +1354,67 @@ impl CorrectiveContext {
     }
 }
 
+/// Coarse outcome of the most recent Learner run for an Attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LearningStatus {
+    Succeeded,
+    Failed,
+}
+
+/// Durable, retryable state of the Learner for a code-producing Attempt.
+///
+/// Recorded on the Attempt so a failed learning run can be retried on its own
+/// without rerunning the Writer, Tester, or reviewers. A successful run carries
+/// exactly one handoff reference; a failed run carries the diagnostic to warn
+/// the operator and leaves the run retryable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptLearning {
+    /// Whether the most recent Learner run succeeded or failed.
+    pub status: LearningStatus,
+    /// How many times the Learner has run for this Attempt.
+    #[serde(default)]
+    pub runs: u32,
+    /// Reference to the persisted handoff, relative and digest-bearing. Present
+    /// once a run has completed successfully.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<crate::follow_up::ArtifactRef>,
+    /// Diagnostic from the last failed run, retained so a retry can complete the
+    /// same record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure: Option<String>,
+}
+
+impl AttemptLearning {
+    /// A completed learning record carrying its single handoff reference.
+    pub fn succeeded(runs: u32, handoff: crate::follow_up::ArtifactRef) -> Self {
+        Self {
+            status: LearningStatus::Succeeded,
+            runs,
+            handoff: Some(handoff),
+            last_failure: None,
+        }
+    }
+
+    /// A failed, retryable learning record carrying its diagnostic.
+    pub fn failed(runs: u32, reason: impl Into<String>) -> Self {
+        Self {
+            status: LearningStatus::Failed,
+            runs,
+            handoff: None,
+            last_failure: Some(reason.into()),
+        }
+    }
+
+    pub fn is_failed(&self) -> bool {
+        self.status == LearningStatus::Failed
+    }
+
+    pub fn is_succeeded(&self) -> bool {
+        self.status == LearningStatus::Succeeded
+    }
+}
+
 fn push_planning_section(sections: &mut Vec<String>, title: &str, content: &Option<String>) {
     if let Some(content) = non_empty_clone(content) {
         sections.push(format!("# {title}\n\n{}", content.trim()));
@@ -1608,6 +1672,29 @@ pub struct Attempt {
     pub created_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<String>,
+    /// Durable, retryable Learner state. Absent until the Learner first runs on
+    /// this code-producing Attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub learning: Option<AttemptLearning>,
+}
+
+impl Default for Attempt {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            work_item_id: String::new(),
+            kind: AttemptKind::default(),
+            status: AttemptStatus::Planned,
+            coder_mapping: CoderMapping::default(),
+            tasks: Vec::new(),
+            review_state: None,
+            pause_kind: None,
+            artifacts: Vec::new(),
+            created_at: None,
+            completed_at: None,
+            learning: None,
+        }
+    }
 }
 
 impl Attempt {
@@ -2795,6 +2882,8 @@ struct AttemptRecord {
     created_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     completed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    learning: Option<AttemptLearning>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2855,6 +2944,7 @@ impl AttemptRecord {
             artifacts: attempt.artifacts.clone(),
             created_at: attempt.created_at.clone(),
             completed_at: attempt.completed_at.clone(),
+            learning: attempt.learning.clone(),
         }
     }
 }
@@ -2873,6 +2963,7 @@ impl From<AttemptRecord> for Attempt {
             artifacts: record.artifacts,
             created_at: record.created_at,
             completed_at: record.completed_at,
+            learning: record.learning,
         }
     }
 }
@@ -4387,6 +4478,7 @@ mod tests {
                 artifacts: Vec::new(),
                 created_at: None,
                 completed_at: None,
+                ..Default::default()
             }],
             merge_candidates: Vec::new(),
             ..Default::default()
@@ -4710,6 +4802,7 @@ mod tests {
                 artifacts: Vec::new(),
                 created_at: None,
                 completed_at: None,
+                ..Default::default()
             }],
             merge_candidates: Vec::new(),
             ..Default::default()
@@ -5008,6 +5101,7 @@ mod tests {
                 artifacts: Vec::new(),
                 created_at: None,
                 completed_at: None,
+                            ..Default::default()
             }],
             merge_candidates: Vec::new(),
             ..Default::default()
@@ -5047,6 +5141,7 @@ mod tests {
                 }],
                 created_at: None,
                 completed_at: None,
+                ..Default::default()
             }],
             merge_candidates: Vec::new(),
             ..Default::default()
@@ -5086,6 +5181,7 @@ mod tests {
                 artifacts: Vec::new(),
                 created_at: None,
                 completed_at: None,
+                ..Default::default()
             }],
             merge_candidates: Vec::new(),
             ..Default::default()
@@ -5134,6 +5230,7 @@ mod tests {
                 artifacts: Vec::new(),
                 created_at: None,
                 completed_at: None,
+                ..Default::default()
             }],
             merge_candidates: Vec::new(),
             ..Default::default()
@@ -5172,6 +5269,7 @@ mod tests {
                 artifacts: Vec::new(),
                 created_at: None,
                 completed_at: None,
+                ..Default::default()
             }],
             merge_candidates: Vec::new(),
             ..Default::default()
@@ -5212,6 +5310,7 @@ mod tests {
                 artifacts: Vec::new(),
                 created_at: None,
                 completed_at: None,
+                ..Default::default()
             }],
             merge_candidates: Vec::new(),
             ..Default::default()
@@ -5267,6 +5366,7 @@ mod tests {
                 artifacts: Vec::new(),
                 created_at: None,
                 completed_at: None,
+                ..Default::default()
             }],
             merge_candidates: Vec::new(),
             ..Default::default()
@@ -5322,6 +5422,7 @@ mod tests {
                 artifacts: Vec::new(),
                 created_at: None,
                 completed_at: None,
+                ..Default::default()
             }],
             merge_candidates: Vec::new(),
             ..Default::default()
@@ -5378,6 +5479,7 @@ mod tests {
                 artifacts: Vec::new(),
                 created_at: None,
                 completed_at: None,
+                ..Default::default()
             }],
             merge_candidates: Vec::new(),
             ..Default::default()
@@ -5433,6 +5535,7 @@ mod tests {
             artifacts: Vec::new(),
             created_at: None,
             completed_at: None,
+            ..Default::default()
         };
         let candidate = MergeCandidate {
             id: "candidate-1".to_string(),
@@ -5541,6 +5644,7 @@ mod tests {
                 artifacts: Vec::new(),
                 created_at: None,
                 completed_at: None,
+                ..Default::default()
             }],
             merge_candidates: Vec::new(),
             ..Default::default()
@@ -5623,6 +5727,7 @@ mod tests {
                 artifacts: Vec::new(),
                 created_at: None,
                 completed_at: None,
+                ..Default::default()
             }],
             merge_candidates: Vec::new(),
             ..Default::default()
@@ -5766,6 +5871,7 @@ mod tests {
             artifacts: Vec::new(),
             created_at: None,
             completed_at: None,
+            ..Default::default()
         });
         item.create_or_get_merge_candidate("attempt-1").unwrap();
         assert_eq!(
@@ -5935,6 +6041,7 @@ mod tests {
             artifacts: Vec::new(),
             created_at: Some("2026-06-12T10:00:00+00:00".to_string()),
             completed_at: Some("2026-06-12T10:05:00+00:00".to_string()),
+            ..Default::default()
         };
         let json = serde_json::to_string(&attempt).unwrap();
         assert!(json.contains("\"created_at\""));
@@ -6086,6 +6193,7 @@ mod tests {
             artifacts: Vec::new(),
             created_at: None,
             completed_at: None,
+            ..Default::default()
         };
         set_attempt_terminal(&mut attempt, AttemptStatus::Complete);
         assert_eq!(attempt.status, AttemptStatus::Complete);
@@ -6288,6 +6396,7 @@ mod tests {
             artifacts: Vec::new(),
             created_at: None,
             completed_at: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&attempt).unwrap();
         let parsed: Attempt = serde_json::from_str(&json).unwrap();
