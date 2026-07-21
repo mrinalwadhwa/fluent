@@ -3651,6 +3651,62 @@ fn post_land_learner_retry_materializes_recovered_handoff() {
         !candidate_workspace.exists(),
         "successful post-land recovery removes the retained candidate workspace"
     );
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["cleanup", "--apply"])
+        .assert()
+        .success();
+    assert!(!main_dir.join(".fluent/work/items/work-1.json").exists());
+    assert_eq!(
+        open_observation_files(&main_dir).len(),
+        1,
+        "cleanup after recovery preserves the materialized descendant"
+    );
+}
+
+#[test]
+fn missing_legacy_learning_record_retries_after_land() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let counter = tmp.path().join("learner-counter-missing-record");
+    let bin_dir = tmp.path().join("bin-missing-record");
+    write_mock_claude(
+        &bin_dir,
+        &post_land_learner_mock_script(
+            &counter,
+            r#"{"learning_summary":"legacy retry","follow_ups":[{"id":"fu-1","summary":"Recovered legacy follow-up","corrective":false}]}"#,
+            false,
+        ),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+    let attempt_path = main_dir.join(".fluent/work/attempts/work-1/attempt-1.json");
+    let mut attempt = read_json_value(&attempt_path);
+    attempt.as_object_mut().unwrap().remove("learning");
+    write_json_value(&attempt_path, &attempt);
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["cleanup", "--apply"])
+        .assert()
+        .success();
+    assert!(main_dir.join(".fluent/work/items/work-1.json").exists());
+    assert!(main_dir.join("../work-6-work-1-attempt-1").is_dir());
+
+    rerun_learner_attempt(&main_dir, &bin_dir);
+
+    assert_eq!(open_observation_files(&main_dir).len(), 1);
+    assert_eq!(
+        fs::read_to_string(format!("{}.invocations", counter.display()))
+            .unwrap()
+            .lines()
+            .count(),
+        2,
+        "a missing legacy record triggers one post-land Learner retry"
+    );
+    assert!(!main_dir.join("../work-6-work-1-attempt-1").exists());
 }
 
 #[test]
@@ -4294,15 +4350,54 @@ fn cleanup_preserves_descendant_context_after_origin_removal() {
     let main_dir = setup_git_project(&tmp);
     let bin_dir = run_corrective_attempt(&main_dir, &tmp, "bin-descendant", true);
     land_work_1(&main_dir, &bin_dir, true);
+    let origin_merged_commit = merged_commit_of(&main_dir);
 
-    // Remove optional origin artifacts (the handoff and its artifact tree).
-    fs::remove_dir_all(main_dir.join(".fluent/work/artifacts/work-1")).unwrap();
+    let origin_item = main_dir.join(".fluent/work/items/work-1.json");
+    let origin_attempts = main_dir.join(".fluent/work/attempts/work-1");
+    let origin_tasks = main_dir.join(".fluent/work/tasks/work-1");
+    let origin_artifacts = main_dir.join(".fluent/work/artifacts/work-1");
+    let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
+
+    // Land normally removes the candidate worktree. Re-register the persisted
+    // source branch at its managed path so real cleanup must remove every kind
+    // of origin state, including a registered worktree and optional artifacts.
+    assert!(!candidate_workspace.exists());
+    let merged_commit = merged_commit_of(&main_dir);
+    git::run(
+        &main_dir,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            candidate_workspace.to_str().unwrap(),
+            &merged_commit,
+        ],
+        "recreate origin worktree for cleanup",
+    )
+    .unwrap();
+    assert!(origin_item.exists());
+    assert!(origin_attempts.is_dir());
+    assert!(origin_tasks.is_dir());
+    assert!(origin_artifacts.is_dir());
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["cleanup", "--apply"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cleaned Work Item work-1"));
+
+    assert!(!origin_item.exists(), "cleanup removes the originating Work Item");
+    assert!(!origin_attempts.exists(), "cleanup removes the originating Attempt records");
+    assert!(!origin_tasks.exists(), "cleanup removes the originating Task records");
+    assert!(!candidate_workspace.exists(), "cleanup removes the registered candidate worktree");
+    assert!(!origin_artifacts.exists(), "cleanup removes optional origin artifacts");
 
     // The derived Work stays inspectable with self-contained corrective context
     // and provenance identifiers.
     let derived = work_item_value(&main_dir, DERIVED_FU1);
     assert!(derived["corrective_context"]["objective"].is_string());
-    assert_eq!(derived["origin"]["merged_commit"], merged_commit_of(&main_dir));
+    assert_eq!(derived["origin"]["merged_commit"], origin_merged_commit);
     assert_eq!(derived["origin"]["observation_id"], OBS_FU1);
 
     // The Observation stays inspectable with its origin identifiers.
@@ -4417,6 +4512,62 @@ fn followup_retry_resumes_each_partial_failure_exactly_once() {
     );
     assert_eq!(dispatch_count(&main_dir, DERIVED_FU1), 1);
     assert_eq!(follow_up_failure_stage(&main_dir), "", "a completed resume clears the failure");
+}
+
+#[test]
+fn followup_retry_recovers_work_creation_exactly_once() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = run_corrective_attempt(&main_dir, &tmp, "bin-work-resume", true);
+    let derived_path = main_dir
+        .join(".fluent/work/items")
+        .join(format!("{DERIVED_FU1}.json"));
+
+    fs::create_dir_all(derived_path.parent().unwrap()).unwrap();
+    fs::write(&derived_path, "{ not json").unwrap();
+    land_work_1(&main_dir, &bin_dir, true);
+    assert_eq!(follow_up_failure_stage(&main_dir), "work");
+    assert_eq!(open_observation_files(&main_dir).len(), 1);
+
+    fs::remove_file(&derived_path).unwrap();
+    let rerun = tmp.path().join("bin-work-resume-norebase");
+    write_mock_claude(&rerun, &rebase_failing_mock_script());
+    land_work_1(&main_dir, &rerun, true);
+    land_work_1(&main_dir, &rerun, true);
+
+    let derived = work_item_value(&main_dir, DERIVED_FU1);
+    assert_eq!(open_observation_files(&main_dir).len(), 1);
+    assert_eq!(work_item_json_count(&main_dir), 2);
+    assert_eq!(derived["lineage"]["charged"], true);
+    assert_eq!(dispatch_count(&main_dir, DERIVED_FU1), 1);
+    assert_eq!(follow_up_failure_stage(&main_dir), "");
+}
+
+#[test]
+fn followup_retry_recovers_queue_dispatch_exactly_once() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = run_corrective_attempt(&main_dir, &tmp, "bin-queue-resume", true);
+    let ledger_path = queue_ledger_path(&main_dir, DERIVED_FU1);
+
+    fs::create_dir_all(&ledger_path).unwrap();
+    land_work_1(&main_dir, &bin_dir, true);
+    assert_eq!(follow_up_failure_stage(&main_dir), "queue");
+    assert_eq!(open_observation_files(&main_dir).len(), 1);
+    assert_eq!(work_item_json_count(&main_dir), 2);
+    assert_eq!(work_item_value(&main_dir, DERIVED_FU1)["lineage"]["charged"], true);
+
+    fs::remove_dir(&ledger_path).unwrap();
+    let rerun = tmp.path().join("bin-queue-resume-norebase");
+    write_mock_claude(&rerun, &rebase_failing_mock_script());
+    land_work_1(&main_dir, &rerun, true);
+    land_work_1(&main_dir, &rerun, true);
+
+    assert_eq!(open_observation_files(&main_dir).len(), 1);
+    assert_eq!(work_item_json_count(&main_dir), 2);
+    assert_eq!(work_item_value(&main_dir, DERIVED_FU1)["lineage"]["charged"], true);
+    assert_eq!(dispatch_count(&main_dir, DERIVED_FU1), 1);
+    assert_eq!(follow_up_failure_stage(&main_dir), "");
 }
 
 #[test]

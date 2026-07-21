@@ -490,6 +490,14 @@ fn git_branch_exists(source_root: &Path, branch_name: &str) -> Result<bool> {
 
 fn work_item_artifact_paths(source_root: &Path, work_item: &WorkItem) -> Vec<PathBuf> {
     let mut paths = Vec::new();
+    // The Work Item owns its complete artifact subtree, including learner
+    // handoffs and other optional files that are not referenced by Task artifact
+    // fields. Remove that root when cleanup removes the owning Work Item.
+    push_unique_artifact_path(
+        source_root,
+        &mut paths,
+        &format!("{WORK_ARTIFACTS_DIR}/{}", work_item.id),
+    );
     for attempt in &work_item.attempts {
         for task in &attempt.tasks {
             if let Some(area) = &task.artifact_area {
