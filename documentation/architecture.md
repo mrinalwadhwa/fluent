@@ -1121,10 +1121,10 @@ fluent/main/
     plan.rs                  ← Parse plan.md into groups and steps
     post_merge_review.rs     ← Post-merge review orchestration
     prep.rs                  ← Pre-flight workspace preparation
-    queue.rs                 ← Work queue entry CRUD and ordering
+    queue.rs                 ← Per-Work-Item dispatch ledger (history + one active dispatch)
     review.rs                ← Review verdict parsing and state
     review_diff_command.rs   ← Review diff CLI subcommand
-    scheduler.rs             ← Sequential scheduler loop for queued Work Items
+    scheduler.rs             ← Elected coordinator running a capacity-limited worker pool
     transcript.rs            ← Parse stream-json transcripts incrementally
     update.rs                ← Self-update and update-check nudge
     usage.rs                 ← Per-turn usage row logging and summary cache
@@ -1457,10 +1457,11 @@ skills and expertise through `ContentResolver`.
 
 ## Scheduler
 
-The scheduler is a multi-slice architecture for unattended Work Item
-execution. Slice 1 delivers usage logging, a queue substrate, and a
-sequential worker. Later slices add cost estimation, capacity-aware
-deferrals, coder switching, and calibration.
+The scheduler drives unattended Work Item execution. It layers a
+durable dispatch ledger, an elected per-project coordinator that fills
+configured capacity with a worker pool, and usage logging. Later slices
+add cost estimation, capacity-aware deferrals, coder switching, and
+calibration.
 
 ### Usage logging
 
@@ -1481,38 +1482,103 @@ slices populate remaining-estimate fields.
 Usage logging is best-effort: parse or I/O failures print a warning
 to stderr and do not fail the Task.
 
-### Queue substrate
+### Dispatch ledger
 
-Work Items are queued via `fluent queue add <work-item-id>
-[--priority N]`. Each entry is stored at
-`.fluent/work/queue/<work-item-id>.json` with fields: `work_item_id`,
-`queued_at` (RFC 3339 UTC), `priority` (numeric, higher = sooner,
-default 0), and `status` (`queued`, `running`, `done`, `failed`,
-`needs-user`).
+Each Work Item owns one dispatch ledger at
+`.fluent/work/queue/<work-item-id>.json`. A ledger holds an ordered
+list of dispatches (oldest first): terminal history plus at most one
+active dispatch, always the last entry. Each dispatch carries
+`work_item_id`, `queued_at` (RFC 3339 UTC), `priority` (numeric,
+higher = sooner, default 0), `status`, a monotonic `generation` bumped
+on every state mutation, an optional `bound_attempt_id`, and a block
+reason when blocked. The status vocabulary is `queued`, `claimed`,
+`running`, `candidate-ready`, `failed`, `needs-user`, `canceled`, and
+`blocked`; `queued`/`claimed`/`running` are active and the rest are
+terminal.
 
-`fluent queue list` prints entries sorted by priority descending,
-then `queued_at` ascending. `fluent queue remove` deletes the
-entry file.
+A legacy single-entry queue file loads as the ledger's first dispatch,
+preserving its priority, queue time, and outcome, mapping the old `done`
+status to `candidate-ready`. Migration is lazy and creates no new
+Attempt.
 
-The queue validates that the Work Item exists before creating an entry.
-Malformed queue files are skipped with a warning.
+`fluent queue add <work-item-id> [--priority N]` creates one `queued`
+dispatch for an execution-ready, lifecycle-eligible Work Item that has
+no active dispatch, keeping any earlier terminal history. It exits
+non-zero for an unknown, proposed, or abandoned Work Item, or one whose
+Attempt is suspended at `needs-user` or whose Merge Candidate is pending
+land. Repeating `add` while a dispatch is already active preserves its
+queue time and changes priority only when an explicit `--priority` is
+given.
 
-### Sequential scheduler
+Automatic promotion enqueues through `ensure_dispatch`, which reconciles
+or creates one dispatch without reviving terminal history — a replayed
+promotion, materialization, or enqueue reuses the existing disposition
+rather than restoring canceled or terminal Work or charging lineage
+again.
 
-`fluent scheduler run` enters a polling loop that reads the queue,
-picks the highest-priority `queued` entry, sets its status to `running`,
-creates an Attempt via `fluent attempt create <id>`, and executes it via
-`fluent attempt run <id> --no-sandbox` (sandbox is disabled for
-unattended execution).
+`fluent queue list` prints each Work Item's active dispatch sorted by
+priority descending, then `queued_at` ascending, showing priority,
+queue time, execution status, and Work Item id. `fluent queue remove`
+records a `canceled` disposition on an unclaimed dispatch — the entry
+leaves the active queue but the cancellation survives replayed automatic
+promotion. Removal is rejected while a dispatch has a live claim, and
+errors when the Work Item has no active dispatch.
 
-When the Attempt terminates, the scheduler updates the queue entry
-status: `done` on success, `failed` on failure, `needs-user` when human
-input is required. The scheduler does not perform merges — that is the
-job of `fluent auto-merge --all`, which runs as a sibling process.
+Malformed ledger files are skipped with a warning and preserved
+on disk for operator inspection.
 
-On SIGTERM or SIGINT while idle, the scheduler exits immediately. While
-an Attempt is running, it allows the Attempt to complete before exiting.
+### Local scheduler coordinator
 
-Slice 1 runs one Work Item at a time. Concurrency, capacity-awareness,
-coder switching, and dependency-aware ordering are planned for later
-slices.
+`fluent scheduler run` elects a single coordinator per project using a
+lifetime `flock` lease. A start that finds another live coordinator
+reports reuse and returns successfully without claiming Work; when
+several starts race, exactly one wins and the rest reuse it.
+
+The elected coordinator runs an in-process worker pool
+(`thread::scope`). On each poll it fills free capacity up to the project's
+configured limit (`ResolvedSchedulerConfig.max_local_concurrency`,
+default 4), claiming eligible dispatches by priority descending and
+oldest queue time first. Running Work is never interrupted. Capacity
+counts every dispatch claimed or running with a live bound-Attempt lease,
+including still-live leases left by an earlier coordinator; Attempts
+started directly or on an explicitly selected Fargate runtime do not
+count, and reviewer Tasks nested inside a scheduled Attempt occupy one
+slot while the reviewer-parallelism limit applies independently.
+
+When it claims a `queued` dispatch, the coordinator durably binds
+exactly one Attempt (`bound_attempt_id`) under a generation-checked
+update before launching, then transitions the dispatch from `claimed`
+to `running`. A `DispatchToken` carries the Work Item, dispatch id,
+generation, bound Attempt id, and priority so a launch or reconcile can
+confirm it still acts on the dispatch it claimed. Each worker holds a
+whole-Attempt lease for the life of the dispatch, and drives execution
+via `fluent attempt run <id> <attempt-id> --no-sandbox` (sandbox
+disabled for unattended runs).
+
+Before each poll, `recover_and_reconcile` reads model state first and
+then applies a generation-checked queue update, so recovery never nests
+the queue lock with Work, lineage, candidate, or follow-up locks. A
+stale claim whose bound Attempt is nonterminal and not executing resumes
+that same Attempt; a stale claim whose bound Attempt became terminal
+reconciles the dispatch from that outcome without rerunning it; an
+interrupted claim with no bound Attempt returns to `queued` and creates
+at most one Attempt on the next claim.
+
+When an Attempt terminates, the coordinator reconciles the dispatch and
+releases its claim: a passing Merge Candidate sets `candidate-ready` and
+leaves the candidate pending, `failed` and `needs-user` set the matching
+state, an unclaimed Work Item that became abandoned is set `canceled`
+with no Attempt, and a missing, malformed, or non-executable reference is
+set `blocked` with the reason. Other in-flight dispatches are unaffected.
+The scheduler never invokes merge logic — landing remains the job of an
+explicit land command or the separately authorized `fluent auto-merge
+--all`, which runs as a sibling process.
+
+On SIGTERM or SIGINT the coordinator stops claiming new Work, preserves
+unclaimed Work as `queued`, and drains live children — letting them
+finish and recording their outcomes — before exiting. With no live
+Attempts it exits without waiting for the polling interval.
+
+When queued Work exists but no live coordinator can claim it, the Work
+stays `queued` and `fluent status` reports that execution is stopped,
+naming `fluent scheduler run` as the start or recovery action.
