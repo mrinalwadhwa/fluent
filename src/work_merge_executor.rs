@@ -192,11 +192,22 @@ pub fn process_landed_follow_ups_at_boundary(
         Err(error) => {
             // The merge stays successful. Record a retryable follow-up-processing
             // failure naming the first incomplete stage so a later land resumes.
-            let operation_id = crate::follow_up::operation_id_for_candidate(
-                work_item_id,
-                candidate_id,
-            );
-            let stage = crate::follow_up::first_incomplete_stage(project_root, &operation_id)
+            let origin = store.read_work_item(work_item_id).ok().and_then(|item| {
+                item.merge_candidates
+                    .iter()
+                    .find(|candidate| candidate.id == candidate_id)
+                    .map(|candidate| crate::follow_up::PostLandOrigin {
+                        work_item_id: work_item_id.to_string(),
+                        attempt_id: candidate.attempt_id.clone(),
+                        merge_candidate_id: candidate_id.to_string(),
+                        merged_commit: merged_commit.to_string(),
+                    })
+            });
+            let stage = origin
+                .as_ref()
+                .and_then(|origin| {
+                    crate::follow_up::first_incomplete_stage_for_origin(project_root, origin)
+                })
                 .unwrap_or_else(|| "validate-handoff".to_string());
             let next_action = format!(
                 "Re-run `fluent merge-candidate land {} {}` to resume follow-up processing.",

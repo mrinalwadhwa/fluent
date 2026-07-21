@@ -685,21 +685,57 @@ fn discover_recorded_operation_id(
     let legacy = legacy_operation_id_for(origin);
     let mut found = Vec::new();
     for operation_id in [&current, &legacy] {
-        let path = operation_dir(project_root, operation_id).join("operation.json");
-        if !path.exists() {
-            continue;
+        let dir = operation_dir(project_root, operation_id);
+        let operation_path = dir.join("operation.json");
+        let batch_path = dir.join("batch.json");
+        let journal_path = dir.join("journal.json");
+        let mut has_evidence = false;
+        if operation_path.exists() {
+            has_evidence = true;
+            let operation: PendingPostLandOperationV1 =
+                serde_json::from_slice(&fs::read(&operation_path)?).with_context(|| {
+                    format!("parse recorded operation {}", operation_path.display())
+                })?;
+            if operation.schema_version != PendingPostLandOperationV1::SCHEMA_VERSION
+                || operation.operation_id != *operation_id
+                || operation.origin != *origin
+                || operation_identity_digest(&operation)? != operation.digest
+            {
+                bail!("post-land operation {operation_id} does not match its recorded V1 identity");
+            }
         }
-        let operation: PendingPostLandOperationV1 = serde_json::from_slice(&fs::read(&path)?)
-            .with_context(|| format!("parse recorded operation {}", path.display()))?;
-        if operation.schema_version != PendingPostLandOperationV1::SCHEMA_VERSION
-            || operation.operation_id != *operation_id
-            || operation.origin != *origin
-            || operation_identity_digest(&operation)? != operation.digest
-        {
-            bail!("post-land operation {operation_id} does not match its recorded V1 identity");
+        if batch_path.exists() {
+            has_evidence = true;
+            let batch: NormalizedFollowUpBatchV1 =
+                serde_json::from_slice(&fs::read(&batch_path)?).with_context(|| {
+                    format!("parse recorded batch {}", batch_path.display())
+                })?;
+            if batch.schema_version != NormalizedFollowUpBatchV1::SCHEMA_VERSION
+                || batch.origin != *origin
+            {
+                bail!("post-land batch {operation_id} does not match its landed origin");
+            }
         }
-        found.push(operation_id.clone());
+        if journal_path.exists() {
+            has_evidence = true;
+            let journal: PostLandJournal =
+                serde_json::from_slice(&fs::read(&journal_path)?).with_context(|| {
+                    format!("parse recorded journal {}", journal_path.display())
+                })?;
+            if journal.schema_version != PostLandJournal::SCHEMA_VERSION
+                || journal.operation_id != *operation_id
+            {
+                bail!("post-land journal {operation_id} does not match its V1 identity");
+            }
+        }
+        if has_evidence {
+            found.push(operation_id.clone());
+        }
     }
+
+    collect_effect_operation_evidence(project_root, origin, &current, &legacy, &mut found)?;
+    found.sort();
+    found.dedup();
     match found.as_slice() {
         [] => Ok(None),
         [operation_id] => Ok(Some(operation_id.clone())),
@@ -707,6 +743,80 @@ fn discover_recorded_operation_id(
             "landed origin has both legacy and current post-land operations; refusing to choose"
         ),
     }
+}
+
+fn collect_effect_operation_evidence(
+    project_root: &Path,
+    origin: &PostLandOrigin,
+    current: &str,
+    legacy: &str,
+    found: &mut Vec<String>,
+) -> Result<()> {
+    let classify = |effect_id: &str, kind: &str| -> Result<Option<String>> {
+        if effect_id.starts_with(&format!("derived-{current}-"))
+            || effect_id.starts_with(&format!("followup-{current}-"))
+        {
+            Ok(Some(current.to_string()))
+        } else if effect_id.starts_with(&format!("derived-{legacy}-"))
+            || effect_id.starts_with(&format!("followup-{legacy}-"))
+        {
+            Ok(Some(legacy.to_string()))
+        } else {
+            bail!("{kind} {effect_id:?} matches the landed origin but not a known V1 identity")
+        }
+    };
+
+    for item in WorkModelStore::new(project_root).list_work_items()? {
+        let Some(provenance) = item.origin.provenance() else {
+            continue;
+        };
+        if provenance.work_item_id.as_deref() == Some(origin.work_item_id.as_str())
+            && provenance.attempt_id.as_deref() == Some(origin.attempt_id.as_str())
+            && provenance.merge_candidate_id.as_deref()
+                == Some(origin.merge_candidate_id.as_str())
+            && provenance.merged_commit.as_deref() == Some(origin.merged_commit.as_str())
+            && let Some(operation_id) = classify(&item.id, "derived Work Item")?
+        {
+            found.push(operation_id);
+        }
+    }
+
+    for directory in [
+        project_root.join(".fluent/observations"),
+        project_root.join(".fluent/observations/resolved"),
+    ] {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("md") {
+                continue;
+            }
+            let content = fs::read_to_string(&path)?;
+            let (frontmatter, _) = observations::split_frontmatter(&content);
+            let Some(frontmatter) = frontmatter else {
+                continue;
+            };
+            if frontmatter.kind.as_deref() == Some(LEARNER_FOLLOW_UP_KIND)
+                && frontmatter.work_item_id.as_deref() == Some(origin.work_item_id.as_str())
+                && frontmatter.attempt_id.as_deref() == Some(origin.attempt_id.as_str())
+                && frontmatter.merge_candidate_id.as_deref()
+                    == Some(origin.merge_candidate_id.as_str())
+                && frontmatter.merged_commit.as_deref() == Some(origin.merged_commit.as_str())
+            {
+                let id = path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .context("provenance Observation id is not UTF-8")?;
+                if let Some(operation_id) = classify(id, "Observation")? {
+                    found.push(operation_id);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn batch_rel_path(operation_id: &str) -> String {
@@ -731,6 +841,7 @@ pub fn record_post_land_operation(
     batch: &NormalizedFollowUpBatchV1,
     review_request: Option<ArtifactRef>,
 ) -> Result<PendingPostLandOperationV1> {
+    let _origin_lock = lock_origin(project_root, &batch.origin)?;
     let operation_id = discover_recorded_operation_id(project_root, &batch.origin)?
         .unwrap_or_else(|| operation_id_for(&batch.origin));
     let dir = operation_dir(project_root, &operation_id);
@@ -775,7 +886,17 @@ pub fn record_post_land_operation(
         return Ok(existing);
     }
 
-    atomic_write(&project_root.join(&operation.batch_ref.path), &batch_bytes)
+    let batch_path = project_root.join(&operation.batch_ref.path);
+    if batch_path.exists() {
+        let existing = fs::read(&batch_path)?;
+        if content_digest(&existing) != operation.batch_ref.digest || existing != batch_bytes {
+            bail!(
+                "post-land operation {operation_id} has conflicting durable batch evidence"
+            );
+        }
+    }
+
+    atomic_write(&batch_path, &batch_bytes)
         .with_context(|| format!("write normalized batch {}", operation.batch_ref.path))?;
 
     atomic_write(&op_path, &serde_json::to_vec_pretty(&operation)?)
@@ -924,21 +1045,28 @@ fn process_one_follow_up(
 
     // Stage 4: derive proposed or execution-ready Work under lineage budget.
     let derived_id = derived_work_item_id_for_operation(operation, &follow_up.id);
+    if journal.follow_ups[index]
+        .derived_work_item_id
+        .as_deref()
+        .is_some_and(|recorded| recorded != derived_id)
+    {
+        bail!("corrective receipt names a conflicting derived Work identity");
+    }
+    let created = ensure_derived_work(
+        store,
+        project_root,
+        &operation.origin,
+        &observation_id,
+        &derived_id,
+        source,
+        learning_summary,
+        follow_up,
+        &policy,
+    )?;
+    if created {
+        totals.work_items_created += 1;
+    }
     if journal.follow_ups[index].derived_work_item_id.is_none() {
-        let created = ensure_derived_work(
-            store,
-            project_root,
-            &operation.origin,
-            &observation_id,
-            &derived_id,
-            source,
-            learning_summary,
-            follow_up,
-            &policy,
-        )?;
-        if created {
-            totals.work_items_created += 1;
-        }
         journal.follow_ups[index].derived_work_item_id = Some(derived_id.clone());
         write_journal(journal_path, journal)?;
     }
@@ -1009,6 +1137,18 @@ pub fn first_incomplete_stage(project_root: &Path, operation_id: &str) -> Option
     None
 }
 
+/// Resolve the persisted V1 identity for a landed origin before reporting its
+/// first incomplete stage, so legacy operations never fall back to the hashed
+/// identity during recovery diagnostics.
+pub fn first_incomplete_stage_for_origin(
+    project_root: &Path,
+    origin: &PostLandOrigin,
+) -> Option<String> {
+    let _origin_lock = lock_origin(project_root, origin).ok()?;
+    let operation_id = discover_recorded_operation_id(project_root, origin).ok()??;
+    first_incomplete_stage(project_root, &operation_id)
+}
+
 /// Prove that a landed origin's operation, journal, receipts, and durable
 /// effects are complete. Missing or incomplete evidence returns `false`;
 /// malformed or conflicting evidence returns an error so cleanup fails closed.
@@ -1022,6 +1162,7 @@ pub fn post_land_operation_complete(
             return Ok(false);
         }};
     }
+    let _origin_lock = lock_origin(project_root, expected_origin)?;
     let Some(operation_id) = discover_recorded_operation_id(project_root, expected_origin)? else {
         incomplete!("missing operation");
     };
@@ -1112,6 +1253,23 @@ pub fn post_land_operation_complete(
                     if source.kind() == std::io::ErrorKind::NotFound => incomplete!("missing work"),
                 Err(error) => return Err(error.into()),
             };
+            let origin_item = store.read_work_item(&expected_origin.work_item_id)?;
+            let root_id = origin_item
+                .lineage
+                .root_id(&origin_item.id)
+                .to_string();
+            let expected_work = expected_derived_work(
+                expected_origin,
+                &observation_id,
+                &expected_work_id,
+                batch.source,
+                &batch.learning_summary,
+                follow_up,
+                policy,
+                &root_id,
+                None,
+            )?;
+            reconcile_reusable_derived_work(&store, &work_item, &expected_work)?;
             let expected_provenance = DerivedProvenance {
                 observation_id: Some(observation_id),
                 work_item_id: Some(expected_origin.work_item_id.clone()),
@@ -1303,9 +1461,8 @@ fn ensure_receipt(
 /// it is authorized automatically while lineage budget remains, charging the
 /// lineage once; in propose mode or with the budget exhausted it stays proposed.
 /// Returns whether a new Work Item was created.
-fn ensure_derived_work(
-    store: &WorkModelStore,
-    project_root: &Path,
+#[allow(clippy::too_many_arguments)]
+fn expected_derived_work(
     origin: &PostLandOrigin,
     observation_id: &str,
     derived_id: &str,
@@ -1313,12 +1470,13 @@ fn ensure_derived_work(
     learning_summary: &str,
     follow_up: &FollowUpDraftV1,
     policy: &FrozenFollowUpPolicy,
-) -> Result<bool> {
+    root_id: &str,
+    ready_authority: Option<ExecutionAuthority>,
+) -> Result<WorkItem> {
     let context = follow_up
         .corrective_context
         .clone()
         .context("corrective follow-up lost its corrective context before Work creation")?;
-
     let provenance = DerivedProvenance {
         observation_id: Some(observation_id.to_string()),
         work_item_id: Some(origin.work_item_id.clone()),
@@ -1326,31 +1484,7 @@ fn ensure_derived_work(
         merge_candidate_id: Some(origin.merge_candidate_id.clone()),
         merged_commit: Some(origin.merged_commit.clone()),
     };
-
-    // The derived Work joins its originating Work Item's lineage root.
-    let origin_item = store.read_work_item(&origin.work_item_id)?;
-    let root_id = origin_item.lineage.root_id(&origin_item.id).to_string();
-    let lineage = WorkLineage::descendant_of(root_id.clone(), Some(policy.descendant_limit));
-
-    // Distinct operations can target the same root lineage. Serialize the
-    // count/authorize/create decision across them so every contender observes
-    // the latest durable charges. The operation lock is already held; release
-    // this root lock before the later queue stage.
-    let _lineage_lock = crate::lineage_lock::acquire_automatic(project_root, &root_id)
-        .with_context(|| format!("lock corrective Work lineage {root_id:?}"))?;
-
-    // Execute mode authorizes automatically while lineage budget remains;
-    // otherwise the descendant stays proposed for an explicit human decision.
-    let ready_authority = if policy.is_execute()
-        && WorkLineage::can_authorize_descendant(
-            count_charged_descendants(store, &root_id, derived_id)?,
-            policy.descendant_limit,
-        ) {
-        Some(ExecutionAuthority::Automatic)
-    } else {
-        None
-    };
-
+    let lineage = WorkLineage::descendant_of(root_id.to_string(), Some(policy.descendant_limit));
     let mut item = WorkItem::derived_corrective(
         derived_id.to_string(),
         follow_up.summary.trim().to_string(),
@@ -1359,9 +1493,6 @@ fn ensure_derived_work(
         lineage,
         ready_authority,
     )?;
-    // Record the durable enqueue intent up front so an execution-ready
-    // descendant enqueues now and a proposed one enqueues on human
-    // authorization, both keyed by the same stable origin.
     item.set_enqueue_intent(policy.priority, derived_id.to_string());
     let authority = follow_up
         .authority
@@ -1399,13 +1530,61 @@ fn ensure_derived_work(
             })
             .collect(),
     });
+    Ok(item)
+}
+
+fn ensure_derived_work(
+    store: &WorkModelStore,
+    project_root: &Path,
+    origin: &PostLandOrigin,
+    observation_id: &str,
+    derived_id: &str,
+    source: FollowUpSource,
+    learning_summary: &str,
+    follow_up: &FollowUpDraftV1,
+    policy: &FrozenFollowUpPolicy,
+) -> Result<bool> {
+    // The derived Work joins its originating Work Item's lineage root.
+    let origin_item = store.read_work_item(&origin.work_item_id)?;
+    let root_id = origin_item.lineage.root_id(&origin_item.id).to_string();
+
+    // Distinct operations can target the same root lineage. Serialize the
+    // count/authorize/create decision across them so every contender observes
+    // the latest durable charges. The operation lock is already held; release
+    // this root lock before the later queue stage.
+    let _lineage_lock = crate::lineage_lock::acquire_automatic(project_root, &root_id)
+        .with_context(|| format!("lock corrective Work lineage {root_id:?}"))?;
+
+    // Execute mode authorizes automatically while lineage budget remains;
+    // otherwise the descendant stays proposed for an explicit human decision.
+    let ready_authority = if policy.is_execute()
+        && WorkLineage::can_authorize_descendant(
+            count_charged_descendants(store, &root_id, derived_id)?,
+            policy.descendant_limit,
+        ) {
+        Some(ExecutionAuthority::Automatic)
+    } else {
+        None
+    };
+
+    let item = expected_derived_work(
+        origin,
+        observation_id,
+        derived_id,
+        source,
+        learning_summary,
+        follow_up,
+        policy,
+        &root_id,
+        ready_authority,
+    )?;
 
     // Recheck only after computing the complete expected identity under the
     // lineage lock. Reuse requires every immutable intake decision to match;
     // a merely valid Work Item at this deterministic id is unrelated state.
     match store.read_work_item(derived_id) {
         Ok(existing) => {
-            verify_reusable_derived_work(&existing, &item)?;
+            reconcile_reusable_derived_work(store, &existing, &item)?;
             return Ok(false);
         }
         Err(WorkModelStorageError::ReadFile { source, .. })
@@ -1417,12 +1596,19 @@ fn ensure_derived_work(
     Ok(true)
 }
 
-fn verify_reusable_derived_work(existing: &WorkItem, expected: &WorkItem) -> Result<()> {
+fn reconcile_reusable_derived_work(
+    store: &WorkModelStore,
+    existing: &WorkItem,
+    expected: &WorkItem,
+) -> Result<()> {
     if existing.id != expected.id
         || existing.title != expected.title
         || existing.origin != expected.origin
         || existing.corrective_context != expected.corrective_context
-        || existing.corrective_audit != expected.corrective_audit
+        || existing
+            .corrective_audit
+            .as_ref()
+            .is_some_and(|audit| Some(audit) != expected.corrective_audit.as_ref())
         || existing.lineage.root_id != expected.lineage.root_id
         || existing.lineage.descendant_limit != expected.lineage.descendant_limit
         || existing.pending_enqueue != expected.pending_enqueue
@@ -1432,6 +1618,11 @@ fn verify_reusable_derived_work(existing: &WorkItem, expected: &WorkItem) -> Res
              lineage identity, and enqueue intent",
             expected.id
         );
+    }
+    if existing.corrective_audit.is_none() {
+        let mut reconciled = existing.clone();
+        reconciled.corrective_audit = expected.corrective_audit.clone();
+        store.write_work_item(&reconciled)?;
     }
     Ok(())
 }
@@ -1523,6 +1714,21 @@ fn count_charged_descendants(
 
 /// Take a blocking exclusive lock on a post-land operation so concurrent
 /// processors serialize and converge on the same effects.
+fn lock_origin(project_root: &Path, origin: &PostLandOrigin) -> Result<File> {
+    let directory = follow_ups_root(project_root).join(".locks");
+    fs::create_dir_all(&directory)?;
+    let path = directory.join(format!("{}.lock", operation_id_for(origin)));
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open landed-origin lock {}", path.display()))?;
+    flock(&file, FlockOperation::LockExclusive)
+        .map_err(std::io::Error::from)
+        .with_context(|| format!("lock landed origin {}", path.display()))?;
+    Ok(file)
+}
+
 fn lock_operation(dir: &Path, _operation_id: &str, _actor: &str) -> Result<File> {
     let path = dir.join("operation.lock");
     let file = OpenOptions::new()
@@ -2649,6 +2855,35 @@ mod tests {
         operation
     }
 
+    fn write_pre_audit_work_fixture(
+        root: &Path,
+        item: &WorkItem,
+        authorization: serde_json::Value,
+        charged: bool,
+    ) {
+        let fixture = serde_json::json!({
+            "id": item.id,
+            "title": item.title,
+            "origin": item.origin,
+            "authorization": authorization,
+            "lineage": {
+                "root_id": item.lineage.root_id,
+                "charged": charged,
+                "descendant_limit": item.lineage.descendant_limit,
+            },
+            "corrective_context": item.corrective_context,
+            "pending_enqueue": item.pending_enqueue,
+            "attempts": [],
+            "merge_candidates": [],
+        });
+        assert!(fixture.get("corrective_audit").is_none());
+        fs::write(
+            root.join(format!(".fluent/work/items/{}.json", item.id)),
+            serde_json::to_vec_pretty(&fixture).unwrap(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn deterministic_ids_keep_distinct_raw_identities_distinct() {
         assert_ne!(
@@ -2728,6 +2963,185 @@ mod tests {
             2,
             "completed legacy replay keeps one root and one derived Work Item"
         );
+    }
+
+    #[test]
+    fn legacy_discovery_recovers_from_batch_and_journal_without_operation_header() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        seed_root_work_item(tmp.path());
+        let authority = fresh_expertise_authority(tmp.path());
+        let batch = corrective_batch(tmp.path(), FollowUpSource::Learner, Some(authority));
+        let legacy = write_legacy_operation(tmp.path(), &batch);
+        let legacy_dir = operation_dir(tmp.path(), &legacy.operation_id);
+        fs::remove_file(legacy_dir.join("operation.json")).unwrap();
+
+        let recovered = record_post_land_operation(tmp.path(), &batch, None).unwrap();
+
+        assert_eq!(recovered.operation_id, legacy.operation_id);
+        assert!(legacy_dir.join("operation.json").exists());
+        assert!(!operation_dir(tmp.path(), &operation_id_for(&batch.origin)).exists());
+    }
+
+    #[test]
+    fn legacy_discovery_recovers_from_materialized_effects_without_journal_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        seed_root_work_item(tmp.path());
+        let authority = fresh_expertise_authority(tmp.path());
+        let batch = corrective_batch(tmp.path(), FollowUpSource::Learner, Some(authority));
+        let legacy = write_legacy_operation(tmp.path(), &batch);
+        replay_post_land_operation(tmp.path(), &legacy.operation_id).unwrap();
+        fs::remove_dir_all(operation_dir(tmp.path(), &legacy.operation_id)).unwrap();
+
+        let recovered = record_post_land_operation(tmp.path(), &batch, None).unwrap();
+
+        assert_eq!(recovered.operation_id, legacy.operation_id);
+        assert!(!operation_dir(tmp.path(), &operation_id_for(&batch.origin)).exists());
+    }
+
+    #[test]
+    fn legacy_discovery_rejects_ambiguous_partial_layouts() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        seed_root_work_item(tmp.path());
+        let authority = fresh_expertise_authority(tmp.path());
+        let batch = corrective_batch(tmp.path(), FollowUpSource::Learner, Some(authority));
+        write_legacy_operation(tmp.path(), &batch);
+        let current = operation_id_for(&batch.origin);
+        let current_dir = operation_dir(tmp.path(), &current);
+        fs::create_dir_all(&current_dir).unwrap();
+        write_journal(&current_dir.join("journal.json"), &PostLandJournal::empty(&current))
+            .unwrap();
+
+        let error = record_post_land_operation(tmp.path(), &batch, None)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("both legacy and current"));
+    }
+
+    #[test]
+    fn recovery_stage_uses_discovered_legacy_identity() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        seed_root_work_item(tmp.path());
+        let authority = fresh_expertise_authority(tmp.path());
+        let batch = corrective_batch(tmp.path(), FollowUpSource::Learner, Some(authority));
+        let legacy = write_legacy_operation(tmp.path(), &batch);
+
+        assert_eq!(
+            first_incomplete_stage_for_origin(tmp.path(), &batch.origin).as_deref(),
+            Some("observation")
+        );
+        assert_ne!(legacy.operation_id, operation_id_for(&batch.origin));
+    }
+
+    #[test]
+    fn pre_audit_work_is_backfilled_after_work_before_receipt_crash() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        seed_root_work_item(tmp.path());
+        let authority = fresh_expertise_authority(tmp.path());
+        let batch = corrective_batch(tmp.path(), FollowUpSource::Learner, Some(authority));
+        let legacy = write_legacy_operation(tmp.path(), &batch);
+        replay_post_land_operation(tmp.path(), &legacy.operation_id).unwrap();
+        let derived_id = format!("derived-{}-fu-1", legacy.operation_id);
+        let store = WorkModelStore::new(tmp.path());
+        let derived = store.read_work_item(&derived_id).unwrap();
+        write_pre_audit_work_fixture(
+            tmp.path(),
+            &derived,
+            serde_json::json!({"state": "execution-ready", "authority": "human"}),
+            true,
+        );
+        let journal_path = operation_dir(tmp.path(), &legacy.operation_id).join("journal.json");
+        let mut journal = read_journal(&journal_path, &legacy.operation_id).unwrap();
+        journal.completed = false;
+        journal.follow_ups[0].derived_work_item_id = None;
+        journal.follow_ups[0].queue_expected = false;
+        journal.follow_ups[0].queued = false;
+        write_journal(&journal_path, &journal).unwrap();
+
+        let replay = replay_post_land_operation(tmp.path(), &legacy.operation_id).unwrap();
+
+        assert_eq!(replay.work_items_created, 0);
+        let reconciled = store.read_work_item(&derived_id).unwrap();
+        assert!(reconciled.corrective_audit.is_some());
+        assert_eq!(
+            reconciled.authorization.authority(),
+            Some(ExecutionAuthority::Human)
+        );
+        assert!(reconciled.lineage.charged);
+    }
+
+    #[test]
+    fn completed_pre_audit_work_is_validated_and_backfilled_before_cleanup() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        seed_root_work_item(tmp.path());
+        let authority = fresh_expertise_authority(tmp.path());
+        let batch = corrective_batch(tmp.path(), FollowUpSource::Learner, Some(authority));
+        let legacy = write_legacy_operation(tmp.path(), &batch);
+        replay_post_land_operation(tmp.path(), &legacy.operation_id).unwrap();
+        let derived_id = format!("derived-{}-fu-1", legacy.operation_id);
+        let store = WorkModelStore::new(tmp.path());
+        let derived = store.read_work_item(&derived_id).unwrap();
+        write_pre_audit_work_fixture(
+            tmp.path(),
+            &derived,
+            serde_json::json!({"state": "proposed"}),
+            false,
+        );
+
+        assert!(post_land_operation_complete(tmp.path(), &batch.origin).unwrap());
+        assert!(
+            store
+                .read_work_item(&derived_id)
+                .unwrap()
+                .corrective_audit
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn receipt_does_not_bless_tampered_derived_work_identity() {
+        for field in [
+            "title",
+            "context",
+            "audit",
+            "lineage-root",
+            "lineage-limit",
+            "enqueue",
+        ] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            seed_root_work_item(tmp.path());
+            let authority = fresh_expertise_authority(tmp.path());
+            let batch = corrective_batch(tmp.path(), FollowUpSource::Learner, Some(authority));
+            let operation = record_post_land_operation(tmp.path(), &batch, None).unwrap();
+            replay_post_land_operation(tmp.path(), &operation.operation_id).unwrap();
+            let store = WorkModelStore::new(tmp.path());
+            let mut derived = store.read_work_item(DERIVED_ID).unwrap();
+            match field {
+                "title" => derived.title = "tampered after receipt".to_string(),
+                "context" => {
+                    derived.corrective_context.as_mut().unwrap().objective =
+                        "tampered objective".to_string()
+                }
+                "audit" => {
+                    derived.corrective_audit.as_mut().unwrap().learning_summary =
+                        "tampered learning".to_string()
+                }
+                "lineage-root" => derived.lineage.root_id = Some("different-root".to_string()),
+                "lineage-limit" => derived.lineage.descendant_limit = Some(999),
+                "enqueue" => derived.pending_enqueue.as_mut().unwrap().priority += 1,
+                _ => unreachable!(),
+            }
+            store.write_work_item(&derived).unwrap();
+
+            assert!(
+                replay_post_land_operation(tmp.path(), &operation.operation_id).is_err(),
+                "replay accepted tampered {field}"
+            );
+            assert!(
+                post_land_operation_complete(tmp.path(), &batch.origin).is_err(),
+                "completion accepted tampered {field}"
+            );
+        }
     }
 
     #[test]

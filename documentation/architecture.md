@@ -320,10 +320,13 @@ Item and Merge Candidate, and replays
 that operation. Operation, Observation, and derived Work identities use hashes
 of canonical component arrays, so delimiters and filename normalization cannot
 collapse distinct origins or follow-ups. When Fluent finds a V1 operation that
-predates hashed identities, recording, replay, and cleanup reuse its legacy
-operation path and its already-established Observation and Work ids. Fluent
-fails closed if both legacy and hashed operations exist for the same landed
-origin. Recording and replay hold the same
+predates hashed identities, recording, replay, cleanup, and failure reporting
+reuse its legacy operation path and its already-established Observation and
+Work ids. Discovery inventories operation, batch, journal, Observation, and
+derived-Work evidence under one landed-origin lock, so it can reconstruct a
+missing legacy operation header without creating duplicate effects. Fluent
+fails closed on malformed evidence or when both legacy and hashed identities
+exist for the same landed origin. Recording and replay hold the same
 per-operation lock while
 they read or replace durable state. A repeated recording must match both the
 stored operation identity and its verified batch, so a conflicting retry
@@ -361,8 +364,11 @@ corrective Work Item keyed by a deterministic id and linked to the
 Observation and its originating lineage root. Reusing that id requires the
 stored Work to match the complete expected provenance, corrective context,
 lineage root and limit, audit context, and enqueue intent; unrelated Work is
-rejected. Replay preserves mutable lifecycle state such as human authorization
-and its resulting lineage charge. The
+rejected. Replay and cleanup revalidate that immutable identity even after the
+journal records the derived Work. For pre-audit V1 Work records, Fluent verifies
+the legacy immutable fields and adds only the missing audit package; it preserves
+mutable lifecycle state such as human authorization and its resulting lineage
+charge. The
 derived Work also retains the accepted expected result, trusted authority,
 supporting evidence, unresolved-decision set, follow-up source, and learning
 summary. Fluent includes this audit package in corrective task instructions,
