@@ -349,7 +349,9 @@ commit, and requires the corrective requirement to equal the non-empty
 digest-matched anchor. Corrective proposals carry non-empty relative target
 paths whose raw spelling already matches their canonical normal components;
 absolute paths, parent/current-directory components, repeated separators, and
-trailing separators do not pass as lexical aliases. An `AGENTS.md` authority
+trailing separators do not pass as lexical aliases, and filesystem path inputs
+containing NUL or control characters are rejected before Git or filesystem
+access. An `AGENTS.md` authority
 must be the closest applicable ancestor for every target, including when a
 nested instruction overrides a root instruction.
 Later `HEAD` movement, working-tree edits, and untracked files cannot authorize

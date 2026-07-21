@@ -226,6 +226,12 @@ fn path_is_canonical_relative(path: &Path) -> bool {
     if path.as_os_str().is_empty() || !path.is_relative() {
         return false;
     }
+    let Some(raw) = path.to_str() else {
+        return false;
+    };
+    if raw.chars().any(char::is_control) {
+        return false;
+    }
     let mut canonical = PathBuf::new();
     for component in path.components() {
         let Component::Normal(component) = component else {
@@ -2424,21 +2430,54 @@ mod tests {
     }
 
     #[test]
-    fn gate_rejects_authority_path_traversal() {
+    fn gate_rejects_noncanonical_authority_path_matrix() {
         let tmp = tempfile::TempDir::new().unwrap();
         let anchor = "Retries stop after the configured cap";
-        write_authority(
-            tmp.path(),
-            ".fluent/expertise/retry.md",
-            &format!("{anchor}\n"),
-        );
-        let follow_up = corrective_follow_up(Some(locator(
-            AuthorityKind::ExpertiseEntry,
+        let context = corrective_context_sample();
+        for authority_path in [
+            "",
+            "/.fluent/expertise/retry.md",
+            ".",
+            ".fluent/expertise/./retry.md",
             ".fluent/expertise/../expertise/retry.md",
-            anchor,
-        )));
-
-        assert!(!classify_follow_up(tmp.path(), &follow_up).is_corrective());
+            ".fluent//expertise/retry.md",
+            ".fluent/expertise/retry.md/",
+            ".fluent/expertise/\0retry.md",
+            ".fluent/expertise/retry\n.md",
+            ".fluent/expertise/retry\u{7f}.md",
+        ] {
+            let authority = locator(
+                AuthorityKind::ExpertiseEntry,
+                authority_path,
+                anchor,
+            );
+            let reason = verify_authority(
+                tmp.path(),
+                "HEAD",
+                &authority,
+                &context,
+                &["src/retry.rs".to_string()],
+            )
+            .unwrap_err();
+            assert!(
+                reason.contains("not a normalized relative path"),
+                "non-canonical authority path {authority_path:?} reached a later boundary: {reason}"
+            );
+        }
+        for control in (0..=0x1f).chain(std::iter::once(0x7f)) {
+            let control = char::from_u32(control).unwrap();
+            let authority_path = format!(".fluent/expertise/retry{control}.md");
+            let authority = locator(AuthorityKind::ExpertiseEntry, &authority_path, anchor);
+            let reason = verify_authority(
+                tmp.path(),
+                "HEAD",
+                &authority,
+                &context,
+                &["src/retry.rs".to_string()],
+            )
+            .unwrap_err();
+            assert!(reason.contains("not a normalized relative path"));
+        }
     }
 
     #[cfg(unix)]
@@ -2583,17 +2622,30 @@ mod tests {
 
         for target in [
             "",
+            "/src/retry.rs",
             ".",
             "src/./retry.rs",
             "src//retry.rs",
             "src/retry.rs/",
             "src/../src/retry.rs",
+            "src/\0/retry.rs",
+            "src/retry\t.rs",
+            "src/retry\u{7f}.rs",
         ] {
             let mut follow_up = base.clone();
             follow_up.target_paths = vec![target.to_string()];
             assert!(
                 !classify_follow_up(tmp.path(), &follow_up).is_corrective(),
                 "lexically non-canonical target {target:?} must be rejected"
+            );
+        }
+        for codepoint in (0..=0x1f).chain(std::iter::once(0x7f)) {
+            let control = char::from_u32(codepoint).unwrap();
+            let mut follow_up = base.clone();
+            follow_up.target_paths = vec![format!("src/retry{control}.rs")];
+            assert!(
+                !classify_follow_up(tmp.path(), &follow_up).is_corrective(),
+                "control U+{codepoint:04X} must not survive target validation"
             );
         }
     }
