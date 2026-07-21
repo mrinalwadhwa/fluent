@@ -351,6 +351,7 @@ pub fn ensure_dispatch(
     if !work_item_exists(project_root, id) {
         bail!("Work Item {id:?} not found");
     }
+    ensure_lifecycle_eligible(project_root, id)?;
 
     let _lock = lock_queue(project_root)?;
     let mut ledger = read_ledger(project_root, id)?.unwrap_or_else(|| DispatchLedger::empty(id));
@@ -530,6 +531,7 @@ pub fn claim(
     work_item_id: &str,
     bound_attempt_id: &str,
 ) -> Result<Option<DispatchToken>> {
+    ensure_lifecycle_eligible(project_root, work_item_id)?;
     let _lock = lock_queue(project_root)?;
     let mut ledger = match read_ledger(project_root, work_item_id)? {
         Some(ledger) => ledger,
@@ -892,6 +894,36 @@ mod tests {
             read_ledger(dir.path(), "wi-abandoned").unwrap().is_none(),
             "no queue entry is created for abandoned Work"
         );
+    }
+
+    #[test]
+    fn automatic_dispatch_rejects_ineligible_work() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        write_work_item_json(
+            dir.path(),
+            "wi-proposed",
+            r#",\"authorization\":{\"state\":\"proposed\"}"#,
+        );
+        write_work_item_json(dir.path(), "wi-abandoned", r#",\"abandonment\":{}"#);
+
+        assert!(ensure_dispatch(dir.path(), "wi-proposed", "op-proposed", 1).is_err());
+        assert!(ensure_dispatch(dir.path(), "wi-abandoned", "op-abandoned", 1).is_err());
+        assert!(read_ledger(dir.path(), "wi-proposed").unwrap().is_none());
+        assert!(read_ledger(dir.path(), "wi-abandoned").unwrap().is_none());
+    }
+
+    #[test]
+    fn claim_rechecks_work_lifecycle() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        write_ready_work_item(dir.path(), "wi-abandoned");
+        add(dir.path(), "wi-abandoned", None).unwrap();
+        write_work_item_json(dir.path(), "wi-abandoned", r#",\"abandonment\":{}"#);
+
+        assert!(claim(dir.path(), "wi-abandoned", "attempt-1").is_err());
+        let ledger = read_ledger(dir.path(), "wi-abandoned").unwrap().unwrap();
+        assert_eq!(ledger.active().unwrap().status, DispatchStatus::Queued);
     }
 
     #[test]

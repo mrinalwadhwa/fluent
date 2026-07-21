@@ -319,7 +319,11 @@ Item, Attempt, Merge Candidate, and merged commit), records a versioned
 Item and Merge Candidate, and replays
 that operation. Operation, Observation, and derived Work identities use hashes
 of canonical component arrays, so delimiters and filename normalization cannot
-collapse distinct origins or follow-ups. Recording and replay hold the same
+collapse distinct origins or follow-ups. When Fluent finds a V1 operation that
+predates hashed identities, recording, replay, and cleanup reuse its legacy
+operation path and its already-established Observation and Work ids. Fluent
+fails closed if both legacy and hashed operations exist for the same landed
+origin. Recording and replay hold the same
 per-operation lock while
 they read or replace durable state. A repeated recording must match both the
 stored operation identity and its verified batch, so a conflicting retry
@@ -353,7 +357,9 @@ frozen decision even after configuration changes. It then derives one
 corrective Work Item keyed by a deterministic id and linked to the
 Observation and its originating lineage root. Reusing that id requires the
 stored Work to match the complete expected provenance, corrective context,
-lineage, authorization, and enqueue intent; unrelated Work is rejected. The
+lineage root and limit, audit context, and enqueue intent; unrelated Work is
+rejected. Replay preserves mutable lifecycle state such as human authorization
+and its resulting lineage charge. The
 derived Work also retains the accepted expected result, trusted authority,
 supporting evidence, unresolved-decision set, follow-up source, and learning
 summary. Fluent includes this audit package in corrective task instructions,
@@ -1678,7 +1684,9 @@ Automatic promotion enqueues through `ensure_dispatch`, which reconciles
 or creates one dispatch without reviving terminal history — a replayed
 promotion, materialization, or enqueue reuses the existing disposition
 rather than restoring canceled or terminal Work or charging lineage
-again.
+again. Automatic dispatch and claim paths apply the same lifecycle checks as
+explicit queueing, so proposed, abandoned, suspended, or land-pending Work
+cannot enter or resume execution through replay.
 
 `fluent queue list` prints each Work Item's active dispatch sorted by
 priority descending, then `queued_at` ascending, showing priority,
