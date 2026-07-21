@@ -3956,13 +3956,42 @@ fn concurrent_learner_retry_and_land_never_mutate_after_merge() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    assert!(
-        land.try_wait().unwrap().is_none(),
-        "land stays blocked while retry owns the shared boundary"
-    );
-
+    let land_lock_path =
+        fs::canonicalize(main_dir.join(".fluent/work/locks/land.lock")).unwrap();
+    let land_pid = land.id().to_string();
+    let land_lock_text = land_lock_path.to_string_lossy().into_owned();
+    let mut land_opened_shared_boundary = false;
+    for _ in 0..200 {
+        let output = std::process::Command::new("/usr/sbin/lsof")
+            .args([
+                "-a",
+                "-p",
+                &land_pid,
+                "-Fn",
+                "--",
+                &land_lock_text,
+            ])
+            .output()
+            .unwrap();
+        let expected = format!("n{}", land_lock_path.display());
+        if output.status.success()
+            && String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line == expected)
+        {
+            land_opened_shared_boundary = true;
+            break;
+        }
+        if land.try_wait().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     fs::write(&retry_release, "release\n").unwrap();
+    assert!(
+        land_opened_shared_boundary,
+        "the real land process opened the shared boundary while retry held its lock"
+    );
     let retry_output = retry.wait_with_output().unwrap();
     let land_output = land.wait_with_output().unwrap();
 
