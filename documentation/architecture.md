@@ -428,10 +428,12 @@ candidate worktree and index to the candidate's stored `merged_commit` before
 launch, so an interrupted unrecorded Learner commit cannot become the next
 retry's baseline. The Learner diff uses the persisted accepted base. For a
 legacy merged TaskOutput without that field, recovery reads the retained
-candidate's rebase reflog to recover the exact target tip; this includes every
-accepted candidate and merge-fix commit while excluding target-only history.
-Only repositories whose reflog predates that sequence fall back to compatible
-first-parent reconstruction.
+candidate's rebase reflog only when it contains one intact session whose start
+names the recorded target branch and whose finish returns to the retained
+candidate ref. Both endpoints must be ancestors of the stored merged commit,
+which includes accepted rebase rewrites and merge-fix commits while excluding
+target-only history. Missing, partial, expired, or repeated sessions fail
+closed; recovery never guesses the base by counting commits.
 Before invoking the coder, Fluent clones the merged repository without hard
 links into a disposable directory and creates a sibling temporary project for
 the draft. The prompt, diff command, current directory, and draft path name only

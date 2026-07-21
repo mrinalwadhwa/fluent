@@ -1030,54 +1030,107 @@ fn try_learn(
 }
 
 /// Recover the immutable accepted base for an already-merged legacy Attempt
-/// whose TaskOutput predates `base_commit`. Prefer the retained candidate
-/// branch's durable rebase reflog, whose start entry is the exact target tip;
-/// fall back to first-parent ancestry only for older repositories without that
-/// reflog sequence.
+/// whose TaskOutput predates `base_commit`. Recovery succeeds only from one
+/// intact rebase session bound to the retained candidate and original target;
+/// missing, partial, or repeated sessions fail closed.
 fn recover_legacy_accepted_base(
     workspace_path: &Path,
     attempt: &Attempt,
     merged_commit: &str,
 ) -> Result<String> {
+    let candidate_ref = symbolic_head(workspace_path)?.ok_or_else(|| {
+        anyhow::anyhow!("cannot recover accepted diff base: candidate HEAD is detached")
+    })?;
+    let source_branches: HashSet<&str> = attempt
+        .tasks
+        .iter()
+        .filter(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+        .filter_map(|task| task.output.as_ref().map(|output| output.source_branch.as_str()))
+        .collect();
+    if source_branches.len() != 1 {
+        bail!(
+            "cannot recover accepted diff base: completed Writes do not identify one source branch"
+        );
+    }
+    let source_branch = source_branches
+        .into_iter()
+        .next()
+        .expect("one source branch checked");
     let output = git::run_raw(
         workspace_path,
         &["reflog", "show", "--format=%H%x09%gs", "HEAD"],
     )?;
-    if output.status.success() {
-        let reflog = String::from_utf8_lossy(&output.stdout);
-        let mut matching_rebase = false;
-        for line in reflog.lines() {
-            let Some((commit, subject)) = line.split_once('\t') else {
-                continue;
-            };
-            if !matching_rebase
-                && commit == merged_commit
-                && subject.starts_with("rebase (finish):")
-            {
-                matching_rebase = true;
-                continue;
+    if !output.status.success() {
+        bail!("cannot recover accepted diff base: candidate reflog is unavailable");
+    }
+    let reflog = String::from_utf8(output.stdout)
+        .map_err(|_| anyhow::anyhow!("cannot recover accepted diff base: reflog is not UTF-8"))?;
+    let (base, rebased_tip) = parse_exact_rebase_base(&reflog, &candidate_ref, source_branch)?;
+
+    let ensure_ancestor = |ancestor: &str, descendant: &str, description: &str| -> Result<()> {
+        let ancestry = git::run_raw(
+            workspace_path,
+            &["merge-base", "--is-ancestor", ancestor, descendant],
+        )?;
+        if !ancestry.status.success() {
+            bail!("cannot recover accepted diff base: {description}");
+        }
+        Ok(())
+    };
+    ensure_ancestor(
+        &base,
+        &rebased_tip,
+        "rebase start is not an ancestor of its finish",
+    )?;
+    ensure_ancestor(
+        &rebased_tip,
+        merged_commit,
+        "rebase finish is not an ancestor of merged commit",
+    )?;
+    Ok(base)
+}
+
+fn parse_exact_rebase_base(
+    reflog: &str,
+    candidate_ref: &str,
+    source_branch: &str,
+) -> Result<(String, String)> {
+    let entries: Vec<(&str, &str)> = reflog
+        .lines()
+        .map(|line| {
+            line.split_once('\t').ok_or_else(|| {
+                anyhow::anyhow!("cannot recover accepted diff base: malformed reflog entry")
+            })
+        })
+        .collect::<Result<_>>()?;
+    let expected_finish = format!("rebase (finish): returning to {candidate_ref}");
+    let expected_start = format!("rebase (start): checkout {source_branch}");
+    let mut matching_finishes = 0usize;
+    let mut sessions = Vec::new();
+
+    for (index, (finish_commit, subject)) in entries.iter().enumerate() {
+        if *subject != expected_finish {
+            continue;
+        }
+        matching_finishes += 1;
+        for (start_commit, older_subject) in entries.iter().skip(index + 1) {
+            if older_subject.starts_with("rebase (finish):") {
+                break;
             }
-            if matching_rebase && subject.starts_with("rebase (start):") {
-                return Ok(commit.to_string());
+            if older_subject.starts_with("rebase (start):") {
+                if *older_subject == expected_start {
+                    sessions.push(((*start_commit).to_string(), (*finish_commit).to_string()));
+                }
+                break;
             }
         }
     }
 
-    let write_commits = attempt
-        .tasks
-        .iter()
-        .filter(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
-        .filter(|task| task.output.is_some())
-        .count();
-    if write_commits == 0 {
-        bail!("cannot recover accepted diff base: Attempt has no completed Write output");
+    match sessions.as_slice() {
+        [session] if matching_finishes == 1 => Ok(session.clone()),
+        [] => bail!("cannot recover accepted diff base: exact rebase provenance is unavailable"),
+        _ => bail!("cannot recover accepted diff base: rebase provenance is ambiguous"),
     }
-    let revision = format!("{merged_commit}~{write_commits}");
-    git::run_stdout(
-        workspace_path,
-        &["rev-parse", "--verify", &format!("{revision}^{{commit}}")],
-        "recover legacy accepted diff base",
-    )
 }
 
 /// The outcome of confining the Learner's commit: the expertise it was allowed
@@ -1745,6 +1798,97 @@ mod tests {
     use crate::work_model::AttemptKind;
     use crate::work_model::WorkItemAbandonment;
     use crate::work_model::{Attempt, CoderMapping, TaskArtifactArea, WorkspaceAccess};
+
+    #[test]
+    fn exact_legacy_rebase_base_accepts_post_rebase_fix() {
+        let reflog = concat!(
+            "merged\tcommit: Apply accepted merge fix\n",
+            "rebased\trebase (finish): returning to refs/heads/work/candidate\n",
+            "rebased\trebase (pick): Add accepted change\n",
+            "base\trebase (start): checkout main\n",
+        );
+
+        assert_eq!(
+            parse_exact_rebase_base(
+                reflog,
+                "refs/heads/work/candidate",
+                "main",
+            )
+            .unwrap(),
+            ("base".to_string(), "rebased".to_string())
+        );
+    }
+
+    #[test]
+    fn exact_legacy_rebase_base_rejects_multiple_sessions() {
+        let reflog = concat!(
+            "tip-2\trebase (finish): returning to refs/heads/work/candidate\n",
+            "base-2\trebase (start): checkout main\n",
+            "tip-1\trebase (finish): returning to refs/heads/work/candidate\n",
+            "base-1\trebase (start): checkout main\n",
+        );
+
+        let error = parse_exact_rebase_base(
+            reflog,
+            "refs/heads/work/candidate",
+            "main",
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn exact_legacy_rebase_base_rejects_partial_session() {
+        let reflog = concat!(
+            "tip\trebase (finish): returning to refs/heads/work/candidate\n",
+            "picked\trebase (pick): Add accepted change\n",
+        );
+
+        let error = parse_exact_rebase_base(
+            reflog,
+            "refs/heads/work/candidate",
+            "main",
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("exact rebase provenance"));
+    }
+
+    #[test]
+    fn exact_legacy_rebase_base_accepts_rewritten_and_noop_sessions() {
+        for middle in [
+            "",
+            "tip\trebase (squash): Combine accepted changes\n",
+            "tip\trebase (reword): Clarify accepted change\n",
+            "tip\trebase (pick): Keep accepted change\n",
+        ] {
+            let reflog = format!(
+                "tip\trebase (finish): returning to refs/heads/work/candidate\n{middle}base\trebase (start): checkout main\n"
+            );
+            assert_eq!(
+                parse_exact_rebase_base(
+                    &reflog,
+                    "refs/heads/work/candidate",
+                    "main",
+                )
+                .unwrap(),
+                ("base".to_string(), "tip".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn exact_legacy_rebase_base_rejects_expired_reflog() {
+        let error = parse_exact_rebase_base(
+            "",
+            "refs/heads/work/candidate",
+            "main",
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("exact rebase provenance"));
+    }
 
     #[cfg(unix)]
     #[test]
