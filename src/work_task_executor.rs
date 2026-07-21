@@ -4173,7 +4173,8 @@ mod tests {
         let expertise_index_path = workspace.join(".fluent/expertise/INDEX.md");
 
         let review_paths = "- /tmp/review-1/review.md\n- /tmp/review-2/review.md";
-        let tester_paths = "- /tmp/tester-1/tester-results.json\n- /tmp/tester-2/tester-results.json";
+        let tester_paths =
+            "- /tmp/tester-1/tester-results.json\n- /tmp/tester-2/tester-results.json";
         let diff_command = "git -C '/tmp/workspace' diff 'main...HEAD'";
         let draft_path = "/tmp/learner/follow-up-draft.json";
 

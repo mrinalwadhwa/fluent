@@ -2243,7 +2243,6 @@ exit 0
     assert!(String::from_utf8_lossy(&output.stdout).contains("Completed Task attempt-1-write-1"));
 }
 
-
 /// A mock coder that drives write and review rounds like `loop_mock_script`, but
 /// makes the Learner invocation fail by exiting non-zero.
 fn learner_failing_mock_script() -> String {
@@ -2373,7 +2372,11 @@ fn learner_retry_completes_existing_record_idempotently() {
         &main_dir.join(".fluent/work/artifacts/work-1/attempt-1/learner/handoff.json"),
     );
     let follow_ups = handoff["follow_ups"].as_array().unwrap();
-    assert_eq!(follow_ups.len(), 1, "one accepted follow-up, not duplicated");
+    assert_eq!(
+        follow_ups.len(),
+        1,
+        "one accepted follow-up, not duplicated"
+    );
     assert_eq!(follow_ups[0]["id"], "fu-1");
 }
 
@@ -2577,7 +2580,13 @@ fn learner_handoff_does_not_materialize_before_land() {
         .map(|entries| {
             entries
                 .filter_map(|entry| entry.ok())
-                .filter(|entry| entry.path().extension().map(|e| e == "json").unwrap_or(false))
+                .filter(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .map(|e| e == "json")
+                        .unwrap_or(false)
+                })
                 .count()
         })
         .unwrap_or(0);

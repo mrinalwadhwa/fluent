@@ -774,7 +774,8 @@ fn try_learn(
     let diff_command =
         review_diff_command::render_review_diff_command(&workspace_path, &diff_range);
 
-    let handoff_dir = project_root.join(crate::learner::handoff_dir_rel(&work_item_id, &attempt_id));
+    let handoff_dir =
+        project_root.join(crate::learner::handoff_dir_rel(&work_item_id, &attempt_id));
 
     (config.run_coder)(&LearnerCoderRequest {
         workspace_path: &workspace_path,
@@ -1112,7 +1113,13 @@ fn interpret_reviews(
     // Run the Learner for every code-producing Attempt, whether or not a
     // reviewer raised a finding.
     if let Some(ref learner_config) = learner_config {
-        run_learner_step(project_root, &mut item, attempt_index, &candidate_id, learner_config);
+        run_learner_step(
+            project_root,
+            &mut item,
+            attempt_index,
+            &candidate_id,
+            learner_config,
+        );
     }
     store.write_work_item(&item)?;
     Ok(WorkAttemptRunOutcome::MergeCandidateReady { candidate_id })
@@ -2327,9 +2334,11 @@ mod tests {
         attempt.tasks[0].output = Some(output.clone());
 
         let review1_path = work_artifact_path("work-1", "attempt-1", "attempt-1-review-1-tests");
-        attempt
-            .tasks
-            .push(review_task_with_artifact("attempt-1-review-1-tests", "tests", &review1_path));
+        attempt.tasks.push(review_task_with_artifact(
+            "attempt-1-review-1-tests",
+            "tests",
+            &review1_path,
+        ));
         let review1_dir = project_root.join(&review1_path);
         fs::create_dir_all(&review1_dir).unwrap();
         fs::write(review1_dir.join("review.md"), "Verdict: pass\n").unwrap();
@@ -2360,7 +2369,9 @@ mod tests {
 
     /// A Learner coder stub that writes an untrusted draft into the handoff
     /// surface and makes no expertise commit.
-    fn draft_only_coder(draft_json: &'static str) -> impl Fn(&LearnerCoderRequest<'_>) -> Result<()> {
+    fn draft_only_coder(
+        draft_json: &'static str,
+    ) -> impl Fn(&LearnerCoderRequest<'_>) -> Result<()> {
         move |request: &LearnerCoderRequest<'_>| {
             fs::create_dir_all(request.handoff_dir).unwrap();
             fs::write(
@@ -2852,8 +2863,7 @@ mod tests {
         )
         .unwrap();
 
-        let expertise_head =
-            git::run_stdout(&workspace, &["rev-parse", "HEAD"], "head").unwrap();
+        let expertise_head = git::run_stdout(&workspace, &["rev-parse", "HEAD"], "head").unwrap();
         assert_ne!(expertise_head, base);
         let stored = store.read_work_item("work-1").unwrap();
         assert_eq!(
@@ -2909,18 +2919,17 @@ mod tests {
             "the candidate is still produced when the learner commit is discarded"
         );
         let head_after = git::run_stdout(&workspace, &["rev-parse", "HEAD"], "after").unwrap();
-        assert_eq!(head_after, base, "an out-of-bounds learner commit is discarded");
+        assert_eq!(
+            head_after, base,
+            "an out-of-bounds learner commit is discarded"
+        );
         let stored = store.read_work_item("work-1").unwrap();
         assert_eq!(
             stored.merge_candidates[0].candidate_commit, base,
             "the candidate commit stays at the pre-learner tip"
         );
         assert!(
-            stored.attempts[0]
-                .learning
-                .as_ref()
-                .unwrap()
-                .is_failed(),
+            stored.attempts[0].learning.as_ref().unwrap().is_failed(),
             "an out-of-bounds learner commit records a retryable failure"
         );
     }

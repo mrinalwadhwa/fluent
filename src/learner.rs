@@ -36,7 +36,10 @@ pub fn handoff_dir_rel(work_item_id: &str, attempt_id: &str) -> String {
 
 /// Relative path of the Learner's untrusted draft.
 pub fn draft_path_rel(work_item_id: &str, attempt_id: &str) -> String {
-    format!("{}/{DRAFT_FILE_NAME}", handoff_dir_rel(work_item_id, attempt_id))
+    format!(
+        "{}/{DRAFT_FILE_NAME}",
+        handoff_dir_rel(work_item_id, attempt_id)
+    )
 }
 
 /// Relative path of the immutable handoff.
@@ -50,7 +53,11 @@ pub fn handoff_path_rel(work_item_id: &str, attempt_id: &str) -> String {
 /// Read the Learner's untrusted draft. A missing draft is treated as an empty
 /// draft: a Learner that refined only expertise, or nothing, still succeeds with
 /// a handoff carrying zero follow-ups.
-pub fn read_draft(project_root: &Path, work_item_id: &str, attempt_id: &str) -> Result<LearnerDraftV1> {
+pub fn read_draft(
+    project_root: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+) -> Result<LearnerDraftV1> {
     let path = project_root.join(draft_path_rel(work_item_id, attempt_id));
     match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes)
@@ -111,7 +118,10 @@ fn validate_follow_up(follow_up: &FollowUpDraftV1) -> Result<()> {
             )
         })?;
         context.validate().with_context(|| {
-            format!("corrective follow-up {:?} has an incomplete context", follow_up.id)
+            format!(
+                "corrective follow-up {:?} has an incomplete context",
+                follow_up.id
+            )
         })?;
     } else if follow_up.corrective_context.is_some() {
         bail!(
@@ -167,12 +177,16 @@ pub fn write_handoff(
 /// Load a handoff through its reference, verifying the on-disk content matches
 /// the reference digest before returning it. A digest mismatch means the handoff
 /// was altered after it was produced and must not be trusted.
-pub fn load_verified_handoff(project_root: &Path, reference: &ArtifactRef) -> Result<LearnerHandoffV1> {
+pub fn load_verified_handoff(
+    project_root: &Path,
+    reference: &ArtifactRef,
+) -> Result<LearnerHandoffV1> {
     if !reference.is_relative() {
         bail!("handoff reference {:?} is not relative", reference.path);
     }
     let path = project_root.join(&reference.path);
-    let bytes = std::fs::read(&path).with_context(|| format!("read handoff at {}", path.display()))?;
+    let bytes =
+        std::fs::read(&path).with_context(|| format!("read handoff at {}", path.display()))?;
     let actual = digest(&bytes);
     if actual != reference.digest {
         bail!(
@@ -215,8 +229,14 @@ mod tests {
                 evidence: Vec::new(),
             }],
         };
-        let handoff = stamp_handoff(draft, "work-1", "attempt-1", "attempt-1-merge-candidate", Vec::new())
-            .unwrap();
+        let handoff = stamp_handoff(
+            draft,
+            "work-1",
+            "attempt-1",
+            "attempt-1-merge-candidate",
+            Vec::new(),
+        )
+        .unwrap();
         assert_eq!(handoff.source_work_item_id, "work-1");
         assert_eq!(handoff.source_attempt_id, "attempt-1");
         assert_eq!(
@@ -325,7 +345,11 @@ mod tests {
         );
         let reference = write_handoff(tmp.path(), "work-1", "attempt-1", &handoff).unwrap();
         let path = tmp.path().join(&reference.path);
-        std::fs::write(&path, b"{\"schema_version\":1,\"source_work_item_id\":\"tampered\"}").unwrap();
+        std::fs::write(
+            &path,
+            b"{\"schema_version\":1,\"source_work_item_id\":\"tampered\"}",
+        )
+        .unwrap();
         assert!(load_verified_handoff(tmp.path(), &reference).is_err());
     }
 
