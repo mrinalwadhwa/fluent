@@ -365,7 +365,9 @@ processors of the same operation serialize on an operation lock. Every
 automatic promotion and human authorization also takes a lock keyed by the
 root lineage before it counts or records charges, so different operations
 cannot overspend one lineage. The lock order is follow-up operation, root
-lineage, then Work Item; callers release model locks before touching the queue.
+lineage, Work Item, then queue. Callers release the lineage and Work locks before
+touching the queue; replay retains its outer operation lock through the queue
+stage so another processor cannot observe a partially completed journal.
 The Observation, Work Item, lineage charge, and queue entry each converge
 exactly once.
 

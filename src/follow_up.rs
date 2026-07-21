@@ -1099,7 +1099,7 @@ fn ensure_derived_work(
     // count/authorize/create decision across them so every contender observes
     // the latest durable charges. The operation lock is already held; release
     // this root lock before the later queue stage.
-    let _lineage_lock = crate::lineage_lock::acquire(project_root, &root_id)
+    let _lineage_lock = crate::lineage_lock::acquire_automatic(project_root, &root_id)
         .with_context(|| format!("lock corrective Work lineage {root_id:?}"))?;
 
     // Execute mode authorizes automatically while lineage budget remains;
@@ -1195,6 +1195,69 @@ fn verify_reusable_derived_work(existing: &WorkItem, expected: &WorkItem) -> Res
             expected.id
         );
     }
+    Ok(())
+}
+
+/// Authorize one proposed derived Work Item under human authority and reconcile
+/// its durable queue intent. Human and automatic charging share the same root
+/// lineage lock, while the Work lock protects the item-level transition.
+pub fn authorize_derived_work_item(
+    project_root: &Path,
+    store: &WorkModelStore,
+    id: &str,
+) -> Result<()> {
+    let initial = match store.read_work_item(id) {
+        Ok(item) => item,
+        Err(WorkModelStorageError::ReadFile { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            bail!("Work Item {id:?} not found");
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let root_id = initial.lineage.root_id(&initial.id).to_string();
+    let lineage_lock = crate::lineage_lock::acquire_human(project_root, &root_id)
+        .with_context(|| format!("acquire lineage lock for {root_id:?}"))?;
+    let work_lock_path = project_root
+        .join(".fluent/work/locks")
+        .join(id)
+        .join("authorize.lock");
+    let work_lock = crate::lease::acquire(&work_lock_path)
+        .with_context(|| format!("acquire authorization lock for Work Item {id:?}"))?;
+
+    let mut item = match store.read_work_item(id) {
+        Ok(item) => item,
+        Err(WorkModelStorageError::ReadFile { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            bail!("Work Item {id:?} not found");
+        }
+        Err(error) => return Err(error.into()),
+    };
+    item.ensure_not_abandoned()?;
+    if item.authorization.is_proposed() {
+        item.authorize_execution(ExecutionAuthority::Human)?;
+    }
+    if item.pending_enqueue.is_none() {
+        let priority = config::resolve_follow_up_policy(project_root)
+            .map(|policy| policy.learner_priority.value)
+            .unwrap_or(0);
+        item.set_enqueue_intent(priority, format!("authorize-{id}"));
+    }
+    let intent = item
+        .pending_enqueue
+        .clone()
+        .expect("enqueue intent was just ensured");
+    store.write_work_item(&item)?;
+    drop(work_lock);
+    drop(lineage_lock);
+
+    crate::queue::ensure_dispatch(
+        project_root,
+        id,
+        &intent.origin_operation_id,
+        intent.priority,
+    )?;
     Ok(())
 }
 
@@ -2408,6 +2471,92 @@ mod tests {
             1,
             "different operations cannot overspend the one-slot lineage"
         );
+    }
+
+    #[test]
+    fn automatic_promotion_contends_with_human_authorization_on_root_lineage() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root_id = "lineage-contention-root-unique";
+        let store = WorkModelStore::new(tmp.path());
+        store
+            .create_work_item(&WorkItem::planned(root_id, "Root work"))
+            .unwrap();
+        write_project_policy(
+            tmp.path(),
+            "follow-up:\n  mode: execute\n  descendant-limit: 1\n",
+        );
+
+        let mut human = WorkItem::derived_corrective(
+            "human-descendant",
+            "Human override",
+            DerivedProvenance {
+                work_item_id: Some(root_id.to_string()),
+                ..Default::default()
+            },
+            corrective_context_sample(),
+            WorkLineage::descendant_of(root_id, Some(1)),
+            None,
+        )
+        .unwrap();
+        human.set_enqueue_intent(0, "human-descendant");
+        store.create_work_item(&human).unwrap();
+
+        let authority = fresh_expertise_authority(tmp.path());
+        let mut automatic =
+            corrective_batch(tmp.path(), FollowUpSource::Learner, Some(authority));
+        automatic.origin.work_item_id = root_id.to_string();
+        let automatic_id = derived_work_item_id(
+            &operation_id_for(&automatic.origin),
+            &automatic.follow_ups[0].id,
+        );
+
+        let human_acquired = tmp.path().join("human-lineage-acquired");
+        let human_release = tmp.path().join("human-lineage-release");
+        let automatic_blocked = tmp.path().join("automatic-lineage-blocked");
+        unsafe {
+            std::env::set_var("FLUENT_TEST_LINEAGE_ROOT", root_id);
+            std::env::set_var("FLUENT_TEST_HUMAN_LINEAGE_ACQUIRED_PATH", &human_acquired);
+            std::env::set_var("FLUENT_TEST_HUMAN_LINEAGE_RELEASE_PATH", &human_release);
+            std::env::set_var("FLUENT_TEST_AUTOMATIC_LINEAGE_BLOCKED_PATH", &automatic_blocked);
+        }
+
+        std::thread::scope(|scope| {
+            let human_run = scope.spawn(|| {
+                authorize_derived_work_item(tmp.path(), &store, "human-descendant")
+            });
+            for _ in 0..500 {
+                if human_acquired.exists() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+
+            let automatic_run = scope.spawn(|| process_landed_batch(tmp.path(), &automatic, None));
+            for _ in 0..500 {
+                if automatic_blocked.exists() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let contended = human_acquired.exists() && automatic_blocked.exists();
+            fs::write(&human_release, "release\n").unwrap();
+            human_run.join().unwrap().unwrap();
+            automatic_run.join().unwrap().unwrap();
+            assert!(contended, "both authorization paths reached the shared critical boundary");
+        });
+
+        unsafe {
+            std::env::remove_var("FLUENT_TEST_LINEAGE_ROOT");
+            std::env::remove_var("FLUENT_TEST_HUMAN_LINEAGE_ACQUIRED_PATH");
+            std::env::remove_var("FLUENT_TEST_HUMAN_LINEAGE_RELEASE_PATH");
+            std::env::remove_var("FLUENT_TEST_AUTOMATIC_LINEAGE_BLOCKED_PATH");
+        }
+
+        let human = store.read_work_item("human-descendant").unwrap();
+        let automatic = store.read_work_item(&automatic_id).unwrap();
+        assert!(human.lineage.charged);
+        assert!(!automatic.lineage.charged);
+        assert!(automatic.authorization.is_proposed());
     }
 
     #[test]
