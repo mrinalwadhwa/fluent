@@ -135,6 +135,8 @@ fn run_coordinator(
                 break;
             }
 
+            recover_and_reconcile(project_root)?;
+
             let mut spawned = false;
             for (token, lease) in claim_available(project_root, capacity)? {
                 let handle = scope.spawn(move || {
@@ -227,6 +229,151 @@ pub fn project_local_capacity_used(project_root: &Path) -> Result<usize> {
     Ok(used)
 }
 
+// -------------------------------------------------------------------------
+// Recovery and reconciliation
+// -------------------------------------------------------------------------
+
+/// Reconcile the queue against durable Work model state before claiming fresh
+/// Work. Recovers stale claims, cancels abandoned queued Work, blocks invalid
+/// references, and reflects human-resumed suspensions. One bad entry never
+/// stalls the others.
+pub fn recover_and_reconcile(project_root: &Path) -> Result<()> {
+    for ledger in queue::list_ledgers(project_root)? {
+        let work_item_id = ledger.work_item_id.clone();
+        let Some(dispatch) = ledger.latest() else {
+            continue;
+        };
+        let result = match dispatch.status {
+            DispatchStatus::Queued => reconcile_queued(project_root, &work_item_id),
+            DispatchStatus::Claimed | DispatchStatus::Running => {
+                reconcile_claim(project_root, &work_item_id, dispatch.bound_attempt_id.as_deref())
+            }
+            DispatchStatus::NeedsUser => {
+                reconcile_suspension(project_root, &work_item_id, dispatch.bound_attempt_id.as_deref())
+            }
+            _ => Ok(()),
+        };
+        if let Err(error) = result {
+            eprintln!("[scheduler] recovery skipped {work_item_id}: {error}");
+        }
+    }
+    Ok(())
+}
+
+/// A queued dispatch that has since become abandoned is canceled; one that
+/// references missing, malformed, or non-executable Work is blocked. Both leave
+/// other eligible entries untouched.
+fn reconcile_queued(project_root: &Path, work_item_id: &str) -> Result<()> {
+    let store = WorkModelStore::new(project_root);
+    match store.read_work_item(work_item_id) {
+        Ok(item) => {
+            if item.abandonment.is_some() {
+                queue::cancel_active(project_root, work_item_id)?;
+            } else if item.authorization.is_proposed() {
+                queue::block_active(
+                    project_root,
+                    work_item_id,
+                    "Work Item is not execution-ready",
+                )?;
+            }
+            Ok(())
+        }
+        Err(error) if is_missing(&error) => {
+            queue::block_active(project_root, work_item_id, "Work Item not found")?;
+            Ok(())
+        }
+        Err(_) => {
+            queue::block_active(
+                project_root,
+                work_item_id,
+                "Work Item could not be read",
+            )?;
+            Ok(())
+        }
+    }
+}
+
+/// A claim whose bound-Attempt lease is dead is recovered: an unbound or
+/// never-created binding returns to `queued` for a fresh single Attempt, a
+/// terminal Attempt reconciles the dispatch from its outcome, and a nonterminal
+/// Attempt returns to `queued` with its binding preserved so the same Attempt
+/// resumes.
+fn reconcile_claim(
+    project_root: &Path,
+    work_item_id: &str,
+    bound_attempt_id: Option<&str>,
+) -> Result<()> {
+    if lease::is_leased(&queue::dispatch_lease_path(project_root, work_item_id)) {
+        return Ok(());
+    }
+
+    match bound_attempt_terminal_status(project_root, work_item_id, bound_attempt_id)? {
+        BoundAttemptState::Unbound => {
+            queue::requeue_active(project_root, work_item_id, true)?;
+        }
+        BoundAttemptState::Nonterminal => {
+            queue::requeue_active(project_root, work_item_id, false)?;
+        }
+        BoundAttemptState::Terminal(status) => {
+            queue::reconcile_active(project_root, work_item_id, status)?;
+        }
+    }
+    Ok(())
+}
+
+/// A needs-user dispatch whose bound Attempt has been resumed to a new terminal
+/// outcome reconciles to that outcome; one still suspended is left untouched.
+fn reconcile_suspension(
+    project_root: &Path,
+    work_item_id: &str,
+    bound_attempt_id: Option<&str>,
+) -> Result<()> {
+    if let BoundAttemptState::Terminal(status) =
+        bound_attempt_terminal_status(project_root, work_item_id, bound_attempt_id)?
+    {
+        if status != DispatchStatus::NeedsUser {
+            queue::reconcile_active(project_root, work_item_id, status)?;
+        }
+    }
+    Ok(())
+}
+
+enum BoundAttemptState {
+    Unbound,
+    Nonterminal,
+    Terminal(DispatchStatus),
+}
+
+fn bound_attempt_terminal_status(
+    project_root: &Path,
+    work_item_id: &str,
+    bound_attempt_id: Option<&str>,
+) -> Result<BoundAttemptState> {
+    let Some(attempt_id) = bound_attempt_id else {
+        return Ok(BoundAttemptState::Unbound);
+    };
+    let store = WorkModelStore::new(project_root);
+    let item = store.read_work_item(work_item_id)?;
+    let Some(attempt) = item.attempts.iter().find(|a| a.id == attempt_id) else {
+        // The binding was recorded but the Attempt was never created.
+        return Ok(BoundAttemptState::Unbound);
+    };
+    Ok(match attempt.status {
+        AttemptStatus::Complete => BoundAttemptState::Terminal(DispatchStatus::CandidateReady),
+        AttemptStatus::Failed => BoundAttemptState::Terminal(DispatchStatus::Failed),
+        AttemptStatus::NeedsUser => BoundAttemptState::Terminal(DispatchStatus::NeedsUser),
+        _ => BoundAttemptState::Nonterminal,
+    })
+}
+
+fn is_missing(error: &crate::work_model::WorkModelStorageError) -> bool {
+    matches!(
+        error,
+        crate::work_model::WorkModelStorageError::ReadFile { source, .. }
+            if source.kind() == std::io::ErrorKind::NotFound
+    )
+}
+
 /// Claim a queued dispatch, durably bind exactly one Attempt, launch it, and
 /// reconcile the dispatch from the Attempt's outcome. Never invokes merge
 /// logic.
@@ -316,9 +463,18 @@ pub fn start_or_reuse(project_root: &Path) -> Result<CoordinatorStart> {
     }
 }
 
-/// The Attempt id a fresh dispatch will bind. Reuses a non-terminal Attempt for
-/// recovery; otherwise allocates the next id.
+/// The Attempt id a dispatch will bind. A queued dispatch that still carries a
+/// binding — a stale claim returned to the queue for resume — reuses that exact
+/// Attempt; otherwise a fresh id is allocated so a requeue after a terminal
+/// Attempt opens a new one.
 fn resolve_bound_attempt_id(project_root: &Path, work_item_id: &str) -> Result<String> {
+    if let Some(ledger) = queue::read_ledger(project_root, work_item_id)? {
+        if let Some(active) = ledger.active() {
+            if let Some(bound) = &active.bound_attempt_id {
+                return Ok(bound.clone());
+            }
+        }
+    }
     let store = WorkModelStore::new(project_root);
     let item = store.read_work_item(work_item_id)?;
     Ok(item.next_attempt_id())
@@ -686,6 +842,229 @@ mod tests {
         assert!(
             claim_available(dir.path(), 4).unwrap().is_empty(),
             "a live claim is not re-dispatched"
+        );
+    }
+
+    /// A runner that records the Attempt ids it was launched with, so a test can
+    /// prove recovery resumed the same Attempt rather than opening a new one.
+    struct AttemptRecordingRunner {
+        outcome: AttemptOutcome,
+        attempts: std::sync::Mutex<Vec<String>>,
+    }
+    impl AttemptRecordingRunner {
+        fn new(outcome: AttemptOutcome) -> Self {
+            Self {
+                outcome,
+                attempts: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+    impl AttemptRunner for AttemptRecordingRunner {
+        fn run(&self, _p: &Path, _wi: &str, attempt_id: &str) -> Result<AttemptOutcome> {
+            self.attempts.lock().unwrap().push(attempt_id.to_string());
+            Ok(self.outcome)
+        }
+    }
+
+    /// Create a bound Attempt in a given status on an existing Work Item.
+    fn create_attempt(project_root: &Path, work_item_id: &str, attempt_id: &str, status: AttemptStatus) {
+        let store = WorkModelStore::new(project_root);
+        let mut item = store.read_work_item(work_item_id).unwrap();
+        item.add_initial_attempt(attempt_id).unwrap();
+        item.attempts.iter_mut().find(|a| a.id == attempt_id).unwrap().status = status;
+        store.write_work_item(&item).unwrap();
+    }
+
+    fn active_dispatch(project_root: &Path, work_item_id: &str) -> Dispatch {
+        queue::read_ledger(project_root, work_item_id)
+            .unwrap()
+            .unwrap()
+            .active()
+            .unwrap()
+            .clone()
+    }
+
+    fn latest_status(project_root: &Path, work_item_id: &str) -> DispatchStatus {
+        queue::read_ledger(project_root, work_item_id)
+            .unwrap()
+            .unwrap()
+            .latest()
+            .unwrap()
+            .status
+    }
+
+    #[test]
+    fn stale_claim_resumes_bound_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        write_ready_work_item(dir.path(), "wi-1");
+        add_queued(dir.path(), "wi-1", 0);
+        queue::claim(dir.path(), "wi-1", "attempt-1").unwrap().unwrap();
+        // The bound Attempt exists and is still in flight; the claim is stale
+        // because no lease is held.
+        create_attempt(dir.path(), "wi-1", "attempt-1", AttemptStatus::Executing);
+
+        recover_and_reconcile(dir.path()).unwrap();
+
+        // Returned to queued with its binding preserved for resume.
+        let active = active_dispatch(dir.path(), "wi-1");
+        assert_eq!(active.status, DispatchStatus::Queued);
+        assert_eq!(active.bound_attempt_id.as_deref(), Some("attempt-1"));
+
+        // A subsequent dispatch advances that same Attempt, creating no new one.
+        let runner = AttemptRecordingRunner::new(AttemptOutcome::Complete);
+        dispatch_one(dir.path(), &active, &runner).unwrap();
+        assert_eq!(runner.attempts.lock().unwrap().as_slice(), ["attempt-1"]);
+        let store = WorkModelStore::new(dir.path());
+        assert_eq!(store.read_work_item("wi-1").unwrap().attempts.len(), 1);
+    }
+
+    #[test]
+    fn stale_claim_reconciles_terminal_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        write_ready_work_item(dir.path(), "wi-1");
+        add_queued(dir.path(), "wi-1", 0);
+        queue::claim(dir.path(), "wi-1", "attempt-1").unwrap().unwrap();
+        // The bound Attempt already reached a terminal outcome before the claim
+        // went stale.
+        create_attempt(dir.path(), "wi-1", "attempt-1", AttemptStatus::Failed);
+
+        recover_and_reconcile(dir.path()).unwrap();
+
+        // Reconciled from the Attempt's outcome, without running it again.
+        assert_eq!(latest_status(dir.path(), "wi-1"), DispatchStatus::Failed);
+        let store = WorkModelStore::new(dir.path());
+        assert_eq!(store.read_work_item("wi-1").unwrap().attempts.len(), 1);
+    }
+
+    #[test]
+    fn unbound_stale_claim_recovers_without_duplicate_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        write_ready_work_item(dir.path(), "wi-1");
+        add_queued(dir.path(), "wi-1", 0);
+        // Claim binds an Attempt id but the Attempt was never created (a crash
+        // between the claim write and Attempt creation).
+        queue::claim(dir.path(), "wi-1", "attempt-1").unwrap().unwrap();
+
+        recover_and_reconcile(dir.path()).unwrap();
+
+        let active = active_dispatch(dir.path(), "wi-1");
+        assert_eq!(active.status, DispatchStatus::Queued);
+        assert_eq!(active.bound_attempt_id, None, "binding is cleared");
+
+        // The next claim creates exactly one Attempt.
+        let runner = AttemptRecordingRunner::new(AttemptOutcome::Complete);
+        dispatch_one(dir.path(), &active, &runner).unwrap();
+        let store = WorkModelStore::new(dir.path());
+        assert_eq!(store.read_work_item("wi-1").unwrap().attempts.len(), 1);
+    }
+
+    #[test]
+    fn concurrent_terminal_outcomes_are_independent() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        for id in ["wi-fail", "wi-nu", "wi-keep"] {
+            write_ready_work_item(dir.path(), id);
+            add_queued(dir.path(), id, 0);
+        }
+
+        let fail = active_dispatch(dir.path(), "wi-fail");
+        dispatch_one(dir.path(), &fail, &MockRunner::new(AttemptOutcome::Failed)).unwrap();
+        let nu = active_dispatch(dir.path(), "wi-nu");
+        dispatch_one(dir.path(), &nu, &MockRunner::new(AttemptOutcome::NeedsUser)).unwrap();
+
+        assert_eq!(latest_status(dir.path(), "wi-fail"), DispatchStatus::Failed);
+        assert_eq!(latest_status(dir.path(), "wi-nu"), DispatchStatus::NeedsUser);
+        // The third entry is untouched by the others' outcomes.
+        assert_eq!(
+            active_dispatch(dir.path(), "wi-keep").status,
+            DispatchStatus::Queued
+        );
+    }
+
+    #[test]
+    fn needs_user_recovery_resumes_bound_attempt_and_reconciles_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        write_ready_work_item(dir.path(), "wi-1");
+        add_queued(dir.path(), "wi-1", 0);
+        queue::claim(dir.path(), "wi-1", "attempt-1").unwrap().unwrap();
+        create_attempt(dir.path(), "wi-1", "attempt-1", AttemptStatus::NeedsUser);
+        queue::reconcile_active(dir.path(), "wi-1", DispatchStatus::NeedsUser).unwrap();
+        assert_eq!(latest_status(dir.path(), "wi-1"), DispatchStatus::NeedsUser);
+
+        // A human resumes the same Attempt through its recovery action; it now
+        // completes with a passing Merge Candidate.
+        make_attempt_pass_with_candidate(dir.path(), "wi-1", "attempt-1");
+        let store = WorkModelStore::new(dir.path());
+
+        recover_and_reconcile(dir.path()).unwrap();
+
+        // The queue entry reconciles to the new outcome; no new Attempt appears.
+        assert_eq!(
+            latest_status(dir.path(), "wi-1"),
+            DispatchStatus::CandidateReady
+        );
+        assert_eq!(store.read_work_item("wi-1").unwrap().attempts.len(), 1);
+    }
+
+    #[test]
+    fn abandoned_queued_work_is_canceled_before_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        write_ready_work_item(dir.path(), "wi-abandoned");
+        write_ready_work_item(dir.path(), "wi-ok");
+        add_queued(dir.path(), "wi-abandoned", 0);
+        add_queued(dir.path(), "wi-ok", 0);
+
+        let store = WorkModelStore::new(dir.path());
+        let mut item = store.read_work_item("wi-abandoned").unwrap();
+        item.abandon(Some("superseded".to_string()), None).unwrap();
+        store.write_work_item(&item).unwrap();
+
+        recover_and_reconcile(dir.path()).unwrap();
+
+        assert_eq!(
+            latest_status(dir.path(), "wi-abandoned"),
+            DispatchStatus::Canceled
+        );
+        assert!(
+            store.read_work_item("wi-abandoned").unwrap().attempts.is_empty(),
+            "no Attempt is created for abandoned Work"
+        );
+        // The other eligible entry keeps processing.
+        assert_eq!(
+            active_dispatch(dir.path(), "wi-ok").status,
+            DispatchStatus::Queued
+        );
+    }
+
+    #[test]
+    fn invalid_queue_reference_is_blocked_without_stalling_scheduler() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        write_ready_work_item(dir.path(), "wi-missing");
+        write_ready_work_item(dir.path(), "wi-ok");
+        add_queued(dir.path(), "wi-missing", 0);
+        add_queued(dir.path(), "wi-ok", 0);
+
+        // The referenced Work Item disappears after being queued.
+        fs::remove_file(dir.path().join(".fluent/work/items/wi-missing.json")).unwrap();
+
+        recover_and_reconcile(dir.path()).unwrap();
+
+        let blocked = queue::read_ledger(dir.path(), "wi-missing")
+            .unwrap()
+            .unwrap();
+        let blocked = blocked.latest().unwrap();
+        assert_eq!(blocked.status, DispatchStatus::Blocked);
+        assert!(blocked.blocked_reason.is_some(), "blocked reason recorded");
+        // The other eligible entry is unaffected.
+        assert_eq!(
+            active_dispatch(dir.path(), "wi-ok").status,
+            DispatchStatus::Queued
         );
     }
 

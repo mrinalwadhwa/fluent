@@ -10680,6 +10680,140 @@ fn second_scheduler_run_reuses_live_coordinator() {
     assert!(status.success(), "the live coordinator exits cleanly");
 }
 
+#[test]
+fn failed_scheduled_work_requeues_as_new_attempt_without_losing_history() {
+    use fluent::queue::{self, DispatchStatus};
+    use fluent::work_model::{AttemptStatus, WorkItem, WorkModelStore};
+
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+    let store = WorkModelStore::new(project);
+    store
+        .create_work_item(&WorkItem::planned("wi-req", "Requeue after failure"))
+        .unwrap();
+    queue::add(project, "wi-req", None).unwrap();
+
+    // A scheduled dispatch fails: its bound Attempt is failed and the dispatch
+    // reconciles to failed.
+    let token = queue::claim(project, "wi-req", "attempt-1").unwrap().unwrap();
+    let mut item = store.read_work_item("wi-req").unwrap();
+    item.add_initial_attempt("attempt-1").unwrap();
+    item.attempts[0].status = AttemptStatus::Failed;
+    store.write_work_item(&item).unwrap();
+    queue::reconcile(project, &token, DispatchStatus::Failed).unwrap();
+
+    // The recovery action is an explicit re-queue.
+    fluent_cmd()
+        .current_dir(project)
+        .args(["queue", "add", "wi-req"])
+        .assert()
+        .success();
+
+    let ledger = queue::read_ledger(project, "wi-req").unwrap().unwrap();
+    // The failed dispatch survives as history; a fresh dispatch is active.
+    assert_eq!(ledger.dispatches.len(), 2);
+    assert_eq!(ledger.dispatches[0].status, DispatchStatus::Failed);
+    assert_eq!(
+        ledger.dispatches[0].bound_attempt_id.as_deref(),
+        Some("attempt-1")
+    );
+    let active = ledger.active().unwrap();
+    assert_eq!(active.status, DispatchStatus::Queued);
+
+    // Claiming the new dispatch binds a fresh Attempt distinct from the failed
+    // one.
+    let next = queue::claim(project, "wi-req", "attempt-2").unwrap().unwrap();
+    assert_eq!(next.bound_attempt_id, "attempt-2");
+}
+
+#[test]
+fn descendant_execution_failure_preserves_land_and_reports_recovery() {
+    use fluent::queue::{self, DispatchStatus};
+    use fluent::work_model::{
+        AttemptStatus, CorrectiveContext, DerivedProvenance, ExecutionAuthority, WorkItem,
+        WorkLineage, WorkModelStore,
+    };
+
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+    let store = WorkModelStore::new(project);
+
+    // An autonomous descendant derived from a landed correction.
+    let provenance = DerivedProvenance {
+        work_item_id: Some("root-wi".to_string()),
+        merged_commit: Some("deadbeef".to_string()),
+        ..Default::default()
+    };
+    let context = CorrectiveContext {
+        objective: "Restore the retry cap".to_string(),
+        requirement: "Retries stop after the configured cap".to_string(),
+        evidence: "Merged commit deadbeef removed the cap".to_string(),
+        included_scope: "src/retry.rs".to_string(),
+        excluded_scope: "unrelated tuning".to_string(),
+        verification: "cargo test retry::cap".to_string(),
+    };
+    let lineage = WorkLineage {
+        root_id: Some("root-wi".to_string()),
+        ..Default::default()
+    };
+    let item = WorkItem::derived_corrective(
+        "wi-desc",
+        "Autonomous descendant",
+        provenance,
+        context,
+        lineage,
+        Some(ExecutionAuthority::Automatic),
+    )
+    .unwrap();
+    store.create_work_item(&item).unwrap();
+
+    fluent_cmd()
+        .current_dir(project)
+        .args(["queue", "add", "wi-desc"])
+        .assert()
+        .success();
+
+    // The scheduled Attempt fails.
+    let token = queue::claim(project, "wi-desc", "attempt-1").unwrap().unwrap();
+    let mut item = store.read_work_item("wi-desc").unwrap();
+    item.add_initial_attempt("attempt-1").unwrap();
+    item.attempts[0].status = AttemptStatus::Failed;
+    store.write_work_item(&item).unwrap();
+    queue::reconcile(project, &token, DispatchStatus::Failed).unwrap();
+
+    // Durable failure evidence: the dispatch is failed.
+    assert_eq!(
+        queue::read_ledger(project, "wi-desc")
+            .unwrap()
+            .unwrap()
+            .latest()
+            .unwrap()
+            .status,
+        DispatchStatus::Failed
+    );
+
+    // The originating land is untouched: the derived provenance still points at
+    // the merged commit.
+    let after = store.read_work_item("wi-desc").unwrap();
+    assert_eq!(
+        after.origin.provenance().and_then(|p| p.merged_commit.as_deref()),
+        Some("deadbeef")
+    );
+
+    // Status exposes the failure and its recovery action.
+    let output = fluent_cmd()
+        .current_dir(project)
+        .args(["status"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("wi-desc"), "status lists the descendant");
+    assert!(
+        stdout.contains("failed"),
+        "status reports the failed outcome: {stdout}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // B1–B5: Read commands for attempts, merge candidates, and tasks
 // ---------------------------------------------------------------------------

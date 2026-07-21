@@ -592,6 +592,78 @@ pub fn reconcile(project_root: &Path, token: &DispatchToken, status: DispatchSta
     })
 }
 
+// -------------------------------------------------------------------------
+// Recovery transitions on the latest dispatch
+// -------------------------------------------------------------------------
+//
+// Recovery acts on the ledger's latest dispatch (which may already read as a
+// terminal disposition, e.g. a resumed needs-user Attempt) rather than only on
+// an active dispatch. Each transition is guarded by the queue lock and bumps
+// the generation so an in-flight token fails closed.
+
+/// Return a stale claimed or running dispatch to `queued`. When `clear_binding`
+/// is set the bound Attempt is dropped so the next claim allocates a fresh one;
+/// otherwise the binding is preserved so the next claim resumes the same
+/// Attempt.
+pub fn requeue_active(project_root: &Path, work_item_id: &str, clear_binding: bool) -> Result<()> {
+    mutate_latest(project_root, work_item_id, |dispatch| {
+        dispatch.status = DispatchStatus::Queued;
+        dispatch.claimed_at = None;
+        if clear_binding {
+            dispatch.bound_attempt_id = None;
+        }
+        dispatch.generation += 1;
+    })
+}
+
+/// Force the latest dispatch to a terminal disposition during recovery, without
+/// a matching token. Used to reconcile a stale claim from its Attempt's outcome
+/// or to reflect a human-resumed suspension.
+pub fn reconcile_active(project_root: &Path, work_item_id: &str, status: DispatchStatus) -> Result<()> {
+    debug_assert!(status.is_terminal(), "reconcile expects a terminal status");
+    mutate_latest(project_root, work_item_id, |dispatch| {
+        dispatch.status = status;
+        dispatch.generation += 1;
+    })
+}
+
+/// Block the latest dispatch with a reason, leaving it as durable evidence for
+/// operator inspection.
+pub fn block_active(project_root: &Path, work_item_id: &str, reason: &str) -> Result<()> {
+    mutate_latest(project_root, work_item_id, |dispatch| {
+        dispatch.status = DispatchStatus::Blocked;
+        dispatch.blocked_reason = Some(reason.to_string());
+        dispatch.generation += 1;
+    })
+}
+
+/// Cancel the latest dispatch — used when queued Work becomes abandoned before
+/// any Attempt is created.
+pub fn cancel_active(project_root: &Path, work_item_id: &str) -> Result<()> {
+    mutate_latest(project_root, work_item_id, |dispatch| {
+        dispatch.status = DispatchStatus::Canceled;
+        dispatch.generation += 1;
+    })
+}
+
+fn mutate_latest(
+    project_root: &Path,
+    work_item_id: &str,
+    mutate: impl FnOnce(&mut Dispatch),
+) -> Result<()> {
+    let _lock = lock_queue(project_root)?;
+    let mut ledger = match read_ledger(project_root, work_item_id)? {
+        Some(ledger) => ledger,
+        None => bail!("Work Item {work_item_id:?} has no queue ledger"),
+    };
+    let Some(dispatch) = ledger.dispatches.last_mut() else {
+        bail!("Work Item {work_item_id:?} has no dispatch");
+    };
+    mutate(dispatch);
+    write_ledger(project_root, &ledger)?;
+    Ok(())
+}
+
 fn with_matching_active(
     project_root: &Path,
     token: &DispatchToken,
