@@ -252,6 +252,7 @@ fn run_write_task(
         workspace_id: workspace.id.clone(),
         workspace_path: workspace.path.clone(),
         source_branch,
+        base_commit: Some(baseline_commit),
         commit: commit.clone(),
     };
     let mut completed_item = read_work_item_or_not_found(config.store, config.work_item_id)?;
@@ -2984,6 +2985,7 @@ mod tests {
             workspace_id: workspace.id,
             workspace_path: workspace.path,
             source_branch: "main".to_string(),
+            base_commit: None,
             commit: "abc123".to_string(),
         });
         item.add_review_tasks("attempt-1", &[role]).unwrap();
@@ -3061,6 +3063,7 @@ mod tests {
             workspace_id: workspace.id,
             workspace_path: workspace.path,
             source_branch: "main".to_string(),
+            base_commit: None,
             commit: "abc123".to_string(),
         });
         item.add_review_tasks("attempt-1", &[role]).unwrap();

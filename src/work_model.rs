@@ -2224,6 +2224,11 @@ pub struct TaskOutput {
     pub workspace_id: String,
     pub workspace_path: String,
     pub source_branch: String,
+    /// The commit at the start of the accepted Attempt change. Persisting the
+    /// commit, rather than only the branch name, keeps post-land diffs stable
+    /// after the target branch advances.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
     pub commit: String,
 }
 
@@ -4444,6 +4449,7 @@ mod tests {
             workspace_id: "candidate".to_string(),
             workspace_path: "../work-6-work-1-attempt-1-second".to_string(),
             source_branch: "main".to_string(),
+            base_commit: None,
             commit: "commit-second".to_string(),
         });
         work_item.attempts[0].status = AttemptStatus::Complete;
@@ -5757,6 +5763,7 @@ mod tests {
                 workspace_id: "candidate".to_string(),
                 workspace_path: format!("../work-6-work-1-attempt-1-{suffix}"),
                 source_branch: "main".to_string(),
+                base_commit: None,
                 commit: format!("commit-{suffix}"),
             }),
             created_at: None,
@@ -6148,6 +6155,24 @@ mod tests {
         assert_eq!(task.created_at, None);
         assert_eq!(task.started_at, None);
         assert_eq!(task.completed_at, None);
+    }
+
+    #[test]
+    fn task_output_base_commit_is_backward_compatible() {
+        let legacy = r#"{
+            "workspace_id": "candidate",
+            "workspace_path": "../work-candidate",
+            "source_branch": "main",
+            "commit": "abc123"
+        }"#;
+        let output: TaskOutput = serde_json::from_str(legacy).unwrap();
+        assert!(output.base_commit.is_none());
+        assert!(!serde_json::to_string(&output).unwrap().contains("base_commit"));
+
+        let mut persisted = output;
+        persisted.base_commit = Some("base123".to_string());
+        let json = serde_json::to_string(&persisted).unwrap();
+        assert!(json.contains(r#""base_commit":"base123""#));
     }
 
     #[test]
@@ -6662,6 +6687,7 @@ mod tests {
             workspace_id: "candidate".to_string(),
             workspace_path: "../work-1-candidate".to_string(),
             source_branch: "main".to_string(),
+            base_commit: None,
             commit: "abc123".to_string(),
         });
         item.add_review_tasks("attempt-1", &["tests"]).unwrap();

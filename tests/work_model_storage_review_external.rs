@@ -48,6 +48,7 @@ fn documented_work_item() -> WorkItem {
                     workspace_id: "candidate".to_string(),
                     workspace_path: "../workspaces/candidate".to_string(),
                     source_branch: "main".to_string(),
+                    base_commit: None,
                     commit: "abc123".to_string(),
                 }),
                 created_at: None,

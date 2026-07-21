@@ -342,6 +342,7 @@ fn execute_merge(
                 config.work_item_id,
                 &candidate.id,
                 &candidate.attempt_id,
+                &target_head_before,
                 &new_tip,
             )?;
         }
@@ -1094,6 +1095,7 @@ fn regenerate_provenance(
     work_item_id: &str,
     candidate_id: &str,
     attempt_id: &str,
+    accepted_base: &str,
     new_tip: &str,
 ) -> Result<()> {
     let mut item = read_work_item_or_not_found(store, work_item_id)?;
@@ -1114,6 +1116,7 @@ fn regenerate_provenance(
     for task in &mut attempt.tasks {
         if task.kind == TaskKind::Write && task.status == TaskStatus::Complete {
             if let Some(ref mut output) = task.output {
+                output.base_commit = Some(accepted_base.to_string());
                 output.commit = new_tip.to_string();
             }
         }
@@ -1356,6 +1359,7 @@ mod tests {
             workspace_id: workspace.id,
             workspace_path: workspace.path,
             source_branch: "main".to_string(),
+            base_commit: None,
             commit: "abc123".to_string(),
         });
 
@@ -1480,6 +1484,7 @@ mod tests {
             workspace_id: workspace.id.clone(),
             workspace_path: workspace.path.clone(),
             source_branch: "main".to_string(),
+            base_commit: None,
             commit: "old-sha-1".to_string(),
         });
 
@@ -1503,6 +1508,7 @@ mod tests {
                 workspace_id: workspace.id,
                 workspace_path: workspace.path,
                 source_branch: "main".to_string(),
+                base_commit: None,
                 commit: "old-sha-2".to_string(),
             }),
             created_at: None,
@@ -1528,7 +1534,15 @@ mod tests {
     fn regenerate_provenance_updates_all_write_tasks_and_candidate() {
         let (_tmp, store, _item, candidate_id) = completed_write_item();
 
-        regenerate_provenance(&store, "work-1", &candidate_id, "attempt-1", "new-tip-sha").unwrap();
+        regenerate_provenance(
+            &store,
+            "work-1",
+            &candidate_id,
+            "attempt-1",
+            "new-base-sha",
+            "new-tip-sha",
+        )
+        .unwrap();
 
         let item = store.read_work_item("work-1").unwrap();
         let attempt = &item.attempts[0];
@@ -1540,6 +1554,10 @@ mod tests {
                     "new-tip-sha",
                     "write task {} commit should be updated",
                     task.id
+                );
+                assert_eq!(
+                    task.output.as_ref().unwrap().base_commit.as_deref(),
+                    Some("new-base-sha")
                 );
             }
         }
@@ -1592,7 +1610,15 @@ mod tests {
         attempt.tasks.push(rebase_task);
         store.write_work_item(&item).unwrap();
 
-        regenerate_provenance(&store, "work-1", &candidate_id, "attempt-1", "new-tip-sha").unwrap();
+        regenerate_provenance(
+            &store,
+            "work-1",
+            &candidate_id,
+            "attempt-1",
+            "new-base-sha",
+            "new-tip-sha",
+        )
+        .unwrap();
 
         let item = store.read_work_item("work-1").unwrap();
         let attempt = &item.attempts[0];
@@ -1641,7 +1667,15 @@ mod tests {
         });
         store.write_work_item(&item).unwrap();
 
-        regenerate_provenance(&store, "work-1", &candidate_id, "attempt-1", "new-tip-sha").unwrap();
+        regenerate_provenance(
+            &store,
+            "work-1",
+            &candidate_id,
+            "attempt-1",
+            "new-base-sha",
+            "new-tip-sha",
+        )
+        .unwrap();
 
         let item = store.read_work_item("work-1").unwrap();
         let artifacts = &item.attempts[0].artifacts;
@@ -1680,7 +1714,15 @@ mod tests {
         ));
         store.write_work_item(&item).unwrap();
 
-        regenerate_provenance(&store, "work-1", &candidate_id, "attempt-1", "new-tip-sha").unwrap();
+        regenerate_provenance(
+            &store,
+            "work-1",
+            &candidate_id,
+            "attempt-1",
+            "new-base-sha",
+            "new-tip-sha",
+        )
+        .unwrap();
 
         let item = store.read_work_item("work-1").unwrap();
         let learning = item.attempts[0].learning.as_ref().unwrap();

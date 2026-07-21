@@ -646,6 +646,7 @@ pub(crate) mod test_support {
             workspace_id: "candidate".to_string(),
             workspace_path: format!("../work-{work_item_id}-{attempt_id}"),
             source_branch: "main".to_string(),
+            base_commit: None,
             commit: "abc123".to_string(),
         });
         attempt.status = AttemptStatus::Complete;

@@ -377,6 +377,7 @@ mod tests {
             workspace_id: "candidate".to_string(),
             workspace_path: "../work-6-work-1-attempt-1".to_string(),
             source_branch: "main".to_string(),
+            base_commit: None,
             commit: "abc123".to_string(),
         });
         attempt.status = AttemptStatus::Complete;
@@ -516,6 +517,7 @@ mod tests {
             workspace_id: "candidate".to_string(),
             workspace_path: "../work-6-work-1-attempt-1".to_string(),
             source_branch: "main".to_string(),
+            base_commit: None,
             commit: "abc123".to_string(),
         });
         attempt.status = AttemptStatus::Complete;

@@ -1001,6 +1001,7 @@ mod tests {
             workspace_id: "candidate".to_string(),
             workspace_path: "../work-6-work-1-attempt-1".to_string(),
             source_branch: "main".to_string(),
+            base_commit: None,
             commit: "abc123".to_string(),
         });
         let candidate_id = item.create_or_get_merge_candidate("attempt-1").unwrap();

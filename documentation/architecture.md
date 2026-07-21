@@ -243,7 +243,8 @@ state). If the agent cannot resolve a conflict, it writes a diagnostic
 to `give-up.md` in its artifact directory and exits non-zero; the Merge
 Candidate transitions to `needs-user` with the diagnostic attached. When
 the rebase succeeds, Fluent regenerates provenance: it updates every
-completed Write Task's `output.commit`, the Attempt's
+completed Write Task's `output.base_commit` to the rebased target commit and
+`output.commit` to the candidate tip, the Attempt's
 `artifacts[*].path` entries, and the Merge Candidate's
 `candidate_commit` to the new candidate-tip SHA. Per-task SHA fidelity
 is intentionally lossy; per-task contribution remains visible through the
@@ -594,8 +595,11 @@ Item instructions or derived from Work Item planning context. JSON omits
 `status` tracks Task lifecycle state: `planned`, `executing`,
 `complete`, `failed`, or `needs-user`. Planned Tasks omit the field in
 JSON. Completed write Tasks include `output`, which records the writable
-workspace id and path, the source branch resolved from the project root
-when the Task run started, and the commit that contains the Task output.
+workspace id and path, the source branch resolved from the project root,
+the immutable base commit captured before the coder ran, and the commit that
+contains the Task output. A post-land Learner uses the stored base and merged
+candidate commit for its complete-change diff, so advancing the source branch
+cannot turn the retry prompt into an empty diff.
 Planned review Tasks include `review_context`, copied from that write
 output, with the candidate workspace id and path, source branch, and
 candidate commit. Follow-up write Tasks include `input_artifacts` when

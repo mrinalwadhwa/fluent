@@ -825,13 +825,6 @@ fn try_learn(
     };
     let effort: Option<String> = mapping_pair.effort.clone();
 
-    let diff_range = format!("{}...HEAD", write_output.source_branch);
-    let diff_command =
-        review_diff_command::render_review_diff_command(&workspace_path, &diff_range);
-
-    let handoff_dir =
-        project_root.join(crate::learner::handoff_dir_rel(&work_item_id, &attempt_id));
-
     // The commit the confinement compares against. Normally the Learner runs
     // right after the write task, so its baseline is the write commit. A post-
     // land retry runs against the current (possibly rebased) worktree tip, so its
@@ -846,6 +839,26 @@ fn try_learn(
     } else {
         write_output.commit.clone()
     };
+
+    let accepted_base = attempt
+        .tasks
+        .iter()
+        .filter(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+        .filter_map(|task| task.output.as_ref()?.base_commit.as_ref())
+        .next()
+        .cloned()
+        .unwrap_or_else(|| write_output.source_branch.clone());
+    let accepted_tip = if handoff_only {
+        baseline_commit.as_str()
+    } else {
+        write_output.commit.as_str()
+    };
+    let diff_range = format!("{accepted_base}...{accepted_tip}");
+    let diff_command =
+        review_diff_command::render_review_diff_command(&workspace_path, &diff_range);
+
+    let handoff_dir =
+        project_root.join(crate::learner::handoff_dir_rel(&work_item_id, &attempt_id));
 
     (config.run_coder)(&LearnerCoderRequest {
         workspace_path: &workspace_path,
@@ -2030,6 +2043,7 @@ mod tests {
             workspace_id: "candidate".to_string(),
             workspace_path: ".fluent/work/workspaces/work-1/attempt-1/candidate".to_string(),
             source_branch: "work/attempt-1".to_string(),
+            base_commit: None,
             commit: "abc123".to_string(),
         });
 
@@ -2470,6 +2484,7 @@ mod tests {
             workspace_id: "candidate".to_string(),
             workspace_path: "../work-1-candidate".to_string(),
             source_branch: "main".to_string(),
+            base_commit: None,
             commit: base.clone(),
         };
 
@@ -2810,6 +2825,7 @@ mod tests {
                         workspace_id: "candidate".to_string(),
                         workspace_path: "work/wi-1/attempt-1".to_string(),
                         source_branch: "main".to_string(),
+                        base_commit: None,
                         commit: "abc123".to_string(),
                     }),
                     created_at: None,

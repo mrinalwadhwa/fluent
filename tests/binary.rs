@@ -2679,6 +2679,7 @@ fn land_work_1(main_dir: &Path, bin_dir: &Path, no_post_merge_review: bool) {
 /// run must discard.
 fn post_land_learner_mock_script(counter: &Path, draft_json: &str, commit_expertise: bool) -> String {
     let counter = counter.display().to_string();
+    let prompt_log = format!("{counter}.prompt");
     let expertise = if commit_expertise {
         "  mkdir -p .fluent/expertise\n  printf 'late knowledge\\n' > .fluent/expertise/late.md\n  git add .fluent/expertise/late.md\n  git commit -m \"Update expertise\" >/dev/null 2>&1\n"
     } else {
@@ -2699,6 +2700,7 @@ if printf '%s' "$PROMPT" | grep -q "Rebase the candidate branch"; then
   exit $?
 fi
 if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
+  printf '%s' "$PROMPT" > "{prompt_log}"
   if [ ! -f "{counter}" ]; then
     touch "{counter}"
     exit 1
@@ -3535,6 +3537,7 @@ fn post_land_learner_retry_preserves_merged_commit() {
     let main_dir = setup_git_project(&tmp);
     let counter = tmp.path().join("learner-counter");
     let bin_dir = tmp.path().join("bin-preserve");
+    let accepted_base = git::run_stdout(&main_dir, &["rev-parse", "HEAD"], "accepted base").unwrap();
     // The retry attempts an expertise commit, which a handoff-only run discards.
     write_mock_claude(
         &bin_dir,
@@ -3550,6 +3553,20 @@ fn post_land_learner_retry_preserves_merged_commit() {
     let merged_before = merged_commit_of(&main_dir);
 
     rerun_learner_attempt(&main_dir, &bin_dir);
+
+    let retry_prompt = fs::read_to_string(format!("{}.prompt", counter.display())).unwrap();
+    assert!(
+        retry_prompt.contains(&format!("{accepted_base}...{merged_before}")),
+        "post-land retry prompt must render the persisted accepted change; prompt:\n{retry_prompt}"
+    );
+    let candidate = main_dir.join("../work-6-work-1-attempt-1");
+    let accepted_files = git::run_stdout(
+        &candidate,
+        &["diff", "--name-only", &format!("{accepted_base}...{merged_before}")],
+        "inspect accepted Attempt change",
+    )
+    .unwrap();
+    assert!(accepted_files.lines().any(|path| path == "loop-output.txt"));
 
     // The merged candidate commit is unchanged and no expertise reached main.
     assert_eq!(
@@ -12039,6 +12056,7 @@ fn queue_add_rejects_suspended_attempt_and_pending_candidate() {
             workspace_id: "candidate".to_string(),
             workspace_path: "../work-wi-pend-attempt-1".to_string(),
             source_branch: "main".to_string(),
+            base_commit: None,
             commit: "abc123".to_string(),
         });
         attempt.status = AttemptStatus::Complete;

@@ -36,6 +36,7 @@ fn task(kind: TaskKind) -> Task {
             workspace_id: "candidate".to_string(),
             workspace_path: "../workspaces/candidate".to_string(),
             source_branch: "main".to_string(),
+            base_commit: None,
             commit: "abc123".to_string(),
         }),
         created_at: None,
