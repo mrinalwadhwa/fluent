@@ -252,7 +252,7 @@ pub struct WorkItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corrective_context: Option<CorrectiveContext>,
     /// Accepted proposal details that make derived corrective Work auditable
-    /// after its originating handoff and post-land journal are cleaned up.
+    /// after cleanup removes its originating Work records and handoff.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corrective_audit: Option<CorrectiveAuditContext>,
     /// A durable intent to enqueue this Work on the regular Work Queue once its
@@ -1448,12 +1448,15 @@ impl CorrectiveContext {
 
 /// The complete accepted proposal retained beside a derived Work Item's
 /// corrective execution context. These fields preserve the decision's audit
-/// trail after Fluent removes the originating handoff and journal.
+/// trail after Fluent removes the originating Work records and handoff.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CorrectiveAuditContext {
     pub follow_up_id: String,
     /// Normalized proposal source, such as `learner` or `post-merge`.
     pub source: String,
+    /// Accepted follow-up summary, retained independently from the Work title.
+    #[serde(default)]
+    pub summary: String,
     pub learning_summary: String,
     pub expected_result: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1494,7 +1497,7 @@ impl CorrectiveAuditContext {
              ## Trusted authority\nKind: {}\nPath: {}\nAnchor: {}\nDigest: {}\n\n\
              ## Supporting evidence\n{}\n\n\
              ## Unresolved decisions\n{}\n\n\
-             ## Follow-up source\nSource: {}\nFollow-up: {}\nLearning summary: {}",
+             ## Follow-up source\nSource: {}\nFollow-up: {}\nSummary: {}\nLearning summary: {}",
             self.expected_result.trim(),
             self.target_paths
                 .iter()
@@ -1509,6 +1512,7 @@ impl CorrectiveAuditContext {
             unresolved,
             self.source,
             self.follow_up_id,
+            self.summary.trim(),
             self.learning_summary.trim(),
         )
     }

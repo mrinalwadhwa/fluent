@@ -3075,6 +3075,7 @@ mod tests {
         item.corrective_audit = Some(CorrectiveAuditContext {
             follow_up_id: "fu-retry-cap".to_string(),
             source: "learner".to_string(),
+            summary: "Restore the retry guard".to_string(),
             learning_summary: "The accepted change removed the retry cap".to_string(),
             expected_result: "The retry cap is enforced again".to_string(),
             target_paths: vec!["src/retry.rs".to_string()],
@@ -3190,7 +3191,7 @@ mod tests {
         ] {
             crate::git::run(&project_root, args, "initialize prompt cleanup repository").unwrap();
         }
-        let authority_anchor = "Retries stop after the configured cap";
+        let authority_anchor = "AUTHORITY REQUIREMENT: retries stop at the configured cap";
         fs::write(
             project_root.join(".fluent/expertise/retry.md"),
             format!("{authority_anchor}\n"),
@@ -3254,12 +3255,12 @@ mod tests {
 
         let authority_digest = crate::follow_up::content_digest(authority_anchor.as_bytes());
         let corrective_context = CorrectiveContext {
-            objective: "Restore the retry guard".to_string(),
+            objective: "OBJECTIVE: reinstate bounded retry behavior".to_string(),
             requirement: authority_anchor.to_string(),
-            evidence: "Merged commit removed the retry cap".to_string(),
-            included_scope: "src/retry.rs".to_string(),
-            excluded_scope: "unrelated backoff tuning".to_string(),
-            verification: "cargo test retry::cap_is_enforced".to_string(),
+            evidence: "CONTEXT EVIDENCE: merged retry guard disappeared".to_string(),
+            included_scope: "INCLUDED SCOPE: retry execution path".to_string(),
+            excluded_scope: "EXCLUDED SCOPE: backoff tuning".to_string(),
+            verification: "VERIFY SENTINEL: cargo test retry_cap".to_string(),
         };
         let batch = crate::follow_up::NormalizedFollowUpBatchV1 {
             schema_version: crate::follow_up::NormalizedFollowUpBatchV1::SCHEMA_VERSION,
@@ -3270,14 +3271,14 @@ mod tests {
                 merge_candidate_id: candidate_id,
                 merged_commit,
             },
-            learning_summary: "The accepted change removed the retry cap".to_string(),
+            learning_summary: "LEARNING SUMMARY: reviewer found a retry regression".to_string(),
             follow_ups: vec![crate::follow_up::FollowUpDraftV1 {
                 id: "fu-retry-cap".to_string(),
-                summary: "Restore the retry guard".to_string(),
+                summary: "SUMMARY: correct the retry regression".to_string(),
                 corrective: true,
                 corrective_context: Some(corrective_context),
-                target_paths: vec!["src/retry.rs".to_string()],
-                expected_result: "The retry cap is enforced again".to_string(),
+                target_paths: vec!["src/target-path-sentinel.rs".to_string()],
+                expected_result: "EXPECTED RESULT: retry attempts remain bounded".to_string(),
                 unresolved_decisions: Vec::new(),
                 authority: Some(crate::follow_up::AuthorityLocator {
                     kind: crate::follow_up::AuthorityKind::ExpertiseEntry,
@@ -3286,8 +3287,8 @@ mod tests {
                     digest: authority_digest.clone(),
                 }),
                 evidence: vec![crate::follow_up::ArtifactRef {
-                    path: "review.md".to_string(),
-                    digest: "sha256:evidence".to_string(),
+                    path: "artifacts/evidence-sentinel.patch".to_string(),
+                    digest: "sha256:evidence-sentinel".to_string(),
                 }],
             }],
         };
@@ -3322,6 +3323,8 @@ mod tests {
             )
             .unwrap();
         store.write_work_item(&seeded).unwrap();
+        crate::follow_up::authorize_derived_work_item(&project_root, &store, &seeded.id).unwrap();
+        crate::follow_up::process_landed_batch(&project_root, &batch, None).unwrap();
 
         let cleanup = crate::cleanup::cleanup_work_items(
             &project_root,
@@ -3343,6 +3346,21 @@ mod tests {
         assert!(!project_root.join(".fluent/work/artifacts/root-1").exists());
 
         let item = store.read_work_item(&seeded.id).unwrap();
+        let expected_corrective_block = item.write_task_instructions().unwrap();
+        for expected_section in [
+            "## Objective\nOBJECTIVE: reinstate bounded retry behavior",
+            "## Authoritative requirement\nAUTHORITY REQUIREMENT: retries stop at the configured cap",
+            "## In scope\nINCLUDED SCOPE: retry execution path",
+            "## Target paths\n- src/target-path-sentinel.rs",
+            "## Follow-up source\nSource: learner\nFollow-up: fu-retry-cap\nSummary: SUMMARY: correct the retry regression\nLearning summary: LEARNING SUMMARY: reviewer found a retry regression",
+            "Anchor: AUTHORITY REQUIREMENT: retries stop at the configured cap",
+            "- artifacts/evidence-sentinel.patch (sha256:evidence-sentinel)",
+        ] {
+            assert!(
+                expected_corrective_block.contains(expected_section),
+                "corrective block omitted section-local sentinel {expected_section:?}"
+            );
+        }
         let workspace = tmp.path().join("candidate");
         fs::create_dir_all(&workspace).unwrap();
         let writer = build_write_task_prompt_with_workspace(
@@ -3353,23 +3371,29 @@ mod tests {
             Some(&workspace),
             Some(&project_root),
         );
+        assert!(
+            writer.contains(&expected_corrective_block),
+            "Writer omitted the exact corrective block after cleanup"
+        );
         let audit_fields = [
-            "Restore the retry guard",
+            "OBJECTIVE: reinstate bounded retry behavior",
             authority_anchor,
-            "Merged commit removed the retry cap",
-            "src/retry.rs",
-            "unrelated backoff tuning",
-            "cargo test retry::cap_is_enforced",
-            "The retry cap is enforced again",
+            "CONTEXT EVIDENCE: merged retry guard disappeared",
+            "INCLUDED SCOPE: retry execution path",
+            "src/target-path-sentinel.rs",
+            "EXCLUDED SCOPE: backoff tuning",
+            "VERIFY SENTINEL: cargo test retry_cap",
+            "EXPECTED RESULT: retry attempts remain bounded",
             "expertise-entry",
             ".fluent/expertise/retry.md",
             authority_digest.as_str(),
-            "review.md",
-            "sha256:evidence",
+            "artifacts/evidence-sentinel.patch",
+            "sha256:evidence-sentinel",
             "Unresolved decisions\nnone",
             "learner",
             "fu-retry-cap",
-            "The accepted change removed the retry cap",
+            "SUMMARY: correct the retry regression",
+            "LEARNING SUMMARY: reviewer found a retry regression",
         ];
         for field in audit_fields {
             assert!(writer.contains(field), "Writer omitted {field:?} after cleanup");
@@ -3393,6 +3417,10 @@ mod tests {
                 review_only: false,
             })
             .unwrap();
+            assert!(
+                prompts.review_prompt.contains(&expected_corrective_block),
+                "{role} reviewer omitted the exact corrective block after cleanup"
+            );
             for field in audit_fields {
                 assert!(
                     prompts.review_prompt.contains(field),
@@ -3400,6 +3428,16 @@ mod tests {
                 );
             }
         }
+        let tester = item.attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.kind == TaskKind::Tester)
+            .expect("reloaded corrective Attempt retains its Tester Task");
+        assert_eq!(
+            tester.instructions.as_deref(),
+            Some(expected_corrective_block.as_str()),
+            "reloaded Tester Task retains the exact corrective block"
+        );
     }
 
     #[test]

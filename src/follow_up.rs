@@ -1372,6 +1372,7 @@ fn ensure_derived_work(
             FollowUpSource::PostMerge => "post-merge",
         }
         .to_string(),
+        summary: follow_up.summary.clone(),
         learning_summary: learning_summary.to_string(),
         expected_result: follow_up.expected_result.clone(),
         target_paths: follow_up.target_paths.clone(),
