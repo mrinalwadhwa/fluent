@@ -619,7 +619,11 @@ pub fn requeue_active(project_root: &Path, work_item_id: &str, clear_binding: bo
 /// Force the latest dispatch to a terminal disposition during recovery, without
 /// a matching token. Used to reconcile a stale claim from its Attempt's outcome
 /// or to reflect a human-resumed suspension.
-pub fn reconcile_active(project_root: &Path, work_item_id: &str, status: DispatchStatus) -> Result<()> {
+pub fn reconcile_active(
+    project_root: &Path,
+    work_item_id: &str,
+    status: DispatchStatus,
+) -> Result<()> {
     debug_assert!(status.is_terminal(), "reconcile expects a terminal status");
     mutate_latest(project_root, work_item_id, |dispatch| {
         dispatch.status = status;
@@ -744,13 +748,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_project(dir.path());
         write_ready_work_item(dir.path(), "wi-legacy");
-        write_legacy_entry(
-            dir.path(),
-            "wi-legacy",
-            7,
-            "done",
-            "2026-06-13T10:00:00Z",
-        );
+        write_legacy_entry(dir.path(), "wi-legacy", 7, "done", "2026-06-13T10:00:00Z");
 
         let ledger = read_ledger(dir.path(), "wi-legacy").unwrap().unwrap();
         assert_eq!(ledger.dispatches.len(), 1);
@@ -874,7 +872,11 @@ mod tests {
     fn add_rejects_proposed_and_abandoned_work() {
         let dir = tempfile::tempdir().unwrap();
         setup_project(dir.path());
-        write_work_item_json(dir.path(), "wi-proposed", r#","authorization":{"state":"proposed"}"#);
+        write_work_item_json(
+            dir.path(),
+            "wi-proposed",
+            r#","authorization":{"state":"proposed"}"#,
+        );
         write_work_item_json(dir.path(), "wi-abandoned", r#","abandonment":{}"#);
 
         let proposed = add(dir.path(), "wi-proposed", None);
@@ -979,8 +981,7 @@ mod tests {
         claim(dir.path(), "wi-1", "attempt-1").unwrap().unwrap();
 
         // Hold the dispatch lease so the claim reads as live.
-        let lease =
-            crate::lease::acquire(&dispatch_lease_path(dir.path(), "wi-1")).unwrap();
+        let lease = crate::lease::acquire(&dispatch_lease_path(dir.path(), "wi-1")).unwrap();
 
         let result = remove(dir.path(), "wi-1");
         assert!(result.is_err(), "a live claim blocks removal");

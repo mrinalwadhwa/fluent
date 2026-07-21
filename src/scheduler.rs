@@ -240,8 +240,10 @@ pub fn project_local_capacity_used(project_root: &Path) -> Result<usize> {
         if matches!(
             active.status,
             DispatchStatus::Claimed | DispatchStatus::Running
-        ) && lease::is_leased(&queue::dispatch_lease_path(project_root, &ledger.work_item_id))
-        {
+        ) && lease::is_leased(&queue::dispatch_lease_path(
+            project_root,
+            &ledger.work_item_id,
+        )) {
             used += 1;
         }
     }
@@ -264,12 +266,16 @@ pub fn recover_and_reconcile(project_root: &Path) -> Result<()> {
         };
         let result = match dispatch.status {
             DispatchStatus::Queued => reconcile_queued(project_root, &work_item_id),
-            DispatchStatus::Claimed | DispatchStatus::Running => {
-                reconcile_claim(project_root, &work_item_id, dispatch.bound_attempt_id.as_deref())
-            }
-            DispatchStatus::NeedsUser => {
-                reconcile_suspension(project_root, &work_item_id, dispatch.bound_attempt_id.as_deref())
-            }
+            DispatchStatus::Claimed | DispatchStatus::Running => reconcile_claim(
+                project_root,
+                &work_item_id,
+                dispatch.bound_attempt_id.as_deref(),
+            ),
+            DispatchStatus::NeedsUser => reconcile_suspension(
+                project_root,
+                &work_item_id,
+                dispatch.bound_attempt_id.as_deref(),
+            ),
             _ => Ok(()),
         };
         if let Err(error) = result {
@@ -302,11 +308,7 @@ fn reconcile_queued(project_root: &Path, work_item_id: &str) -> Result<()> {
             Ok(())
         }
         Err(_) => {
-            queue::block_active(
-                project_root,
-                work_item_id,
-                "Work Item could not be read",
-            )?;
+            queue::block_active(project_root, work_item_id, "Work Item could not be read")?;
             Ok(())
         }
     }
@@ -472,10 +474,7 @@ pub fn start_or_reuse(project_root: &Path) -> Result<CoordinatorStart> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(&path)?;
+    let file = OpenOptions::new().create(true).write(true).open(&path)?;
     match flock(&file, FlockOperation::NonBlockingLockExclusive) {
         Ok(()) => Ok(CoordinatorStart::Elected(CoordinatorLease { _file: file })),
         Err(_) => Ok(CoordinatorStart::Reused),
@@ -676,7 +675,9 @@ mod tests {
     /// lease so the caller keeps the claim live.
     fn make_running(project_root: &Path, id: &str) -> TaskLease {
         add_queued(project_root, id, 0);
-        let token = queue::claim(project_root, id, "attempt-1").unwrap().unwrap();
+        let token = queue::claim(project_root, id, "attempt-1")
+            .unwrap()
+            .unwrap();
         let lease = hold_lease(project_root, id);
         queue::mark_running(project_root, &token).unwrap();
         lease
@@ -889,11 +890,20 @@ mod tests {
     }
 
     /// Create a bound Attempt in a given status on an existing Work Item.
-    fn create_attempt(project_root: &Path, work_item_id: &str, attempt_id: &str, status: AttemptStatus) {
+    fn create_attempt(
+        project_root: &Path,
+        work_item_id: &str,
+        attempt_id: &str,
+        status: AttemptStatus,
+    ) {
         let store = WorkModelStore::new(project_root);
         let mut item = store.read_work_item(work_item_id).unwrap();
         item.add_initial_attempt(attempt_id).unwrap();
-        item.attempts.iter_mut().find(|a| a.id == attempt_id).unwrap().status = status;
+        item.attempts
+            .iter_mut()
+            .find(|a| a.id == attempt_id)
+            .unwrap()
+            .status = status;
         store.write_work_item(&item).unwrap();
     }
 
@@ -921,7 +931,9 @@ mod tests {
         setup_project(dir.path());
         write_ready_work_item(dir.path(), "wi-1");
         add_queued(dir.path(), "wi-1", 0);
-        queue::claim(dir.path(), "wi-1", "attempt-1").unwrap().unwrap();
+        queue::claim(dir.path(), "wi-1", "attempt-1")
+            .unwrap()
+            .unwrap();
         // The bound Attempt exists and is still in flight; the claim is stale
         // because no lease is held.
         create_attempt(dir.path(), "wi-1", "attempt-1", AttemptStatus::Executing);
@@ -947,7 +959,9 @@ mod tests {
         setup_project(dir.path());
         write_ready_work_item(dir.path(), "wi-1");
         add_queued(dir.path(), "wi-1", 0);
-        queue::claim(dir.path(), "wi-1", "attempt-1").unwrap().unwrap();
+        queue::claim(dir.path(), "wi-1", "attempt-1")
+            .unwrap()
+            .unwrap();
         // The bound Attempt already reached a terminal outcome before the claim
         // went stale.
         create_attempt(dir.path(), "wi-1", "attempt-1", AttemptStatus::Failed);
@@ -968,7 +982,9 @@ mod tests {
         add_queued(dir.path(), "wi-1", 0);
         // Claim binds an Attempt id but the Attempt was never created (a crash
         // between the claim write and Attempt creation).
-        queue::claim(dir.path(), "wi-1", "attempt-1").unwrap().unwrap();
+        queue::claim(dir.path(), "wi-1", "attempt-1")
+            .unwrap()
+            .unwrap();
 
         recover_and_reconcile(dir.path()).unwrap();
 
@@ -998,7 +1014,10 @@ mod tests {
         dispatch_one(dir.path(), &nu, &MockRunner::new(AttemptOutcome::NeedsUser)).unwrap();
 
         assert_eq!(latest_status(dir.path(), "wi-fail"), DispatchStatus::Failed);
-        assert_eq!(latest_status(dir.path(), "wi-nu"), DispatchStatus::NeedsUser);
+        assert_eq!(
+            latest_status(dir.path(), "wi-nu"),
+            DispatchStatus::NeedsUser
+        );
         // The third entry is untouched by the others' outcomes.
         assert_eq!(
             active_dispatch(dir.path(), "wi-keep").status,
@@ -1012,7 +1031,9 @@ mod tests {
         setup_project(dir.path());
         write_ready_work_item(dir.path(), "wi-1");
         add_queued(dir.path(), "wi-1", 0);
-        queue::claim(dir.path(), "wi-1", "attempt-1").unwrap().unwrap();
+        queue::claim(dir.path(), "wi-1", "attempt-1")
+            .unwrap()
+            .unwrap();
         create_attempt(dir.path(), "wi-1", "attempt-1", AttemptStatus::NeedsUser);
         queue::reconcile_active(dir.path(), "wi-1", DispatchStatus::NeedsUser).unwrap();
         assert_eq!(latest_status(dir.path(), "wi-1"), DispatchStatus::NeedsUser);
@@ -1053,7 +1074,11 @@ mod tests {
             DispatchStatus::Canceled
         );
         assert!(
-            store.read_work_item("wi-abandoned").unwrap().attempts.is_empty(),
+            store
+                .read_work_item("wi-abandoned")
+                .unwrap()
+                .attempts
+                .is_empty(),
             "no Attempt is created for abandoned Work"
         );
         // The other eligible entry keeps processing.

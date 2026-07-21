@@ -10285,7 +10285,11 @@ fn explicit_queue_add_after_terminal_creates_new_dispatch() {
         .assert()
         .success();
 
-    assert_eq!(dispatch_count(tmp.path(), "wi-term"), 2, "history preserved");
+    assert_eq!(
+        dispatch_count(tmp.path(), "wi-term"),
+        2,
+        "history preserved"
+    );
     assert_eq!(latest_dispatch_status(tmp.path(), "wi-term"), "queued");
 }
 
@@ -10326,8 +10330,7 @@ fn queue_add_ineligible_work_errors() {
         .failure();
 
     assert!(
-        !tmp
-            .path()
+        !tmp.path()
             .join(".fluent/work/queue/wi-proposed.json")
             .exists(),
         "no queue entry is created for proposed Work"
@@ -10735,7 +10738,9 @@ fn failed_scheduled_work_requeues_as_new_attempt_without_losing_history() {
 
     // A scheduled dispatch fails: its bound Attempt is failed and the dispatch
     // reconciles to failed.
-    let token = queue::claim(project, "wi-req", "attempt-1").unwrap().unwrap();
+    let token = queue::claim(project, "wi-req", "attempt-1")
+        .unwrap()
+        .unwrap();
     let mut item = store.read_work_item("wi-req").unwrap();
     item.add_initial_attempt("attempt-1").unwrap();
     item.attempts[0].status = AttemptStatus::Failed;
@@ -10762,7 +10767,9 @@ fn failed_scheduled_work_requeues_as_new_attempt_without_losing_history() {
 
     // Claiming the new dispatch binds a fresh Attempt distinct from the failed
     // one.
-    let next = queue::claim(project, "wi-req", "attempt-2").unwrap().unwrap();
+    let next = queue::claim(project, "wi-req", "attempt-2")
+        .unwrap()
+        .unwrap();
     assert_eq!(next.bound_attempt_id, "attempt-2");
 }
 
@@ -10814,7 +10821,9 @@ fn descendant_execution_failure_preserves_land_and_reports_recovery() {
         .success();
 
     // The scheduled Attempt fails.
-    let token = queue::claim(project, "wi-desc", "attempt-1").unwrap().unwrap();
+    let token = queue::claim(project, "wi-desc", "attempt-1")
+        .unwrap()
+        .unwrap();
     let mut item = store.read_work_item("wi-desc").unwrap();
     item.add_initial_attempt("attempt-1").unwrap();
     item.attempts[0].status = AttemptStatus::Failed;
@@ -10836,7 +10845,10 @@ fn descendant_execution_failure_preserves_land_and_reports_recovery() {
     // the merged commit.
     let after = store.read_work_item("wi-desc").unwrap();
     assert_eq!(
-        after.origin.provenance().and_then(|p| p.merged_commit.as_deref()),
+        after
+            .origin
+            .provenance()
+            .and_then(|p| p.merged_commit.as_deref()),
         Some("deadbeef")
     );
 
@@ -10971,7 +10983,10 @@ exit 0
     }
     send_signal(first.id(), "TERM");
     let first_status = first.wait_with_output().unwrap();
-    assert!(first_status.status.success(), "first coordinator drains cleanly");
+    assert!(
+        first_status.status.success(),
+        "first coordinator drains cleanly"
+    );
 
     // The remaining Work stayed durably queued; a restart processes it.
     let second = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
