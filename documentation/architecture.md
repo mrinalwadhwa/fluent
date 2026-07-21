@@ -441,6 +441,16 @@ registration when its checkout directory has already disappeared. Derived
 Observations and Work Items stay inspectable with self-contained corrective
 context and provenance identifiers after optional origin artifacts are gone.
 
+Fluent stores each Work Item as a top-level record plus split Attempt, Task, and
+Merge Candidate records. Aggregate reads and writes share one per-Work-Item
+model lock. Before changing split records, a writer records the complete target
+snapshot in a durable transaction; it publishes child records first and the
+new top-level storage revision last. Readers recover any interrupted transaction
+before assembling the aggregate, and listing also recovers interrupted
+creations. This prevents mixed-generation reads and makes a failed or crashed
+write retryable without allowing a stale snapshot to overwrite its successor.
+Storage-revision exhaustion fails closed.
+
 A Learner run that failed before its candidate landed recovers through
 `fluent attempt run`, which retries only the Learner. When the candidate
 has already merged, that retry runs in handoff-only mode: it serializes

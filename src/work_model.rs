@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -21,6 +21,7 @@ pub const WORK_ITEMS_DIR: &str = "items";
 pub const WORK_ATTEMPTS_DIR: &str = "attempts";
 pub const WORK_TASKS_DIR: &str = "tasks";
 pub const WORK_MERGE_CANDIDATES_DIR: &str = "merge-candidates";
+const WORK_TRANSACTIONS_DIR: &str = "transactions";
 pub const WORK_ARTIFACTS_DIR: &str = ".fluent/work/artifacts";
 pub const WORK_PROGRESS_DIR: &str = ".fluent/work/progress";
 
@@ -2966,6 +2967,10 @@ pub enum WorkModelStorageError {
         expected_revision: Option<u64>,
         actual_revision: u64,
     },
+    StorageRevisionExhausted {
+        path: PathBuf,
+        id: String,
+    },
     ParseFile {
         path: PathBuf,
         source: serde_json::Error,
@@ -2991,6 +2996,7 @@ impl WorkModelStorageError {
             | Self::WriteFile { path, .. }
             | Self::WorkItemAlreadyExists { path, .. }
             | Self::StaleWorkItem { path, .. }
+            | Self::StorageRevisionExhausted { path, .. }
             | Self::ParseFile { path, .. }
             | Self::WorkItemIdMismatch { path, .. }
             | Self::InvalidModel { path, .. } => Some(path),
@@ -3031,6 +3037,12 @@ impl fmt::Display for WorkModelStorageError {
                      {expected_revision:?}, found {actual_revision}); reload before writing"
                 )
             }
+            Self::StorageRevisionExhausted { id, .. } => {
+                write!(
+                    f,
+                    "Work Item {id:?} exhausted its storage revision; refusing to disable stale-write detection"
+                )
+            }
             Self::ParseFile { path, source } => {
                 write!(f, "failed to parse {}: {source}", path.display())
             }
@@ -3062,6 +3074,7 @@ impl Error for WorkModelStorageError {
             | Self::WriteFile { source, .. } => Some(source),
             Self::WorkItemAlreadyExists { .. } => None,
             Self::StaleWorkItem { .. } => None,
+            Self::StorageRevisionExhausted { .. } => None,
             Self::ParseFile { source, .. } => Some(source),
             Self::WorkItemIdMismatch { .. } => None,
             Self::InvalidModel { source, .. } => Some(source),
@@ -3103,6 +3116,19 @@ struct WorkItemRecord {
     corrective_audit: Option<CorrectiveAuditContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_enqueue: Option<EnqueueIntent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct WorkItemTransaction {
+    schema_version: u32,
+    id: String,
+    base_revision: Option<u64>,
+    target_revision: u64,
+    work_item: WorkItem,
+}
+
+impl WorkItemTransaction {
+    const SCHEMA_VERSION: u32 = 1;
 }
 
 fn is_zero_u64(value: &u64) -> bool {
@@ -3267,6 +3293,14 @@ impl WorkModelStore {
         self.work_dir().join(WORK_MERGE_CANDIDATES_DIR)
     }
 
+    fn work_transactions_dir(&self) -> PathBuf {
+        self.work_dir().join(WORK_TRANSACTIONS_DIR)
+    }
+
+    fn work_transaction_path(&self, id: &str) -> Result<PathBuf, WorkModelStorageError> {
+        work_item_file_name(id).map(|file_name| self.work_transactions_dir().join(file_name))
+    }
+
     pub fn work_item_path(&self, id: &str) -> Result<PathBuf, WorkModelStorageError> {
         work_item_file_name(id).map(|file_name| self.work_items_dir().join(file_name))
     }
@@ -3331,6 +3365,7 @@ impl WorkModelStore {
     }
 
     fn list_work_item_paths(&self) -> Result<Vec<PathBuf>, WorkModelStorageError> {
+        self.recover_pending_transactions()?;
         let dir = self.work_items_dir();
         if !dir.exists() {
             return Ok(Vec::new());
@@ -3362,6 +3397,16 @@ impl WorkModelStore {
     pub fn read_work_item(&self, id: &str) -> Result<WorkItem, WorkModelStorageError> {
         let path = self.work_item_path(id)?;
         self.read_work_item_file(&path, true)
+    }
+
+    /// Read a Work Item while the caller holds its model lock.
+    pub(crate) fn read_work_item_under_model_lock(
+        &self,
+        id: &str,
+    ) -> Result<WorkItem, WorkModelStorageError> {
+        let path = self.work_item_path(id)?;
+        self.recover_work_item_transaction(id)?;
+        self.read_work_item_file_unlocked(&path, true)
     }
 
     pub(crate) fn read_work_item_for_merge_recovery(
@@ -3439,10 +3484,24 @@ impl WorkModelStore {
         fs::create_dir_all(&dir)
             .map_err(|source| WorkModelStorageError::CreateDirectory { path: dir, source })?;
 
-        let mut record = WorkItemRecord::from(work_item);
-        if !create_new && path.exists() {
+        if let Some(transaction) = self.read_work_item_transaction(&work_item.id)? {
+            if aggregate_snapshot_matches(&transaction.work_item, work_item)? {
+                self.apply_work_item_transaction(&transaction)?;
+                work_item.storage_revision.set(transaction.target_revision);
+                return Ok(());
+            }
+            self.apply_work_item_transaction(&transaction)?;
+        }
+
+        let expected_revision = work_item.storage_revision.get();
+        let base_revision = if path.exists() {
             let current: WorkItemRecord = read_json_file(&path)?;
-            let expected_revision = work_item.storage_revision.get();
+            if create_new {
+                return Err(WorkModelStorageError::WorkItemAlreadyExists {
+                    path,
+                    id: work_item.id.clone(),
+                });
+            }
             if expected_revision != Some(current.storage_revision) {
                 return Err(WorkModelStorageError::StaleWorkItem {
                     path,
@@ -3451,51 +3510,52 @@ impl WorkModelStore {
                     actual_revision: current.storage_revision,
                 });
             }
-            record.storage_revision = current.storage_revision.saturating_add(1);
-        }
-        let json = to_json_pretty(&record).map_err(|source| WorkModelStorageError::ParseFile {
-            path: path.clone(),
-            source,
-        })?;
-        if create_new {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-                .map_err(|source| {
-                    if source.kind() == io::ErrorKind::AlreadyExists {
-                        WorkModelStorageError::WorkItemAlreadyExists {
-                            path: path.clone(),
-                            id: work_item.id.clone(),
-                        }
-                    } else {
-                        WorkModelStorageError::WriteFile {
-                            path: path.clone(),
-                            source,
-                        }
-                    }
-                })?;
-            file.write_all(json.as_bytes())
-                .map_err(|source| WorkModelStorageError::WriteFile {
-                    path: path.clone(),
-                    source,
-                })?;
+            Some(current.storage_revision)
         } else {
-            crate::atomic_write::atomic_write(&path, json.as_bytes()).map_err(|source| {
-                WorkModelStorageError::WriteFile {
+            None
+        };
+        let target_revision = match base_revision {
+            Some(revision) => revision.checked_add(1).ok_or_else(|| {
+                WorkModelStorageError::StorageRevisionExhausted {
                     path: path.clone(),
-                    source,
+                    id: work_item.id.clone(),
                 }
-            })?;
-        }
-
-        self.write_attempt_records(work_item)?;
-        self.write_merge_candidate_records(work_item)?;
-        work_item.storage_revision.set(record.storage_revision);
+            })?,
+            None => 0,
+        };
+        let transaction = WorkItemTransaction {
+            schema_version: WorkItemTransaction::SCHEMA_VERSION,
+            id: work_item.id.clone(),
+            base_revision,
+            target_revision,
+            work_item: work_item.clone(),
+        };
+        write_json_file(
+            &self.work_transaction_path(&work_item.id)?,
+            &transaction,
+        )?;
+        self.apply_work_item_transaction(&transaction)?;
+        work_item.storage_revision.set(target_revision);
         Ok(())
     }
 
     fn read_work_item_file(
+        &self,
+        path: &Path,
+        validate: bool,
+    ) -> Result<WorkItem, WorkModelStorageError> {
+        let expected = path.file_stem().and_then(|stem| stem.to_str()).ok_or_else(|| {
+            WorkModelStorageError::InvalidWorkItemId {
+                id: path.display().to_string(),
+            }
+        })?;
+        work_item_file_name(expected)?;
+        let _lock = self.lock_work_item_model(expected)?;
+        self.recover_work_item_transaction(expected)?;
+        self.read_work_item_file_unlocked(path, validate)
+    }
+
+    fn read_work_item_file_unlocked(
         &self,
         path: &Path,
         validate: bool,
@@ -3531,6 +3591,104 @@ impl WorkModelStore {
                 })?;
         }
         Ok(work_item)
+    }
+
+    fn read_work_item_transaction(
+        &self,
+        id: &str,
+    ) -> Result<Option<WorkItemTransaction>, WorkModelStorageError> {
+        let path = self.work_transaction_path(id)?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        let transaction: WorkItemTransaction = read_json_file(&path)?;
+        let expected_target = match transaction.base_revision {
+            Some(base) => base.checked_add(1),
+            None => Some(0),
+        };
+        if transaction.schema_version != WorkItemTransaction::SCHEMA_VERSION
+            || transaction.id != id
+            || transaction.work_item.id != id
+            || expected_target != Some(transaction.target_revision)
+        {
+            return Err(WorkModelStorageError::InvalidModel {
+                path,
+                source: WorkModelError::InvalidId {
+                    kind: "work item transaction",
+                    id: id.to_string(),
+                },
+            });
+        }
+        transaction.work_item.validate().map_err(|source| {
+            WorkModelStorageError::InvalidModel {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        Ok(Some(transaction))
+    }
+
+    fn recover_work_item_transaction(&self, id: &str) -> Result<(), WorkModelStorageError> {
+        if let Some(transaction) = self.read_work_item_transaction(id)? {
+            self.apply_work_item_transaction(&transaction)?;
+        }
+        Ok(())
+    }
+
+    fn recover_pending_transactions(&self) -> Result<(), WorkModelStorageError> {
+        let dir = self.work_transactions_dir();
+        if !dir.exists() {
+            return Ok(());
+        }
+        for path in list_json_paths(&dir)? {
+            let id = file_stem_id(&path)?;
+            let _lock = self.lock_work_item_model(&id)?;
+            self.recover_work_item_transaction(&id)?;
+        }
+        Ok(())
+    }
+
+    fn apply_work_item_transaction(
+        &self,
+        transaction: &WorkItemTransaction,
+    ) -> Result<(), WorkModelStorageError> {
+        let path = self.work_item_path(&transaction.id)?;
+        let current_revision = if path.exists() {
+            Some(read_json_file::<WorkItemRecord>(&path)?.storage_revision)
+        } else {
+            None
+        };
+        let valid_revision = current_revision == transaction.base_revision
+            || current_revision == Some(transaction.target_revision);
+        if !valid_revision {
+            return Err(WorkModelStorageError::StaleWorkItem {
+                path,
+                id: transaction.id.clone(),
+                expected_revision: transaction.base_revision,
+                actual_revision: current_revision.unwrap_or(0),
+            });
+        }
+
+        self.write_attempt_records(&transaction.work_item)?;
+        self.write_merge_candidate_records(&transaction.work_item)?;
+        let mut record = WorkItemRecord::from(&transaction.work_item);
+        record.storage_revision = transaction.target_revision;
+        let json = to_json_pretty(&record).map_err(|source| WorkModelStorageError::ParseFile {
+            path: path.clone(),
+            source,
+        })?;
+        crate::atomic_write::atomic_write(&path, json.as_bytes()).map_err(|source| {
+            WorkModelStorageError::WriteFile {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        let transaction_path = self.work_transaction_path(&transaction.id)?;
+        fs::remove_file(&transaction_path).map_err(|source| WorkModelStorageError::WriteFile {
+            path: transaction_path,
+            source,
+        })?;
+        Ok(())
     }
 
     fn assemble_split_work_item(
@@ -4089,6 +4247,20 @@ fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), WorkModel
             source,
         }
     })
+}
+
+fn aggregate_snapshot_matches(
+    left: &WorkItem,
+    right: &WorkItem,
+) -> Result<bool, WorkModelStorageError> {
+    let path = PathBuf::from("<work-item-transaction>");
+    let left = to_json_pretty(left).map_err(|source| WorkModelStorageError::ParseFile {
+        path: path.clone(),
+        source,
+    })?;
+    let right = to_json_pretty(right)
+        .map_err(|source| WorkModelStorageError::ParseFile { path, source })?;
+    Ok(left == right)
 }
 
 fn prune_json_files(dir: &Path, keep: &HashSet<PathBuf>) -> Result<(), WorkModelStorageError> {
@@ -6038,6 +6210,154 @@ mod tests {
             merge_candidates: Vec::new(),
             ..Default::default()
         }
+    }
+
+    fn candidate_for_completed_write() -> MergeCandidate {
+        MergeCandidate {
+            id: "attempt-1-merge-candidate".to_string(),
+            attempt_id: "attempt-1".to_string(),
+            source_workspace: WorkspaceRef {
+                id: "candidate".to_string(),
+                path: "../work-6-work-1-attempt-1-initial".to_string(),
+            },
+            target_workspace: WorkspaceRef {
+                id: "target".to_string(),
+                path: ".".to_string(),
+            },
+            source_branch: "main".to_string(),
+            target_branch: "main".to_string(),
+            candidate_commit: "commit-initial".to_string(),
+            merge_review_state: MergeReviewState::Pending,
+            merge_state: MergeCandidateMergeState::default(),
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn aggregate_reader_waits_until_split_snapshot_is_complete() {
+        use std::sync::{Arc, mpsc};
+        use std::thread;
+        use std::time::Duration;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(WorkModelStore::new(tmp.path()));
+        let initial = work_item_with_completed_write("work-1");
+        store.create_work_item(&initial).unwrap();
+        let mut updated = store.read_work_item("work-1").unwrap();
+        updated.title = "Committed snapshot".to_string();
+        updated.attempts[0].coder_mapping.write.model = "new-model".to_string();
+
+        let model_lock = store.lock_work_item_model("work-1").unwrap();
+        let path = store.work_item_path("work-1").unwrap();
+        let mut record = WorkItemRecord::from(&updated);
+        record.storage_revision = 1;
+        crate::atomic_write::atomic_write(
+            &path,
+            to_json_pretty(&record).unwrap().as_bytes(),
+        )
+        .unwrap();
+
+        let (sender, receiver) = mpsc::channel();
+        let reader = Arc::clone(&store);
+        let handle = thread::spawn(move || {
+            sender.send(reader.read_work_item("work-1")).unwrap();
+        });
+        assert!(
+            receiver.recv_timeout(Duration::from_millis(100)).is_err(),
+            "an aggregate reader must not observe a top-level record before its children"
+        );
+
+        store.write_attempt_records(&updated).unwrap();
+        drop(model_lock);
+        let observed = receiver.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        handle.join().unwrap();
+        assert_eq!(observed.title, "Committed snapshot");
+        assert_eq!(observed.attempts[0].coder_mapping.write.model, "new-model");
+    }
+
+    #[test]
+    fn failed_split_write_retries_from_durable_transaction() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        store
+            .create_work_item(&work_item_with_completed_write("work-1"))
+            .unwrap();
+        let mut updated = store.read_work_item("work-1").unwrap();
+        updated.title = "Recovered transaction".to_string();
+        updated.attempts[0].review_state = Some(AttemptReviewState::Passed);
+        updated
+            .merge_candidates
+            .push(candidate_for_completed_write());
+        let candidate_path = store
+            .work_merge_candidate_path("work-1", "attempt-1-merge-candidate")
+            .unwrap();
+        fs::create_dir_all(&candidate_path).unwrap();
+
+        assert!(store.write_work_item(&updated).is_err());
+        let transaction_path = tmp
+            .path()
+            .join(".fluent/work/transactions/work-1.json");
+        assert!(transaction_path.is_file(), "the retry snapshot must remain durable");
+        let top_level: WorkItemRecord = read_json_file(&store.work_item_path("work-1").unwrap())
+            .unwrap();
+        assert_eq!(top_level.storage_revision, 0, "publish the revision last");
+
+        fs::remove_dir(&candidate_path).unwrap();
+        store.write_work_item(&updated).unwrap();
+
+        let recovered = WorkModelStore::new(tmp.path())
+            .read_work_item("work-1")
+            .unwrap();
+        assert_eq!(recovered.title, "Recovered transaction");
+        assert_eq!(recovered.merge_candidates.len(), 1);
+        assert!(!transaction_path.exists());
+    }
+
+    #[test]
+    fn fresh_store_recovers_interrupted_creation_before_listing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = work_item_with_completed_write("work-1");
+        item.attempts[0].review_state = Some(AttemptReviewState::Passed);
+        item.merge_candidates
+            .push(candidate_for_completed_write());
+        let candidate_path = store
+            .work_merge_candidate_path("work-1", "attempt-1-merge-candidate")
+            .unwrap();
+        fs::create_dir_all(&candidate_path).unwrap();
+
+        assert!(store.create_work_item(&item).is_err());
+        assert!(!store.work_item_path("work-1").unwrap().exists());
+        fs::remove_dir(&candidate_path).unwrap();
+
+        let recovered = WorkModelStore::new(tmp.path()).list_work_items().unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].merge_candidates.len(), 1);
+    }
+
+    #[test]
+    fn storage_revision_exhaustion_fails_closed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        store
+            .create_work_item(&work_item_with_completed_write("work-1"))
+            .unwrap();
+        let path = store.work_item_path("work-1").unwrap();
+        let mut record: WorkItemRecord = read_json_file(&path).unwrap();
+        record.storage_revision = u64::MAX;
+        write_json_file(&path, &record).unwrap();
+        let mut item = store.read_work_item("work-1").unwrap();
+        item.title = "must not publish".to_string();
+
+        let error = store.write_work_item(&item).unwrap_err();
+
+        assert!(matches!(
+            error,
+            WorkModelStorageError::StorageRevisionExhausted { .. }
+        ));
+        assert_ne!(store.read_work_item("work-1").unwrap().title, "must not publish");
     }
 
     #[test]

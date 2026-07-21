@@ -322,7 +322,7 @@ pub fn add(project_root: &Path, id: &str, priority: Option<i64>) -> Result<()> {
     }
     let store = WorkModelStore::new(project_root);
     let _model_lock = store.lock_work_item_model(id)?;
-    let item = store.read_work_item(id)?;
+    let item = store.read_work_item_under_model_lock(id)?;
     ensure_lifecycle_eligible(&item, id)?;
 
     let _lock = lock_queue(project_root)?;
@@ -364,7 +364,7 @@ pub fn ensure_dispatch(
     }
     let store = WorkModelStore::new(project_root);
     let _model_lock = store.lock_work_item_model(id)?;
-    let item = store.read_work_item(id)?;
+    let item = store.read_work_item_under_model_lock(id)?;
     let eligibility = ensure_lifecycle_eligible(&item, id);
 
     let _lock = lock_queue(project_root)?;
@@ -547,7 +547,7 @@ pub fn claim(
     }
     let store = WorkModelStore::new(project_root);
     let _model_lock = store.lock_work_item_model(work_item_id)?;
-    let item = store.read_work_item(work_item_id)?;
+    let item = store.read_work_item_under_model_lock(work_item_id)?;
     ensure_lifecycle_eligible(&item, work_item_id)?;
     #[cfg(test)]
     crate::test_lock_probe::reach(
@@ -1016,6 +1016,11 @@ mod tests {
         setup_project(dir.path());
         write_ready_work_item(dir.path(), "wi-race");
         add(dir.path(), "wi-race", None).unwrap();
+        let store = WorkModelStore::new(dir.path());
+        let mut abandoned = store.read_work_item("wi-race").unwrap();
+        abandoned.abandonment = Some(WorkItemAbandonment {
+            reason: Some("race winner".to_string()),
+        });
         let queue_lock = lock_queue(dir.path()).unwrap();
         let probe = crate::test_lock_probe::ScopedLockProbe::install(
             "queue-lifecycle",
@@ -1028,11 +1033,6 @@ mod tests {
         });
         assert!(probe.wait_for("claim", "ELIGIBLE"));
 
-        let store = WorkModelStore::new(dir.path());
-        let mut abandoned = store.read_work_item("wi-race").unwrap();
-        abandoned.abandonment = Some(WorkItemAbandonment {
-            reason: Some("race winner".to_string()),
-        });
         let abandon_root = dir.path().to_path_buf();
         let (abandoned_tx, abandoned_rx) = mpsc::channel();
         let abandon_thread = std::thread::spawn(move || {

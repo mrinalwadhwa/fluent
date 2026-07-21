@@ -10,16 +10,27 @@ aggregate, so a stale snapshot can otherwise revert or delete concurrent work.
 ## Mechanism
 
 `WorkModelStore` attaches the top-level record's persisted storage revision to
-every assembled `WorkItem`. It takes the per-item `model.lock` before an
-aggregate write, compares the caller's observed revision with the current
-record, and increments the revision before replacing any top-level or split
-record. A mismatch returns `StaleWorkItem` before pruning. Reload the Work Item,
-reapply the intended field-level change, and retry through the same boundary.
+every assembled `WorkItem`. Aggregate readers and writers take the per-item
+`model.lock`. A writer compares the caller's observed revision with the current
+record, rejects revision exhaustion, and durably records the complete target
+snapshot under `.fluent/work/transactions/` before replacing any split record.
+It writes and prunes children first, publishes the incremented top-level record
+last, then removes the transaction. A mismatch returns `StaleWorkItem` before
+pruning. Reload the Work Item, reapply the intended field-level change, and
+retry through the same boundary.
+
+If a child write, process failure, or crash interrupts publication, readers and
+later writers finish the durable transaction while holding the same model lock
+before they assemble or mutate the Work Item. Listing Work Items first recovers
+transactions too, including a creation whose top-level record was not yet
+published. Code that already holds `model.lock` must call
+`read_work_item_under_model_lock` to avoid reacquiring the lock.
 
 New in-memory Work has an unobserved revision. Its first write may create a
 missing record, but it cannot overwrite a record another creator installed
-first. The store updates the in-memory revision after a successful write, so a
-single owner can perform sequential mutations without reloading.
+first. The top-level record stays absent until all split children are durable.
+The store updates the in-memory revision after a successful write, so a single
+owner can perform sequential mutations without reloading.
 
 ## Example
 
