@@ -3873,6 +3873,24 @@ fn post_land_learner_retry_preserves_merged_commit() {
         "inspect candidate reflog",
     )
     .unwrap();
+    git::run(
+        &candidate,
+        &["branch", "substituted-after-land", &merged_before],
+        "create substituted retained branch",
+    )
+    .unwrap();
+    git::run(
+        &candidate,
+        &[
+            "symbolic-ref",
+            "-m",
+            "substitute retained HEAD",
+            "HEAD",
+            "refs/heads/substituted-after-land",
+        ],
+        "substitute retained symbolic HEAD",
+    )
+    .unwrap();
 
     rerun_learner_attempt(&main_dir, &bin_dir);
 
@@ -3903,6 +3921,77 @@ fn post_land_learner_retry_preserves_merged_commit() {
     assert!(
         !main_dir.join(".fluent/expertise/late.md").exists(),
         "a post-land handoff-only retry writes no expertise to the merged branch"
+    );
+}
+
+#[test]
+fn post_land_legacy_recovery_rejects_a_wrong_ref_reflog_session() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let counter = tmp.path().join("learner-counter-wrong-ref");
+    let bin_dir = tmp.path().join("bin-wrong-ref");
+    write_mock_claude(
+        &bin_dir,
+        &post_land_learner_mock_script(
+            &counter,
+            r#"{"learning_summary":"must not run","follow_ups":[]}"#,
+            false,
+        ),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+    let merged = merged_commit_of(&main_dir);
+    let candidate = main_dir.join("../work-6-work-1-attempt-1");
+    let task_path = work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-write-1");
+    let mut task = read_json_value(&task_path);
+    task["output"].as_object_mut().unwrap().remove("base_commit");
+    write_json_value(&task_path, &task);
+
+    git::run(
+        &candidate,
+        &["reflog", "expire", "--expire=now", "--all"],
+        "expire retained provenance",
+    )
+    .unwrap();
+    let base = git::run_stdout(&candidate, &["rev-parse", "HEAD^"], "resolve wrong-ref base")
+        .unwrap();
+    git::run(
+        &candidate,
+        &["update-ref", "-m", "rebase (start): checkout main", "HEAD", &base],
+        "record wrong-ref start",
+    )
+    .unwrap();
+    git::run(
+        &candidate,
+        &[
+            "update-ref",
+            "-m",
+            "rebase (finish): returning to refs/heads/unrelated",
+            "HEAD",
+            &merged,
+        ],
+        "record wrong-ref finish",
+    )
+    .unwrap();
+
+    rerun_learner_attempt(&main_dir, &bin_dir);
+
+    assert_eq!(
+        fs::read_to_string(format!("{}.invocations", counter.display()))
+            .unwrap()
+            .lines()
+            .count(),
+        1,
+        "ambiguous legacy provenance suppresses the retry Learner"
+    );
+    let state = work_item_value(&main_dir, "work-1");
+    assert_eq!(state["attempts"][0]["learning"]["status"], "failed");
+    assert!(
+        state["attempts"][0]["learning"]["last_failure"]
+            .as_str()
+            .unwrap()
+            .contains("exact rebase provenance")
     );
 }
 

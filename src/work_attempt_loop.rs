@@ -951,7 +951,23 @@ fn try_learn(
         .map(Ok)
         .unwrap_or_else(|| {
             if handoff_only {
-                recover_legacy_accepted_base(&workspace_path, attempt, &baseline_commit)
+                let candidate_commit = item
+                    .merge_candidates
+                    .iter()
+                    .find(|candidate| candidate.id == candidate_id)
+                    .map(|candidate| candidate.candidate_commit.as_str())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "cannot recover accepted diff base: Merge Candidate is unavailable"
+                        )
+                    })?;
+                recover_legacy_accepted_base(
+                    &workspace_path,
+                    &work_item_id,
+                    attempt,
+                    candidate_commit,
+                    &baseline_commit,
+                )
             } else {
                 Ok(write_output.source_branch.clone())
             }
@@ -1067,12 +1083,40 @@ fn try_learn(
 /// missing, partial, or repeated sessions fail closed.
 fn recover_legacy_accepted_base(
     workspace_path: &Path,
+    work_item_id: &str,
     attempt: &Attempt,
+    candidate_commit: &str,
     merged_commit: &str,
 ) -> Result<String> {
-    let candidate_ref = symbolic_head(workspace_path)?.ok_or_else(|| {
-        anyhow::anyhow!("cannot recover accepted diff base: candidate HEAD is detached")
+    let completed_writes = attempt
+        .tasks
+        .iter()
+        .filter(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+        .collect::<Vec<_>>();
+    let first_write = completed_writes.first().ok_or_else(|| {
+        anyhow::anyhow!("cannot recover accepted diff base: no completed Write")
     })?;
+    let candidate_ref = format!(
+        "refs/heads/work/{}/{}/{}",
+        work_item_id, attempt.id, first_write.id
+    );
+    let persisted_tips = completed_writes
+        .iter()
+        .filter_map(|task| task.output.as_ref().map(|output| output.commit.as_str()))
+        .collect::<HashSet<_>>();
+    if completed_writes.iter().any(|task| task.output.is_none()) {
+        bail!(
+            "cannot recover accepted diff base: a completed Write has no persisted rebase tip"
+        );
+    }
+    let persisted_tip = match persisted_tips.iter().copied().collect::<Vec<_>>().as_slice() {
+        [tip] if *tip == candidate_commit => *tip,
+        _ => {
+            bail!(
+                "cannot recover accepted diff base: completed Writes and Merge Candidate do not identify one persisted rebase tip"
+            )
+        }
+    };
     let source_branches: HashSet<&str> = attempt
         .tasks
         .iter()
@@ -1097,7 +1141,8 @@ fn recover_legacy_accepted_base(
     }
     let reflog = String::from_utf8(output.stdout)
         .map_err(|_| anyhow::anyhow!("cannot recover accepted diff base: reflog is not UTF-8"))?;
-    let (base, rebased_tip) = parse_exact_rebase_base(&reflog, &candidate_ref, source_branch)?;
+    let (base, rebased_tip) =
+        parse_exact_rebase_base(&reflog, &candidate_ref, source_branch, persisted_tip)?;
 
     let ensure_ancestor = |ancestor: &str, descendant: &str, description: &str| -> Result<()> {
         let ancestry = git::run_raw(
@@ -1119,6 +1164,11 @@ fn recover_legacy_accepted_base(
         merged_commit,
         "rebase finish is not an ancestor of merged commit",
     )?;
+    ensure_ancestor(
+        merged_commit,
+        source_branch,
+        "merged commit is not reachable from the recorded target branch",
+    )?;
     Ok(base)
 }
 
@@ -1126,6 +1176,7 @@ fn parse_exact_rebase_base(
     reflog: &str,
     candidate_ref: &str,
     source_branch: &str,
+    persisted_tip: &str,
 ) -> Result<(String, String)> {
     let entries: Vec<(&str, &str)> = reflog
         .lines()
@@ -1137,6 +1188,13 @@ fn parse_exact_rebase_base(
         .collect::<Result<_>>()?;
     let expected_finish = format!("rebase (finish): returning to {candidate_ref}");
     let expected_start = format!("rebase (start): checkout {source_branch}");
+    let exact_finish_count = entries
+        .iter()
+        .filter(|(_, subject)| *subject == expected_finish)
+        .count();
+    if exact_finish_count > 1 {
+        bail!("cannot recover accepted diff base: rebase provenance is ambiguous");
+    }
     let mut matching_finishes = 0usize;
     let mut sessions = Vec::new();
 
@@ -1145,6 +1203,11 @@ fn parse_exact_rebase_base(
             continue;
         }
         matching_finishes += 1;
+        if *finish_commit != persisted_tip {
+            bail!(
+                "cannot recover accepted diff base: rebase finish does not match persisted rebase tip"
+            );
+        }
         for (start_commit, older_subject) in entries.iter().skip(index + 1) {
             if older_subject.starts_with("rebase (finish):") {
                 break;
@@ -1155,6 +1218,11 @@ fn parse_exact_rebase_base(
                 }
                 break;
             }
+            if !is_accepted_rebase_action(older_subject) {
+                bail!(
+                    "cannot recover accepted diff base: rebase session contains a structural gap"
+                );
+            }
         }
     }
 
@@ -1163,6 +1231,19 @@ fn parse_exact_rebase_base(
         [] => bail!("cannot recover accepted diff base: exact rebase provenance is unavailable"),
         _ => bail!("cannot recover accepted diff base: rebase provenance is ambiguous"),
     }
+}
+
+fn is_accepted_rebase_action(subject: &str) -> bool {
+    [
+        "rebase (pick):",
+        "rebase (squash):",
+        "rebase (fixup):",
+        "rebase (reword):",
+        "rebase (edit):",
+        "rebase (drop):",
+    ]
+    .iter()
+    .any(|prefix| subject.starts_with(prefix))
 }
 
 /// The outcome of confining the Learner's commit: the expertise it was allowed
@@ -1304,19 +1385,6 @@ fn copy_learner_artifacts(
             Ok(copied)
         })
         .collect()
-}
-
-fn symbolic_head(repo: &Path) -> Result<Option<String>> {
-    let output = git::run_raw(repo, &["symbolic-ref", "-q", "HEAD"])?;
-    match output.status.code() {
-        Some(0) => Ok(Some(String::from_utf8_lossy(&output.stdout).trim().to_string())),
-        Some(1) => Ok(None),
-        _ => bail!(
-            "failed to inspect symbolic HEAD in {}: {}",
-            repo.display(),
-            String::from_utf8_lossy(&output.stderr)
-        ),
-    }
 }
 
 /// Reduce a denied path to a filename-safe component for a synthesized follow-up
@@ -1880,6 +1948,7 @@ mod tests {
                 reflog,
                 "refs/heads/work/candidate",
                 "main",
+                "rebased",
             )
             .unwrap(),
             ("base".to_string(), "rebased".to_string())
@@ -1899,6 +1968,7 @@ mod tests {
             reflog,
             "refs/heads/work/candidate",
             "main",
+            "tip-2",
         )
         .unwrap_err();
 
@@ -1916,6 +1986,7 @@ mod tests {
             reflog,
             "refs/heads/work/candidate",
             "main",
+            "tip",
         )
         .unwrap_err();
 
@@ -1923,9 +1994,45 @@ mod tests {
     }
 
     #[test]
-    fn exact_legacy_rebase_base_accepts_rewritten_and_noop_sessions() {
+    fn exact_legacy_rebase_base_rejects_a_spliced_session() {
+        let reflog = concat!(
+            "tip\trebase (finish): returning to refs/heads/work/candidate\n",
+            "other\tcommit: unrelated history\n",
+            "base\trebase (start): checkout main\n",
+        );
+
+        let error = parse_exact_rebase_base(
+            reflog,
+            "refs/heads/work/candidate",
+            "main",
+            "tip",
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("structural gap"));
+    }
+
+    #[test]
+    fn exact_legacy_rebase_base_rejects_a_different_persisted_tip() {
+        let reflog = concat!(
+            "substitute\trebase (finish): returning to refs/heads/work/candidate\n",
+            "base\trebase (start): checkout main\n",
+        );
+
+        let error = parse_exact_rebase_base(
+            reflog,
+            "refs/heads/work/candidate",
+            "main",
+            "persisted-tip",
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("persisted rebase tip"));
+    }
+
+    #[test]
+    fn exact_legacy_rebase_base_accepts_supported_rewritten_sessions() {
         for middle in [
-            "",
             "tip\trebase (squash): Combine accepted changes\n",
             "tip\trebase (reword): Clarify accepted change\n",
             "tip\trebase (pick): Keep accepted change\n",
@@ -1938,6 +2045,7 @@ mod tests {
                     &reflog,
                     "refs/heads/work/candidate",
                     "main",
+                    "tip",
                 )
                 .unwrap(),
                 ("base".to_string(), "tip".to_string())
@@ -1946,11 +2054,31 @@ mod tests {
     }
 
     #[test]
+    fn exact_legacy_rebase_base_rejects_unknown_rebase_actions() {
+        let reflog = concat!(
+            "tip\trebase (finish): returning to refs/heads/work/candidate\n",
+            "tip\trebase (mystery): Rewrite accepted change\n",
+            "base\trebase (start): checkout main\n",
+        );
+
+        let error = parse_exact_rebase_base(
+            reflog,
+            "refs/heads/work/candidate",
+            "main",
+            "tip",
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("structural gap"));
+    }
+
+    #[test]
     fn exact_legacy_rebase_base_rejects_expired_reflog() {
         let error = parse_exact_rebase_base(
             "",
             "refs/heads/work/candidate",
             "main",
+            "tip",
         )
         .unwrap_err();
 
