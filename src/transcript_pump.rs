@@ -10,7 +10,7 @@
 use std::io::{Read, Write};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
+use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
 use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -76,16 +76,21 @@ pub fn status_path_for(transcript_path: &Path) -> PathBuf {
     transcript_path.with_file_name("transcript-pump.json")
 }
 
-/// A best-effort console sink for bounded record previews. Delivery must never
-/// block the pump: an implementation that cannot take a preview returns `false`
-/// so the pump accounts for the loss and keeps draining.
+/// A best-effort console sink for bounded record previews. Delivery is
+/// synchronous and must never block the pump: an implementation renders the
+/// preview without waiting and returns `false` when it could not — because there
+/// is no live console, a nonblocking write would stall, or the write failed — so
+/// the pump counts the loss immediately and keeps draining. Because delivery is
+/// synchronous, the returned outcome is the true fate of the preview, so the
+/// pump's drop accounting is exact at every status write.
 pub trait PreviewSink: Send + Sync {
     /// Offer one bounded preview. Returns `false` when it could not be delivered.
     fn deliver(&self, preview: &[u8]) -> bool;
 }
 
 /// A sink that discards every preview but reports success. Used where the pump
-/// runs without a live console.
+/// runs without a live console and previews are intentionally unwanted, so the
+/// discard is not accounted as a dropped preview.
 pub struct DiscardPreviews;
 
 impl PreviewSink for DiscardPreviews {
@@ -395,42 +400,33 @@ where
     }
 }
 
-/// The process-wide console preview sink. It hands bounded previews to a single
-/// background renderer over a bounded channel; a full or gone renderer drops
-/// the preview instead of backpressuring the pump. One renderer serves every
-/// pump so a blocked console cannot accumulate one stuck thread per coder.
+/// The process-wide console preview sink. For this landing it synchronously
+/// declines every preview and counts it as dropped: it spawns no renderer and
+/// writes preview bytes to no descriptor.
+///
+/// Live previews are deferred, not merely disabled for redirected output.
+/// Mirroring previews into a redirected (non-terminal) stderr is the flood that
+/// first stalled Fluent. Writing them to the terminal is no safer here: even a
+/// nonblocking write to an independent `/dev/tty` consumes the terminal's
+/// remaining queue capacity, so the very next blocking control-plane write to
+/// fd 2 could stall on the space the preview just took. An independent file
+/// description does not reserve capacity for fd 2. Until every Fluent-owned
+/// stderr write moves behind one independently nonblocking console bus, the safe
+/// contract is to decline previews; the canonical transcript already holds every
+/// byte, and declining keeps drop accounting exact (`dropped_console == records`)
+/// without ever touching Rust's process-global stderr lock.
 pub fn console_preview_sink() -> &'static dyn PreviewSink {
-    static SINK: OnceLock<ConsoleSink> = OnceLock::new();
-    SINK.get_or_init(ConsoleSink::spawn)
+    static SINK: ConsoleSink = ConsoleSink;
+    &SINK
 }
 
-struct ConsoleSink {
-    sender: SyncSender<Vec<u8>>,
-}
-
-impl ConsoleSink {
-    fn spawn() -> Self {
-        let (sender, receiver) = sync_channel::<Vec<u8>>(256);
-        // The renderer is intentionally never joined: writing to a blocked
-        // stderr must not keep the process alive at shutdown, and a detached
-        // thread is reaped when the process exits.
-        std::thread::spawn(move || {
-            let mut stderr = std::io::stderr();
-            for preview in receiver {
-                let _ = stderr.write_all(&preview);
-                let _ = stderr.write_all(b"\n");
-            }
-        });
-        Self { sender }
-    }
-}
+/// The production preview sink. It declines every preview so no preview transport
+/// can ever backpressure capture or stall control-plane output.
+struct ConsoleSink;
 
 impl PreviewSink for ConsoleSink {
-    fn deliver(&self, preview: &[u8]) -> bool {
-        match self.sender.try_send(preview.to_vec()) {
-            Ok(()) => true,
-            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => false,
-        }
+    fn deliver(&self, _preview: &[u8]) -> bool {
+        false
     }
 }
 
@@ -468,7 +464,7 @@ impl PreviewLine {
     }
 
     /// Offer the accumulated record as a bounded preview. Returns whether the
-    /// sink accepted it, then resets for the next record.
+    /// sink delivered it, then resets for the next record.
     fn flush(&mut self, preview: &dyn PreviewSink) -> bool {
         let delivered = if self.truncated {
             let mut bounded = self.buf.clone();
@@ -729,5 +725,45 @@ mod tests {
         let persisted = std::fs::read(&path).unwrap();
         assert_eq!(persisted, input, "raw bytes must be preserved unchanged");
         assert_eq!(summary.records, 2, "capture continues after invalid UTF-8");
+    }
+
+    #[test]
+    fn production_console_sink_declines_and_counts_every_preview() {
+        // The production sink declines every preview: `deliver` reports the loss
+        // and writes no bytes. Driven through a full drain, every record counts
+        // as a dropped preview and canonical capture is byte-exact, so an
+        // operator reading the status sees `dropped_console == records`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        let mut input = Vec::new();
+        for i in 0..6 {
+            input.extend_from_slice(format!("{{\"n\":{i}}}\n").as_bytes());
+        }
+
+        let sink = console_preview_sink();
+        assert!(
+            !sink.deliver(b"any preview"),
+            "the production sink must decline previews so none is counted delivered"
+        );
+
+        let summary = drain(
+            Cursor::new(input.clone()),
+            &path,
+            None,
+            sink,
+            &TranscriptPumpConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            input,
+            "a declined console must not cost the transcript any bytes"
+        );
+        assert_eq!(summary.records, 6);
+        assert_eq!(
+            summary.dropped_console, summary.records,
+            "every declined preview must be counted; dropped_console must equal records"
+        );
     }
 }

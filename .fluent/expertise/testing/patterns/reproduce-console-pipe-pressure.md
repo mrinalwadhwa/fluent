@@ -9,10 +9,20 @@ draining, while a stdout drain and a wait timeout keep the suite safe.
 
 Use when a binary test must prove that an unread or saturated console
 (the writer's stderr) cannot stall canonical transcript capture — the
-`transcript_pump` reliability contract. A coder emits a record larger
-than the ~64 KiB OS pipe capacity followed by another record; the test
-must confirm the writer still completes and every byte lands in the
-transcript.
+`transcript_pump` reliability contract. Two shapes: a single record
+larger than the ~64 KiB OS pipe capacity, or a sustained flood of many
+records whose previews would together exceed the pipe. The test must
+confirm the whole writer process completes within a deadline and every
+byte lands in the transcript.
+
+Because the sink declines every live preview in this landing, previews
+never reach the pipe in these tests; the regression proves that a
+sustained flood cannot saturate the console and that Fluent's own
+control-plane output and post-coder Attempt transition keep flowing.
+Assert prompt exit, a byte-exact transcript, `Complete` pump status,
+the exact record count, and `dropped_console == records`. A design that
+mirrored previews into the console would fill the pipe and hang the
+writer, failing the test.
 
 ## Mechanism
 

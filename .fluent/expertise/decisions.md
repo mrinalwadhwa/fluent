@@ -28,21 +28,48 @@ Host-owned Learner run evidence (transcript, submitted-draft snapshot, error, no
 
 ---
 
-## The transcript pump's console renderer and config are process-wide
+## The transcript pump's console sink is synchronous, terminal-only, and process-wide
 
 The `transcript_pump` module renders console previews through a single
-process-wide bounded renderer (`console_preview_sink`, a `OnceLock`) and reads
-its thresholds from a process-wide installed config (`install_config` /
-`active_config`, a `Mutex`). This is deliberate, not a hidden global smell.
-`Coder::run`'s signature is kept stable for non-transcript callers, so the pump
-cannot take per-call config through the trait; the executor resolves the layered
-thresholds once per project (`install_transcript_pump_config`) and installs them
-before launching a coder. One renderer for the whole process is the point: a
-blocked console must not accumulate one stuck thread per Task, and previews are
-dropped (`try_send`) rather than backpressuring capture. The renderer thread is
-never joined so a blocked stderr cannot keep the process alive at shutdown. Do
-not "fix" this by threading config through `Coder::run` or by spawning a renderer
-per pump.
+process-wide sink (`console_preview_sink`, a `OnceLock`) and reads its thresholds
+from a process-wide installed config (`install_config` / `active_config`, a
+`Mutex`). This is deliberate, not a hidden global smell. `Coder::run`'s signature
+is kept stable for non-transcript callers, so the pump cannot take per-call
+config through the trait; the executor resolves the layered thresholds once per
+project (`install_transcript_pump_config`) and installs them before launching a
+coder.
+
+Preview delivery is **synchronous and best-effort**, deliberately not a
+background renderer over a bounded queue. `PreviewSink::deliver` decides the fate
+of the preview on the pump's own thread and returns whether it was delivered, so
+drop accounting is exact at every status write (there is no in-flight queue to
+settle before `Complete`).
+
+For this landing the production sink **declines every preview** and counts it as
+dropped (`dropped_console == records`). Live previews are deferred, not merely
+disabled for redirected output:
+
+- Mirroring previews into a redirected (non-terminal) stderr is the flood that
+  first stalled Fluent, so a pipe or file sink is never written to.
+- Writing to the terminal is no safer here. Even a nonblocking write to an
+  independent `/dev/tty` consumes the terminal's remaining queue capacity, so the
+  very next *blocking* control-plane write to fd 2 could stall on the space the
+  preview just took; an independent file description does not reserve capacity for
+  fd 2. Until every Fluent-owned stderr write moves behind one independently
+  nonblocking console bus, declining is the safe contract.
+- Never `dup(2)` and write blocking: the duplicate shares the same kernel pipe,
+  so a later ordinary `eprintln!` would still block in the kernel even with no
+  Rust stderr mutex held. Never set `O_NONBLOCK` on a dup of fd 2 either —
+  file-status flags are shared.
+
+Declining touches no descriptor and no Rust process-global stderr lock, so
+capture is never backpressured and control-plane output never stalls behind the
+console. The canonical transcript already holds every byte.
+
+Do not "fix" this by threading config through `Coder::run`, by mirroring previews
+to any stderr, or by reintroducing a background renderer thread. Re-enabling live
+previews is a separate change that must first move all Fluent-owned stderr writes
+behind one independently nonblocking console bus.
 
 ---
 

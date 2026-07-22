@@ -2296,6 +2296,123 @@ exit 0
 }
 
 #[test]
+fn writer_completes_under_sustained_previews_on_an_unread_console() {
+    // A sustained flood of records — several MiB of bounded previews, far more
+    // than a 64 KiB stderr pipe can hold — with the writer's stderr piped and
+    // never drained. The sink declines live previews rather than mirroring them,
+    // so the flood cannot saturate the console and stall Fluent's own
+    // control-plane output. The whole writer process must complete within a
+    // deadline, drive its post-coder Attempt transition (task state and pump
+    // status), and count every declined preview: `dropped_console == records`.
+    // A design that mirrored previews into this non-terminal console would fill
+    // the pipe and block the writer, failing this regression.
+    const RECORDS: usize = 2000;
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+i=0
+pad=$(head -c 2000 /dev/zero | tr '\0' 'a')
+while [ $i -lt 2000 ]; do
+  printf '{"type":"rec","n":%d,"pad":"%s"}\n' "$i" "$pad"
+  i=$((i+1))
+done
+printf 'task output\n' > task-output.txt
+git add task-output.txt
+git commit -m "Add task output" >/dev/null
+exit 0
+"##,
+    );
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Pump test"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    // Pipe stderr and never drain it: that is the saturated-console condition.
+    // stdout is drained on a thread; it carries unrelated inherited output.
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_fluent"))
+        .current_dir(&main_dir)
+        .args([
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_NO_UPDATE_CHECK", "1")
+        .env("FLUENT_MAX_TASK_RETRIES", "0")
+        .env_remove("FLUENT_TASK_KIND")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut stdout = child.stdout.take().unwrap();
+    let drain_stdout = std::thread::spawn(move || {
+        let mut sink = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stdout, &mut sink);
+    });
+
+    let status = wait_with_timeout(&mut child, std::time::Duration::from_secs(60))
+        .expect("writer must complete instead of blocking on the saturated console");
+    let _ = drain_stdout.join();
+    assert!(
+        status.success(),
+        "writer should complete despite sustained previews on an unread console"
+    );
+
+    let transcript =
+        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/transcript.jsonl");
+    let content = fs::read(&transcript).unwrap();
+    assert!(
+        content.len() > 64 * 1024,
+        "the sustained flood must persist in full; got {} bytes",
+        content.len()
+    );
+    assert!(
+        content
+            .windows(br#""n":1999"#.len())
+            .any(|w| w == br#""n":1999"#),
+        "the last record of the sustained flood must be captured"
+    );
+
+    // The post-coder Attempt transition ran: the task committed its output.
+    assert!(
+        main_dir.join("task-output.txt").exists(),
+        "the writer must reach its post-coder work, not stall on the console"
+    );
+
+    // The pump status is byte-truthful: capture completed, every record counted,
+    // and every declined preview accounted as a drop.
+    let status_file = main_dir
+        .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/transcript-pump.json");
+    let status_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&status_file).unwrap()).unwrap();
+    assert_eq!(status_json["state"], "complete");
+    assert_eq!(
+        status_json["records"].as_u64().unwrap(),
+        RECORDS as u64,
+        "every emitted record must be counted"
+    );
+    assert_eq!(
+        status_json["dropped_console"].as_u64().unwrap(),
+        status_json["records"].as_u64().unwrap(),
+        "a declined console must count every preview as dropped"
+    );
+}
+
+#[test]
 fn seed_failure_does_not_abort_attempt() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
