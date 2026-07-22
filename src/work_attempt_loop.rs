@@ -2254,12 +2254,17 @@ fn interpret_reviews(
             return Ok(WorkAttemptRunOutcome::ReviewOnlyFailed);
         }
         if !followup_budget_available {
-            let handoff_path =
-                write_budget_exhausted_handoff(project_root, &item.id, attempt_id, &failed)?;
+            // Persist the authoritative RoundCap pause FIRST so a handoff-write
+            // failure can never roll the pause back or leave the attempt executing.
             crate::work_model::suspend_attempt(
                 &mut item.attempts[attempt_index],
                 crate::work_model::PauseKind::RoundCap,
             );
+            store.write_work_item(&item)?;
+            // Write the operator handoff second and attach its reference in a later
+            // durable mutation; the pause above is already durable.
+            let handoff_path =
+                write_budget_exhausted_handoff(project_root, &item.id, attempt_id, &failed)?;
             item.attempts[attempt_index].artifacts.push(ArtifactRef {
                 producer_id: "attempt-loop".to_string(),
                 path: handoff_path.clone(),
@@ -2274,13 +2279,18 @@ fn interpret_reviews(
     }
 
     if !uncertain.is_empty() {
-        let handoff_path =
-            write_needs_user_handoff(project_root, &item.id, attempt_id, &uncertain)?;
+        // Persist the authoritative Uncertain pause FIRST so a handoff-write failure
+        // can never roll the pause back or leave the attempt executing.
         item.attempts[attempt_index].review_state = Some(AttemptReviewState::Uncertain);
         crate::work_model::suspend_attempt(
             &mut item.attempts[attempt_index],
             crate::work_model::PauseKind::Uncertain,
         );
+        store.write_work_item(&item)?;
+        // Write the operator handoff second and attach its reference in a later
+        // durable mutation; the pause above is already durable.
+        let handoff_path =
+            write_needs_user_handoff(project_root, &item.id, attempt_id, &uncertain)?;
         item.attempts[attempt_index].artifacts.push(ArtifactRef {
             producer_id: "attempt-loop".to_string(),
             path: handoff_path.clone(),
@@ -3730,6 +3740,43 @@ mod tests {
         assert!(
             matches!(outcome, WorkAttemptRunOutcome::NeedsUser { .. }),
             "tester failure at budget cap should record needs-user; got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn round_cap_handoff_failure_preserves_durable_pause() {
+        // State-before-artifact ordering: the authoritative RoundCap pause is
+        // persisted BEFORE the operator handoff is written, so a handoff-write
+        // failure never rolls the pause back or leaves the attempt executing.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, _) =
+            make_interpret_reviews_fixture(tmp.path(), "PASS", Some(failing_tester_json()));
+
+        // Obstruct the handoff write: pre-create its target path as a directory so
+        // `write_budget_exhausted_handoff` fails after the pause is durable.
+        let handoff_path =
+            tmp.path()
+                .join(work_artifact_path("work-1", "attempt-1", "needs-user.md"));
+        fs::create_dir_all(&handoff_path).unwrap();
+
+        let item = store.read_work_item("work-1").unwrap();
+        let result = interpret_reviews(tmp.path(), &store, item, "attempt-1", false, None);
+        assert!(
+            result.is_err(),
+            "a handoff-write failure surfaces as an error"
+        );
+
+        // The authoritative RoundCap pause is durable despite the handoff failure.
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(
+            stored.attempts[0].status,
+            AttemptStatus::NeedsUser,
+            "the attempt is durably paused, never left executing by a handoff failure"
+        );
+        assert_eq!(
+            stored.attempts[0].pause_kind,
+            Some(crate::work_model::PauseKind::RoundCap),
+            "the RoundCap pause is persisted before the auxiliary handoff"
         );
     }
 
