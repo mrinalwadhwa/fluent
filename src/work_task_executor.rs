@@ -904,18 +904,44 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         );
     }
 
-    if let Err(error) = readable_workspaces.finish() {
-        lock_mark_task_failed(
-            config.store,
-            config.store_lock,
-            config.work_item_id,
-            config.attempt_id,
-            config.task_id,
-        )?;
-        return Err(error);
-    }
+    // Compose the coder/pump primary with the workspace-confinement cleanup
+    // outcome and durably terminalize through one boundary. A confinement cleanup
+    // failure must never mask or erase a coder/pump failure, and no raw `?` after
+    // the reservation may leave the Task Executing.
+    let cleanup_result = readable_workspaces.finish();
+    finalize_review_outcome(
+        &config,
+        run_result,
+        cleanup_result,
+        &review_path,
+        &crate::notify::notify,
+    )
+}
 
+/// Compose a Reviewer's coder/pump outcome with its workspace-confinement cleanup
+/// outcome and durably terminalize the Task before returning.
+///
+/// A confinement cleanup failure never masks or erases a coder/pump primary: when
+/// the coder failed, that typed primary is preserved and any cleanup failure is
+/// attached as secondary context (so the typed [`crate::transcript_pump::TranscriptPumpError`]
+/// stays discoverable by downcast); when only cleanup failed, it is the primary.
+/// On success the completion is persisted through the same terminal boundary.
+fn finalize_review_outcome(
+    config: &WorkTaskRunConfig<'_>,
+    run_result: Result<()>,
+    cleanup_result: Result<()>,
+    review_path: &Path,
+    notify_fn: &dyn Fn(&str, &str),
+) -> Result<WorkTaskRunResult> {
     if let Err(error) = run_result {
+        // The coder/pump failure is the primary. Retain a confinement cleanup
+        // failure as secondary context without letting it displace the primary.
+        let error = match cleanup_result {
+            Ok(()) => error,
+            Err(cleanup_error) => error.context(format!(
+                "additionally failed to finish reviewer workspace confinement: {cleanup_error:#}"
+            )),
+        };
         let failure = classify_task_failure(&error);
         lock_mark_task_failed_attempt_needs_user(
             config.store,
@@ -925,7 +951,18 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             config.attempt_id,
             config.task_id,
             &failure,
-            &crate::notify::notify,
+            notify_fn,
+        )?;
+        return Err(error);
+    }
+
+    if let Err(error) = cleanup_result {
+        lock_mark_task_failed(
+            config.store,
+            config.store_lock,
+            config.work_item_id,
+            config.attempt_id,
+            config.task_id,
         )?;
         return Err(error);
     }
@@ -946,10 +983,9 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     }
 
     // Route every post-reservation completion failure — completion read/find and the
-    // terminal write — through one durable terminal boundary, so no raw `?` after the
-    // reservation can leave the Task Executing. The completion helper takes and
-    // releases the store lock itself, so terminalization on failure never deadlocks.
-    match complete_review_task(&config, &review_path) {
+    // terminal write — through one durable terminal boundary. The completion helper
+    // takes and releases the store lock itself, so terminalization never deadlocks.
+    match complete_review_task(config, review_path) {
         Ok(result) => Ok(result),
         Err(error) => {
             lock_mark_task_failed(
@@ -3954,6 +3990,133 @@ mod tests {
             after.attempts[0].pause_kind,
             Some(crate::work_model::PauseKind::TranscriptPump),
             "the primary transcript-pump classification is preserved"
+        );
+    }
+
+    #[test]
+    fn reviewer_preserves_pump_and_cleanup_failures() {
+        // B7: when a Reviewer's coder run fails with a typed transcript-pump
+        // primary AND its workspace-confinement cleanup also fails, the composed
+        // outcome durably terminalizes the Task, preserves the typed pump primary
+        // (still discoverable by downcast, so it classifies as a resumable
+        // transcript-pump pause rather than a generic failure), and retains the
+        // cleanup failure as secondary context rather than masking the primary.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Reviewer composite failure".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            post_merge_review_fix_depth: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        // Reserve a Review Task Executing under a Reviewing Attempt.
+        let review_task = crate::work_model::Task {
+            id: "attempt-1-review-architecture".to_string(),
+            kind: TaskKind::Review,
+            status: TaskStatus::Executing,
+            role: "architecture".to_string(),
+            instructions: None,
+            work_item_id: "work-1".to_string(),
+            attempt_id: Some("attempt-1".to_string()),
+            workspace_access: crate::work_model::WorkspaceAccess {
+                reads: vec![crate::work_model::WorkspaceRef {
+                    id: "candidate".to_string(),
+                    path: "candidate-workspace".to_string(),
+                }],
+                writes: Vec::new(),
+            },
+            artifact_area: Some(crate::work_model::TaskArtifactArea {
+                path: crate::work_model::work_artifact_path(
+                    "work-1",
+                    "attempt-1",
+                    "attempt-1-review-architecture",
+                ),
+            }),
+            review_context: Some(crate::work_model::ReviewContext {
+                candidate_workspace_id: "candidate".to_string(),
+                candidate_workspace_path: "candidate-workspace".to_string(),
+                source_branch: "work/attempt-1".to_string(),
+                candidate_commit: "abc123".to_string(),
+                base_commit: None,
+            }),
+            input_artifacts: Vec::new(),
+            depends_on: None,
+            output: None,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+        };
+        item.attempts[0].tasks.push(review_task);
+        item.attempts[0].status = AttemptStatus::Reviewing;
+        store.create_work_item(&item).unwrap();
+
+        let resolver = ContentResolver::new(None);
+        let config = WorkTaskRunConfig {
+            project_root: tmp.path(),
+            store: &store,
+            work_item_id: "work-1",
+            attempt_id: "attempt-1",
+            task_id: "attempt-1-review-architecture",
+            resolver: &resolver,
+            extra_args: &[],
+            no_sandbox: true,
+            store_lock: None,
+        };
+
+        let pump_primary: Result<()> = Err(anyhow::Error::new(
+            crate::transcript_pump::TranscriptPumpError::new(
+                "write transcript-pump status: no space left on device",
+            ),
+        ));
+        let cleanup_failure: Result<()> =
+            Err(anyhow::anyhow!("restore reviewer worktree confinement failed"));
+
+        let error = finalize_review_outcome(
+            &config,
+            pump_primary,
+            cleanup_failure,
+            &tmp.path().join("does-not-exist-review.md"),
+            &|_, _| {},
+        )
+        .expect_err("a composite coder+cleanup failure must return an error");
+
+        // The typed pump primary survives composition and stays downcastable.
+        assert!(
+            error
+                .downcast_ref::<crate::transcript_pump::TranscriptPumpError>()
+                .is_some(),
+            "the transcript-pump primary must remain discoverable by downcast, not be masked by cleanup"
+        );
+        // The cleanup failure is retained as secondary context.
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("restore reviewer worktree confinement failed"),
+            "the cleanup failure must be retained as secondary context: {rendered}"
+        );
+
+        // The Task is durably terminalized as a resumable transcript-pump pause,
+        // never left Executing, and classified from the preserved typed primary.
+        let after = store.read_work_item("work-1").unwrap();
+        let review = after.attempts[0]
+            .tasks
+            .iter()
+            .find(|t| t.id == "attempt-1-review-architecture")
+            .unwrap();
+        assert_eq!(
+            review.status,
+            TaskStatus::NeedsUser,
+            "the Review Task is durably terminalized, never left Executing"
+        );
+        assert_eq!(
+            after.attempts[0].pause_kind,
+            Some(crate::work_model::PauseKind::TranscriptPump),
+            "the preserved typed pump primary classifies the pause, not the cleanup failure"
         );
     }
 
