@@ -1111,13 +1111,27 @@ fn try_learn(
                 ),
             ));
     }
-    let handoff = crate::learner::stamp_handoff(
+    // Normalize toward Observation-only and record every normalization on the
+    // host-owned run surface, so a single malformed optional field cannot reject
+    // the draft yet the change is never silent.
+    let (draft, normalizations) = crate::learner::normalize_draft(draft);
+    record_run_normalizations(&run_dir, &normalizations)?;
+    let handoff = match crate::learner::stamp_handoff(
         draft,
         &work_item_id,
         &attempt_id,
         candidate_id,
         confinement.expertise,
-    )?;
+    ) {
+        Ok(handoff) => handoff,
+        Err(error) => {
+            // A rejected draft preserves its submitted bytes (already recorded)
+            // and its full validation error as immutable run artifacts before any
+            // later repair may publish another draft.
+            record_run_rejection(&run_dir, &error)?;
+            return Err(error);
+        }
+    };
     let handoff_ref =
         crate::learner::write_handoff(project_root, &work_item_id, &attempt_id, &handoff)?;
     Ok(handoff_ref)
@@ -1504,6 +1518,39 @@ fn record_submitted_draft(
         .with_context(|| format!("record submitted draft evidence at {}", evidence.display()))?;
     file.write_all(&bytes)
         .with_context(|| format!("write submitted draft evidence at {}", evidence.display()))?;
+    Ok(())
+}
+
+/// Record every draft normalization on the host-owned run surface, so a
+/// downgrade toward Observation-only is durable rather than silent. Writes
+/// nothing when no normalization occurred.
+fn record_run_normalizations(run_dir: &Path, normalizations: &[String]) -> Result<()> {
+    if normalizations.is_empty() {
+        return Ok(());
+    }
+    let path = run_dir.join("normalizations.txt");
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .with_context(|| format!("record run normalizations at {}", path.display()))?;
+    file.write_all(format!("{}\n", normalizations.join("\n")).as_bytes())
+        .with_context(|| format!("write run normalizations at {}", path.display()))?;
+    Ok(())
+}
+
+/// Preserve a rejected draft's full validation error as an immutable run
+/// artifact beside the already-recorded submitted bytes, so a later repair
+/// cannot publish another draft without the rejection surviving as evidence.
+fn record_run_rejection(run_dir: &Path, error: &anyhow::Error) -> Result<()> {
+    let path = run_dir.join("error.txt");
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .with_context(|| format!("record run rejection at {}", path.display()))?;
+    file.write_all(format!("{error:#}\n").as_bytes())
+        .with_context(|| format!("write run rejection at {}", path.display()))?;
     Ok(())
 }
 

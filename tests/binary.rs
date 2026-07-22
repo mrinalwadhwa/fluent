@@ -3834,6 +3834,75 @@ fn post_land_learner_retry_materializes_recovered_handoff() {
 }
 
 #[test]
+fn learner_rejected_drafts_are_immutable_run_artifacts() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let counter = tmp.path().join("learner-counter-rejected");
+    let bin_dir = tmp.path().join("bin-rejected");
+    // The retry produces a schema-invalid draft: a follow-up with no stable id
+    // cannot stamp into a handoff.
+    write_mock_claude(
+        &bin_dir,
+        &post_land_learner_mock_script(
+            &counter,
+            r#"{"learning_summary":"rejected draft","follow_ups":[{"id":"","summary":"missing id finding"}]}"#,
+            false,
+        ),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+    let merged = merged_commit_of(&main_dir);
+
+    let retry_output = rerun_learner_attempt(&main_dir, &bin_dir);
+    if !real_sandbox_exec_is_usable() {
+        assert!(!retry_output.status.success());
+        return;
+    }
+
+    // A schema-invalid draft leaves the Learning failed and the merged commit
+    // untouched.
+    assert_eq!(
+        work_item_value(&main_dir, "work-1")["attempts"][0]["learning"]["status"],
+        "failed",
+        "a schema-invalid draft must not produce a handoff"
+    );
+    assert_eq!(git_head(&main_dir), merged);
+
+    // The submitted bytes and the full validation error are preserved as
+    // immutable artifacts under a durable run identity on the host-owned run
+    // surface, before any repair could publish another draft.
+    let runs = main_dir.join(".fluent/work/artifacts/work-1/attempt-1/learner/runs");
+    let mut preserved_submitted = false;
+    let mut preserved_error = false;
+    for run in fs::read_dir(&runs)
+        .expect("the host-owned run surface must exist")
+        .filter_map(|e| e.ok())
+    {
+        let submitted = run.path().join("submitted-draft.json");
+        if submitted.exists()
+            && fs::read_to_string(&submitted)
+                .unwrap()
+                .contains("missing id finding")
+        {
+            preserved_submitted = true;
+        }
+        let error = run.path().join("error.txt");
+        if error.exists() && fs::read_to_string(&error).unwrap().contains("stable id") {
+            preserved_error = true;
+        }
+    }
+    assert!(
+        preserved_submitted,
+        "the submitted draft bytes must be preserved as immutable run evidence"
+    );
+    assert!(
+        preserved_error,
+        "the full validation error must be preserved as immutable run evidence"
+    );
+}
+
+#[test]
 fn missing_legacy_learning_record_retries_after_land() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);

@@ -80,6 +80,7 @@ pub fn stamp_handoff(
     source_merge_candidate_id: &str,
     expertise: Vec<ArtifactRef>,
 ) -> Result<LearnerHandoffV1> {
+    let (draft, _normalizations) = normalize_draft(draft);
     let mut follow_ups = Vec::with_capacity(draft.follow_ups.len());
     let mut seen = std::collections::HashSet::new();
     for follow_up in draft.follow_ups {
@@ -101,6 +102,85 @@ pub fn stamp_handoff(
         },
         follow_ups,
     })
+}
+
+/// Normalize a Learner draft toward a safely persistable, Observation-only
+/// state. It only ever moves a follow-up *away* from corrective authority, never
+/// toward it: malformed optional artifact evidence is dropped, and malformed,
+/// incomplete, or unsupported corrective metadata downgrades the follow-up to a
+/// plain Observation. Returns the normalized draft plus a note for every change,
+/// so one malformed optional field cannot reject the whole draft yet no
+/// normalization passes silently.
+pub fn normalize_draft(mut draft: LearnerDraftV1) -> (LearnerDraftV1, Vec<String>) {
+    let mut notes = Vec::new();
+    for follow_up in &mut draft.follow_ups {
+        normalize_follow_up(follow_up, &mut notes);
+    }
+    (draft, notes)
+}
+
+fn normalize_follow_up(follow_up: &mut FollowUpDraftV1, notes: &mut Vec<String>) {
+    // Drop malformed optional artifact evidence: a bad digest or absolute path
+    // must not sink an otherwise-valid Observation.
+    let before = follow_up.evidence.len();
+    follow_up.evidence.retain(evidence_is_well_formed);
+    let dropped = before - follow_up.evidence.len();
+    if dropped > 0 {
+        notes.push(format!(
+            "follow-up {:?}: dropped {dropped} malformed artifact-evidence entr{}, \
+             preserved as an Observation",
+            follow_up.id,
+            if dropped == 1 { "y" } else { "ies" }
+        ));
+    }
+    // Downgrade malformed, incomplete, or unsupported corrective metadata to
+    // Observation-only. Never upgrade: a non-corrective follow-up that carries a
+    // stray corrective context or authority simply loses it.
+    if follow_up.corrective {
+        if let Err(reason) = corrective_metadata_reason(follow_up) {
+            follow_up.corrective = false;
+            follow_up.corrective_context = None;
+            follow_up.authority = None;
+            notes.push(format!(
+                "follow-up {:?}: downgraded to Observation-only ({reason})",
+                follow_up.id
+            ));
+        }
+    } else if follow_up.corrective_context.is_some() || follow_up.authority.is_some() {
+        follow_up.corrective_context = None;
+        follow_up.authority = None;
+        notes.push(format!(
+            "follow-up {:?}: dropped corrective metadata from a non-corrective follow-up",
+            follow_up.id
+        ));
+    }
+}
+
+/// `Ok` when a follow-up's corrective metadata is structurally complete enough
+/// to stand as a corrective execution input, or the reason it is not. Authority
+/// freshness is left to the host's corrective gate; this only rejects metadata
+/// that could never be corrective at all.
+fn corrective_metadata_reason(follow_up: &FollowUpDraftV1) -> Result<()> {
+    let context = follow_up
+        .corrective_context
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("missing corrective context"))?;
+    context
+        .validate()
+        .map_err(|error| anyhow::anyhow!("incomplete corrective context: {error}"))?;
+    Ok(())
+}
+
+/// Whether an artifact-evidence reference is well formed: a non-empty relative
+/// path with a `sha256:` digest. A malformed reference is dropped rather than
+/// rejecting the follow-up that carries it.
+fn evidence_is_well_formed(evidence: &ArtifactRef) -> bool {
+    !evidence.path.trim().is_empty()
+        && evidence.is_relative()
+        && evidence
+            .digest
+            .strip_prefix("sha256:")
+            .is_some_and(|hex| !hex.trim().is_empty())
 }
 
 fn validate_follow_up(follow_up: &FollowUpDraftV1) -> Result<()> {
@@ -248,25 +328,43 @@ mod tests {
     }
 
     #[test]
-    fn stamp_handoff_rejects_incomplete_corrective_follow_up() {
-        let mut context = corrective_context();
-        context.verification = "  ".to_string();
+    fn malformed_corrective_followup_downgrades_without_batch_failure() {
+        let mut incomplete = corrective_context();
+        incomplete.verification = "  ".to_string();
         let draft = LearnerDraftV1 {
             learning_summary: String::new(),
-            follow_ups: vec![FollowUpDraftV1 {
-                id: "fu-1".to_string(),
-                summary: "Restore the retry cap".to_string(),
-                corrective: true,
-                corrective_context: Some(context),
-                evidence: Vec::new(),
-                ..Default::default()
-            }],
+            follow_ups: vec![
+                FollowUpDraftV1 {
+                    id: "fu-bad".to_string(),
+                    summary: "Malformed corrective proposal".to_string(),
+                    corrective: true,
+                    corrective_context: Some(incomplete),
+                    ..Default::default()
+                },
+                FollowUpDraftV1 {
+                    id: "fu-ok".to_string(),
+                    summary: "A plain observation".to_string(),
+                    corrective: false,
+                    ..Default::default()
+                },
+            ],
         };
-        assert!(stamp_handoff(draft, "work-1", "attempt-1", "mc", Vec::new()).is_err());
+        // The whole draft is preserved: the malformed corrective downgrades to
+        // Observation-only rather than failing the batch.
+        let handoff = stamp_handoff(draft, "work-1", "attempt-1", "mc", Vec::new()).unwrap();
+        assert_eq!(handoff.follow_ups.len(), 2);
+        let downgraded = &handoff.follow_ups[0];
+        assert_eq!(downgraded.id, "fu-bad");
+        assert_eq!(downgraded.summary, "Malformed corrective proposal");
+        assert!(
+            !downgraded.corrective,
+            "malformed corrective metadata must not create executable Work"
+        );
+        assert!(downgraded.corrective_context.is_none());
     }
 
     #[test]
-    fn stamp_handoff_rejects_corrective_follow_up_without_context() {
+    fn corrective_followup_without_context_downgrades_to_observation() {
         let draft = LearnerDraftV1 {
             learning_summary: String::new(),
             follow_ups: vec![FollowUpDraftV1 {
@@ -278,7 +376,72 @@ mod tests {
                 ..Default::default()
             }],
         };
-        assert!(stamp_handoff(draft, "work-1", "attempt-1", "mc", Vec::new()).is_err());
+        let handoff = stamp_handoff(draft, "work-1", "attempt-1", "mc", Vec::new()).unwrap();
+        assert_eq!(handoff.follow_ups.len(), 1);
+        assert!(!handoff.follow_ups[0].corrective);
+    }
+
+    #[test]
+    fn malformed_noncorrective_artifact_evidence_is_preserved_observation_only() {
+        let draft = LearnerDraftV1 {
+            learning_summary: String::new(),
+            follow_ups: vec![FollowUpDraftV1 {
+                id: "fu-1".to_string(),
+                summary: "Consider tightening the retry cap".to_string(),
+                corrective: false,
+                evidence: vec![
+                    ArtifactRef {
+                        path: "/absolute/eviction.log".to_string(),
+                        digest: "sha256:abc".to_string(),
+                    },
+                    ArtifactRef {
+                        path: "notes.md".to_string(),
+                        digest: "not-a-digest".to_string(),
+                    },
+                ],
+                ..Default::default()
+            }],
+        };
+        let (normalized, notes) = normalize_draft(draft.clone());
+        assert!(
+            normalized.follow_ups[0].evidence.is_empty(),
+            "malformed optional evidence is dropped"
+        );
+        assert!(!normalized.follow_ups[0].corrective);
+        assert!(!notes.is_empty(), "the normalization is recorded");
+
+        // The finding survives into the handoff as an Observation-only follow-up
+        // rather than rejecting the whole draft.
+        let handoff = stamp_handoff(draft, "work-1", "attempt-1", "mc", Vec::new()).unwrap();
+        assert_eq!(handoff.follow_ups.len(), 1);
+        assert_eq!(handoff.follow_ups[0].summary, "Consider tightening the retry cap");
+        assert!(handoff.follow_ups[0].evidence.is_empty());
+        assert!(!handoff.follow_ups[0].corrective);
+    }
+
+    #[test]
+    fn normalize_keeps_a_complete_corrective_follow_up_and_its_valid_evidence() {
+        let draft = LearnerDraftV1 {
+            learning_summary: String::new(),
+            follow_ups: vec![FollowUpDraftV1 {
+                id: "fu-1".to_string(),
+                summary: "Restore the retry cap".to_string(),
+                corrective: true,
+                corrective_context: Some(corrective_context()),
+                evidence: vec![ArtifactRef {
+                    path: "reviews/review.md".to_string(),
+                    digest: "sha256:deadbeef".to_string(),
+                }],
+                ..Default::default()
+            }],
+        };
+        let (normalized, notes) = normalize_draft(draft);
+        assert!(
+            notes.is_empty(),
+            "a well-formed corrective follow-up is not normalized: {notes:?}"
+        );
+        assert!(normalized.follow_ups[0].corrective);
+        assert_eq!(normalized.follow_ups[0].evidence.len(), 1);
     }
 
     #[test]
