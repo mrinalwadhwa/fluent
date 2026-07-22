@@ -31,20 +31,98 @@ pub struct WorkTaskRunConfig<'a> {
     pub store_lock: Option<&'a std::sync::Mutex<()>>,
 }
 
+#[derive(Debug)]
 pub struct WorkTaskRunResult {
     pub task_id: String,
     pub output: String,
 }
 
-/// Run a Task to completion, or return `Ok(None)` when the start is rejected.
+/// A Task start lost the precedence race: a peer already took the Attempt
+/// terminal (a pause or a failure) before this Task could start.
 ///
-/// A `None` result means the precedence boundary declined this Task's start
-/// transition because a peer already took the Attempt terminal (for example a
-/// transcript-pump pause) in the race window between the loop-level terminal
-/// check and this start. No Task was mutated and no coder or tester launched;
-/// the caller re-reads and lets the loop's terminal check resume or surface the
-/// pause. Every other outcome returns `Ok(Some(..))` or an error.
-pub fn run_task(config: WorkTaskRunConfig<'_>) -> Result<Option<WorkTaskRunResult>> {
+/// Surfaced as an error so the current loop invocation stops and observes the
+/// peer's persisted terminal state, rather than reviving the Attempt to active
+/// or auto-reopening the just-taken pause. Nothing was mutated or launched.
+#[derive(Debug, Clone)]
+pub struct StartRejected {
+    attempt_id: String,
+    task_id: String,
+}
+
+impl StartRejected {
+    fn new(attempt_id: impl Into<String>, task_id: impl Into<String>) -> Self {
+        Self {
+            attempt_id: attempt_id.into(),
+            task_id: task_id.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for StartRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Task {} did not start: Attempt {} was already resolved by a peer",
+            self.task_id, self.attempt_id
+        )
+    }
+}
+
+impl std::error::Error for StartRejected {}
+
+/// Whether `error` is a [`StartRejected`] raised by the atomic start boundary.
+pub fn is_start_rejected(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<StartRejected>().is_some()
+}
+
+/// Atomically start a Task against the live store, honoring the precedence
+/// boundary.
+///
+/// Reads the Work Item fresh (under `store_lock` when a peer batch provides one),
+/// applies the precedence boundary to that fresh Attempt state, and — only when
+/// the transition is allowed — marks the Task Executing, clears its stale output,
+/// and commits transactionally. A peer that already took the Attempt terminal in
+/// the race window yields a typed [`StartRejected`] error with nothing mutated or
+/// persisted. Callers run this before any Task side effect (worktree, baseline,
+/// artifact directory, or evidence removal), so a rejected start leaves the
+/// workspace and prior evidence untouched.
+fn atomic_start_task(
+    store: &WorkModelStore,
+    store_lock: Option<&std::sync::Mutex<()>>,
+    work_item_id: &str,
+    attempt_id: &str,
+    task_id: &str,
+    active_status: AttemptStatus,
+) -> Result<()> {
+    let _lock = store_lock.map(|m| m.lock().unwrap_or_else(|e| e.into_inner()));
+    let mut item = read_work_item_or_not_found(store, work_item_id)?;
+    item.ensure_not_abandoned()?;
+    let (attempt_index, task_index) = find_attempt_task_indexes(&item, attempt_id, task_id)
+        .ok_or_else(|| anyhow::anyhow!("Task {task_id:?} not found"))?;
+    if !crate::work_model::transition_attempt(
+        &mut item.attempts[attempt_index],
+        active_status,
+        None,
+    ) {
+        return Err(anyhow::Error::new(StartRejected::new(attempt_id, task_id)));
+    }
+    item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Executing;
+    crate::work_model::mark_task_started(&mut item.attempts[attempt_index].tasks[task_index]);
+    item.attempts[attempt_index].tasks[task_index].output = None;
+    store.write_work_item(&item)?;
+    Ok(())
+}
+
+/// Run a Task to completion.
+///
+/// When the precedence boundary declines this Task's start transition — a peer
+/// already took the Attempt terminal (for example a transcript-pump pause) in
+/// the race window between the loop-level terminal check and this start — the
+/// atomic start returns a typed [`StartRejected`] error. It surfaces as an error
+/// so the current loop invocation stops and observes the peer's persisted
+/// terminal state, rather than reviving the Attempt or auto-reopening the pause.
+/// No Task was mutated and no coder or tester launched.
+pub fn run_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
     item.ensure_not_abandoned()?;
     let (attempt_index, task_index) =
@@ -82,8 +160,8 @@ fn run_write_task(
     coder_kind: CoderKind,
     model: Option<&str>,
     effort: Option<&str>,
-) -> Result<Option<WorkTaskRunResult>> {
-    let mut item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+) -> Result<WorkTaskRunResult> {
+    let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
     let attempt_index = item
         .attempts
         .iter()
@@ -132,6 +210,27 @@ fn run_write_task(
         config.work_item_id, config.attempt_id, config.task_id
     );
 
+    let lock_path =
+        crate::lease::task_lock_path(config.project_root, config.work_item_id, config.task_id);
+    let _lease = crate::lease::acquire(&lock_path)
+        .with_context(|| format!("Failed to acquire lease for Task {:?}", config.task_id))?;
+
+    // Start atomically against a fresh read BEFORE any side effect. If a peer
+    // took the Attempt terminal in the race window since the loop's terminal
+    // check, the precedence boundary rejects the transition and this returns a
+    // typed StartRejected error — so no worktree is created, no baseline is
+    // persisted, the baseline Tester never runs, and no coder launches.
+    atomic_start_task(
+        config.store,
+        config.store_lock,
+        config.work_item_id,
+        config.attempt_id,
+        config.task_id,
+        AttemptStatus::Executing,
+    )?;
+    // Re-read the committed state for downstream steps.
+    let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+
     prepare_task_worktree(
         config.project_root,
         &workspace_path,
@@ -159,28 +258,6 @@ fn run_write_task(
             config.resolver,
         );
     }
-
-    let lock_path =
-        crate::lease::task_lock_path(config.project_root, config.work_item_id, config.task_id);
-    let _lease = crate::lease::acquire(&lock_path)
-        .with_context(|| format!("Failed to acquire lease for Task {:?}", config.task_id))?;
-
-    // Route the start through the precedence boundary so a Task starting after a
-    // peer already took the Attempt terminal cannot revive it to Executing. If the
-    // boundary rejects the transition, a peer paused or failed the Attempt in the
-    // race window: abort the whole start event — mutate no Task, persist nothing,
-    // launch no coder — and leave this Task Planned for the loop's terminal check.
-    if !crate::work_model::transition_attempt(
-        &mut item.attempts[attempt_index],
-        AttemptStatus::Executing,
-        None,
-    ) {
-        return Ok(None);
-    }
-    item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Executing;
-    crate::work_model::mark_task_started(&mut item.attempts[attempt_index].tasks[task_index]);
-    item.attempts[attempt_index].tasks[task_index].output = None;
-    config.store.write_work_item(&item)?;
 
     let mut run_result = run_task_coder(
         &item,
@@ -310,10 +387,10 @@ fn run_write_task(
     );
     config.store.write_work_item(&completed_item)?;
 
-    Ok(Some(WorkTaskRunResult {
+    Ok(WorkTaskRunResult {
         task_id: config.task_id.to_string(),
         output: commit,
-    }))
+    })
 }
 
 fn run_review_task(
@@ -321,7 +398,7 @@ fn run_review_task(
     coder_kind: CoderKind,
     model: Option<&str>,
     effort: Option<&str>,
-) -> Result<Option<WorkTaskRunResult>> {
+) -> Result<WorkTaskRunResult> {
     let lock_path =
         crate::lease::task_lock_path(config.project_root, config.work_item_id, config.task_id);
     let _lease = crate::lease::acquire(&lock_path)
@@ -396,6 +473,28 @@ fn run_review_task(
                 config.task_id
             );
         }
+        // Apply the precedence boundary to the freshly-read Attempt state BEFORE
+        // any side effect, still under the held store lock. If a peer took the
+        // Attempt terminal in the race window, the transition is rejected and this
+        // returns a typed StartRejected error — so preflight is skipped, the
+        // artifact directory is not created, prior review.md evidence is not
+        // deleted, nothing is persisted, and no coder launches. The Executing
+        // mutation is applied in memory and committed only after the side effects
+        // succeed, so a later preflight or filesystem error leaves the Task Planned.
+        if !crate::work_model::transition_attempt(
+            &mut item.attempts[attempt_index],
+            AttemptStatus::Reviewing,
+            None,
+        ) {
+            return Err(anyhow::Error::new(StartRejected::new(
+                config.attempt_id,
+                config.task_id,
+            )));
+        }
+        item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Executing;
+        crate::work_model::mark_task_started(&mut item.attempts[attempt_index].tasks[task_index]);
+        item.attempts[attempt_index].tasks[task_index].output = None;
+
         ReviewReadableWorkspaces::preflight(
             config.project_root,
             config.work_item_id,
@@ -414,22 +513,6 @@ fn run_review_task(
                 review_path.display()
             );
         }
-
-        // Route the start through the precedence boundary so a reviewer starting
-        // after a peer already took the Attempt terminal cannot revive it. If the
-        // boundary rejects the transition, a peer paused or failed the Attempt in
-        // the race window: abort the whole start event — mutate no Task, persist
-        // nothing, launch no coder — and leave this reviewer Planned.
-        if !crate::work_model::transition_attempt(
-            &mut item.attempts[attempt_index],
-            AttemptStatus::Reviewing,
-            None,
-        ) {
-            return Ok(None);
-        }
-        item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Executing;
-        crate::work_model::mark_task_started(&mut item.attempts[attempt_index].tasks[task_index]);
-        item.attempts[attempt_index].tasks[task_index].output = None;
         config.store.write_work_item(&item)?;
 
         (
@@ -616,10 +699,10 @@ fn run_review_task(
         config.store.write_work_item(&completed_item)?;
     }
 
-    Ok(Some(WorkTaskRunResult {
+    Ok(WorkTaskRunResult {
         task_id: config.task_id.to_string(),
         output: path_for_model(config.project_root, &review_path),
-    }))
+    })
 }
 
 fn capture_baseline_tester(
@@ -643,7 +726,7 @@ fn capture_baseline_tester(
     }
 }
 
-fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<Option<WorkTaskRunResult>> {
+fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     let lock_path =
         crate::lease::task_lock_path(config.project_root, config.work_item_id, config.task_id);
     let _lease = crate::lease::acquire(&lock_path)
@@ -678,23 +761,27 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<Option<WorkTaskRunRe
             .path
             .clone();
         let artifact_dir = resolve_managed_artifact_area_path(config.project_root, &artifact_area)?;
-        fs::create_dir_all(&artifact_dir)?;
 
-        // Route the start through the precedence boundary so a Tester starting
-        // after a peer already took the Attempt terminal cannot revive it. If the
-        // boundary rejects the transition, a peer paused or failed the Attempt in
-        // the race window: abort the whole start event — mutate no Task, persist
-        // nothing, launch no tester — and leave this Task Planned.
+        // Apply the precedence boundary to the freshly-read Attempt state BEFORE
+        // any side effect, still under the held store lock. If a peer took the
+        // Attempt terminal in the race window, the transition is rejected and this
+        // returns a typed StartRejected error — so the artifact directory is not
+        // created and no tester launches.
         if !crate::work_model::transition_attempt(
             &mut item.attempts[attempt_index],
             AttemptStatus::Reviewing,
             None,
         ) {
-            return Ok(None);
+            return Err(anyhow::Error::new(StartRejected::new(
+                config.attempt_id,
+                config.task_id,
+            )));
         }
         item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Executing;
         crate::work_model::mark_task_started(&mut item.attempts[attempt_index].tasks[task_index]);
         item.attempts[attempt_index].tasks[task_index].output = None;
+
+        fs::create_dir_all(&artifact_dir)?;
         config.store.write_work_item(&item)?;
 
         artifact_dir
@@ -818,10 +905,10 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<Option<WorkTaskRunRe
         config.store.write_work_item(&completed_item)?;
     }
 
-    Ok(Some(WorkTaskRunResult {
+    Ok(WorkTaskRunResult {
         task_id: config.task_id.to_string(),
         output: path_for_model(config.project_root, &results_path),
-    }))
+    })
 }
 
 struct ReviewReadableWorkspaces {
@@ -3531,12 +3618,12 @@ mod tests {
     }
 
     #[test]
-    fn task_start_rejected_by_peer_terminal_launches_no_coder() {
-        // A Task whose start loses the race to a peer that already took the
-        // Attempt terminal (for example a transcript-pump pause) must abort the
-        // whole start event: the precedence boundary rejects the transition, so
-        // the Task mutates nothing, launches no coder, and stays Planned while the
-        // peer pause is preserved for the loop's terminal check to resume.
+    fn write_start_rejected_by_peer_terminal_is_side_effect_free() {
+        // A write Task whose start loses the race to a peer that already took the
+        // Attempt terminal (a transcript-pump pause) must abort the whole start
+        // event at the atomic boundary, before any side effect: no worktree is
+        // created, no baseline is persisted, no coder launches, and the Task stays
+        // Planned while the peer pause is preserved.
         let tmp = tempfile::TempDir::new().unwrap();
         // Nest project_root inside the tempdir so the managed sibling workspace
         // (project_root.parent()/work-…) also lands inside this unique tempdir,
@@ -3545,8 +3632,6 @@ mod tests {
         let project_root = project_root.as_path();
         fs::create_dir_all(project_root).unwrap();
 
-        // A real repository so the write path's worktree and baseline setup
-        // succeed right up to the start transition, where the rejection lands.
         let git = |args: &[&str]| {
             crate::git::run(project_root, args, "test git setup").unwrap();
         };
@@ -3575,7 +3660,7 @@ mod tests {
         store.create_work_item(&item).unwrap();
 
         let resolver = ContentResolver::new(Some(project_root));
-        let result = run_task(WorkTaskRunConfig {
+        let error = run_task(WorkTaskRunConfig {
             project_root,
             store: &store,
             work_item_id: "work-1",
@@ -3586,10 +3671,10 @@ mod tests {
             no_sandbox: true,
             store_lock: None,
         })
-        .expect("a rejected start must not error");
+        .expect_err("a rejected start must surface a typed StartRejected error");
         assert!(
-            result.is_none(),
-            "a start rejected by the precedence boundary returns no run result"
+            is_start_rejected(&error),
+            "the rejection must be the typed StartRejected error, not a generic failure: {error}"
         );
 
         let stored = store.read_work_item("work-1").unwrap();
@@ -3600,13 +3685,255 @@ mod tests {
             stored.attempts[0].pause_kind,
             Some(crate::work_model::PauseKind::TranscriptPump)
         );
-        // The Task is left Planned and unstarted: no coder ever launched, since
-        // mark_task_started runs only after a successful start transition.
+        // The Task is left Planned and unstarted.
         assert_eq!(stored.attempts[0].tasks[0].status, TaskStatus::Planned);
         assert!(
             stored.attempts[0].tasks[0].started_at.is_none(),
-            "a rejected start must not stamp the Task started or launch a coder"
+            "a rejected start must not stamp the Task started"
         );
+        // No side effect ran before the boundary: the worktree was never created
+        // and no baseline sidecar was persisted.
+        let workspace_path = resolve_managed_workspace_path(
+            project_root,
+            &stored.attempts[0].tasks[0].workspace_access.writes[0].path,
+            "work-1",
+            "attempt-1",
+        )
+        .unwrap();
+        assert!(
+            !workspace_path.exists(),
+            "a rejected start must not create the write worktree"
+        );
+        let baseline_sidecar = project_root
+            .join(work_artifact_path("work-1", "attempt-1", "attempt-1-write-1"))
+            .join("write-baseline-commit");
+        assert!(
+            !baseline_sidecar.exists(),
+            "a rejected start must not persist a baseline"
+        );
+    }
+
+    #[test]
+    fn tester_start_rejected_by_peer_terminal_creates_no_artifacts() {
+        // A Tester start that loses the race to a peer pause rejects at the atomic
+        // boundary before creating its artifact directory or launching the tester.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let store = WorkModelStore::new(project_root);
+
+        let mut item = review_item_with_role("tests");
+        // Add a Planned Tester Task alongside the completed write, then pause the
+        // Attempt as a peer would on a transcript-pump failure.
+        let area = ".fluent/work/artifacts/work-1/attempt-1/attempt-1-tester".to_string();
+        item.attempts[0].tasks.push(crate::work_model::Task {
+            id: "attempt-1-tester".to_string(),
+            kind: TaskKind::Tester,
+            status: TaskStatus::Planned,
+            role: "tester".to_string(),
+            instructions: None,
+            work_item_id: "work-1".to_string(),
+            attempt_id: Some("attempt-1".to_string()),
+            workspace_access: crate::work_model::WorkspaceAccess {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            },
+            artifact_area: Some(crate::work_model::TaskArtifactArea { path: area.clone() }),
+            review_context: None,
+            input_artifacts: Vec::new(),
+            depends_on: None,
+            output: None,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+        });
+        item.attempts[0].status = AttemptStatus::NeedsUser;
+        item.attempts[0].pause_kind = Some(crate::work_model::PauseKind::TranscriptPump);
+        store.create_work_item(&item).unwrap();
+
+        let resolver = ContentResolver::new(Some(project_root));
+        let error = run_task(WorkTaskRunConfig {
+            project_root,
+            store: &store,
+            work_item_id: "work-1",
+            attempt_id: "attempt-1",
+            task_id: "attempt-1-tester",
+            resolver: &resolver,
+            extra_args: &[],
+            no_sandbox: true,
+            store_lock: None,
+        })
+        .expect_err("a rejected tester start must surface StartRejected");
+        assert!(is_start_rejected(&error), "typed rejection expected: {error}");
+
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.attempts[0].status, AttemptStatus::NeedsUser);
+        let tester = stored
+            .attempts[0]
+            .tasks
+            .iter()
+            .find(|t| t.kind == TaskKind::Tester)
+            .unwrap();
+        assert_eq!(tester.status, TaskStatus::Planned);
+        assert!(tester.started_at.is_none());
+        assert!(
+            !project_root.join(&area).exists(),
+            "a rejected tester start must not create its artifact directory"
+        );
+    }
+
+    #[test]
+    fn review_start_rejected_by_peer_terminal_preserves_evidence() {
+        // A reviewer start that loses the race to a peer pause rejects at the
+        // atomic boundary before preflight, before creating its artifact
+        // directory, and before deleting prior review.md evidence.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let store = WorkModelStore::new(project_root);
+
+        let item = review_item_with_role("tests");
+        let review_task = item.attempts[0]
+            .tasks
+            .iter()
+            .find(|t| t.kind == TaskKind::Review)
+            .expect("review item has a review task");
+        let review_task_id = review_task.id.clone();
+        let area = review_task
+            .artifact_area
+            .as_ref()
+            .expect("review task has an artifact area")
+            .path
+            .clone();
+        let input_artifacts = review_task.input_artifacts.clone();
+        let mut item = item;
+        item.attempts[0].status = AttemptStatus::NeedsUser;
+        item.attempts[0].pause_kind = Some(crate::work_model::PauseKind::TranscriptPump);
+        store.create_work_item(&item).unwrap();
+
+        // The reviewer resolves its declared input artifacts (a read-only
+        // existence check) before the boundary; materialize them so the run
+        // reaches the start transition rather than failing validation early.
+        for input in &input_artifacts {
+            let input_path = project_root.join(&input.path);
+            fs::create_dir_all(input_path.parent().unwrap()).unwrap();
+            fs::write(&input_path, "{}").unwrap();
+        }
+
+        // Prior review evidence that a rejected start must not delete.
+        let review_dir = project_root.join(&area);
+        fs::create_dir_all(&review_dir).unwrap();
+        let review_md = review_dir.join("review.md");
+        fs::write(&review_md, "prior verdict evidence").unwrap();
+
+        let resolver = ContentResolver::new(Some(project_root));
+        let error = run_task(WorkTaskRunConfig {
+            project_root,
+            store: &store,
+            work_item_id: "work-1",
+            attempt_id: "attempt-1",
+            task_id: &review_task_id,
+            resolver: &resolver,
+            extra_args: &[],
+            no_sandbox: true,
+            store_lock: None,
+        })
+        .expect_err("a rejected review start must surface StartRejected");
+        assert!(is_start_rejected(&error), "typed rejection expected: {error}");
+
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.attempts[0].status, AttemptStatus::NeedsUser);
+        let reviewer = stored
+            .attempts[0]
+            .tasks
+            .iter()
+            .find(|t| t.id == review_task_id)
+            .unwrap();
+        assert_eq!(reviewer.status, TaskStatus::Planned);
+        assert!(reviewer.started_at.is_none());
+        assert_eq!(
+            fs::read_to_string(&review_md).unwrap(),
+            "prior verdict evidence",
+            "a rejected review start must preserve prior review.md evidence"
+        );
+    }
+
+    #[test]
+    fn atomic_start_serializes_against_a_concurrent_peer_terminal() {
+        // A barriered race: one thread pauses the Attempt while another attempts an
+        // atomic start, both under the shared store lock. Whichever the lock admits
+        // first wins; the start either fully commits Executing or cleanly rejects
+        // with StartRejected, but never revives an Attempt a peer paused.
+        use std::sync::{Arc, Barrier, Mutex};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let store = WorkModelStore::new(project_root);
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Serialize starts against peer terminals".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            post_merge_review_fix_depth: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+
+        let store_lock = Mutex::new(());
+        let barrier = Arc::new(Barrier::new(2));
+
+        std::thread::scope(|scope| {
+            let pauser_barrier = Arc::clone(&barrier);
+            let store_ref = &store;
+            let lock_ref = &store_lock;
+            scope.spawn(move || {
+                pauser_barrier.wait();
+                let _guard = lock_ref.lock().unwrap_or_else(|e| e.into_inner());
+                let mut item = store_ref.read_work_item("work-1").unwrap();
+                crate::work_model::transition_attempt(
+                    &mut item.attempts[0],
+                    AttemptStatus::NeedsUser,
+                    Some(crate::work_model::PauseKind::TranscriptPump),
+                );
+                store_ref.write_work_item(&item).unwrap();
+            });
+
+            let starter_barrier = Arc::clone(&barrier);
+            let starter = scope.spawn(move || {
+                starter_barrier.wait();
+                atomic_start_task(
+                    store_ref,
+                    Some(lock_ref),
+                    "work-1",
+                    "attempt-1",
+                    "attempt-1-write-1",
+                    AttemptStatus::Executing,
+                )
+            });
+            let start_result = starter.join().unwrap();
+
+            let stored = store_ref.read_work_item("work-1").unwrap();
+            match start_result {
+                Ok(()) => {
+                    // The start won the lock first: the Task is Executing and the
+                    // pauser's later transition cannot downgrade it below active.
+                    assert_eq!(stored.attempts[0].tasks[0].status, TaskStatus::Executing);
+                }
+                Err(error) => {
+                    // The pause won first: the start rejected cleanly and left the
+                    // pause intact — never a revived, torn state.
+                    assert!(is_start_rejected(&error), "unexpected error: {error}");
+                    assert_eq!(stored.attempts[0].status, AttemptStatus::NeedsUser);
+                    assert_eq!(
+                        stored.attempts[0].pause_kind,
+                        Some(crate::work_model::PauseKind::TranscriptPump)
+                    );
+                    assert_eq!(stored.attempts[0].tasks[0].status, TaskStatus::Planned);
+                }
+            }
+        });
     }
 
     fn corrective_review_item(role: &str) -> WorkItem {

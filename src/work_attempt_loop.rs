@@ -340,15 +340,10 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                 no_sandbox: config.no_sandbox,
                 store_lock: None,
             })?;
-            // A rejected start (a peer took the Attempt terminal in the race
-            // window) returns no result: re-read and let the terminal check
-            // above resume or surface the pause on the next iteration.
-            if let Some(result) = result {
-                outcomes.push(WorkAttemptRunOutcome::RanTask {
-                    task_id: result.task_id,
-                    output: result.output,
-                });
-            }
+            outcomes.push(WorkAttemptRunOutcome::RanTask {
+                task_id: result.task_id,
+                output: result.output,
+            });
             continue;
         }
 
@@ -525,7 +520,7 @@ fn run_parallel_reviews(
     let semaphore = Arc::new((Mutex::new(0_usize), Condvar::new()));
     let store_lock = Mutex::new(());
 
-    let results: Vec<Result<Option<work_task_executor::WorkTaskRunResult>>> = thread::scope(|scope| {
+    let results: Vec<Result<work_task_executor::WorkTaskRunResult>> = thread::scope(|scope| {
         let store_lock_ref = &store_lock;
         let handles: Vec<_> = task_ids
             .iter()
@@ -560,16 +555,12 @@ fn run_parallel_reviews(
     let mut first_error = None;
     for result in results {
         match result {
-            Ok(Some(run_result)) => {
+            Ok(run_result) => {
                 outcomes.push(WorkAttemptRunOutcome::RanTask {
                     task_id: run_result.task_id,
                     output: run_result.output,
                 });
             }
-            // A rejected start: a peer took the Attempt terminal in the race
-            // window. No Task was mutated and no coder launched; the reviewer is
-            // left Planned for the loop's terminal check to resume or surface.
-            Ok(None) => {}
             Err(error) => {
                 if first_error.is_none() {
                     first_error = Some(error);
