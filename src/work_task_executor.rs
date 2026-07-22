@@ -793,9 +793,15 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     let attempt_kind = reservation.attempt_kind.clone();
     let workspace_reads = reservation.task.workspace_access.reads.clone();
 
-    // Side-effectful setup after the reservation: create the artifact directory
-    // and replace prior review.md evidence. A failure CAS-reverts the reservation.
-    with_reservation_rollback(
+    // Route the ENTIRE side-effectful post-reservation setup through one rollback
+    // finalizer: create the artifact directory, replace prior review.md evidence,
+    // read the work item, and materialize planning artifacts, bundled expertise, and
+    // the review-<role> skill. Any failure here CAS-reverts the reservation, so a
+    // disk-full or obstructed-path error can never strand the reserved Review Task
+    // Executing. Materialization happens BEFORE the source-checkout review guard
+    // snapshots the workspace; otherwise the guard treats these Fluent-managed files
+    // as reviewer-induced changes when diffing against its baseline.
+    let item = with_reservation_rollback(
         config.store,
         config.work_item_id,
         config.attempt_id,
@@ -806,25 +812,15 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             if review_path.is_file() {
                 fs::remove_file(&review_path)?;
             }
-            Ok(())
+            let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+            materialize_planning_files(&item, config.project_root)?;
+            materialize_general_expertise(config.project_root)?;
+            materialize_skill(
+                &format!("review-{role}"),
+                &review_skills_dir(config.project_root),
+            )?;
+            Ok(item)
         },
-    )?;
-
-    let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
-
-    // Materialize planning artifacts and bundled expertise BEFORE the source
-    // checkout review guard snapshots the workspace. Otherwise the guard
-    // treats these Fluent-managed files as reviewer-induced changes when
-    // diffing against its baseline.
-    materialize_planning_files(&item, config.project_root)?;
-    materialize_general_expertise(config.project_root)?;
-    // Materialize this Task's review-<role> skill here as well, so it is part of
-    // the guard's baseline. review_skill_path would otherwise write it during
-    // prompt construction, after the snapshot, and the source-checkout guard
-    // rejects that as a reviewer-induced change.
-    materialize_skill(
-        &format!("review-{role}"),
-        &review_skills_dir(config.project_root),
     )?;
 
     let readable_workspaces = match ReviewReadableWorkspaces::resolve(
@@ -4797,6 +4793,85 @@ mod tests {
             stored.attempts[0].tasks[0].status,
             TaskStatus::Executing,
             "a reserved Task must never be left durably Executing after a setup error"
+        );
+    }
+
+    #[test]
+    fn reviewer_setup_error_after_reservation_does_not_strand_task() {
+        // B7: a post-reservation setup failure in the REAL Reviewer route (here the
+        // artifact directory creation obstructed by a file) must never leave the
+        // reserved Review Task durably Executing — the reservation is rolled back so
+        // the Task is recoverable. This drives run_review_task end-to-end past the
+        // reservation, unlike the finalizer-in-isolation tests.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let git = |args: &[&str]| {
+            crate::git::run(project_root, args, "test git setup").unwrap();
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t.co"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "baseline"]);
+
+        let store = WorkModelStore::new(project_root);
+        let item = review_item_with_role("architecture");
+        let review_task_id = item.attempts[0].tasks[1].id.clone();
+        let read_path = item.attempts[0].tasks[1].workspace_access.reads[0]
+            .path
+            .clone();
+        let artifact_area = item.attempts[0].tasks[1]
+            .artifact_area
+            .as_ref()
+            .unwrap()
+            .path
+            .clone();
+        store.create_work_item(&item).unwrap();
+
+        // Create a real, registered, clean worktree for the readable candidate so the
+        // read-only preflight passes and the reservation is reached.
+        let candidate_path =
+            resolve_managed_readable_workspace_path(project_root, &read_path, "work-1", "attempt-1")
+                .unwrap();
+        fs::create_dir_all(candidate_path.parent().unwrap()).unwrap();
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            candidate_path.to_str().unwrap(),
+        ]);
+
+        // Obstruct the artifact directory's parent with a file so the post-reservation
+        // create_dir_all fails AFTER the reservation has marked the Task Executing.
+        let artifact_dir = resolve_managed_artifact_area_path(project_root, &artifact_area).unwrap();
+        let obstruction = artifact_dir.parent().unwrap().to_path_buf();
+        fs::create_dir_all(obstruction.parent().unwrap()).unwrap();
+        fs::write(&obstruction, "not a directory").unwrap();
+
+        let resolver = ContentResolver::new(Some(project_root));
+        let _ = run_task(WorkTaskRunConfig {
+            project_root,
+            store: &store,
+            work_item_id: "work-1",
+            attempt_id: "attempt-1",
+            task_id: &review_task_id,
+            resolver: &resolver,
+            extra_args: &[],
+            no_sandbox: true,
+            store_lock: None,
+        })
+        .expect_err("an obstructed artifact directory must surface an error");
+
+        let stored = store.read_work_item("work-1").unwrap();
+        let review = stored.attempts[0]
+            .tasks
+            .iter()
+            .find(|t| t.id == review_task_id)
+            .unwrap();
+        assert_ne!(
+            review.status,
+            TaskStatus::Executing,
+            "a reserved Review Task must never be left durably Executing after a setup error"
         );
     }
 
