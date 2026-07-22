@@ -10,8 +10,9 @@
 use std::io::{Read, Write};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -154,13 +155,54 @@ pub struct PumpStatus {
     pub error: Option<String>,
 }
 
+/// Shared, panic-safe pump counters. They live behind atomics so the pump's
+/// panic path can read the values accumulated before the panic instead of
+/// reporting zeros.
+#[derive(Default)]
+struct SharedCounters {
+    bytes: AtomicU64,
+    records: AtomicU64,
+    dropped_console: AtomicU64,
+}
+
+impl SharedCounters {
+    fn add_bytes(&self, n: u64) {
+        self.bytes.fetch_add(n, Ordering::Relaxed);
+    }
+    fn add_record(&self) {
+        self.records.fetch_add(1, Ordering::Relaxed);
+    }
+    fn add_dropped(&self) {
+        self.dropped_console.fetch_add(1, Ordering::Relaxed);
+    }
+    fn snapshot(&self) -> PumpSummary {
+        PumpSummary {
+            bytes: self.bytes.load(Ordering::Relaxed),
+            records: self.records.load(Ordering::Relaxed),
+            dropped_console: self.dropped_console.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// Drain `reader` into the transcript at `transcript_path`, writing every byte
 /// exactly and in order. Record boundaries drive a bounded preview through
 /// `preview` and increment the record count; they never transform or withhold
-/// canonical bytes. When `status_path` is set, adjacent diagnostic status is
-/// persisted atomically as capture advances and again at the terminal state.
-/// Returns the observed counters, or a typed failure if the transcript could
-/// not be opened, written, or read.
+/// canonical bytes.
+///
+/// When `status_path` is set, the initial `Running` and the terminal
+/// `Complete`/`Failed` status are persisted atomically and **synchronously**;
+/// a failure to persist either is a typed terminal infrastructure failure, so
+/// the durable diagnostic is truthful. Periodic `Running` snapshots between them
+/// are best-effort: they are coalesced through a background writer that never
+/// backpressures canonical capture, and a slow or failing status filesystem
+/// cannot stall stdout draining. Returns the observed counters, or a typed
+/// failure if the transcript could not be opened, written, or read, or if a
+/// required status could not be persisted.
+///
+/// Production capture runs through [`spawn_pump`], which shares the counters for
+/// panic-safe reporting; this synchronous entry point drives the same logic for
+/// focused tests.
+#[cfg(test)]
 pub fn drain(
     reader: impl Read,
     transcript_path: &Path,
@@ -168,47 +210,82 @@ pub fn drain(
     preview: &dyn PreviewSink,
     config: &TranscriptPumpConfig,
 ) -> Result<PumpSummary, TranscriptPumpError> {
-    let started = now_ms();
-    let mut summary = PumpSummary::default();
-    let result = drain_inner(
+    let counters = SharedCounters::default();
+    drain_with_counters(
         reader,
         transcript_path,
         status_path,
         preview,
         config,
-        started,
-        &mut summary,
-    );
-    // Persist the terminal state whichever way the drain ended, so a failure to
-    // even open the transcript is still recorded as a failed pump. Status
-    // persistence is best effort: it must never overturn a successful capture
-    // nor mask the original failure.
-    match &result {
-        Ok(()) => {
-            write_status(status_path, PumpState::Complete, started, &summary, None);
-            Ok(summary)
-        }
-        Err(err) => {
-            write_status(
-                status_path,
-                PumpState::Failed,
-                started,
-                &summary,
-                Some(err.message()),
-            );
-            Err(err.clone())
-        }
-    }
+        &counters,
+    )
 }
 
-fn drain_inner(
+fn drain_with_counters(
     reader: impl Read,
     transcript_path: &Path,
     status_path: Option<&Path>,
     preview: &dyn PreviewSink,
     config: &TranscriptPumpConfig,
+    counters: &SharedCounters,
+) -> Result<PumpSummary, TranscriptPumpError> {
+    let started = now_ms();
+    let writer = status_path.map(|path| StatusWriter::spawn(path.to_path_buf()));
+
+    let result = capture(
+        reader,
+        transcript_path,
+        status_path,
+        preview,
+        config,
+        counters,
+        started,
+        writer.as_ref(),
+    );
+
+    // Flush the periodic writer before the terminal write, so the terminal status
+    // serializes after all queued periodic work and cannot be overwritten by a
+    // late snapshot. Retain its last persistence failure for diagnostics.
+    let periodic_error = writer.and_then(StatusWriter::shutdown);
+    let summary = counters.snapshot();
+
+    match result {
+        Ok(()) => {
+            // The terminal Complete status is required and typed: if it cannot be
+            // persisted the capture is not independently observable, which is a
+            // terminal infrastructure failure.
+            persist_status_sync(status_path, PumpState::Complete, started, &summary, None)?;
+            Ok(summary)
+        }
+        Err(err) => {
+            // Record the failure terminally, best-effort — it must not mask the
+            // original error. A retained periodic error is folded in for context.
+            let message = match periodic_error {
+                Some(periodic) => format!("{}; periodic status write failed: {periodic}", err.message()),
+                None => err.message().to_string(),
+            };
+            let _ = persist_status_sync(
+                status_path,
+                PumpState::Failed,
+                started,
+                &summary,
+                Some(&message),
+            );
+            Err(err)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture(
+    reader: impl Read,
+    transcript_path: &Path,
+    status_path: Option<&Path>,
+    preview: &dyn PreviewSink,
+    config: &TranscriptPumpConfig,
+    counters: &SharedCounters,
     started: u64,
-    summary: &mut PumpSummary,
+    writer: Option<&StatusWriter>,
 ) -> Result<(), TranscriptPumpError> {
     let mut file = std::fs::File::create(transcript_path).map_err(|err| {
         TranscriptPumpError::new(format!(
@@ -216,7 +293,14 @@ fn drain_inner(
             transcript_path.display()
         ))
     })?;
-    write_status(status_path, PumpState::Running, started, summary, None);
+    // The initial Running status is required and typed.
+    persist_status_sync(
+        status_path,
+        PumpState::Running,
+        started,
+        &counters.snapshot(),
+        None,
+    )?;
 
     let mut reader = reader;
     let chunk_size = config.read_chunk_size.max(1);
@@ -238,13 +322,13 @@ fn drain_inner(
                 transcript_path.display()
             ))
         })?;
-        summary.bytes += read as u64;
+        counters.add_bytes(read as u64);
 
         for &byte in chunk {
             if byte == b'\n' {
-                summary.records += 1;
+                counters.add_record();
                 if !line.flush(preview) {
-                    summary.dropped_console += 1;
+                    counters.add_dropped();
                 }
             } else {
                 line.push(byte);
@@ -252,7 +336,16 @@ fn drain_inner(
         }
 
         if last_flush.elapsed() >= config.status_flush_interval {
-            write_status(status_path, PumpState::Running, started, summary, None);
+            // Periodic snapshots go through the coalescing writer, never blocking
+            // canonical capture on a slow status filesystem.
+            if let Some(writer) = writer {
+                writer.submit(build_status(
+                    PumpState::Running,
+                    started,
+                    &counters.snapshot(),
+                    None,
+                ));
+            }
             last_flush = Instant::now();
         }
     }
@@ -260,9 +353,9 @@ fn drain_inner(
     // A trailing record without a final newline is still a record the coder
     // emitted; count it and offer its preview before completing.
     if line.has_bytes() {
-        summary.records += 1;
+        counters.add_record();
         if !line.flush(preview) {
-            summary.dropped_console += 1;
+            counters.add_dropped();
         }
     }
 
@@ -283,17 +376,13 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn write_status(
-    status_path: Option<&Path>,
+fn build_status(
     state: PumpState,
     started_at_ms: u64,
     summary: &PumpSummary,
     error: Option<&str>,
-) {
-    let Some(path) = status_path else {
-        return;
-    };
-    let status = PumpStatus {
+) -> PumpStatus {
+    PumpStatus {
         schema_version: PUMP_STATUS_SCHEMA_VERSION,
         state,
         started_at_ms,
@@ -302,10 +391,96 @@ fn write_status(
         records: summary.records,
         dropped_console: summary.dropped_console,
         error: error.map(str::to_string),
-    };
-    if let Ok(bytes) = serde_json::to_vec_pretty(&status) {
-        let _ = crate::atomic_write::atomic_write(path, &bytes);
     }
+}
+
+/// Serialize and atomically persist a status document, returning a message on
+/// failure so the caller can decide whether the failure is terminal.
+fn persist_status_to(path: &Path, status: &PumpStatus) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(status).map_err(|err| err.to_string())?;
+    crate::atomic_write::atomic_write(path, &bytes).map_err(|err| err.to_string())
+}
+
+/// Persist a required status synchronously. A persistence failure is a typed
+/// terminal infrastructure error, because the durable diagnostic must be
+/// independently observable.
+fn persist_status_sync(
+    status_path: Option<&Path>,
+    state: PumpState,
+    started_at_ms: u64,
+    summary: &PumpSummary,
+    error: Option<&str>,
+) -> Result<(), TranscriptPumpError> {
+    let Some(path) = status_path else {
+        return Ok(());
+    };
+    let status = build_status(state, started_at_ms, summary, error);
+    persist_status_to(path, &status).map_err(|err| {
+        TranscriptPumpError::new(format!("persist pump status at {}: {err}", path.display()))
+    })
+}
+
+/// A background writer for periodic `Running` snapshots. The drain thread submits
+/// snapshots without blocking; the writer coalesces (a full one-slot queue drops
+/// the older snapshot in favor of the periodic cadence) and performs the atomic
+/// writes off the canonical drain thread, so a slow status filesystem never
+/// backpressures stdout capture. Its last persistence failure is retained.
+struct StatusWriter {
+    sender: SyncSender<PumpStatus>,
+    join: JoinHandle<Option<String>>,
+}
+
+impl StatusWriter {
+    fn spawn(path: PathBuf) -> Self {
+        let (sender, receiver) = sync_channel::<PumpStatus>(1);
+        let join = std::thread::Builder::new()
+            .name("transcript-pump-status".to_string())
+            .spawn(move || {
+                let mut last_error = None;
+                for status in receiver {
+                    if let Err(err) = persist_status_to(&path, &status) {
+                        last_error = Some(err);
+                    }
+                }
+                last_error
+            })
+            .expect("spawn transcript pump status writer");
+        Self { sender, join }
+    }
+
+    fn submit(&self, status: PumpStatus) {
+        // Never block the drain thread: if the writer is mid-write, drop this
+        // snapshot; the next periodic tick carries fresher counters.
+        let _ = self.sender.try_send(status);
+    }
+
+    /// Close the queue, flush all pending periodic writes, and return the last
+    /// persistence failure the writer observed, if any.
+    fn shutdown(self) -> Option<String> {
+        let StatusWriter { sender, join } = self;
+        drop(sender);
+        join.join().ok().flatten()
+    }
+}
+
+/// Install, once per process, a panic hook that suppresses the default hook's
+/// blocking stderr write for transcript-pump threads. The pump's panic is caught
+/// and reported through durable status instead, so a saturated stderr can never
+/// block panic recovery. Non-pump panics keep the previous hook's behavior. This
+/// is a single process-wide install, not a racy per-thread swap of the hook.
+fn ensure_pump_panic_hook() {
+    static INIT: OnceLock<()> = OnceLock::new();
+    INIT.get_or_init(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let is_pump = std::thread::current()
+                .name()
+                .is_some_and(|name| name == "transcript-pump");
+            if !is_pump {
+                previous(info);
+            }
+        }));
+    });
 }
 
 /// A running pump on its own thread. The supervisor polls `try_terminal` while
@@ -346,8 +521,10 @@ impl PumpHandle {
 }
 
 /// Spawn a pump on its own thread. A panic inside the drain is caught and
-/// reported as a typed failure and a persisted `Failed` status, so a crashed
-/// pump can never silently stop capture while the coder keeps running.
+/// reported as a typed failure and a persisted `Failed` status that preserves the
+/// counters accumulated before the panic, so a crashed pump can never silently
+/// stop capture while the coder keeps running. The pump thread is named so a
+/// process-wide hook can keep its panic off the blocking default stderr path.
 pub fn spawn_pump<R>(
     reader: R,
     transcript_path: PathBuf,
@@ -358,31 +535,40 @@ pub fn spawn_pump<R>(
 where
     R: Read + Send + 'static,
 {
+    ensure_pump_panic_hook();
     let (tx, rx) = sync_channel(1);
-    let join = std::thread::spawn(move || {
-        let started = now_ms();
-        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            drain(
-                reader,
-                &transcript_path,
-                status_path.as_deref(),
-                preview,
-                &config,
-            )
-        }))
-        .unwrap_or_else(|_| {
-            let err = TranscriptPumpError::new("transcript pump panicked");
-            write_status(
-                status_path.as_deref(),
-                PumpState::Failed,
-                started,
-                &PumpSummary::default(),
-                Some(err.message()),
-            );
-            Err(err)
-        });
-        let _ = tx.send(outcome);
-    });
+    let counters = Arc::new(SharedCounters::default());
+    let counters_for_panic = Arc::clone(&counters);
+    let join = std::thread::Builder::new()
+        .name("transcript-pump".to_string())
+        .spawn(move || {
+            let started = now_ms();
+            let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                drain_with_counters(
+                    reader,
+                    &transcript_path,
+                    status_path.as_deref(),
+                    preview,
+                    &config,
+                    &counters,
+                )
+            }))
+            .unwrap_or_else(|_| {
+                let err = TranscriptPumpError::new("transcript pump panicked");
+                // Preserve the counters accumulated before the panic.
+                let summary = counters_for_panic.snapshot();
+                let _ = persist_status_sync(
+                    status_path.as_deref(),
+                    PumpState::Failed,
+                    started,
+                    &summary,
+                    Some(err.message()),
+                );
+                Err(err)
+            });
+            let _ = tx.send(outcome);
+        })
+        .expect("spawn transcript pump thread");
     PumpHandle {
         terminal: rx,
         join: Some(join),
@@ -754,5 +940,174 @@ mod tests {
             summary.dropped_console, summary.records,
             "every declined preview must be counted; dropped_console must equal records"
         );
+    }
+
+    #[test]
+    fn unwritable_status_path_is_a_typed_terminal_failure() {
+        // B8: the durable status must be independently observable. When it cannot
+        // be persisted (here its parent directory does not exist), the drain
+        // returns a typed transcript-pump infrastructure failure rather than
+        // silently discarding the write and reporting success.
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let status = dir.path().join("missing-dir/transcript-pump.json");
+
+        let sink = SaturatedSink::new();
+        let err = drain(
+            Cursor::new(b"{\"a\":1}\n".to_vec()),
+            &transcript,
+            Some(&status),
+            &sink,
+            &TranscriptPumpConfig::default(),
+        )
+        .expect_err("an unwritable required status must fail the pump");
+        assert!(
+            err.message().contains("persist pump status"),
+            "the failure must name the status persistence problem: {err}"
+        );
+    }
+
+    /// A reader that emits one record and then panics on the next read.
+    struct PanicAfterOneRecord {
+        emitted: bool,
+    }
+
+    impl Read for PanicAfterOneRecord {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.emitted {
+                panic!("simulated mid-stream pump panic");
+            }
+            self.emitted = true;
+            let data = b"{\"rec\":1}\n";
+            buf[..data.len()].copy_from_slice(data);
+            Ok(data.len())
+        }
+    }
+
+    #[test]
+    fn pump_panic_preserves_counters_and_recovers_promptly() {
+        // B6: a mid-stream pump panic is caught, reported as a typed failure, and
+        // its terminal status preserves the counters accumulated before the panic
+        // (not zeros). Recovery is prompt — the panic path never blocks — which
+        // the process-wide hook keeps true even when stderr is saturated by
+        // suppressing the pump thread's blocking default hook output.
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let status = status_path_for(&transcript);
+
+        let mut pump = spawn_pump(
+            PanicAfterOneRecord { emitted: false },
+            transcript.clone(),
+            Some(status.clone()),
+            console_preview_sink(),
+            TranscriptPumpConfig::default(),
+        );
+
+        let started = Instant::now();
+        let outcome = pump.wait_terminal();
+        let elapsed = started.elapsed();
+        pump.join();
+
+        assert!(outcome.is_err(), "a panicking pump must report a typed failure");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "panic recovery must be prompt, not blocked; took {elapsed:?}"
+        );
+
+        let persisted: PumpStatus =
+            serde_json::from_slice(&std::fs::read(&status).unwrap()).unwrap();
+        assert_eq!(persisted.state, PumpState::Failed);
+        assert_eq!(
+            persisted.records, 1,
+            "the terminal status must preserve counters accumulated before the panic"
+        );
+        assert!(persisted.error.is_some());
+    }
+
+    /// A reader that emits `count` records, sleeping between each so the pump's
+    /// status lifecycle can be observed advancing.
+    struct PacedReader {
+        remaining: usize,
+        gap: Duration,
+    }
+
+    impl Read for PacedReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.remaining == 0 {
+                return Ok(0);
+            }
+            std::thread::sleep(self.gap);
+            self.remaining -= 1;
+            let data = b"{\"tick\":1}\n";
+            buf[..data.len()].copy_from_slice(data);
+            Ok(data.len())
+        }
+    }
+
+    #[test]
+    fn pump_status_advances_through_running_to_terminal() {
+        // Looking only at the final JSON does not prove lifecycle wiring. Drive a
+        // paced reader while a poller samples the adjacent status atomically, and
+        // require observing a Running state, at least one Running with an
+        // advancing record count, and the terminal Complete state.
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let status = status_path_for(&transcript);
+        let config = TranscriptPumpConfig {
+            status_flush_interval: Duration::from_millis(15),
+            ..TranscriptPumpConfig::default()
+        };
+
+        let poll_status = Arc::new(std::sync::Mutex::new(Vec::<(PumpState, u64)>::new()));
+        let poll_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let poller = {
+            let status = status.clone();
+            let poll_status = Arc::clone(&poll_status);
+            let poll_done = Arc::clone(&poll_done);
+            std::thread::spawn(move || {
+                while !poll_done.load(Ordering::Relaxed) {
+                    if let Ok(bytes) = std::fs::read(&status) {
+                        if let Ok(s) = serde_json::from_slice::<PumpStatus>(&bytes) {
+                            poll_status.lock().unwrap().push((s.state, s.records));
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(3));
+                }
+            })
+        };
+
+        let sink = SaturatedSink::new();
+        let summary = drain(
+            PacedReader {
+                remaining: 6,
+                gap: Duration::from_millis(40),
+            },
+            &transcript,
+            Some(&status),
+            &sink,
+            &config,
+        )
+        .unwrap();
+        poll_done.store(true, Ordering::Relaxed);
+        poller.join().unwrap();
+
+        assert_eq!(summary.records, 6);
+        let samples = poll_status.lock().unwrap();
+        assert!(
+            samples.iter().any(|(state, _)| *state == PumpState::Running),
+            "a Running state must be observable during capture"
+        );
+        assert!(
+            samples
+                .iter()
+                .any(|(state, records)| *state == PumpState::Running && *records > 0 && *records < 6),
+            "at least one Running snapshot must show an advancing record count"
+        );
+        // The terminal Complete status is written synchronously before drain
+        // returns, so read it directly: it must be the final atomic state.
+        let terminal: PumpStatus =
+            serde_json::from_slice(&std::fs::read(&status).unwrap()).unwrap();
+        assert_eq!(terminal.state, PumpState::Complete);
+        assert_eq!(terminal.records, 6);
     }
 }
