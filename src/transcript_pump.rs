@@ -119,18 +119,25 @@ pub fn status_path_for(transcript_path: &Path) -> PathBuf {
 }
 
 /// Cap a retained or persisted error message so a pathological error string can
-/// never bloat the shared diagnostics or the status document.
+/// never bloat the shared diagnostics or the status document. This is the TOTAL
+/// cap: a truncated message (payload plus marker) never exceeds it.
 const MAX_STATUS_ERROR_LEN: usize = 2000;
+
+/// The marker appended to a truncated error. It is counted against the total cap,
+/// so a truncated payload is shortened to leave room for it.
+const STATUS_TRUNCATION_MARKER: &str = "…[truncated]";
 
 fn bound_error(message: &str) -> String {
     if message.len() <= MAX_STATUS_ERROR_LEN {
         return message.to_string();
     }
-    let mut end = MAX_STATUS_ERROR_LEN;
-    while !message.is_char_boundary(end) {
+    // Reserve room for the marker so the TOTAL bounded string is within the cap,
+    // then walk back to a char boundary so a multibyte code point is never split.
+    let mut end = MAX_STATUS_ERROR_LEN.saturating_sub(STATUS_TRUNCATION_MARKER.len());
+    while end > 0 && !message.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}…[truncated]", &message[..end])
+    format!("{}{STATUS_TRUNCATION_MARKER}", &message[..end])
 }
 
 /// A best-effort console sink for bounded record previews. Delivery is
@@ -2184,8 +2191,8 @@ mod tests {
         let long = "€".repeat(5000); // 3 bytes each, boundary lands mid-character
         let bounded = bound_error(&long);
         assert!(
-            bounded.len() <= MAX_STATUS_ERROR_LEN + "…[truncated]".len(),
-            "bounded to the cap plus the marker, got {}",
+            bounded.len() <= MAX_STATUS_ERROR_LEN,
+            "bounded to the total cap including the marker, got {}",
             bounded.len()
         );
         assert!(bounded.ends_with("…[truncated]"));
@@ -2218,13 +2225,13 @@ mod tests {
             "the primary is the Complete write failure"
         );
         assert!(
-            err.message().len() <= MAX_STATUS_ERROR_LEN + "…[truncated]".len(),
+            err.message().len() <= MAX_STATUS_ERROR_LEN,
             "the primary is bounded"
         );
         let fallback = err.fallback_error().expect("the Failed fallback also failed");
         assert!(fallback.starts_with('F'), "the fallback error is distinct");
         assert!(
-            fallback.len() <= MAX_STATUS_ERROR_LEN + "…[truncated]".len(),
+            fallback.len() <= MAX_STATUS_ERROR_LEN,
             "the fallback error is bounded"
         );
         assert_ne!(
@@ -2333,7 +2340,7 @@ mod tests {
             .submit_required(running_status())
             .expect_err("a failed required write is a typed failure");
         assert!(
-            err.message().len() <= MAX_STATUS_ERROR_LEN + "…[truncated]".len(),
+            err.message().len() <= MAX_STATUS_ERROR_LEN,
             "the required failure returned to the caller is bounded, got {}",
             err.message().len()
         );
@@ -2341,6 +2348,61 @@ mod tests {
             err.message().ends_with("…[truncated]"),
             "the long required error is truncated with the marker: {}",
             err.message()
+        );
+    }
+
+    #[test]
+    fn persisted_document_multibyte_errors_are_bounded() {
+        // B4: the actual persisted-document builder bounds a pathological multibyte
+        // primary AND periodic error within the total cap without splitting a UTF-8
+        // boundary (constructing the String would panic if it did).
+        let long = "€".repeat(5000);
+        let status = build_status(
+            PumpState::Failed,
+            0,
+            &PumpSummary::default(),
+            Some(&long),
+            Some(&long),
+            StatusTransportDiagnostics::default(),
+        );
+        let persisted_error = status.error.expect("a Failed document carries its error");
+        let persisted_periodic = status
+            .periodic_error
+            .expect("the periodic error is retained");
+        assert!(
+            persisted_error.len() <= MAX_STATUS_ERROR_LEN,
+            "the persisted primary error is bounded, got {}",
+            persisted_error.len()
+        );
+        assert!(
+            persisted_periodic.len() <= MAX_STATUS_ERROR_LEN,
+            "the persisted periodic error is bounded, got {}",
+            persisted_periodic.len()
+        );
+    }
+
+    #[test]
+    fn real_path_transport_last_error_is_bounded() {
+        // B1/B3: on the real coordinator path, a store that fails every write with a
+        // pathological error leaves a BOUNDED `last_error` in the terminal transport
+        // diagnostics, and the balance still holds.
+        let mut coordinator = StatusCoordinator::spawn(Box::new(LongErrorStore), None).unwrap();
+        let _ = coordinator.submit_required(running_status());
+        let settlement =
+            coordinator.finish(TerminalStatusSpec::failed(0, PumpSummary::default(), "primary"));
+        let last_error = settlement
+            .diagnostics
+            .last_error
+            .expect("a failed write records a last error");
+        assert!(
+            last_error.len() <= MAX_STATUS_ERROR_LEN,
+            "the retained transport last_error is bounded, got {}",
+            last_error.len()
+        );
+        assert!(
+            settlement.diagnostics.is_balanced(),
+            "the balance holds despite the failing writes: {:?}",
+            settlement.diagnostics
         );
     }
 
