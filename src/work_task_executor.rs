@@ -2455,10 +2455,6 @@ fn run_seed_project_model(
 /// Inputs the Learner coder needs to refine expertise and write its handoff
 /// draft.
 pub struct LearnerRunInputs<'a> {
-    /// The main project root, used to resolve this launch's transcript-pump
-    /// config so the Learner threads the same layered thresholds as every other
-    /// entry point rather than inheriting a prior task's state.
-    pub project_root: &'a Path,
     /// The candidate worktree the Attempt produced.
     pub workspace_path: &'a Path,
     pub resolver: &'a ContentResolver,
@@ -2475,11 +2471,14 @@ pub struct LearnerRunInputs<'a> {
     pub diff_command: &'a str,
     /// The managed handoff surface where the coder writes its untrusted draft.
     pub handoff_dir: &'a Path,
-    /// Durable path, on the managed Learner artifact surface, where the host
-    /// captures the coder transcript. The host writes it outside the sandbox, so
-    /// it survives an isolated handoff-only run and lets the one-refresh auth
-    /// policy classify a session-ending 401.
-    pub transcript_path: Option<&'a Path>,
+    /// The immutable, already-resolved transcript capture for this launch: the
+    /// durable transcript path on the managed Learner artifact surface plus this
+    /// project's resolved pump thresholds. The host writes it outside the sandbox,
+    /// so it survives an isolated handoff-only run and lets the one-refresh auth
+    /// policy classify a session-ending 401. Resolving it at the caller keeps
+    /// transient capture state off this input struct and never names the private
+    /// pump config.
+    pub capture: Option<crate::coder::TranscriptCapture<'a>>,
     /// Live repository roots that a handoff-only retry must never write.
     pub denied_write_roots: &'a [PathBuf],
     /// Whether the Learner runs post-land in handoff-only mode: after its
@@ -2710,25 +2709,19 @@ fn run_learner_with_coder(
         }
     };
 
-    if let Some(transcript_path) = inputs.transcript_path
-        && let Some(parent) = transcript_path.parent()
-    {
+    if let Some(parent) = inputs.capture.as_ref().and_then(|c| c.path().parent()) {
         fs::create_dir_all(parent)
             .with_context(|| format!("create Learner transcript dir at {}", parent.display()))?;
     }
 
     let coder = make_coder(sandbox);
-    let pump_config = crate::transcript_pump::resolve_config(inputs.project_root);
-    let capture = inputs
-        .transcript_path
-        .map(|p| crate::coder::TranscriptCapture::with_config(p, pump_config.clone()));
     let exit_code = coder.run_captured(
         &prompt,
         &system_prompt,
         workspace_path,
         inputs.extra_args,
         &extra_env,
-        capture.as_ref(),
+        inputs.capture.as_ref(),
     )?;
     if exit_code != 0 {
         bail!("Learner coder exited with code {exit_code}");
@@ -4097,9 +4090,11 @@ mod tests {
 
         let recorded = Arc::new(Mutex::new(None));
         let recorded_for_coder = Arc::clone(&recorded);
+        // Resolve the capture the way the production adapter does — through the
+        // public constructor, from the transcript path and project root.
+        let capture = crate::coder::TranscriptCapture::new(&transcript_path, project_root);
         run_learner_with_coder(
             LearnerRunInputs {
-                project_root,
                 workspace_path: &workspace,
                 resolver: &resolver,
                 extra_args: &[],
@@ -4113,7 +4108,7 @@ mod tests {
                 tester_artifact_paths: &[],
                 diff_command: "git diff",
                 handoff_dir: &handoff_dir,
-                transcript_path: Some(&transcript_path),
+                capture: Some(capture),
                 denied_write_roots: &[],
                 handoff_only: false,
                 repair: None,

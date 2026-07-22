@@ -465,8 +465,12 @@ fn default_learner_run_coder(
     config: &WorkAttemptRunConfig<'_>,
     request: &LearnerCoderRequest<'_>,
 ) -> Result<()> {
+    // Resolve the immutable transcript capture here so no transient capture state
+    // (project root or transcript path for late resolution) rides on the public
+    // LearnerRunInputs; the public constructor never names the private pump config.
+    let capture =
+        crate::coder::TranscriptCapture::new(request.transcript_path, config.project_root);
     work_task_executor::run_learner(work_task_executor::LearnerRunInputs {
-        project_root: config.project_root,
         workspace_path: request.workspace_path,
         resolver: config.resolver,
         extra_args: config.extra_args,
@@ -478,7 +482,7 @@ fn default_learner_run_coder(
         tester_artifact_paths: request.tester_artifact_paths,
         diff_command: request.diff_command,
         handoff_dir: request.handoff_dir,
-        transcript_path: Some(request.transcript_path),
+        capture: Some(capture),
         handoff_only: request.handoff_only,
         denied_write_roots: request.denied_write_roots,
         repair: request.repair,
