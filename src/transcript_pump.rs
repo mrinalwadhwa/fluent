@@ -191,7 +191,7 @@ impl TranscriptPumpError {
     /// Fold a completed status settlement's secondary diagnostics onto this
     /// primary fault without overwriting the primary `message`.
     fn with_settlement(mut self, settlement: &StatusSettlement) -> Self {
-        self.periodic_error = settlement.diagnostics.last_error.clone();
+        self.periodic_error = settlement.periodic_error.clone();
         self.settlement_error = settlement.settlement_error.clone();
         self.fallback_error = settlement.fallback_error.clone();
         self.worker_error = settlement.worker_error.clone();
@@ -706,14 +706,17 @@ impl TerminalStatusSpec {
         }
     }
 
-    fn build(&self, transport: StatusTransportDiagnostics) -> PumpStatus {
-        let periodic_error = transport.last_error.clone();
+    fn build(
+        &self,
+        transport: StatusTransportDiagnostics,
+        periodic_error: Option<&str>,
+    ) -> PumpStatus {
         build_status(
             self.state,
             self.started_at_ms,
             &self.summary,
             self.error.as_deref(),
-            periodic_error.as_deref(),
+            periodic_error,
             transport,
         )
     }
@@ -730,6 +733,9 @@ struct StatusSettlement {
     settlement_error: Option<String>,
     /// A Complete-to-Failed fallback also failed to persist.
     fallback_error: Option<String>,
+    /// The last best-effort periodic write failure, kept distinct from required and
+    /// terminal failures.
+    periodic_error: Option<String>,
     /// The coordinator worker panicked or could not be joined.
     worker_error: Option<String>,
 }
@@ -746,7 +752,7 @@ impl StatusSettlement {
             .or_else(|| self.worker_error.clone())?;
         Some(TranscriptPumpError {
             message,
-            periodic_error: self.diagnostics.last_error.clone(),
+            periodic_error: self.periodic_error.clone(),
             settlement_error: None,
             fallback_error: self.fallback_error.clone(),
             worker_error: self.worker_error.clone(),
@@ -809,6 +815,15 @@ enum Work {
     Idle,
 }
 
+/// Which submission a write persisted, so periodic failures stay distinct from
+/// required and terminal failures in the diagnostics.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WriteKind {
+    Periodic,
+    Required,
+    Terminal,
+}
+
 /// Shared coordinator state. Every submission mutates it under one lock and every
 /// category the submitter can decide (coalesced, dropped, disconnected) is recorded
 /// there immediately, so the balance invariant holds even for submissions the
@@ -822,6 +837,12 @@ struct CoordinatorInner {
     terminal: Option<TerminalStatusSpec>,
     /// Exact accounting of every submission.
     diagnostics: StatusTransportDiagnostics,
+    /// The last best-effort *periodic* write failure, kept distinct from required
+    /// and terminal failures so a required failure never masquerades as periodic.
+    periodic_error: Option<String>,
+    /// A terminal (Complete) status write failure, recorded before any Failed
+    /// fallback so a fallback panic cannot lose the primary Complete error.
+    settlement_error: Option<String>,
     /// Terminal sealing has begun; no further periodic snapshot is written.
     sealed: bool,
     /// The worker has fully shut down; further submissions are disconnected.
@@ -849,19 +870,53 @@ impl SharedStatusState {
         Work::Idle
     }
 
-    fn record_write(&self, result: &Result<(), String>) {
+    fn record_write(&self, result: &Result<(), String>, kind: WriteKind) {
         let mut inner = self.inner.lock().unwrap();
         match result {
             Ok(()) => inner.diagnostics.written += 1,
             Err(err) => {
                 inner.diagnostics.write_failures += 1;
                 inner.diagnostics.last_error = Some(err.clone());
+                if kind == WriteKind::Periodic {
+                    inner.periodic_error = Some(err.clone());
+                }
             }
         }
     }
 
+    /// Record a Complete write failure before attempting a Failed fallback, so a
+    /// fallback that itself panics still surfaces the original Complete error.
+    fn set_settlement_error(&self, err: &str) {
+        self.inner.lock().unwrap().settlement_error = Some(err.to_string());
+    }
+
     fn diagnostics(&self) -> StatusTransportDiagnostics {
         self.inner.lock().unwrap().diagnostics.clone()
+    }
+
+    fn periodic_error(&self) -> Option<String> {
+        self.inner.lock().unwrap().periodic_error.clone()
+    }
+
+    /// Reconcile work the worker abandoned when it disconnected or panicked before
+    /// acknowledgement: acknowledge any pending required submission with an error so
+    /// its submitter never hangs, clear the pending periodic, and account every
+    /// still-uncategorized submission as disconnected so the balance invariant holds.
+    fn reconcile_abandoned(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        while let Some(cmd) = inner.required.pop_front() {
+            let _ = cmd
+                .ack
+                .send(Err("persist pump status: status worker disconnected".to_string()));
+        }
+        inner.periodic = None;
+        inner.shutdown = true;
+        let d = &inner.diagnostics;
+        let accounted =
+            d.written + d.coalesced + d.dropped + d.disconnected + d.write_failures;
+        if d.submitted > accounted {
+            inner.diagnostics.disconnected += d.submitted - accounted;
+        }
     }
 }
 
@@ -891,6 +946,8 @@ impl StatusCoordinator {
                 required: VecDeque::new(),
                 terminal: None,
                 diagnostics: StatusTransportDiagnostics::default(),
+                periodic_error: None,
+                settlement_error: None,
                 sealed: false,
                 shutdown: false,
             }),
@@ -911,8 +968,15 @@ impl StatusCoordinator {
                     if let Some(latch) = &first_fault {
                         latch.publish(&TranscriptPumpError::new(STATUS_WORKER_PANIC));
                     }
+                    // Acknowledge and account any work the panic abandoned so no
+                    // submitter hangs and the balance holds, then surface the panic
+                    // while preserving any Complete and periodic errors already seen.
+                    worker_shared.reconcile_abandoned();
+                    let inner = worker_shared.inner.lock().unwrap();
                     StatusSettlement {
-                        diagnostics: worker_shared.diagnostics(),
+                        diagnostics: inner.diagnostics.clone(),
+                        settlement_error: inner.settlement_error.clone(),
+                        periodic_error: inner.periodic_error.clone(),
                         worker_error: Some(STATUS_WORKER_PANIC.to_string()),
                         ..StatusSettlement::default()
                     }
@@ -1055,12 +1119,12 @@ fn run_status_worker(
             match shared.next_work() {
                 Work::Required(cmd) => {
                     let result = store.write(&cmd.status);
-                    shared.record_write(&result);
+                    shared.record_write(&result, WriteKind::Required);
                     let _ = cmd.ack.send(result);
                 }
                 Work::Periodic(status) => {
                     let result = store.write(&status);
-                    shared.record_write(&result);
+                    shared.record_write(&result, WriteKind::Periodic);
                 }
                 Work::Terminal(spec) => {
                     return finalize_terminal(shared, store, spec);
@@ -1069,8 +1133,13 @@ fn run_status_worker(
             }
         }
         if wake_rx.recv().is_err() {
+            // The coordinator was dropped without a terminal (an unwind that skipped
+            // finish). Reconcile any abandoned work so no submitter hangs and the
+            // balance holds.
+            shared.reconcile_abandoned();
             return StatusSettlement {
                 diagnostics: shared.diagnostics(),
+                periodic_error: shared.periodic_error(),
                 ..StatusSettlement::default()
             };
         }
@@ -1091,11 +1160,15 @@ fn finalize_terminal(
         Ok(()) => {
             return StatusSettlement {
                 diagnostics: shared.diagnostics(),
+                periodic_error: shared.periodic_error(),
                 ..StatusSettlement::default()
             };
         }
         Err(err) => err,
     };
+    // Record the Complete error in shared state BEFORE the fallback, so a fallback
+    // that itself panics still surfaces the original Complete error.
+    shared.set_settlement_error(&settlement_error);
     // A Complete that could not be persisted attempts exactly one Failed fallback,
     // itself accounted as a real submission.
     if spec.state == PumpState::Complete {
@@ -1105,12 +1178,14 @@ fn finalize_terminal(
             diagnostics: shared.diagnostics(),
             settlement_error: Some(settlement_error),
             fallback_error,
+            periodic_error: shared.periodic_error(),
             worker_error: None,
         }
     } else {
         StatusSettlement {
             diagnostics: shared.diagnostics(),
             settlement_error: Some(settlement_error),
+            periodic_error: shared.periodic_error(),
             ..StatusSettlement::default()
         }
     }
@@ -1125,15 +1200,15 @@ fn write_accounted_terminal(
 ) -> Result<(), String> {
     // Count this terminal write as a submission and project it as written so the
     // persisted document balances including itself.
-    let projected = {
+    let (projected, periodic_error) = {
         let mut inner = shared.inner.lock().unwrap();
         inner.diagnostics.submitted += 1;
         let mut projected = inner.diagnostics.clone();
         projected.written += 1;
-        projected
+        (projected, inner.periodic_error.clone())
     };
-    let result = store.write(&spec.build(projected));
-    shared.record_write(&result);
+    let result = store.write(&spec.build(projected, periodic_error.as_deref()));
+    shared.record_write(&result, WriteKind::Terminal);
     result
 }
 
@@ -1732,6 +1807,50 @@ mod tests {
         assert!(
             settlement.terminal_failure().is_some(),
             "a worker panic is a terminal failure, never silent success"
+        );
+    }
+
+    #[test]
+    fn worker_panic_reconciles_abandoned_work_and_keeps_balance() {
+        // Audit regression: when the worker panics mid-persist, a required submitter
+        // is disconnected rather than left hanging, and every counted submission is
+        // reconciled to a terminal category so the balance still holds.
+        let latch = Arc::new(FirstFault::default());
+        let mut coordinator =
+            StatusCoordinator::spawn(Box::new(PanicStore), Some(Arc::clone(&latch))).unwrap();
+        assert!(
+            coordinator.submit_required(running_status()).is_err(),
+            "the submitter is disconnected, not hung, when the worker panics"
+        );
+        let settlement = coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
+        assert!(
+            settlement.diagnostics.is_balanced(),
+            "abandoned work is reconciled so the balance holds: {:?}",
+            settlement.diagnostics
+        );
+        assert!(settlement.diagnostics.submitted >= 1);
+    }
+
+    #[test]
+    fn required_write_failure_is_not_labeled_periodic() {
+        // Audit regression: a required (initial Running) write failure must not be
+        // copied into the periodic_error channel; periodic_error names only
+        // best-effort periodic failures.
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let store = FailStateStore {
+            attempts: Arc::clone(&attempts),
+            fail: vec![PumpState::Running],
+        };
+        let mut coordinator = StatusCoordinator::spawn(Box::new(store), None).unwrap();
+        assert!(
+            coordinator.submit_required(running_status()).is_err(),
+            "a failed required write is a typed failure"
+        );
+        let settlement = coordinator.finish(TerminalStatusSpec::failed(0, PumpSummary::default(), "primary"));
+        assert!(
+            settlement.periodic_error.is_none(),
+            "a required write failure is not a periodic error: {:?}",
+            settlement.periodic_error
         );
     }
 
