@@ -3326,13 +3326,7 @@ mod tests {
         fs::create_dir_all(&workspace).unwrap();
 
         let git = |args: &[&str]| {
-            let ok = Command::new("git")
-                .args(args)
-                .current_dir(&workspace)
-                .status()
-                .unwrap()
-                .success();
-            assert!(ok, "git {args:?} must succeed");
+            crate::git::run(&workspace, args, "test git setup").unwrap();
         };
         git(&["init", "-q"]);
         git(&["config", "user.email", "t@t.co"]);
@@ -3396,14 +3390,7 @@ mod tests {
             &["config", "user.name", "t"][..],
             &["commit", "-q", "--allow-empty", "-m", "baseline"][..],
         ] {
-            assert!(
-                Command::new("git")
-                    .args(args)
-                    .current_dir(&workspace)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
+            crate::git::run(&workspace, args, "test git setup").unwrap();
         }
 
         let area = ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1";
