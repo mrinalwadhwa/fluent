@@ -797,9 +797,12 @@ fn run_with_transcript(
     }
 }
 
-/// A failed process operation, retaining WHICH syscall failed and its OS errno, so
-/// a cleanup diagnostic is lossless — it names the operation and error rather than
-/// collapsing every failure into a bare `false`/`None`.
+/// A failed process operation, retaining WHICH syscall failed and its OS errno, so a
+/// cleanup diagnostic is lossless — it names the operation and renders the original OS
+/// message (from the retained errno) rather than collapsing every failure into a bare
+/// `false`/`None` or an opaque error code. The `ErrorKind` is not stored separately: it
+/// is recoverable from `errno` on demand, so the type stays `Copy` and carries no
+/// redundant, never-read field.
 #[derive(Debug, Clone, Copy)]
 struct ProcessOpError {
     op: &'static str,
@@ -809,7 +812,14 @@ struct ProcessOpError {
 impl std::fmt::Display for ProcessOpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.errno {
-            Some(errno) => write!(f, "{} (os error {errno})", self.op),
+            // Render the original OS message (which itself includes the errno) rather
+            // than a bare number, so the diagnostic names the failure, not just a code.
+            Some(errno) => write!(
+                f,
+                "{}: {}",
+                self.op,
+                std::io::Error::from_raw_os_error(errno)
+            ),
             None => write!(f, "{}", self.op),
         }
     }
@@ -2602,6 +2612,38 @@ mod pump_supervision_tests {
         assert!(
             format!("{err:#}").contains("could not be reaped"),
             "the cleanup failure is attached as context: {err:#}"
+        );
+    }
+
+    #[test]
+    fn process_op_error_renders_the_original_os_message() {
+        // The cleanup diagnostic renders the original OS message (with its errno)
+        // rather than an opaque code, so a failed signal/kill/reap is lossless and
+        // legible; the ErrorKind stays recoverable from the retained errno.
+        let err = ProcessOpError {
+            op: "kill process group",
+            errno: Some(libc::EPERM),
+        };
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("kill process group"),
+            "the failed operation is named: {rendered}"
+        );
+        let expected_os = std::io::Error::from_raw_os_error(libc::EPERM).to_string();
+        assert!(
+            rendered.contains(&expected_os),
+            "the original OS message is rendered, not dropped: {rendered}"
+        );
+        assert!(
+            rendered.contains("os error"),
+            "the errno is still present in the rendered message: {rendered}"
+        );
+        // The structured category remains recoverable from the retained errno without
+        // storing a redundant field.
+        assert_eq!(
+            std::io::Error::from_raw_os_error(err.errno.unwrap()).kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "the ErrorKind is recoverable from the retained errno"
         );
     }
 

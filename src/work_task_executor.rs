@@ -294,7 +294,7 @@ fn rollback_reservation(
     attempt_id: &str,
     task_id: &str,
     receipt: &ReservationReceipt,
-) -> Result<()> {
+) -> Result<(), WorkModelStorageError> {
     store.mutate_work_item(work_item_id, |item| {
         if let Some((attempt_index, task_index)) =
             find_attempt_task_indexes(item, attempt_id, task_id)
@@ -341,9 +341,13 @@ fn with_reservation_rollback<T>(
             if let Err(rollback_error) =
                 rollback_reservation(store, work_item_id, attempt_id, task_id, receipt)
             {
-                return Err(error.context(format!(
-                    "and failed to normalize the reserved Task: {rollback_error}"
-                )));
+                // The setup failure is the primary fault. Retain the rollback
+                // persistence failure STRUCTURALLY as a downcastable secondary rather
+                // than flattening it to a string, so both the typed primary and the
+                // typed storage error stay recoverable and the primary is never masked.
+                return Err(error
+                    .context(rollback_error)
+                    .context("failed to normalize the reserved Task after a setup failure"));
             }
             Err(error)
         }
@@ -4607,6 +4611,63 @@ mod tests {
         assert_eq!(
             *limit, 7777,
             "the retry threads the resolve-once config, not the changed on-disk 4321"
+        );
+    }
+
+    #[test]
+    fn reservation_rollback_failure_composes_downcastable_secondary() {
+        // When post-reservation setup fails AND the CAS rollback cannot be persisted,
+        // both the typed primary and the typed storage secondary must stay
+        // downcastable — the rollback failure is composed structurally, not flattened
+        // into the primary's message.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+
+        // Build a receipt from a real Task shape, but never write the Work Item to the
+        // store, so the rollback's `mutate_work_item` fails to read it and returns a
+        // typed `WorkModelStorageError`.
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Rollback compose".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        let task = item.attempts[0].tasks[0].clone();
+        let receipt = ReservationReceipt {
+            prior_task: task.clone(),
+            prior_attempt_status: AttemptStatus::Planned,
+            prior_attempt_pause: None,
+            prior_attempt_completed_at: None,
+            written_task: task.clone(),
+            written_attempt_status: AttemptStatus::Executing,
+            written_attempt_pause: None,
+            written_attempt_completed_at: None,
+        };
+
+        let err = with_reservation_rollback(
+            &store,
+            "work-1",
+            "attempt-1",
+            "attempt-1-write-1",
+            &receipt,
+            || {
+                Err::<(), _>(anyhow::Error::new(
+                    crate::transcript_pump::TranscriptPumpError::new(
+                        "post-reservation setup failed",
+                    ),
+                ))
+            },
+        )
+        .expect_err("setup failed and the absent Work Item cannot be rolled back");
+
+        assert!(
+            err.downcast_ref::<crate::transcript_pump::TranscriptPumpError>()
+                .is_some(),
+            "the typed primary setup fault stays downcastable, never masked: {err:#}"
+        );
+        assert!(
+            err.downcast_ref::<WorkModelStorageError>().is_some(),
+            "the rollback persistence failure is retained as a downcastable secondary: {err:#}"
         );
     }
 
