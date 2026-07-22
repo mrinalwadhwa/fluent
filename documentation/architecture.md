@@ -483,9 +483,15 @@ stay outside the Learner's writable surface. A handoff-only run always invokes
 the absolute system Seatbelt launcher, even when the caller uses
 `--no-sandbox`; if the host cannot enforce that profile, the command records
 failed Learning and returns a recovery-pending failure instead of reporting a
-ready candidate. The profile exposes isolated Git data read-only, strips broad
-temporary-tree write grants, and explicitly denies every live root while
-allowing only the isolated draft directory. Fluent launches the coder in its
+ready candidate. Before entering the sandbox — the last trusted host boundary —
+Fluent hydrates the selected coder's supported credentials from the host
+credential store, which the sandbox itself denies. The profile exposes isolated
+Git data read-only, strips the shared `/private/tmp` and per-user
+`/private/var/folders` temporary-tree write grants on every effectively
+sandboxed branch, and explicitly denies every live root while allowing only the
+coder's staging directory. In place of the shared temp trees, each coder launch
+receives a distinct, mode-0700 private temporary directory created beneath its
+staging scope and held alive for the launch. Fluent launches the coder in its
 own process group and kills surviving descendants before it imports the draft.
 It then opens the draft without following the final component, requires one
 bounded regular inode with no hardlink aliases, and writes through a retained
@@ -495,6 +501,31 @@ confinement, and size rules; a declared missing artifact fails the run.
 Candidate commits, staged files, unstaged files, and untracked files are
 collected as denied paths inside the disposable clone, which is removed after
 the host stamps the handoff.
+
+Each Learner invocation allocates a collision-safe, host-owned run directory
+under `.fluent/work/artifacts/<work-item-id>/<attempt-id>/learner/runs/run-<N>`,
+its index taken from on-disk state so a lost or absent in-memory Learning record
+can never reuse an earlier run identity. That directory holds the host-written
+run evidence — the coder transcript, the immutable submitted-draft snapshot, any
+recorded normalizations, and, on a rejection, the full validation error. It is a
+non-writable sibling of the coder's staging directory, so the coder cannot
+replace, delete, or truncate its own run evidence. A refreshing auth retry
+preserves the pre-refresh transcript phase with a create-new write that
+propagates failures, never an overwrite-capable copy.
+
+Before it stamps a handoff, the host normalizes the untrusted draft toward
+Observation-only, only ever moving a follow-up away from corrective authority:
+malformed optional artifact evidence is dropped, and malformed, incomplete, or
+unsupported corrective metadata downgrades the follow-up to a plain Observation,
+each change recorded on the run surface. A single malformed optional field
+therefore cannot reject the whole draft, and no normalization can manufacture
+executable Work. If the normalized draft still fails schema validation and the
+configured repair budget (project-over-user layering, default two) remains,
+Fluent re-invokes the coder with the rejected draft and exact error as a bounded
+schema repair — not a fresh audit — under a fresh run identity, and accepts the
+corrected draft only when it preserves every prior follow-up id and its
+non-schema content. The prompt keeps the artifact-evidence array empty until the
+handoff transport can publish referenced evidence artifacts.
 Land takes that lock before it reads or mutates candidate state, resolves
 workspaces, or checks cleanliness, and holds it through merge finalization and
 follow-up recovery. A retry therefore cannot make land observe its transient

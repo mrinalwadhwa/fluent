@@ -4794,6 +4794,87 @@ expertise commit; it SHALL NOT grant write access to the Observation
 backlog, Work model, or remaining workspace.
 Test: src/work_task_executor.rs (learner_sandbox_confines_expertise_handoff_and_git_writes)
 
+### B15
+
+WHEN Fluent launches an effectively sandboxed Learner,
+THE SYSTEM SHALL resolve and inject the selected coder's supported
+credentials before entering the sandbox, without granting sandbox access
+to the host credential store.
+Test: tests/binary.rs (trusted_learner_hydrates_credentials_before_sandbox)
+
+### B16
+
+WHEN an effectively sandboxed Learner launches a coder tool that requires
+temporary files,
+THE SYSTEM SHALL provide a unique private writable temporary directory and
+keep shared temporary trees and live project roots non-writable.
+Test: tests/binary.rs (trusted_learner_has_private_temp_without_shared_temp_access)
+Test: src/work_task_executor.rs (create_private_launch_temp_gives_distinct_mode_0700_dirs)
+
+### B17
+
+WHEN a Claude Learner session returns an authentication rejection,
+THE SYSTEM SHALL preserve a transcript, apply the existing one-refresh
+retry policy, and either continue automatically or record the specific
+authentication recovery state.
+Test: tests/binary.rs (trusted_learner_auth_401_refreshes_from_transcript)
+Test: src/coder.rs (preserve_transcript_phase_refuses_to_overwrite_an_existing_sibling)
+
+### B18
+
+WHEN Fluent instructs a Learner to write a handoff draft,
+THE SYSTEM SHALL describe every serialized field with an example that
+parses as the production `LearnerDraftV1` schema and distinguish prose
+corrective evidence from digest-bearing artifact evidence.
+Test: src/follow_up.rs (learner_prompt_examples_parse_as_complete_drafts)
+
+### B19
+
+WHILE the handoff transport cannot publish independently referenced
+evidence artifacts,
+THE SYSTEM SHALL instruct the Learner to emit an empty artifact-evidence
+array.
+Test: src/work_task_executor.rs (learner_prompt_requires_empty_artifact_evidence_until_transport_exists)
+
+### B20
+
+IF a non-corrective follow-up is otherwise valid but carries malformed
+optional artifact evidence,
+THEN THE SYSTEM SHALL preserve it as Observation-only without that evidence
+and record the normalization rather than reject the whole draft.
+Test: src/learner.rs (malformed_noncorrective_artifact_evidence_is_preserved_observation_only)
+
+### B21
+
+IF a corrective follow-up contains malformed, incomplete, or unsupported
+corrective metadata,
+THEN THE SYSTEM SHALL preserve the finding as Observation-only and SHALL
+NOT create executable Work from it.
+Test: src/learner.rs (malformed_corrective_followup_downgrades_without_batch_failure)
+
+### B22
+
+WHEN a Learner draft fails schema validation and the configured
+schema-repair budget remains,
+THE SYSTEM SHALL retry with the rejected draft and exact validation error
+as a schema repair, without rerunning the semantic audit.
+Test: tests/binary.rs (learner_schema_failure_repairs_prior_draft)
+
+### B23
+
+IF a schema repair removes a prior follow-up id or changes a prior
+follow-up's non-schema content,
+THEN THE SYSTEM SHALL reject that repair and retain the earlier draft.
+Test: src/learner.rs (schema_repair_cannot_silently_drop_or_rewrite_followups)
+
+### B24
+
+WHEN a Learner draft or schema repair is rejected,
+THE SYSTEM SHALL preserve the submitted bytes, full validation error, and
+run identity as immutable Attempt artifacts before another draft may be
+published.
+Test: tests/binary.rs (learner_rejected_drafts_are_immutable_run_artifacts)
+
 ## Corrective classification and Work authorization
 
 ### B1
