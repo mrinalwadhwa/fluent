@@ -470,23 +470,25 @@ fn default_learner_run_coder(
     // LearnerRunInputs; the public constructor never names the private pump config.
     let capture =
         crate::coder::TranscriptCapture::new(request.transcript_path, config.project_root);
-    work_task_executor::run_learner(work_task_executor::LearnerRunInputs {
-        workspace_path: request.workspace_path,
-        resolver: config.resolver,
-        extra_args: config.extra_args,
-        coder_kind: request.coder_kind,
-        no_sandbox: config.no_sandbox,
-        model: request.model,
-        effort: request.effort,
-        review_artifact_paths: request.review_artifact_paths,
-        tester_artifact_paths: request.tester_artifact_paths,
-        diff_command: request.diff_command,
-        handoff_dir: request.handoff_dir,
-        capture: Some(capture),
-        handoff_only: request.handoff_only,
-        denied_write_roots: request.denied_write_roots,
-        repair: request.repair,
-    })
+    work_task_executor::run_learner(
+        work_task_executor::LearnerRunInputs {
+            workspace_path: request.workspace_path,
+            resolver: config.resolver,
+            extra_args: config.extra_args,
+            coder_kind: request.coder_kind,
+            no_sandbox: config.no_sandbox,
+            model: request.model,
+            effort: request.effort,
+            review_artifact_paths: request.review_artifact_paths,
+            tester_artifact_paths: request.tester_artifact_paths,
+            diff_command: request.diff_command,
+            handoff_dir: request.handoff_dir,
+            handoff_only: request.handoff_only,
+            denied_write_roots: request.denied_write_roots,
+            repair: request.repair,
+        },
+        Some(capture),
+    )
 }
 
 struct SlotGuard {

@@ -2512,14 +2512,6 @@ pub struct LearnerRunInputs<'a> {
     pub diff_command: &'a str,
     /// The managed handoff surface where the coder writes its untrusted draft.
     pub handoff_dir: &'a Path,
-    /// The immutable, already-resolved transcript capture for this launch: the
-    /// durable transcript path on the managed Learner artifact surface plus this
-    /// project's resolved pump thresholds. The host writes it outside the sandbox,
-    /// so it survives an isolated handoff-only run and lets the one-refresh auth
-    /// policy classify a session-ending 401. Resolving it at the caller keeps
-    /// transient capture state off this input struct and never names the private
-    /// pump config.
-    pub capture: Option<crate::coder::TranscriptCapture<'a>>,
     /// Live repository roots that a handoff-only retry must never write.
     pub denied_write_roots: &'a [PathBuf],
     /// Whether the Learner runs post-land in handoff-only mode: after its
@@ -2577,20 +2569,27 @@ pub fn expertise_proposal_follow_up(
 /// The coder is sandboxed to write only `.fluent/expertise/`, the designated
 /// managed handoff surface, and the Git metadata an expertise commit needs — not
 /// the Observation backlog, the Work model, or the rest of the workspace.
-pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
+pub fn run_learner(
+    inputs: LearnerRunInputs<'_>,
+    capture: Option<crate::coder::TranscriptCapture<'_>>,
+) -> Result<()> {
     let coder_kind = inputs.coder_kind;
     let model = inputs.model.map(|s| s.to_string());
     let effort = inputs.effort.map(|s| s.to_string());
-    run_learner_with_coder(inputs, move |sandbox| {
+    run_learner_with_coder(inputs, capture, move |sandbox| {
         coder_kind.boxed_with_model(sandbox, model.as_deref(), effort.as_deref())
     })
 }
 
 /// Run the Learner with a caller-supplied coder factory. Production builds the real
 /// coder for the resolved kind; tests inject a fake to prove the launch threads the
-/// resolved [`TranscriptCapture`] into `run_captured` rather than dropping it.
+/// resolved [`TranscriptCapture`] into `run_captured` rather than dropping it. The
+/// capture is threaded as a separate immutable argument — resolved once in the
+/// crate-private Attempt adapter — so no transient capture state rides on the public
+/// `LearnerRunInputs`.
 fn run_learner_with_coder(
     inputs: LearnerRunInputs<'_>,
+    capture: Option<crate::coder::TranscriptCapture<'_>>,
     make_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
 ) -> Result<()> {
     eprintln!("  Running the Learner after passing reviews…");
@@ -2750,7 +2749,7 @@ fn run_learner_with_coder(
         }
     };
 
-    if let Some(parent) = inputs.capture.as_ref().and_then(|c| c.path().parent()) {
+    if let Some(parent) = capture.as_ref().and_then(|c| c.path().parent()) {
         fs::create_dir_all(parent)
             .with_context(|| format!("create Learner transcript dir at {}", parent.display()))?;
     }
@@ -2762,7 +2761,7 @@ fn run_learner_with_coder(
         workspace_path,
         inputs.extra_args,
         &extra_env,
-        inputs.capture.as_ref(),
+        capture.as_ref(),
     )?;
     if exit_code != 0 {
         bail!("Learner coder exited with code {exit_code}");
@@ -4149,11 +4148,11 @@ mod tests {
                 tester_artifact_paths: &[],
                 diff_command: "git diff",
                 handoff_dir: &handoff_dir,
-                capture: Some(capture),
                 denied_write_roots: &[],
                 handoff_only: false,
                 repair: None,
             },
+            Some(capture),
             move |_sandbox| {
                 Box::new(RecordingLearnerCoder {
                     recorded: recorded_for_coder,
