@@ -1258,6 +1258,18 @@ impl ManagedChild {
         // `EPERM`/`ESRCH`) is not a run fault, so it must not abort the task. Drop
         // stays conservative and detaches rather than joins the pump when the sweep
         // was not confirmed.
+        if !self.outcome.group_swept() {
+            // The sweep was not confirmed. Surface the retained OS error as an
+            // observable diagnostic so the unconfirmed sweep is not swallowed once
+            // this owner drops — but never claim the group was swept (the structured
+            // `group_signal` stays `Failed`, distinct from an `ESRCH` `AlreadyGone`).
+            eprintln!(
+                "  Note: coder process {id} was reaped after a direct kill, but its \
+                 process group sweep could not be confirmed ({}); non-fatal, and the \
+                 group is not recorded as swept.",
+                self.outcome.group_sweep_error()
+            );
+        }
         Ok(code)
     }
 
@@ -2488,19 +2500,22 @@ mod pump_supervision_tests {
     #[cfg(unix)]
     #[test]
     fn drop_with_unswept_group_does_not_block_joining_a_live_pump() {
-        // B5/B6: when cleanup cannot verifiably sweep the group (here an ECHILD
-        // identity loss), a surviving descendant may still hold the transcript
-        // pipe's write end open, so the pump would never reach EOF. Drop must stay
-        // bounded — it detaches the still-running pump instead of joining it — and
-        // return within a wall-clock deadline rather than hanging forever. This is
-        // the real-pump Drop-deadline evidence the unswept-invariant seam test alone
-        // cannot provide.
+        // B5/B6: this pins the Drop *wall-clock* contract — when the group sweep is
+        // unconfirmed (`group_swept()` is false, here via an ECHILD identity loss),
+        // Drop detaches the still-running pump instead of joining it, returning
+        // within a deadline rather than hanging forever on a pump that never reaches
+        // EOF. The pipe here is held open by an independent process standing in for a
+        // surviving descendant — this test isolates the non-join timing, NOT real
+        // process-group descendant sweeping, which `no_transcript_sweeps_real_descendants`
+        // and `real_leader_is_reaped_exactly_once_and_leaves_no_zombie` cover at the
+        // OS boundary.
         let dir = tempfile::tempdir().unwrap();
         let transcript = dir.path().join("transcript.jsonl");
         let status = crate::transcript_pump::status_path_for(&transcript);
 
-        // A real descendant that holds the pump's read source open without ever
-        // writing to it or closing it, so the pump thread blocks on read.
+        // An independent process that holds the pump's read source open without ever
+        // writing to it or closing it, so the pump thread blocks on read — a stand-in
+        // for a surviving descendant that keeps the transcript pipe open.
         let mut writer = Command::new("/bin/sh");
         writer.arg("-c").arg("sleep 30").stdout(Stdio::piped());
         let mut writer_child = writer.spawn().unwrap();
