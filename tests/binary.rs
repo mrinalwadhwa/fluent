@@ -1741,11 +1741,18 @@ fn attempt_create_accepts_execution_ready_work() {
 
 #[test]
 fn work_attempt_adds_planned_attempt_with_initial_write_task() {
+    // Nest the project under its own parent so the managed workspace sibling
+    // (`../work-6-work-1-attempt-1`) resolves inside this test's TempDir. A bare
+    // TempDir root would place that sibling directly in the shared system temp
+    // dir under a fixed name, where a parallel test could transiently create it
+    // and trip the non-existence assertion below.
     let tmp = TempDir::new().unwrap();
-    write_work_item_json(tmp.path(), "work-1", "Attempt intake");
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    write_work_item_json(&project, "work-1", "Attempt intake");
 
     fluent_cmd()
-        .current_dir(tmp.path())
+        .current_dir(&project)
         .args(["attempt", "create", "work-1", "attempt-1"])
         .assert()
         .success()
@@ -1754,7 +1761,7 @@ fn work_attempt_adds_planned_attempt_with_initial_write_task() {
         ));
 
     let output = fluent_cmd()
-        .current_dir(tmp.path())
+        .current_dir(&project)
         .args(["work-item", "show", "work-1"])
         .output()
         .unwrap();
@@ -1790,7 +1797,7 @@ fn work_attempt_adds_planned_attempt_with_initial_write_task() {
             .unwrap()
             .is_empty()
     );
-    assert!(!tmp.path().join("../work-6-work-1-attempt-1").exists());
+    assert!(!project.join("../work-6-work-1-attempt-1").exists());
 }
 
 #[test]
