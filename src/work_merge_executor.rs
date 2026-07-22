@@ -1119,8 +1119,15 @@ fn run_reserved_rebase(
         Ok(code) => code,
         Err(err) => {
             // A typed pump/coder failure returns to the terminal finalizer, which
-            // leaves a durable terminal Task; abort the in-progress rebase first.
-            git::run_raw(source_workspace, &["rebase", "--abort"]).ok();
+            // leaves a durable terminal Task; abort the in-progress rebase first and
+            // compose a genuine abort failure as a typed secondary rather than
+            // dropping it, without masking the pump/coder primary.
+            let err = match abort_rebase_if_in_progress(source_workspace) {
+                Ok(()) => err,
+                Err(abort_err) => err.context(format!(
+                    "additionally failed to abort the in-progress rebase: {abort_err:#}"
+                )),
+            };
             return Err(err);
         }
     };
@@ -1128,9 +1135,14 @@ fn run_reserved_rebase(
     let give_up_path = rebase_artifact_dir.join("give-up.md");
 
     if give_up_path.exists() {
-        git::run_raw(source_workspace, &["rebase", "--abort"]).ok();
-        let diagnostic = fs::read_to_string(&give_up_path)
+        let abort = abort_rebase_if_in_progress(source_workspace);
+        let mut diagnostic = fs::read_to_string(&give_up_path)
             .unwrap_or_else(|_| "Rebase agent gave up (no diagnostic)".to_string());
+        if let Err(abort_err) = abort {
+            diagnostic.push_str(&format!(
+                "\n\nAdditionally, aborting the in-progress rebase failed: {abort_err:#}"
+            ));
+        }
         update_rebase_task_status(
             config.store,
             config.work_item_id,
@@ -1141,12 +1153,18 @@ fn run_reserved_rebase(
         Ok(RebaseOutcome::NeedsUser { diagnostic })
     } else if exit_code == 0 {
         if let Err(reason) = verify_rebase_completed(source_workspace, target_branch) {
-            git::run_raw(source_workspace, &["rebase", "--abort"]).ok();
-            bail!(
+            let abort = abort_rebase_if_in_progress(source_workspace);
+            let mut message = format!(
                 "Rebase coder exited 0 but verification failed: {reason} \
                  while rebasing Merge Candidate {:?} against {target_branch}",
                 candidate.id
             );
+            if let Err(abort_err) = abort {
+                message.push_str(&format!(
+                    "; additionally failed to abort the in-progress rebase: {abort_err:#}"
+                ));
+            }
+            bail!("{message}");
         }
         let new_tip = head_commit(source_workspace)?;
         update_rebase_task_status(
@@ -1158,12 +1176,18 @@ fn run_reserved_rebase(
         )?;
         Ok(RebaseOutcome::Success { new_tip })
     } else {
-        git::run_raw(source_workspace, &["rebase", "--abort"]).ok();
-        bail!(
+        let abort = abort_rebase_if_in_progress(source_workspace);
+        let mut message = format!(
             "Rebase agent failed (exit code {exit_code}) while rebasing \
              Merge Candidate {:?} against {target_branch}",
             candidate.id
-        )
+        );
+        if let Err(abort_err) = abort {
+            message.push_str(&format!(
+                "; additionally failed to abort the in-progress rebase: {abort_err:#}"
+            ));
+        }
+        bail!("{message}")
     }
 }
 
@@ -1251,18 +1275,76 @@ fn update_rebase_task_status(
         .iter_mut()
         .find(|a| a.id == attempt_id)
         .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", attempt_id))?;
-    if let Some(task) = attempt.tasks.iter_mut().find(|t| t.id == task_id) {
-        if matches!(
-            status,
-            TaskStatus::Complete | TaskStatus::Failed | TaskStatus::NeedsUser
-        ) {
-            crate::work_model::set_task_terminal(task, status);
-        } else {
-            task.status = status;
-        }
+    // A structurally absent reserved Rebase Task is a model-integrity failure, not
+    // a silent no-op: terminalizing a Task that the reservation should have created
+    // must record its state or surface why it could not, so a missing entity never
+    // masquerades as a successful terminal write.
+    let task = attempt
+        .tasks
+        .iter_mut()
+        .find(|t| t.id == task_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Rebase Task {:?} not found in Attempt {:?}",
+                task_id,
+                attempt_id
+            )
+        })?;
+    if matches!(
+        status,
+        TaskStatus::Complete | TaskStatus::Failed | TaskStatus::NeedsUser
+    ) {
+        crate::work_model::set_task_terminal(task, status);
+    } else {
+        task.status = status;
     }
     store.write_work_item(&item)?;
     Ok(())
+}
+
+/// Whether a rebase is currently in progress in `workspace`. Decides whether an
+/// abort is a required cleanup step or a no-op: a coder that failed before the
+/// rebase started — or a workspace that is not a git repository — leaves no state
+/// to abort, so a benign "no rebase in progress" is never treated as a failure.
+fn rebase_in_progress(workspace: &Path) -> bool {
+    for state in ["rebase-merge", "rebase-apply"] {
+        if let Ok(relative) = git::run_stdout(
+            workspace,
+            &["rev-parse", "--git-path", state],
+            "check rebase state path",
+        ) {
+            if workspace.join(relative.trim()).exists() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Abort an in-progress rebase, returning a typed diagnostic when a genuine abort
+/// fails so a failed cleanup is never silently dropped through `.ok()`.
+///
+/// A rebase that is in progress but cannot be aborted is a real integrity fault;
+/// callers compose it as a typed secondary rather than masking the primary. When
+/// no rebase is in progress the abort is a no-op and returns `Ok`.
+fn abort_rebase_if_in_progress(workspace: &Path) -> Result<()> {
+    if !rebase_in_progress(workspace) {
+        return Ok(());
+    }
+    let output =
+        git::run_raw(workspace, &["rebase", "--abort"]).context("spawn git rebase --abort")?;
+    if output.status.success() {
+        return Ok(());
+    }
+    bail!(
+        "git rebase --abort failed (exit {}): {}",
+        output
+            .status
+            .code()
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "terminated by signal".to_string()),
+        String::from_utf8_lossy(&output.stderr).trim()
+    )
 }
 
 fn record_candidate_needs_user(
@@ -2426,6 +2508,85 @@ mod tests {
         // main is still an ancestor of feature HEAD (no divergence)
         let result = verify_rebase_completed(&repo, "main");
         assert!(result.is_ok(), "clean rebase should verify as success");
+    }
+
+    #[test]
+    fn update_rebase_task_status_requires_the_reserved_task() {
+        // B7: terminalizing a Rebase Task that is structurally absent is a model-
+        // integrity failure, not a silent success — a missing reserved entity must
+        // surface rather than report a clean terminal write.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Missing rebase task".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+
+        let error = update_rebase_task_status(
+            &store,
+            "work-1",
+            "attempt-1",
+            "attempt-1-rebase",
+            TaskStatus::Failed,
+        )
+        .expect_err("a missing reserved Rebase Task must fail, not silently no-op");
+        assert!(
+            error.to_string().contains("Rebase Task"),
+            "the error names the missing Rebase Task: {error}"
+        );
+    }
+
+    #[test]
+    fn abort_rebase_if_in_progress_aborts_a_conflicting_rebase() {
+        // A rebase left in progress by a coder failure is a real cleanup step: the
+        // checked abort detects the in-progress state, aborts it, and reports success
+        // with the state cleared — never silently dropping the outcome through `.ok()`.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_test_repo(&repo);
+
+        git::run(&repo, &["checkout", "-b", "feature"], "branch").unwrap();
+        fs::write(repo.join("file.txt"), "feature change").unwrap();
+        git::run(&repo, &["add", "."], "stage").unwrap();
+        git::run(&repo, &["commit", "-m", "feature"], "commit").unwrap();
+
+        git::run(&repo, &["checkout", "main"], "checkout").unwrap();
+        fs::write(repo.join("file.txt"), "main change").unwrap();
+        git::run(&repo, &["add", "."], "stage").unwrap();
+        git::run(&repo, &["commit", "-m", "diverge"], "commit").unwrap();
+
+        git::run(&repo, &["checkout", "feature"], "checkout").unwrap();
+        // A conflicting rebase leaves the workspace mid-rebase.
+        let _ = git::run_raw(&repo, &["rebase", "main"]);
+        assert!(
+            rebase_in_progress(&repo),
+            "the conflicting rebase must leave the workspace mid-rebase"
+        );
+
+        abort_rebase_if_in_progress(&repo).expect("aborting an in-progress rebase must succeed");
+        assert!(
+            !rebase_in_progress(&repo),
+            "the checked abort clears the in-progress rebase state"
+        );
+    }
+
+    #[test]
+    fn abort_rebase_if_in_progress_is_a_no_op_without_a_rebase() {
+        // No rebase in progress — including a workspace that is not a git repository —
+        // is a benign no-op, never a spurious cleanup failure.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_test_repo(&repo);
+        abort_rebase_if_in_progress(&repo).expect("a clean repo aborts to a no-op");
+
+        let non_repo = tmp.path().join("not-git");
+        fs::create_dir_all(&non_repo).unwrap();
+        abort_rebase_if_in_progress(&non_repo).expect("a non-git workspace aborts to a no-op");
     }
 
     #[test]
