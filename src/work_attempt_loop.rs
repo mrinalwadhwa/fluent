@@ -162,7 +162,7 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             let learner_pending = item.attempts[attempt_index]
                 .learning
                 .as_ref()
-                .map(|learning| learning.is_failed())
+                .map(|learning| learning.is_pending())
                 .unwrap_or(true);
             let landed_success = item
                 .merge_candidates
@@ -195,7 +195,7 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                 let learner_still_pending = item.attempts[attempt_index]
                     .learning
                     .as_ref()
-                    .map(|learning| learning.is_failed())
+                    .map(|learning| learning.is_pending())
                     .unwrap_or(true);
                 if item.attempts[attempt_index].status != AttemptStatus::Complete
                     || item.attempts[attempt_index].review_state != Some(AttemptReviewState::Passed)
@@ -234,6 +234,7 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                         default_learner_run_coder(&config, request)
                     };
                     run_learner_step(
+                        config.store,
                         config.project_root,
                         &mut item,
                         attempt_index,
@@ -242,7 +243,7 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                         &LearnerConfig {
                             run_coder: &run_coder,
                         },
-                    );
+                    )?;
                     config.store.write_work_item(&item)?;
                     if handoff_only
                         && item.attempts[attempt_index]
@@ -891,41 +892,101 @@ struct LearnerConfig<'a> {
 /// retryable outcome on the Attempt. A failure warns the operator and leaves the
 /// Merge Candidate unaffected; the record can be retried later.
 fn run_learner_step(
+    store: &WorkModelStore,
     project_root: &Path,
     item: &mut WorkItem,
     attempt_index: usize,
     candidate_id: &str,
     handoff_only: bool,
     config: &LearnerConfig<'_>,
-) {
+) -> Result<()> {
     let runs = item.attempts[attempt_index]
         .learning
         .as_ref()
         .map(|learning| learning.runs)
         .unwrap_or(0)
         + 1;
-    match try_learn(
+
+    // Reserve a durable, crash-observable in-progress state BEFORE the coder runs
+    // and before any handoff is written. A crash mid-run then leaves a retryable
+    // record rather than an orphan handoff with no durable learning state — the
+    // durable transition is never kept only in memory.
+    item.attempts[attempt_index].learning = Some(AttemptLearning::in_progress(runs));
+    store.write_work_item(item)?;
+
+    let work_item_id = item.id.clone();
+    let attempt_id = item.attempts[attempt_index].id.clone();
+
+    // Run the Learner coder, confinement, and draft stamping, producing the handoff
+    // to write. The handoff is written LAST, by `finalize_learning`, after the
+    // terminal learning outcome is persisted or composed from a write failure.
+    let learned = try_learn(
         project_root,
         item,
         attempt_index,
         candidate_id,
         handoff_only,
         config,
-    ) {
-        Ok(handoff_ref) => {
-            item.attempts[attempt_index].learning =
-                Some(AttemptLearning::succeeded(runs, handoff_ref));
-        }
+    );
+    finalize_learning(store, item, attempt_index, runs, learned, |handoff| {
+        crate::learner::write_handoff(project_root, &work_item_id, &attempt_id, handoff)
+    })
+}
+
+/// Persist the Learner's terminal durable outcome and write the canonical handoff
+/// last. A successful run writes the handoff and records `Succeeded` with its
+/// reference; a handoff-write failure is composed into a retryable `Failed` record
+/// that preserves the typed classification, so the outcome is never dropped and the
+/// in-progress reservation is always resolved to a terminal record. A Learner logic
+/// failure records a typed `Failed` record. A learner failure does not fail the
+/// Attempt (the record is retryable); only a durable store-write failure propagates.
+fn finalize_learning(
+    store: &WorkModelStore,
+    item: &mut WorkItem,
+    attempt_index: usize,
+    runs: u32,
+    learned: Result<crate::follow_up::LearnerHandoffV1>,
+    write_handoff: impl FnOnce(
+        &crate::follow_up::LearnerHandoffV1,
+    ) -> Result<crate::follow_up::ArtifactRef>,
+) -> Result<()> {
+    match learned {
+        Ok(handoff) => match write_handoff(&handoff) {
+            Ok(handoff_ref) => {
+                item.attempts[attempt_index].learning =
+                    Some(AttemptLearning::succeeded(runs, handoff_ref));
+                store.write_work_item(item)?;
+            }
+            Err(err) => {
+                // The Learner produced a valid handoff, but writing the canonical
+                // handoff failed. Preserve a composite, retryable failure that keeps
+                // the typed classification discoverable rather than dropping the
+                // outcome or stranding the in-progress reservation.
+                eprintln!("  Warning: learner produced a handoff but writing it failed: {err:#}");
+                let kind = classify_learning_failure(&err);
+                item.attempts[attempt_index].learning = Some(AttemptLearning::failed_with_kind(
+                    runs,
+                    format!("learner produced a handoff but persisting it failed: {err:#}"),
+                    kind,
+                ));
+                store.write_work_item(item)?;
+            }
+        },
         Err(err) => {
             eprintln!("  Warning: learner failed, continuing without handoff: {err:#}");
             // Preserve the typed transcript-pump classification on the durable
             // learning record rather than flattening it to a bare string, so a
             // transcript-pump primary stays discoverable through recovery.
             let kind = classify_learning_failure(&err);
-            item.attempts[attempt_index].learning =
-                Some(AttemptLearning::failed_with_kind(runs, format!("{err:#}"), kind));
+            item.attempts[attempt_index].learning = Some(AttemptLearning::failed_with_kind(
+                runs,
+                format!("{err:#}"),
+                kind,
+            ));
+            store.write_work_item(item)?;
         }
     }
+    Ok(())
 }
 
 /// Classify a failed Learner run for the durable learning record: a typed
@@ -949,7 +1010,7 @@ fn try_learn(
     candidate_id: &str,
     handoff_only: bool,
     config: &LearnerConfig<'_>,
-) -> Result<crate::follow_up::ArtifactRef> {
+) -> Result<crate::follow_up::LearnerHandoffV1> {
     let work_item_id = item.id.clone();
     let attempt = &item.attempts[attempt_index];
     let attempt_id = attempt.id.clone();
@@ -1238,9 +1299,11 @@ fn try_learn(
             }
         }
     };
-    let handoff_ref =
-        crate::learner::write_handoff(project_root, &work_item_id, &attempt_id, &handoff)?;
-    Ok(handoff_ref)
+    // Return the stamped handoff WITHOUT writing it. Persisting the durable
+    // learning outcome and writing the canonical handoff is the caller's ordered
+    // responsibility (see `finalize_learning`), so the handoff is never written
+    // before a durable learning record exists.
+    Ok(handoff)
 }
 
 /// Whether an executing Task is still live. Liveness is owned by the Task's
@@ -2244,13 +2307,14 @@ fn interpret_reviews(
     if let Some(ref learner_config) = learner_config {
         // The Learner runs before land here, so it is never handoff-only.
         run_learner_step(
+            store,
             project_root,
             &mut item,
             attempt_index,
             &candidate_id,
             false,
             learner_config,
-        );
+        )?;
     }
     store.write_work_item(&item)?;
     Ok(WorkAttemptRunOutcome::MergeCandidateReady { candidate_id })
@@ -4069,6 +4133,101 @@ mod tests {
         assert_eq!(
             handoff.source_merge_candidate_id.as_deref(),
             Some("attempt-1-merge-candidate")
+        );
+    }
+
+    #[test]
+    fn learner_handoff_failure_preserves_composite_diagnostic() {
+        // B7: the Learner persists a durable, crash-observable in-progress
+        // reservation BEFORE its coder runs and writes the canonical handoff LAST.
+        // When the handoff write fails after a successful run, the durable learning
+        // record composes a retryable Failed outcome that preserves the diagnostic —
+        // the outcome is never dropped and the in-progress reservation is never
+        // stranded.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, _workspace, _base) =
+            make_learner_passing_fixture(tmp.path(), 1);
+
+        // Prove the durable in-progress reservation is persisted before the coder
+        // runs: when the coder is invoked, the durable record already exists and is
+        // in-progress.
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        let probe_root = project_root.clone();
+        let observed_in_progress = Arc::new(AtomicBool::new(false));
+        let observed_for_coder = Arc::clone(&observed_in_progress);
+        let run_coder = move |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            let probe = WorkModelStore::new(&probe_root)
+                .read_work_item("work-1")
+                .unwrap();
+            if probe.attempts[0]
+                .learning
+                .as_ref()
+                .map(|learning| learning.is_in_progress())
+                .unwrap_or(false)
+            {
+                observed_for_coder.store(true, AtomicOrdering::SeqCst);
+            }
+            fs::create_dir_all(request.handoff_dir).unwrap();
+            fs::write(
+                request.handoff_dir.join(crate::learner::DRAFT_FILE_NAME),
+                r#"{"learning_summary":"learned","follow_ups":[]}"#,
+            )
+            .unwrap();
+            Ok(())
+        };
+
+        // Obstruct the canonical handoff write: pre-create the handoff FILE path as a
+        // directory so `write_handoff` fails after an otherwise successful run.
+        let handoff_rel = crate::learner::handoff_path_rel("work-1", "attempt-1");
+        let handoff_path = project_root.join(&handoff_rel);
+        fs::create_dir_all(&handoff_path).unwrap();
+
+        let item = store.read_work_item("work-1").unwrap();
+        let outcome = interpret_reviews(
+            &project_root,
+            &store,
+            item,
+            "attempt-1",
+            true,
+            Some(LearnerConfig {
+                run_coder: &run_coder,
+            }),
+        )
+        .unwrap();
+
+        // A learner failure never fails the Attempt: the candidate is still ready.
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
+            "a handoff-write failure leaves the candidate ready; got {outcome:?}"
+        );
+
+        assert!(
+            observed_in_progress.load(AtomicOrdering::SeqCst),
+            "the durable in-progress reservation must be persisted before the coder runs"
+        );
+
+        let stored = store.read_work_item("work-1").unwrap();
+        let learning = stored.attempts[0]
+            .learning
+            .as_ref()
+            .expect("a durable learning record survives the handoff failure");
+        assert!(
+            learning.is_failed(),
+            "a handoff-write failure records a retryable Failed outcome, not a lost success"
+        );
+        assert!(
+            !learning.is_in_progress(),
+            "the in-progress reservation is resolved to a terminal record, never stranded"
+        );
+        assert_eq!(learning.runs, 1);
+        assert!(
+            learning.handoff.is_none(),
+            "a failed handoff write records no handoff reference"
+        );
+        let diagnostic = learning.last_failure.as_deref().unwrap_or_default();
+        assert!(
+            diagnostic.contains("handoff") && diagnostic.contains("persisting it failed"),
+            "the composite diagnostic preserves that the handoff write failed: {diagnostic}"
         );
     }
 

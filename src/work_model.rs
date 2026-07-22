@@ -1570,6 +1570,11 @@ pub struct EnqueueIntent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LearningStatus {
+    /// A durable, crash-observable reservation: the Learner run was persisted as
+    /// started before its coder ran and before any handoff was written, so a crash
+    /// mid-run leaves a retryable record rather than an orphan handoff with no
+    /// durable learning state. Treated as pending (retryable) by the loop.
+    InProgress,
     Succeeded,
     Failed,
 }
@@ -1615,6 +1620,20 @@ pub enum LearningFailureKind {
 }
 
 impl AttemptLearning {
+    /// A durable in-progress reservation persisted before the Learner's coder runs
+    /// and before any handoff is written. It is crash-observable and retryable: a
+    /// run that crashes after this write leaves this record, which the loop treats
+    /// as still pending.
+    pub fn in_progress(runs: u32) -> Self {
+        Self {
+            status: LearningStatus::InProgress,
+            runs,
+            handoff: None,
+            last_failure: None,
+            failure_kind: None,
+        }
+    }
+
     /// A completed learning record carrying its single handoff reference.
     pub fn succeeded(runs: u32, handoff: crate::follow_up::ArtifactRef) -> Self {
         Self {
@@ -1652,6 +1671,19 @@ impl AttemptLearning {
 
     pub fn is_succeeded(&self) -> bool {
         self.status == LearningStatus::Succeeded
+    }
+
+    /// A durable in-progress reservation whose run has not yet reached a terminal
+    /// success or failure. The loop treats it as still pending so a crashed run is
+    /// retried rather than mistaken for a completed one.
+    pub fn is_in_progress(&self) -> bool {
+        self.status == LearningStatus::InProgress
+    }
+
+    /// Whether the Learner still needs a (re)run for this Attempt: no record yet, a
+    /// failed run, or a durable in-progress reservation left by a crash.
+    pub fn is_pending(&self) -> bool {
+        !self.is_succeeded()
     }
 }
 

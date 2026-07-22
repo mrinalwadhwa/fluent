@@ -2538,6 +2538,21 @@ pub fn expertise_proposal_follow_up(
 /// managed handoff surface, and the Git metadata an expertise commit needs — not
 /// the Observation backlog, the Work model, or the rest of the workspace.
 pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
+    let coder_kind = inputs.coder_kind;
+    let model = inputs.model.map(|s| s.to_string());
+    let effort = inputs.effort.map(|s| s.to_string());
+    run_learner_with_coder(inputs, move |sandbox| {
+        coder_kind.boxed_with_model(sandbox, model.as_deref(), effort.as_deref())
+    })
+}
+
+/// Run the Learner with a caller-supplied coder factory. Production builds the real
+/// coder for the resolved kind; tests inject a fake to prove the launch threads the
+/// resolved [`TranscriptCapture`] into `run_captured` rather than dropping it.
+fn run_learner_with_coder(
+    inputs: LearnerRunInputs<'_>,
+    make_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
+) -> Result<()> {
     eprintln!("  Running the Learner after passing reviews…");
 
     let workspace_path = inputs.workspace_path;
@@ -2702,9 +2717,7 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
             .with_context(|| format!("create Learner transcript dir at {}", parent.display()))?;
     }
 
-    let coder = inputs
-        .coder_kind
-        .boxed_with_model(sandbox, inputs.model, inputs.effort);
+    let coder = make_coder(sandbox);
     let pump_config = crate::transcript_pump::resolve_config(inputs.project_root);
     let capture = inputs
         .transcript_path
@@ -4009,6 +4022,121 @@ mod tests {
             after.attempts[0].pause_kind,
             Some(crate::work_model::PauseKind::TranscriptPump),
             "the primary transcript-pump classification is preserved"
+        );
+    }
+
+    /// A fake coder that records the resolved transcript capture threaded into
+    /// `run_captured` and returns success, so a launch route can be checked for
+    /// capture threading without a real coder process.
+    struct RecordingLearnerCoder {
+        recorded: Arc<Mutex<Option<(PathBuf, usize)>>>,
+    }
+
+    impl crate::coder::Coder for RecordingLearnerCoder {
+        fn run(
+            &self,
+            _prompt: &str,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+            _transcript_file: Option<&Path>,
+        ) -> Result<i32> {
+            unreachable!("the learner route launches through run_captured")
+        }
+
+        fn run_captured(
+            &self,
+            _prompt: &str,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+            capture: Option<&crate::coder::TranscriptCapture<'_>>,
+        ) -> Result<i32> {
+            if let Some(capture) = capture {
+                *self.recorded.lock().unwrap() =
+                    Some((capture.path.to_path_buf(), capture.config.console_preview_limit));
+            }
+            Ok(0)
+        }
+
+        fn run_interactive(
+            &self,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+        ) -> Result<i32> {
+            unreachable!("the learner route never runs interactively")
+        }
+    }
+
+    #[test]
+    fn learner_launch_threads_resolved_capture() {
+        // B8: the Learner launch route threads the project's resolved, immutable
+        // TranscriptCapture into run_captured — not a dropped or default config. A
+        // distinctive project console-preview-limit must arrive at the coder
+        // verbatim; this fails if the route drops or re-resolves the capture.
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let config_dir = project_root.join(".fluent");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            config_dir.join("config.yaml"),
+            "transcript:\n  console-preview-limit: 7777\n",
+        )
+        .unwrap();
+
+        let workspace = project_root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let handoff_dir = project_root.join("handoff");
+        fs::create_dir_all(&handoff_dir).unwrap();
+        let transcript_path = project_root.join("learner-transcript.jsonl");
+        let resolver = ContentResolver::new(None);
+
+        let recorded = Arc::new(Mutex::new(None));
+        let recorded_for_coder = Arc::clone(&recorded);
+        run_learner_with_coder(
+            LearnerRunInputs {
+                project_root,
+                workspace_path: &workspace,
+                resolver: &resolver,
+                extra_args: &[],
+                coder_kind: CoderKind::Codex,
+                // no_sandbox with a pre-land (not handoff-only) run keeps the launch
+                // effectively unsandboxed, so no credential/Seatbelt setup is needed.
+                no_sandbox: true,
+                model: None,
+                effort: None,
+                review_artifact_paths: &[],
+                tester_artifact_paths: &[],
+                diff_command: "git diff",
+                handoff_dir: &handoff_dir,
+                transcript_path: Some(&transcript_path),
+                denied_write_roots: &[],
+                handoff_only: false,
+                repair: None,
+            },
+            move |_sandbox| {
+                Box::new(RecordingLearnerCoder {
+                    recorded: recorded_for_coder,
+                })
+            },
+        )
+        .expect("the learner launch runs the injected coder");
+
+        let recorded = recorded.lock().unwrap();
+        let (path, limit) = recorded
+            .as_ref()
+            .expect("the learner route must pass a capture to run_captured, not drop it");
+        assert_eq!(
+            path, &transcript_path,
+            "the capture must carry the learner transcript path"
+        );
+        assert_eq!(
+            *limit, 7777,
+            "the resolved project pump threshold must be threaded verbatim, not defaulted"
         );
     }
 
