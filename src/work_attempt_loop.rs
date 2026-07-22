@@ -1181,11 +1181,17 @@ fn try_learn(
                 if let Some(isolated) = &isolated_workspace {
                     isolated.publish_draft(project_root, &work_item_id, &attempt_id)?;
                 } else {
-                    publish_pre_land_draft(project_root, &work_item_id, &attempt_id, repair_staging)?;
+                    publish_pre_land_draft(
+                        project_root,
+                        &work_item_id,
+                        &attempt_id,
+                        repair_staging,
+                    )?;
                 }
                 record_submitted_draft(project_root, &work_item_id, &attempt_id, &repair_run_dir)?;
 
-                let repaired = crate::learner::read_draft(project_root, &work_item_id, &attempt_id)?;
+                let repaired =
+                    crate::learner::read_draft(project_root, &work_item_id, &attempt_id)?;
                 // Reject a repair that drops a prior follow-up id or rewrites a
                 // prior follow-up's content: retain the earlier draft instead.
                 if let Err(reject) = crate::learner::accept_schema_repair(&prior, &repaired) {
@@ -1526,8 +1532,9 @@ fn allocate_learner_run_dir(runs_dir: &Path) -> Result<PathBuf> {
             Ok(()) => return Ok(candidate),
             Err(error) if error.kind() == ErrorKind::AlreadyExists => next += 1,
             Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("allocate Learner run dir at {}", candidate.display()));
+                return Err(error).with_context(|| {
+                    format!("allocate Learner run dir at {}", candidate.display())
+                });
             }
         }
     }

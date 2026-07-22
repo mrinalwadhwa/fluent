@@ -5007,9 +5007,8 @@ fn trusted_learner_hydrates_credentials_before_sandbox() {
         String::from_utf8_lossy(&retry_output.stderr)
     );
 
-    let handoff: serde_json::Value = read_json_path(
-        &main_dir.join(fluent::learner::handoff_path_rel("work-1", "attempt-1")),
-    );
+    let handoff: serde_json::Value =
+        read_json_path(&main_dir.join(fluent::learner::handoff_path_rel("work-1", "attempt-1")));
     let summary = handoff["learning"]["summary"].as_str().unwrap();
     assert!(
         summary.contains("oauth=injected-oauth-b1"),
@@ -5044,9 +5043,8 @@ fn trusted_learner_has_private_temp_without_shared_temp_access() {
         String::from_utf8_lossy(&retry_output.stderr)
     );
 
-    let handoff: serde_json::Value = read_json_path(
-        &main_dir.join(fluent::learner::handoff_path_rel("work-1", "attempt-1")),
-    );
+    let handoff: serde_json::Value =
+        read_json_path(&main_dir.join(fluent::learner::handoff_path_rel("work-1", "attempt-1")));
     let summary = handoff["learning"]["summary"].as_str().unwrap();
     assert!(
         summary.contains("private=0"),
@@ -5078,8 +5076,11 @@ fn trusted_learner_auth_401_refreshes_from_transcript() {
     create_and_run_learner_attempt(&main_dir, &bin_dir);
     land_work_1(&main_dir, &bin_dir, true);
 
-    let retry_output =
-        rerun_learner_trusted(&main_dir, &bin_dir, &[("CLAUDE_CODE_OAUTH_TOKEN", "auth-probe-token")]);
+    let retry_output = rerun_learner_trusted(
+        &main_dir,
+        &bin_dir,
+        &[("CLAUDE_CODE_OAUTH_TOKEN", "auth-probe-token")],
+    );
     if !real_sandbox_exec_is_usable() {
         assert!(!retry_output.status.success());
         return;
@@ -5131,9 +5132,8 @@ fn trusted_learner_auth_401_refreshes_from_transcript() {
         "the pre-refresh phase must capture the session-ending 401 as an immutable artifact"
     );
 
-    let handoff: serde_json::Value = read_json_path(
-        &main_dir.join(fluent::learner::handoff_path_rel("work-1", "attempt-1")),
-    );
+    let handoff: serde_json::Value =
+        read_json_path(&main_dir.join(fluent::learner::handoff_path_rel("work-1", "attempt-1")));
     assert_eq!(
         handoff["learning"]["summary"], "recovered after refresh",
         "the Learner must continue automatically after the refresh"

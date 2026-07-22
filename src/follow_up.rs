@@ -2425,9 +2425,8 @@ mod tests {
             } else {
                 // A single follow-up example must parse as a complete follow-up,
                 // so every serialized field the schema names is shown.
-                serde_json::from_str::<FollowUpDraftV1>(example).unwrap_or_else(|e| {
-                    panic!("follow-up example does not parse: {e}\n{example}")
-                });
+                serde_json::from_str::<FollowUpDraftV1>(example)
+                    .unwrap_or_else(|e| panic!("follow-up example does not parse: {e}\n{example}"));
             }
         }
         assert!(

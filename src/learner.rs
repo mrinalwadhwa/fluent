@@ -176,10 +176,7 @@ pub fn accept_schema_repair(prior: &LearnerDraftV1, repaired: &LearnerDraftV1) -
             .iter()
             .find(|candidate| candidate.id == prior_fu.id)
         else {
-            bail!(
-                "schema repair dropped prior follow-up {:?}",
-                prior_fu.id
-            );
+            bail!("schema repair dropped prior follow-up {:?}", prior_fu.id);
         };
         if !non_schema_content_matches(prior_fu, repaired_fu) {
             bail!(
@@ -462,7 +459,10 @@ mod tests {
         // rather than rejecting the whole draft.
         let handoff = stamp_handoff(draft, "work-1", "attempt-1", "mc", Vec::new()).unwrap();
         assert_eq!(handoff.follow_ups.len(), 1);
-        assert_eq!(handoff.follow_ups[0].summary, "Consider tightening the retry cap");
+        assert_eq!(
+            handoff.follow_ups[0].summary,
+            "Consider tightening the retry cap"
+        );
         assert!(handoff.follow_ups[0].evidence.is_empty());
         assert!(!handoff.follow_ups[0].corrective);
     }

@@ -2038,8 +2038,7 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
                 &[],
                 inputs.coder_kind,
             )?;
-            let sandbox =
-                CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
+            let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
             (sandbox, Some(profile))
         } else {
             // Handoff-only: deny expertise writes. Expertise stays readable, but
@@ -2073,9 +2072,8 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
     if let Some(transcript_path) = inputs.transcript_path
         && let Some(parent) = transcript_path.parent()
     {
-        fs::create_dir_all(parent).with_context(|| {
-            format!("create Learner transcript dir at {}", parent.display())
-        })?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create Learner transcript dir at {}", parent.display()))?;
     }
 
     let coder = inputs

@@ -867,8 +867,12 @@ fn preserve_transcript_phase(transcript_file: Option<&Path>, phase: &mut u32) ->
         .create_new(true)
         .open(&preserved)
         .with_context(|| format!("preserve transcript phase to {}", preserved.display()))?;
-    file.write_all(&contents)
-        .with_context(|| format!("write preserved transcript phase to {}", preserved.display()))?;
+    file.write_all(&contents).with_context(|| {
+        format!(
+            "write preserved transcript phase to {}",
+            preserved.display()
+        )
+    })?;
     *phase += 1;
     Ok(())
 }
