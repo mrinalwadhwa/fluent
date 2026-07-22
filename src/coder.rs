@@ -797,31 +797,78 @@ fn run_with_transcript(
     }
 }
 
-/// A failed process operation, retaining WHICH syscall failed and its OS errno, so a
-/// cleanup diagnostic is lossless — it names the operation and renders the original OS
-/// message (from the retained errno) rather than collapsing every failure into a bare
-/// `false`/`None` or an opaque error code. The `ErrorKind` is not stored separately: it
-/// is recoverable from `errno` on demand, so the type stays `Copy` and carries no
-/// redundant, never-read field.
-#[derive(Debug, Clone, Copy)]
+/// A failed process operation, retaining WHICH syscall failed, the OS [`ErrorKind`],
+/// the errno, and the ORIGINAL OS message, so a cleanup diagnostic is lossless — it
+/// names the operation and its structured category and message rather than collapsing
+/// every failure into a bare `false`/`None` or an opaque code. It OWNS the message, so
+/// it is `Clone` but not `Copy`; the outcome enums that embed it (`GroupSweep`,
+/// `CleanupError`) are `Clone` too. The kind/message are recoverable structurally from
+/// the returned/durable diagnostic, not only from the rendered text.
+///
+/// [`ErrorKind`]: std::io::ErrorKind
+#[derive(Debug, Clone)]
 struct ProcessOpError {
     op: &'static str,
     errno: Option<i32>,
+    kind: Option<std::io::ErrorKind>,
+    message: Option<String>,
+}
+
+impl ProcessOpError {
+    /// Retain the full structured payload of a failed syscall from its `io::Error`:
+    /// the errno, the `ErrorKind`, and the original OS message.
+    fn from_io(op: &'static str, err: &std::io::Error) -> Self {
+        Self {
+            op,
+            errno: err.raw_os_error(),
+            kind: Some(err.kind()),
+            message: Some(err.to_string()),
+        }
+    }
+
+    /// A structured outcome for a state with no underlying OS error: an id out of
+    /// range, a signal not attempted, or a group that was never swept.
+    fn without_os_error(op: &'static str) -> Self {
+        Self {
+            op,
+            errno: None,
+            kind: None,
+            message: None,
+        }
+    }
+
+    /// The structured OS `ErrorKind`, recoverable from the returned/durable diagnostic
+    /// without parsing the rendered message.
+    #[cfg(test)]
+    fn kind(&self) -> Option<std::io::ErrorKind> {
+        self.kind
+    }
+
+    /// The original OS message, recoverable from the returned/durable diagnostic.
+    #[cfg(test)]
+    fn message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
 }
 
 impl std::fmt::Display for ProcessOpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.errno {
-            // Render the original OS message (which itself includes the errno) rather
-            // than a bare number, so the diagnostic names the failure, not just a code.
-            Some(errno) => write!(
-                f,
-                "{}: {}",
-                self.op,
-                std::io::Error::from_raw_os_error(errno)
-            ),
-            None => write!(f, "{}", self.op),
+        write!(f, "{}", self.op)?;
+        match &self.message {
+            // Prefer the retained original OS message; it already includes the errno.
+            Some(message) => write!(f, ": {message}")?,
+            None => {
+                if let Some(errno) = self.errno {
+                    write!(f, " (os error {errno})")?;
+                }
+            }
         }
+        // Append the structured error category when known, so the durable diagnostic
+        // carries the OS `ErrorKind` itself, not only its rendered message.
+        if let Some(kind) = self.kind {
+            write!(f, " [{kind:?}]")?;
+        }
+        Ok(())
     }
 }
 
@@ -829,7 +876,7 @@ impl std::fmt::Display for ProcessOpError {
 /// group has no live members left to signal; `Failed` retains the OS error, so a
 /// group that was not verifiably swept is a lossless structured outcome rather than
 /// a heuristic guess derived from the leader's observed exit.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum GroupSweep {
     /// SIGKILL was delivered to the group.
     Delivered,
@@ -854,23 +901,19 @@ impl GroupSweep {
 #[cfg(unix)]
 fn terminate_process_group(leader: u32) -> GroupSweep {
     let Ok(process_group) = i32::try_from(leader) else {
-        return GroupSweep::Failed(ProcessOpError {
-            op: "process group id out of range",
-            errno: None,
-        });
+        return GroupSweep::Failed(ProcessOpError::without_os_error(
+            "process group id out of range",
+        ));
     };
     let rc = unsafe { libc::kill(-process_group, libc::SIGKILL) };
     if rc == 0 {
         return GroupSweep::Delivered;
     }
-    let errno = std::io::Error::last_os_error().raw_os_error();
-    if errno == Some(libc::ESRCH) {
+    let os_error = std::io::Error::last_os_error();
+    if os_error.raw_os_error() == Some(libc::ESRCH) {
         GroupSweep::AlreadyGone
     } else {
-        GroupSweep::Failed(ProcessOpError {
-            op: "kill process group",
-            errno,
-        })
+        GroupSweep::Failed(ProcessOpError::from_io("kill process group", &os_error))
     }
 }
 
@@ -1041,10 +1084,9 @@ impl LeaderProcess for SystemLeader {
     }
 
     fn kill_leader(&mut self) -> Result<(), ProcessOpError> {
-        self.child.kill().map_err(|err| ProcessOpError {
-            op: "kill leader",
-            errno: err.raw_os_error(),
-        })
+        self.child
+            .kill()
+            .map_err(|err| ProcessOpError::from_io("kill leader", &err))
     }
 
     fn reap(&mut self) -> Result<i32, ProcessOpError> {
@@ -1054,17 +1096,14 @@ impl LeaderProcess for SystemLeader {
         self.child
             .wait()
             .map(|status| status.code().unwrap_or(1))
-            .map_err(|err| ProcessOpError {
-                op: "reap leader",
-                errno: err.raw_os_error(),
-            })
+            .map_err(|err| ProcessOpError::from_io("reap leader", &err))
     }
 }
 
 /// A cleanup step that could not be completed. It is a diagnostic outcome the
 /// caller composes with any primary pump failure rather than discards, so a coder
 /// that could not be terminated or reaped is never silently reported as clean.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum CleanupError {
     /// Neither the verified group signal nor the direct-child kill settled the
     /// group, so the coder cannot be guaranteed terminated. Retains both OS errors.
@@ -1124,34 +1163,28 @@ impl CleanupOutcome {
     /// Whether the leader is terminated (the group was swept, or the direct kill
     /// succeeded). Only a swept group also guarantees descendants are gone.
     fn leader_terminated(&self) -> bool {
-        matches!(self.group_signal, Some(sweep) if sweep.swept())
-            || matches!(self.direct_kill, Some(Ok(())))
+        matches!(&self.group_signal, Some(sweep) if sweep.swept())
+            || matches!(&self.direct_kill, Some(Ok(())))
     }
 
     /// Whether the group and its descendants were verifiably swept.
     fn group_swept(&self) -> bool {
-        matches!(self.group_signal, Some(sweep) if sweep.swept())
+        matches!(&self.group_signal, Some(sweep) if sweep.swept())
     }
 
     /// The group-sweep OS error, when the group was not swept, for a cleanup error.
     fn group_sweep_error(&self) -> ProcessOpError {
-        match self.group_signal {
-            Some(GroupSweep::Failed(err)) => err,
-            _ => ProcessOpError {
-                op: "process group not swept",
-                errno: None,
-            },
+        match &self.group_signal {
+            Some(GroupSweep::Failed(err)) => err.clone(),
+            _ => ProcessOpError::without_os_error("process group not swept"),
         }
     }
 
     /// The direct-kill OS error, when the fallback kill failed, for a cleanup error.
     fn direct_kill_error(&self) -> ProcessOpError {
-        match self.direct_kill {
-            Some(Err(err)) => err,
-            _ => ProcessOpError {
-                op: "direct child kill not attempted",
-                errno: None,
-            },
+        match &self.direct_kill {
+            Some(Err(err)) => err.clone(),
+            _ => ProcessOpError::without_os_error("direct child kill not attempted"),
         }
     }
 }
@@ -1203,8 +1236,8 @@ impl ManagedChild {
     /// sweep stays inspectable without writing to a possibly-saturated stderr during
     /// finalization.
     fn unconfirmed_group_sweep(&self) -> Option<ProcessOpError> {
-        match self.outcome.group_signal {
-            Some(GroupSweep::Failed(err)) => Some(err),
+        match &self.outcome.group_signal {
+            Some(GroupSweep::Failed(err)) => Some(err.clone()),
             _ => None,
         }
     }
@@ -1220,11 +1253,11 @@ impl ManagedChild {
         // later call (an explicit retry or Drop) returns it verbatim WITHOUT any
         // further signal/kill/reap. Caching failure too is what guarantees a stale or
         // recycled PID is never signaled or reaped twice.
-        if let Some(finalized) = self.outcome.finalized {
-            return finalized;
+        if let Some(finalized) = &self.outcome.finalized {
+            return finalized.clone();
         }
         let result = self.finalize_cleanup();
-        self.outcome.finalized = Some(result);
+        self.outcome.finalized = Some(result.clone());
         result
     }
 
@@ -2281,10 +2314,12 @@ mod pump_supervision_tests {
             if self.group_settles {
                 GroupSweep::Delivered
             } else {
-                GroupSweep::Failed(ProcessOpError {
-                    op: "fake group signal",
-                    errno: None,
-                })
+                // Inject a real OS error so the retained sweep diagnostic carries a
+                // recoverable ErrorKind and message, as a genuine EPERM sweep would.
+                GroupSweep::Failed(ProcessOpError::from_io(
+                    "fake group signal",
+                    &std::io::Error::from_raw_os_error(libc::EPERM),
+                ))
             }
         }
         fn kill_leader(&mut self) -> Result<(), ProcessOpError> {
@@ -2292,17 +2327,19 @@ mod pump_supervision_tests {
             if self.kill_succeeds {
                 Ok(())
             } else {
-                Err(ProcessOpError {
-                    op: "fake direct kill",
-                    errno: None,
-                })
+                Err(ProcessOpError::from_io(
+                    "fake direct kill",
+                    &std::io::Error::from_raw_os_error(libc::EPERM),
+                ))
             }
         }
         fn reap(&mut self) -> Result<i32, ProcessOpError> {
             self.calls.lock().unwrap().push("reap");
-            self.reaps.pop_front().unwrap_or(None).ok_or(ProcessOpError {
-                op: "fake reap",
-                errno: None,
+            self.reaps.pop_front().unwrap_or(None).ok_or_else(|| {
+                ProcessOpError::from_io(
+                    "fake reap",
+                    &std::io::Error::from_raw_os_error(libc::ECHILD),
+                )
             })
         }
     }
@@ -2592,10 +2629,10 @@ mod pump_supervision_tests {
             crate::transcript_pump::TranscriptPumpError::new("primary pump fault"),
             Err(CleanupError::NotReaped {
                 id: 99,
-                source: ProcessOpError {
-                    op: "reap leader",
-                    errno: Some(libc::ECHILD),
-                },
+                source: ProcessOpError::from_io(
+                    "reap leader",
+                    &std::io::Error::from_raw_os_error(libc::ECHILD),
+                ),
             }),
         );
         assert!(
@@ -2616,34 +2653,65 @@ mod pump_supervision_tests {
     }
 
     #[test]
-    fn process_op_error_renders_the_original_os_message() {
-        // The cleanup diagnostic renders the original OS message (with its errno)
-        // rather than an opaque code, so a failed signal/kill/reap is lossless and
-        // legible; the ErrorKind stays recoverable from the retained errno.
-        let err = ProcessOpError {
-            op: "kill process group",
-            errno: Some(libc::EPERM),
-        };
+    fn process_op_error_retains_structured_kind_and_message() {
+        // B5/B6: a failed process operation retains an OWNED structured payload — the
+        // operation, the OS ErrorKind, the errno, and the original message — that is
+        // recoverable structurally (not by parsing rendered text) and rendered in the
+        // durable diagnostic.
+        let err = ProcessOpError::from_io(
+            "kill process group",
+            &std::io::Error::from_raw_os_error(libc::EPERM),
+        );
+        assert_eq!(
+            err.kind(),
+            Some(std::io::ErrorKind::PermissionDenied),
+            "the structured OS ErrorKind is retained, not reconstructed from errno"
+        );
+        let message = err.message().expect("the original OS message is retained");
+        assert!(
+            message.contains("os error"),
+            "the retained message is the original OS message: {message}"
+        );
+
         let rendered = err.to_string();
         assert!(
             rendered.contains("kill process group"),
             "the failed operation is named: {rendered}"
         );
-        let expected_os = std::io::Error::from_raw_os_error(libc::EPERM).to_string();
         assert!(
-            rendered.contains(&expected_os),
-            "the original OS message is rendered, not dropped: {rendered}"
+            rendered.contains(message),
+            "the durable diagnostic renders the retained OS message: {rendered}"
         );
         assert!(
-            rendered.contains("os error"),
-            "the errno is still present in the rendered message: {rendered}"
+            rendered.contains("PermissionDenied"),
+            "the durable diagnostic renders the structured ErrorKind category: {rendered}"
         );
-        // The structured category remains recoverable from the retained errno without
-        // storing a redundant field.
+    }
+
+    #[test]
+    fn unconfirmed_group_sweep_recovers_structured_kind_and_message() {
+        // B5/B6: the retained sweep diagnostic exposes the structured payload of a
+        // failed group signal, so a caller recovers the OS ErrorKind and message from
+        // the returned/durable diagnostic — not only from the rendered CleanupError.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let leader = FakeLeader {
+            group_settles: false,
+            ..FakeLeader::new(Arc::clone(&calls), Some(0))
+        };
+        let mut managed = ManagedChild::new(Box::new(leader));
+        assert_eq!(managed.terminate_and_reap().unwrap(), 0);
+
+        let sweep = managed
+            .unconfirmed_group_sweep()
+            .expect("the unconfirmed group sweep retains its structured OS error");
         assert_eq!(
-            std::io::Error::from_raw_os_error(err.errno.unwrap()).kind(),
-            std::io::ErrorKind::PermissionDenied,
-            "the ErrorKind is recoverable from the retained errno"
+            sweep.kind(),
+            Some(std::io::ErrorKind::PermissionDenied),
+            "the ErrorKind is recoverable from the returned diagnostic"
+        );
+        assert!(
+            sweep.message().is_some_and(|m| m.contains("os error")),
+            "the original OS message is recoverable from the returned diagnostic: {sweep}"
         );
     }
 
