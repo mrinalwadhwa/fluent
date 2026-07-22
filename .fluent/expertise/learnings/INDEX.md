@@ -2,6 +2,7 @@
 
 - [backward-compatible-serde-fields](backward-compatible-serde-fields.md) — Persisted Work model field additions and renames must preserve backward compatibility with existing on-disk JSON
 - [behaviors-test-citation-sync](behaviors-test-citation-sync.md) — Test renames must update all Test: citations in behaviors.md in the same commit
+- [config-fails-open-only-for-diagnostics](config-fails-open-only-for-diagnostics.md) — Layered config fails closed by default; only diagnostic-only knobs may fail open, and that must be justified in the docstring
 - [doc-comment-attachment-in-rust](doc-comment-attachment-in-rust.md) — Inserting a function between a doc comment and its target silently re-attaches the comment to the wrong item
 - [expertise-testing-patterns-are-copyable-templates](expertise-testing-patterns-are-copyable-templates.md) — Files under .fluent/expertise/testing/patterns are copied verbatim by future test authors, so stale paths or removed mechanisms block review
 - [extract-logic-to-avoid-test-duplication](extract-logic-to-avoid-test-duplication.md) — Extract multi-step logic into standalone functions so integration tests call real code rather than reimplementing it
@@ -17,5 +18,6 @@
 - [record-divergence-in-decisions-md](record-divergence-in-decisions-md.md) — Deliberate divergences from approach.md belong in decisions.md (durable), not just progress.md (round-scoped)
 - [sandbox-denials-track-template-grants](sandbox-denials-track-template-grants.md) — Handoff-only sandbox confinement depends on stripping exact shared-temp grant strings from the rendered profile
 - [shell-tests-invisible-to-compiler](shell-tests-invisible-to-compiler.md) — Shell behavior tests query JSON via jq and are not caught by the compiler when serialized field names change
+- [terminal-coder-errors-bypass-retry-budget](terminal-coder-errors-bypass-retry-budget.md) — Classify typed coder failures that may leave invisible side effects as terminal in should_retry_coder_error, never retried
 - [test-fixtures-use-production-state](test-fixtures-use-production-state.md) — Test fixtures must use state values that production code actually creates, not unreachable states
 - [test-names-match-assertions](test-names-match-assertions.md) — Test function names must describe the behavior the test actually asserts, not what a behavior statement claims
