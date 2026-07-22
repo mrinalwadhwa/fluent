@@ -522,6 +522,10 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         },
     )?;
 
+    // Resolve the transcript-capture config once per logical Writer run, before the
+    // retry loop, and thread the same immutable config into every attempt so a config
+    // change between retries can never swap this role's capture mid-run.
+    let pump_config = crate::transcript_pump::resolve_config(config.project_root);
     let mut run_result = run_task_coder(
         &item,
         config.attempt_id,
@@ -535,6 +539,7 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         config.no_sandbox,
         reservation.model.as_deref(),
         reservation.effort.as_deref(),
+        &pump_config,
     );
     let mut retries = 0;
     while should_retry_coder_error(&run_result) && retries < max_task_retries() {
@@ -557,6 +562,7 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             config.no_sandbox,
             reservation.model.as_deref(),
             reservation.effort.as_deref(),
+            &pump_config,
         );
     }
 
@@ -863,6 +869,10 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         );
     }
 
+    // Resolve the transcript-capture config once per logical Reviewer run, before the
+    // retry loop, and thread the same immutable config into every attempt so a config
+    // change between retries can never swap this role's capture mid-run.
+    let pump_config = crate::transcript_pump::resolve_config(config.project_root);
     let mut run_result = run_review_coder(
         &item,
         config.attempt_id,
@@ -879,6 +889,7 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         config.no_sandbox,
         reservation.model.as_deref(),
         reservation.effort.as_deref(),
+        &pump_config,
     );
     let mut retries = 0;
     while should_retry_coder_error(&run_result) && retries < max_task_retries() {
@@ -904,6 +915,7 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             config.no_sandbox,
             reservation.model.as_deref(),
             reservation.effort.as_deref(),
+            &pump_config,
         );
     }
 
@@ -2056,6 +2068,7 @@ fn capture_coder_info(coder_kind: CoderKind, model: &str, artifact_dir: &Path) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_task_coder(
     item: &WorkItem,
     attempt_id: &str,
@@ -2069,6 +2082,7 @@ fn run_task_coder(
     no_sandbox: bool,
     model: Option<&str>,
     effort: Option<&str>,
+    pump_config: &crate::transcript_pump::TranscriptPumpConfig,
 ) -> Result<()> {
     // Production launches the resolved coder; the `_with_coder` seam lets route
     // tests inject a recording coder to prove the resolved capture threads through
@@ -2086,6 +2100,7 @@ fn run_task_coder(
         no_sandbox,
         model,
         effort,
+        pump_config,
         move |sandbox| coder_kind.boxed_with_model(sandbox, model, effort),
     )
 }
@@ -2104,6 +2119,7 @@ fn run_task_coder_with_coder(
     no_sandbox: bool,
     model: Option<&str>,
     effort: Option<&str>,
+    pump_config: &crate::transcript_pump::TranscriptPumpConfig,
     make_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
 ) -> Result<()> {
     if !no_sandbox {
@@ -2209,7 +2225,9 @@ fn run_task_coder_with_coder(
     }
 
     let coder = make_coder(sandbox);
-    let pump_config = crate::transcript_pump::resolve_config(project_root);
+    // Use the capture config the caller resolved once per logical role run, so every
+    // outer retry threads the SAME immutable config — a config change or a concurrent
+    // launch between attempts can never hand this role a different capture mid-run.
     let capture = transcript_path
         .as_deref()
         .map(|p| crate::coder::TranscriptCapture::with_config(p, pump_config.clone()));
@@ -3004,6 +3022,7 @@ fn input_artifact_readable_roots(input_artifacts: &[PathBuf]) -> Vec<PathBuf> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn run_review_coder(
     item: &WorkItem,
     attempt_id: &str,
@@ -3020,6 +3039,7 @@ fn run_review_coder(
     no_sandbox: bool,
     model: Option<&str>,
     effort: Option<&str>,
+    pump_config: &crate::transcript_pump::TranscriptPumpConfig,
 ) -> Result<()> {
     // Production launches the resolved coder; the `_with_coder` seam lets route
     // tests inject a recording coder to prove the resolved capture threads through
@@ -3040,6 +3060,7 @@ fn run_review_coder(
         no_sandbox,
         model,
         effort,
+        pump_config,
         move |sandbox| coder_kind.boxed_with_model(sandbox, model, effort),
     )
 }
@@ -3061,6 +3082,7 @@ fn run_review_coder_with_coder(
     no_sandbox: bool,
     model: Option<&str>,
     effort: Option<&str>,
+    pump_config: &crate::transcript_pump::TranscriptPumpConfig,
     make_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
 ) -> Result<()> {
     if !no_sandbox {
@@ -3117,8 +3139,10 @@ fn run_review_coder_with_coder(
 
     let transcript_path = artifact_dir.join("transcript.jsonl");
     let coder = make_coder(sandbox);
-    let pump_config = crate::transcript_pump::resolve_config(project_root);
-    let capture = crate::coder::TranscriptCapture::with_config(&transcript_path, pump_config);
+    // Use the capture config the caller resolved once per logical Reviewer run, so
+    // every outer retry threads the SAME immutable config rather than re-resolving.
+    let capture =
+        crate::coder::TranscriptCapture::with_config(&transcript_path, pump_config.clone());
     let exit_code = coder.run_captured(
         &prompts.review_prompt,
         &prompts.system_prompt,
@@ -4317,6 +4341,7 @@ mod tests {
         let resolver = ContentResolver::new(Some(project_root));
         let recorded = Arc::new(Mutex::new(None));
         let recorded_for_coder = Arc::clone(&recorded);
+        let pump_config = crate::transcript_pump::resolve_config(project_root);
         run_task_coder_with_coder(
             &item,
             "attempt-1",
@@ -4330,6 +4355,7 @@ mod tests {
             true,
             None,
             None,
+            &pump_config,
             move |_sandbox| {
                 Box::new(RecordingLearnerCoder {
                     recorded: recorded_for_coder,
@@ -4349,6 +4375,85 @@ mod tests {
         assert_eq!(
             *limit, 7777,
             "the resolved project pump threshold must be threaded verbatim, not defaulted"
+        );
+    }
+
+    #[test]
+    fn writer_retry_reuses_resolved_capture_after_config_change() {
+        // B8: `run_write_task` resolves the capture config once, before its retry loop,
+        // and threads the same immutable config into every attempt. Prove the launch
+        // route honors that immutable config rather than re-resolving: resolve once at
+        // 7777, change the on-disk config to 4321, then launch (as a retry would) and
+        // assert the capture still carries 7777 — a config change between attempts can
+        // never swap this role's capture mid-run.
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let config_dir = project_root.join(".fluent");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            config_dir.join("config.yaml"),
+            "transcript:\n  console-preview-limit: 7777\n",
+        )
+        .unwrap();
+
+        let workspace = project_root.join("workspace");
+        fs::create_dir_all(workspace.join(".fluent/expertise")).unwrap();
+        fs::write(workspace.join(".fluent/expertise/INDEX.md"), "# Index\n").unwrap();
+
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Writer capture".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            post_merge_review_fix_depth: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+
+        let resolver = ContentResolver::new(Some(project_root));
+        // Resolve once, exactly as `run_write_task` does before its retry loop.
+        let pump_config = crate::transcript_pump::resolve_config(project_root);
+        // A config change lands between the initial attempt and the retry.
+        fs::write(
+            config_dir.join("config.yaml"),
+            "transcript:\n  console-preview-limit: 4321\n",
+        )
+        .unwrap();
+
+        let recorded = Arc::new(Mutex::new(None));
+        let recorded_for_coder = Arc::clone(&recorded);
+        run_task_coder_with_coder(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            project_root,
+            &workspace,
+            &[],
+            &resolver,
+            &[],
+            CoderKind::Codex,
+            true,
+            None,
+            None,
+            &pump_config,
+            move |_sandbox| {
+                Box::new(RecordingLearnerCoder {
+                    recorded: recorded_for_coder,
+                })
+            },
+        )
+        .expect("the writer retry launch runs the injected coder");
+
+        let recorded = recorded.lock().unwrap();
+        let (_path, limit) = recorded
+            .as_ref()
+            .expect("the writer route must pass a capture to run_captured");
+        assert_eq!(
+            *limit, 7777,
+            "the retry threads the resolve-once config, not the changed on-disk 4321"
         );
     }
 
@@ -4388,6 +4493,7 @@ mod tests {
         let resolver = ContentResolver::new(Some(project_root));
         let recorded = Arc::new(Mutex::new(None));
         let recorded_for_coder = Arc::clone(&recorded);
+        let pump_config = crate::transcript_pump::resolve_config(project_root);
         run_review_coder_with_coder(
             &item,
             "attempt-1",
@@ -4404,6 +4510,7 @@ mod tests {
             true,
             None,
             None,
+            &pump_config,
             move |_sandbox| {
                 Box::new(RecordingLearnerCoder {
                     recorded: recorded_for_coder,
@@ -4423,6 +4530,83 @@ mod tests {
         assert_eq!(
             *limit, 7777,
             "the resolved project pump threshold must be threaded verbatim, not defaulted"
+        );
+    }
+
+    #[test]
+    fn reviewer_retry_reuses_resolved_capture_after_config_change() {
+        // B8: `run_review_task` resolves the capture config once, before its retry
+        // loop, and threads the same immutable config into every attempt. Prove the
+        // launch route honors that immutable config rather than re-resolving: resolve
+        // once at 7777, change the on-disk config to 4321, then launch (as a retry
+        // would) and assert the capture still carries 7777.
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let config_dir = project_root.join(".fluent");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            config_dir.join("config.yaml"),
+            "transcript:\n  console-preview-limit: 7777\n",
+        )
+        .unwrap();
+
+        let item = review_item_with_role("architecture");
+        let review_task_id = item.attempts[0]
+            .tasks
+            .iter()
+            .find(|t| t.role == "architecture")
+            .expect("the architecture review task exists")
+            .id
+            .clone();
+
+        let artifact_dir = project_root.join("artifacts");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        let review_path = artifact_dir.join("review.md");
+
+        let resolver = ContentResolver::new(Some(project_root));
+        // Resolve once, exactly as `run_review_task` does before its retry loop.
+        let pump_config = crate::transcript_pump::resolve_config(project_root);
+        // A config change lands between the initial attempt and the retry.
+        fs::write(
+            config_dir.join("config.yaml"),
+            "transcript:\n  console-preview-limit: 4321\n",
+        )
+        .unwrap();
+
+        let recorded = Arc::new(Mutex::new(None));
+        let recorded_for_coder = Arc::clone(&recorded);
+        run_review_coder_with_coder(
+            &item,
+            "attempt-1",
+            &review_task_id,
+            project_root,
+            &artifact_dir,
+            &review_path,
+            &[],
+            &[],
+            false,
+            &resolver,
+            &[],
+            CoderKind::Codex,
+            true,
+            None,
+            None,
+            &pump_config,
+            move |_sandbox| {
+                Box::new(RecordingLearnerCoder {
+                    recorded: recorded_for_coder,
+                })
+            },
+        )
+        .expect("the reviewer retry launch runs the injected coder");
+
+        let recorded = recorded.lock().unwrap();
+        let (_path, limit) = recorded
+            .as_ref()
+            .expect("the reviewer route must pass a capture to run_captured");
+        assert_eq!(
+            *limit, 7777,
+            "the retry threads the resolve-once config, not the changed on-disk 4321"
         );
     }
 
