@@ -77,10 +77,18 @@ pub fn is_start_rejected(error: &anyhow::Error) -> bool {
 
 /// The fresh, under-lock execution context captured when a Task start commits.
 ///
-/// The coder mapping is resolved from the same fresh read that reserved the Task,
-/// so a launch never runs with a mapping the top-level `run_task` read captured
-/// before a concurrent update.
+/// Every post-reservation execution input — workspace, input artifacts, artifact
+/// area, review context, and the coder mapping — derives from this single
+/// consistent snapshot read under the model lock that reserved the Task, never
+/// from a separately-timed read that a concurrent update could have moved.
 struct TaskStartSnapshot {
+    /// The Task exactly as read under the lock at reservation time.
+    task: crate::work_model::Task,
+    /// The reserving Attempt's kind, captured under the same lock.
+    attempt_kind: AttemptKind,
+    /// Whether the reserving Attempt still has no Tester Task (the first write
+    /// round), computed under the same lock.
+    is_first_write: bool,
     coder: CoderKind,
     model: Option<String>,
     effort: Option<String>,
@@ -90,16 +98,17 @@ struct TaskStartSnapshot {
 /// precedence boundary.
 ///
 /// Runs one transaction under the Work Item's cross-process model lock: a fresh
-/// read, a revalidation of the Task's identity/kind/`Planned` status, the attempt
-/// precedence check, and — only when all hold — the Executing reservation, all
-/// committed together so no other process can interleave between the read and the
-/// write. A peer that already took the Attempt terminal, or a Task a peer already
+/// read, a revalidation of the Task's identity/kind/`Planned` status, an
+/// executor-specific `validate` of the start contract, the attempt precedence
+/// check, and — only when all hold — the Executing reservation, all committed
+/// together so no other process can interleave between the read and the write. A
+/// peer that already took the Attempt terminal, or a Task a peer already
 /// completed/failed/started, yields a typed [`StartRejected`] error with nothing
 /// mutated (the transaction commits an identical snapshot, a durable no-op) and
 /// its output never cleared. Callers reserve before any Task side effect
 /// (worktree, baseline, artifact directory, or evidence removal), so a rejected
 /// start leaves the workspace and prior evidence untouched. Returns the fresh
-/// execution snapshot for the launch that follows.
+/// execution snapshot the launch derives every input from.
 fn atomic_start_task(
     store: &WorkModelStore,
     work_item_id: &str,
@@ -107,9 +116,10 @@ fn atomic_start_task(
     task_id: &str,
     expected_kind: TaskKind,
     active_status: AttemptStatus,
+    validate: impl FnOnce(&crate::work_model::Task) -> Result<(), crate::work_model::WorkModelError>,
 ) -> Result<TaskStartSnapshot> {
     enum Decision {
-        Started(TaskStartSnapshot),
+        Started(Box<TaskStartSnapshot>),
         Rejected,
     }
 
@@ -119,7 +129,8 @@ fn atomic_start_task(
             .ok_or_else(|| crate::work_model::WorkModelError::TaskNotFound {
                 id: task_id.to_string(),
             })?;
-        let task = &item.attempts[attempt_index].tasks[task_index];
+        let attempt = &item.attempts[attempt_index];
+        let task = &attempt.tasks[task_index];
         if task.kind != expected_kind {
             return Err(crate::work_model::WorkModelError::TaskNotFound {
                 id: task_id.to_string(),
@@ -130,6 +141,21 @@ fn atomic_start_task(
         if task.status != TaskStatus::Planned {
             return Ok(Decision::Rejected);
         }
+        // Enforce the executor-specific start contract under the same lock; the
+        // aggregate validate() does not cover every executor invariant.
+        validate(task)?;
+        let attempt_kind = attempt.kind.clone();
+        let is_first_write = !attempt.tasks.iter().any(|t| t.kind == TaskKind::Tester);
+        let mapping = attempt.coder_mapping.for_task_kind(expected_kind);
+        let coder = mapping.coder;
+        let model = if mapping.model.is_empty() {
+            None
+        } else {
+            Some(mapping.model.clone())
+        };
+        let effort = mapping.effort.clone();
+        let task_clone = task.clone();
+
         if !crate::work_model::transition_attempt(
             &mut item.attempts[attempt_index],
             active_status,
@@ -140,22 +166,18 @@ fn atomic_start_task(
         item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Executing;
         crate::work_model::mark_task_started(&mut item.attempts[attempt_index].tasks[task_index]);
         item.attempts[attempt_index].tasks[task_index].output = None;
-        let mapping = item.attempts[attempt_index]
-            .coder_mapping
-            .for_task_kind(expected_kind);
-        Ok(Decision::Started(TaskStartSnapshot {
-            coder: mapping.coder,
-            model: if mapping.model.is_empty() {
-                None
-            } else {
-                Some(mapping.model.clone())
-            },
-            effort: mapping.effort.clone(),
-        }))
+        Ok(Decision::Started(Box::new(TaskStartSnapshot {
+            task: task_clone,
+            attempt_kind,
+            is_first_write,
+            coder,
+            model,
+            effort,
+        })))
     })?;
 
     match decision {
-        Decision::Started(snapshot) => Ok(snapshot),
+        Decision::Started(snapshot) => Ok(*snapshot),
         Decision::Rejected => Err(anyhow::Error::new(StartRejected::new(attempt_id, task_id))),
     }
 }
@@ -248,49 +270,14 @@ pub fn run_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
 }
 
 fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
+    // Read the Work Item once for WorkItem-level prompt context (instructions and
+    // planning), which is immutable across the run. Every Task/Attempt execution
+    // input instead derives from the fresh snapshot the reservation returns.
     let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
-    let attempt_index = item
-        .attempts
-        .iter()
-        .position(|attempt| attempt.id == config.attempt_id)
-        .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", config.attempt_id))?;
-    let task_index = item.attempts[attempt_index]
-        .tasks
-        .iter()
-        .position(|task| task.id == config.task_id)
-        .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", config.task_id))?;
 
-    let task = &item.attempts[attempt_index].tasks[task_index];
-    if task.kind != TaskKind::Write {
-        bail!(
-            "Task {:?} is kind {}; expected write",
-            config.task_id,
-            task.kind
-        );
-    }
-    if task.status != TaskStatus::Planned {
-        bail!(
-            "Task {:?} is {}; expected planned",
-            config.task_id,
-            task.status
-        );
-    }
-    if task.workspace_access.writes.len() != 1 {
-        bail!(
-            "Task {:?} must declare exactly one writable workspace; found {}",
-            config.task_id,
-            task.workspace_access.writes.len()
-        );
-    }
-
-    let workspace = task.workspace_access.writes[0].clone();
-    let workspace_path = resolve_managed_workspace_path(
-        config.project_root,
-        &workspace.path,
-        config.work_item_id,
-        config.attempt_id,
-    )?;
-    let prior_reviews = resolve_input_artifact_paths(config.project_root, &task.input_artifacts)?;
+    // Inputs independent of the aggregate: the source branch (git) and the Task
+    // branch name (ids). Resolved before the reservation so a git failure never
+    // orphans a reserved Task.
     let source_branch = current_branch(config.project_root)?;
     let branch_name = format!(
         "work/{}/{}/{}",
@@ -303,12 +290,12 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         .with_context(|| format!("Failed to acquire lease for Task {:?}", config.task_id))?;
 
     // Reserve the start atomically against a fresh under-lock read BEFORE any
-    // side effect. If a peer took the Attempt terminal in the race window since
-    // the loop's terminal check, the precedence boundary rejects the transition
-    // and this returns a typed StartRejected error — so no worktree is created,
-    // no baseline is persisted, the baseline Tester never runs, and no coder
-    // launches. The snapshot carries the coder mapping resolved from that same
-    // fresh read.
+    // side effect, validating the write start contract in the same transaction.
+    // If a peer took the Attempt terminal in the race window since the loop's
+    // terminal check, the precedence boundary rejects the transition and this
+    // returns a typed StartRejected error — so no worktree is created, no
+    // baseline is persisted, the baseline Tester never runs, and no coder
+    // launches.
     let snapshot = atomic_start_task(
         config.store,
         config.work_item_id,
@@ -316,19 +303,35 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         config.task_id,
         TaskKind::Write,
         AttemptStatus::Executing,
+        |task| {
+            if task.workspace_access.writes.len() != 1 {
+                return Err(crate::work_model::WorkModelError::MultipleWriteWorkspaces {
+                    count: task.workspace_access.writes.len(),
+                });
+            }
+            Ok(())
+        },
     )?;
-    // Re-read the committed state for downstream steps.
-    let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+    let workspace = snapshot.task.workspace_access.writes[0].clone();
 
-    // Every fallible pre-launch setup step normalizes the reservation on failure
-    // so a worktree, baseline, or Tester error leaves the Task recoverable
-    // (Planned) rather than orphaned Executing.
-    let baseline_commit = with_reservation_rollback(
+    // Every fallible pre-launch step — input resolution and setup — normalizes the
+    // reservation on failure so a path, worktree, baseline, or Tester error leaves
+    // the Task recoverable (Planned) rather than orphaned Executing. All inputs
+    // derive from the reservation snapshot.
+    let (workspace_path, prior_reviews, baseline_commit) = with_reservation_rollback(
         config.store,
         config.work_item_id,
         config.attempt_id,
         config.task_id,
         || {
+            let workspace_path = resolve_managed_workspace_path(
+                config.project_root,
+                &workspace.path,
+                config.work_item_id,
+                config.attempt_id,
+            )?;
+            let prior_reviews =
+                resolve_input_artifact_paths(config.project_root, &snapshot.task.input_artifacts)?;
             prepare_task_worktree(
                 config.project_root,
                 &workspace_path,
@@ -338,15 +341,11 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             worktree::disable_commit_signing(&workspace_path)?;
             let baseline_commit = resolve_or_persist_write_baseline(
                 config.project_root,
-                &item.attempts[attempt_index].tasks[task_index],
+                &snapshot.task,
                 &workspace_path,
             )?;
 
-            let is_first_write = !item.attempts[attempt_index]
-                .tasks
-                .iter()
-                .any(|t| t.kind == TaskKind::Tester);
-            if is_first_write {
+            if snapshot.is_first_write {
                 capture_baseline_tester(
                     config.project_root,
                     &workspace_path,
@@ -356,7 +355,7 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
                     config.resolver,
                 );
             }
-            Ok(baseline_commit)
+            Ok((workspace_path, prior_reviews, baseline_commit))
         },
     )?;
 
@@ -500,92 +499,12 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     let _lease = crate::lease::acquire(&lock_path)
         .with_context(|| format!("Failed to acquire lease for Task {:?}", config.task_id))?;
 
-    let (
-        attempt_kind,
-        workspace_reads,
-        candidate_commit,
-        input_artifacts,
-        artifact_dir,
-        review_path,
-        role,
-    ) = {
-        let _lock = config
-            .store_lock
-            .map(|m| m.lock().unwrap_or_else(|e| e.into_inner()));
-        let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
-        let (attempt_index, task_index) =
-            find_attempt_task_indexes(&item, config.attempt_id, config.task_id)
-                .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", config.task_id))?;
-
-        let task = &item.attempts[attempt_index].tasks[task_index];
-        let attempt_kind = item.attempts[attempt_index].kind.clone();
-        if task.status != TaskStatus::Planned {
-            bail!(
-                "Task {:?} is {}; expected planned",
-                config.task_id,
-                task.status
-            );
-        }
-        if !task.workspace_access.writes.is_empty() {
-            bail!("Review Task {:?} cannot write a workspace", config.task_id);
-        }
-        if task.workspace_access.reads.is_empty() {
-            bail!(
-                "Review Task {:?} must declare at least one readable candidate workspace",
-                config.task_id
-            );
-        }
-        let artifact_area = task
-            .artifact_area
-            .as_ref()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Review Task {:?} must declare an artifact area",
-                    config.task_id
-                )
-            })?
-            .path
-            .clone();
-        let review_context = task.review_context.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Review Task {:?} must declare review context",
-                config.task_id
-            )
-        })?;
-        let workspace_reads = task.workspace_access.reads.clone();
-        let role = task.role.clone();
-        let candidate_commit = review_context.candidate_commit.clone();
-        let input_artifacts =
-            resolve_input_artifact_paths(config.project_root, &task.input_artifacts)?;
-        let artifact_dir = resolve_managed_artifact_area_path(config.project_root, &artifact_area)?;
-        let review_path = artifact_dir.join("review.md");
-
-        if !workspace_reads.iter().any(|workspace| {
-            workspace.id == review_context.candidate_workspace_id
-                && workspace.path == review_context.candidate_workspace_path
-        }) {
-            bail!(
-                "Review Task {:?} review context candidate must match a readable workspace",
-                config.task_id
-            );
-        }
-
-        (
-            attempt_kind,
-            workspace_reads,
-            candidate_commit,
-            input_artifacts,
-            artifact_dir,
-            review_path,
-            role,
-        )
-    };
-
-    // Reserve the start atomically under the model lock BEFORE any side effect.
-    // A peer that took the Attempt terminal in the race window rejects the start
-    // with a typed error — so preflight never runs, the artifact directory is not
-    // created, and prior review.md evidence is not deleted. The snapshot carries
-    // the coder mapping resolved from that same fresh read.
+    // Reserve the start atomically under the model lock BEFORE any side effect,
+    // validating the review start contract in the same transaction. A peer that
+    // took the Attempt terminal in the race window rejects the start with a typed
+    // error — so preflight never runs, the artifact directory is not created, and
+    // prior review.md evidence is not deleted. Every input below derives from the
+    // returned snapshot.
     let snapshot = atomic_start_task(
         config.store,
         config.work_item_id,
@@ -593,17 +512,74 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         config.task_id,
         TaskKind::Review,
         AttemptStatus::Reviewing,
+        |task| {
+            if !task.workspace_access.writes.is_empty() {
+                return Err(crate::work_model::WorkModelError::ReviewTaskWritesWorkspace {
+                    task_id: task.id.clone(),
+                });
+            }
+            if task.workspace_access.reads.is_empty() {
+                return Err(
+                    crate::work_model::WorkModelError::ReviewTaskMissingReadableWorkspace {
+                        task_id: task.id.clone(),
+                    },
+                );
+            }
+            if task.artifact_area.is_none() {
+                return Err(crate::work_model::WorkModelError::ReviewTaskMissingArtifactArea {
+                    task_id: task.id.clone(),
+                });
+            }
+            let review_context = task.review_context.as_ref().ok_or_else(|| {
+                crate::work_model::WorkModelError::ReviewTaskMissingContext {
+                    task_id: task.id.clone(),
+                }
+            })?;
+            if !task.workspace_access.reads.iter().any(|workspace| {
+                workspace.id == review_context.candidate_workspace_id
+                    && workspace.path == review_context.candidate_workspace_path
+            }) {
+                return Err(
+                    crate::work_model::WorkModelError::ReviewTaskContextCandidateNotReadable {
+                        task_id: task.id.clone(),
+                    },
+                );
+            }
+            Ok(())
+        },
     )?;
 
-    // Pre-launch setup normalizes the reservation on failure so a preflight or
+    // Non-fallible inputs derived from the reservation snapshot.
+    let attempt_kind = snapshot.attempt_kind.clone();
+    let workspace_reads = snapshot.task.workspace_access.reads.clone();
+    let role = snapshot.task.role.clone();
+    let review_context = snapshot
+        .task
+        .review_context
+        .clone()
+        .expect("review context validated present under the reservation lock");
+    let candidate_commit = review_context.candidate_commit.clone();
+    let artifact_area = snapshot
+        .task
+        .artifact_area
+        .clone()
+        .expect("artifact area validated present under the reservation lock")
+        .path;
+
+    // Fallible input resolution and setup, normalized on failure so a preflight or
     // filesystem error leaves the reviewer recoverable (Planned), not orphaned
     // Executing.
-    with_reservation_rollback(
+    let (artifact_dir, review_path, input_artifacts) = with_reservation_rollback(
         config.store,
         config.work_item_id,
         config.attempt_id,
         config.task_id,
         || {
+            let artifact_dir =
+                resolve_managed_artifact_area_path(config.project_root, &artifact_area)?;
+            let review_path = artifact_dir.join("review.md");
+            let input_artifacts =
+                resolve_input_artifact_paths(config.project_root, &snapshot.task.input_artifacts)?;
             ReviewReadableWorkspaces::preflight(
                 config.project_root,
                 config.work_item_id,
@@ -622,7 +598,7 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
                     review_path.display()
                 );
             }
-            Ok(())
+            Ok((artifact_dir, review_path, input_artifacts))
         },
     )?;
 
@@ -832,54 +808,44 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     let _lease = crate::lease::acquire(&lock_path)
         .with_context(|| format!("Failed to acquire lease for Task {:?}", config.task_id))?;
 
-    let artifact_dir = {
-        let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
-        let (attempt_index, task_index) =
-            find_attempt_task_indexes(&item, config.attempt_id, config.task_id)
-                .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", config.task_id))?;
-
-        let task = &item.attempts[attempt_index].tasks[task_index];
-        if task.status != TaskStatus::Planned {
-            bail!(
-                "Task {:?} is {}; expected planned",
-                config.task_id,
-                task.status
-            );
-        }
-        let artifact_area = task
-            .artifact_area
-            .as_ref()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Tester Task {:?} must declare an artifact area",
-                    config.task_id
-                )
-            })?
-            .path
-            .clone();
-        resolve_managed_artifact_area_path(config.project_root, &artifact_area)?
-    };
-
-    // Reserve the start atomically under the model lock BEFORE any side effect. A
-    // peer that took the Attempt terminal in the race window rejects the start
-    // with a typed error — so the artifact directory is not created and no tester
-    // launches. The Tester needs no coder mapping, so the snapshot is unused.
-    let _snapshot = atomic_start_task(
+    // Reserve the start atomically under the model lock BEFORE any side effect,
+    // validating that the Tester declares an artifact area in the same
+    // transaction. A peer that took the Attempt terminal in the race window
+    // rejects the start with a typed error — so the artifact directory is not
+    // created and no tester launches. The Tester needs no coder mapping.
+    let snapshot = atomic_start_task(
         config.store,
         config.work_item_id,
         config.attempt_id,
         config.task_id,
         TaskKind::Tester,
         AttemptStatus::Reviewing,
+        |task| {
+            if task.artifact_area.is_none() {
+                return Err(crate::work_model::WorkModelError::ReviewTaskMissingArtifactArea {
+                    task_id: task.id.clone(),
+                });
+            }
+            Ok(())
+        },
     )?;
-    with_reservation_rollback(
+    let artifact_area = snapshot
+        .task
+        .artifact_area
+        .clone()
+        .expect("artifact area validated present under the reservation lock")
+        .path;
+
+    let artifact_dir = with_reservation_rollback(
         config.store,
         config.work_item_id,
         config.attempt_id,
         config.task_id,
         || {
+            let artifact_dir =
+                resolve_managed_artifact_area_path(config.project_root, &artifact_area)?;
             fs::create_dir_all(&artifact_dir)?;
-            Ok(())
+            Ok(artifact_dir)
         },
     )?;
 
@@ -4280,6 +4246,7 @@ mod tests {
                     "attempt-1-write-1",
                     TaskKind::Write,
                     AttemptStatus::Executing,
+                    |_task| Ok(()),
                 )
             });
             let start_result = starter.join().unwrap();
