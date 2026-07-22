@@ -8,9 +8,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 DECISIONS="$ROOT/.fluent/expertise/decisions.md"
+SOURCE="$ROOT/src/transcript_pump.rs"
 
 if [ ! -f "$DECISIONS" ]; then
   echo "expertise decisions file is missing: $DECISIONS" >&2
+  exit 1
+fi
+if [ ! -f "$SOURCE" ]; then
+  echo "transcript pump source is missing: $SOURCE" >&2
   exit 1
 fi
 
@@ -49,5 +54,33 @@ for stale in \
     exit 1
   fi
 done
+
+# The documented console-sink type must match the shipped source. Presence of the
+# term 'console_preview_sink' is not enough — the decision must describe its real
+# type. Extract the function body and confirm it returns a plain static ConsoleSink
+# and not a OnceLock, then confirm the decision names that type and does not
+# misdescribe it. A future rename or type change fails here instead of silently
+# leaving the decision wrong.
+sink_body="$(awk '/pub fn console_preview_sink/{f=1} f{print} f && /^}/{exit}' "$SOURCE")"
+if [ -z "$sink_body" ]; then
+  echo "console_preview_sink is missing from $SOURCE" >&2
+  exit 1
+fi
+if printf '%s\n' "$sink_body" | grep -q 'OnceLock'; then
+  echo "console_preview_sink now uses OnceLock; the decision describes a plain static ConsoleSink" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$sink_body" | grep -Eq 'static[[:space:]]+[A-Za-z_]+:[[:space:]]*ConsoleSink'; then
+  echo "console_preview_sink no longer returns a plain static ConsoleSink; update the decision" >&2
+  exit 1
+fi
+if grep -Fq '`console_preview_sink`, a `OnceLock`' "$DECISIONS"; then
+  echo "transcript-pump decision misdescribes console_preview_sink as a OnceLock" >&2
+  exit 1
+fi
+if ! grep -Fq 'ConsoleSink' "$DECISIONS"; then
+  echo "transcript-pump decision does not name the shipped ConsoleSink sink type" >&2
+  exit 1
+fi
 
 echo "ok: transcript-pump expertise decision is current"

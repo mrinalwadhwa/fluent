@@ -31,7 +31,8 @@ Host-owned Learner run evidence (transcript, submitted-draft snapshot, error, no
 ## The transcript pump's console sink is synchronous and terminal-only; config is per-capture and status has one coordinator
 
 The `transcript_pump` module renders console previews through a single
-process-wide sink (`console_preview_sink`, a `OnceLock`). Its operator thresholds
+process-wide sink (`console_preview_sink`, a reference to a plain zero-sized
+`static ConsoleSink`). Its operator thresholds
 are **not** process-global: they are resolved once per launch (`resolve_config`)
 into an immutable `coder::TranscriptCapture` value that is threaded through
 `Coder::run_captured` and retained across a launch's auth/rate-limit retry phases.
