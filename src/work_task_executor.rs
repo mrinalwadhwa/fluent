@@ -1474,6 +1474,12 @@ fn mark_task_failed_attempt_needs_user(
             crate::work_model::AttemptStatus::NeedsUser,
             Some(pause_kind),
         );
+        // Persist the authoritative terminal Task/Attempt state FIRST, before any
+        // auxiliary handoff or notification. If a later diagnostic effect fails, the
+        // durable transition is already recorded, so the Task can never be left
+        // Executing by a handoff or notify failure.
+        store.write_work_item(&item)?;
+
         match failure {
             TaskFailure::Auth(_) => notify_fn(
                 "Fluent",
@@ -1485,13 +1491,30 @@ fn mark_task_failed_attempt_needs_user(
             ),
             TaskFailure::Generic => {}
         }
-        let handoff_path =
-            write_task_error_handoff(project_root, work_item_id, attempt_id, task_id, failure)?;
-        item.attempts[attempt_index].artifacts.push(ArtifactRef {
-            producer_id: task_id.to_string(),
-            path: handoff_path,
-        });
-        store.write_work_item(&item)?;
+
+        // Write the auxiliary handoff and attach its reference in a second durable
+        // mutation, both best-effort. A handoff or attach failure preserves — never
+        // rolls back — the authoritative terminal state persisted above.
+        match write_task_error_handoff(project_root, work_item_id, attempt_id, task_id, failure) {
+            Ok(handoff_path) => {
+                item.attempts[attempt_index].artifacts.push(ArtifactRef {
+                    producer_id: task_id.to_string(),
+                    path: handoff_path,
+                });
+                if let Err(err) = store.write_work_item(&item) {
+                    eprintln!(
+                        "  Warning: recorded terminal Task state but could not attach its \
+                         needs-user handoff reference: {err}"
+                    );
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "  Warning: recorded terminal Task state but could not write its \
+                     needs-user handoff: {err}"
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -3787,6 +3810,73 @@ mod tests {
         )
         .expect("a resumed pump-paused Task must be directly startable, no state repair");
         assert_eq!(plan.task.id, write_id);
+    }
+
+    #[test]
+    fn task_state_persists_when_failure_handoff_cannot_be_written() {
+        // B7: the authoritative terminal Task/Attempt state is persisted BEFORE the
+        // auxiliary needs-user handoff. When the handoff write fails, the durable
+        // transition still holds — the Task is never left Executing by a handoff
+        // failure — and the primary failure classification is preserved.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Handoff obstruction".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            post_merge_review_fix_depth: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+        let write_id = store.read_work_item("work-1").unwrap().attempts[0].tasks[0]
+            .id
+            .clone();
+
+        // Reserve the Task so it is durably Executing before the failure.
+        let mut executing = store.read_work_item("work-1").unwrap();
+        executing.attempts[0].tasks[0].status = TaskStatus::Executing;
+        store.write_work_item(&executing).unwrap();
+
+        // Obstruct the handoff write: pre-create its target path as a directory so
+        // `fs::write` fails.
+        let handoff_rel = crate::work_model::work_artifact_path(
+            "work-1",
+            "attempt-1",
+            &format!("needs-user-{write_id}.md"),
+        );
+        let handoff_path = tmp.path().join(&handoff_rel);
+        fs::create_dir_all(&handoff_path).unwrap();
+
+        // The terminalization does not fail even though the handoff write cannot land.
+        mark_task_failed_attempt_needs_user(
+            &store,
+            tmp.path(),
+            "work-1",
+            "attempt-1",
+            &write_id,
+            &TaskFailure::TranscriptPump("write transcript: disk full".to_string()),
+            &|_, _| {},
+        )
+        .expect("terminalization must not fail because the auxiliary handoff could not be written");
+
+        // The authoritative terminal state IS persisted despite the handoff failure.
+        let after = store.read_work_item("work-1").unwrap();
+        assert_eq!(
+            after.attempts[0].tasks[0].status,
+            TaskStatus::NeedsUser,
+            "the Task is durably NeedsUser, never left Executing by a handoff failure"
+        );
+        assert_eq!(after.attempts[0].status, AttemptStatus::NeedsUser);
+        assert_eq!(
+            after.attempts[0].pause_kind,
+            Some(crate::work_model::PauseKind::TranscriptPump),
+            "the primary transcript-pump classification is preserved"
+        );
     }
 
     #[test]

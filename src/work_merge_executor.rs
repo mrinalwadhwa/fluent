@@ -1044,14 +1044,28 @@ fn rebase_candidate(
     let capture = crate::coder::TranscriptCapture::with_config(&transcript_path, pump_config);
 
     let coder = config.coder_kind.boxed(sandbox);
-    let exit_code = coder.run_captured(
+    let exit_code = match coder.run_captured(
         &prompt,
         &system_prompt,
         source_workspace,
         config.extra_args,
         &[],
         Some(&capture),
-    )?;
+    ) {
+        Ok(code) => code,
+        Err(err) => {
+            // A typed pump/coder failure after the Rebase Task was reserved
+            // Executing must leave a durable terminal Task before returning, so the
+            // Rebase Task is never stranded Executing for outer recovery.
+            git::run_raw(source_workspace, &["rebase", "--abort"]).ok();
+            return Err(terminalize_rebase_failure(
+                config,
+                &candidate.attempt_id,
+                &rebase_task_id,
+                err,
+            ));
+        }
+    };
 
     let give_up_path = rebase_artifact_dir.join("give-up.md");
 
@@ -1083,7 +1097,17 @@ fn rebase_candidate(
                 candidate.id
             );
         }
-        let new_tip = head_commit(source_workspace)?;
+        let new_tip = match head_commit(source_workspace) {
+            Ok(tip) => tip,
+            Err(err) => {
+                return Err(terminalize_rebase_failure(
+                    config,
+                    &candidate.attempt_id,
+                    &rebase_task_id,
+                    err,
+                ));
+            }
+        };
         update_rebase_task_status(
             config.store,
             config.work_item_id,
@@ -1141,6 +1165,30 @@ fn add_rebase_task_to_attempt(
     attempt.tasks.push(task);
     store.write_work_item(&item)?;
     Ok(())
+}
+
+/// Durably terminalize a reserved Rebase Task as Failed before returning `primary`,
+/// so a post-reservation failure never strands the Task Executing. The primary error
+/// (which may be a typed transcript-pump failure) is preserved; a failure to persist
+/// the terminal state is attached as context rather than masking the primary.
+fn terminalize_rebase_failure(
+    config: &WorkMergeConfig<'_>,
+    attempt_id: &str,
+    task_id: &str,
+    primary: anyhow::Error,
+) -> anyhow::Error {
+    if let Err(state_err) = update_rebase_task_status(
+        config.store,
+        config.work_item_id,
+        attempt_id,
+        task_id,
+        TaskStatus::Failed,
+    ) {
+        return primary.context(format!(
+            "additionally failed to persist terminal Rebase Task state: {state_err}"
+        ));
+    }
+    primary
 }
 
 fn update_rebase_task_status(
