@@ -28,6 +28,7 @@ pub mod review;
 pub mod review_diff_command;
 pub mod review_only_worktree;
 pub mod transcript;
+pub mod transcript_pump;
 pub mod version;
 pub mod work_attempt_loop;
 pub mod work_merge_executor;
