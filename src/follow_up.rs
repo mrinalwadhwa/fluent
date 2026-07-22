@@ -2399,6 +2399,63 @@ mod tests {
         panic!("learner prompt has no corrective follow-up example");
     }
 
+    fn json_examples_from_prompt(prompt: &str) -> Vec<String> {
+        prompt
+            .split("```json")
+            .skip(1)
+            .filter_map(|block| block.split("```").next())
+            .map(|body| body.trim().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn learner_prompt_examples_parse_as_complete_drafts() {
+        let prompt = crate::content::bundled_content("prompts/learner-user.md")
+            .expect("learner-user prompt is bundled");
+        let examples = json_examples_from_prompt(&prompt);
+        assert!(!examples.is_empty(), "the prompt must show JSON examples");
+
+        let mut parsed_a_draft = false;
+        for example in &examples {
+            if example.contains("\"follow_ups\"") {
+                // A whole-draft example must parse as the production schema.
+                serde_json::from_str::<LearnerDraftV1>(example)
+                    .unwrap_or_else(|e| panic!("draft example does not parse: {e}\n{example}"));
+                parsed_a_draft = true;
+            } else {
+                // A single follow-up example must parse as a complete follow-up,
+                // so every serialized field the schema names is shown.
+                serde_json::from_str::<FollowUpDraftV1>(example).unwrap_or_else(|e| {
+                    panic!("follow-up example does not parse: {e}\n{example}")
+                });
+            }
+        }
+        assert!(
+            parsed_a_draft,
+            "the prompt must show at least one whole-draft example"
+        );
+
+        // The corrective example distinguishes prose corrective evidence from
+        // digest-bearing artifact evidence: the artifact `evidence` list is
+        // empty, while `corrective_context.evidence` carries prose.
+        let corrective: FollowUpDraftV1 =
+            serde_json::from_str(&corrective_example_from_prompt(&prompt)).unwrap();
+        assert!(
+            corrective.evidence.is_empty(),
+            "the corrective example must leave artifact evidence empty"
+        );
+        assert!(
+            !corrective
+                .corrective_context
+                .as_ref()
+                .unwrap()
+                .evidence
+                .trim()
+                .is_empty(),
+            "the corrective example must carry prose corrective-context evidence"
+        );
+    }
+
     #[test]
     fn learner_prompt_corrective_example_passes_the_gate() {
         // The prompt a real Learner reads must describe every field the

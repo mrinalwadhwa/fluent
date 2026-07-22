@@ -1860,6 +1860,19 @@ pub struct LearnerRunInputs<'a> {
     /// originating Merge Candidate has merged, it may not mutate expertise or the
     /// merged branch, so it only produces a handoff.
     pub handoff_only: bool,
+    /// When set, this invocation is a bounded schema repair, not a fresh audit:
+    /// the coder receives the rejected draft and exact validation error and must
+    /// re-emit a corrected draft, without repeating the semantic review.
+    pub repair: Option<SchemaRepairInput<'a>>,
+}
+
+/// The rejected draft and exact validation error handed to a bounded schema
+/// repair. The coder must correct only the schema problem the validator
+/// reported, preserving every follow-up id and its content.
+#[derive(Clone, Copy)]
+pub struct SchemaRepairInput<'a> {
+    pub rejected_draft: &'a str,
+    pub validation_error: &'a str,
 }
 
 /// Whether the Learner runs in handoff-only mode. A post-land retry — one whose
@@ -1922,31 +1935,37 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
 
     let draft_path = inputs.handoff_dir.join(crate::learner::DRAFT_FILE_NAME);
 
-    let template = inputs
-        .resolver
-        .resolve_content("prompts/learner-user.md")
-        .ok_or_else(|| anyhow::anyhow!("bundled learner-user.md must resolve"))?;
-    let prompt = crate::content::render_template(
-        &template,
-        &[
-            ("review_artifact_paths", &review_paths_rendered),
-            ("tester_artifact_paths", &tester_paths_rendered),
-            ("diff_command", inputs.diff_command),
-            ("learnings_dir", &learnings_dir.display().to_string()),
-            (
-                "learnings_index_path",
-                &learnings_index_path.display().to_string(),
-            ),
-            (
-                "expertise_index_path",
-                &expertise_index_path.display().to_string(),
-            ),
-            ("has_learnings_index", has_learnings_index),
-            ("draft_path", &draft_path.display().to_string()),
-            ("handoff_only", if inputs.handoff_only { "yes" } else { "" }),
-        ],
-    )
-    .map_err(|e| anyhow::anyhow!("learner-user.md template error: {e}"))?;
+    // A schema repair is not a fresh audit: the coder receives the rejected
+    // draft and exact error and re-emits only a schema-corrected draft.
+    let prompt = if let Some(repair) = inputs.repair.as_ref() {
+        schema_repair_prompt(&draft_path, repair)
+    } else {
+        let template = inputs
+            .resolver
+            .resolve_content("prompts/learner-user.md")
+            .ok_or_else(|| anyhow::anyhow!("bundled learner-user.md must resolve"))?;
+        crate::content::render_template(
+            &template,
+            &[
+                ("review_artifact_paths", &review_paths_rendered),
+                ("tester_artifact_paths", &tester_paths_rendered),
+                ("diff_command", inputs.diff_command),
+                ("learnings_dir", &learnings_dir.display().to_string()),
+                (
+                    "learnings_index_path",
+                    &learnings_index_path.display().to_string(),
+                ),
+                (
+                    "expertise_index_path",
+                    &expertise_index_path.display().to_string(),
+                ),
+                ("has_learnings_index", has_learnings_index),
+                ("draft_path", &draft_path.display().to_string()),
+                ("handoff_only", if inputs.handoff_only { "yes" } else { "" }),
+            ],
+        )
+        .map_err(|e| anyhow::anyhow!("learner-user.md template error: {e}"))?
+    };
 
     let mut readable_roots: Vec<PathBuf> = inputs
         .review_artifact_paths
@@ -2075,6 +2094,26 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Build the bounded schema-repair prompt. It hands the coder the rejected
+/// draft and the exact validation error and asks for a schema-corrected draft at
+/// the same path, without repeating the review audit or changing any finding.
+fn schema_repair_prompt(draft_path: &Path, repair: &SchemaRepairInput<'_>) -> String {
+    format!(
+        "A prior Learner follow-up draft for this Attempt failed schema \
+         validation. Do not repeat the review audit and do not change your \
+         findings. Re-emit a corrected follow-up draft as JSON to exactly this \
+         path:\n\n```\n{}\n```\n\n\
+         Fix only the schema problem the validator reported. Preserve every \
+         follow-up `id` and all of its content — do not drop, add, merge, or \
+         rewrite findings — and leave each `evidence` an empty array.\n\n\
+         ## The rejected draft\n\n```json\n{}\n```\n\n\
+         ## The exact validation error\n\n```\n{}\n```\n",
+        draft_path.display(),
+        repair.rejected_draft,
+        repair.validation_error,
+    )
 }
 
 /// Create a distinct private temporary directory for one coder launch beneath
@@ -4771,6 +4810,32 @@ mod tests {
                 "corrective criteria must instruct on {required:?}; prompt:\n{template}"
             );
         }
+    }
+
+    #[test]
+    fn learner_prompt_requires_empty_artifact_evidence_until_transport_exists() {
+        let resolver = ContentResolver::new(None);
+        let template = resolver
+            .resolve_content("prompts/learner-user.md")
+            .expect("learner-user.md must resolve");
+
+        // The prompt must tell the Learner to leave the artifact-evidence array
+        // empty, because the handoff transport cannot yet publish referenced
+        // evidence artifacts.
+        assert!(
+            template.contains("Always leave it an empty array"),
+            "the prompt must require an empty artifact-evidence array; prompt:\n{template}"
+        );
+        assert!(
+            template.contains("cannot yet publish referenced evidence artifacts"),
+            "the prompt must explain why artifact evidence stays empty; prompt:\n{template}"
+        );
+        // It must distinguish the prose corrective-context evidence from the
+        // digest-bearing artifact evidence so the two are not confused.
+        assert!(
+            template.contains("corrective_context.evidence") && template.contains("prose"),
+            "the prompt must distinguish prose corrective evidence from artifact evidence"
+        );
     }
 
     #[test]

@@ -484,6 +484,7 @@ fn default_learner_run_coder(
         transcript_path: Some(request.transcript_path),
         handoff_only: request.handoff_only,
         denied_write_roots: request.denied_write_roots,
+        repair: request.repair,
     })
 }
 
@@ -860,6 +861,8 @@ struct LearnerCoderRequest<'a> {
     model: Option<&'a str>,
     effort: Option<&'a str>,
     handoff_only: bool,
+    /// When set, a bounded schema repair rather than a fresh audit.
+    repair: Option<work_task_executor::SchemaRepairInput<'a>>,
 }
 
 /// The Learner's coder-run is injected so the orchestration around it — running
@@ -1069,6 +1072,7 @@ fn try_learn(
         model: model.as_deref(),
         effort: effort.as_deref(),
         handoff_only,
+        repair: None,
     });
     // Confine the Learner's commit. In the normal case an expertise commit is
     // accepted and advances the Merge Candidate tip. In a post-land handoff-only
@@ -1116,20 +1120,83 @@ fn try_learn(
     // the draft yet the change is never silent.
     let (draft, normalizations) = crate::learner::normalize_draft(draft);
     record_run_normalizations(&run_dir, &normalizations)?;
-    let handoff = match crate::learner::stamp_handoff(
-        draft,
-        &work_item_id,
-        &attempt_id,
-        candidate_id,
-        confinement.expertise,
-    ) {
-        Ok(handoff) => handoff,
-        Err(error) => {
-            // A rejected draft preserves its submitted bytes (already recorded)
-            // and its full validation error as immutable run artifacts before any
-            // later repair may publish another draft.
-            record_run_rejection(&run_dir, &error)?;
-            return Err(error);
+
+    // Bounded schema-repair loop. When a draft fails schema validation and the
+    // configured budget remains, re-invoke the coder with the rejected draft and
+    // exact error as a schema repair — not a fresh audit — and accept a repair
+    // only when it preserves every prior follow-up id and its content.
+    let mut repair_budget = crate::config::resolve_learner_schema_repair_budget(project_root)
+        .unwrap_or(crate::config::DEFAULT_LEARNER_SCHEMA_REPAIR_BUDGET);
+    let mut current_draft = draft;
+    let mut current_run_dir = run_dir;
+    let handoff = loop {
+        let prior = current_draft.clone();
+        match crate::learner::stamp_handoff(
+            current_draft,
+            &work_item_id,
+            &attempt_id,
+            candidate_id,
+            confinement.expertise.clone(),
+        ) {
+            Ok(handoff) => break handoff,
+            Err(error) => {
+                // A rejected draft preserves its submitted bytes (already
+                // recorded) and its full validation error as immutable run
+                // artifacts before any repair may publish another draft.
+                record_run_rejection(&current_run_dir, &error)?;
+                if repair_budget == 0 {
+                    return Err(error);
+                }
+                repair_budget -= 1;
+
+                // A fresh run identity keeps the repair's transcript and
+                // submitted-draft evidence immutable and distinct.
+                let repair_run_dir = allocate_learner_run_dir(&real_handoff_dir.join("runs"))?;
+                let repair_transcript = repair_run_dir.join("transcript.jsonl");
+                let repair_staging_owned = repair_run_dir.join("staging");
+                let repair_staging = isolated_workspace
+                    .as_ref()
+                    .map(|isolated| isolated.handoff_dir.as_path())
+                    .unwrap_or(repair_staging_owned.as_path());
+                let rejected_draft = serde_json::to_string(&prior)?;
+                let validation_error = format!("{error:#}");
+
+                (config.run_coder)(&LearnerCoderRequest {
+                    workspace_path: learner_workspace_path,
+                    review_artifact_paths: learner_review_artifact_paths,
+                    tester_artifact_paths: learner_tester_artifact_paths,
+                    diff_command: &diff_command,
+                    handoff_dir: repair_staging,
+                    transcript_path: &repair_transcript,
+                    denied_write_roots: &denied_write_roots,
+                    coder_kind,
+                    model: model.as_deref(),
+                    effort: effort.as_deref(),
+                    handoff_only,
+                    repair: Some(work_task_executor::SchemaRepairInput {
+                        rejected_draft: &rejected_draft,
+                        validation_error: &validation_error,
+                    }),
+                })?;
+                if let Some(isolated) = &isolated_workspace {
+                    isolated.publish_draft(project_root, &work_item_id, &attempt_id)?;
+                } else {
+                    publish_pre_land_draft(project_root, &work_item_id, &attempt_id, repair_staging)?;
+                }
+                record_submitted_draft(project_root, &work_item_id, &attempt_id, &repair_run_dir)?;
+
+                let repaired = crate::learner::read_draft(project_root, &work_item_id, &attempt_id)?;
+                // Reject a repair that drops a prior follow-up id or rewrites a
+                // prior follow-up's content: retain the earlier draft instead.
+                if let Err(reject) = crate::learner::accept_schema_repair(&prior, &repaired) {
+                    record_run_rejection(&repair_run_dir, &reject)?;
+                    return Err(reject);
+                }
+                let (repaired, repair_notes) = crate::learner::normalize_draft(repaired);
+                record_run_normalizations(&repair_run_dir, &repair_notes)?;
+                current_draft = repaired;
+                current_run_dir = repair_run_dir;
+            }
         }
     };
     let handoff_ref =

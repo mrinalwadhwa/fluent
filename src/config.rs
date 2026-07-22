@@ -20,6 +20,9 @@ pub const DEFAULT_LEARNER_PRIORITY: i64 = 100;
 pub const DEFAULT_POST_MERGE_PRIORITY: i64 = 200;
 /// Built-in number of scheduler-managed Work Items allowed to run concurrently.
 pub const DEFAULT_LOCAL_SCHEDULER_CONCURRENCY: u32 = 4;
+/// Built-in number of bounded schema repairs a rejected Learner draft may
+/// attempt before the run fails. Layered configuration may override it.
+pub const DEFAULT_LEARNER_SCHEMA_REPAIR_BUDGET: u32 = 2;
 
 /// Which configuration layer supplied a resolved leaf.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -376,6 +379,31 @@ fn resolve_scheduler_config_from(
     })
 }
 
+/// Resolve the bounded schema-repair budget for a project, layering project over
+/// user over the built-in default. A malformed configured value fails closed.
+pub fn resolve_learner_schema_repair_budget(
+    project_root: &Path,
+) -> Result<u32, FollowUpConfigError> {
+    resolve_learner_schema_repair_budget_from(
+        &project_config_path(project_root),
+        user_config_path().as_deref(),
+    )
+}
+
+fn resolve_learner_schema_repair_budget_from(
+    project_path: &Path,
+    user_path: Option<&Path>,
+) -> Result<u32, FollowUpConfigError> {
+    let layers = load_policy_layers(project_path, user_path)?;
+    let budget = resolve_leaf(
+        &layers,
+        &["learner", "schema-repair-budget"],
+        DEFAULT_LEARNER_SCHEMA_REPAIR_BUDGET,
+        convert_count,
+    )?;
+    Ok(budget.value)
+}
+
 fn load_policy_layers(
     project_path: &Path,
     user_path: Option<&Path>,
@@ -643,6 +671,35 @@ coders:
             scheduler.max_local_concurrency.source,
             ConfigSource::Default
         );
+    }
+
+    #[test]
+    fn learner_schema_repair_budget_defaults_to_two() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("absent.yaml");
+
+        let budget = resolve_learner_schema_repair_budget_from(&project, None).unwrap();
+
+        assert_eq!(budget, DEFAULT_LEARNER_SCHEMA_REPAIR_BUDGET);
+    }
+
+    #[test]
+    fn learner_schema_repair_budget_layers_project_over_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = write_yaml(
+            dir.path(),
+            "project.yaml",
+            "learner:\n  schema-repair-budget: 5\n",
+        );
+        let user = write_yaml(
+            dir.path(),
+            "user.yaml",
+            "learner:\n  schema-repair-budget: 1\n",
+        );
+
+        let budget = resolve_learner_schema_repair_budget_from(&project, Some(&user)).unwrap();
+
+        assert_eq!(budget, 5, "the project layer wins over the user layer");
     }
 
     #[test]

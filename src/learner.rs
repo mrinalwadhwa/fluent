@@ -156,6 +156,54 @@ fn normalize_follow_up(follow_up: &mut FollowUpDraftV1, notes: &mut Vec<String>)
     }
 }
 
+/// Accept a schema repair only when it preserves the identity and semantic
+/// content of every follow-up in the prior draft. A repair may add the schema
+/// fields a validation error demanded, but it must not drop a prior follow-up id
+/// or rewrite a prior follow-up's non-schema content (its summary, corrective
+/// intent, corrective context, target paths, expected result, unresolved
+/// decisions, or cited authority). A repair that does is rejected so the earlier
+/// draft is retained rather than silently lost or altered.
+///
+/// A prior follow-up with an empty id cannot be tracked across the repair, so it
+/// imposes no preservation constraint; the repair is free to give it an id.
+pub fn accept_schema_repair(prior: &LearnerDraftV1, repaired: &LearnerDraftV1) -> Result<()> {
+    for prior_fu in &prior.follow_ups {
+        if prior_fu.id.trim().is_empty() {
+            continue;
+        }
+        let Some(repaired_fu) = repaired
+            .follow_ups
+            .iter()
+            .find(|candidate| candidate.id == prior_fu.id)
+        else {
+            bail!(
+                "schema repair dropped prior follow-up {:?}",
+                prior_fu.id
+            );
+        };
+        if !non_schema_content_matches(prior_fu, repaired_fu) {
+            bail!(
+                "schema repair rewrote the content of prior follow-up {:?}",
+                prior_fu.id
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Whether two follow-ups carry the same non-schema semantic content. Artifact
+/// `evidence` is excluded because a repair may legitimately normalize it toward
+/// the required empty array; everything else must be preserved verbatim.
+fn non_schema_content_matches(prior: &FollowUpDraftV1, repaired: &FollowUpDraftV1) -> bool {
+    prior.summary == repaired.summary
+        && prior.corrective == repaired.corrective
+        && prior.corrective_context == repaired.corrective_context
+        && prior.target_paths == repaired.target_paths
+        && prior.expected_result == repaired.expected_result
+        && prior.unresolved_decisions == repaired.unresolved_decisions
+        && prior.authority == repaired.authority
+}
+
 /// `Ok` when a follow-up's corrective metadata is structurally complete enough
 /// to stand as a corrective execution input, or the reason it is not. Authority
 /// freshness is left to the host's corrective gate; this only rejects metadata
@@ -417,6 +465,64 @@ mod tests {
         assert_eq!(handoff.follow_ups[0].summary, "Consider tightening the retry cap");
         assert!(handoff.follow_ups[0].evidence.is_empty());
         assert!(!handoff.follow_ups[0].corrective);
+    }
+
+    #[test]
+    fn schema_repair_cannot_silently_drop_or_rewrite_followups() {
+        let prior = LearnerDraftV1 {
+            learning_summary: "prior".to_string(),
+            follow_ups: vec![
+                FollowUpDraftV1 {
+                    id: "fu-keep".to_string(),
+                    summary: "A well-formed observation".to_string(),
+                    corrective: false,
+                    ..Default::default()
+                },
+                FollowUpDraftV1 {
+                    // Schema-broken: no id. The repair may give it one.
+                    id: String::new(),
+                    summary: "Needs an id".to_string(),
+                    corrective: false,
+                    ..Default::default()
+                },
+            ],
+        };
+
+        // A repair that fixes only the schema-broken follow-up, leaving the
+        // well-formed one untouched, is accepted.
+        let repaired_ok = LearnerDraftV1 {
+            learning_summary: "prior".to_string(),
+            follow_ups: vec![
+                prior.follow_ups[0].clone(),
+                FollowUpDraftV1 {
+                    id: "fu-new".to_string(),
+                    summary: "Needs an id".to_string(),
+                    corrective: false,
+                    ..Default::default()
+                },
+            ],
+        };
+        assert!(accept_schema_repair(&prior, &repaired_ok).is_ok());
+
+        // A repair that drops the well-formed prior follow-up is rejected.
+        let repaired_dropped = LearnerDraftV1 {
+            learning_summary: "prior".to_string(),
+            follow_ups: vec![FollowUpDraftV1 {
+                id: "fu-new".to_string(),
+                summary: "Needs an id".to_string(),
+                corrective: false,
+                ..Default::default()
+            }],
+        };
+        let error = accept_schema_repair(&prior, &repaired_dropped).unwrap_err();
+        assert!(error.to_string().contains("dropped prior follow-up"));
+
+        // A repair that rewrites the well-formed prior follow-up's content is
+        // rejected.
+        let mut rewritten = repaired_ok.clone();
+        rewritten.follow_ups[0].summary = "Silently rewritten".to_string();
+        let error = accept_schema_repair(&prior, &rewritten).unwrap_err();
+        assert!(error.to_string().contains("rewrote the content"));
     }
 
     #[test]

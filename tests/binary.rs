@@ -2737,6 +2737,55 @@ exit 0
     )
 }
 
+/// A learner mock whose post-land retry first emits a schema-invalid draft (a
+/// follow-up with no id), then, given the schema-repair prompt, emits a valid
+/// corrected draft. It announces each phase on stdout so the test can confirm
+/// the repair ran and the semantic audit did not rerun.
+fn schema_repair_learner_mock_script(counter: &Path) -> String {
+    format!(
+        r##"#!/bin/bash
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
+done
+if [ -z "$PROMPT" ]; then exit 0; fi
+if [ "$PROMPT" = "ok" ]; then exit 0; fi
+if printf '%s' "$PROMPT" | grep -q "Rebase the candidate branch"; then
+  TARGET=$(printf '%s' "$PROMPT" | grep -o 'onto `[^`]*`' | sed 's/onto `//;s/`//')
+  git rebase "$TARGET" 2>/dev/null
+  exit $?
+fi
+if printf '%s' "$PROMPT" | grep -q "failed schema validation"; then
+  echo "SCHEMA_REPAIR_RUN"
+  DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
+  mkdir -p "$(dirname "$DRAFT")"
+  printf '%s\n' '{{"learning_summary":"repaired","follow_ups":[{{"id":"fu-1","summary":"Recovered finding","corrective":false}}]}}' > "$DRAFT"
+  exit 0
+fi
+if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
+  if [ ! -f "{counter}" ]; then touch "{counter}"; exit 1; fi
+  echo "LEARNER_RUN"
+  DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
+  mkdir -p "$(dirname "$DRAFT")"
+  printf '%s\n' '{{"learning_summary":"invalid","follow_ups":[{{"id":"","summary":"Missing id finding"}}]}}' > "$DRAFT"
+  exit 0
+fi
+case "$PWD" in
+  */work-6-work-1-attempt-1)
+    printf 'loop output\n' > loop-output.txt
+    git add loop-output.txt
+    git commit -m "Add loop output" >/dev/null 2>&1
+    ;;
+  *) printf 'Verdict: pass\n\nLoop review.\n' > review.md ;;
+esac
+exit 0
+"##,
+        counter = counter.display()
+    )
+}
+
 /// A learner mock whose retry dirties the candidate, announces that state, and
 /// waits for the test to release it before committing. This makes a land/retry
 /// overlap deterministic instead of relying on scheduler timing.
@@ -3830,6 +3879,50 @@ fn post_land_learner_retry_materializes_recovered_handoff() {
         open_observation_files(&main_dir).len(),
         1,
         "cleanup after recovery preserves the materialized descendant"
+    );
+}
+
+#[test]
+fn learner_schema_failure_repairs_prior_draft() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let counter = tmp.path().join("learner-counter-repair");
+    let bin_dir = tmp.path().join("bin-repair");
+    write_mock_claude(&bin_dir, &schema_repair_learner_mock_script(&counter));
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    land_work_1(&main_dir, &bin_dir, true);
+
+    // The retry's first draft fails schema validation; a bounded schema repair
+    // corrects it and the handoff materializes.
+    require_successful_trusted_retry!(rerun_learner_attempt(&main_dir, &bin_dir));
+
+    assert_eq!(
+        work_item_value(&main_dir, "work-1")["attempts"][0]["learning"]["status"],
+        "succeeded",
+        "a repaired draft must produce a handoff"
+    );
+    let observations = open_observation_files(&main_dir);
+    assert_eq!(
+        observations.len(),
+        1,
+        "the repaired handoff materializes one Observation"
+    );
+    let observation =
+        fs::read_to_string(main_dir.join(".fluent/observations").join(&observations[0])).unwrap();
+    assert!(observation.contains("follow-up-id: fu-1"));
+
+    // The schema repair ran, but the semantic audit did not rerun: exactly one
+    // audit run and one repair run are recorded on the run surface.
+    let transcripts = learner_transcripts(&main_dir);
+    assert!(
+        transcripts.contains("SCHEMA_REPAIR_RUN"),
+        "the bounded schema repair must run: {transcripts}"
+    );
+    assert_eq!(
+        learner_run_count(&main_dir),
+        1,
+        "the repair must not rerun the semantic audit: {transcripts}"
     );
 }
 

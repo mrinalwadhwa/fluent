@@ -100,6 +100,16 @@ The draft has this shape:
 If there are no follow-ups, write `{"learning_summary": "...", "follow_ups": []}`.
 Each follow-up `id` must be stable and unique within this draft.
 
+Every follow-up field above is required and must appear exactly as named. The
+two evidence fields are different things and must not be confused:
+
+- `evidence` (the top-level follow-up field) is a list of digest-bearing
+  **artifact** references. Always leave it an empty array `[]`. The handoff
+  transport cannot yet publish referenced evidence artifacts, so any entry is
+  dropped and the follow-up is preserved without it.
+- `corrective_context.evidence` (below) is a **prose** sentence describing what
+  motivated a correction. It is text, not an artifact reference.
+
 For a non-corrective follow-up, leave `expected_result` empty, `authority`
 `null`, and `unresolved_decisions` empty (or list the open questions that keep it
 non-corrective).
@@ -143,7 +153,8 @@ looks like this:
     "path": ".fluent/expertise/retry-cap.md",
     "anchor": "Retries must stop after the configured cap.",
     "digest": "sha256:91128a6a0f51cf76a78f76356a8ad3af7d3f9a48a30f8fc867dd27129bdf97d4"
-  }
+  },
+  "evidence": []
 }
 ```
 
