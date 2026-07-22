@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -33,6 +33,7 @@ pub struct WorkMergeOutcome {
     pub merged_commit: String,
 }
 
+#[derive(Debug)]
 enum RebaseOutcome {
     Success { new_tip: String },
     NeedsUser { diagnostic: String },
@@ -957,6 +958,35 @@ fn rebase_candidate(
     target_branch: &str,
     artifact_dir: &Path,
 ) -> Result<RebaseOutcome> {
+    rebase_candidate_with_coder(
+        config,
+        item,
+        candidate,
+        source_workspace,
+        target_branch,
+        artifact_dir,
+        |sandbox| config.coder_kind.boxed(sandbox),
+    )
+}
+
+/// Rebase a Merge Candidate with a caller-supplied coder factory.
+///
+/// Production builds the real coder for the resolved kind; tests inject a fake to
+/// drive the launch-threading and failure-ordering paths deterministically. Once
+/// the Rebase Task is reserved `Executing`, the entire remaining body — setup,
+/// prompt render, sandbox build, coder launch, verification, head lookup, and
+/// terminal-status writes — funnels through one terminal finalizer, so no `?` or
+/// render failure can strand the Task `Executing` for outer Merge-Candidate
+/// recovery. The typed transcript-pump primary is preserved on that path.
+fn rebase_candidate_with_coder(
+    config: &WorkMergeConfig<'_>,
+    item: &WorkItem,
+    candidate: &MergeCandidate,
+    source_workspace: &Path,
+    target_branch: &str,
+    artifact_dir: &Path,
+    make_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
+) -> Result<RebaseOutcome> {
     let rebase_task_id = next_rebase_task_id(item, &candidate.attempt_id);
     let rebase_artifact_dir = artifact_dir.join(&rebase_task_id);
     fs::create_dir_all(&rebase_artifact_dir)?;
@@ -992,6 +1022,41 @@ fn rebase_candidate(
         rebase_task,
     )?;
 
+    // Everything after the reservation runs inside the finalizer: a setup, prompt,
+    // sandbox, launch, verification, or terminal-write failure durably terminalizes
+    // the reserved Rebase Task as Failed before returning the primary error.
+    match run_reserved_rebase(
+        config,
+        candidate,
+        source_workspace,
+        target_branch,
+        &rebase_artifact_dir,
+        &rebase_task_id,
+        make_coder,
+    ) {
+        Ok(outcome) => Ok(outcome),
+        Err(err) => Err(terminalize_rebase_failure(
+            config,
+            &candidate.attempt_id,
+            &rebase_task_id,
+            err,
+        )),
+    }
+}
+
+/// Run the reserved rebase body. Every fallible step returns through `?`/`bail!`
+/// to the caller's terminal finalizer rather than stranding the reserved Task; the
+/// give-up and success paths persist their own resumable/terminal status and return
+/// `Ok`. A give-up aborts and records `NeedsUser`; success records `Complete`.
+fn run_reserved_rebase(
+    config: &WorkMergeConfig<'_>,
+    candidate: &MergeCandidate,
+    source_workspace: &Path,
+    target_branch: &str,
+    rebase_artifact_dir: &Path,
+    rebase_task_id: &str,
+    make_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
+) -> Result<RebaseOutcome> {
     let workspace_resolver = ContentResolver::new(Some(source_workspace));
     let system_prompt = workspace_resolver
         .resolve_content("prompts/rebase-system.md")
@@ -999,7 +1064,7 @@ fn rebase_candidate(
 
     let user_template = workspace_resolver
         .resolve_content("prompts/rebase-user.md")
-        .expect("bundled rebase-user.md must resolve");
+        .ok_or_else(|| anyhow::anyhow!("bundled rebase-user.md must resolve"))?;
     let artifact_dir_display = rebase_artifact_dir.display().to_string();
     let prompt = crate::content::render_template(
         &user_template,
@@ -1008,7 +1073,7 @@ fn rebase_candidate(
             ("artifact_dir", &artifact_dir_display),
         ],
     )
-    .expect("rebase-user.md template must render with the documented context");
+    .context("render rebase-user.md template with the documented context")?;
 
     let transcript_path = rebase_artifact_dir.join("transcript.jsonl");
 
@@ -1026,7 +1091,7 @@ fn rebase_candidate(
             config.coder_kind,
             config.resolver,
             source_workspace,
-            &[common_git_dir, rebase_artifact_dir.clone()],
+            &[common_git_dir, rebase_artifact_dir.to_path_buf()],
         )?
     };
 
@@ -1039,11 +1104,10 @@ fn rebase_candidate(
     // Resolve this project's pump config and thread it into the rebase-agent
     // launch, so the rebase pump uses the same layered thresholds as every other
     // entry point rather than a prior operation's state.
-    let pump_config =
-        crate::transcript_pump::resolve_config(config.project_root);
+    let pump_config = crate::transcript_pump::resolve_config(config.project_root);
     let capture = crate::coder::TranscriptCapture::with_config(&transcript_path, pump_config);
 
-    let coder = config.coder_kind.boxed(sandbox);
+    let coder = make_coder(sandbox);
     let exit_code = match coder.run_captured(
         &prompt,
         &system_prompt,
@@ -1054,16 +1118,10 @@ fn rebase_candidate(
     ) {
         Ok(code) => code,
         Err(err) => {
-            // A typed pump/coder failure after the Rebase Task was reserved
-            // Executing must leave a durable terminal Task before returning, so the
-            // Rebase Task is never stranded Executing for outer recovery.
+            // A typed pump/coder failure returns to the terminal finalizer, which
+            // leaves a durable terminal Task; abort the in-progress rebase first.
             git::run_raw(source_workspace, &["rebase", "--abort"]).ok();
-            return Err(terminalize_rebase_failure(
-                config,
-                &candidate.attempt_id,
-                &rebase_task_id,
-                err,
-            ));
+            return Err(err);
         }
     };
 
@@ -1077,54 +1135,30 @@ fn rebase_candidate(
             config.store,
             config.work_item_id,
             &candidate.attempt_id,
-            &rebase_task_id,
+            rebase_task_id,
             TaskStatus::NeedsUser,
         )?;
         Ok(RebaseOutcome::NeedsUser { diagnostic })
     } else if exit_code == 0 {
         if let Err(reason) = verify_rebase_completed(source_workspace, target_branch) {
             git::run_raw(source_workspace, &["rebase", "--abort"]).ok();
-            update_rebase_task_status(
-                config.store,
-                config.work_item_id,
-                &candidate.attempt_id,
-                &rebase_task_id,
-                TaskStatus::Failed,
-            )?;
             bail!(
                 "Rebase coder exited 0 but verification failed: {reason} \
                  while rebasing Merge Candidate {:?} against {target_branch}",
                 candidate.id
             );
         }
-        let new_tip = match head_commit(source_workspace) {
-            Ok(tip) => tip,
-            Err(err) => {
-                return Err(terminalize_rebase_failure(
-                    config,
-                    &candidate.attempt_id,
-                    &rebase_task_id,
-                    err,
-                ));
-            }
-        };
+        let new_tip = head_commit(source_workspace)?;
         update_rebase_task_status(
             config.store,
             config.work_item_id,
             &candidate.attempt_id,
-            &rebase_task_id,
+            rebase_task_id,
             TaskStatus::Complete,
         )?;
         Ok(RebaseOutcome::Success { new_tip })
     } else {
         git::run_raw(source_workspace, &["rebase", "--abort"]).ok();
-        update_rebase_task_status(
-            config.store,
-            config.work_item_id,
-            &candidate.attempt_id,
-            &rebase_task_id,
-            TaskStatus::Failed,
-        )?;
         bail!(
             "Rebase agent failed (exit code {exit_code}) while rebasing \
              Merge Candidate {:?} against {target_branch}",
@@ -1485,6 +1519,250 @@ mod tests {
             reset.console_preview_limit,
             crate::transcript_pump::TranscriptPumpConfig::default().console_preview_limit,
             "a malformed config must fail closed to the built-in default"
+        );
+    }
+
+    /// What a recording fake coder returns after observing its launch inputs.
+    enum FakeOutcome {
+        /// A typed transcript-pump infrastructure failure.
+        PumpError(String),
+        /// Any other error, used to stop the rebase right after recording.
+        GenericError(String),
+    }
+
+    /// A fake coder that records the resolved transcript capture threaded into
+    /// `run_captured` and then returns a configured outcome, so a rebase launch can
+    /// be driven deterministically without a real coder process.
+    struct RecordingRebaseCoder {
+        recorded: std::sync::Arc<std::sync::Mutex<Option<(PathBuf, usize)>>>,
+        outcome: FakeOutcome,
+    }
+
+    impl crate::coder::Coder for RecordingRebaseCoder {
+        fn run(
+            &self,
+            _prompt: &str,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+            _transcript_file: Option<&Path>,
+        ) -> Result<i32> {
+            unreachable!("the rebase route launches through run_captured")
+        }
+
+        fn run_captured(
+            &self,
+            _prompt: &str,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+            capture: Option<&crate::coder::TranscriptCapture<'_>>,
+        ) -> Result<i32> {
+            if let Some(capture) = capture {
+                *self.recorded.lock().unwrap() =
+                    Some((capture.path.to_path_buf(), capture.config.console_preview_limit));
+            }
+            match &self.outcome {
+                FakeOutcome::PumpError(message) => Err(anyhow::Error::new(
+                    crate::transcript_pump::TranscriptPumpError::new(message.clone()),
+                )),
+                FakeOutcome::GenericError(message) => Err(anyhow::anyhow!("{message}")),
+            }
+        }
+
+        fn run_interactive(
+            &self,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+        ) -> Result<i32> {
+            unreachable!("the rebase route never runs interactively")
+        }
+    }
+
+    fn merge_candidate_fixture(source_workspace: &Path) -> MergeCandidate {
+        MergeCandidate {
+            id: "attempt-1-merge-candidate".to_string(),
+            attempt_id: "attempt-1".to_string(),
+            source_workspace: crate::work_model::WorkspaceRef {
+                id: "candidate".to_string(),
+                path: source_workspace.to_string_lossy().into_owned(),
+            },
+            target_workspace: crate::work_model::WorkspaceRef {
+                id: "target".to_string(),
+                path: source_workspace.to_string_lossy().into_owned(),
+            },
+            source_branch: "work/attempt-1".to_string(),
+            target_branch: "main".to_string(),
+            candidate_commit: "abc123".to_string(),
+            merge_review_state: MergeReviewState::Pending,
+            merge_state: MergeCandidateMergeState::default(),
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn rebase_launch_threads_resolved_capture() {
+        // B8: the rebase launch route threads the project's resolved, immutable
+        // TranscriptCapture into run_captured — not a dropped or default config. A
+        // distinctive project console-preview-limit must arrive at the coder
+        // verbatim; this fails if the route drops or re-resolves the capture.
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        // A distinctive project pump threshold the launch must carry through.
+        let config_dir = project_root.join(".fluent");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("config.yaml"),
+            "transcript:\n  console-preview-limit: 7777\n",
+        )
+        .unwrap();
+
+        let source_workspace = project_root.join("workspace");
+        std::fs::create_dir_all(&source_workspace).unwrap();
+        let artifact_dir = project_root.join("artifacts");
+
+        let store = WorkModelStore::new(project_root);
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Rebase capture threading".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+        let item = store.read_work_item("work-1").unwrap();
+
+        let candidate = merge_candidate_fixture(&source_workspace);
+        let resolver = ContentResolver::new(None);
+        let config = WorkMergeConfig {
+            project_root,
+            store: &store,
+            work_item_id: "work-1",
+            merge_candidate_id: "attempt-1-merge-candidate",
+            resolver: &resolver,
+            extra_args: &[],
+            coder_kind: CoderKind::Codex,
+            no_sandbox: true,
+            skip_post_merge_review: false,
+        };
+
+        let recorded = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let recorded_for_coder = std::sync::Arc::clone(&recorded);
+        let result = rebase_candidate_with_coder(
+            &config,
+            &item,
+            &candidate,
+            &source_workspace,
+            "main",
+            &artifact_dir,
+            move |_sandbox| {
+                Box::new(RecordingRebaseCoder {
+                    recorded: recorded_for_coder,
+                    outcome: FakeOutcome::GenericError(
+                        "stop the rebase after recording the capture".to_string(),
+                    ),
+                })
+            },
+        );
+        assert!(
+            result.is_err(),
+            "the fake coder stops the rebase after recording the capture"
+        );
+
+        let recorded = recorded.lock().unwrap();
+        let (path, limit) = recorded
+            .as_ref()
+            .expect("the rebase route must pass a capture to run_captured, not drop it");
+        assert_eq!(
+            path,
+            &artifact_dir
+                .join("attempt-1-rebase")
+                .join("transcript.jsonl"),
+            "the capture must carry the rebase transcript path"
+        );
+        assert_eq!(
+            *limit, 7777,
+            "the resolved project pump threshold must be threaded verbatim, not defaulted"
+        );
+    }
+
+    #[test]
+    fn rebase_pump_failure_terminalizes_task_before_return() {
+        // B7: a typed transcript-pump failure during the rebase launch — after the
+        // Rebase Task is reserved Executing — durably terminalizes that Task before
+        // returning (never leaving it Executing for outer recovery) and preserves the
+        // typed pump primary.
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let source_workspace = project_root.join("workspace");
+        std::fs::create_dir_all(&source_workspace).unwrap();
+        let artifact_dir = project_root.join("artifacts");
+
+        let store = WorkModelStore::new(project_root);
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Rebase pump failure".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+        let item = store.read_work_item("work-1").unwrap();
+
+        let candidate = merge_candidate_fixture(&source_workspace);
+        let resolver = ContentResolver::new(None);
+        let config = WorkMergeConfig {
+            project_root,
+            store: &store,
+            work_item_id: "work-1",
+            merge_candidate_id: "attempt-1-merge-candidate",
+            resolver: &resolver,
+            extra_args: &[],
+            coder_kind: CoderKind::Codex,
+            no_sandbox: true,
+            skip_post_merge_review: false,
+        };
+
+        let error = rebase_candidate_with_coder(
+            &config,
+            &item,
+            &candidate,
+            &source_workspace,
+            "main",
+            &artifact_dir,
+            |_sandbox| {
+                Box::new(RecordingRebaseCoder {
+                    recorded: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                    outcome: FakeOutcome::PumpError(
+                        "write transcript-pump status: no space left on device".to_string(),
+                    ),
+                })
+            },
+        )
+        .expect_err("a transcript-pump failure must return an error");
+
+        assert!(
+            error
+                .downcast_ref::<crate::transcript_pump::TranscriptPumpError>()
+                .is_some(),
+            "the typed transcript-pump primary must be preserved, not flattened to a string"
+        );
+
+        // The reserved Rebase Task is durably terminal, never left Executing.
+        let after = store.read_work_item("work-1").unwrap();
+        let rebase_task = after.attempts[0]
+            .tasks
+            .iter()
+            .find(|t| t.kind == TaskKind::Rebase)
+            .expect("the rebase task was reserved");
+        assert_eq!(
+            rebase_task.status,
+            TaskStatus::Failed,
+            "the Rebase Task must be durably terminalized before return, never left Executing"
         );
     }
 
