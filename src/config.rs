@@ -428,7 +428,7 @@ pub fn resolve_transcript_pump_config(
     )
 }
 
-fn resolve_transcript_pump_config_from(
+pub(crate) fn resolve_transcript_pump_config_from(
     project_path: &Path,
     user_path: Option<&Path>,
 ) -> Result<ResolvedTranscriptPumpConfig, FollowUpConfigError> {

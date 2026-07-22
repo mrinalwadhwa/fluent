@@ -193,6 +193,27 @@ impl CoderKind {
 }
 
 /// Trait abstracting the coding agent.
+/// A resolved, immutable per-launch transcript capture: where to persist the
+/// canonical byte stream and the pump thresholds to use for it.
+///
+/// The config travels WITH the launch rather than through mutable process-global
+/// state, so a concurrent launch (for example a parallel reviewer) can never
+/// overwrite another capture's resolved thresholds between resolution and pump
+/// spawn. The one value is retained across a launch's auth/rate-limit phases.
+pub struct TranscriptCapture<'a> {
+    pub(crate) path: &'a Path,
+    pub(crate) config: crate::transcript_pump::TranscriptPumpConfig,
+}
+
+impl<'a> TranscriptCapture<'a> {
+    pub(crate) fn new(
+        path: &'a Path,
+        config: crate::transcript_pump::TranscriptPumpConfig,
+    ) -> Self {
+        Self { path, config }
+    }
+}
+
 pub trait Coder: Send + Sync {
     /// Launch the coder with a prompt, system prompt, and working directory.
     /// When `transcript_file` is provided, add `--verbose --output-format
@@ -207,6 +228,33 @@ pub trait Coder: Send + Sync {
         extra_env: &[(String, String)],
         transcript_file: Option<&Path>,
     ) -> Result<i32>;
+
+    /// Launch the coder draining stdout into a byte pump configured by an
+    /// immutable per-launch [`TranscriptCapture`].
+    ///
+    /// This is the production entry point: it threads the resolved config into
+    /// the pump at spawn, so capture never depends on a mutable process-global
+    /// value a concurrent launch could replace. The default implementation is for
+    /// coders without a byte pump (mocks, interactive shims): it drops the config
+    /// and runs the legacy transcript path.
+    fn run_captured(
+        &self,
+        prompt: &str,
+        system_prompt: &str,
+        working_dir: &Path,
+        extra_args: &[String],
+        extra_env: &[(String, String)],
+        capture: Option<&TranscriptCapture<'_>>,
+    ) -> Result<i32> {
+        self.run(
+            prompt,
+            system_prompt,
+            working_dir,
+            extra_args,
+            extra_env,
+            capture.map(|c| c.path),
+        )
+    }
 
     /// Launch an interactive session (no -p flag).
     fn run_interactive(
@@ -236,8 +284,30 @@ impl Coder for SandboxedClaudeCode {
         extra_env: &[(String, String)],
         transcript_file: Option<&Path>,
     ) -> Result<i32> {
+        let capture = transcript_file.map(|path| TranscriptCapture::new(path, Default::default()));
+        self.run_captured(
+            prompt,
+            system_prompt,
+            working_dir,
+            extra_args,
+            extra_env,
+            capture.as_ref(),
+        )
+    }
+
+    fn run_captured(
+        &self,
+        prompt: &str,
+        system_prompt: &str,
+        working_dir: &Path,
+        extra_args: &[String],
+        extra_env: &[(String, String)],
+        capture: Option<&TranscriptCapture<'_>>,
+    ) -> Result<i32> {
         ensure_not_expired_with_refresh()?;
-        let want_transcript = transcript_file.is_some();
+        let want_transcript = capture.is_some();
+        let transcript_file = capture.map(|c| c.path);
+        let config = capture.map(|c| c.config.clone()).unwrap_or_default();
         run_with_transcript_retrying(
             || {
                 let mut cmd = self.build_command(working_dir);
@@ -251,6 +321,7 @@ impl Coder for SandboxedClaudeCode {
                 cmd
             },
             transcript_file,
+            &config,
             &crate::notify::notify,
             &real_credential_refresh,
         )
@@ -330,8 +401,30 @@ impl Coder for BareClaudeCode {
         extra_env: &[(String, String)],
         transcript_file: Option<&Path>,
     ) -> Result<i32> {
+        let capture = transcript_file.map(|path| TranscriptCapture::new(path, Default::default()));
+        self.run_captured(
+            prompt,
+            system_prompt,
+            working_dir,
+            extra_args,
+            extra_env,
+            capture.as_ref(),
+        )
+    }
+
+    fn run_captured(
+        &self,
+        prompt: &str,
+        system_prompt: &str,
+        working_dir: &Path,
+        extra_args: &[String],
+        extra_env: &[(String, String)],
+        capture: Option<&TranscriptCapture<'_>>,
+    ) -> Result<i32> {
         ensure_not_expired_with_refresh()?;
-        let want_transcript = transcript_file.is_some();
+        let want_transcript = capture.is_some();
+        let transcript_file = capture.map(|c| c.path);
+        let config = capture.map(|c| c.config.clone()).unwrap_or_default();
         let model = self.effective_model();
         let effort = self.effort.clone();
         run_with_transcript_retrying(
@@ -355,6 +448,7 @@ impl Coder for BareClaudeCode {
                 cmd
             },
             transcript_file,
+            &config,
             &crate::notify::notify,
             &real_credential_refresh,
         )
@@ -397,7 +491,29 @@ impl Coder for CodexCode {
         extra_env: &[(String, String)],
         transcript_file: Option<&Path>,
     ) -> Result<i32> {
-        let want_transcript = transcript_file.is_some();
+        let capture = transcript_file.map(|path| TranscriptCapture::new(path, Default::default()));
+        self.run_captured(
+            prompt,
+            system_prompt,
+            working_dir,
+            extra_args,
+            extra_env,
+            capture.as_ref(),
+        )
+    }
+
+    fn run_captured(
+        &self,
+        prompt: &str,
+        system_prompt: &str,
+        working_dir: &Path,
+        extra_args: &[String],
+        extra_env: &[(String, String)],
+        capture: Option<&TranscriptCapture<'_>>,
+    ) -> Result<i32> {
+        let want_transcript = capture.is_some();
+        let transcript_file = capture.map(|c| c.path);
+        let config = capture.map(|c| c.config.clone()).unwrap_or_default();
         let combined_prompt = format!("{system_prompt}\n\n---\n\n{prompt}");
         run_with_transcript_retrying(
             || {
@@ -411,6 +527,7 @@ impl Coder for CodexCode {
                 cmd
             },
             transcript_file,
+            &config,
             &crate::notify::notify,
             &real_credential_refresh,
         )
@@ -528,7 +645,29 @@ impl Coder for PiCode {
         extra_env: &[(String, String)],
         transcript_file: Option<&Path>,
     ) -> Result<i32> {
-        let want_transcript = transcript_file.is_some();
+        let capture = transcript_file.map(|path| TranscriptCapture::new(path, Default::default()));
+        self.run_captured(
+            prompt,
+            system_prompt,
+            working_dir,
+            extra_args,
+            extra_env,
+            capture.as_ref(),
+        )
+    }
+
+    fn run_captured(
+        &self,
+        prompt: &str,
+        system_prompt: &str,
+        working_dir: &Path,
+        extra_args: &[String],
+        extra_env: &[(String, String)],
+        capture: Option<&TranscriptCapture<'_>>,
+    ) -> Result<i32> {
+        let want_transcript = capture.is_some();
+        let transcript_file = capture.map(|c| c.path);
+        let config = capture.map(|c| c.config.clone()).unwrap_or_default();
         run_with_transcript_retrying(
             || {
                 let mut cmd = self.build_command(working_dir);
@@ -543,6 +682,7 @@ impl Coder for PiCode {
                 cmd
             },
             transcript_file,
+            &config,
             &crate::notify::notify,
             &real_credential_refresh,
         )
@@ -571,9 +711,19 @@ impl Coder for PiCode {
 const SUPERVISOR_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// Run a command, optionally draining stdout into a transcript file through the
-/// byte-oriented pump. When `transcript_file` is `None`, stdout inherits from
-/// the parent process.
-fn run_with_transcript(mut cmd: Command, transcript_file: Option<&Path>) -> Result<i32> {
+/// byte-oriented pump configured by `config`. When `transcript_file` is `None`,
+/// stdout inherits from the parent process.
+///
+/// The child is owned by a [`CoderSupervisor`] guard from the instant it is
+/// spawned — before stdout is taken and before the pump thread is spawned — so
+/// any failure or panic in that window still terminates and reaps the coder
+/// process group rather than leaking a live child. Both branches route through
+/// the same guard, so a `wait`/`try_wait` error can never bypass cleanup.
+fn run_with_transcript(
+    mut cmd: Command,
+    transcript_file: Option<&Path>,
+    config: &crate::transcript_pump::TranscriptPumpConfig,
+) -> Result<i32> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -582,77 +732,121 @@ fn run_with_transcript(mut cmd: Command, transcript_file: Option<&Path>) -> Resu
     match transcript_file {
         Some(path) => {
             cmd.stdout(Stdio::piped());
-            let mut child = cmd.spawn()?;
+            let child = cmd.spawn()?;
             let child_id = child.id();
-            let stdout = child.stdout.take().expect("stdout was piped");
+            // Own the child immediately: from here every exit path — a missing
+            // stdout, a failed pump-thread spawn, or a `?` return — terminates and
+            // reaps the coder group through the guard's cleanup.
+            let mut supervisor = CoderSupervisor::new(child, child_id);
 
-            let config = crate::transcript_pump::active_config();
+            let stdout = supervisor
+                .take_stdout()
+                .ok_or_else(|| anyhow::anyhow!("coder stdout was not piped"))?;
             let status_path = crate::transcript_pump::status_path_for(path);
             let pump = crate::transcript_pump::spawn_pump(
                 stdout,
                 path.to_path_buf(),
                 Some(status_path),
                 crate::transcript_pump::console_preview_sink(),
-                config,
-            );
-
-            // Own the child and pump in a guard so cleanup runs on every exit
-            // path — including a `?` early return from a wait/try_wait error.
-            // Its Drop terminates and reaps the whole coder process group and
-            // settles the pump, so a supervision error can never leak a live
-            // coder, a surviving descendant, or a stuck pump thread.
-            let mut supervisor = CoderSupervisor {
-                child,
-                child_id,
-                pump,
-            };
+                config.clone(),
+            )?;
+            supervisor.attach_pump(pump);
             supervisor.supervise()
         }
         None => {
-            let mut child = cmd.spawn()?;
+            let child = cmd.spawn()?;
             let child_id = child.id();
-            let status = child.wait()?;
-            terminate_process_group(child_id);
-            Ok(status.code().unwrap_or(1))
+            let mut supervisor = CoderSupervisor::new(child, child_id);
+            supervisor.wait_no_pump()
         }
     }
 }
 
+/// Kill the coder's process group. Returns whether the group is settled — either
+/// the signal was delivered, or the group is already gone (`ESRCH`). A `false`
+/// return means the signal failed for another reason, so the caller should fall
+/// back to killing the direct child.
 #[cfg(unix)]
-fn terminate_process_group(leader: u32) {
-    if let Ok(process_group) = i32::try_from(leader) {
-        // The child was launched as its own process-group leader. Kill the
-        // group before returning so descendants cannot race a managed import.
-        unsafe {
-            libc::kill(-process_group, libc::SIGKILL);
-        }
-    }
+fn terminate_process_group(leader: u32) -> bool {
+    let Ok(process_group) = i32::try_from(leader) else {
+        return false;
+    };
+    // The child was launched as its own process-group leader. Kill the group so
+    // descendants cannot race a managed import.
+    let rc = unsafe { libc::kill(-process_group, libc::SIGKILL) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
 #[cfg(not(unix))]
-fn terminate_process_group(_leader: u32) {}
+fn terminate_process_group(_leader: u32) -> bool {
+    true
+}
 
-/// Owns a coder child and its transcript pump for the duration of supervision.
-/// Its `Drop` is the single structured-cleanup point: it terminates and reaps
-/// the coder's whole process group and settles the pump thread on every exit
-/// path, so an error propagated by `?` cannot leak a live coder, a surviving
-/// descendant, or a stuck pump thread.
+/// Owns a coder child and (once spawned) its transcript pump for the duration of
+/// supervision. Its `Drop` is the single structured-cleanup point: it terminates
+/// and reaps the coder's whole process group and settles the pump thread on every
+/// exit path, so an error propagated by `?` — or a panic while wiring up the pump
+/// — cannot leak a live coder, a surviving descendant, or a stuck pump thread.
 struct CoderSupervisor {
     child: Child,
     child_id: u32,
-    pump: crate::transcript_pump::PumpHandle,
+    /// `None` until a pump is attached (the no-transcript branch never attaches
+    /// one, and the transcript branch attaches it only after a successful spawn).
+    pump: Option<crate::transcript_pump::PumpHandle>,
+    /// Whether the direct child has already been reaped. Once reaped, its PGID may
+    /// be recycled, so cleanup must never re-signal the group.
+    reaped: bool,
 }
 
 impl CoderSupervisor {
+    fn new(child: Child, child_id: u32) -> Self {
+        Self {
+            child,
+            child_id,
+            pump: None,
+            reaped: false,
+        }
+    }
+
+    fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
+        self.child.stdout.take()
+    }
+
+    fn attach_pump(&mut self, pump: crate::transcript_pump::PumpHandle) {
+        self.pump = Some(pump);
+    }
+
+    /// Terminate the coder's group; if the group signal fails outright (not merely
+    /// already-gone), fall back to killing the direct child, so a live coder is
+    /// never left behind when its PGID is unusable.
+    fn terminate_group_or_child(&mut self) {
+        if !terminate_process_group(self.child_id) {
+            let _ = self.child.kill();
+        }
+    }
+
     /// Poll the child and pump together until one reaches a terminal outcome. A
     /// pump failure while the coder is still alive returns at once (its Drop then
     /// terminates the live coder); a coder exit terminates any surviving
     /// descendants so the pump can observe EOF, then returns the coder's status.
     fn supervise(&mut self) -> Result<i32> {
         loop {
-            if let Some(terminal) = self.pump.try_terminal() {
+            if let Some(terminal) = self
+                .pump
+                .as_mut()
+                .expect("supervise runs only after a pump is attached")
+                .try_terminal()
+            {
                 return match terminal {
-                    Ok(_summary) => Ok(self.child.wait()?.code().unwrap_or(1)),
+                    Ok(_summary) => {
+                        // The coder closed stdout and the pump drained to EOF
+                        // cleanly. Reap the leader for its status; because it is
+                        // exiting, cleanup will not re-signal a recyclable group.
+                        let status = self.child.wait()?;
+                        self.reaped = true;
+                        Ok(status.code().unwrap_or(1))
+                    }
+                    // Drop terminates the still-live coder group.
                     Err(pump_err) => Err(anyhow::Error::new(pump_err)),
                 };
             }
@@ -660,11 +854,17 @@ impl CoderSupervisor {
                 // The leader exited. Terminate any surviving descendants in the
                 // group before waiting for the pump: a backgrounded descendant
                 // that inherited stdout would otherwise hold the pipe's write end
-                // open and the pump would wait for EOF forever. The leader's bytes
-                // are already buffered in the pipe, so closing the group lets the
-                // pump drain them to EOF and finish.
-                terminate_process_group(self.child_id);
-                return match self.pump.wait_terminal() {
+                // open and the pump would wait for EOF forever. Those descendants
+                // keep the group alive, so signaling it here is safe; the leader's
+                // buffered bytes then drain to EOF and the pump finishes.
+                let _ = terminate_process_group(self.child_id);
+                self.reaped = true;
+                let outcome = self
+                    .pump
+                    .as_mut()
+                    .expect("supervise runs only after a pump is attached")
+                    .wait_terminal();
+                return match outcome {
                     Ok(_summary) => Ok(status.code().unwrap_or(1)),
                     Err(pump_err) => Err(anyhow::Error::new(pump_err)),
                 };
@@ -672,16 +872,32 @@ impl CoderSupervisor {
             std::thread::sleep(SUPERVISOR_POLL_INTERVAL);
         }
     }
+
+    /// Wait a coder launched without a transcript pump. A `wait` error still
+    /// routes through the guard, so the group is terminated and reaped rather than
+    /// leaked. After the leader exits, sweep any descendants that inherited stdio.
+    fn wait_no_pump(&mut self) -> Result<i32> {
+        let status = self.child.wait()?;
+        self.reaped = true;
+        let _ = terminate_process_group(self.child_id);
+        Ok(status.code().unwrap_or(1))
+    }
 }
 
 impl Drop for CoderSupervisor {
     fn drop(&mut self) {
-        // Terminate and reap the whole coder process group, then settle the pump.
-        // Every step is idempotent, so this runs safely after the happy path has
-        // already reaped, and it is the sole cleanup after a `?` early return.
-        terminate_process_group(self.child_id);
-        let _ = self.child.wait();
-        self.pump.join();
+        // Terminate and reap the coder, then settle the pump. Idempotent: this is
+        // the sole cleanup after a `?` early return or a panic, and a no-op after
+        // a happy path already reaped. Once the leader is reaped its PGID may be
+        // recycled, so never re-signal the group after that.
+        if !self.reaped {
+            self.terminate_group_or_child();
+            let _ = self.child.wait();
+            self.reaped = true;
+        }
+        if let Some(pump) = self.pump.as_mut() {
+            pump.join();
+        }
     }
 }
 
@@ -1021,6 +1237,7 @@ fn phase_transcript_path(path: &Path, phase: u32) -> PathBuf {
 fn run_with_transcript_retrying<F>(
     build_cmd: F,
     transcript_file: Option<&Path>,
+    config: &crate::transcript_pump::TranscriptPumpConfig,
     notify_fn: &dyn Fn(&str, &str),
     refresh_fn: &dyn Fn(),
 ) -> Result<i32>
@@ -1036,7 +1253,10 @@ where
     let mut phase: u32 = next_transcript_phase(transcript_file);
 
     loop {
-        let exit = run_with_transcript(build_cmd(), transcript_file)?;
+        // The one resolved config value is retained across every auth/rate-limit
+        // phase of this launch, so a mid-launch retry never re-resolves or picks
+        // up a different value.
+        let exit = run_with_transcript(build_cmd(), transcript_file, config)?;
         if exit == 0 {
             if auth_refreshed {
                 notify_fn("Fluent", "Recovered after credential refresh.");
@@ -1157,9 +1377,94 @@ mod pump_supervision_tests {
     use super::*;
     use std::time::Instant;
 
+    /// A pump reader that panics on its first read, modelling a pump that crashes
+    /// while its coder is still alive.
+    struct PanicOnRead;
+
+    impl std::io::Read for PanicOnRead {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            panic!("simulated pump panic");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
-    fn pump_failure_terminates_and_reaps_live_coder_and_its_descendant() {
+    fn pump_panic_recovers_while_console_is_saturated() {
+        // B6: a pump that panics while its coder is still alive must recover
+        // promptly. The panic never blocks on a saturated console: the production
+        // sink declines every preview (never touching fd 2) and the process-wide
+        // hook keeps the pump thread's panic off the blocking default stderr path.
+        // Supervision returns a typed failure and its guard terminates and reaps
+        // the still-live coder.
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let status = crate::transcript_pump::status_path_for(&transcript);
+
+        // A live coder that outlives the pump panic.
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg("sleep 5");
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        let child = cmd.spawn().unwrap();
+        let child_id = child.id();
+
+        // A pump whose reader panics immediately, while the coder keeps running.
+        let pump = crate::transcript_pump::spawn_pump(
+            PanicOnRead,
+            transcript.clone(),
+            Some(status.clone()),
+            crate::transcript_pump::console_preview_sink(),
+            crate::transcript_pump::TranscriptPumpConfig::default(),
+        )
+        .unwrap();
+
+        let mut supervisor = CoderSupervisor::new(child, child_id);
+        supervisor.attach_pump(pump);
+
+        let started = Instant::now();
+        let result = supervisor.supervise();
+        let elapsed = started.elapsed();
+
+        let err = result.expect_err("a pump panic must surface as a typed failure");
+        assert!(
+            err.downcast_ref::<crate::transcript_pump::TranscriptPumpError>()
+                .is_some(),
+            "the failure must be a typed transcript-pump error: {err}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "panic recovery must be prompt, well before the coder's 5s sleep; took {elapsed:?}"
+        );
+
+        // The guard terminates and reaps the still-live coder.
+        drop(supervisor);
+        let alive = Command::new("/bin/kill")
+            .args(["-0", &child_id.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(
+            !alive,
+            "the live coder must be terminated and reaped after the pump panic"
+        );
+
+        // The terminal status names the panic.
+        let persisted: crate::transcript_pump::PumpStatus =
+            serde_json::from_slice(&std::fs::read(&status).unwrap()).unwrap();
+        assert_eq!(
+            persisted.state,
+            crate::transcript_pump::PumpState::Failed
+        );
+        assert!(persisted.error.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pump_failure_terminates_and_reaps_live_coder() {
         // The pump cannot open its transcript because the path is a directory, so
         // it fails immediately while the coder is still alive. A pump failure must
         // terminate and reap the coder's WHOLE process group — the leader and a
@@ -1181,7 +1486,7 @@ mod pump_supervision_tests {
         ));
 
         let started = Instant::now();
-        let result = run_with_transcript(cmd, Some(&transcript));
+        let result = run_with_transcript(cmd, Some(&transcript), &crate::transcript_pump::TranscriptPumpConfig::default());
         let elapsed = started.elapsed();
 
         let err = result.expect_err("a pump failure must surface as an error");
@@ -1246,7 +1551,7 @@ mod pump_supervision_tests {
         cmd.arg("-c")
             .arg("printf '{\"type\":\"a\"}\\n{\"type\":\"b\"}\\n'; exit 0");
 
-        let exit = run_with_transcript(cmd, Some(&transcript)).unwrap();
+        let exit = run_with_transcript(cmd, Some(&transcript), &crate::transcript_pump::TranscriptPumpConfig::default()).unwrap();
         assert_eq!(exit, 0);
         let body = std::fs::read_to_string(&transcript).unwrap();
         assert!(body.contains("\"type\":\"a\""));
@@ -1272,7 +1577,7 @@ mod pump_supervision_tests {
             .current_dir(dir.path());
 
         let started = Instant::now();
-        let exit = run_with_transcript(cmd, Some(&transcript)).unwrap();
+        let exit = run_with_transcript(cmd, Some(&transcript), &crate::transcript_pump::TranscriptPumpConfig::default()).unwrap();
         let elapsed = started.elapsed();
 
         assert_eq!(exit, 0);
@@ -1841,7 +2146,7 @@ mod model_default_tests {
             )
             .current_dir(dir.path());
 
-        assert_eq!(run_with_transcript(command, None).unwrap(), 0);
+        assert_eq!(run_with_transcript(command, None, &crate::transcript_pump::TranscriptPumpConfig::default()).unwrap(), 0);
         assert!(
             launched_path.exists(),
             "hostile descendant actually executed"
@@ -2085,6 +2390,7 @@ exit 1"#
                 cmd
             },
             Some(&transcript),
+            &crate::transcript_pump::TranscriptPumpConfig::default(),
             &|_, _| {},
             &refresh,
         );
@@ -2119,6 +2425,7 @@ exit 1"#
                 cmd
             },
             Some(&transcript),
+            &crate::transcript_pump::TranscriptPumpConfig::default(),
             &|_, _| {},
             &|| {},
         );
@@ -2140,6 +2447,7 @@ exit 1"#
                 cmd
             },
             Some(&transcript),
+            &crate::transcript_pump::TranscriptPumpConfig::default(),
             &|_, _| {},
             &|| {},
         );
@@ -2186,6 +2494,7 @@ exit 1"#
                 cmd
             },
             Some(&transcript),
+            &crate::transcript_pump::TranscriptPumpConfig::default(),
             &|_, _| {},
             &|| {},
         );
@@ -2270,6 +2579,7 @@ exit 1"#
                 cmd
             },
             Some(&transcript),
+            &crate::transcript_pump::TranscriptPumpConfig::default(),
             &|_, _| {},
             &|| {},
         );
@@ -2333,6 +2643,7 @@ exit 1"#
                 cmd
             },
             Some(&transcript),
+            &crate::transcript_pump::TranscriptPumpConfig::default(),
             &|_, _| {},
             &|| {},
         );
@@ -2374,6 +2685,7 @@ exit 1"#
                 cmd
             },
             Some(&transcript),
+            &crate::transcript_pump::TranscriptPumpConfig::default(),
             &notify,
             &refresh,
         );
@@ -2416,6 +2728,7 @@ exit 1"#
                 cmd
             },
             Some(&transcript),
+            &crate::transcript_pump::TranscriptPumpConfig::default(),
             &|_, _| {},
             &real_credential_refresh,
         );

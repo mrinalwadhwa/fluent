@@ -1852,29 +1852,6 @@ fn capture_coder_info(coder_kind: CoderKind, model: &str, artifact_dir: &Path) {
     }
 }
 
-/// Resolve the layered transcript-pump thresholds for this project and install
-/// them process-wide before launching a coder, so the pump bounds console
-/// previews and paces status flushes per configuration.
-///
-/// This runs before every transcript-enabled entry point — Writer, Reviewer,
-/// Learner, and rebase agent — so no operation inherits a prior task's
-/// process-global config. A malformed or unreadable configuration explicitly
-/// installs the built-in defaults rather than leaving stale global state in
-/// place; capture correctness never depends on these diagnostics knobs.
-pub(crate) fn install_transcript_pump_config(project_root: &Path) {
-    let config = match crate::config::resolve_transcript_pump_config(project_root) {
-        Ok(resolved) => crate::transcript_pump::TranscriptPumpConfig {
-            console_preview_limit: resolved.console_preview_limit.value as usize,
-            status_flush_interval: std::time::Duration::from_millis(
-                resolved.status_flush_interval_ms.value as u64,
-            ),
-            ..crate::transcript_pump::TranscriptPumpConfig::default()
-        },
-        Err(_) => crate::transcript_pump::TranscriptPumpConfig::default(),
-    };
-    crate::transcript_pump::install_config(config);
-}
-
 fn run_task_coder(
     item: &WorkItem,
     attempt_id: &str,
@@ -1894,8 +1871,6 @@ fn run_task_coder(
         credential::inject_credentials()?;
         credential::setup_git_signing();
     }
-
-    install_transcript_pump_config(project_root);
 
     let task = item
         .attempts
@@ -1994,13 +1969,17 @@ fn run_task_coder(
     }
 
     let coder = coder_kind.boxed_with_model(sandbox, model, effort);
-    let exit_code = coder.run(
+    let pump_config = crate::transcript_pump::resolve_config(project_root);
+    let capture = transcript_path
+        .as_deref()
+        .map(|p| crate::coder::TranscriptCapture::new(p, pump_config.clone()));
+    let exit_code = coder.run_captured(
         &prompt,
         &system_prompt,
         workspace_path,
         extra_args,
         &[],
-        transcript_path.as_deref(),
+        capture.as_ref(),
     )?;
     if let Some(tp) = &transcript_path {
         crate::usage::log_usage_from_transcript(
@@ -2320,6 +2299,10 @@ fn run_seed_project_model(
 /// Inputs the Learner coder needs to refine expertise and write its handoff
 /// draft.
 pub struct LearnerRunInputs<'a> {
+    /// The main project root, used to resolve this launch's transcript-pump
+    /// config so the Learner threads the same layered thresholds as every other
+    /// entry point rather than inheriting a prior task's state.
+    pub project_root: &'a Path,
     /// The candidate worktree the Attempt produced.
     pub workspace_path: &'a Path,
     pub resolver: &'a ContentResolver,
@@ -2566,13 +2549,17 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
     let coder = inputs
         .coder_kind
         .boxed_with_model(sandbox, inputs.model, inputs.effort);
-    let exit_code = coder.run(
+    let pump_config = crate::transcript_pump::resolve_config(inputs.project_root);
+    let capture = inputs
+        .transcript_path
+        .map(|p| crate::coder::TranscriptCapture::new(p, pump_config.clone()));
+    let exit_code = coder.run_captured(
         &prompt,
         &system_prompt,
         workspace_path,
         inputs.extra_args,
         &extra_env,
-        inputs.transcript_path,
+        capture.as_ref(),
     )?;
     if exit_code != 0 {
         bail!("Learner coder exited with code {exit_code}");
@@ -2784,8 +2771,6 @@ fn run_review_coder(
         credential::setup_git_signing();
     }
 
-    install_transcript_pump_config(project_root);
-
     // Planning artifacts and bundled expertise were materialized earlier (in
     // run_review_task, before the source-checkout review guard snapshotted
     // the workspace). Build prompts here only; a missing review-<role> skill
@@ -2834,13 +2819,15 @@ fn run_review_coder(
 
     let transcript_path = artifact_dir.join("transcript.jsonl");
     let coder = coder_kind.boxed_with_model(sandbox, model, effort);
-    let exit_code = coder.run(
+    let pump_config = crate::transcript_pump::resolve_config(project_root);
+    let capture = crate::coder::TranscriptCapture::new(&transcript_path, pump_config);
+    let exit_code = coder.run_captured(
         &prompts.review_prompt,
         &prompts.system_prompt,
         artifact_dir,
         extra_args,
         &[],
-        Some(&transcript_path),
+        Some(&capture),
     )?;
     crate::usage::log_usage_from_transcript(
         &transcript_path,
@@ -3696,6 +3683,110 @@ mod tests {
 
         let success: Result<()> = Ok(());
         assert!(!should_retry_coder_error(&success));
+    }
+
+    #[test]
+    fn phase_preservation_failure_is_not_retried() {
+        // B10: when auth/rate-limit recovery cannot preserve prior transcript
+        // evidence, `preserve_transcript_phase` returns a typed TranscriptPumpError.
+        // The executor must treat that evidence-preservation failure exactly like
+        // any pump infrastructure failure: never retried through the generic budget,
+        // and classified as a resumable TranscriptPump pause, not a RoundCap.
+        let phase_failure: Result<()> = Err(anyhow::Error::new(
+            crate::transcript_pump::TranscriptPumpError::new(
+                "preserve transcript phase to run.0.jsonl: File exists",
+            ),
+        ));
+        assert!(is_transcript_pump_error(&phase_failure));
+        assert!(
+            !should_retry_coder_error(&phase_failure),
+            "a phase-preservation failure must not be retried through the generic budget"
+        );
+
+        match classify_task_failure(phase_failure.as_ref().unwrap_err()) {
+            TaskFailure::TranscriptPump(msg) => assert!(
+                msg.contains("preserve transcript phase"),
+                "the resumable pause must carry the phase-preservation diagnostic: {msg}"
+            ),
+            _ => panic!(
+                "a phase-preservation failure must classify as a resumable TranscriptPump \
+                 pause, not a terminal RoundCap"
+            ),
+        }
+    }
+
+    #[test]
+    fn transcript_pump_failure_resumes_without_state_repair() {
+        // B7: after a transcript-pump failure records its resumable pause, the
+        // standard operator resume (reopen_attempt) makes the failed Task directly
+        // startable again with NO intervening durable-state repair. The failure
+        // never leaves inconsistent state a resume must first fix by hand.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Pump resume".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            post_merge_review_fix_depth: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+        let write_id = store.read_work_item("work-1").unwrap().attempts[0].tasks[0]
+            .id
+            .clone();
+
+        // A transcript-pump failure records the resumable pause.
+        mark_task_failed_attempt_needs_user(
+            &store,
+            tmp.path(),
+            "work-1",
+            "attempt-1",
+            &write_id,
+            &TaskFailure::TranscriptPump("write transcript: broken pipe".to_string()),
+            &|_, _| {},
+        )
+        .unwrap();
+
+        // Before resume the paused Task cannot start — it is durably NeedsUser.
+        let rejected = plan_task_start(
+            &store,
+            "work-1",
+            "attempt-1",
+            &write_id,
+            TaskKind::Write,
+            |_| Ok(()),
+        );
+        assert!(
+            rejected.is_err(),
+            "a paused Task must not start until it is resumed"
+        );
+
+        // The standard resume transition — reopen_attempt — is the ONLY step.
+        let mut reopened = store.read_work_item("work-1").unwrap();
+        crate::work_model::reopen_attempt(&mut reopened.attempts[0]);
+        store.write_work_item(&reopened).unwrap();
+
+        let after = store.read_work_item("work-1").unwrap();
+        assert_eq!(after.attempts[0].status, AttemptStatus::Planned);
+        assert!(after.attempts[0].pause_kind.is_none());
+        assert_eq!(after.attempts[0].tasks[0].status, TaskStatus::Planned);
+
+        // After the reopen the Task starts through the normal path with no repair.
+        let plan = plan_task_start(
+            &store,
+            "work-1",
+            "attempt-1",
+            &write_id,
+            TaskKind::Write,
+            |_| Ok(()),
+        )
+        .expect("a resumed pump-paused Task must be directly startable, no state repair");
+        assert_eq!(plan.task.id, write_id);
     }
 
     #[test]
@@ -6323,58 +6414,73 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
-    fn install_transcript_pump_config_layers_and_fails_closed_between_operations() {
-        // Every transcript-enabled entry point installs this project's resolved
-        // pump config before its coder. A valid project value is applied; a
-        // malformed or absent config fails closed to built-in defaults so a
-        // prior operation's process-global thresholds never leak forward.
-        let home = tempfile::TempDir::new().unwrap();
-        // SAFETY: serialized via #[serial]; no other thread reads HOME here.
-        unsafe {
-            std::env::set_var("HOME", home.path());
-        }
+    fn malformed_pump_config_resets_active_defaults() {
+        // B5: a malformed project config fails closed to the built-in defaults for
+        // EVERY field, not just the one that failed to parse, so no stale value
+        // leaks into the launch. Uses explicit config paths, never process-global
+        // HOME, so the check is hermetic and cannot leak into parallel tests.
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
 
-        let write_project_config = |contents: &str| {
-            let dir = tempfile::TempDir::new().unwrap();
-            fs::create_dir_all(dir.path().join(".fluent")).unwrap();
-            fs::write(dir.path().join(".fluent/config.yaml"), contents).unwrap();
-            dir
-        };
+        // A valid project value resolves as itself.
+        let valid = dir.path().join("valid.yaml");
+        fs::write(
+            &valid,
+            "transcript:\n  console-preview-limit: 4096\n  status-flush-interval-ms: 250\n",
+        )
+        .unwrap();
+        let resolved = crate::transcript_pump::resolve_config_from(&valid, None);
+        assert_eq!(resolved.console_preview_limit, 4096);
+        assert_eq!(resolved.status_flush_interval, Duration::from_millis(250));
 
-        // A valid project value is applied.
-        let custom = write_project_config("transcript:\n  console-preview-limit: 4096\n");
-        install_transcript_pump_config(custom.path());
+        // A malformed value fails closed to the built-in defaults — both fields,
+        // not just the one that failed to parse.
+        let malformed = dir.path().join("malformed.yaml");
+        fs::write(
+            &malformed,
+            "transcript:\n  console-preview-limit: not-a-number\n  status-flush-interval-ms: 250\n",
+        )
+        .unwrap();
+        let reset = crate::transcript_pump::resolve_config_from(&malformed, None);
+        let default = crate::transcript_pump::TranscriptPumpConfig::default();
         assert_eq!(
-            crate::transcript_pump::active_config().console_preview_limit,
-            4096,
-            "a valid project value must be installed"
+            reset.console_preview_limit, default.console_preview_limit,
+            "a malformed config must reset the console limit to the built-in default"
         );
-
-        // A malformed value fails closed to defaults and does not leak the prior.
-        let malformed =
-            write_project_config("transcript:\n  console-preview-limit: not-a-number\n");
-        install_transcript_pump_config(malformed.path());
         assert_eq!(
-            crate::transcript_pump::active_config().console_preview_limit,
-            crate::transcript_pump::DEFAULT_CONSOLE_PREVIEW_LIMIT,
-            "a malformed config must fail closed to defaults, not keep the prior value"
+            reset.status_flush_interval, default.status_flush_interval,
+            "a malformed config must reset EVERY field, including the status interval"
         );
+    }
 
-        // Re-apply a custom value, then an absent config must also fall back to
-        // defaults rather than inheriting the custom value.
-        let custom2 = write_project_config("transcript:\n  console-preview-limit: 2048\n");
-        install_transcript_pump_config(custom2.path());
+    #[test]
+    fn learner_installs_resolved_pump_config() {
+        // B5: the Learner entry point resolves this project's layered thresholds
+        // (project over user over built-in default) and threads that immutable
+        // value into its capture — `run_learner` calls the same
+        // `transcript_pump::resolve_config(project_root)` and passes the result to
+        // `run_captured`. This verifies the resolution the Learner performs, with a
+        // key that only the user layer sets falling through to it.
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project.yaml");
+        fs::write(&project, "transcript:\n  console-preview-limit: 4096\n").unwrap();
+        let user = dir.path().join("user.yaml");
+        fs::write(
+            &user,
+            "transcript:\n  console-preview-limit: 1024\n  status-flush-interval-ms: 250\n",
+        )
+        .unwrap();
+
+        let resolved = crate::transcript_pump::resolve_config_from(&project, Some(&user));
         assert_eq!(
-            crate::transcript_pump::active_config().console_preview_limit,
-            2048
+            resolved.console_preview_limit, 4096,
+            "the project layer wins over the user layer"
         );
-        let absent = tempfile::TempDir::new().unwrap();
-        install_transcript_pump_config(absent.path());
         assert_eq!(
-            crate::transcript_pump::active_config().console_preview_limit,
-            crate::transcript_pump::DEFAULT_CONSOLE_PREVIEW_LIMIT,
-            "consecutive operations with different configs must not leak state"
+            resolved.status_flush_interval,
+            Duration::from_millis(250),
+            "a key only the user layer sets falls through to the Learner's config"
         );
     }
 

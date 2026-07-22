@@ -12,7 +12,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -20,7 +20,10 @@ use serde::{Deserialize, Serialize};
 
 /// Schema version of the adjacent `transcript-pump.json` status document. Bump
 /// this when the persisted shape changes so readers can detect the format.
-pub const PUMP_STATUS_SCHEMA_VERSION: u32 = 1;
+///
+/// v2 adds `periodic_error`: a best-effort periodic status write may fail without
+/// failing capture, and that last failure is retained on the terminal status.
+pub const PUMP_STATUS_SCHEMA_VERSION: u32 = 2;
 
 /// Built-in size, in bytes, of each read chunk pulled from coder stdout.
 pub const DEFAULT_READ_CHUNK_SIZE: usize = 64 * 1024;
@@ -58,21 +61,50 @@ impl Default for TranscriptPumpConfig {
     }
 }
 
-/// Install the process-wide transcript-pump configuration. Coder supervision
-/// reads this when spawning a pump, so the executor resolves layered thresholds
-/// once per project and installs them before launching a coder.
-pub fn install_config(config: TranscriptPumpConfig) {
-    *process_config().lock().unwrap() = config;
+// Transcript-pump thresholds are resolved once per launch and threaded into the
+// coder as an immutable value (see `coder::TranscriptCapture`). There is no
+// process-global config: a concurrent launch cannot overwrite another capture's
+// resolved thresholds between resolution and pump spawn.
+
+/// Resolve this project's layered transcript-pump thresholds into an immutable
+/// value the caller threads into its launch. A malformed or unreadable
+/// configuration fails closed to the built-in defaults — every field, not just
+/// the one that failed to parse — because capture correctness never depends on
+/// these diagnostics knobs.
+///
+/// This lives beside the pump (rather than in an executor) so every
+/// transcript-enabled entry point — Writer, Reviewer, Learner, rebase agent —
+/// resolves it without depending on any one executor.
+pub(crate) fn resolve_config(project_root: &Path) -> TranscriptPumpConfig {
+    map_resolved_config(crate::config::resolve_transcript_pump_config(project_root))
 }
 
-/// The currently installed process-wide configuration, or the built-in default.
-pub fn active_config() -> TranscriptPumpConfig {
-    process_config().lock().unwrap().clone()
+/// Resolve from explicit project and user config paths, bypassing HOME. Tests use
+/// this to exercise layering and fail-closed behavior hermetically.
+#[cfg(test)]
+pub(crate) fn resolve_config_from(
+    project_path: &Path,
+    user_path: Option<&Path>,
+) -> TranscriptPumpConfig {
+    map_resolved_config(crate::config::resolve_transcript_pump_config_from(
+        project_path,
+        user_path,
+    ))
 }
 
-fn process_config() -> &'static Mutex<TranscriptPumpConfig> {
-    static CONFIG: OnceLock<Mutex<TranscriptPumpConfig>> = OnceLock::new();
-    CONFIG.get_or_init(|| Mutex::new(TranscriptPumpConfig::default()))
+fn map_resolved_config(
+    resolved: Result<crate::config::ResolvedTranscriptPumpConfig, crate::config::FollowUpConfigError>,
+) -> TranscriptPumpConfig {
+    match resolved {
+        Ok(resolved) => TranscriptPumpConfig {
+            console_preview_limit: resolved.console_preview_limit.value as usize,
+            status_flush_interval: Duration::from_millis(
+                resolved.status_flush_interval_ms.value as u64,
+            ),
+            ..TranscriptPumpConfig::default()
+        },
+        Err(_) => TranscriptPumpConfig::default(),
+    }
 }
 
 /// The adjacent status document path for a transcript: `transcript-pump.json`
@@ -155,8 +187,14 @@ pub struct PumpStatus {
     pub bytes: u64,
     pub records: u64,
     pub dropped_console: u64,
+    /// The terminal failure cause, present only on a `Failed` state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The last best-effort periodic status-write failure, if any. It is retained
+    /// on the terminal status — including a successful `Complete` — so a slow or
+    /// flaky status filesystem is observable without failing canonical capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub periodic_error: Option<String>,
 }
 
 /// Shared, panic-safe pump counters. They live behind atomics so the pump's
@@ -178,6 +216,9 @@ impl SharedCounters {
     }
     fn add_dropped(&self) {
         self.dropped_console.fetch_add(1, Ordering::Relaxed);
+    }
+    fn sub_dropped(&self) {
+        self.dropped_console.fetch_sub(1, Ordering::Relaxed);
     }
     fn snapshot(&self) -> PumpSummary {
         PumpSummary {
@@ -234,7 +275,9 @@ fn drain_with_counters(
     counters: &SharedCounters,
 ) -> Result<PumpSummary, TranscriptPumpError> {
     let started = now_ms();
-    let writer = status_path.map(|path| StatusWriter::spawn(path.to_path_buf()));
+    let mut writer = status_path
+        .map(|path| StatusWriter::spawn(path.to_path_buf()))
+        .transpose()?;
 
     let result = capture(
         reader,
@@ -247,36 +290,41 @@ fn drain_with_counters(
         writer.as_ref(),
     );
 
-    // Flush the periodic writer before the terminal write, so the terminal status
-    // serializes after all queued periodic work and cannot be overwritten by a
-    // late snapshot. Retain its last persistence failure for diagnostics.
-    let periodic_error = writer.and_then(StatusWriter::shutdown);
+    // Settle the periodic writer BEFORE the terminal write, so the terminal status
+    // serializes after all queued periodic work and no late snapshot can overwrite
+    // it. Its `Drop` also settles it on unwind, so a pump panic cannot leave a
+    // queued periodic `Running` to land after the panic handler writes `Failed`.
+    // Retain its last persistence failure for the terminal diagnostic.
+    let periodic_error = writer.as_mut().and_then(StatusWriter::shutdown);
     let summary = counters.snapshot();
 
     match result {
         Ok(()) => {
             // The terminal Complete status is required and typed: if it cannot be
             // persisted the capture is not independently observable, which is a
-            // terminal infrastructure failure.
-            persist_status_sync(status_path, PumpState::Complete, started, &summary, None)?;
+            // terminal infrastructure failure. A retained periodic error rides
+            // along as a non-fatal diagnostic.
+            persist_status_sync(
+                status_path,
+                PumpState::Complete,
+                started,
+                &summary,
+                None,
+                periodic_error.as_deref(),
+            )?;
             Ok(summary)
         }
         Err(err) => {
             // Record the failure terminally, best-effort — it must not mask the
-            // original error. A retained periodic error is folded in for context.
-            let message = match periodic_error {
-                Some(periodic) => format!(
-                    "{}; periodic status write failed: {periodic}",
-                    err.message()
-                ),
-                None => err.message().to_string(),
-            };
+            // original error. The retained periodic error is kept in its own field
+            // rather than folded into the primary cause.
             let _ = persist_status_sync(
                 status_path,
                 PumpState::Failed,
                 started,
                 &summary,
-                Some(&message),
+                Some(err.message()),
+                periodic_error.as_deref(),
             );
             Err(err)
         }
@@ -307,6 +355,7 @@ fn capture(
         started,
         &counters.snapshot(),
         None,
+        None,
     )?;
 
     let mut reader = reader;
@@ -323,24 +372,7 @@ fn capture(
             break;
         }
         let chunk = &buf[..read];
-        file.write_all(chunk).map_err(|err| {
-            TranscriptPumpError::new(format!(
-                "write transcript at {}: {err}",
-                transcript_path.display()
-            ))
-        })?;
-        counters.add_bytes(read as u64);
-
-        for &byte in chunk {
-            if byte == b'\n' {
-                counters.add_record();
-                if !line.flush(preview) {
-                    counters.add_dropped();
-                }
-            } else {
-                line.push(byte);
-            }
-        }
+        persist_chunk(&mut file, chunk, &mut line, preview, counters, transcript_path)?;
 
         if last_flush.elapsed() >= config.status_flush_interval {
             // Periodic snapshots go through the coalescing writer, never blocking
@@ -350,6 +382,7 @@ fn capture(
                     PumpState::Running,
                     started,
                     &counters.snapshot(),
+                    None,
                     None,
                 ));
             }
@@ -361,9 +394,7 @@ fn capture(
     // emitted; count it and offer its preview before completing.
     if line.has_bytes() {
         counters.add_record();
-        if !line.flush(preview) {
-            counters.add_dropped();
-        }
+        deliver_preview(&mut line, preview, counters);
     }
 
     file.flush().map_err(|err| {
@@ -374,6 +405,71 @@ fn capture(
     })?;
 
     Ok(())
+}
+
+/// Persist one read chunk to the transcript, accounting each successful partial
+/// write BEFORE the next fallible write and driving record and preview accounting
+/// only over the bytes that actually reached the transcript.
+///
+/// A single `write` may persist fewer bytes than requested; the byte counter and
+/// record/preview parsing must reflect exactly the persisted prefix, so a later
+/// write in the same chunk that fails leaves truthful counters rather than
+/// crediting bytes that never landed.
+fn persist_chunk<W: Write>(
+    writer: &mut W,
+    chunk: &[u8],
+    line: &mut PreviewLine,
+    preview: &dyn PreviewSink,
+    counters: &SharedCounters,
+    transcript_path: &Path,
+) -> Result<(), TranscriptPumpError> {
+    let mut written = 0;
+    while written < chunk.len() {
+        match writer.write(&chunk[written..]) {
+            Ok(0) => {
+                return Err(TranscriptPumpError::new(format!(
+                    "write transcript at {}: wrote zero bytes",
+                    transcript_path.display()
+                )));
+            }
+            Ok(n) => {
+                // Count the persisted prefix and parse only those bytes before the
+                // next fallible write.
+                counters.add_bytes(n as u64);
+                for &byte in &chunk[written..written + n] {
+                    if byte == b'\n' {
+                        counters.add_record();
+                        deliver_preview(line, preview, counters);
+                    } else {
+                        line.push(byte);
+                    }
+                }
+                written += n;
+            }
+            Err(ref err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => {
+                return Err(TranscriptPumpError::new(format!(
+                    "write transcript at {}: {err}",
+                    transcript_path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Offer one record's bounded preview to the console sink, accounting the loss
+/// BEFORE the call and undoing it only once delivery is confirmed.
+///
+/// Pre-accounting is what makes a sink that panics — or unwinds — safe: the
+/// record's dropped-preview count is already committed, so the caught-panic
+/// terminal status can never show a record whose preview simply vanished.
+fn deliver_preview(line: &mut PreviewLine, preview: &dyn PreviewSink, counters: &SharedCounters) {
+    let rendered = line.render_and_reset();
+    counters.add_dropped();
+    if preview.deliver(&rendered) {
+        counters.sub_dropped();
+    }
 }
 
 fn now_ms() -> u64 {
@@ -388,6 +484,7 @@ fn build_status(
     started_at_ms: u64,
     summary: &PumpSummary,
     error: Option<&str>,
+    periodic_error: Option<&str>,
 ) -> PumpStatus {
     PumpStatus {
         schema_version: PUMP_STATUS_SCHEMA_VERSION,
@@ -398,6 +495,7 @@ fn build_status(
         records: summary.records,
         dropped_console: summary.dropped_console,
         error: error.map(str::to_string),
+        periodic_error: periodic_error.map(str::to_string),
     }
 }
 
@@ -417,11 +515,12 @@ fn persist_status_sync(
     started_at_ms: u64,
     summary: &PumpSummary,
     error: Option<&str>,
+    periodic_error: Option<&str>,
 ) -> Result<(), TranscriptPumpError> {
     let Some(path) = status_path else {
         return Ok(());
     };
-    let status = build_status(state, started_at_ms, summary, error);
+    let status = build_status(state, started_at_ms, summary, error, periodic_error);
     persist_status_to(path, &status).map_err(|err| {
         TranscriptPumpError::new(format!("persist pump status at {}: {err}", path.display()))
     })
@@ -433,12 +532,14 @@ fn persist_status_sync(
 /// writes off the canonical drain thread, so a slow status filesystem never
 /// backpressures stdout capture. Its last persistence failure is retained.
 struct StatusWriter {
-    sender: SyncSender<PumpStatus>,
-    join: JoinHandle<Option<String>>,
+    /// `None` once the writer has been shut down. Dropping the sender ends the
+    /// worker loop.
+    sender: Option<SyncSender<PumpStatus>>,
+    join: Option<JoinHandle<Option<String>>>,
 }
 
 impl StatusWriter {
-    fn spawn(path: PathBuf) -> Self {
+    fn spawn(path: PathBuf) -> Result<Self, TranscriptPumpError> {
         let (sender, receiver) = sync_channel::<PumpStatus>(1);
         let join = std::thread::Builder::new()
             .name("transcript-pump-status".to_string())
@@ -451,22 +552,39 @@ impl StatusWriter {
                 }
                 last_error
             })
-            .expect("spawn transcript pump status writer");
-        Self { sender, join }
+            .map_err(|err| {
+                TranscriptPumpError::new(format!("spawn transcript pump status writer: {err}"))
+            })?;
+        Ok(Self {
+            sender: Some(sender),
+            join: Some(join),
+        })
     }
 
     fn submit(&self, status: PumpStatus) {
         // Never block the drain thread: if the writer is mid-write, drop this
         // snapshot; the next periodic tick carries fresher counters.
-        let _ = self.sender.try_send(status);
+        if let Some(sender) = &self.sender {
+            let _ = sender.try_send(status);
+        }
     }
 
     /// Close the queue, flush all pending periodic writes, and return the last
-    /// persistence failure the writer observed, if any.
-    fn shutdown(self) -> Option<String> {
-        let StatusWriter { sender, join } = self;
-        drop(sender);
-        join.join().ok().flatten()
+    /// persistence failure the writer observed, if any. Idempotent: a second call
+    /// (for example from `Drop` after an explicit shutdown) is a no-op.
+    fn shutdown(&mut self) -> Option<String> {
+        // Drop the sender first so the worker's receive loop ends, then join it.
+        self.sender = None;
+        self.join.take().and_then(|join| join.join().ok().flatten())
+    }
+}
+
+impl Drop for StatusWriter {
+    fn drop(&mut self) {
+        // On unwind (a pump panic) the writer is dropped here before the panic
+        // reaches the pump's catch handler. Settling it now guarantees no queued
+        // periodic `Running` snapshot can land after the handler writes `Failed`.
+        let _ = self.shutdown();
     }
 }
 
@@ -538,7 +656,7 @@ pub fn spawn_pump<R>(
     status_path: Option<PathBuf>,
     preview: &'static dyn PreviewSink,
     config: TranscriptPumpConfig,
-) -> PumpHandle
+) -> Result<PumpHandle, TranscriptPumpError>
 where
     R: Read + Send + 'static,
 {
@@ -562,7 +680,9 @@ where
             }))
             .unwrap_or_else(|_| {
                 let err = TranscriptPumpError::new("transcript pump panicked");
-                // Preserve the counters accumulated before the panic.
+                // Preserve the counters accumulated before the panic. The drain's
+                // status writer was already settled during unwind, so this Failed
+                // write is the last word — no queued Running can overwrite it.
                 let summary = counters_for_panic.snapshot();
                 let _ = persist_status_sync(
                     status_path.as_deref(),
@@ -570,16 +690,19 @@ where
                     started,
                     &summary,
                     Some(err.message()),
+                    None,
                 );
                 Err(err)
             });
             let _ = tx.send(outcome);
         })
-        .expect("spawn transcript pump thread");
-    PumpHandle {
+        .map_err(|err| {
+            TranscriptPumpError::new(format!("spawn transcript pump thread: {err}"))
+        })?;
+    Ok(PumpHandle {
         terminal: rx,
         join: Some(join),
-    }
+    })
 }
 
 /// The process-wide console preview sink. For this landing it synchronously
@@ -645,27 +768,33 @@ impl PreviewLine {
         self.any
     }
 
-    /// Offer the accumulated record as a bounded preview. Returns whether the
-    /// sink delivered it, then resets for the next record.
+    /// Render the accumulated record as a bounded preview and reset for the next
+    /// record.
     ///
-    /// The configured limit bounds the TOTAL rendered preview, so a truncated
-    /// preview reserves room for the marker: its payload is capped at
-    /// `limit - marker.len()` and the whole rendered preview stays within `limit`
-    /// (when the limit is at least the marker length).
-    fn flush(&mut self, preview: &dyn PreviewSink) -> bool {
-        let delivered = if self.truncated {
-            let payload_cap = self.limit.saturating_sub(TRUNCATION_MARKER.len());
-            let keep = payload_cap.min(self.buf.len());
-            let mut bounded = self.buf[..keep].to_vec();
-            bounded.extend_from_slice(TRUNCATION_MARKER);
-            preview.deliver(&bounded)
+    /// The configured limit bounds the TOTAL rendered preview for EVERY value. A
+    /// truncated preview reserves room for the marker, capping its payload at
+    /// `limit - marker.len()`. When the limit is even smaller than the marker
+    /// itself, only a bounded prefix of the marker is emitted, so the rendered
+    /// bytes never exceed the limit for any configured value — including 0 and 1.
+    fn render_and_reset(&mut self) -> Vec<u8> {
+        let rendered = if self.truncated {
+            if self.limit < TRUNCATION_MARKER.len() {
+                TRUNCATION_MARKER[..self.limit].to_vec()
+            } else {
+                let payload_cap = self.limit - TRUNCATION_MARKER.len();
+                let keep = payload_cap.min(self.buf.len());
+                let mut bounded = self.buf[..keep].to_vec();
+                bounded.extend_from_slice(TRUNCATION_MARKER);
+                bounded
+            }
         } else {
-            preview.deliver(&self.buf)
+            // A non-truncated record is capped at `limit` bytes by `push`.
+            self.buf.clone()
         };
         self.buf.clear();
         self.truncated = false;
         self.any = false;
-        delivered
+        rendered
     }
 }
 
@@ -1031,6 +1160,252 @@ mod tests {
         );
     }
 
+    /// A reader that emits one record and then returns an I/O error on the next
+    /// read, modelling a mid-stream stdout failure after real progress.
+    struct ErrorAfterOneRecord {
+        emitted: bool,
+    }
+
+    impl Read for ErrorAfterOneRecord {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.emitted {
+                return Err(std::io::Error::other("simulated stdout read failure"));
+            }
+            self.emitted = true;
+            let data = b"{\"rec\":1}\n";
+            buf[..data.len()].copy_from_slice(data);
+            Ok(data.len())
+        }
+    }
+
+    #[test]
+    fn required_status_failure_is_typed_and_preserves_counts() {
+        // B8: two facets of the required-status contract.
+        // (1) A required status that cannot be persisted fails the drain with a
+        //     typed transcript-pump error rather than a silent success.
+        // (2) When capture ends on a non-status failure AFTER real progress, the
+        //     terminal Failed status preserves the byte and record counts observed
+        //     before the failure, so the durable diagnostic is truthful.
+        let dir = tempfile::tempdir().unwrap();
+
+        // (1) Required status failure is typed.
+        let transcript = dir.path().join("t1.jsonl");
+        let status = dir.path().join("missing-dir/transcript-pump.json");
+        let sink = SaturatedSink::new();
+        let err = drain(
+            Cursor::new(b"{\"a\":1}\n".to_vec()),
+            &transcript,
+            Some(&status),
+            &sink,
+            &TranscriptPumpConfig::default(),
+        )
+        .expect_err("an unwritable required status must fail the pump");
+        assert!(
+            err.message().contains("persist pump status"),
+            "the required-status failure must be typed and named: {err}"
+        );
+
+        // (2) A mid-stream read failure ends capture; the terminal Failed status
+        //     preserves the counts observed before the failure.
+        let transcript2 = dir.path().join("t2.jsonl");
+        let status2 = status_path_for(&transcript2);
+        let sink2 = SaturatedSink::new();
+        let err2 = drain(
+            ErrorAfterOneRecord { emitted: false },
+            &transcript2,
+            Some(&status2),
+            &sink2,
+            &TranscriptPumpConfig::default(),
+        )
+        .expect_err("a mid-stream read failure fails the drain");
+        assert!(
+            err2.message().contains("read coder stdout"),
+            "the failure must name the read error: {err2}"
+        );
+        let failed: PumpStatus =
+            serde_json::from_slice(&std::fs::read(&status2).unwrap()).unwrap();
+        assert_eq!(failed.state, PumpState::Failed);
+        assert_eq!(
+            failed.records, 1,
+            "the terminal status preserves the record observed before the failure"
+        );
+        assert_eq!(
+            failed.bytes,
+            b"{\"rec\":1}\n".len() as u64,
+            "and the bytes persisted before the failure"
+        );
+        assert!(
+            failed
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("read coder stdout")
+        );
+    }
+
+    #[test]
+    fn preview_is_bounded_even_when_limit_is_below_the_marker() {
+        // The configured limit bounds the TOTAL rendered preview for EVERY value,
+        // including limits smaller than the truncation marker: 0, 1, and one below
+        // the marker length must all yield a rendered preview within the limit,
+        // while the canonical transcript still holds every byte.
+        for &limit in &[0usize, 1, TRUNCATION_MARKER.len() - 1] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("t.jsonl");
+            let big = "z".repeat(4096);
+            let input = format!("{{\"b\":\"{big}\"}}\n").into_bytes();
+            let sink = RecordingSink::new();
+            let config = TranscriptPumpConfig {
+                console_preview_limit: limit,
+                ..TranscriptPumpConfig::default()
+            };
+            drain(Cursor::new(input.clone()), &path, None, &sink, &config).unwrap();
+
+            let previews = sink.previews.lock().unwrap();
+            assert_eq!(previews.len(), 1);
+            assert!(
+                previews[0].len() <= limit,
+                "limit {limit}: the rendered preview must stay within the limit, got {}",
+                previews[0].len()
+            );
+            drop(previews);
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                input,
+                "the canonical transcript still holds every byte"
+            );
+        }
+    }
+
+    /// A transcript writer that persists a bounded budget of bytes and then errors.
+    struct WriteThenFail {
+        budget: usize,
+    }
+
+    impl Write for WriteThenFail {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.budget == 0 {
+                return Err(std::io::Error::other("simulated disk full"));
+            }
+            let n = self.budget.min(buf.len());
+            self.budget -= n;
+            Ok(n)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn partial_write_accounts_only_persisted_bytes_before_erroring() {
+        // A transcript writer that persists a bounded prefix and then fails must
+        // leave the byte and record counters reflecting exactly what reached the
+        // transcript, not the whole chunk it was handed.
+        let counters = SharedCounters::default();
+        let mut line = PreviewLine::new(DEFAULT_CONSOLE_PREVIEW_LIMIT);
+        let sink = SaturatedSink::new();
+        let chunk = b"{\"rec\":1}\n{\"rec\":2}\n"; // 20 bytes, two records
+        let mut writer = WriteThenFail { budget: 10 }; // persists exactly the first record
+        let err = persist_chunk(
+            &mut writer,
+            chunk,
+            &mut line,
+            &sink,
+            &counters,
+            Path::new("t.jsonl"),
+        )
+        .expect_err("the writer fails once its budget is exhausted");
+        assert!(err.message().contains("write transcript"), "typed: {err}");
+        let snap = counters.snapshot();
+        assert_eq!(snap.bytes, 10, "only the persisted prefix is counted");
+        assert_eq!(
+            snap.records, 1,
+            "only the record whose bytes were persisted is counted"
+        );
+    }
+
+    /// A preview sink that panics on delivery, modelling a renderer that unwinds.
+    struct PanicOnPreview;
+
+    impl PreviewSink for PanicOnPreview {
+        fn deliver(&self, _preview: &[u8]) -> bool {
+            panic!("preview sink panicked");
+        }
+    }
+
+    #[test]
+    fn panicking_preview_sink_counts_the_dropped_record() {
+        // A preview sink that panics must not silently lose a record: the loss is
+        // accounted BEFORE delivery, so the caught-panic terminal status still
+        // counts the record's preview as dropped and preserves the counters.
+        static SINK: PanicOnPreview = PanicOnPreview;
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let status = status_path_for(&transcript);
+        let mut pump = spawn_pump(
+            Cursor::new(b"{\"rec\":1}\n".to_vec()),
+            transcript.clone(),
+            Some(status.clone()),
+            &SINK,
+            TranscriptPumpConfig::default(),
+        )
+        .unwrap();
+        let outcome = pump.wait_terminal();
+        pump.join();
+
+        assert!(
+            outcome.is_err(),
+            "a panicking preview sink surfaces a typed pump failure"
+        );
+        let persisted: PumpStatus =
+            serde_json::from_slice(&std::fs::read(&status).unwrap()).unwrap();
+        assert_eq!(persisted.state, PumpState::Failed);
+        assert_eq!(
+            persisted.records, 1,
+            "the record whose bytes persisted is counted"
+        );
+        assert_eq!(
+            persisted.dropped_console, 1,
+            "its preview, lost to the panic, is accounted as dropped"
+        );
+    }
+
+    #[test]
+    fn concurrent_captures_use_independent_configs() {
+        // The resolved config travels WITH each launch, not through shared process
+        // state, so two captures running at once each honor their OWN preview
+        // limit. Under the old process-global config, one launch could overwrite
+        // the other's threshold between resolution and pump spawn.
+        let dir = tempfile::tempdir().unwrap();
+        let big = "q".repeat(4096);
+        let input = format!("{{\"x\":\"{big}\"}}\n").into_bytes();
+
+        let run_one = |limit: usize, name: &str| -> usize {
+            let path = dir.path().join(name);
+            let sink = RecordingSink::new();
+            let config = TranscriptPumpConfig {
+                console_preview_limit: limit,
+                ..TranscriptPumpConfig::default()
+            };
+            drain(Cursor::new(input.clone()), &path, None, &sink, &config).unwrap();
+            let previews = sink.previews.lock().unwrap();
+            previews[0].len()
+        };
+
+        let (a, b) = std::thread::scope(|s| {
+            let ha = s.spawn(|| run_one(64, "a.jsonl"));
+            let hb = s.spawn(|| run_one(256, "b.jsonl"));
+            (ha.join().unwrap(), hb.join().unwrap())
+        });
+
+        assert!(a <= 64, "capture A must honor its own 64-byte limit, got {a}");
+        assert!(b <= 256, "capture B must honor its own 256-byte limit, got {b}");
+        assert_ne!(
+            a, b,
+            "each concurrent capture used its own config, not a shared global"
+        );
+    }
+
     /// A reader that emits one record and then panics on the next read.
     struct PanicAfterOneRecord {
         emitted: bool,
@@ -1065,7 +1440,8 @@ mod tests {
             Some(status.clone()),
             console_preview_sink(),
             TranscriptPumpConfig::default(),
-        );
+        )
+        .unwrap();
 
         let started = Instant::now();
         let outcome = pump.wait_terminal();

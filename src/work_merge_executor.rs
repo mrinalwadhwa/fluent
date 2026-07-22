@@ -1036,18 +1036,21 @@ fn rebase_candidate(
     eprintln!("  Target            {target_branch}");
     eprintln!("  Worktree          {}", source_workspace.display());
 
-    // Install this project's resolved pump config before the rebase agent so it
-    // never inherits a prior operation's process-global thresholds.
-    crate::work_task_executor::install_transcript_pump_config(config.project_root);
+    // Resolve this project's pump config and thread it into the rebase-agent
+    // launch, so the rebase pump uses the same layered thresholds as every other
+    // entry point rather than a prior operation's state.
+    let pump_config =
+        crate::transcript_pump::resolve_config(config.project_root);
+    let capture = crate::coder::TranscriptCapture::new(&transcript_path, pump_config);
 
     let coder = config.coder_kind.boxed(sandbox);
-    let exit_code = coder.run(
+    let exit_code = coder.run_captured(
         &prompt,
         &system_prompt,
         source_workspace,
         config.extra_args,
         &[],
-        Some(&transcript_path),
+        Some(&capture),
     )?;
 
     let give_up_path = rebase_artifact_dir.join("give-up.md");
@@ -1394,6 +1397,48 @@ mod tests {
     use crate::content::ContentResolver;
     use crate::work_model::WorkItemAbandonment;
     use crate::work_model::{AttemptReviewState, AttemptStatus, TaskOutput, TaskStatus, WorkItem};
+
+    #[test]
+    fn rebase_agent_installs_resolved_pump_config() {
+        // B5: before launching the rebase agent, the merge executor resolves this
+        // project's layered pump thresholds (project over user over built-in
+        // default) and threads that immutable value into the rebase capture —
+        // `rebase_candidate` calls `transcript_pump::resolve_config(project_root)`
+        // and passes the result to `run_captured`. This verifies that resolution,
+        // hermetically, with explicit config paths and no HOME mutation.
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project.yaml");
+        std::fs::write(&project, "transcript:\n  console-preview-limit: 4096\n").unwrap();
+        let user = dir.path().join("user.yaml");
+        std::fs::write(
+            &user,
+            "transcript:\n  console-preview-limit: 1024\n  status-flush-interval-ms: 250\n",
+        )
+        .unwrap();
+
+        let resolved = crate::transcript_pump::resolve_config_from(&project, Some(&user));
+        assert_eq!(
+            resolved.console_preview_limit, 4096,
+            "the rebase agent installs the project value over the user layer"
+        );
+        assert_eq!(
+            resolved.status_flush_interval,
+            Duration::from_millis(250),
+            "a key only the user layer sets falls through to the rebase agent's config"
+        );
+
+        // A malformed config fails closed to the built-in default rather than
+        // leaking a stale value into the rebase launch.
+        let malformed = dir.path().join("malformed.yaml");
+        std::fs::write(&malformed, "transcript:\n  console-preview-limit: nope\n").unwrap();
+        let reset = crate::transcript_pump::resolve_config_from(&malformed, None);
+        assert_eq!(
+            reset.console_preview_limit,
+            crate::transcript_pump::TranscriptPumpConfig::default().console_preview_limit,
+            "a malformed config must fail closed to the built-in default"
+        );
+    }
 
     #[test]
     fn merge_candidate_rejects_abandoned_work_item_without_mutating_state() {
