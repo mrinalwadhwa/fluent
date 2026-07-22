@@ -2070,6 +2070,42 @@ fn run_task_coder(
     model: Option<&str>,
     effort: Option<&str>,
 ) -> Result<()> {
+    // Production launches the resolved coder; the `_with_coder` seam lets route
+    // tests inject a recording coder to prove the resolved capture threads through
+    // this route unchanged, mirroring the Learner and rebase launch seams.
+    run_task_coder_with_coder(
+        item,
+        attempt_id,
+        task_id,
+        project_root,
+        workspace_path,
+        prior_reviews,
+        resolver,
+        extra_args,
+        coder_kind,
+        no_sandbox,
+        model,
+        effort,
+        move |sandbox| coder_kind.boxed_with_model(sandbox, model, effort),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_task_coder_with_coder(
+    item: &WorkItem,
+    attempt_id: &str,
+    task_id: &str,
+    project_root: &Path,
+    workspace_path: &Path,
+    prior_reviews: &[PathBuf],
+    resolver: &ContentResolver,
+    extra_args: &[String],
+    coder_kind: CoderKind,
+    no_sandbox: bool,
+    model: Option<&str>,
+    effort: Option<&str>,
+    make_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
+) -> Result<()> {
     if !no_sandbox {
         os::check_prerequisites_for(coder_kind)?;
         credential::inject_credentials()?;
@@ -2172,7 +2208,7 @@ fn run_task_coder(
         }
     }
 
-    let coder = coder_kind.boxed_with_model(sandbox, model, effort);
+    let coder = make_coder(sandbox);
     let pump_config = crate::transcript_pump::resolve_config(project_root);
     let capture = transcript_path
         .as_deref()
@@ -2967,6 +3003,7 @@ fn input_artifact_readable_roots(input_artifacts: &[PathBuf]) -> Vec<PathBuf> {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_review_coder(
     item: &WorkItem,
     attempt_id: &str,
@@ -2983,6 +3020,48 @@ fn run_review_coder(
     no_sandbox: bool,
     model: Option<&str>,
     effort: Option<&str>,
+) -> Result<()> {
+    // Production launches the resolved coder; the `_with_coder` seam lets route
+    // tests inject a recording coder to prove the resolved capture threads through
+    // this route unchanged, mirroring the Learner and rebase launch seams.
+    run_review_coder_with_coder(
+        item,
+        attempt_id,
+        task_id,
+        project_root,
+        artifact_dir,
+        review_path,
+        readable_workspaces,
+        input_artifacts,
+        review_only,
+        resolver,
+        extra_args,
+        coder_kind,
+        no_sandbox,
+        model,
+        effort,
+        move |sandbox| coder_kind.boxed_with_model(sandbox, model, effort),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_review_coder_with_coder(
+    item: &WorkItem,
+    attempt_id: &str,
+    task_id: &str,
+    project_root: &Path,
+    artifact_dir: &Path,
+    review_path: &Path,
+    readable_workspaces: &[PathBuf],
+    input_artifacts: &[PathBuf],
+    review_only: bool,
+    resolver: &ContentResolver,
+    extra_args: &[String],
+    coder_kind: CoderKind,
+    no_sandbox: bool,
+    model: Option<&str>,
+    effort: Option<&str>,
+    make_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
 ) -> Result<()> {
     if !no_sandbox {
         os::check_prerequisites_for(coder_kind)?;
@@ -3037,7 +3116,7 @@ fn run_review_coder(
     capture_coder_info(coder_kind, &effective_model, artifact_dir);
 
     let transcript_path = artifact_dir.join("transcript.jsonl");
-    let coder = coder_kind.boxed_with_model(sandbox, model, effort);
+    let coder = make_coder(sandbox);
     let pump_config = crate::transcript_pump::resolve_config(project_root);
     let capture = crate::coder::TranscriptCapture::with_config(&transcript_path, pump_config);
     let exit_code = coder.run_captured(
@@ -4185,6 +4264,153 @@ mod tests {
         assert_eq!(
             path, &transcript_path,
             "the capture must carry the learner transcript path"
+        );
+        assert_eq!(
+            *limit, 7777,
+            "the resolved project pump threshold must be threaded verbatim, not defaulted"
+        );
+    }
+
+    #[test]
+    fn writer_launch_threads_resolved_capture() {
+        // B8: the Writer launch route (`run_task_coder`) threads the project's
+        // resolved, immutable TranscriptCapture into run_captured — a distinctive
+        // project console-preview-limit must arrive at the coder verbatim, and the
+        // capture must carry the write Task's transcript path. This fails if the route
+        // drops, defaults, or re-resolves the capture.
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let config_dir = project_root.join(".fluent");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            config_dir.join("config.yaml"),
+            "transcript:\n  console-preview-limit: 7777\n",
+        )
+        .unwrap();
+
+        // A workspace whose expertise INDEX already exists, so the route skips seeding
+        // the project model (which would otherwise launch a real coder).
+        let workspace = project_root.join("workspace");
+        fs::create_dir_all(workspace.join(".fluent/expertise")).unwrap();
+        fs::write(workspace.join(".fluent/expertise/INDEX.md"), "# Index\n").unwrap();
+
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Writer capture".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            post_merge_review_fix_depth: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        let artifact_area = item.attempts[0].tasks[0]
+            .artifact_area
+            .as_ref()
+            .unwrap()
+            .path
+            .clone();
+        let expected_transcript = project_root.join(&artifact_area).join("transcript.jsonl");
+
+        let resolver = ContentResolver::new(Some(project_root));
+        let recorded = Arc::new(Mutex::new(None));
+        let recorded_for_coder = Arc::clone(&recorded);
+        run_task_coder_with_coder(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            project_root,
+            &workspace,
+            &[],
+            &resolver,
+            &[],
+            CoderKind::Codex,
+            true,
+            None,
+            None,
+            move |_sandbox| {
+                Box::new(RecordingLearnerCoder {
+                    recorded: recorded_for_coder,
+                })
+            },
+        )
+        .expect("the writer launch runs the injected coder");
+
+        let recorded = recorded.lock().unwrap();
+        let (path, limit) = recorded
+            .as_ref()
+            .expect("the writer route must pass a capture to run_captured, not drop it");
+        assert_eq!(
+            path, &expected_transcript,
+            "the capture must carry the write Task's transcript path"
+        );
+        assert_eq!(
+            *limit, 7777,
+            "the resolved project pump threshold must be threaded verbatim, not defaulted"
+        );
+    }
+
+    #[test]
+    fn reviewer_launch_threads_resolved_capture() {
+        // B8: the Reviewer launch route (`run_review_coder`) threads the project's
+        // resolved, immutable TranscriptCapture into run_captured — the distinctive
+        // project console-preview-limit arrives verbatim and the capture carries the
+        // artifact-area transcript path. This fails if the route drops, defaults, or
+        // re-resolves the capture.
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let config_dir = project_root.join(".fluent");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            config_dir.join("config.yaml"),
+            "transcript:\n  console-preview-limit: 7777\n",
+        )
+        .unwrap();
+
+        let item = review_item_with_role("architecture");
+        let review_task_id = item.attempts[0].tasks[1].id.clone();
+
+        let artifact_dir = project_root.join("artifacts");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        let review_path = artifact_dir.join("review.md");
+        let expected_transcript = artifact_dir.join("transcript.jsonl");
+
+        let resolver = ContentResolver::new(Some(project_root));
+        let recorded = Arc::new(Mutex::new(None));
+        let recorded_for_coder = Arc::clone(&recorded);
+        run_review_coder_with_coder(
+            &item,
+            "attempt-1",
+            &review_task_id,
+            project_root,
+            &artifact_dir,
+            &review_path,
+            &[],
+            &[],
+            false,
+            &resolver,
+            &[],
+            CoderKind::Codex,
+            true,
+            None,
+            None,
+            move |_sandbox| {
+                Box::new(RecordingLearnerCoder {
+                    recorded: recorded_for_coder,
+                })
+            },
+        )
+        .expect("the reviewer launch runs the injected coder");
+
+        let recorded = recorded.lock().unwrap();
+        let (path, limit) = recorded
+            .as_ref()
+            .expect("the reviewer route must pass a capture to run_captured, not drop it");
+        assert_eq!(
+            path, &expected_transcript,
+            "the capture must carry the reviewer artifact transcript path"
         );
         assert_eq!(
             *limit, 7777,
