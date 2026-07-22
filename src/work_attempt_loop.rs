@@ -676,8 +676,23 @@ fn reject_terminal_attempt(attempt: &Attempt) -> Result<TerminalCheck> {
     match attempt.status {
         AttemptStatus::Failed => bail!("Attempt is failed and cannot be advanced"),
         AttemptStatus::NeedsUser => match attempt.pause_kind {
-            Some(PauseKind::Auth) => Ok(TerminalCheck::Reopen),
-            Some(PauseKind::TranscriptPump) => Ok(TerminalCheck::Reopen),
+            Some(PauseKind::Auth) | Some(PauseKind::TranscriptPump) => {
+                // Resume only a cleanly resumable Attempt: a hard-Failed or
+                // still-live peer Task means resuming could discard a hard
+                // failure or race a running Task. Such a mixed state needs the
+                // operator, not an automatic reopen.
+                if attempt
+                    .tasks
+                    .iter()
+                    .any(|t| matches!(t.status, TaskStatus::Failed | TaskStatus::Executing))
+                {
+                    bail!(
+                        "Attempt paused on recoverable infrastructure but also has a \
+                         hard-failed or still-running Task; resolve it before re-running."
+                    );
+                }
+                Ok(TerminalCheck::Reopen)
+            }
             Some(PauseKind::Uncertain) => bail!(
                 "Attempt is paused with uncertain reviews. \
                  Resolve the uncertain verdicts and re-run; \
@@ -4128,7 +4143,7 @@ mod tests {
                 Task {
                     id: "attempt-1-review-tests".to_string(),
                     kind: TaskKind::Review,
-                    status: TaskStatus::Failed,
+                    status: TaskStatus::NeedsUser,
                     role: "tests".to_string(),
                     instructions: None,
                     work_item_id: "work-1".to_string(),
@@ -4246,7 +4261,7 @@ mod tests {
                 Task {
                     id: "attempt-1-review-tests".to_string(),
                     kind: TaskKind::Review,
-                    status: TaskStatus::Failed,
+                    status: TaskStatus::NeedsUser,
                     role: "tests".to_string(),
                     instructions: None,
                     work_item_id: "work-1".to_string(),
@@ -4308,7 +4323,7 @@ mod tests {
             tasks: vec![Task {
                 id: "attempt-1-write-1".to_string(),
                 kind: TaskKind::Write,
-                status: TaskStatus::Failed,
+                status: TaskStatus::NeedsUser,
                 role: "author".to_string(),
                 instructions: None,
                 work_item_id: "work-1".to_string(),
@@ -4346,6 +4361,53 @@ mod tests {
             TaskStatus::Planned,
             "the pump-failed write task resets to Planned to retry"
         );
+    }
+
+    #[test]
+    fn transcript_pump_pause_with_mixed_state_is_not_auto_resumed() {
+        // A resumable pause that also carries a hard-Failed or still-live peer
+        // Task is a mixed state: resuming could discard a hard failure or race a
+        // running Task, so it must be rejected for the operator rather than
+        // reopened automatically.
+        let base = |id: &str, status: TaskStatus| Task {
+            id: id.to_string(),
+            kind: TaskKind::Review,
+            status,
+            role: "peer".to_string(),
+            instructions: None,
+            work_item_id: "work-1".to_string(),
+            attempt_id: Some("attempt-1".to_string()),
+            workspace_access: WorkspaceAccess {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            },
+            artifact_area: None,
+            review_context: None,
+            input_artifacts: Vec::new(),
+            depends_on: None,
+            output: None,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+        };
+
+        for peer_status in [TaskStatus::Failed, TaskStatus::Executing] {
+            let attempt = Attempt {
+                id: "attempt-1".to_string(),
+                status: AttemptStatus::NeedsUser,
+                pause_kind: Some(PauseKind::TranscriptPump),
+                tasks: vec![
+                    base("attempt-1-write-1", TaskStatus::NeedsUser),
+                    base("attempt-1-peer", peer_status.clone()),
+                ],
+                completed_at: Some("2026-07-21T12:00:00Z".to_string()),
+                ..Default::default()
+            };
+            assert!(
+                reject_terminal_attempt(&attempt).is_err(),
+                "a mixed {peer_status:?} peer must not auto-resume a pump pause"
+            );
+        }
     }
 
     #[test]

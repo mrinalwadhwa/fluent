@@ -2686,16 +2686,17 @@ pub fn transition_attempt(
 }
 
 /// Reopen a resumably-paused Attempt so a supported resume can retry. Only the
-/// Tasks that ended terminally on the resumable pause (`Failed`/`NeedsUser`) are
-/// replanned and have their terminal timestamp cleared; `Complete` Tasks and
-/// still-live `Executing` Tasks are left untouched, so resume never discards a
-/// completed peer or replans a Task that is still running.
+/// Tasks that ended on the resumable pause — durably marked `NeedsUser` — are
+/// replanned and have their terminal timestamp cleared. `Complete` Tasks, hard
+/// `Failed` Tasks, and still-live `Executing` Tasks are left untouched, so resume
+/// never discards a completed peer, silently retries a hard failure, or replans a
+/// Task that is still running.
 pub fn reopen_attempt(attempt: &mut Attempt) {
     attempt.status = AttemptStatus::Planned;
     attempt.pause_kind = None;
     attempt.completed_at = None;
     for task in &mut attempt.tasks {
-        if matches!(task.status, TaskStatus::Failed | TaskStatus::NeedsUser) {
+        if task.status == TaskStatus::NeedsUser {
             task.status = TaskStatus::Planned;
             task.completed_at = None;
         }
@@ -7045,9 +7046,10 @@ mod tests {
     }
 
     #[test]
-    fn reopen_attempt_replans_only_terminally_failed_tasks() {
-        // Reopen resets Failed/NeedsUser Tasks but leaves Complete and still-live
-        // Executing Tasks untouched.
+    fn reopen_attempt_replans_only_pause_failed_tasks() {
+        // Reopen resets only the resumable pause-failed Task (durably NeedsUser),
+        // leaving Complete peers, hard Failed Tasks, and still-live Executing
+        // Tasks untouched.
         let mut a = attempt_in(AttemptStatus::NeedsUser, Some(PauseKind::TranscriptPump));
         let task = |id: &str, status: TaskStatus| Task {
             id: id.to_string(),
@@ -7072,7 +7074,8 @@ mod tests {
         };
         a.tasks = vec![
             task("complete", TaskStatus::Complete),
-            task("failed", TaskStatus::Failed),
+            task("pause-failed", TaskStatus::NeedsUser),
+            task("hard-failed", TaskStatus::Failed),
             task("live", TaskStatus::Executing),
         ];
 
@@ -7084,7 +7087,7 @@ mod tests {
         assert_eq!(
             a.tasks[1].status,
             TaskStatus::Planned,
-            "the pump-failed task replans"
+            "the pause-failed task replans"
         );
         assert!(
             a.tasks[1].completed_at.is_none(),
@@ -7092,6 +7095,11 @@ mod tests {
         );
         assert_eq!(
             a.tasks[2].status,
+            TaskStatus::Failed,
+            "a hard-failed task is not silently retried"
+        );
+        assert_eq!(
+            a.tasks[3].status,
             TaskStatus::Executing,
             "a still-live task is not replanned"
         );
@@ -7504,7 +7512,9 @@ mod tests {
         item.add_review_tasks("attempt-1", &["tests"]).unwrap();
         let attempt = &mut item.attempts[0];
         attempt.tasks[1].status = TaskStatus::Complete;
-        attempt.tasks[2].status = TaskStatus::Failed;
+        // A resumable auth failure marks the Task NeedsUser, distinct from a hard
+        // Failed; reopen replans exactly these.
+        attempt.tasks[2].status = TaskStatus::NeedsUser;
 
         suspend_attempt(attempt, PauseKind::Auth);
         assert_eq!(attempt.status, AttemptStatus::NeedsUser);
@@ -7528,7 +7538,7 @@ mod tests {
         assert_eq!(
             attempt.tasks[2].status,
             TaskStatus::Planned,
-            "failed review resets to planned"
+            "the pause-failed review resets to planned"
         );
     }
 

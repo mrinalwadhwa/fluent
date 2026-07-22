@@ -157,7 +157,13 @@ fn run_write_task(
     let _lease = crate::lease::acquire(&lock_path)
         .with_context(|| format!("Failed to acquire lease for Task {:?}", config.task_id))?;
 
-    item.attempts[attempt_index].status = AttemptStatus::Executing;
+    // Route the start through the precedence boundary so a Task starting after a
+    // peer already took the Attempt terminal cannot revive it to Executing.
+    crate::work_model::transition_attempt(
+        &mut item.attempts[attempt_index],
+        AttemptStatus::Executing,
+        None,
+    );
     item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Executing;
     crate::work_model::mark_task_started(&mut item.attempts[attempt_index].tasks[task_index]);
     item.attempts[attempt_index].tasks[task_index].output = None;
@@ -396,7 +402,13 @@ fn run_review_task(
             );
         }
 
-        item.attempts[attempt_index].status = AttemptStatus::Reviewing;
+        // Route the start through the precedence boundary so a reviewer starting
+        // after a peer already took the Attempt terminal cannot revive it.
+        crate::work_model::transition_attempt(
+            &mut item.attempts[attempt_index],
+            AttemptStatus::Reviewing,
+            None,
+        );
         item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Executing;
         crate::work_model::mark_task_started(&mut item.attempts[attempt_index].tasks[task_index]);
         item.attempts[attempt_index].tasks[task_index].output = None;
@@ -650,7 +662,13 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         let artifact_dir = resolve_managed_artifact_area_path(config.project_root, &artifact_area)?;
         fs::create_dir_all(&artifact_dir)?;
 
-        item.attempts[attempt_index].status = AttemptStatus::Reviewing;
+        // Route the start through the precedence boundary so a reviewer starting
+        // after a peer already took the Attempt terminal cannot revive it.
+        crate::work_model::transition_attempt(
+            &mut item.attempts[attempt_index],
+            AttemptStatus::Reviewing,
+            None,
+        );
         item.attempts[attempt_index].tasks[task_index].status = TaskStatus::Executing;
         crate::work_model::mark_task_started(&mut item.attempts[attempt_index].tasks[task_index]);
         item.attempts[attempt_index].tasks[task_index].output = None;
@@ -1069,9 +1087,16 @@ fn mark_task_failed_attempt_needs_user(
     let mut item = read_work_item_or_not_found(store, work_item_id)?;
     if let Some((attempt_index, task_index)) = find_attempt_task_indexes(&item, attempt_id, task_id)
     {
+        // A resumable Auth/transcript failure gets durable `NeedsUser` Task state,
+        // distinct from a hard `Failed`, so a supported resume can reopen exactly
+        // that Task and reject a mixed hard-Failed/still-live Attempt.
+        let task_terminal = match failure {
+            TaskFailure::Auth(_) | TaskFailure::TranscriptPump(_) => TaskStatus::NeedsUser,
+            TaskFailure::Generic => TaskStatus::Failed,
+        };
         crate::work_model::set_task_terminal(
             &mut item.attempts[attempt_index].tasks[task_index],
-            TaskStatus::Failed,
+            task_terminal,
         );
         let pause_kind = match failure {
             TaskFailure::Auth(_) => crate::work_model::PauseKind::Auth,
@@ -3196,11 +3221,22 @@ fn resolve_or_persist_write_baseline(
         .transpose()?;
 
     if let Some(path) = baseline_path.as_ref() {
-        if let Ok(existing) = fs::read_to_string(path) {
+        if path.exists() {
+            // The sidecar exists: it MUST parse, or fail closed. Silently
+            // recomputing HEAD here would fold a commit made before a late
+            // failure into the baseline on resume.
+            let existing = fs::read_to_string(path).with_context(|| {
+                format!("read persisted write baseline at {}", path.display())
+            })?;
             let trimmed = existing.trim();
-            if !trimmed.is_empty() {
-                return Ok(trimmed.to_string());
+            if trimmed.is_empty() {
+                bail!(
+                    "persisted write baseline at {} is empty; refusing to recompute \
+                     from HEAD and risk adopting a post-commit baseline",
+                    path.display()
+                );
             }
+            return Ok(trimmed.to_string());
         }
     }
 
@@ -3209,7 +3245,8 @@ fn resolve_or_persist_write_baseline(
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, &baseline)?;
+        fs::write(path, &baseline)
+            .with_context(|| format!("persist write baseline at {}", path.display()))?;
     }
     Ok(baseline)
 }
@@ -3342,6 +3379,68 @@ mod tests {
         assert!(
             commits_ahead(&workspace, &resumed).unwrap() >= 1,
             "the pre-failure commit must count as produced work on resume"
+        );
+    }
+
+    #[test]
+    fn write_baseline_fails_closed_on_corrupt_sidecar() {
+        // A present-but-unreadable baseline sidecar must fail closed, never
+        // silently recompute HEAD and risk adopting a post-commit baseline.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let workspace = project_root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.email", "t@t.co"][..],
+            &["config", "user.name", "t"][..],
+            &["commit", "-q", "--allow-empty", "-m", "baseline"][..],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(&workspace)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+
+        let area = ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1";
+        let task = crate::work_model::Task {
+            id: "attempt-1-write-1".to_string(),
+            kind: crate::work_model::TaskKind::Write,
+            status: TaskStatus::Planned,
+            role: "author".to_string(),
+            instructions: None,
+            work_item_id: "work-1".to_string(),
+            attempt_id: Some("attempt-1".to_string()),
+            workspace_access: crate::work_model::WorkspaceAccess {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            },
+            artifact_area: Some(crate::work_model::TaskArtifactArea {
+                path: area.to_string(),
+            }),
+            review_context: None,
+            input_artifacts: Vec::new(),
+            depends_on: None,
+            output: None,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+        };
+
+        // An empty sidecar (a corruption we can create portably) must fail closed.
+        let sidecar = project_root.join(area).join("write-baseline-commit");
+        fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        fs::write(&sidecar, "").unwrap();
+
+        let err = resolve_or_persist_write_baseline(project_root, &task, &workspace)
+            .expect_err("an empty baseline sidecar must fail closed");
+        assert!(
+            err.to_string().contains("empty"),
+            "the failure must name the corrupt baseline: {err}"
         );
     }
 
@@ -5228,8 +5327,8 @@ mod tests {
         assert_eq!(attempt.status, crate::work_model::AttemptStatus::NeedsUser);
         assert_eq!(
             attempt.tasks[0].status,
-            TaskStatus::Failed,
-            "the failed coder task must be terminal"
+            TaskStatus::NeedsUser,
+            "a resumable pump failure marks the Task NeedsUser, distinct from a hard Failed"
         );
 
         let handoff = attempt

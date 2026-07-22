@@ -2501,8 +2501,8 @@ exit 0
     )
     .unwrap();
     assert_eq!(
-        task_json["status"], "failed",
-        "the pump-failed write task must be terminal"
+        task_json["status"], "needs-user",
+        "a resumable pump failure marks the Task NeedsUser, not a hard Failed"
     );
 
     // The pump status is the durable diagnostic that named the transport fault.
@@ -2541,6 +2541,143 @@ exit 0
     assert!(
         !fs::read(&transcript).unwrap().is_empty(),
         "the retried transcript must hold the coder's output"
+    );
+}
+
+#[test]
+fn transcript_pump_late_failure_after_commit_resumes_without_second_commit() {
+    // The commit-before-late-failure contract. The writer commits its output and
+    // THEN fails on a transcript-pump infrastructure error (a 401 whose phase
+    // preservation cannot complete). On resume, the persisted baseline keeps the
+    // already-produced commit as the Task output, so the resumed coder need not
+    // manufacture a second commit, and the Task output records the original
+    // pre-write baseline. The late failure is not charged to the generic retry
+    // budget: exactly one writer invocation runs before the pause.
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin");
+    let counter = tmp.path().join("writer-count");
+    let mock = r##"#!/bin/bash
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
+done
+if printf '%s' "$PROMPT" | grep -q "seeding fluent"; then exit 0; fi
+# The Learner runs in the attempt worktree too; let it fail rather than count as
+# a writer invocation. A failed Learner still yields the Merge Candidate.
+if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then exit 1; fi
+case "$PWD" in
+  */work-*-work-1-attempt-1)
+    C="__COUNTER__"
+    n=$(cat "$C" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$C"
+    if [ "$n" -eq 1 ]; then
+      printf 'task output\n' > task-output.txt
+      git add task-output.txt
+      git commit -m "Add task output" >/dev/null 2>&1
+      echo '{"type":"result","api_error_status":401,"request_id":"r"}'
+      exit 1
+    fi
+    printf '{"type":"result","subtype":"success"}\n'
+    exit 0
+    ;;
+  *)
+    printf 'Verdict: pass\n\nok.\n' > review.md
+    ;;
+esac
+exit 0
+"##
+    .replace("__COUNTER__", counter.to_str().unwrap());
+    write_mock_claude(&bin_dir, &mock);
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Late pump"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    // Occupy the write transcript's phase-0 slot with a directory so the 401's
+    // phase preservation fails late — after the coder has already committed.
+    let artifact_dir =
+        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1");
+    fs::create_dir_all(artifact_dir.join("transcript.0.jsonl")).unwrap();
+
+    // First run: commit, then late pump failure. A generous retry budget must
+    // not be spent.
+    let _ = fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_NO_UPDATE_CHECK", "1")
+        .env("FLUENT_MAX_TASK_RETRIES", "3")
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(&counter).unwrap().trim(),
+        "1",
+        "the late pump failure must not be retried: exactly one writer invocation"
+    );
+    let attempt_json: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(main_dir.join(".fluent/work/attempts/work-1/attempt-1.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        attempt_json["pause_kind"], "transcript-pump",
+        "a late pump failure must record a resumable transcript-pump pause: {attempt_json}"
+    );
+
+    let baseline = fs::read_to_string(artifact_dir.join("write-baseline-commit"))
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // Fix the transport and resume.
+    fs::remove_dir_all(artifact_dir.join("transcript.0.jsonl")).unwrap();
+    let resumed = fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_NO_UPDATE_CHECK", "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&resumed.stdout);
+    let stderr = String::from_utf8_lossy(&resumed.stderr);
+    assert!(
+        resumed.status.success(),
+        "resume must succeed without a second commit: stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stdout.contains("Merge Candidate attempt-1-merge-candidate is ready"),
+        "resume must drive to a Merge Candidate; got:\n{stdout}"
+    );
+
+    // The resumed writer ran exactly once more and did NOT commit again.
+    assert_eq!(
+        fs::read_to_string(&counter).unwrap().trim(),
+        "2",
+        "resume runs the writer once more"
+    );
+
+    // The completed Task adopted the ORIGINAL baseline and the first run's commit
+    // as its output — no artificial second commit.
+    let task_json: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(
+            main_dir.join(".fluent/work/tasks/work-1/attempt-1/attempt-1-write-1.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(task_json["status"], "complete");
+    assert_eq!(
+        task_json["output"]["base_commit"], baseline,
+        "the resumed Task output must keep the original pre-write baseline"
     );
 }
 
