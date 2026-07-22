@@ -975,7 +975,15 @@ fn finalize_learning(
                     format!("learner produced a handoff but persisting it failed: {err:#}"),
                     kind,
                 ));
-                store.write_work_item(item)?;
+                if let Err(store_err) = store.write_work_item(item) {
+                    // The handoff-write failure is the primary fault. A failure to
+                    // persist the terminal learning record is composed as a SECONDARY
+                    // so the typed primary stays discoverable rather than being masked
+                    // by the store error.
+                    return Err(err.context(format!(
+                        "additionally failed to persist the terminal learning record: {store_err:#}"
+                    )));
+                }
             }
         },
         Err(err) => {
@@ -989,7 +997,14 @@ fn finalize_learning(
                 format!("{err:#}"),
                 kind,
             ));
-            store.write_work_item(item)?;
+            if let Err(store_err) = store.write_work_item(item) {
+                // The coder/confinement/handoff failure is the PRIMARY. A failure to
+                // persist the terminal learning record is composed as a SECONDARY so
+                // the typed primary is never masked by the store error.
+                return Err(err.context(format!(
+                    "additionally failed to persist the terminal learning record: {store_err:#}"
+                )));
+            }
         }
     }
     Ok(())
@@ -4281,6 +4296,48 @@ mod tests {
         assert!(
             diagnostic.contains("handoff") && diagnostic.contains("persisting it failed"),
             "the composite diagnostic preserves that the handoff write failed: {diagnostic}"
+        );
+    }
+
+    #[test]
+    fn learner_store_write_failure_preserves_primary_over_secondary() {
+        // B7: when the Learner fails with a typed coder/confinement/handoff PRIMARY
+        // and the terminal learning-record store write ALSO fails, the reducer
+        // returns the primary as the cause with the store failure composed as a
+        // SECONDARY — the typed primary is never masked behind the store error.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, _project_root, _workspace, _base) =
+            make_learner_passing_fixture(tmp.path(), 1);
+        let mut item = store.read_work_item("work-1").unwrap();
+
+        // Obstruct the durable work-item write deterministically: replace its file
+        // with a directory so `write_work_item` fails when it reads the current
+        // record.
+        let item_path = store.work_item_path("work-1").unwrap();
+        fs::remove_file(&item_path).unwrap();
+        fs::create_dir_all(&item_path).unwrap();
+
+        // A typed transcript-pump error stands in for the coder/confinement/handoff
+        // failure that must survive as the returned cause.
+        let primary = anyhow::Error::new(crate::transcript_pump::TranscriptPumpError::new(
+            "coder transcript pump failed",
+        ));
+        let err = finalize_learning(&store, &mut item, 0, 1, Err(primary), |_| {
+            unreachable!("the handoff is never written on a learner failure")
+        })
+        .expect_err("a terminal store-write failure surfaces as an error");
+
+        // The typed primary is preserved as the cause, still downcastable for the
+        // pause-kind classification.
+        assert!(
+            err.downcast_ref::<crate::transcript_pump::TranscriptPumpError>()
+                .is_some(),
+            "the typed primary is preserved as the cause: {err:#}"
+        );
+        // The store failure is composed as a secondary, never the returned cause.
+        assert!(
+            format!("{err:#}").contains("failed to persist the terminal learning record"),
+            "the store failure is composed as a secondary: {err:#}"
         );
     }
 
