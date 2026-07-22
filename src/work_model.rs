@@ -1595,6 +1595,23 @@ pub struct AttemptLearning {
     /// same record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_failure: Option<String>,
+    /// The typed classification of the last failure, so a transcript-pump
+    /// infrastructure failure stays discoverable rather than flattened to a string.
+    /// Absent on records written before this field existed (backward-compatible).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<LearningFailureKind>,
+}
+
+/// The typed classification of a failed Learner run, retained on the durable
+/// learning record so a transcript-pump primary is discoverable through recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LearningFailureKind {
+    /// A transcript-pump infrastructure failure — the console/transcript transport,
+    /// not the coder's learning, is the fault.
+    TranscriptPump,
+    /// Any other persistent Learner failure.
+    Generic,
 }
 
 impl AttemptLearning {
@@ -1605,16 +1622,27 @@ impl AttemptLearning {
             runs,
             handoff: Some(handoff),
             last_failure: None,
+            failure_kind: None,
         }
     }
 
     /// A failed, retryable learning record carrying its diagnostic.
     pub fn failed(runs: u32, reason: impl Into<String>) -> Self {
+        Self::failed_with_kind(runs, reason, LearningFailureKind::Generic)
+    }
+
+    /// A failed learning record carrying its diagnostic and typed classification.
+    pub fn failed_with_kind(
+        runs: u32,
+        reason: impl Into<String>,
+        kind: LearningFailureKind,
+    ) -> Self {
         Self {
             status: LearningStatus::Failed,
             runs,
             handoff: None,
             last_failure: Some(reason.into()),
+            failure_kind: Some(kind),
         }
     }
 

@@ -917,10 +917,28 @@ fn run_learner_step(
                 Some(AttemptLearning::succeeded(runs, handoff_ref));
         }
         Err(err) => {
-            eprintln!("  Warning: learner failed, continuing without handoff: {err}");
+            eprintln!("  Warning: learner failed, continuing without handoff: {err:#}");
+            // Preserve the typed transcript-pump classification on the durable
+            // learning record rather than flattening it to a bare string, so a
+            // transcript-pump primary stays discoverable through recovery.
+            let kind = classify_learning_failure(&err);
             item.attempts[attempt_index].learning =
-                Some(AttemptLearning::failed(runs, err.to_string()));
+                Some(AttemptLearning::failed_with_kind(runs, format!("{err:#}"), kind));
         }
+    }
+}
+
+/// Classify a failed Learner run for the durable learning record: a typed
+/// transcript-pump infrastructure failure anywhere in the error chain is preserved
+/// as such rather than collapsed to a generic string.
+fn classify_learning_failure(err: &anyhow::Error) -> crate::work_model::LearningFailureKind {
+    if err
+        .chain()
+        .any(|cause| cause.is::<crate::transcript_pump::TranscriptPumpError>())
+    {
+        crate::work_model::LearningFailureKind::TranscriptPump
+    } else {
+        crate::work_model::LearningFailureKind::Generic
     }
 }
 
@@ -2384,7 +2402,52 @@ mod tests {
     use crate::content::ContentResolver;
     use crate::work_model::AttemptKind;
     use crate::work_model::WorkItemAbandonment;
-    use crate::work_model::{Attempt, CoderMapping, TaskArtifactArea, WorkspaceAccess};
+    use crate::work_model::{Attempt, CoderMapping, LearningFailureKind, TaskArtifactArea, WorkspaceAccess};
+
+    #[test]
+    fn learner_preserves_typed_pump_failure() {
+        // B7: a Learner run that fails with a typed transcript-pump error — even
+        // wrapped in context along the way — records a typed TranscriptPump failure
+        // kind on the durable learning record, so the primary stays discoverable
+        // through recovery rather than being flattened to a bare string.
+        let pump = crate::transcript_pump::TranscriptPumpError::new("write transcript: disk full");
+        let wrapped =
+            anyhow::Error::new(pump).context("learner coder failed while producing its draft");
+        assert_eq!(
+            classify_learning_failure(&wrapped),
+            LearningFailureKind::TranscriptPump,
+            "a typed pump failure in the chain is preserved as TranscriptPump"
+        );
+
+        // The durable record carries the typed kind alongside the diagnostic.
+        let learning = crate::work_model::AttemptLearning::failed_with_kind(
+            1,
+            format!("{wrapped:#}"),
+            classify_learning_failure(&wrapped),
+        );
+        assert_eq!(learning.failure_kind, Some(LearningFailureKind::TranscriptPump));
+        assert!(learning.last_failure.unwrap().contains("disk full"));
+
+        // A generic error stays Generic.
+        let generic = anyhow::anyhow!("some other learner failure");
+        assert_eq!(
+            classify_learning_failure(&generic),
+            LearningFailureKind::Generic
+        );
+    }
+
+    #[test]
+    fn learning_record_without_failure_kind_deserializes_backward_compatibly() {
+        // The new typed failure_kind is backward-compatible: a record persisted
+        // before it existed (no `failure_kind` field) still deserializes, with the
+        // kind absent.
+        let legacy = r#"{"status":"failed","runs":2,"last_failure":"old failure"}"#;
+        let learning: crate::work_model::AttemptLearning =
+            serde_json::from_str(legacy).unwrap();
+        assert!(learning.is_failed());
+        assert_eq!(learning.runs, 2);
+        assert_eq!(learning.failure_kind, None, "absent on legacy records");
+    }
 
     /// Acquire a Task lease, retrying to absorb macOS flock release-visibility
     /// latency under the thread-per-test harness.
