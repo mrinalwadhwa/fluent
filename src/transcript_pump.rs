@@ -88,17 +88,6 @@ pub trait PreviewSink: Send + Sync {
     fn deliver(&self, preview: &[u8]) -> bool;
 }
 
-/// A sink that discards every preview but reports success. Used where the pump
-/// runs without a live console and previews are intentionally unwanted, so the
-/// discard is not accounted as a dropped preview.
-pub struct DiscardPreviews;
-
-impl PreviewSink for DiscardPreviews {
-    fn deliver(&self, _preview: &[u8]) -> bool {
-        true
-    }
-}
-
 /// A typed transcript-pump infrastructure failure. Coder supervision converts
 /// this into a terminal error that bypasses the generic coder retry budget, so a
 /// capture failure never masquerades as a retryable coder error.

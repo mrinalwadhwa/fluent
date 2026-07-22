@@ -28,7 +28,10 @@ pub mod review;
 pub mod review_diff_command;
 pub mod review_only_worktree;
 pub mod transcript;
-pub mod transcript_pump;
+// Crate-private: the byte pump, its typed `TranscriptPumpError`, and the pump
+// handle are used only by coder supervision, retry classification, and config
+// resolution inside this crate. They are deliberately not part of the public API.
+pub(crate) mod transcript_pump;
 pub mod version;
 pub mod work_attempt_loop;
 pub mod work_merge_executor;
