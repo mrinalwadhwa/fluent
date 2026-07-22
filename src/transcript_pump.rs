@@ -857,6 +857,12 @@ struct CoordinatorInner {
     terminal: Option<TerminalStatusSpec>,
     /// Exact accounting of every submission.
     diagnostics: StatusTransportDiagnostics,
+    /// The category of the write the worker is currently attempting, set before
+    /// each `store.write` and cleared once its result is recorded. If the worker
+    /// unwinds *inside* `store.write`, this remains set, so reconciliation accounts
+    /// the attempted write truthfully as a write failure rather than sweeping it
+    /// into the disconnected bucket (which would hide that the store was reached).
+    active_write: Option<WriteKind>,
     /// The last best-effort *periodic* write failure, kept distinct from required
     /// and terminal failures so a required failure never masquerades as periodic.
     periodic_error: Option<String>,
@@ -890,8 +896,16 @@ impl SharedStatusState {
         Work::Idle
     }
 
+    /// Mark that the worker is about to attempt a write of `kind`. Paired with
+    /// `record_write`, which clears it. A still-set marker means the worker
+    /// unwound inside `store.write`.
+    fn begin_write(&self, kind: WriteKind) {
+        self.inner.lock().unwrap().active_write = Some(kind);
+    }
+
     fn record_write(&self, result: &Result<(), String>, kind: WriteKind) {
         let mut inner = self.inner.lock().unwrap();
+        inner.active_write = None;
         match result {
             Ok(()) => inner.diagnostics.written += 1,
             Err(err) => {
@@ -935,6 +949,18 @@ impl SharedStatusState {
     /// still-uncategorized submission as disconnected so the balance invariant holds.
     fn reconcile_abandoned(&self) {
         let mut inner = self.inner.lock().unwrap();
+        // A write that was in flight when the worker unwound is accounted truthfully
+        // as a write failure carrying the panic as its error — never swept into the
+        // disconnected bucket, which would falsely report the store was never
+        // attempted. A periodic write also latches into `periodic_error`.
+        if let Some(kind) = inner.active_write.take() {
+            let bounded = bound_error(STATUS_WORKER_PANIC);
+            inner.diagnostics.write_failures += 1;
+            inner.diagnostics.last_error = Some(bounded.clone());
+            if kind == WriteKind::Periodic {
+                inner.periodic_error = Some(bounded);
+            }
+        }
         while let Some(cmd) = inner.required.pop_front() {
             let _ = cmd
                 .ack
@@ -977,6 +1003,7 @@ impl StatusCoordinator {
                 required: VecDeque::new(),
                 terminal: None,
                 diagnostics: StatusTransportDiagnostics::default(),
+                active_write: None,
                 periodic_error: None,
                 settlement_error: None,
                 sealed: false,
@@ -1170,12 +1197,14 @@ fn run_status_worker(
                     // Stamp live projected transport diagnostics so the persisted
                     // Running document carries a self-consistent view, not zeros.
                     status.transport = shared.projected_write_diagnostics();
+                    shared.begin_write(WriteKind::Required);
                     let result = store.write(&status);
                     shared.record_write(&result, WriteKind::Required);
                     let _ = ack.send(result);
                 }
                 Work::Periodic(mut status) => {
                     status.transport = shared.projected_write_diagnostics();
+                    shared.begin_write(WriteKind::Periodic);
                     let result = store.write(&status);
                     shared.record_write(&result, WriteKind::Periodic);
                 }
@@ -1267,6 +1296,7 @@ fn write_accounted_terminal(
     let (projected, periodic_error) = {
         let mut inner = shared.inner.lock().unwrap();
         inner.diagnostics.submitted += 1;
+        inner.active_write = Some(WriteKind::Terminal);
         let mut projected = inner.diagnostics.clone();
         projected.written += 1;
         (projected, inner.periodic_error.clone())
@@ -1878,6 +1908,23 @@ mod tests {
             settlement.terminal_failure().is_some(),
             "a worker panic is a terminal failure, never silent success"
         );
+        // The write the store actually attempted and crashed on is accounted as a
+        // write failure carrying an error — never a silent `disconnected` with an
+        // empty `last_error`, which would report the store was never reached.
+        assert!(
+            settlement.diagnostics.write_failures >= 1,
+            "the in-flight write the store crashed on is a write failure: {:?}",
+            settlement.diagnostics
+        );
+        assert!(
+            settlement
+                .diagnostics
+                .last_error
+                .as_deref()
+                .is_some_and(|e| e.contains("panicked")),
+            "the crashed write records its panic as the last error: {:?}",
+            settlement.diagnostics
+        );
     }
 
     #[test]
@@ -1893,12 +1940,21 @@ mod tests {
             "the submitter is disconnected, not hung, when the worker panics"
         );
         let settlement = coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
-        // Exactly the initial Running and the terminal are submitted; both are
-        // reconciled to disconnected, nothing is written, and no snapshot is pending.
+        // Exactly the initial Running and the terminal are submitted. The Running
+        // write is the one the worker crashed on mid-persist, so it is accounted as
+        // a write failure; the terminal was never reached by the dead worker, so it
+        // is the only disconnected submission. Nothing is written and no snapshot is
+        // pending, and the balance still holds.
         assert_eq!(settlement.diagnostics.submitted, 2, "Running + terminal");
         assert_eq!(
-            settlement.diagnostics.disconnected, 2,
-            "both are reconciled to disconnected"
+            settlement.diagnostics.write_failures, 1,
+            "the crashed Running write is a write failure, not disconnected: {:?}",
+            settlement.diagnostics
+        );
+        assert_eq!(
+            settlement.diagnostics.disconnected, 1,
+            "only the never-attempted terminal is disconnected: {:?}",
+            settlement.diagnostics
         );
         assert_eq!(settlement.diagnostics.written, 0);
         assert!(
@@ -1979,6 +2035,105 @@ mod tests {
             pump.first_fault_observed(),
             "the status worker panic latched the first fault"
         );
+    }
+
+    #[test]
+    fn status_worker_panic_recovers_under_saturated_fd2() {
+        // B2: the process-wide pump panic hook must suppress the default hook's
+        // blocking stderr write for pump threads, so a status-worker panic recovers
+        // even when fd 2 is a genuinely full, non-drained pipe. The in-process panic
+        // tests cannot prove this — they never saturate fd 2 — so re-exec this test
+        // binary's child body with fd 2 bound to an unread pipe. The child saturates
+        // the pipe, drives a status-worker panic, and exits 0 only if recovery
+        // completed without blocking on the saturated stderr; a blocking default hook
+        // would hang until the child's alarm watchdog killed it (a non-zero status).
+        use std::process::{Command, Stdio};
+        let exe = std::env::current_exe().expect("test binary path");
+        let mut child = Command::new(exe)
+            .args([
+                "--exact",
+                "transcript_pump::tests::saturated_fd2_panic_child",
+                "--nocapture",
+            ])
+            .env("PUMP_FD2_CHILD", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            // The parent holds the pipe's read end but never drains it, so once the
+            // child fills the pipe its fd 2 is genuinely full; keeping the handle
+            // open (rather than dropping it) means a blocked write stays blocked
+            // instead of failing with EPIPE.
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn saturated-fd2 child");
+        let _saturated_pipe = child.stderr.take();
+        let status = child.wait().expect("await saturated-fd2 child");
+        assert!(
+            status.success(),
+            "the pump panic hook must recover a status-worker panic under a saturated \
+             fd 2 (child status: {status:?}); a blocking default hook would hang until \
+             the alarm killed it"
+        );
+    }
+
+    /// Child-process body for `status_worker_panic_recovers_under_saturated_fd2`.
+    /// A no-op in an ordinary run; the parent re-executes this binary with
+    /// `PUMP_FD2_CHILD=1` and fd 2 bound to an unread pipe to drive the real check.
+    #[test]
+    fn saturated_fd2_panic_child() {
+        if std::env::var_os("PUMP_FD2_CHILD").is_none() {
+            return;
+        }
+        // Saturate the inherited fd 2: fill it with nonblocking writes until EAGAIN,
+        // then restore blocking mode so any further write — including the default
+        // panic hook's — would block on the full, unread pipe.
+        unsafe {
+            let flags = libc::fcntl(2, libc::F_GETFL);
+            assert!(flags != -1, "F_GETFL on fd 2");
+            assert!(
+                libc::fcntl(2, libc::F_SETFL, flags | libc::O_NONBLOCK) != -1,
+                "set fd 2 nonblocking"
+            );
+            let buf = [b'x'; 4096];
+            loop {
+                let n = libc::write(2, buf.as_ptr() as *const libc::c_void, buf.len());
+                if n < 0 {
+                    match std::io::Error::last_os_error().raw_os_error() {
+                        Some(libc::EINTR) => continue,
+                        _ => break, // EAGAIN: the pipe is now full
+                    }
+                }
+                if n == 0 {
+                    break;
+                }
+            }
+            assert!(
+                libc::fcntl(2, libc::F_SETFL, flags) != -1,
+                "restore fd 2 to blocking"
+            );
+            // Watchdog: if recovery blocks on the saturated fd 2, SIGALRM terminates
+            // the process and the parent observes a non-zero status.
+            libc::alarm(15);
+        }
+
+        // Install the production hook and drive a status-worker panic. If the hook
+        // suppresses the pump thread's blocking stderr write, recovery completes and
+        // we reach the clean exit below; otherwise the default hook blocks on fd 2.
+        ensure_pump_panic_hook();
+        let latch = Arc::new(FirstFault::default());
+        let mut coordinator =
+            StatusCoordinator::spawn(Box::new(PanicStore), Some(Arc::clone(&latch))).unwrap();
+        let _ = coordinator.submit_required(running_status());
+        let settlement =
+            coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
+
+        assert!(latch.observed(), "the worker panic latched the first fault");
+        assert!(
+            settlement.terminal_failure().is_some(),
+            "a worker panic is a terminal failure, never silent success"
+        );
+        // Bypass libtest's result printing (which would write to the saturated fd 2)
+        // and report success through the exit status the parent checks.
+        std::process::exit(0);
     }
 
     /// A store that fails both the Complete write and the Failed fallback with
