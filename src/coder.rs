@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 const DEFAULT_PI_MODEL: &str = "qwen3.6-35b-a3b";
@@ -588,7 +588,7 @@ fn run_with_transcript(mut cmd: Command, transcript_file: Option<&Path>) -> Resu
 
             let config = crate::transcript_pump::active_config();
             let status_path = crate::transcript_pump::status_path_for(path);
-            let mut pump = crate::transcript_pump::spawn_pump(
+            let pump = crate::transcript_pump::spawn_pump(
                 stdout,
                 path.to_path_buf(),
                 Some(status_path),
@@ -596,46 +596,17 @@ fn run_with_transcript(mut cmd: Command, transcript_file: Option<&Path>) -> Resu
                 config,
             );
 
-            // Supervise the child and pump together. A pump that fails while the
-            // coder is still alive terminates and reaps the process group at
-            // once, rather than letting the coder run on invisibly until it
-            // exits on its own.
-            loop {
-                if let Some(terminal) = pump.try_terminal() {
-                    match terminal {
-                        Ok(_summary) => {
-                            let status = child.wait()?;
-                            terminate_process_group(child_id);
-                            pump.join();
-                            return Ok(status.code().unwrap_or(1));
-                        }
-                        Err(pump_err) => {
-                            terminate_process_group(child_id);
-                            let _ = child.wait();
-                            pump.join();
-                            return Err(anyhow::Error::new(pump_err));
-                        }
-                    }
-                }
-                if let Some(status) = child.try_wait()? {
-                    // The leader exited. Terminate any surviving descendants in
-                    // the group before waiting for the pump: a backgrounded
-                    // descendant that inherited stdout would otherwise hold the
-                    // pipe's write end open and the pump would wait for EOF
-                    // forever. The leader's bytes are already buffered in the
-                    // pipe, so closing the group lets the pump drain them to EOF
-                    // and finish. Killing the group here reaps the descendants
-                    // rather than racing a managed import against them.
-                    terminate_process_group(child_id);
-                    let terminal = pump.wait_terminal();
-                    pump.join();
-                    return match terminal {
-                        Ok(_summary) => Ok(status.code().unwrap_or(1)),
-                        Err(pump_err) => Err(anyhow::Error::new(pump_err)),
-                    };
-                }
-                std::thread::sleep(SUPERVISOR_POLL_INTERVAL);
-            }
+            // Own the child and pump in a guard so cleanup runs on every exit
+            // path — including a `?` early return from a wait/try_wait error.
+            // Its Drop terminates and reaps the whole coder process group and
+            // settles the pump, so a supervision error can never leak a live
+            // coder, a surviving descendant, or a stuck pump thread.
+            let mut supervisor = CoderSupervisor {
+                child,
+                child_id,
+                pump,
+            };
+            supervisor.supervise()
         }
         None => {
             let mut child = cmd.spawn()?;
@@ -660,6 +631,59 @@ fn terminate_process_group(leader: u32) {
 
 #[cfg(not(unix))]
 fn terminate_process_group(_leader: u32) {}
+
+/// Owns a coder child and its transcript pump for the duration of supervision.
+/// Its `Drop` is the single structured-cleanup point: it terminates and reaps
+/// the coder's whole process group and settles the pump thread on every exit
+/// path, so an error propagated by `?` cannot leak a live coder, a surviving
+/// descendant, or a stuck pump thread.
+struct CoderSupervisor {
+    child: Child,
+    child_id: u32,
+    pump: crate::transcript_pump::PumpHandle,
+}
+
+impl CoderSupervisor {
+    /// Poll the child and pump together until one reaches a terminal outcome. A
+    /// pump failure while the coder is still alive returns at once (its Drop then
+    /// terminates the live coder); a coder exit terminates any surviving
+    /// descendants so the pump can observe EOF, then returns the coder's status.
+    fn supervise(&mut self) -> Result<i32> {
+        loop {
+            if let Some(terminal) = self.pump.try_terminal() {
+                return match terminal {
+                    Ok(_summary) => Ok(self.child.wait()?.code().unwrap_or(1)),
+                    Err(pump_err) => Err(anyhow::Error::new(pump_err)),
+                };
+            }
+            if let Some(status) = self.child.try_wait()? {
+                // The leader exited. Terminate any surviving descendants in the
+                // group before waiting for the pump: a backgrounded descendant
+                // that inherited stdout would otherwise hold the pipe's write end
+                // open and the pump would wait for EOF forever. The leader's bytes
+                // are already buffered in the pipe, so closing the group lets the
+                // pump drain them to EOF and finish.
+                terminate_process_group(self.child_id);
+                return match self.pump.wait_terminal() {
+                    Ok(_summary) => Ok(status.code().unwrap_or(1)),
+                    Err(pump_err) => Err(anyhow::Error::new(pump_err)),
+                };
+            }
+            std::thread::sleep(SUPERVISOR_POLL_INTERVAL);
+        }
+    }
+}
+
+impl Drop for CoderSupervisor {
+    fn drop(&mut self) {
+        // Terminate and reap the whole coder process group, then settle the pump.
+        // Every step is idempotent, so this runs safely after the happy path has
+        // already reaped, and it is the sole cleanup after a `?` early return.
+        terminate_process_group(self.child_id);
+        let _ = self.child.wait();
+        self.pump.join();
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Rate-limit parsing, jitter, and state tracking
@@ -1133,19 +1157,28 @@ mod pump_supervision_tests {
     use super::*;
     use std::time::Instant;
 
+    #[cfg(unix)]
     #[test]
-    fn pump_failure_terminates_and_reaps_live_coder() {
-        // The pump cannot open its transcript because the path is a directory,
-        // so it fails immediately while the coder is still sleeping. Supervision
-        // must terminate and reap the live coder at once, persist the specific
-        // pump error, and return a typed infrastructure failure — not wait out
-        // the coder's 30-second sleep.
+    fn pump_failure_terminates_and_reaps_live_coder_and_its_descendant() {
+        // The pump cannot open its transcript because the path is a directory, so
+        // it fails immediately while the coder is still alive. A pump failure must
+        // terminate and reap the coder's WHOLE process group — the leader and a
+        // backgrounded descendant that never touches stdout, so neither can be
+        // killed incidentally by SIGPIPE. Both must be gone and neither's delayed
+        // side effect may occur after the typed failure returns.
         let dir = tempfile::tempdir().unwrap();
         let transcript = dir.path().join("transcript.jsonl");
         std::fs::create_dir(&transcript).unwrap();
+        let d = dir.path().display();
 
+        // The leader records its and the descendant's pids, then both sleep and
+        // touch a side-effect file. Nothing reads or writes stdout.
         let mut cmd = Command::new("/bin/sh");
-        cmd.arg("-c").arg("printf 'starting\\n'; sleep 30");
+        cmd.arg("-c").arg(format!(
+            "echo $$ > {d}/leader.pid; \
+             ( sleep 1; : > {d}/descendant-ran ) & echo $! > {d}/descendant.pid; \
+             sleep 1; : > {d}/leader-ran"
+        ));
 
         let started = Instant::now();
         let result = run_with_transcript(cmd, Some(&transcript));
@@ -1158,8 +1191,35 @@ mod pump_supervision_tests {
             "the failure must be a typed transcript-pump infrastructure error: {err}"
         );
         assert!(
-            elapsed < Duration::from_secs(10),
-            "the live coder must be terminated promptly, not waited out; took {elapsed:?}"
+            elapsed < Duration::from_secs(1),
+            "the live coder group must be terminated promptly; took {elapsed:?}"
+        );
+
+        let is_alive = |pid: &str| {
+            Command::new("/bin/kill")
+                .args(["-0", pid.trim()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        for pidfile in ["leader.pid", "descendant.pid"] {
+            let pid = std::fs::read_to_string(dir.path().join(pidfile))
+                .unwrap_or_else(|_| panic!("{pidfile} must have been recorded"));
+            assert!(!is_alive(&pid), "{pidfile} process survived the pump failure");
+        }
+
+        // Wait past the 1s side-effect delay: neither the leader nor the reaped
+        // descendant may run its delayed side effect after the boundary returned.
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(
+            !dir.path().join("leader-ran").exists(),
+            "the leader ran a delayed side effect after termination"
+        );
+        assert!(
+            !dir.path().join("descendant-ran").exists(),
+            "the descendant ran a delayed side effect after termination"
         );
 
         let status_path = crate::transcript_pump::status_path_for(&transcript);
