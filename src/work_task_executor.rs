@@ -131,7 +131,11 @@ fn run_write_task(
         &source_branch,
     )?;
     worktree::disable_commit_signing(&workspace_path)?;
-    let baseline_commit = head_commit(&workspace_path)?;
+    let baseline_commit = resolve_or_persist_write_baseline(
+        config.project_root,
+        &item.attempts[attempt_index].tasks[task_index],
+        &workspace_path,
+    )?;
 
     let is_first_write = !item.attempts[attempt_index]
         .tasks
@@ -198,16 +202,14 @@ fn run_write_task(
     }
 
     if let Err(error) = run_result {
-        let auth_message = error
-            .downcast_ref::<crate::claude_auth::AuthError>()
-            .map(|e| e.user_message());
+        let failure = classify_task_failure(&error);
         mark_task_failed_attempt_needs_user(
             config.store,
             config.project_root,
             config.work_item_id,
             config.attempt_id,
             config.task_id,
-            auth_message.as_deref(),
+            &failure,
             &crate::notify::notify,
         )?;
         return Err(error);
@@ -274,14 +276,19 @@ fn run_write_task(
         .tasks
         .iter()
         .all(|task| task.status == TaskStatus::Complete);
-    if all_complete {
-        crate::work_model::set_attempt_terminal(
-            &mut completed_item.attempts[attempt_index],
-            AttemptStatus::Complete,
-        );
+    let (next_status, next_pause) = if all_complete {
+        (AttemptStatus::Complete, None)
     } else {
-        completed_item.attempts[attempt_index].status = AttemptStatus::Executing;
-    }
+        (AttemptStatus::Executing, None)
+    };
+    // Advance the Attempt only through the precedence boundary: a completion must
+    // update its own Task but never overwrite an Attempt a peer already took
+    // terminal (for example a transcript-pump pause).
+    crate::work_model::transition_attempt(
+        &mut completed_item.attempts[attempt_index],
+        next_status,
+        next_pause,
+    );
     config.store.write_work_item(&completed_item)?;
 
     Ok(WorkTaskRunResult {
@@ -512,9 +519,7 @@ fn run_review_task(
     }
 
     if let Err(error) = run_result {
-        let auth_message = error
-            .downcast_ref::<crate::claude_auth::AuthError>()
-            .map(|e| e.user_message());
+        let failure = classify_task_failure(&error);
         lock_mark_task_failed_attempt_needs_user(
             config.store,
             config.store_lock,
@@ -522,7 +527,7 @@ fn run_review_task(
             config.work_item_id,
             config.attempt_id,
             config.task_id,
-            auth_message.as_deref(),
+            &failure,
             &crate::notify::notify,
         )?;
         return Err(error);
@@ -565,14 +570,19 @@ fn run_review_task(
             .tasks
             .iter()
             .all(|task| task.status == TaskStatus::Complete);
-        if all_complete {
-            crate::work_model::set_attempt_terminal(
-                &mut completed_item.attempts[attempt_index],
-                AttemptStatus::Complete,
-            );
+        let next_status = if all_complete {
+            AttemptStatus::Complete
         } else {
-            completed_item.attempts[attempt_index].status = AttemptStatus::Reviewing;
-        }
+            AttemptStatus::Reviewing
+        };
+        // Under the store lock, advance only through the precedence boundary so a
+        // reviewer finishing after a peer recorded a terminal pause/failure
+        // updates its own Task but never overwrites the terminal Attempt.
+        crate::work_model::transition_attempt(
+            &mut completed_item.attempts[attempt_index],
+            next_status,
+            None,
+        );
         config.store.write_work_item(&completed_item)?;
     }
 
@@ -708,7 +718,7 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
                 config.work_item_id,
                 config.attempt_id,
                 config.task_id,
-                None,
+                &TaskFailure::Generic,
                 &crate::notify::notify,
             )?;
             return Err(error);
@@ -752,14 +762,18 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             .tasks
             .iter()
             .all(|task| task.status == TaskStatus::Complete);
-        if all_complete {
-            crate::work_model::set_attempt_terminal(
-                &mut completed_item.attempts[attempt_index],
-                AttemptStatus::Complete,
-            );
+        let next_status = if all_complete {
+            AttemptStatus::Complete
         } else {
-            completed_item.attempts[attempt_index].status = AttemptStatus::Reviewing;
-        }
+            AttemptStatus::Reviewing
+        };
+        // Advance only through the precedence boundary so a tester finishing after
+        // a peer took the Attempt terminal cannot overwrite it.
+        crate::work_model::transition_attempt(
+            &mut completed_item.attempts[attempt_index],
+            next_status,
+            None,
+        );
         config.store.write_work_item(&completed_item)?;
     }
 
@@ -1015,13 +1029,41 @@ fn should_retry_coder_error(result: &Result<()>) -> bool {
     result.is_err() && !is_auth_error(result) && !is_transcript_pump_error(result)
 }
 
+/// How a Task's terminal failure should be recorded in durable Attempt state and
+/// resumed. The classification decides the pause kind, the operator handoff, and
+/// whether a supported resume may retry.
+enum TaskFailure {
+    /// The auth token expired; carries the user-facing re-auth message. Resume
+    /// re-checks auth.
+    Auth(String),
+    /// A transcript-pump infrastructure failure; carries its diagnostic. The
+    /// coder's work — not the console transport — may already be on disk, so the
+    /// failure is not retried in-process; a supported resume retries after the
+    /// operator fixes the transport.
+    TranscriptPump(String),
+    /// Any other persistent failure (generic coder error at the retry cap, a
+    /// tester error, and the like).
+    Generic,
+}
+
+/// Classify a terminal coder error for durable persistence and resume.
+fn classify_task_failure(error: &anyhow::Error) -> TaskFailure {
+    if let Some(auth) = error.downcast_ref::<crate::claude_auth::AuthError>() {
+        TaskFailure::Auth(auth.user_message())
+    } else if let Some(pump) = error.downcast_ref::<crate::transcript_pump::TranscriptPumpError>() {
+        TaskFailure::TranscriptPump(pump.message().to_string())
+    } else {
+        TaskFailure::Generic
+    }
+}
+
 fn mark_task_failed_attempt_needs_user(
     store: &WorkModelStore,
     project_root: &Path,
     work_item_id: &str,
     attempt_id: &str,
     task_id: &str,
-    auth_message: Option<&str>,
+    failure: &TaskFailure,
     notify_fn: &dyn Fn(&str, &str),
 ) -> Result<()> {
     let mut item = read_work_item_or_not_found(store, work_item_id)?;
@@ -1031,25 +1073,31 @@ fn mark_task_failed_attempt_needs_user(
             &mut item.attempts[attempt_index].tasks[task_index],
             TaskStatus::Failed,
         );
-        let pause_kind = if auth_message.is_some() {
-            crate::work_model::PauseKind::Auth
-        } else {
-            crate::work_model::PauseKind::RoundCap
+        let pause_kind = match failure {
+            TaskFailure::Auth(_) => crate::work_model::PauseKind::Auth,
+            TaskFailure::TranscriptPump(_) => crate::work_model::PauseKind::TranscriptPump,
+            TaskFailure::Generic => crate::work_model::PauseKind::RoundCap,
         };
-        crate::work_model::suspend_attempt(&mut item.attempts[attempt_index], pause_kind);
-        if auth_message.is_some() {
-            notify_fn(
+        // Route through the precedence boundary so a resumable pause cannot mask
+        // a harder terminal state a peer Task already recorded.
+        crate::work_model::transition_attempt(
+            &mut item.attempts[attempt_index],
+            crate::work_model::AttemptStatus::NeedsUser,
+            Some(pause_kind),
+        );
+        match failure {
+            TaskFailure::Auth(_) => notify_fn(
                 "Fluent",
                 "Auth token expired. Run 'claude /login' to re-authenticate, then 'fluent attempt run'.",
-            );
+            ),
+            TaskFailure::TranscriptPump(_) => notify_fn(
+                "Fluent",
+                "Transcript capture failed. Fix the console/transcript transport, then 'fluent attempt run' to retry.",
+            ),
+            TaskFailure::Generic => {}
         }
-        let handoff_path = write_task_error_handoff(
-            project_root,
-            work_item_id,
-            attempt_id,
-            task_id,
-            auth_message,
-        )?;
+        let handoff_path =
+            write_task_error_handoff(project_root, work_item_id, attempt_id, task_id, failure)?;
         item.attempts[attempt_index].artifacts.push(ArtifactRef {
             producer_id: task_id.to_string(),
             path: handoff_path,
@@ -1064,7 +1112,7 @@ fn write_task_error_handoff(
     work_item_id: &str,
     attempt_id: &str,
     task_id: &str,
-    auth_message: Option<&str>,
+    failure: &TaskFailure,
 ) -> Result<String> {
     let filename = format!("needs-user-{task_id}.md");
     let relative_path = work_artifact_path(work_item_id, attempt_id, &filename);
@@ -1072,14 +1120,20 @@ fn write_task_error_handoff(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let body = if let Some(msg) = auth_message {
-        format!("# Attempt needs user input\n\n{msg}\n")
-    } else {
-        format!(
+    let body = match failure {
+        TaskFailure::Auth(msg) => format!("# Attempt needs user input\n\n{msg}\n"),
+        TaskFailure::TranscriptPump(diagnostic) => format!(
+            "# Attempt needs user input\n\nTask {task_id:?} stopped on a transcript-pump \
+             infrastructure failure:\n\n    {diagnostic}\n\nThe coder's work — not the console \
+             transport — may already be on disk. This is not charged against the write-round \
+             budget. Fix the transcript/console transport (for example free disk space or an \
+             unwritable transcript path), then re-run `fluent attempt run` to retry.\n"
+        ),
+        TaskFailure::Generic => format!(
             "# Attempt needs user input\n\nTask {task_id:?} failed after {} retries. \
              The coder execution errored persistently.\n",
             max_task_retries()
-        )
+        ),
     };
     fs::write(&path, body)?;
     Ok(relative_path)
@@ -1103,7 +1157,7 @@ fn lock_mark_task_failed_attempt_needs_user(
     work_item_id: &str,
     attempt_id: &str,
     task_id: &str,
-    auth_message: Option<&str>,
+    failure: &TaskFailure,
     notify_fn: &dyn Fn(&str, &str),
 ) -> Result<()> {
     let _lock = store_lock.map(|m| m.lock().unwrap_or_else(|e| e.into_inner()));
@@ -1113,7 +1167,7 @@ fn lock_mark_task_failed_attempt_needs_user(
         work_item_id,
         attempt_id,
         task_id,
-        auth_message,
+        failure,
         notify_fn,
     )
 }
@@ -3113,6 +3167,47 @@ fn head_commit(workspace_path: &Path) -> Result<String> {
     )
 }
 
+/// Resolve the Writer's stable Git baseline for counting produced commits.
+///
+/// The baseline is persisted beside the Task's artifacts before the first coder
+/// launch and reused verbatim on every resume. Recomputing it from `HEAD` would
+/// fold a commit the coder made before a late pump or terminal-status failure
+/// into the baseline, so the resumed run would see zero commits ahead and
+/// wrongly demand a second, artificial commit. The persisted baseline keeps the
+/// original pre-write commit stable across resumes.
+fn resolve_or_persist_write_baseline(
+    project_root: &Path,
+    task: &crate::work_model::Task,
+    workspace_path: &Path,
+) -> Result<String> {
+    let baseline_path = task
+        .artifact_area
+        .as_ref()
+        .map(|area| {
+            resolve_managed_artifact_area_path(project_root, &area.path)
+                .map(|dir| dir.join("write-baseline-commit"))
+        })
+        .transpose()?;
+
+    if let Some(path) = baseline_path.as_ref() {
+        if let Ok(existing) = fs::read_to_string(path) {
+            let trimmed = existing.trim();
+            if !trimmed.is_empty() {
+                return Ok(trimmed.to_string());
+            }
+        }
+    }
+
+    let baseline = head_commit(workspace_path)?;
+    if let Some(path) = baseline_path.as_ref() {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, &baseline)?;
+    }
+    Ok(baseline)
+}
+
 fn current_branch(project_root: &Path) -> Result<String> {
     let branch = git::run_stdout(
         project_root,
@@ -3174,6 +3269,74 @@ mod tests {
 
         let success: Result<()> = Ok(());
         assert!(!should_retry_coder_error(&success));
+    }
+
+    #[test]
+    fn write_baseline_is_persisted_and_reused_across_resume() {
+        // The Writer baseline is captured once before the coder and reused on
+        // resume. Even after HEAD advances (a commit made before a late failure),
+        // the resolved baseline stays the original pre-write commit, so the
+        // resumed run still sees the commit as produced work rather than baseline.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let workspace = project_root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+
+        let git = |args: &[&str]| {
+            let ok = Command::new("git")
+                .args(args)
+                .current_dir(&workspace)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?} must succeed");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t.co"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "baseline"]);
+
+        let task = crate::work_model::Task {
+            id: "attempt-1-write-1".to_string(),
+            kind: crate::work_model::TaskKind::Write,
+            status: crate::work_model::TaskStatus::Planned,
+            role: "author".to_string(),
+            instructions: None,
+            work_item_id: "work-1".to_string(),
+            attempt_id: Some("attempt-1".to_string()),
+            workspace_access: crate::work_model::WorkspaceAccess {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            },
+            artifact_area: Some(crate::work_model::TaskArtifactArea {
+                path: ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1".to_string(),
+            }),
+            review_context: None,
+            input_artifacts: Vec::new(),
+            depends_on: None,
+            output: None,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+        };
+
+        let first = resolve_or_persist_write_baseline(project_root, &task, &workspace).unwrap();
+
+        // The coder commits before a late failure: HEAD advances.
+        git(&["commit", "-q", "--allow-empty", "-m", "pre-failure commit"]);
+        let advanced = head_commit(&workspace).unwrap();
+        assert_ne!(first, advanced, "HEAD must have advanced");
+
+        // Resume resolves the SAME persisted baseline, not the advanced HEAD.
+        let resumed = resolve_or_persist_write_baseline(project_root, &task, &workspace).unwrap();
+        assert_eq!(
+            resumed, first,
+            "resume must reuse the persisted pre-write baseline, not recompute from HEAD"
+        );
+        assert!(
+            commits_ahead(&workspace, &resumed).unwrap() >= 1,
+            "the pre-failure commit must count as produced work on resume"
+        );
     }
 
     fn review_item() -> WorkItem {
@@ -4942,7 +5105,7 @@ mod tests {
             "work-1",
             "attempt-1",
             "attempt-1-write-1",
-            Some("Auth token expired"),
+            &TaskFailure::Auth("Auth token expired".to_string()),
             &notify,
         )
         .unwrap();
@@ -4994,7 +5157,7 @@ mod tests {
             "work-1",
             "attempt-1",
             "attempt-1-write-1",
-            None,
+            &TaskFailure::Generic,
             &notify,
         )
         .unwrap();
@@ -5004,6 +5167,208 @@ mod tests {
             notifications.len(),
             0,
             "should not post a notification on non-auth suspend"
+        );
+    }
+
+    #[test]
+    fn transcript_pump_failure_records_resumable_pause_and_diagnostic() {
+        // A transcript-pump failure suspends the Attempt with the TranscriptPump
+        // pause kind — not the terminal RoundCap — writes an actionable
+        // diagnostic handoff, and notifies the operator. This durable state is
+        // what the supported resume path consumes.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Pump durable state".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            post_merge_review_fix_depth: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+
+        let calls: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let calls_clone = Arc::clone(&calls);
+        let notify = move |title: &str, body: &str| {
+            calls_clone
+                .lock()
+                .unwrap()
+                .push((title.to_string(), body.to_string()));
+        };
+
+        mark_task_failed_attempt_needs_user(
+            &store,
+            tmp.path(),
+            "work-1",
+            "attempt-1",
+            "attempt-1-write-1",
+            &TaskFailure::TranscriptPump("write transcript: no space left on device".to_string()),
+            &notify,
+        )
+        .unwrap();
+
+        let item = store.read_work_item("work-1").unwrap();
+        let attempt = &item.attempts[0];
+        assert_eq!(
+            attempt.pause_kind,
+            Some(crate::work_model::PauseKind::TranscriptPump),
+            "a transcript-pump failure must record the resumable TranscriptPump pause"
+        );
+        assert_eq!(attempt.status, crate::work_model::AttemptStatus::NeedsUser);
+        assert_eq!(
+            attempt.tasks[0].status,
+            TaskStatus::Failed,
+            "the failed coder task must be terminal"
+        );
+
+        let handoff = attempt
+            .artifacts
+            .iter()
+            .find(|a| a.path.contains("needs-user-attempt-1-write-1.md"))
+            .expect("a handoff artifact must be recorded");
+        let body = fs::read_to_string(tmp.path().join(&handoff.path)).unwrap();
+        assert!(
+            body.contains("no space left on device"),
+            "the handoff must preserve the specific pump diagnostic: {body}"
+        );
+        assert!(
+            body.contains("not charged against the write-round budget"),
+            "the handoff must explain the failure is not a write-round: {body}"
+        );
+        assert!(
+            body.contains("fluent attempt run"),
+            "the handoff must tell the operator how to resume: {body}"
+        );
+
+        let notifications = calls.lock().unwrap();
+        assert_eq!(
+            notifications.len(),
+            1,
+            "a transcript-pump failure should notify the operator"
+        );
+        assert!(
+            notifications[0].1.contains("transport"),
+            "the notification should point at the transport: {}",
+            notifications[0].1
+        );
+    }
+
+    #[test]
+    fn late_peer_completion_does_not_overwrite_transcript_pump_pause() {
+        // The concurrency race: a failing reviewer records a resumable
+        // transcript-pump pause; a peer reviewer completing afterward must update
+        // its own Task through the store but never overwrite the terminal
+        // Attempt back to Reviewing/Complete. This exercises the persisted
+        // outcome of the precedence boundary the completion path routes through.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Race".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            post_merge_review_fix_depth: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        // Add a second (peer) task alongside the initial write task.
+        let attempt = &mut item.attempts[0];
+        let peer = crate::work_model::Task {
+            id: "attempt-1-review-peer".to_string(),
+            kind: crate::work_model::TaskKind::Review,
+            status: TaskStatus::Executing,
+            role: "peer".to_string(),
+            instructions: None,
+            work_item_id: "work-1".to_string(),
+            attempt_id: Some("attempt-1".to_string()),
+            workspace_access: crate::work_model::WorkspaceAccess {
+                reads: vec![crate::work_model::WorkspaceRef {
+                    id: "candidate".to_string(),
+                    path: "work/work-1/attempt-1".to_string(),
+                }],
+                writes: Vec::new(),
+            },
+            artifact_area: Some(crate::work_model::TaskArtifactArea {
+                path: ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-peer".to_string(),
+            }),
+            review_context: Some(crate::work_model::ReviewContext {
+                candidate_workspace_id: "candidate".to_string(),
+                candidate_workspace_path: "work/work-1/attempt-1".to_string(),
+                source_branch: "main".to_string(),
+                candidate_commit: "abc123".to_string(),
+                base_commit: None,
+            }),
+            input_artifacts: Vec::new(),
+            depends_on: None,
+            output: None,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+        };
+        attempt.tasks.push(peer);
+        store.create_work_item(&item).unwrap();
+
+        // A failing reviewer takes the Attempt to a resumable transcript-pump
+        // pause.
+        mark_task_failed_attempt_needs_user(
+            &store,
+            tmp.path(),
+            "work-1",
+            "attempt-1",
+            "attempt-1-write-1",
+            &TaskFailure::TranscriptPump("write transcript: broken pipe".to_string()),
+            &|_, _| {},
+        )
+        .unwrap();
+
+        // The peer completes afterward, replicating the completion write path:
+        // read → mark its own Task complete → advance only through the boundary.
+        let mut item = store.read_work_item("work-1").unwrap();
+        let (attempt_index, task_index) =
+            find_attempt_task_indexes(&item, "attempt-1", "attempt-1-review-peer").unwrap();
+        crate::work_model::set_task_terminal(
+            &mut item.attempts[attempt_index].tasks[task_index],
+            TaskStatus::Complete,
+        );
+        let all_complete = item.attempts[attempt_index]
+            .tasks
+            .iter()
+            .all(|task| task.status == TaskStatus::Complete);
+        let next = if all_complete {
+            AttemptStatus::Complete
+        } else {
+            AttemptStatus::Reviewing
+        };
+        let applied =
+            crate::work_model::transition_attempt(&mut item.attempts[attempt_index], next, None);
+        store.write_work_item(&item).unwrap();
+
+        assert!(
+            !applied,
+            "the peer completion must not transition the terminal Attempt"
+        );
+        let persisted = store.read_work_item("work-1").unwrap();
+        assert_eq!(
+            persisted.attempts[0].pause_kind,
+            Some(crate::work_model::PauseKind::TranscriptPump),
+            "the transcript-pump pause must survive a late peer completion"
+        );
+        assert_eq!(
+            persisted.attempts[0].status,
+            crate::work_model::AttemptStatus::NeedsUser
+        );
+        assert_eq!(
+            persisted.attempts[0].tasks[task_index].status,
+            TaskStatus::Complete,
+            "the peer's own Task is still recorded complete"
         );
     }
 

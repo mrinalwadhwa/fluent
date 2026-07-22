@@ -2413,6 +2413,138 @@ exit 0
 }
 
 #[test]
+fn transcript_pump_write_failure_pauses_resumably_end_to_end() {
+    // End-to-end: a transcript-pump infrastructure failure during a write task
+    // must record a resumable transcript-pump pause (not a terminal write-round
+    // cap), keep the coder out of the generic retry budget, and — once the
+    // operator fixes the transport — resume through `fluent attempt run` to a
+    // Merge Candidate. The failure is injected by making the write transcript
+    // path a directory, so the pump cannot create its transcript file.
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
+done
+# The seed invocation runs in the attempt worktree too; leave it to fail rather
+# than committing the writer's output during seeding.
+if printf '%s' "$PROMPT" | grep -q "seeding fluent"; then exit 0; fi
+case "$PWD" in
+  */work-*-work-1-attempt-1)
+    printf '{"type":"result","subtype":"success"}\n'
+    # Sleep before committing so the first run — where the pump fails at once —
+    # is terminated before it can commit. The resumed run captures normally and
+    # then commits, producing the Task output.
+    sleep 2
+    printf 'task output\n' > task-output.txt
+    git add task-output.txt
+    git commit -m "Add task output" >/dev/null 2>&1
+    ;;
+  *)
+    printf 'Verdict: pass\n\nLooks good.\n' > review.md
+    ;;
+esac
+exit 0
+"##,
+    );
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Pump resume"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    // Break the transport: occupy the write transcript path with a directory so
+    // the pump's File::create fails immediately while the coder is alive.
+    let artifact_dir =
+        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1");
+    let transcript = artifact_dir.join("transcript.jsonl");
+    fs::create_dir_all(&transcript).unwrap();
+
+    // First run: the pump fails. A generous retry budget must not be spent.
+    let _ = fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_NO_UPDATE_CHECK", "1")
+        .env("FLUENT_MAX_TASK_RETRIES", "3")
+        .output()
+        .unwrap();
+
+    // Attempts and tasks are split-stored beside the item.
+    let attempt_json: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(main_dir.join(".fluent/work/attempts/work-1/attempt-1.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        attempt_json["pause_kind"], "transcript-pump",
+        "a pump failure must record the resumable transcript-pump pause, not a round cap: {attempt_json}"
+    );
+    assert_eq!(attempt_json["status"], "needs-user");
+
+    let task_json: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(
+            main_dir.join(".fluent/work/tasks/work-1/attempt-1/attempt-1-write-1.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        task_json["status"], "failed",
+        "the pump-failed write task must be terminal"
+    );
+
+    // The pump status is the durable diagnostic that named the transport fault.
+    let pump_status: serde_json::Value = serde_json::from_slice(
+        &fs::read(artifact_dir.join("transcript-pump.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(pump_status["state"], "failed");
+
+    // Fix the transport, then resume. The Attempt reopens, retries the write
+    // task, and drives to a Merge Candidate.
+    fs::remove_dir_all(&transcript).unwrap();
+    let resumed = fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_NO_UPDATE_CHECK", "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&resumed.stdout);
+    let stderr = String::from_utf8_lossy(&resumed.stderr);
+    assert!(
+        resumed.status.success(),
+        "resume after fixing the transport must succeed: stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stdout.contains("Merge Candidate attempt-1-merge-candidate is ready"),
+        "resume must drive to a Merge Candidate; got:\n{stdout}"
+    );
+
+    // The retried write captured its transcript to a real file this time.
+    assert!(
+        transcript.is_file(),
+        "the retried write must capture its transcript to a file"
+    );
+    assert!(
+        !fs::read(&transcript).unwrap().is_empty(),
+        "the retried transcript must hold the coder's output"
+    );
+}
+
+#[test]
 fn seed_failure_does_not_abort_attempt() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);

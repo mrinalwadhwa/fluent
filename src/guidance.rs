@@ -107,6 +107,9 @@ pub fn after_attempt_run(
                 "\n→ Next: {}, then fluent attempt run <work-item-id>",
                 coder_reauth_step(ctx.coder)
             )),
+            Some(PauseKind::TranscriptPump) => Some(format!(
+                "\n→ Next: fix the transcript/console transport (see {handoff_path}), then fluent attempt run <work-item-id> to retry"
+            )),
             _ => Some(format!(
                 "\n→ Next: read the handoff {handoff_path}, then fluent attempt run <work-item-id>"
             )),

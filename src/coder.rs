@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -884,7 +884,16 @@ fn real_credential_refresh() {
 /// The sibling is opened create-new so an existing per-phase artifact is never
 /// overwritten, and every failure propagates: a lost transcript record must not
 /// pass silently, since it is the only durable evidence of the recovered phase.
-fn preserve_transcript_phase(transcript_file: Option<&Path>, phase: &mut u32) -> Result<()> {
+/// Preserve the live transcript as an immutable per-phase sibling before a 401
+/// or rate-limit retry replaces it. A failure here is a transcript-pump
+/// infrastructure failure — the coder may already have produced side effects, so
+/// it must never be mistaken for an ordinary retryable coder error and relaunch
+/// a coder; a supported resume retries after the operator fixes the transport.
+fn preserve_transcript_phase(
+    transcript_file: Option<&Path>,
+    phase: &mut u32,
+) -> std::result::Result<(), crate::transcript_pump::TranscriptPumpError> {
+    use crate::transcript_pump::TranscriptPumpError;
     let Some(path) = transcript_file else {
         return Ok(());
     };
@@ -893,24 +902,27 @@ fn preserve_transcript_phase(transcript_file: Option<&Path>, phase: &mut u32) ->
         Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(err) => {
-            return Err(err).with_context(|| {
-                format!(
-                    "read live transcript at {} before phase preservation",
-                    path.display()
-                )
-            });
+            return Err(TranscriptPumpError::new(format!(
+                "read live transcript at {} before phase preservation: {err}",
+                path.display()
+            )));
         }
     };
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&preserved)
-        .with_context(|| format!("preserve transcript phase to {}", preserved.display()))?;
-    file.write_all(&contents).with_context(|| {
-        format!(
-            "write preserved transcript phase to {}",
+        .map_err(|err| {
+            TranscriptPumpError::new(format!(
+                "preserve transcript phase to {}: {err}",
+                preserved.display()
+            ))
+        })?;
+    file.write_all(&contents).map_err(|err| {
+        TranscriptPumpError::new(format!(
+            "write preserved transcript phase to {}: {err}",
             preserved.display()
-        )
+        ))
     })?;
     *phase += 1;
     Ok(())
@@ -918,6 +930,52 @@ fn preserve_transcript_phase(transcript_file: Option<&Path>, phase: &mut u32) ->
 
 /// The immutable per-phase transcript path derived from a live transcript path:
 /// `run.jsonl` becomes `run.<phase>.jsonl`.
+/// The next safe per-phase transcript number for a Task, derived from existing
+/// `<stem>.N.<ext>` siblings on disk. Returns one past the highest existing
+/// phase, or `0` when none exist, so a resumed Task continues numbering rather
+/// than restarting a process-local counter and colliding with preserved
+/// evidence.
+fn next_transcript_phase(transcript_file: Option<&Path>) -> u32 {
+    let Some(path) = transcript_file else {
+        return 0;
+    };
+    let Some(dir) = path.parent() else {
+        return 0;
+    };
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let ext = path.extension().map(|e| e.to_string_lossy().to_string());
+    let prefix = format!("{stem}.");
+
+    let mut max_phase: Option<u32> = None;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            // Only regular files are preserved phase evidence; ignore anything
+            // else so a stray directory cannot inflate the counter.
+            if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Some(rest) = name.strip_prefix(&prefix) else {
+                continue;
+            };
+            let number = match &ext {
+                Some(ext) => rest.strip_suffix(&format!(".{ext}")),
+                None => Some(rest),
+            };
+            if let Some(number) = number
+                && let Ok(parsed) = number.parse::<u32>()
+            {
+                max_phase = Some(max_phase.map_or(parsed, |m| m.max(parsed)));
+            }
+        }
+    }
+    max_phase.map_or(0, |m| m + 1)
+}
+
 fn phase_transcript_path(path: &Path, phase: u32) -> PathBuf {
     let mut name = path
         .file_stem()
@@ -948,7 +1006,10 @@ where
     let mut attempt: u32 = 0;
     let mut rl_state = RateLimitState::Normal;
     let mut auth_refreshed = false;
-    let mut phase: u32 = 0;
+    // Derive the starting phase from existing per-phase siblings so a resumed
+    // Task never overwrites or collides with `.N.jsonl` evidence a prior run
+    // preserved; the process-local counter alone would restart at 0.
+    let mut phase: u32 = next_transcript_phase(transcript_file);
 
     loop {
         let exit = run_with_transcript(build_cmd(), transcript_file)?;
@@ -2106,6 +2167,63 @@ exit 1"#
     }
 
     #[test]
+    fn next_transcript_phase_continues_past_existing_siblings() {
+        // On resume the phase counter must continue past preserved evidence, not
+        // restart at 0 and collide with an existing `.N.jsonl` sibling.
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+
+        // No siblings yet.
+        assert_eq!(next_transcript_phase(Some(&transcript)), 0);
+
+        std::fs::write(dir.path().join("transcript.0.jsonl"), "p0\n").unwrap();
+        std::fs::write(dir.path().join("transcript.1.jsonl"), "p1\n").unwrap();
+        // The live transcript and adjacent status file must be ignored.
+        std::fs::write(&transcript, "live\n").unwrap();
+        std::fs::write(dir.path().join("transcript-pump.json"), "{}").unwrap();
+
+        assert_eq!(
+            next_transcript_phase(Some(&transcript)),
+            2,
+            "the next phase must be one past the highest preserved sibling"
+        );
+    }
+
+    #[test]
+    fn resumed_retry_preserves_a_new_phase_without_collision() {
+        // With phases 0 and 1 already preserved, a resumed retry that hits a 401
+        // must preserve the live transcript as phase 2 rather than colliding.
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        std::fs::write(dir.path().join("transcript.0.jsonl"), "earlier 0\n").unwrap();
+        std::fs::write(dir.path().join("transcript.1.jsonl"), "earlier 1\n").unwrap();
+
+        let counter = dir.path().join("counter");
+        let script = make_401_script(&counter, Some(2));
+        let result = run_with_transcript_retrying(
+            move || {
+                let mut cmd = Command::new("/bin/sh");
+                cmd.arg("-c").arg(&script);
+                cmd
+            },
+            Some(&transcript),
+            &|_, _| {},
+            &|| {},
+        );
+
+        assert_eq!(result.unwrap(), 0, "should recover after refresh");
+        assert!(
+            dir.path().join("transcript.2.jsonl").exists(),
+            "the resumed retry must preserve a fresh phase 2 sibling"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("transcript.0.jsonl")).unwrap(),
+            "earlier 0\n",
+            "preserved evidence from a prior run must be untouched"
+        );
+    }
+
+    #[test]
     fn preserve_transcript_phase_copies_live_bytes_and_advances() {
         let dir = tempfile::tempdir().unwrap();
         let transcript = dir.path().join("transcript.jsonl");
@@ -2126,6 +2244,41 @@ exit 1"#
         assert_eq!(
             std::fs::read_to_string(dir.path().join("transcript.1.jsonl")).unwrap(),
             "phase one body\n"
+        );
+    }
+
+    #[test]
+    fn phase_preservation_failure_surfaces_as_a_transcript_pump_error() {
+        // A 401 refresh preserves the prior transcript phase before replacing it.
+        // When that preservation fails — here phase 0's immutable sibling slot is
+        // already occupied — the retry path must surface a typed transcript-pump
+        // infrastructure error, not an ordinary coder error. The classifier then
+        // keeps it out of the generic retry budget, so a coder is never relaunched
+        // after possible side effects.
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        // Occupy phase 0's slot with a directory: it is not a regular file, so
+        // phase derivation ignores it and still targets phase 0, where
+        // create-new then fails — exercising the typed phase-preservation error.
+        std::fs::create_dir(dir.path().join("transcript.0.jsonl")).unwrap();
+
+        let script = "echo '{\"type\":\"result\",\"api_error_status\":401,\"request_id\":\"req-test\"}'; exit 1";
+        let result = run_with_transcript_retrying(
+            move || {
+                let mut cmd = Command::new("/bin/sh");
+                cmd.arg("-c").arg(script);
+                cmd
+            },
+            Some(&transcript),
+            &|_, _| {},
+            &|| {},
+        );
+
+        let err = result.expect_err("a failed phase preservation must surface as an error");
+        assert!(
+            err.downcast_ref::<crate::transcript_pump::TranscriptPumpError>()
+                .is_some(),
+            "phase-preservation failure must be a typed transcript-pump error: {err:#}"
         );
     }
 

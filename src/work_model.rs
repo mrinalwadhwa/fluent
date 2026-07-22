@@ -2124,6 +2124,12 @@ pub enum PauseKind {
     Auth,
     Uncertain,
     RoundCap,
+    /// A transcript-pump infrastructure failure (capture, status persistence, or
+    /// transcript phase preservation) stopped the coder. The console transport,
+    /// not the coder's work, is broken; a supported resume retries after the
+    /// operator fixes it. It is deliberately not `RoundCap`, so it is not charged
+    /// against the write-round budget or rejected as a terminal cap on resume.
+    TranscriptPump,
 }
 
 /// Coarse attempt lifecycle state.
@@ -2625,13 +2631,73 @@ pub fn suspend_attempt(attempt: &mut Attempt, kind: PauseKind) {
     attempt.completed_at.get_or_insert_with(now_iso8601);
 }
 
+/// Precedence rank of an Attempt's `(status, pause)` for monotonic transitions.
+/// Higher dominates: a hard failure outranks a non-resumable `RoundCap`/
+/// `Uncertain` pause, which outranks a resumable Auth/transcript-infrastructure
+/// pause, which outranks ordinary completion, which outranks any active state.
+fn attempt_state_rank(status: &AttemptStatus, pause: &Option<PauseKind>) -> u8 {
+    match status {
+        AttemptStatus::Failed => 5,
+        AttemptStatus::NeedsUser => match pause {
+            Some(PauseKind::Auth) | Some(PauseKind::TranscriptPump) => 3,
+            // RoundCap, Uncertain, or an unclassified pause is non-resumable.
+            _ => 4,
+        },
+        AttemptStatus::Complete => 2,
+        AttemptStatus::Planned | AttemptStatus::Executing | AttemptStatus::Reviewing => 1,
+    }
+}
+
+/// Transition an Attempt toward `status`/`pause` only when it dominates the
+/// current state by monotonic precedence, then return whether it applied.
+///
+/// This is the single boundary through which concurrent Task outcomes update the
+/// aggregate Attempt state. A terminal Attempt (Complete, a pause, or Failed) is
+/// replaced only by a strictly higher-ranked terminal state, so a late peer
+/// completion never overwrites a `NeedsUser`/`Failed` Attempt, a resumable pump
+/// pause never masks a harder failure, and equal-rank terminal events preserve
+/// the first result. An active target (Planned/Executing/Reviewing) never
+/// overwrites a terminal Attempt. Intentional resume uses `reopen_attempt`, which
+/// deliberately bypasses this guard.
+pub fn transition_attempt(
+    attempt: &mut Attempt,
+    status: AttemptStatus,
+    pause: Option<PauseKind>,
+) -> bool {
+    let current = attempt_state_rank(&attempt.status, &attempt.pause_kind);
+    let incoming = attempt_state_rank(&status, &pause);
+    // A terminal current state (rank >= 2) yields only to a strictly dominating
+    // terminal state; active current states accept any transition.
+    if current >= 2 && incoming <= current {
+        return false;
+    }
+    let is_terminal = matches!(
+        status,
+        AttemptStatus::Complete | AttemptStatus::Failed | AttemptStatus::NeedsUser
+    );
+    attempt.status = status;
+    attempt.pause_kind = pause;
+    if is_terminal {
+        attempt.completed_at.get_or_insert_with(now_iso8601);
+    } else {
+        attempt.completed_at = None;
+    }
+    true
+}
+
+/// Reopen a resumably-paused Attempt so a supported resume can retry. Only the
+/// Tasks that ended terminally on the resumable pause (`Failed`/`NeedsUser`) are
+/// replanned and have their terminal timestamp cleared; `Complete` Tasks and
+/// still-live `Executing` Tasks are left untouched, so resume never discards a
+/// completed peer or replans a Task that is still running.
 pub fn reopen_attempt(attempt: &mut Attempt) {
     attempt.status = AttemptStatus::Planned;
     attempt.pause_kind = None;
     attempt.completed_at = None;
     for task in &mut attempt.tasks {
-        if task.status != TaskStatus::Complete {
+        if matches!(task.status, TaskStatus::Failed | TaskStatus::NeedsUser) {
             task.status = TaskStatus::Planned;
+            task.completed_at = None;
         }
     }
 }
@@ -6905,6 +6971,130 @@ mod tests {
         set_attempt_terminal(&mut attempt, AttemptStatus::Complete);
         assert_eq!(attempt.status, AttemptStatus::Complete);
         assert!(attempt.completed_at.is_some());
+    }
+
+    fn attempt_in(status: AttemptStatus, pause: Option<PauseKind>) -> Attempt {
+        Attempt {
+            id: "a-1".to_string(),
+            work_item_id: "w-1".to_string(),
+            kind: AttemptKind::Write,
+            status,
+            coder_mapping: CoderMapping::default(),
+            tasks: Vec::new(),
+            review_state: None,
+            pause_kind: pause,
+            artifacts: Vec::new(),
+            created_at: None,
+            completed_at: None,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn transition_attempt_enforces_monotonic_precedence() {
+        // A resumable transcript pause is recorded over an active Attempt.
+        let mut a = attempt_in(AttemptStatus::Reviewing, None);
+        assert!(transition_attempt(
+            &mut a,
+            AttemptStatus::NeedsUser,
+            Some(PauseKind::TranscriptPump)
+        ));
+        assert_eq!(a.pause_kind, Some(PauseKind::TranscriptPump));
+
+        // A later peer completion must NOT overwrite the resumable pause.
+        assert!(!transition_attempt(&mut a, AttemptStatus::Complete, None));
+        assert_eq!(a.status, AttemptStatus::NeedsUser);
+        assert_eq!(a.pause_kind, Some(PauseKind::TranscriptPump));
+
+        // A later active transition must NOT overwrite the terminal Attempt.
+        assert!(!transition_attempt(&mut a, AttemptStatus::Reviewing, None));
+        assert_eq!(a.status, AttemptStatus::NeedsUser);
+
+        // A hard failure DOES dominate a resumable pause.
+        assert!(transition_attempt(&mut a, AttemptStatus::Failed, None));
+        assert_eq!(a.status, AttemptStatus::Failed);
+
+        // A resumable pause must NOT mask the hard failure.
+        assert!(!transition_attempt(
+            &mut a,
+            AttemptStatus::NeedsUser,
+            Some(PauseKind::TranscriptPump)
+        ));
+        assert_eq!(a.status, AttemptStatus::Failed);
+    }
+
+    #[test]
+    fn transition_attempt_preserves_first_equal_rank_terminal() {
+        // Two resumable pauses of equal rank: the first is preserved.
+        let mut a = attempt_in(AttemptStatus::Executing, None);
+        assert!(transition_attempt(
+            &mut a,
+            AttemptStatus::NeedsUser,
+            Some(PauseKind::Auth)
+        ));
+        assert!(!transition_attempt(
+            &mut a,
+            AttemptStatus::NeedsUser,
+            Some(PauseKind::TranscriptPump)
+        ));
+        assert_eq!(
+            a.pause_kind,
+            Some(PauseKind::Auth),
+            "equal-rank terminal events preserve the first result"
+        );
+    }
+
+    #[test]
+    fn reopen_attempt_replans_only_terminally_failed_tasks() {
+        // Reopen resets Failed/NeedsUser Tasks but leaves Complete and still-live
+        // Executing Tasks untouched.
+        let mut a = attempt_in(AttemptStatus::NeedsUser, Some(PauseKind::TranscriptPump));
+        let task = |id: &str, status: TaskStatus| Task {
+            id: id.to_string(),
+            kind: TaskKind::Write,
+            status,
+            role: "author".to_string(),
+            instructions: None,
+            work_item_id: "w-1".to_string(),
+            attempt_id: Some("a-1".to_string()),
+            workspace_access: WorkspaceAccess {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            },
+            artifact_area: None,
+            review_context: None,
+            input_artifacts: Vec::new(),
+            depends_on: None,
+            output: None,
+            created_at: None,
+            started_at: None,
+            completed_at: Some("2026-07-21T00:00:00Z".to_string()),
+        };
+        a.tasks = vec![
+            task("complete", TaskStatus::Complete),
+            task("failed", TaskStatus::Failed),
+            task("live", TaskStatus::Executing),
+        ];
+
+        reopen_attempt(&mut a);
+
+        assert_eq!(a.status, AttemptStatus::Planned);
+        assert!(a.pause_kind.is_none());
+        assert_eq!(a.tasks[0].status, TaskStatus::Complete, "complete stays");
+        assert_eq!(
+            a.tasks[1].status,
+            TaskStatus::Planned,
+            "the pump-failed task replans"
+        );
+        assert!(
+            a.tasks[1].completed_at.is_none(),
+            "the replanned task clears its terminal timestamp"
+        );
+        assert_eq!(
+            a.tasks[2].status,
+            TaskStatus::Executing,
+            "a still-live task is not replanned"
+        );
     }
 
     #[test]

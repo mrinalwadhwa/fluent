@@ -123,7 +123,7 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", config.attempt_id))?;
 
         match reject_terminal_attempt(attempt)? {
-            TerminalCheck::ReopenAuth => {
+            TerminalCheck::Reopen => {
                 let mut item = item;
                 let attempt_mut = item
                     .attempts
@@ -663,14 +663,18 @@ fn ensure_review_only_worktree_if_applicable(project_root: &Path, attempt: &Atte
 
 enum TerminalCheck {
     Continue,
-    ReopenAuth,
+    /// The pause is resumable: reopen the Attempt and retry. Auth pauses re-check
+    /// the token; transcript-pump pauses retry after the operator fixes the
+    /// broken console/transcript transport.
+    Reopen,
 }
 
 fn reject_terminal_attempt(attempt: &Attempt) -> Result<TerminalCheck> {
     match attempt.status {
         AttemptStatus::Failed => bail!("Attempt is failed and cannot be advanced"),
         AttemptStatus::NeedsUser => match attempt.pause_kind {
-            Some(PauseKind::Auth) => Ok(TerminalCheck::ReopenAuth),
+            Some(PauseKind::Auth) => Ok(TerminalCheck::Reopen),
+            Some(PauseKind::TranscriptPump) => Ok(TerminalCheck::Reopen),
             Some(PauseKind::Uncertain) => bail!(
                 "Attempt is paused with uncertain reviews. \
                  Resolve the uncertain verdicts and re-run; \
@@ -4268,7 +4272,7 @@ mod tests {
 
         assert!(matches!(
             reject_terminal_attempt(&attempt).unwrap(),
-            TerminalCheck::ReopenAuth
+            TerminalCheck::Reopen
         ));
 
         crate::work_model::reopen_attempt(&mut attempt);
@@ -4285,6 +4289,59 @@ mod tests {
             attempt.tasks[1].status,
             TaskStatus::Planned,
             "auth-failed review task should reset to Planned"
+        );
+    }
+
+    #[test]
+    fn transcript_pump_pause_is_resumable() {
+        // A transcript-pump pause is a supported resume, like an auth pause: the
+        // Attempt reopens and the pump-failed coder task resets to Planned so it
+        // retries once the operator has fixed the transport. It is never rejected
+        // as a terminal write-round cap.
+        let mut attempt = Attempt {
+            id: "attempt-1".to_string(),
+            status: AttemptStatus::NeedsUser,
+            pause_kind: Some(PauseKind::TranscriptPump),
+            tasks: vec![Task {
+                id: "attempt-1-write-1".to_string(),
+                kind: TaskKind::Write,
+                status: TaskStatus::Failed,
+                role: "author".to_string(),
+                instructions: None,
+                work_item_id: "work-1".to_string(),
+                attempt_id: Some("attempt-1".to_string()),
+                workspace_access: WorkspaceAccess {
+                    reads: Vec::new(),
+                    writes: Vec::new(),
+                },
+                artifact_area: None,
+                review_context: None,
+                input_artifacts: Vec::new(),
+                depends_on: None,
+                output: None,
+                created_at: None,
+                started_at: None,
+                completed_at: None,
+            }],
+            completed_at: Some("2026-07-21T12:00:00Z".to_string()),
+            ..Default::default()
+        };
+
+        assert!(
+            matches!(
+                reject_terminal_attempt(&attempt).unwrap(),
+                TerminalCheck::Reopen
+            ),
+            "a transcript-pump pause must resume, not bail as a terminal cap"
+        );
+
+        crate::work_model::reopen_attempt(&mut attempt);
+        assert_eq!(attempt.status, AttemptStatus::Planned);
+        assert!(attempt.pause_kind.is_none());
+        assert_eq!(
+            attempt.tasks[0].status,
+            TaskStatus::Planned,
+            "the pump-failed write task resets to Planned to retry"
         );
     }
 
