@@ -3,8 +3,10 @@
 - [backward-compatible-serde-fields](backward-compatible-serde-fields.md) — Persisted Work model field additions and renames must preserve backward compatibility with existing on-disk JSON
 - [behaviors-test-citation-sync](behaviors-test-citation-sync.md) — Test renames must update all Test: citations in behaviors.md in the same commit
 - [doc-comment-attachment-in-rust](doc-comment-attachment-in-rust.md) — Inserting a function between a doc comment and its target silently re-attaches the comment to the wrong item
+- [expertise-testing-patterns-are-copyable-templates](expertise-testing-patterns-are-copyable-templates.md) — Files under .fluent/expertise/testing/patterns are copied verbatim by future test authors, so stale paths or removed mechanisms block review
 - [extract-logic-to-avoid-test-duplication](extract-logic-to-avoid-test-duplication.md) — Extract multi-step logic into standalone functions so integration tests call real code rather than reimplementing it
 - [follow-up-journal-schema-boundary](follow-up-journal-schema-boundary.md) — Keep post-land journal interpretation in follow_up so cleanup does not become a second schema owner
+- [host-evidence-writes-use-exclusive-create](host-evidence-writes-use-exclusive-create.md) — Host-owned run/handoff evidence is written with exclusive create-new and propagates every write error — never a best-effort copy
 - [inject-side-effects-for-testability](inject-side-effects-for-testability.md) — Side-effect functions like notify() must be injected via &dyn Fn parameters so tests can capture and assert
 - [keep-architecture-doc-in-sync](keep-architecture-doc-in-sync.md) — documentation/architecture.md is a living present-tense doc; subsystem changes must update its file map and subsystem sections in the same change
 - [lock-ordering-across-subsystems](lock-ordering-across-subsystems.md) — Release the queue lock before mutating the Work model; the codebase has a lock hierarchy that must not be inverted
