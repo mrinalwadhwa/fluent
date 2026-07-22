@@ -945,6 +945,32 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         );
     }
 
+    // Route every post-reservation completion failure — completion read/find and the
+    // terminal write — through one durable terminal boundary, so no raw `?` after the
+    // reservation can leave the Task Executing. The completion helper takes and
+    // releases the store lock itself, so terminalization on failure never deadlocks.
+    match complete_review_task(&config, &review_path) {
+        Ok(result) => Ok(result),
+        Err(error) => {
+            lock_mark_task_failed(
+                config.store,
+                config.store_lock,
+                config.work_item_id,
+                config.attempt_id,
+                config.task_id,
+            )?;
+            Err(error)
+        }
+    }
+}
+
+/// Persist a Review Task's successful completion under the store lock. Every fallible
+/// step returns through the caller's terminal boundary, so a completion failure
+/// durably fails the Task rather than leaving it Executing.
+fn complete_review_task(
+    config: &WorkTaskRunConfig<'_>,
+    review_path: &Path,
+) -> Result<WorkTaskRunResult> {
     {
         let _lock = config
             .store_lock
@@ -961,7 +987,7 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             .artifacts
             .push(ArtifactRef {
                 producer_id: config.task_id.to_string(),
-                path: path_for_model(config.project_root, &review_path),
+                path: path_for_model(config.project_root, review_path),
             });
         let all_complete = completed_item.attempts[attempt_index]
             .tasks
@@ -985,7 +1011,7 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
 
     Ok(WorkTaskRunResult {
         task_id: config.task_id.to_string(),
-        output: path_for_model(config.project_root, &review_path),
+        output: path_for_model(config.project_root, review_path),
     })
 }
 
@@ -1153,6 +1179,30 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         );
     }
 
+    // Route every post-reservation completion failure through one durable terminal
+    // boundary; the helper takes and releases the store lock itself, so
+    // terminalization on failure never deadlocks.
+    match complete_tester_task(&config, &results_path) {
+        Ok(result) => Ok(result),
+        Err(error) => {
+            lock_mark_task_failed(
+                config.store,
+                config.store_lock,
+                config.work_item_id,
+                config.attempt_id,
+                config.task_id,
+            )?;
+            Err(error)
+        }
+    }
+}
+
+/// Persist a Tester Task's successful completion under the store lock, returning
+/// through the caller's terminal boundary on any failure.
+fn complete_tester_task(
+    config: &WorkTaskRunConfig<'_>,
+    results_path: &Path,
+) -> Result<WorkTaskRunResult> {
     {
         let _lock = config
             .store_lock
@@ -1169,7 +1219,7 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             .artifacts
             .push(ArtifactRef {
                 producer_id: config.task_id.to_string(),
-                path: path_for_model(config.project_root, &results_path),
+                path: path_for_model(config.project_root, results_path),
             });
         let all_complete = completed_item.attempts[attempt_index]
             .tasks
@@ -1192,7 +1242,7 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
 
     Ok(WorkTaskRunResult {
         task_id: config.task_id.to_string(),
-        output: path_for_model(config.project_root, &results_path),
+        output: path_for_model(config.project_root, results_path),
     })
 }
 
