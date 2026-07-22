@@ -4,7 +4,9 @@
 - [backward-compatible-serde-fields](backward-compatible-serde-fields.md) — Persisted Work model field additions and renames must preserve backward compatibility with existing on-disk JSON
 - [behaviors-test-citation-sync](behaviors-test-citation-sync.md) — Test renames must update all Test: citations in behaviors.md in the same commit
 - [capture-pump-terminate-descendants-before-eof](capture-pump-terminate-descendants-before-eof.md) — When a thread drains a child's piped stdout to EOF, terminate the whole process group before waiting for EOF; a backgrounded descendant can hold the pipe open forever
+- [compose-typed-failure-precedence](compose-typed-failure-precedence.md) — A finalizer facing a coder/pump primary plus a cleanup/confinement secondary composes them by fixed precedence — resumable primary pauses, pure integrity failure is hard Failed — keeping the primary downcastable
 - [config-fails-open-only-for-diagnostics](config-fails-open-only-for-diagnostics.md) — Layered config fails closed by default; only diagnostic-only knobs may fail open, and that must be justified in the docstring
+- [declared-behavior-tests-must-exist-before-land](declared-behavior-tests-must-exist-before-land.md) — Every Test: reference in behaviors.md must resolve to a real passing test before landing; a green suite does not substitute for a missing production-boundary regression
 - [doc-comment-attachment-in-rust](doc-comment-attachment-in-rust.md) — Inserting a function between a doc comment and its target silently re-attaches the comment to the wrong item
 - [expertise-testing-patterns-are-copyable-templates](expertise-testing-patterns-are-copyable-templates.md) — Files under .fluent/expertise/testing/patterns are copied verbatim by future test authors, so stale paths or removed mechanisms block review
 - [extract-logic-to-avoid-test-duplication](extract-logic-to-avoid-test-duplication.md) — Extract multi-step logic into standalone functions so integration tests call real code rather than reimplementing it
@@ -16,8 +18,11 @@
 - [needs-user-not-terminal-for-cleanup](needs-user-not-terminal-for-cleanup.md) — NeedsUser attempts are not terminal for cleanup; only Complete and Failed are reapable
 - [post-land-effects-are-idempotent-and-land-safe](post-land-effects-are-idempotent-and-land-safe.md) — A completed land is durable; post-land side effects run only after merge, replay at-most-once via deterministic ids, and never undo the land on failure
 - [production-lock-test-hooks](production-lock-test-hooks.md) — Lock-contention pause hooks must stay test-only, scoped, bounded, and panic-safe
+- [public-api-surface-test](public-api-surface-test.md) — A capability for external callers gets a tests/public_api.rs test that compiles only against the public API, proving it is usable without private internals
 - [prompt-file-naming-guardrail](prompt-file-naming-guardrail.md) — Adding or renaming prompt files under prompts/ requires updating the no_legacy_prompt_files_in_prompts_dir allowlist test
 - [record-divergence-in-decisions-md](record-divergence-in-decisions-md.md) — Deliberate divergences from approach.md belong in decisions.md (durable), not just progress.md (round-scoped)
+- [reserved-phase-terminal-finalizer](reserved-phase-terminal-finalizer.md) — Once a phase reserves durable state, its whole failure path funnels through one finalizer that persists authoritative state before any handoff/artifact — never a raw ? or panic out of the reserved body
+- [route-tests-drive-real-launch-wiring](route-tests-drive-real-launch-wiring.md) — A launch-route regression must drive the real phase launch path and fail if it drops the threaded value; a helper test asserting resolver/config layering does not verify the wiring
 - [sandbox-denials-track-template-grants](sandbox-denials-track-template-grants.md) — Handoff-only sandbox confinement depends on stripping exact shared-temp grant strings from the rendered profile
 - [shell-tests-invisible-to-compiler](shell-tests-invisible-to-compiler.md) — Shell behavior tests query JSON via jq and are not caught by the compiler when serialized field names change
 - [terminal-coder-errors-bypass-retry-budget](terminal-coder-errors-bypass-retry-budget.md) — Classify typed coder failures that may leave invisible side effects as terminal in should_retry_coder_error, never retried
