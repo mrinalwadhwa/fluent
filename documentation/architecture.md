@@ -526,6 +526,7 @@ schema repair — not a fresh audit — under a fresh run identity, and accepts 
 corrected draft only when it preserves every prior follow-up id and its
 non-schema content. The prompt keeps the artifact-evidence array empty until the
 handoff transport can publish referenced evidence artifacts.
+
 Land takes that lock before it reads or mutates candidate state, resolves
 workspaces, or checks cleanliness, and holds it through merge finalization and
 follow-up recovery. A retry therefore cannot make land observe its transient

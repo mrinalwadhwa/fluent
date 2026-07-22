@@ -15,17 +15,20 @@ the run.
 ## Mechanism
 
 The host captures the coder's stdout line-by-line into a durable transcript on
-the managed Learner surface (`.../learner/transcript.jsonl`), written outside
-the sandbox. `run_learner` preserves any prior run's transcript as an immutable
-`transcript.run<N>.jsonl` sibling before the next run truncates the live path,
-so every run on the Attempt leaves its own record.
+the managed Learner surface, written outside the sandbox. Each invocation gets
+its own collision-safe, host-owned run directory
+(`.../learner/runs/run-<N>/transcript.jsonl`), so every run on the Attempt
+leaves its own immutable record by construction — nothing truncates a shared
+live path. Within a single run, a refreshing auth retry preserves the
+pre-refresh transcript phase as an immutable `transcript.<phase>.jsonl` sibling
+(a create-new write) before it retries.
 
 So: have the mock **print** its observability to stdout instead of writing a
-shared-temp file, and read it back by concatenating every `transcript*.jsonl`
-in the learner dir.
+shared-temp file, and read it back by recursing every `runs/run-<N>/` directory
+and concatenating every `transcript*.jsonl` inside it.
 
 - **Run count** — the mock echoes a marker (`LEARNER_RUN`); count the marker
-  across all preserved and live transcripts.
+  across every run's transcripts.
 - **Prompt / observed commit** — the mock echoes the prompt and
   `git rev-parse HEAD`; grep the concatenated transcripts for the substring.
 - **Serialized window / release** — the mock *reads* a shared-temp release file
@@ -47,8 +50,9 @@ the draft avoids the dependency entirely).
 //   printf 'LEARNER_HEAD %s\n' "$(git rev-parse HEAD)"
 //   printf '%s\n' '{"learning_summary":"...","follow_ups":[]}' > "$DRAFT"
 
-// In the test: read it back from the managed transcript surface.
-fn learner_transcripts(main_dir: &Path) -> String { /* cat transcript*.jsonl */ }
+// In the test: read it back from the managed transcript surface by recursing
+// every run directory (learner/runs/run-<N>/transcript*.jsonl).
+fn learner_transcripts(main_dir: &Path) -> String { /* cat runs/run-<N>/transcript*.jsonl */ }
 fn learner_run_count(main_dir: &Path) -> usize {
     learner_transcripts(main_dir).lines().filter(|l| *l == "LEARNER_RUN").count()
 }
