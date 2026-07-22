@@ -11,7 +11,7 @@ use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
@@ -118,6 +118,21 @@ pub fn status_path_for(transcript_path: &Path) -> PathBuf {
     transcript_path.with_file_name("transcript-pump.json")
 }
 
+/// Cap a retained or persisted error message so a pathological error string can
+/// never bloat the shared diagnostics or the status document.
+const MAX_STATUS_ERROR_LEN: usize = 2000;
+
+fn bound_error(message: &str) -> String {
+    if message.len() <= MAX_STATUS_ERROR_LEN {
+        return message.to_string();
+    }
+    let mut end = MAX_STATUS_ERROR_LEN;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…[truncated]", &message[..end])
+}
+
 /// A best-effort console sink for bounded record previews. Delivery is
 /// synchronous and must never block the pump: an implementation renders the
 /// preview without waiting and returns `false` when it could not — because there
@@ -221,13 +236,17 @@ impl std::fmt::Display for TranscriptPumpError {
 
 impl std::error::Error for TranscriptPumpError {}
 
-/// What a completed drain observed: total bytes persisted, records seen, and
-/// previews a saturated or disconnected console could not accept.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// What a completed drain observed: total bytes persisted, records seen, previews a
+/// saturated or disconnected console could not accept, and — on a settled capture —
+/// the coordinator's final balanced status transport accounting.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PumpSummary {
     pub bytes: u64,
     pub records: u64,
     pub dropped_console: u64,
+    /// The final balanced status transport accounting, populated when the capture
+    /// settles successfully (it is carried on the typed error otherwise).
+    pub transport: StatusTransportDiagnostics,
 }
 
 /// The lifecycle state of a transcript pump, persisted in its status document.
@@ -331,6 +350,7 @@ impl SharedCounters {
     }
     fn snapshot(&self) -> PumpSummary {
         PumpSummary {
+            transport: StatusTransportDiagnostics::default(),
             bytes: self.bytes.load(Ordering::Relaxed),
             records: self.records.load(Ordering::Relaxed),
             dropped_console: self.dropped_console.load(Ordering::Relaxed),
@@ -426,18 +446,20 @@ fn drain_with_first_fault(
         latch.publish(err);
     }
 
-    let summary = counters.snapshot();
+    let mut summary = counters.snapshot();
 
     match result {
         Ok(()) => match coordinator.as_mut() {
             Some(coordinator) => {
                 let settlement =
-                    coordinator.finish(TerminalStatusSpec::complete(started, summary));
+                    coordinator.finish(TerminalStatusSpec::complete(started, summary.clone()));
                 // A terminal-settlement failure OR a status-worker panic is a typed
                 // terminal failure: capture is not independently observable.
                 if let Some(err) = settlement.terminal_failure() {
                     return Err(err);
                 }
+                // Return the final balanced transport accounting on success too.
+                summary.transport = settlement.diagnostics.clone();
                 Ok(summary)
             }
             None => Ok(summary),
@@ -699,7 +721,7 @@ impl TerminalStatusSpec {
         Self {
             state: PumpState::Failed,
             started_at_ms: self.started_at_ms,
-            summary: self.summary,
+            summary: self.summary.clone(),
             error: Some(format!(
                 "complete status could not be persisted: {settlement_error}"
             )),
@@ -766,34 +788,32 @@ impl StatusSettlement {
 /// to it BEFORE attempting terminal status settlement, so a delayed or blocked
 /// status write can never hide the first fault from the supervisor: supervision
 /// observes the latch independently of joining the pump's terminal outcome.
+///
+/// The payload is a `OnceLock`, so publishing the message and making the fault
+/// observable are the same atomic write-once step — a reader that observes the
+/// fault always sees its message — and the notification path never takes a blocking
+/// mutex that a saturated writer could contend.
 #[derive(Default)]
 pub struct FirstFault {
-    set: AtomicBool,
-    message: Mutex<Option<String>>,
+    fault: OnceLock<String>,
 }
 
 impl FirstFault {
     /// Publish the first fault. Only the first caller wins; later faults never
     /// overwrite it, so the latch names the immutable first cause.
     fn publish(&self, err: &TranscriptPumpError) {
-        if self
-            .set
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            *self.message.lock().unwrap() = Some(err.message().to_string());
-        }
+        let _ = self.fault.set(err.message().to_string());
     }
 
     /// Whether a first fault has been published. Supervision polls this so it can
     /// terminate and reap the coder before waiting for terminal status settlement.
     pub fn observed(&self) -> bool {
-        self.set.load(Ordering::Acquire)
+        self.fault.get().is_some()
     }
 
     #[cfg(test)]
     fn message(&self) -> Option<String> {
-        self.message.lock().unwrap().clone()
+        self.fault.get().cloned()
     }
 }
 
@@ -875,10 +895,11 @@ impl SharedStatusState {
         match result {
             Ok(()) => inner.diagnostics.written += 1,
             Err(err) => {
+                let bounded = bound_error(err);
                 inner.diagnostics.write_failures += 1;
-                inner.diagnostics.last_error = Some(err.clone());
+                inner.diagnostics.last_error = Some(bounded.clone());
                 if kind == WriteKind::Periodic {
-                    inner.periodic_error = Some(err.clone());
+                    inner.periodic_error = Some(bounded);
                 }
             }
         }
@@ -887,11 +908,21 @@ impl SharedStatusState {
     /// Record a Complete write failure before attempting a Failed fallback, so a
     /// fallback that itself panics still surfaces the original Complete error.
     fn set_settlement_error(&self, err: &str) {
-        self.inner.lock().unwrap().settlement_error = Some(err.to_string());
+        self.inner.lock().unwrap().settlement_error = Some(bound_error(err));
     }
 
     fn diagnostics(&self) -> StatusTransportDiagnostics {
         self.inner.lock().unwrap().diagnostics.clone()
+    }
+
+    /// A live snapshot of the transport accounting with the in-flight write
+    /// optimistically projected, so a Running document carries a self-consistent,
+    /// balanced view rather than a zeroed default.
+    fn projected_write_diagnostics(&self) -> StatusTransportDiagnostics {
+        let inner = self.inner.lock().unwrap();
+        let mut projected = inner.diagnostics.clone();
+        projected.written += 1;
+        projected
     }
 
     fn periodic_error(&self) -> Option<String> {
@@ -1066,15 +1097,13 @@ impl StatusCoordinator {
             inner.terminal = Some(spec);
         }
         self.wake();
-        let settlement = match self.join.take() {
+        let mut settlement = match self.join.take() {
             Some(join) => join.join().unwrap_or_else(|_| {
                 // The worker panicked while persisting a status. Its terminal write
                 // may not have landed; surface it without losing the diagnostics.
                 StatusSettlement {
                     diagnostics: self.shared.diagnostics(),
-                    worker_error: Some(
-                        "status coordinator worker panicked while persisting a status".to_string(),
-                    ),
+                    worker_error: Some(STATUS_WORKER_PANIC.to_string()),
                     ..StatusSettlement::default()
                 }
             }),
@@ -1083,10 +1112,28 @@ impl StatusCoordinator {
                 ..StatusSettlement::default()
             },
         };
+        // If the worker exited (panicked or disconnected) before processing the
+        // terminal, its spec lingers unprocessed. Account it as a disconnected
+        // submission and reconcile any other abandoned work, so the returned
+        // diagnostics include every submission and remain balanced — never a stale
+        // pre-finish snapshot with an uncounted terminal pending.
+        {
+            let mut inner = self.shared.inner.lock().unwrap();
+            if inner.terminal.take().is_some() {
+                inner.diagnostics.submitted += 1;
+                inner.diagnostics.disconnected += 1;
+            }
+        }
+        self.shared.reconcile_abandoned();
         // Drop the wake sender and mark shutdown so any later submission is accounted
         // as disconnected rather than silently ignored.
         self.wake = None;
         self.shared.inner.lock().unwrap().shutdown = true;
+        // Refresh the returned diagnostics so they reflect all reconciliation.
+        settlement.diagnostics = self.shared.diagnostics();
+        if settlement.periodic_error.is_none() {
+            settlement.periodic_error = self.shared.periodic_error();
+        }
         settlement
     }
 }
@@ -1119,11 +1166,16 @@ fn run_status_worker(
         loop {
             match shared.next_work() {
                 Work::Required(cmd) => {
-                    let result = store.write(&cmd.status);
+                    let RequiredCommand { mut status, ack } = cmd;
+                    // Stamp live projected transport diagnostics so the persisted
+                    // Running document carries a self-consistent view, not zeros.
+                    status.transport = shared.projected_write_diagnostics();
+                    let result = store.write(&status);
                     shared.record_write(&result, WriteKind::Required);
-                    let _ = cmd.ack.send(result);
+                    let _ = ack.send(result);
                 }
-                Work::Periodic(status) => {
+                Work::Periodic(mut status) => {
+                    status.transport = shared.projected_write_diagnostics();
                     let result = store.write(&status);
                     shared.record_write(&result, WriteKind::Periodic);
                 }
@@ -1678,9 +1730,9 @@ mod tests {
                 + settlement.diagnostics.write_failures,
             "every submission is accounted in exactly one category"
         );
-        assert!(
-            settlement.diagnostics.submitted >= 1,
-            "at least the required Running plus the periodics were submitted"
+        assert_eq!(
+            settlement.diagnostics.submitted, 7,
+            "one required Running, five periodics, and the terminal"
         );
 
         // The persisted terminal document carries the same balanced accounting.
@@ -1837,12 +1889,19 @@ mod tests {
             "the submitter is disconnected, not hung, when the worker panics"
         );
         let settlement = coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
+        // Exactly the initial Running and the terminal are submitted; both are
+        // reconciled to disconnected, nothing is written, and no snapshot is pending.
+        assert_eq!(settlement.diagnostics.submitted, 2, "Running + terminal");
+        assert_eq!(
+            settlement.diagnostics.disconnected, 2,
+            "both are reconciled to disconnected"
+        );
+        assert_eq!(settlement.diagnostics.written, 0);
         assert!(
             settlement.diagnostics.is_balanced(),
             "abandoned work is reconciled so the balance holds: {:?}",
             settlement.diagnostics
         );
-        assert!(settlement.diagnostics.submitted >= 1);
     }
 
     #[test]
@@ -1916,6 +1975,53 @@ mod tests {
             pump.first_fault_observed(),
             "the status worker panic latched the first fault"
         );
+    }
+
+    #[test]
+    fn running_document_carries_projected_transport() {
+        // Re-audit regression: a Running document carries live projected transport
+        // diagnostics, not zeroed defaults, and that projection is self-consistent.
+        let (store, writes) = RecordingStore::new();
+        let coordinator = StatusCoordinator::spawn(Box::new(store), None).unwrap();
+        coordinator.submit_required(running_status()).unwrap();
+
+        let writes = writes.lock().unwrap();
+        let running = &writes[0];
+        assert_eq!(running.state, PumpState::Running);
+        assert_eq!(
+            running.transport.submitted, 1,
+            "the Running document projects the live submission count, not zeros"
+        );
+        assert_eq!(running.transport.written, 1, "its own write is projected");
+        assert!(running.transport.is_balanced());
+    }
+
+    #[test]
+    fn successful_capture_returns_balanced_transport() {
+        // Re-audit regression: a successful capture returns the final balanced
+        // transport accounting in its summary, symmetric with the error path.
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let status = status_path_for(&transcript);
+        let sink = SaturatedSink::new();
+        let summary = drain(
+            Cursor::new(b"{\"a\":1}\n".to_vec()),
+            &transcript,
+            Some(&status),
+            &sink,
+            &TranscriptPumpConfig::default(),
+        )
+        .unwrap();
+        assert!(
+            summary.transport.is_balanced(),
+            "the returned transport balances: {:?}",
+            summary.transport
+        );
+        assert!(
+            summary.transport.submitted >= 2,
+            "at least the initial Running and the terminal were submitted"
+        );
+        assert_eq!(summary.transport.write_failures, 0);
     }
 
     #[test]
