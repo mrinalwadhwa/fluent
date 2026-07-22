@@ -2291,7 +2291,16 @@ fn interpret_reviews(
             let handoff_path =
                 write_budget_exhausted_handoff(project_root, &item.id, attempt_id, &failed)?;
             store.mutate_work_item(&item.id, |fresh| {
-                if let Some(attempt) = fresh.attempts.get_mut(attempt_index) {
+                let attempt = fresh
+                    .attempts
+                    .iter_mut()
+                    .find(|a| a.id == attempt_id)
+                    .ok_or_else(|| crate::work_model::WorkModelError::AttemptNotFound {
+                        id: attempt_id.to_string(),
+                    })?;
+                // Idempotent: attach the handoff reference only if a fresh reread has
+                // not already recorded it, so a retry cannot duplicate it.
+                if !attempt.artifacts.iter().any(|a| a.path == handoff_path) {
                     attempt.artifacts.push(ArtifactRef {
                         producer_id: "attempt-loop".to_string(),
                         path: handoff_path.clone(),
@@ -2324,7 +2333,16 @@ fn interpret_reviews(
         let handoff_path =
             write_needs_user_handoff(project_root, &item.id, attempt_id, &uncertain)?;
         store.mutate_work_item(&item.id, |fresh| {
-            if let Some(attempt) = fresh.attempts.get_mut(attempt_index) {
+            let attempt = fresh
+                .attempts
+                .iter_mut()
+                .find(|a| a.id == attempt_id)
+                .ok_or_else(|| crate::work_model::WorkModelError::AttemptNotFound {
+                    id: attempt_id.to_string(),
+                })?;
+            // Idempotent: attach the handoff reference only if a fresh reread has not
+            // already recorded it, so a retry cannot duplicate it.
+            if !attempt.artifacts.iter().any(|a| a.path == handoff_path) {
                 attempt.artifacts.push(ArtifactRef {
                     producer_id: "attempt-loop".to_string(),
                     path: handoff_path.clone(),
