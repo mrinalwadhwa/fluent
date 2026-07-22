@@ -1186,6 +1186,19 @@ impl ManagedChild {
         self.outcome.group_swept()
     }
 
+    /// The retained process-group sweep failure once a sweep was attempted but could
+    /// not be confirmed (a reaped leader whose `killpg` returned `EPERM`, or another
+    /// non-`ESRCH` error). `None` when the group was verifiably swept or no signal was
+    /// attempted. This is a non-blocking, structured diagnostic so an unconfirmed
+    /// sweep stays inspectable without writing to a possibly-saturated stderr during
+    /// finalization.
+    fn unconfirmed_group_sweep(&self) -> Option<ProcessOpError> {
+        match self.outcome.group_signal {
+            Some(GroupSweep::Failed(err)) => Some(err),
+            _ => None,
+        }
+    }
+
     /// Sweep the leader's process group while its PID still pins the group identity,
     /// then reap the leader exactly once. Idempotent and truthful: once reaped, a
     /// repeat is a no-op; a termination that both group-signals and direct-kills
@@ -1258,18 +1271,13 @@ impl ManagedChild {
         // `EPERM`/`ESRCH`) is not a run fault, so it must not abort the task. Drop
         // stays conservative and detaches rather than joins the pump when the sweep
         // was not confirmed.
-        if !self.outcome.group_swept() {
-            // The sweep was not confirmed. Surface the retained OS error as an
-            // observable diagnostic so the unconfirmed sweep is not swallowed once
-            // this owner drops — but never claim the group was swept (the structured
-            // `group_signal` stays `Failed`, distinct from an `ESRCH` `AlreadyGone`).
-            eprintln!(
-                "  Note: coder process {id} was reaped after a direct kill, but its \
-                 process group sweep could not be confirmed ({}); non-fatal, and the \
-                 group is not recorded as swept.",
-                self.outcome.group_sweep_error()
-            );
-        }
+        // When the sweep was not confirmed, the structured `GroupSweep::Failed`
+        // (with its OS error) stays retained on the outcome and is exposed by
+        // `unconfirmed_group_sweep()` — a non-blocking, inspectable diagnostic. It is
+        // deliberately NOT written to stderr here: this runs during coder
+        // finalization, where a saturated fd 2 could block the write and reintroduce
+        // the very deadlock class this pump design closes. The group is still never
+        // recorded as swept (the failure stays distinct from an `ESRCH` `AlreadyGone`).
         Ok(code)
     }
 
@@ -2316,6 +2324,12 @@ mod pump_supervision_tests {
         assert!(
             !managed.group_swept(),
             "an unconfirmed group sweep is never recorded as swept"
+        );
+        // The structured sweep failure stays retained and inspectable (a non-blocking
+        // diagnostic), rather than being written to a possibly-saturated stderr.
+        assert!(
+            managed.unconfirmed_group_sweep().is_some(),
+            "the unconfirmed sweep's OS error is retained for observation"
         );
 
         let calls = calls.lock().unwrap();
