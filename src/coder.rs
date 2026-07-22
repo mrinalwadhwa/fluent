@@ -1063,11 +1063,6 @@ enum CleanupError {
         signal: ProcessOpError,
         kill: ProcessOpError,
     },
-    /// The leader was killed directly because the group signal failed, but the
-    /// process group and any descendants were not verifiably swept. The leader is
-    /// reaped, but this cleanup gap — with the signal's OS error — is retained rather
-    /// than reported as clean.
-    GroupNotSwept { id: u32, signal: ProcessOpError },
     /// The leader could not be reaped; retains the reap operation's OS error.
     NotReaped { id: u32, source: ProcessOpError },
     /// The leader's identity was already lost (`ECHILD`: reaped out from under the
@@ -1081,9 +1076,6 @@ impl std::fmt::Display for CleanupError {
         match self {
             CleanupError::NotTerminated { id, signal, kill } => {
                 write!(f, "coder process {id} could not be terminated (group signal {signal} and direct kill {kill} both failed)")
-            }
-            CleanupError::GroupNotSwept { id, signal } => {
-                write!(f, "coder process {id} was killed directly but its process group was not verifiably swept ({signal})")
             }
             CleanupError::NotReaped { id, source } => {
                 write!(f, "coder process {id} could not be reaped ({source})")
@@ -1257,17 +1249,16 @@ impl ManagedChild {
             Err(source) => return Err(CleanupError::NotReaped { id, source }),
         };
         self.outcome.exit_code = Some(code);
-        if self.outcome.group_swept() {
-            Ok(code)
-        } else {
-            // The leader was reaped via a direct kill, but the group and any
-            // descendants were not verifiably swept — a retained cleanup failure,
-            // never a clean success.
-            Err(CleanupError::GroupNotSwept {
-                id,
-                signal: self.outcome.group_sweep_error(),
-            })
-        }
+        // The leader is terminated and reaped: a successful cleanup for the run.
+        // Whether the process group was *verifiably* swept is a separate diagnostic
+        // that `group_swept()` reports from the structured signal result. That gate
+        // governs only whether Drop may join the pump — not the run's outcome. A
+        // reaped leader whose group signal could not confirm the sweep (a normal path
+        // once the leader has exited: the group is already gone and `killpg` returns
+        // `EPERM`/`ESRCH`) is not a run fault, so it must not abort the task. Drop
+        // stays conservative and detaches rather than joins the pump when the sweep
+        // was not confirmed.
+        Ok(code)
     }
 
     /// Block until the leader exits (without reaping), then sweep the group and reap.
@@ -2297,18 +2288,22 @@ mod pump_supervision_tests {
             ..FakeLeader::new(Arc::clone(&calls), Some(0))
         };
         let mut managed = ManagedChild::new(Box::new(leader));
-        // A direct-kill fallback terminates and reaps the leader, but the group was
-        // not verifiably swept — a retained cleanup failure, persisted on repeat.
-        assert!(matches!(
-            managed.terminate_and_reap(),
-            Err(CleanupError::GroupNotSwept { .. })
-        ));
+        // A direct-kill fallback terminates and reaps the leader — a successful
+        // cleanup for the run — even though the group could not be verifiably swept.
+        // A failed group signal after a reaped leader is a normal path (the group is
+        // already gone), not a run-aborting fault; the same successful outcome is
+        // cached and returned verbatim on repeat.
+        assert_eq!(managed.terminate_and_reap().unwrap(), 0);
+        assert_eq!(
+            managed.terminate_and_reap().unwrap(),
+            0,
+            "the reaped outcome is cached on repeat, never re-signaled"
+        );
+        // The group was not verifiably swept, so Drop must stay conservative and not
+        // join a pump that a surviving descendant could keep open.
         assert!(
-            matches!(
-                managed.terminate_and_reap(),
-                Err(CleanupError::GroupNotSwept { .. })
-            ),
-            "the group-sweep failure is retained on repeat, never flipped to success"
+            !managed.group_swept(),
+            "an unconfirmed group sweep is never recorded as swept"
         );
 
         let calls = calls.lock().unwrap();
