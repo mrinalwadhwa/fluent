@@ -1210,6 +1210,8 @@ fn finalize_terminal(
     spec: TerminalStatusSpec,
     first_fault: Option<&Arc<FirstFault>>,
 ) -> StatusSettlement {
+    // Bound every retained/returned error so a pathological message cannot bloat the
+    // settlement (and, UTF-8-safe, cannot split a multibyte boundary).
     let settlement_error = match write_accounted_terminal(shared, store, &spec) {
         Ok(()) => {
             return StatusSettlement {
@@ -1218,7 +1220,7 @@ fn finalize_terminal(
                 ..StatusSettlement::default()
             };
         }
-        Err(err) => err,
+        Err(err) => bound_error(&err),
     };
     // Record the Complete error in shared state BEFORE the fallback, so a fallback
     // that itself panics still surfaces the original Complete error.
@@ -1233,7 +1235,9 @@ fn finalize_terminal(
     // itself accounted as a real submission.
     if spec.state == PumpState::Complete {
         let fallback = spec.as_failed(&settlement_error);
-        let fallback_error = write_accounted_terminal(shared, store, &fallback).err();
+        let fallback_error = write_accounted_terminal(shared, store, &fallback)
+            .err()
+            .map(|err| bound_error(&err));
         StatusSettlement {
             diagnostics: shared.diagnostics(),
             settlement_error: Some(settlement_error),
@@ -1977,6 +1981,80 @@ mod tests {
         );
     }
 
+    /// A store that fails both the Complete write and the Failed fallback with
+    /// distinct messages, so the composite diagnostics can be checked.
+    struct FailBothStore {
+        complete_msg: String,
+        failed_msg: String,
+    }
+
+    impl StatusStore for FailBothStore {
+        fn write(&mut self, status: &PumpStatus) -> Result<(), String> {
+            match status.state {
+                PumpState::Running => Ok(()),
+                PumpState::Complete => Err(self.complete_msg.clone()),
+                PumpState::Failed => Err(self.failed_msg.clone()),
+            }
+        }
+    }
+
+    #[test]
+    fn bound_error_is_utf8_safe_and_bounded() {
+        // Re-audit regression: a long multibyte error is bounded without splitting a
+        // UTF-8 boundary (constructing the String would panic if it did).
+        let long = "€".repeat(5000); // 3 bytes each, boundary lands mid-character
+        let bounded = bound_error(&long);
+        assert!(
+            bounded.len() <= MAX_STATUS_ERROR_LEN + "…[truncated]".len(),
+            "bounded to the cap plus the marker, got {}",
+            bounded.len()
+        );
+        assert!(bounded.ends_with("…[truncated]"));
+        // A short message is returned unchanged.
+        assert_eq!(bound_error("short"), "short");
+    }
+
+    #[test]
+    fn composite_diagnostics_are_distinct_and_bounded() {
+        // Re-audit regression: when both the Complete write and its Failed fallback
+        // fail, the settlement preserves the two DISTINCT errors, each bounded.
+        let store = FailBothStore {
+            complete_msg: "C".repeat(5000),
+            failed_msg: "F".repeat(5000),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let sink = SaturatedSink::new();
+        let err = drain_with_store(
+            Cursor::new(b"{\"a\":1}\n".to_vec()),
+            &transcript,
+            Some(Box::new(store)),
+            &sink,
+            &TranscriptPumpConfig::default(),
+        )
+        .expect_err("both terminal writes failing fails the drain");
+
+        assert!(
+            err.message().starts_with('C'),
+            "the primary is the Complete write failure"
+        );
+        assert!(
+            err.message().len() <= MAX_STATUS_ERROR_LEN + "…[truncated]".len(),
+            "the primary is bounded"
+        );
+        let fallback = err.fallback_error().expect("the Failed fallback also failed");
+        assert!(fallback.starts_with('F'), "the fallback error is distinct");
+        assert!(
+            fallback.len() <= MAX_STATUS_ERROR_LEN + "…[truncated]".len(),
+            "the fallback error is bounded"
+        );
+        assert_ne!(
+            err.message(),
+            fallback,
+            "the Complete and Failed errors are preserved distinctly"
+        );
+    }
+
     #[test]
     fn running_document_carries_projected_transport() {
         // Re-audit regression: a Running document carries live projected transport
@@ -2012,16 +2090,15 @@ mod tests {
             &TranscriptPumpConfig::default(),
         )
         .unwrap();
-        assert!(
-            summary.transport.is_balanced(),
-            "the returned transport balances: {:?}",
-            summary.transport
-        );
-        assert!(
-            summary.transport.submitted >= 2,
-            "at least the initial Running and the terminal were submitted"
-        );
+        // Exactly the initial Running and the terminal are submitted and written, so
+        // the balance is terminal-inclusive and no snapshot remained pending.
+        assert_eq!(summary.transport.submitted, 2, "initial Running + terminal");
+        assert_eq!(summary.transport.written, 2, "both persisted");
+        assert_eq!(summary.transport.coalesced, 0);
+        assert_eq!(summary.transport.dropped, 0);
+        assert_eq!(summary.transport.disconnected, 0);
         assert_eq!(summary.transport.write_failures, 0);
+        assert!(summary.transport.is_balanced());
     }
 
     #[test]
