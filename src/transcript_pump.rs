@@ -173,8 +173,11 @@ pub struct TranscriptPumpError {
 
 impl TranscriptPumpError {
     pub fn new(message: impl Into<String>) -> Self {
+        // Bound the primary at the one constructor every typed pump failure flows
+        // through — a required-status ack error, a spawn error, or a settlement
+        // message — so no pathological store error can bloat the returned failure.
         Self {
-            message: message.into(),
+            message: bound_error(&message.into()),
             ..Self::default()
         }
     }
@@ -206,10 +209,12 @@ impl TranscriptPumpError {
     /// Fold a completed status settlement's secondary diagnostics onto this
     /// primary fault without overwriting the primary `message`.
     fn with_settlement(mut self, settlement: &StatusSettlement) -> Self {
-        self.periodic_error = settlement.periodic_error.clone();
-        self.settlement_error = settlement.settlement_error.clone();
-        self.fallback_error = settlement.fallback_error.clone();
-        self.worker_error = settlement.worker_error.clone();
+        // Bound every secondary as it is folded on, so the composite typed error is
+        // bounded at the primary and at each of its secondary diagnostics.
+        self.periodic_error = settlement.periodic_error.as_deref().map(bound_error);
+        self.settlement_error = settlement.settlement_error.as_deref().map(bound_error);
+        self.fallback_error = settlement.fallback_error.as_deref().map(bound_error);
+        self.worker_error = settlement.worker_error.as_deref().map(bound_error);
         self.transport = Some(settlement.diagnostics.clone());
         self
     }
@@ -645,8 +650,10 @@ fn build_status(
         bytes: summary.bytes,
         records: summary.records,
         dropped_console: summary.dropped_console,
-        error: error.map(str::to_string),
-        periodic_error: periodic_error.map(str::to_string),
+        // Bound the persisted primary and periodic errors so a pathological store
+        // error can never bloat the on-disk status document either.
+        error: error.map(bound_error),
+        periodic_error: periodic_error.map(bound_error),
         transport,
     }
 }
@@ -773,11 +780,11 @@ impl StatusSettlement {
             .clone()
             .or_else(|| self.worker_error.clone())?;
         Some(TranscriptPumpError {
-            message,
-            periodic_error: self.periodic_error.clone(),
+            message: bound_error(&message),
+            periodic_error: self.periodic_error.as_deref().map(bound_error),
             settlement_error: None,
-            fallback_error: self.fallback_error.clone(),
-            worker_error: self.worker_error.clone(),
+            fallback_error: self.fallback_error.as_deref().map(bound_error),
+            worker_error: self.worker_error.as_deref().map(bound_error),
             transport: Some(self.diagnostics.clone()),
         })
     }
@@ -941,6 +948,17 @@ impl SharedStatusState {
 
     fn periodic_error(&self) -> Option<String> {
         self.inner.lock().unwrap().periodic_error.clone()
+    }
+
+    /// Test-only proof that settlement left nothing pending: no coalescing slot, no
+    /// queued required status, no unwritten terminal, and no in-flight write.
+    #[cfg(test)]
+    fn is_quiescent(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.periodic.is_none()
+            && inner.required.is_empty()
+            && inner.terminal.is_none()
+            && inner.active_write.is_none()
     }
 
     /// Reconcile work the worker abandoned when it disconnected or panicked before
@@ -1112,6 +1130,12 @@ impl StatusCoordinator {
     #[cfg(test)]
     fn diagnostics(&self) -> StatusTransportDiagnostics {
         self.shared.diagnostics()
+    }
+
+    /// Test-only proof that every slot and queue is empty after settlement.
+    #[cfg(test)]
+    fn is_quiescent(&self) -> bool {
+        self.shared.is_quiescent()
     }
 
     /// Seal the coordinator, drain pending work, write the terminal status last, and
@@ -2207,6 +2231,116 @@ mod tests {
             err.message(),
             fallback,
             "the Complete and Failed errors are preserved distinctly"
+        );
+    }
+
+    /// A store that fails the Complete write and PANICS on the Failed fallback, so a
+    /// fallback panic (not merely a failure) can be exercised.
+    struct FailCompletePanicFallbackStore;
+
+    impl StatusStore for FailCompletePanicFallbackStore {
+        fn write(&mut self, status: &PumpStatus) -> Result<(), String> {
+            match status.state {
+                PumpState::Running => Ok(()),
+                PumpState::Complete => Err("simulated Complete write failure".to_string()),
+                PumpState::Failed => panic!("simulated Failed fallback panic"),
+            }
+        }
+    }
+
+    #[test]
+    fn fallback_panic_preserves_settlement_and_worker_diagnostics_distinctly() {
+        // B4: when the Complete write fails and the Failed fallback write PANICS, the
+        // settlement preserves the Complete settlement failure AND the worker panic as
+        // DISTINCT diagnostics — a fallback panic never erases the primary settlement
+        // error — and every submission stays accounted so the balance holds.
+        let latch = Arc::new(FirstFault::default());
+        let mut coordinator = StatusCoordinator::spawn(
+            Box::new(FailCompletePanicFallbackStore),
+            Some(Arc::clone(&latch)),
+        )
+        .unwrap();
+        let settlement =
+            coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
+
+        assert!(
+            settlement
+                .settlement_error
+                .as_deref()
+                .is_some_and(|e| e.contains("simulated Complete write failure")),
+            "the Complete settlement failure survives the fallback panic: {:?}",
+            settlement.settlement_error
+        );
+        assert_eq!(
+            settlement.worker_error.as_deref(),
+            Some(STATUS_WORKER_PANIC),
+            "the fallback panic is preserved distinctly as the worker error"
+        );
+        assert!(
+            latch.observed(),
+            "the terminal-settlement failure latched the first fault before the fallback"
+        );
+        assert!(
+            settlement.diagnostics.is_balanced(),
+            "the balance holds across a failed Complete plus a panicking fallback: {:?}",
+            settlement.diagnostics
+        );
+    }
+
+    #[test]
+    fn settlement_leaves_no_pending_slot_queue_or_active_write() {
+        // B1/B3 quiescence: after settlement every internal slot is proven empty — no
+        // pending periodic snapshot, no queued required status, no unwritten terminal,
+        // and no in-flight write — so the balanced terminal diagnostics account for
+        // every submission with nothing left behind.
+        let (store, _writes) = RecordingStore::new();
+        let mut coordinator = StatusCoordinator::spawn(Box::new(store), None).unwrap();
+        coordinator.submit_periodic(running_status());
+        coordinator.submit_required(running_status()).unwrap();
+        coordinator.submit_periodic(running_status());
+        let settlement =
+            coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
+
+        assert!(
+            coordinator.is_quiescent(),
+            "no coalescing slot, required queue, terminal, or in-flight write remains \
+             after settlement"
+        );
+        assert!(
+            settlement.diagnostics.is_balanced(),
+            "every submission is accounted at settlement: {:?}",
+            settlement.diagnostics
+        );
+    }
+
+    /// A store whose every write fails with a pathologically long error, so the
+    /// bounding of the error returned to a required-status caller can be exercised.
+    struct LongErrorStore;
+
+    impl StatusStore for LongErrorStore {
+        fn write(&mut self, _status: &PumpStatus) -> Result<(), String> {
+            Err("x".repeat(5000))
+        }
+    }
+
+    #[test]
+    fn required_write_failure_returned_to_caller_is_bounded() {
+        // B1/B4 bounding: a required-status write that fails with a pathological
+        // 5000-char error returns a BOUNDED typed failure to the caller — the ack path
+        // is bounded at the constructor, not only in the retained diagnostics.
+        let coordinator = StatusCoordinator::spawn(Box::new(LongErrorStore), None).unwrap();
+        let err = coordinator
+            .submit_required(running_status())
+            .expect_err("a failed required write is a typed failure");
+        assert!(
+            err.message().len() <= MAX_STATUS_ERROR_LEN + "…[truncated]".len(),
+            "the required failure returned to the caller is bounded, got {}",
+            err.message().len()
+        );
+        assert!(
+            err.message().ends_with("…[truncated]"),
+            "the long required error is truncated with the marker: {}",
+            err.message()
         );
     }
 
