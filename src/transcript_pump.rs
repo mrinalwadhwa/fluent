@@ -24,12 +24,15 @@ pub const PUMP_STATUS_SCHEMA_VERSION: u32 = 1;
 
 /// Built-in size, in bytes, of each read chunk pulled from coder stdout.
 pub const DEFAULT_READ_CHUNK_SIZE: usize = 64 * 1024;
-/// Built-in upper bound, in bytes, on a single rendered console preview before
-/// the pump truncates it. The full record always lands in the transcript.
+/// Built-in upper bound, in bytes, on the TOTAL rendered console preview
+/// (payload plus any truncation marker). Beyond it the pump renders a bounded,
+/// lossy preview; the full record always lands in the transcript.
 pub const DEFAULT_CONSOLE_PREVIEW_LIMIT: usize = 8 * 1024;
 
 /// Appended to a preview whose record exceeded the console preview limit. It
 /// points a reader at the canonical transcript, which alone holds every byte.
+/// The marker is counted against the preview limit, so a truncated preview's
+/// payload is capped to leave room for it.
 pub const TRUNCATION_MARKER: &[u8] = b"...[preview truncated; full record in transcript]";
 
 /// Operator-facing thresholds that shape console previews and status flushes.
@@ -38,7 +41,8 @@ pub const TRUNCATION_MARKER: &[u8] = b"...[preview truncated; full record in tra
 pub struct TranscriptPumpConfig {
     /// Bytes read per stdout chunk.
     pub read_chunk_size: usize,
-    /// Maximum bytes of one record rendered to the console preview.
+    /// Maximum bytes of the TOTAL rendered console preview for one record,
+    /// including any truncation marker.
     pub console_preview_limit: usize,
     /// Minimum interval between periodic `Running` status flushes.
     pub status_flush_interval: Duration,
@@ -640,9 +644,16 @@ impl PreviewLine {
 
     /// Offer the accumulated record as a bounded preview. Returns whether the
     /// sink delivered it, then resets for the next record.
+    ///
+    /// The configured limit bounds the TOTAL rendered preview, so a truncated
+    /// preview reserves room for the marker: its payload is capped at
+    /// `limit - marker.len()` and the whole rendered preview stays within `limit`
+    /// (when the limit is at least the marker length).
     fn flush(&mut self, preview: &dyn PreviewSink) -> bool {
         let delivered = if self.truncated {
-            let mut bounded = self.buf.clone();
+            let payload_cap = self.limit.saturating_sub(TRUNCATION_MARKER.len());
+            let keep = payload_cap.min(self.buf.len());
+            let mut bounded = self.buf[..keep].to_vec();
             bounded.extend_from_slice(TRUNCATION_MARKER);
             preview.deliver(&bounded)
         } else {
@@ -858,8 +869,8 @@ mod tests {
             "an oversized preview must carry the truncation marker"
         );
         assert!(
-            preview.len() <= limit + TRUNCATION_MARKER.len(),
-            "the preview must stay bounded, got {} bytes",
+            preview.len() <= limit,
+            "the TOTAL rendered preview (payload + marker) must stay within the limit, got {} bytes",
             preview.len()
         );
 
@@ -900,6 +911,50 @@ mod tests {
         let persisted = std::fs::read(&path).unwrap();
         assert_eq!(persisted, input, "raw bytes must be preserved unchanged");
         assert_eq!(summary.records, 2, "capture continues after invalid UTF-8");
+    }
+
+    #[test]
+    fn trailing_record_without_newline_is_captured_and_counted() {
+        // A final record with no trailing newline must still be preserved
+        // byte-exactly, counted as a record, drive its preview/drop accounting,
+        // and be reflected in the terminal status.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        let status = status_path_for(&path);
+
+        let mut input = Vec::new();
+        input.extend_from_slice(b"{\"type\":\"first\"}\n");
+        // No trailing newline on the last record.
+        input.extend_from_slice(b"{\"type\":\"last-no-newline\"}");
+
+        let sink = SaturatedSink::new();
+        let summary = drain(
+            Cursor::new(input.clone()),
+            &path,
+            Some(&status),
+            &sink,
+            &TranscriptPumpConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            input,
+            "the trailing record's bytes must be preserved without a synthesized newline"
+        );
+        assert_eq!(summary.records, 2, "the newline-less trailing record is counted");
+        assert_eq!(
+            summary.dropped_console, 2,
+            "the trailing record's preview participates in drop accounting"
+        );
+        assert_eq!(*sink.offered.lock().unwrap(), 2);
+
+        let persisted: PumpStatus =
+            serde_json::from_slice(&std::fs::read(&status).unwrap()).unwrap();
+        assert_eq!(persisted.state, PumpState::Complete);
+        assert_eq!(persisted.records, 2);
+        assert_eq!(persisted.dropped_console, 2);
+        assert_eq!(persisted.bytes, input.len() as u64);
     }
 
     #[test]

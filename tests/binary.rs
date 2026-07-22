@@ -2202,18 +2202,19 @@ fn wait_with_timeout(
 
 #[test]
 fn writer_completes_when_oversized_transcript_record_cannot_be_mirrored() {
-    // Reproduce the original failure: a transcript record larger than the
-    // 64 KiB stderr pipe capacity followed by another record, with the writer's
-    // stderr left unread. The byte pump must persist every byte and drain
-    // through coder exit without the unread console stalling capture, so the
-    // writer completes and both records land in the transcript.
+    // Reproduce the original failure comfortably above any plausible host pipe
+    // capacity: a transcript record larger than 1 MiB followed by another
+    // record, with the writer's stderr left unread. The byte pump must persist
+    // every byte and drain through coder exit without the unread console
+    // stalling capture, so the writer completes and both records land in the
+    // transcript.
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     let bin_dir = tmp.path().join("bin");
     write_mock_claude(
         &bin_dir,
         r##"#!/bin/bash
-big=$(head -c 70350 /dev/zero | tr '\0' 'x')
+big=$(head -c 1500000 /dev/zero | tr '\0' 'x')
 printf '{"type":"big","data":"%s"}\n' "$big"
 printf '{"type":"after-oversized-record"}\n'
 printf 'task output\n' > task-output.txt
@@ -2275,8 +2276,8 @@ exit 0
         main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/transcript.jsonl");
     let content = fs::read(&transcript).unwrap();
     assert!(
-        content.len() > 70_350,
-        "the full oversized record must persist; got {} bytes",
+        content.len() > 1_500_000,
+        "the full >1 MiB oversized record must persist; got {} bytes",
         content.len()
     );
     assert!(
