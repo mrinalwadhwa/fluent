@@ -11,7 +11,7 @@ use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
@@ -366,7 +366,7 @@ pub fn drain(
 ) -> Result<PumpSummary, TranscriptPumpError> {
     let counters = SharedCounters::default();
     let store = status_path.map(file_status_store);
-    drain_with_counters(reader, transcript_path, store, preview, config, &counters)
+    drain_with_first_fault(reader, transcript_path, store, preview, config, &counters, None)
 }
 
 /// Drive a drain against an injected [`StatusStore`], so tests can gate, fail, or
@@ -380,56 +380,68 @@ pub(crate) fn drain_with_store(
     config: &TranscriptPumpConfig,
 ) -> Result<PumpSummary, TranscriptPumpError> {
     let counters = SharedCounters::default();
-    drain_with_counters(reader, transcript_path, store, preview, config, &counters)
+    drain_with_first_fault(reader, transcript_path, store, preview, config, &counters, None)
 }
 
-fn drain_with_counters(
+/// Drain into the transcript, owning the status coordinator across a caught capture
+/// panic. The immutable first fault — whether capture returns it or panics — is
+/// published to `first_fault` BEFORE any terminal settlement, so a blocked or slow
+/// status store can never hide the fault from coder supervision.
+fn drain_with_first_fault(
     reader: impl Read,
     transcript_path: &Path,
     store: Option<Box<dyn StatusStore>>,
     preview: &dyn PreviewSink,
     config: &TranscriptPumpConfig,
     counters: &SharedCounters,
+    first_fault: Option<Arc<FirstFault>>,
 ) -> Result<PumpSummary, TranscriptPumpError> {
     let started = now_ms();
-    // One coordinator owns every persisted status write for this capture.
+    // One coordinator owns every persisted status write for this capture. It is
+    // owned here — not dropped through capture's unwind — so a store that blocks
+    // can never delay first-fault notification.
     let mut coordinator = match store {
-        Some(store) => Some(StatusCoordinator::spawn(store)?),
+        Some(store) => Some(StatusCoordinator::spawn(store, first_fault.clone())?),
         None => None,
     };
 
-    let result = capture(
-        reader,
-        transcript_path,
-        coordinator.as_ref(),
-        preview,
-        config,
-        counters,
-        started,
-    );
+    // Catch a capture panic so it settles through the coordinator like any other
+    // fault: publish the first fault, then write the terminal status.
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        capture(
+            reader,
+            transcript_path,
+            coordinator.as_ref(),
+            preview,
+            config,
+            counters,
+            started,
+        )
+    }))
+    .unwrap_or_else(|_| Err(TranscriptPumpError::new("transcript pump panicked")));
+
+    // Publish the first fault BEFORE terminal settlement so a blocked status store
+    // cannot hide it from supervision.
+    if let (Err(err), Some(latch)) = (&result, &first_fault) {
+        latch.publish(err);
+    }
 
     let summary = counters.snapshot();
 
     match result {
-        Ok(()) => {
-            // The terminal Complete status is required and typed. Settle it through
-            // the coordinator, which drains any pending periodic first, then writes
-            // the terminal state and proves nothing remained pending. If Complete
-            // cannot be persisted the capture is not independently observable, so a
-            // Failed fallback is attempted and the composite typed failure preserves
-            // the settlement and fallback diagnostics.
-            match coordinator.as_mut() {
-                Some(coordinator) => {
-                    let settlement =
-                        coordinator.finish(TerminalStatusSpec::complete(started, summary));
-                    if let Some(err) = settlement.complete_failure() {
-                        return Err(err);
-                    }
-                    Ok(summary)
+        Ok(()) => match coordinator.as_mut() {
+            Some(coordinator) => {
+                let settlement =
+                    coordinator.finish(TerminalStatusSpec::complete(started, summary));
+                // A terminal-settlement failure OR a status-worker panic is a typed
+                // terminal failure: capture is not independently observable.
+                if let Some(err) = settlement.terminal_failure() {
+                    return Err(err);
                 }
-                None => Ok(summary),
+                Ok(summary)
             }
-        }
+            None => Ok(summary),
+        },
         Err(err) => {
             // Record the failure terminally without masking the primary fault. The
             // terminal Failed status and its settlement diagnostics ride alongside
@@ -723,20 +735,59 @@ struct StatusSettlement {
 }
 
 impl StatusSettlement {
-    /// A Complete status that could not be persisted is a terminal infrastructure
-    /// failure even though a Failed fallback may have landed, because capture is not
-    /// independently observable. Build the composite typed error, or `None` when the
-    /// Complete status was persisted.
-    fn complete_failure(&self) -> Option<TranscriptPumpError> {
-        let settlement_error = self.settlement_error.clone()?;
+    /// A settled capture is a terminal infrastructure failure when the terminal
+    /// status could not be persisted (even if a Failed fallback landed, capture is
+    /// not independently observable) OR when the status worker panicked. Build the
+    /// composite typed error, or `None` when settlement succeeded cleanly.
+    fn terminal_failure(&self) -> Option<TranscriptPumpError> {
+        let message = self
+            .settlement_error
+            .clone()
+            .or_else(|| self.worker_error.clone())?;
         Some(TranscriptPumpError {
-            message: settlement_error,
+            message,
             periodic_error: self.diagnostics.last_error.clone(),
             settlement_error: None,
             fallback_error: self.fallback_error.clone(),
             worker_error: self.worker_error.clone(),
             transport: Some(self.diagnostics.clone()),
         })
+    }
+}
+
+/// A write-once latch that publishes a capture's immutable first infrastructure
+/// fault to coder supervision. The capture path and the status worker both publish
+/// to it BEFORE attempting terminal status settlement, so a delayed or blocked
+/// status write can never hide the first fault from the supervisor: supervision
+/// observes the latch independently of joining the pump's terminal outcome.
+#[derive(Default)]
+pub struct FirstFault {
+    set: AtomicBool,
+    message: Mutex<Option<String>>,
+}
+
+impl FirstFault {
+    /// Publish the first fault. Only the first caller wins; later faults never
+    /// overwrite it, so the latch names the immutable first cause.
+    fn publish(&self, err: &TranscriptPumpError) {
+        if self
+            .set
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            *self.message.lock().unwrap() = Some(err.message().to_string());
+        }
+    }
+
+    /// Whether a first fault has been published. Supervision polls this so it can
+    /// terminate and reap the coder before waiting for terminal status settlement.
+    pub fn observed(&self) -> bool {
+        self.set.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    fn message(&self) -> Option<String> {
+        self.message.lock().unwrap().clone()
     }
 }
 
@@ -826,8 +877,14 @@ struct StatusCoordinator {
     join: Option<JoinHandle<StatusSettlement>>,
 }
 
+/// The message a status-worker panic publishes and records.
+const STATUS_WORKER_PANIC: &str = "status coordinator worker panicked while persisting a status";
+
 impl StatusCoordinator {
-    fn spawn(mut store: Box<dyn StatusStore>) -> Result<Self, TranscriptPumpError> {
+    fn spawn(
+        mut store: Box<dyn StatusStore>,
+        first_fault: Option<Arc<FirstFault>>,
+    ) -> Result<Self, TranscriptPumpError> {
         let shared = Arc::new(SharedStatusState {
             inner: Mutex::new(CoordinatorInner {
                 periodic: None,
@@ -842,7 +899,25 @@ impl StatusCoordinator {
         let worker_shared = Arc::clone(&shared);
         let join = std::thread::Builder::new()
             .name("transcript-pump-status".to_string())
-            .spawn(move || run_status_worker(&worker_shared, &wake_rx, &mut *store))
+            .spawn(move || {
+                // Catch a store panic so the worker still settles: it publishes the
+                // panic to the first-fault latch (so supervision sees it without
+                // joining) and returns a settlement carrying the worker error rather
+                // than poisoning the join.
+                std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    run_status_worker(&worker_shared, &wake_rx, &mut *store)
+                }))
+                .unwrap_or_else(|_| {
+                    if let Some(latch) = &first_fault {
+                        latch.publish(&TranscriptPumpError::new(STATUS_WORKER_PANIC));
+                    }
+                    StatusSettlement {
+                        diagnostics: worker_shared.diagnostics(),
+                        worker_error: Some(STATUS_WORKER_PANIC.to_string()),
+                        ..StatusSettlement::default()
+                    }
+                })
+            })
             .map_err(|err| {
                 TranscriptPumpError::new(format!("spawn transcript pump status writer: {err}"))
             })?;
@@ -1004,39 +1079,62 @@ fn run_status_worker(
 
 /// Construct and persist the terminal status. The pending periodic slot is already
 /// drained (required-then-periodic-then-terminal ordering), so the embedded
-/// diagnostics balance and prove no snapshot remained pending. A Complete write
-/// failure triggers exactly one Failed fallback.
+/// diagnostics balance and prove no snapshot remained pending. The terminal write
+/// — and any Failed fallback — is itself counted as a real submission, and the
+/// persisted document projects its own write so the accounting is self-consistent.
 fn finalize_terminal(
     shared: &Arc<SharedStatusState>,
     store: &mut dyn StatusStore,
     spec: TerminalStatusSpec,
 ) -> StatusSettlement {
-    let diagnostics = shared.diagnostics();
-    let status = spec.build(diagnostics.clone());
-    match store.write(&status) {
-        Ok(()) => StatusSettlement {
-            diagnostics,
+    let settlement_error = match write_accounted_terminal(shared, store, &spec) {
+        Ok(()) => {
+            return StatusSettlement {
+                diagnostics: shared.diagnostics(),
+                ..StatusSettlement::default()
+            };
+        }
+        Err(err) => err,
+    };
+    // A Complete that could not be persisted attempts exactly one Failed fallback,
+    // itself accounted as a real submission.
+    if spec.state == PumpState::Complete {
+        let fallback = spec.as_failed(&settlement_error);
+        let fallback_error = write_accounted_terminal(shared, store, &fallback).err();
+        StatusSettlement {
+            diagnostics: shared.diagnostics(),
+            settlement_error: Some(settlement_error),
+            fallback_error,
+            worker_error: None,
+        }
+    } else {
+        StatusSettlement {
+            diagnostics: shared.diagnostics(),
+            settlement_error: Some(settlement_error),
             ..StatusSettlement::default()
-        },
-        Err(settlement_error) => {
-            if spec.state == PumpState::Complete {
-                let fallback = spec.as_failed(&settlement_error).build(diagnostics.clone());
-                let fallback_error = store.write(&fallback).err();
-                StatusSettlement {
-                    diagnostics,
-                    settlement_error: Some(settlement_error),
-                    fallback_error,
-                    worker_error: None,
-                }
-            } else {
-                StatusSettlement {
-                    diagnostics,
-                    settlement_error: Some(settlement_error),
-                    ..StatusSettlement::default()
-                }
-            }
         }
     }
+}
+
+/// Account a terminal (or fallback) status as a real submission, persist it with a
+/// self-consistent projected accounting, and record its actual persistence result.
+fn write_accounted_terminal(
+    shared: &Arc<SharedStatusState>,
+    store: &mut dyn StatusStore,
+    spec: &TerminalStatusSpec,
+) -> Result<(), String> {
+    // Count this terminal write as a submission and project it as written so the
+    // persisted document balances including itself.
+    let projected = {
+        let mut inner = shared.inner.lock().unwrap();
+        inner.diagnostics.submitted += 1;
+        let mut projected = inner.diagnostics.clone();
+        projected.written += 1;
+        projected
+    };
+    let result = store.write(&spec.build(projected));
+    shared.record_write(&result);
+    result
 }
 
 /// Install, once per process, a panic hook that suppresses the default hook's
@@ -1061,13 +1159,24 @@ fn ensure_pump_panic_hook() {
 
 /// A running pump on its own thread. The supervisor polls `try_terminal` while
 /// the coder is alive and calls `wait_terminal` once the coder exits, so a pump
-/// failure is observed promptly rather than only after the coder finishes.
+/// failure is observed promptly rather than only after the coder finishes. It also
+/// exposes `first_fault_observed` so supervision can react to the immutable first
+/// fault BEFORE the pump's terminal outcome — which a blocked status store can
+/// delay — is available.
 pub struct PumpHandle {
     terminal: Receiver<Result<PumpSummary, TranscriptPumpError>>,
+    first_fault: Arc<FirstFault>,
     join: Option<JoinHandle<()>>,
 }
 
 impl PumpHandle {
+    /// Whether the pump published its immutable first infrastructure fault. This is
+    /// set before terminal status settlement, so supervision can terminate and reap
+    /// the coder without waiting for a delayed or blocked terminal status write.
+    pub fn first_fault_observed(&self) -> bool {
+        self.first_fault.observed()
+    }
+
     /// The pump's terminal outcome if it has finished, or `None` while it is
     /// still draining. A pump thread that vanished without reporting (a panic
     /// that escaped the guard) surfaces as a typed failure rather than a hang.
@@ -1096,11 +1205,12 @@ impl PumpHandle {
     }
 }
 
-/// Spawn a pump on its own thread. A panic inside the drain is caught and
-/// reported as a typed failure and a persisted `Failed` status that preserves the
-/// counters accumulated before the panic, so a crashed pump can never silently
-/// stop capture while the coder keeps running. The pump thread is named so a
-/// process-wide hook can keep its panic off the blocking default stderr path.
+/// Spawn a pump on its own thread. The drain owns the status coordinator across a
+/// caught capture panic and publishes the first fault to the shared latch before
+/// terminal settlement, so a crashed or blocked pump can never silently stop
+/// capture — or hide the fault from supervision — while the coder keeps running.
+/// The pump thread is named so a process-wide hook can keep its panic off the
+/// blocking default stderr path.
 pub fn spawn_pump<R>(
     reader: R,
     transcript_path: PathBuf,
@@ -1111,52 +1221,56 @@ pub fn spawn_pump<R>(
 where
     R: Read + Send + 'static,
 {
+    let store = status_path.as_deref().map(file_status_store);
+    spawn_pump_with_store(reader, transcript_path, store, preview, config)
+}
+
+/// Spawn a pump against an explicit [`StatusStore`]. Production uses [`spawn_pump`];
+/// tests inject a store to gate, fail, or delay status writes deterministically.
+pub(crate) fn spawn_pump_with_store<R>(
+    reader: R,
+    transcript_path: PathBuf,
+    store: Option<Box<dyn StatusStore>>,
+    preview: &'static dyn PreviewSink,
+    config: TranscriptPumpConfig,
+) -> Result<PumpHandle, TranscriptPumpError>
+where
+    R: Read + Send + 'static,
+{
     ensure_pump_panic_hook();
     let (tx, rx) = sync_channel(1);
+    let first_fault = Arc::new(FirstFault::default());
+    let first_fault_for_thread = Arc::clone(&first_fault);
     let counters = Arc::new(SharedCounters::default());
-    let counters_for_panic = Arc::clone(&counters);
     let join = std::thread::Builder::new()
         .name("transcript-pump".to_string())
         .spawn(move || {
-            let started = now_ms();
-            let store = status_path.as_deref().map(file_status_store);
+            // The drain catches capture panics internally and settles through the
+            // coordinator; this outer catch is a backstop for any residual panic. It
+            // still publishes the first fault so supervision never waits for a pump
+            // that vanished.
             let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                drain_with_counters(
+                drain_with_first_fault(
                     reader,
                     &transcript_path,
                     store,
                     preview,
                     &config,
                     &counters,
+                    Some(Arc::clone(&first_fault_for_thread)),
                 )
             }))
             .unwrap_or_else(|_| {
                 let err = TranscriptPumpError::new("transcript pump panicked");
-                // Preserve the counters accumulated before the panic. The drain's
-                // status coordinator was already settled during unwind, so this
-                // Failed write is the last word — no queued Running can overwrite it.
-                let summary = counters_for_panic.snapshot();
-                if let Some(path) = status_path.as_deref() {
-                    let mut store = file_status_store(path);
-                    let status = build_status(
-                        PumpState::Failed,
-                        started,
-                        &summary,
-                        Some(err.message()),
-                        None,
-                        StatusTransportDiagnostics::default(),
-                    );
-                    let _ = store.write(&status);
-                }
+                first_fault_for_thread.publish(&err);
                 Err(err)
             });
             let _ = tx.send(outcome);
         })
-        .map_err(|err| {
-            TranscriptPumpError::new(format!("spawn transcript pump thread: {err}"))
-        })?;
+        .map_err(|err| TranscriptPumpError::new(format!("spawn transcript pump thread: {err}")))?;
     Ok(PumpHandle {
         terminal: rx,
+        first_fault,
         join: Some(join),
     })
 }
@@ -1349,7 +1463,7 @@ mod tests {
             entered: entered_tx,
             gate: gate_rx,
         };
-        let mut coordinator = StatusCoordinator::spawn(Box::new(store)).unwrap();
+        let mut coordinator = StatusCoordinator::spawn(Box::new(store), None).unwrap();
 
         // A: taken from the slot and blocked mid-write.
         coordinator.submit_periodic(running_status());
@@ -1365,11 +1479,15 @@ mod tests {
         }
         let settlement = coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
 
-        assert_eq!(settlement.diagnostics.submitted, 3);
+        // A, B, C periodics plus the terminal write are all submissions.
+        assert_eq!(settlement.diagnostics.submitted, 4);
         assert_eq!(settlement.diagnostics.coalesced, 1, "the replaced snapshot B");
-        assert_eq!(settlement.diagnostics.written, 2, "A and C reach the store");
+        assert_eq!(
+            settlement.diagnostics.written, 3,
+            "A, C, and the terminal reach the store"
+        );
         assert!(settlement.diagnostics.is_balanced());
-        // Only A and C were persisted; B never reached the store.
+        // Only A and C were persisted from the periodics; B never reached the store.
         assert_eq!(writes.lock().unwrap().len(), 3, "A, C, and the terminal");
     }
 
@@ -1378,7 +1496,7 @@ mod tests {
         // B1: required statuses are persisted in submission order, and each submitter
         // is acknowledged only after its own status is written.
         let (store, writes) = RecordingStore::new();
-        let coordinator = StatusCoordinator::spawn(Box::new(store)).unwrap();
+        let coordinator = StatusCoordinator::spawn(Box::new(store), None).unwrap();
 
         for records in [1u64, 2, 3] {
             let status = build_status(
@@ -1413,7 +1531,7 @@ mod tests {
         // B1: once the terminal status is acknowledged, no later Running status can
         // reach the store — a late submission is refused, never written.
         let (store, writes) = RecordingStore::new();
-        let mut coordinator = StatusCoordinator::spawn(Box::new(store)).unwrap();
+        let mut coordinator = StatusCoordinator::spawn(Box::new(store), None).unwrap();
 
         coordinator.submit_required(running_status()).unwrap();
         let _ = coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
@@ -1449,7 +1567,7 @@ mod tests {
         // document carries the same balanced accounting.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transcript-pump.json");
-        let mut coordinator = StatusCoordinator::spawn(file_status_store(&path)).unwrap();
+        let mut coordinator = StatusCoordinator::spawn(file_status_store(&path), None).unwrap();
 
         coordinator.submit_required(running_status()).unwrap();
         for _ in 0..5 {
@@ -1487,7 +1605,7 @@ mod tests {
         // B3: a status submitted after the coordinator has shut down is accounted as
         // disconnected rather than silently ignored, and never reaches the store.
         let (store, writes) = RecordingStore::new();
-        let mut coordinator = StatusCoordinator::spawn(Box::new(store)).unwrap();
+        let mut coordinator = StatusCoordinator::spawn(Box::new(store), None).unwrap();
         coordinator.submit_required(running_status()).unwrap();
         let _ = coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
         let written_before = writes.lock().unwrap().len();
@@ -1584,6 +1702,59 @@ mod tests {
             err.transport().is_some_and(|t| t.is_balanced()),
             "the balanced transport diagnostics are preserved"
         );
+    }
+
+    /// A status store whose every write panics, modelling a status worker that
+    /// unwinds mid-persist.
+    struct PanicStore;
+
+    impl StatusStore for PanicStore {
+        fn write(&mut self, _status: &PumpStatus) -> Result<(), String> {
+            panic!("simulated status store panic");
+        }
+    }
+
+    #[test]
+    fn status_worker_panic_latches_first_fault() {
+        // B2: a status worker that panics while persisting publishes the immutable
+        // first fault to the latch, so supervision observes it without joining the
+        // pump — and the settlement carries a worker error rather than success.
+        let latch = Arc::new(FirstFault::default());
+        let mut coordinator =
+            StatusCoordinator::spawn(Box::new(PanicStore), Some(Arc::clone(&latch))).unwrap();
+        // The worker panics writing this required status; the submitter is
+        // disconnected rather than acknowledged.
+        assert!(coordinator.submit_required(running_status()).is_err());
+        let settlement = coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
+
+        assert!(latch.observed(), "the worker panic latched the first fault");
+        assert_eq!(latch.message().as_deref(), Some(STATUS_WORKER_PANIC));
+        assert!(
+            settlement.terminal_failure().is_some(),
+            "a worker panic is a terminal failure, never silent success"
+        );
+    }
+
+    #[test]
+    fn terminal_submission_is_counted_in_diagnostics() {
+        // Audit regression: the terminal write is itself accounted as a submission
+        // and its result recorded, and the persisted document projects its own write
+        // so the accounting is self-consistent and balanced including the terminal.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript-pump.json");
+        let mut coordinator = StatusCoordinator::spawn(file_status_store(&path), None).unwrap();
+        coordinator.submit_required(running_status()).unwrap();
+        let settlement = coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
+
+        // One required Running plus the terminal write.
+        assert_eq!(settlement.diagnostics.submitted, 2, "Running + terminal");
+        assert_eq!(settlement.diagnostics.written, 2, "both persisted");
+        assert!(settlement.diagnostics.is_balanced());
+
+        let persisted: PumpStatus = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted.transport.submitted, 2, "the doc counts itself");
+        assert_eq!(persisted.transport.written, 2);
+        assert!(persisted.transport.is_balanced());
     }
 
     /// A sink that records every delivered preview and always accepts.

@@ -831,6 +831,31 @@ impl CoderSupervisor {
     /// descendants so the pump can observe EOF, then returns the coder's status.
     fn supervise(&mut self) -> Result<i32> {
         loop {
+            // First-fault fast path: the pump published its immutable first fault
+            // (capture, preview, phase-preservation, or status persistence) before
+            // attempting terminal settlement. Terminate and reap the coder NOW —
+            // only then wait for the pump's terminal outcome, which a blocked or slow
+            // status store may still be delaying. This is what stops a delayed status
+            // write from extending invisible coder work.
+            if self
+                .pump
+                .as_ref()
+                .expect("supervise runs only after a pump is attached")
+                .first_fault_observed()
+            {
+                self.terminate_group_or_child();
+                let _ = self.child.wait();
+                self.reaped = true;
+                let outcome = self
+                    .pump
+                    .as_mut()
+                    .expect("supervise runs only after a pump is attached")
+                    .wait_terminal();
+                return match outcome {
+                    Ok(_summary) => Ok(0),
+                    Err(pump_err) => Err(anyhow::Error::new(pump_err)),
+                };
+            }
             if let Some(terminal) = self
                 .pump
                 .as_mut()
@@ -1611,6 +1636,102 @@ mod pump_supervision_tests {
             status.state,
             crate::transcript_pump::PumpState::Complete,
             "terminal pump status must record completed capture"
+        );
+    }
+
+    /// A pump reader that errors on its first read, modelling stdout failing while
+    /// the coder is still alive.
+    struct ErrorOnFirstRead;
+
+    impl std::io::Read for ErrorOnFirstRead {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("simulated stdout read failure"))
+        }
+    }
+
+    /// A status store that persists Running immediately but blocks every terminal
+    /// write until the test releases it, so terminal settlement is deterministically
+    /// delayed.
+    struct GateTerminalStore {
+        gate: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl crate::transcript_pump::StatusStore for GateTerminalStore {
+        fn write(
+            &mut self,
+            status: &crate::transcript_pump::PumpStatus,
+        ) -> Result<(), String> {
+            if status.state != crate::transcript_pump::PumpState::Running {
+                let _ = self.gate.recv();
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn first_fault_reaches_supervisor_before_terminal_status_unblocks() {
+        // B2: a gated status store delays terminal settlement. The pump publishes its
+        // first fault before settlement, so supervision terminates and reaps the
+        // still-live coder WITHOUT waiting for the blocked terminal status write.
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+
+        // A live coder that would outlive the fault by seconds.
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg("sleep 5");
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        let child = cmd.spawn().unwrap();
+        let child_id = child.id();
+
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        let store = GateTerminalStore { gate: gate_rx };
+        let pump = crate::transcript_pump::spawn_pump_with_store(
+            ErrorOnFirstRead,
+            transcript.clone(),
+            Some(Box::new(store)),
+            crate::transcript_pump::console_preview_sink(),
+            crate::transcript_pump::TranscriptPumpConfig::default(),
+        )
+        .unwrap();
+
+        let mut supervisor = CoderSupervisor::new(child, child_id);
+        supervisor.attach_pump(pump);
+
+        // Supervise on another thread so the test can observe the coder reaped while
+        // the terminal write is still gated shut.
+        let handle = std::thread::spawn(move || supervisor.supervise());
+
+        let is_alive = |pid: u32| {
+            Command::new("/bin/kill")
+                .args(["-0", &pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while is_alive(child_id) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !is_alive(child_id),
+            "the coder must be reaped before the terminal status unblocks, well before its 5s sleep"
+        );
+
+        // Only now release the gated terminal settlement; supervision returns the
+        // typed pump failure.
+        let _ = gate_tx.send(());
+        let result = handle.join().unwrap();
+        let err = result.expect_err("the first fault must surface as a typed failure");
+        assert!(
+            err.downcast_ref::<crate::transcript_pump::TranscriptPumpError>()
+                .is_some(),
+            "the failure must be a typed transcript-pump error: {err}"
         );
     }
 }
