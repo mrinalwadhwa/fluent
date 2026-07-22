@@ -2485,6 +2485,59 @@ mod pump_supervision_tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn drop_with_unswept_group_does_not_block_joining_a_live_pump() {
+        // B5/B6: when cleanup cannot verifiably sweep the group (here an ECHILD
+        // identity loss), a surviving descendant may still hold the transcript
+        // pipe's write end open, so the pump would never reach EOF. Drop must stay
+        // bounded — it detaches the still-running pump instead of joining it — and
+        // return within a wall-clock deadline rather than hanging forever. This is
+        // the real-pump Drop-deadline evidence the unswept-invariant seam test alone
+        // cannot provide.
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let status = crate::transcript_pump::status_path_for(&transcript);
+
+        // A real descendant that holds the pump's read source open without ever
+        // writing to it or closing it, so the pump thread blocks on read.
+        let mut writer = Command::new("/bin/sh");
+        writer.arg("-c").arg("sleep 30").stdout(Stdio::piped());
+        let mut writer_child = writer.spawn().unwrap();
+        let source = writer_child.stdout.take().unwrap();
+
+        let pump = crate::transcript_pump::spawn_pump(
+            source,
+            transcript.clone(),
+            Some(status.clone()),
+            crate::transcript_pump::console_preview_sink(),
+            crate::transcript_pump::TranscriptPumpConfig::default(),
+        )
+        .unwrap();
+
+        // A leader whose identity was already lost (ECHILD): the group is never
+        // verifiably swept, so `group_swept()` stays false and Drop must not join.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let leader = FakeLeader {
+            poll: ExitObservation::IdentityLost,
+            ..FakeLeader::new(Arc::clone(&calls), Some(0))
+        };
+        let mut supervisor = CoderSupervisor::with_leader(Box::new(leader));
+        supervisor.attach_pump(pump);
+
+        let started = Instant::now();
+        drop(supervisor);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "Drop must not block joining a pump whose descendant still holds stdout; took {elapsed:?}"
+        );
+
+        // Release the still-blocked pump reader so its detached thread can exit.
+        let _ = writer_child.kill();
+        let _ = writer_child.wait();
+    }
+
     #[test]
     fn cleanup_failure_composes_with_primary_pump_error() {
         // B6/B7: a primary pump error is preserved as the cause while a cleanup
