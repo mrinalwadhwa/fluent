@@ -1465,19 +1465,25 @@ fn capture_coder_info(coder_kind: CoderKind, model: &str, artifact_dir: &Path) {
 
 /// Resolve the layered transcript-pump thresholds for this project and install
 /// them process-wide before launching a coder, so the pump bounds console
-/// previews and paces status flushes per configuration. A malformed
-/// configuration leaves the built-in defaults in place rather than failing the
-/// coder launch: capture correctness never depends on these diagnostics knobs.
-fn install_transcript_pump_config(project_root: &Path) {
-    if let Ok(resolved) = crate::config::resolve_transcript_pump_config(project_root) {
-        crate::transcript_pump::install_config(crate::transcript_pump::TranscriptPumpConfig {
+/// previews and paces status flushes per configuration.
+///
+/// This runs before every transcript-enabled entry point — Writer, Reviewer,
+/// Learner, and rebase agent — so no operation inherits a prior task's
+/// process-global config. A malformed or unreadable configuration explicitly
+/// installs the built-in defaults rather than leaving stale global state in
+/// place; capture correctness never depends on these diagnostics knobs.
+pub(crate) fn install_transcript_pump_config(project_root: &Path) {
+    let config = match crate::config::resolve_transcript_pump_config(project_root) {
+        Ok(resolved) => crate::transcript_pump::TranscriptPumpConfig {
             console_preview_limit: resolved.console_preview_limit.value as usize,
             status_flush_interval: std::time::Duration::from_millis(
                 resolved.status_flush_interval_ms.value as u64,
             ),
             ..crate::transcript_pump::TranscriptPumpConfig::default()
-        });
-    }
+        },
+        Err(_) => crate::transcript_pump::TranscriptPumpConfig::default(),
+    };
+    crate::transcript_pump::install_config(config);
 }
 
 fn run_task_coder(
@@ -5255,6 +5261,61 @@ mod tests {
             notifications[0].1.contains("transport"),
             "the notification should point at the transport: {}",
             notifications[0].1
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn install_transcript_pump_config_layers_and_fails_closed_between_operations() {
+        // Every transcript-enabled entry point installs this project's resolved
+        // pump config before its coder. A valid project value is applied; a
+        // malformed or absent config fails closed to built-in defaults so a
+        // prior operation's process-global thresholds never leak forward.
+        let home = tempfile::TempDir::new().unwrap();
+        // SAFETY: serialized via #[serial]; no other thread reads HOME here.
+        unsafe {
+            std::env::set_var("HOME", home.path());
+        }
+
+        let write_project_config = |contents: &str| {
+            let dir = tempfile::TempDir::new().unwrap();
+            fs::create_dir_all(dir.path().join(".fluent")).unwrap();
+            fs::write(dir.path().join(".fluent/config.yaml"), contents).unwrap();
+            dir
+        };
+
+        // A valid project value is applied.
+        let custom = write_project_config("transcript:\n  console-preview-limit: 4096\n");
+        install_transcript_pump_config(custom.path());
+        assert_eq!(
+            crate::transcript_pump::active_config().console_preview_limit,
+            4096,
+            "a valid project value must be installed"
+        );
+
+        // A malformed value fails closed to defaults and does not leak the prior.
+        let malformed = write_project_config("transcript:\n  console-preview-limit: not-a-number\n");
+        install_transcript_pump_config(malformed.path());
+        assert_eq!(
+            crate::transcript_pump::active_config().console_preview_limit,
+            crate::transcript_pump::DEFAULT_CONSOLE_PREVIEW_LIMIT,
+            "a malformed config must fail closed to defaults, not keep the prior value"
+        );
+
+        // Re-apply a custom value, then an absent config must also fall back to
+        // defaults rather than inheriting the custom value.
+        let custom2 = write_project_config("transcript:\n  console-preview-limit: 2048\n");
+        install_transcript_pump_config(custom2.path());
+        assert_eq!(
+            crate::transcript_pump::active_config().console_preview_limit,
+            2048
+        );
+        let absent = tempfile::TempDir::new().unwrap();
+        install_transcript_pump_config(absent.path());
+        assert_eq!(
+            crate::transcript_pump::active_config().console_preview_limit,
+            crate::transcript_pump::DEFAULT_CONSOLE_PREVIEW_LIMIT,
+            "consecutive operations with different configs must not leak state"
         );
     }
 

@@ -1036,6 +1036,10 @@ fn rebase_candidate(
     eprintln!("  Target            {target_branch}");
     eprintln!("  Worktree          {}", source_workspace.display());
 
+    // Install this project's resolved pump config before the rebase agent so it
+    // never inherits a prior operation's process-global thresholds.
+    crate::work_task_executor::install_transcript_pump_config(config.project_root);
+
     let coder = config.coder_kind.boxed(sandbox);
     let exit_code = coder.run(
         &prompt,

@@ -464,6 +464,9 @@ fn default_learner_run_coder(
     config: &WorkAttemptRunConfig<'_>,
     request: &LearnerCoderRequest<'_>,
 ) -> Result<()> {
+    // Install this project's resolved pump config before the Learner coder so it
+    // never inherits a prior task's process-global thresholds.
+    work_task_executor::install_transcript_pump_config(config.project_root);
     work_task_executor::run_learner(work_task_executor::LearnerRunInputs {
         workspace_path: request.workspace_path,
         resolver: config.resolver,
