@@ -5356,8 +5356,16 @@ mod tests {
         // reserved Review Task durably Executing — the reservation is rolled back so
         // the Task is recoverable. This drives run_review_task end-to-end past the
         // reservation, unlike the finalizer-in-isolation tests.
+        //
+        // Nest the project under its own parent so the managed candidate sibling
+        // (`../work-6-work-1-attempt-1`) resolves inside this test's TempDir rather
+        // than a fixed name in the shared system temp root. A bare TempDir root
+        // would create that worktree sibling outside the TempDir, leaving an orphan
+        // after cleanup that collides with a parallel test's `git worktree add`.
         let tmp = tempfile::TempDir::new().unwrap();
-        let project_root = tmp.path();
+        let project_root = tmp.path().join("project");
+        let project_root = project_root.as_path();
+        fs::create_dir_all(project_root).unwrap();
         let git = |args: &[&str]| {
             crate::git::run(project_root, args, "test git setup").unwrap();
         };
@@ -5580,8 +5588,16 @@ mod tests {
         // With the Attempt live, the reservation succeeds and then preflight fails
         // because no candidate workspace exists. The reviewer must roll back to
         // Planned rather than orphan an Executing Task.
+        //
+        // Nest the project under its own parent so the resolved candidate sibling
+        // (`../work-6-work-1-attempt-1`) points inside this test's TempDir. A bare
+        // TempDir root resolves that sibling to a fixed name in the shared system
+        // temp root, where a parallel test's leftover would satisfy the preflight
+        // and mask the setup failure this test asserts.
         let tmp = tempfile::TempDir::new().unwrap();
-        let project_root = tmp.path();
+        let project_root = tmp.path().join("project");
+        let project_root = project_root.as_path();
+        fs::create_dir_all(project_root).unwrap();
         let store = WorkModelStore::new(project_root);
 
         let item = review_item_with_role("tests");
