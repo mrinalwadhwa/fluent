@@ -607,7 +607,35 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             config.task_id
         );
     }
-    let commit = head_commit(&workspace_path)?;
+    // Route every post-reservation completion failure — head lookup, completion
+    // read/find, and the terminal write — through one durable terminal-state
+    // boundary, so no raw `?` after the reservation can leave the Task Executing.
+    let completion = complete_write_task(&config, &workspace, &workspace_path, source_branch, baseline_commit);
+    match completion {
+        Ok(result) => Ok(result),
+        Err(error) => {
+            let _ = mark_task_failed(
+                config.store,
+                config.work_item_id,
+                config.attempt_id,
+                config.task_id,
+            );
+            Err(error)
+        }
+    }
+}
+
+/// Persist a Writer Task's successful completion. Every fallible step returns
+/// through the caller's terminal-state boundary, so a completion failure durably
+/// fails the Task rather than leaving it Executing.
+fn complete_write_task(
+    config: &WorkTaskRunConfig<'_>,
+    workspace: &crate::work_model::WorkspaceRef,
+    workspace_path: &Path,
+    source_branch: String,
+    baseline_commit: String,
+) -> Result<WorkTaskRunResult> {
+    let commit = head_commit(workspace_path)?;
 
     let output = TaskOutput {
         workspace_id: workspace.id.clone(),
@@ -4303,6 +4331,72 @@ mod tests {
         assert!(
             stored.attempts[0].tasks[0].started_at.is_none(),
             "a rolled-back reservation clears the start timestamp"
+        );
+    }
+
+    #[test]
+    fn reserved_phase_setup_error_cannot_leave_task_executing() {
+        // B7: a post-reservation setup failure (here a worktree path obstructed by a
+        // file) must never leave the reserved Task durably Executing — the atomic
+        // start reservation is rolled back so the Task is recoverable and unstarted.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path().join("project");
+        let project_root = project_root.as_path();
+        fs::create_dir_all(project_root).unwrap();
+        let git = |args: &[&str]| {
+            crate::git::run(project_root, args, "test git setup").unwrap();
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t.co"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "baseline"]);
+
+        let store = WorkModelStore::new(project_root);
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Never orphan a reserved Task Executing".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            post_merge_review_fix_depth: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+
+        // Obstruct the managed workspace path so setup fails after the reservation
+        // has already marked the Task Executing.
+        let workspace_path = resolve_managed_workspace_path(
+            project_root,
+            &item.attempts[0].tasks[0].workspace_access.writes[0].path,
+            "work-1",
+            "attempt-1",
+        )
+        .unwrap();
+        fs::create_dir_all(workspace_path.parent().unwrap()).unwrap();
+        fs::write(&workspace_path, "not a worktree").unwrap();
+
+        let resolver = ContentResolver::new(Some(project_root));
+        let _ = run_task(WorkTaskRunConfig {
+            project_root,
+            store: &store,
+            work_item_id: "work-1",
+            attempt_id: "attempt-1",
+            task_id: "attempt-1-write-1",
+            resolver: &resolver,
+            extra_args: &[],
+            no_sandbox: true,
+            store_lock: None,
+        })
+        .expect_err("a worktree setup failure must surface an error");
+
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_ne!(
+            stored.attempts[0].tasks[0].status,
+            TaskStatus::Executing,
+            "a reserved Task must never be left durably Executing after a setup error"
         );
     }
 
