@@ -296,29 +296,37 @@ fn rollback_reservation(
     receipt: &ReservationReceipt,
 ) -> Result<(), WorkModelStorageError> {
     store.mutate_work_item(work_item_id, |item| {
-        if let Some((attempt_index, task_index)) =
+        // The reservation wrote this exact Attempt/Task, so a structurally missing
+        // entity during rollback is a model-integrity fault, not a tolerable
+        // concurrent state — fail rather than silently reporting a clean rollback.
+        // (A peer that merely moved the Attempt/Task to a different but present state
+        // is tolerated below via the CAS equality checks.)
+        let Some((attempt_index, task_index)) =
             find_attempt_task_indexes(item, attempt_id, task_id)
-        {
-            let attempt = &item.attempts[attempt_index];
-            // Restore the owned Task independently: if the Task still equals what
-            // this reservation wrote, revert it — even when a peer took the Attempt
-            // terminal meanwhile — so a CAS mismatch never silently leaves the Task
-            // orphaned Executing.
-            let task_matches = attempt.tasks[task_index] == receipt.written_task;
-            // Restore the Attempt only when it is still exactly what the
-            // reservation wrote; a peer that took it terminal is preserved.
-            let attempt_matches = attempt.status == receipt.written_attempt_status
-                && attempt.pause_kind == receipt.written_attempt_pause
-                && attempt.completed_at == receipt.written_attempt_completed_at;
-            if task_matches {
-                item.attempts[attempt_index].tasks[task_index] = receipt.prior_task.clone();
-            }
-            if attempt_matches {
-                let attempt = &mut item.attempts[attempt_index];
-                attempt.status = receipt.prior_attempt_status.clone();
-                attempt.pause_kind = receipt.prior_attempt_pause.clone();
-                attempt.completed_at = receipt.prior_attempt_completed_at.clone();
-            }
+        else {
+            return Err(crate::work_model::WorkModelError::TaskNotFound {
+                id: task_id.to_string(),
+            });
+        };
+        let attempt = &item.attempts[attempt_index];
+        // Restore the owned Task independently: if the Task still equals what
+        // this reservation wrote, revert it — even when a peer took the Attempt
+        // terminal meanwhile — so a CAS mismatch never silently leaves the Task
+        // orphaned Executing.
+        let task_matches = attempt.tasks[task_index] == receipt.written_task;
+        // Restore the Attempt only when it is still exactly what the
+        // reservation wrote; a peer that took it terminal is preserved.
+        let attempt_matches = attempt.status == receipt.written_attempt_status
+            && attempt.pause_kind == receipt.written_attempt_pause
+            && attempt.completed_at == receipt.written_attempt_completed_at;
+        if task_matches {
+            item.attempts[attempt_index].tasks[task_index] = receipt.prior_task.clone();
+        }
+        if attempt_matches {
+            let attempt = &mut item.attempts[attempt_index];
+            attempt.status = receipt.prior_attempt_status.clone();
+            attempt.pause_kind = receipt.prior_attempt_pause.clone();
+            attempt.completed_at = receipt.prior_attempt_completed_at.clone();
         }
         Ok(())
     })?;
@@ -4668,6 +4676,56 @@ mod tests {
         assert!(
             err.downcast_ref::<WorkModelStorageError>().is_some(),
             "the rollback persistence failure is retained as a downcastable secondary: {err:#}"
+        );
+    }
+
+    #[test]
+    fn rollback_reservation_fails_on_a_missing_entity() {
+        // The reservation wrote this exact Task, so a structurally missing entity
+        // during rollback is a model-integrity fault, not a silently-successful no-op.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+
+        // Persist a Work Item that has NO matching attempt/task.
+        let item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Missing entity".to_string(),
+            ..Default::default()
+        };
+        store.write_work_item(&item).unwrap();
+
+        // A receipt built from an unrelated Task shape; the rollback reducer will not
+        // find the reserved Attempt/Task in the persisted item.
+        let mut shaped = WorkItem {
+            id: "work-1".to_string(),
+            title: "Missing entity".to_string(),
+            ..Default::default()
+        };
+        shaped.add_initial_attempt("attempt-1").unwrap();
+        let task = shaped.attempts[0].tasks[0].clone();
+        let receipt = ReservationReceipt {
+            prior_task: task.clone(),
+            prior_attempt_status: AttemptStatus::Planned,
+            prior_attempt_pause: None,
+            prior_attempt_completed_at: None,
+            written_task: task.clone(),
+            written_attempt_status: AttemptStatus::Executing,
+            written_attempt_pause: None,
+            written_attempt_completed_at: None,
+        };
+
+        let err = rollback_reservation(
+            &store,
+            "work-1",
+            "attempt-1",
+            "attempt-1-write-1",
+            &receipt,
+        )
+        .expect_err("a structurally missing reserved entity fails the rollback");
+        // The reducer's model error surfaces as a typed storage error, never a clean Ok.
+        assert!(
+            matches!(err, WorkModelStorageError::InvalidModel { .. }),
+            "a missing entity is a typed model-integrity failure: {err}"
         );
     }
 
