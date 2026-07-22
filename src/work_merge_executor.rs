@@ -1201,22 +1201,35 @@ fn add_rebase_task_to_attempt(
     Ok(())
 }
 
-/// Durably terminalize a reserved Rebase Task as Failed before returning `primary`,
-/// so a post-reservation failure never strands the Task Executing. The primary error
-/// (which may be a typed transcript-pump failure) is preserved; a failure to persist
-/// the terminal state is attached as context rather than masking the primary.
+/// Durably terminalize a reserved Rebase Task before returning `primary`, so a
+/// post-reservation failure never strands the Task Executing.
+///
+/// A typed transcript-pump infrastructure failure is resumable — the transport, not
+/// the rebase itself, is the fault — so it terminalizes to `NeedsUser` the same way
+/// every other reserved phase does, letting a supported resume retry after the
+/// operator fixes the transport. Any other failure is a hard `Failed`. The primary
+/// error is preserved; a failure to persist the terminal state is attached as
+/// context rather than masking the primary.
 fn terminalize_rebase_failure(
     config: &WorkMergeConfig<'_>,
     attempt_id: &str,
     task_id: &str,
     primary: anyhow::Error,
 ) -> anyhow::Error {
+    let terminal = if primary
+        .downcast_ref::<crate::transcript_pump::TranscriptPumpError>()
+        .is_some()
+    {
+        TaskStatus::NeedsUser
+    } else {
+        TaskStatus::Failed
+    };
     if let Err(state_err) = update_rebase_task_status(
         config.store,
         config.work_item_id,
         attempt_id,
         task_id,
-        TaskStatus::Failed,
+        terminal,
     ) {
         return primary.context(format!(
             "additionally failed to persist terminal Rebase Task state: {state_err}"
@@ -1695,8 +1708,9 @@ mod tests {
     fn rebase_pump_failure_terminalizes_task_before_return() {
         // B7: a typed transcript-pump failure during the rebase launch — after the
         // Rebase Task is reserved Executing — durably terminalizes that Task before
-        // returning (never leaving it Executing for outer recovery) and preserves the
-        // typed pump primary.
+        // returning (never leaving it Executing for outer recovery), preserves the
+        // typed pump primary, and records a resumable NeedsUser terminal (the
+        // transport, not the rebase, is the fault) like every other reserved phase.
         let tmp = tempfile::tempdir().unwrap();
         let project_root = tmp.path();
         let source_workspace = project_root.join("workspace");
@@ -1752,7 +1766,8 @@ mod tests {
             "the typed transcript-pump primary must be preserved, not flattened to a string"
         );
 
-        // The reserved Rebase Task is durably terminal, never left Executing.
+        // The reserved Rebase Task is durably terminal, never left Executing, and a
+        // pump fault records a resumable NeedsUser (not a hard Failed).
         let after = store.read_work_item("work-1").unwrap();
         let rebase_task = after.attempts[0]
             .tasks
@@ -1761,8 +1776,9 @@ mod tests {
             .expect("the rebase task was reserved");
         assert_eq!(
             rebase_task.status,
-            TaskStatus::Failed,
-            "the Rebase Task must be durably terminalized before return, never left Executing"
+            TaskStatus::NeedsUser,
+            "a transcript-pump fault terminalizes the Rebase Task to resumable NeedsUser, \
+             never left Executing and never a hard Failed"
         );
     }
 
