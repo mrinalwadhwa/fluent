@@ -2732,6 +2732,9 @@ pub enum WorkModelError {
     AttemptNotFound {
         id: String,
     },
+    TaskNotFound {
+        id: String,
+    },
     AttemptMissingCompletedWriteTask {
         attempt_id: String,
     },
@@ -2843,6 +2846,9 @@ impl fmt::Display for WorkModelError {
             }
             Self::AttemptNotFound { id } => {
                 write!(f, "Attempt {id:?} not found")
+            }
+            Self::TaskNotFound { id } => {
+                write!(f, "Task {id:?} not found")
             }
             Self::AttemptMissingCompletedWriteTask { attempt_id } => {
                 write!(
@@ -3507,6 +3513,39 @@ impl WorkModelStore {
 
     pub fn write_work_item(&self, work_item: &WorkItem) -> Result<(), WorkModelStorageError> {
         self.write_work_item_file(work_item, false)
+    }
+
+    /// Atomically mutate a Work Item under its per-Work-Item model lock.
+    ///
+    /// Acquires the stable model lock once, recovers any pending transaction,
+    /// reads the aggregate fresh under that lock, applies `reducer`, validates
+    /// the result, and writes it back through the same held lock in one
+    /// transaction — without recursively re-locking. Because no other process can
+    /// interleave between the fresh read and the write, a reducer that inspects
+    /// the current state (for example an attempt-precedence check) sees exactly
+    /// the state it commits, closing the read-modify-write race that separate
+    /// `read_work_item`/`write_work_item` calls leave open. A reducer that leaves
+    /// the aggregate unchanged commits nothing (the write short-circuits on an
+    /// identical snapshot), so a rejected mutation is a durable no-op.
+    pub fn mutate_work_item<T>(
+        &self,
+        id: &str,
+        reducer: impl FnOnce(&mut WorkItem) -> Result<T, WorkModelError>,
+    ) -> Result<T, WorkModelStorageError> {
+        let path = self.work_item_path(id)?;
+        let _lock = self.lock_work_item_model(id)?;
+        let mut work_item = self.read_work_item_under_model_lock(id)?;
+        let output = reducer(&mut work_item).map_err(|source| {
+            WorkModelStorageError::InvalidModel {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        work_item
+            .validate()
+            .map_err(|source| WorkModelStorageError::InvalidModel { path, source })?;
+        self.write_work_item_file_unchecked(&work_item, false)?;
+        Ok(output)
     }
 
     fn write_work_item_file(
@@ -6367,6 +6406,56 @@ mod tests {
         handle.join().unwrap();
         assert_eq!(observed.title, "Committed snapshot");
         assert_eq!(observed.attempts[0].coder_mapping.write.model, "new-model");
+    }
+
+    #[test]
+    fn mutate_work_item_commits_a_reducer_and_no_ops_an_unchanged_snapshot() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        store
+            .create_work_item(&work_item_with_completed_write("work-1"))
+            .unwrap();
+        let base_revision = store.read_work_item("work-1").unwrap().storage_revision.get();
+
+        // A reducer that mutates commits its change and returns its value.
+        let returned = store
+            .mutate_work_item("work-1", |item| {
+                item.title = "Reduced".to_string();
+                Ok(item.attempts.len())
+            })
+            .unwrap();
+        assert_eq!(returned, 1);
+        let after_change = store.read_work_item("work-1").unwrap();
+        assert_eq!(after_change.title, "Reduced");
+        assert_ne!(
+            after_change.storage_revision.get(),
+            base_revision,
+            "a committed mutation advances the storage revision"
+        );
+
+        // A reducer that leaves the aggregate unchanged commits nothing: the
+        // revision is stable, so a rejected transition is a durable no-op.
+        let changed_revision = after_change.storage_revision.get();
+        store.mutate_work_item("work-1", |_item| Ok(())).unwrap();
+        assert_eq!(
+            store.read_work_item("work-1").unwrap().storage_revision.get(),
+            changed_revision,
+            "an unchanged reducer must not advance the revision"
+        );
+
+        // A reducer error propagates and commits nothing.
+        let error = store
+            .mutate_work_item("work-1", |_item| -> Result<(), WorkModelError> {
+                Err(WorkModelError::TaskNotFound {
+                    id: "missing".to_string(),
+                })
+            })
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            WorkModelStorageError::InvalidModel { .. }
+        ));
+        assert_eq!(store.read_work_item("work-1").unwrap().title, "Reduced");
     }
 
     #[test]
