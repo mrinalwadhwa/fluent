@@ -3331,22 +3331,34 @@ fn resolve_or_persist_write_baseline(
         .transpose()?;
 
     if let Some(path) = baseline_path.as_ref() {
-        if path.exists() {
-            // The sidecar exists: it MUST parse, or fail closed. Silently
-            // recomputing HEAD here would fold a commit made before a late
-            // failure into the baseline on resume.
-            let existing = fs::read_to_string(path).with_context(|| {
-                format!("read persisted write baseline at {}", path.display())
-            })?;
-            let trimmed = existing.trim();
-            if trimmed.is_empty() {
-                bail!(
-                    "persisted write baseline at {} is empty; refusing to recompute \
-                     from HEAD and risk adopting a post-commit baseline",
-                    path.display()
-                );
+        // Read the sidecar directly and split on NotFound so the fail-closed
+        // contract holds against every other error. `Path::exists()` would
+        // report `false` on a metadata error (permissions, a broken symlink, an
+        // I/O fault) and fall through to recompute HEAD, folding a commit made
+        // before a late failure into the baseline on resume — the exact outcome
+        // this guard exists to prevent. Only a genuinely absent sidecar
+        // recomputes; anything else propagates.
+        match fs::read_to_string(path) {
+            Ok(existing) => {
+                let trimmed = existing.trim();
+                if trimmed.is_empty() {
+                    bail!(
+                        "persisted write baseline at {} is empty; refusing to recompute \
+                         from HEAD and risk adopting a post-commit baseline",
+                        path.display()
+                    );
+                }
+                return Ok(trimmed.to_string());
             }
-            return Ok(trimmed.to_string());
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                // Fall through to compute and durably persist the initial baseline.
+            }
+            Err(error) => {
+                return Err(anyhow::Error::new(error).context(format!(
+                    "read persisted write baseline at {}",
+                    path.display()
+                )));
+            }
         }
     }
 
@@ -3355,7 +3367,15 @@ fn resolve_or_persist_write_baseline(
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, &baseline)
+        // Create without overwriting: only a NotFound read reaches here, and the
+        // Task lease serializes writers, so an existing sidecar means a concurrent
+        // or prior baseline we must not clobber with a post-commit HEAD.
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .with_context(|| format!("persist write baseline at {}", path.display()))?;
+        std::io::Write::write_all(&mut file, baseline.as_bytes())
             .with_context(|| format!("persist write baseline at {}", path.display()))?;
     }
     Ok(baseline)
@@ -3538,6 +3558,65 @@ mod tests {
         assert!(
             err.to_string().contains("empty"),
             "the failure must name the corrupt baseline: {err}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_baseline_fails_closed_on_unreadable_sidecar() {
+        // A present-but-unresolvable sidecar — here a dangling symlink, which
+        // `Path::exists()` reports as absent — must fail closed. The prior
+        // `path.exists()` gate would treat it as missing, recompute HEAD, and
+        // `fs::write` straight through the link, adopting a post-commit baseline.
+        // The direct read + `create_new` refuses to write through it.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let workspace = project_root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.email", "t@t.co"][..],
+            &["config", "user.name", "t"][..],
+            &["commit", "-q", "--allow-empty", "-m", "baseline"][..],
+        ] {
+            crate::git::run(&workspace, args, "test git setup").unwrap();
+        }
+
+        let area = ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1";
+        let task = crate::work_model::Task {
+            id: "attempt-1-write-1".to_string(),
+            kind: crate::work_model::TaskKind::Write,
+            status: TaskStatus::Planned,
+            role: "author".to_string(),
+            instructions: None,
+            work_item_id: "work-1".to_string(),
+            attempt_id: Some("attempt-1".to_string()),
+            workspace_access: crate::work_model::WorkspaceAccess {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            },
+            artifact_area: Some(crate::work_model::TaskArtifactArea {
+                path: area.to_string(),
+            }),
+            review_context: None,
+            input_artifacts: Vec::new(),
+            depends_on: None,
+            output: None,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+        };
+
+        let sidecar = project_root.join(area).join("write-baseline-commit");
+        fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        let dangling_target = project_root.join("missing-baseline-target");
+        std::os::unix::fs::symlink(&dangling_target, &sidecar).unwrap();
+
+        resolve_or_persist_write_baseline(project_root, &task, &workspace)
+            .expect_err("an unresolvable baseline sidecar must fail closed");
+        assert!(
+            !dangling_target.exists(),
+            "the guard must not recompute HEAD and write a baseline through the sidecar"
         );
     }
 
