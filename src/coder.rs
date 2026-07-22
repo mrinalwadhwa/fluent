@@ -2367,6 +2367,13 @@ mod pump_supervision_tests {
         assert_eq!(managed.terminate_and_reap().unwrap(), 7);
         assert_eq!(managed.terminate_and_reap().unwrap(), 7);
         assert_eq!(managed.terminate_and_reap().unwrap(), 7);
+        // The reaped code is cached on the finalized outcome, so a later reader (a
+        // caller that already reaped, or Drop) can recover it without re-waiting.
+        assert_eq!(
+            managed.exit_code(),
+            Some(7),
+            "the finalized outcome caches the reaped exit code"
+        );
 
         let calls = calls.lock().unwrap();
         assert_eq!(calls.iter().filter(|c| **c == "signal_group").count(), 1);

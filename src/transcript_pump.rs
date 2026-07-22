@@ -1910,6 +1910,63 @@ mod tests {
         );
     }
 
+    /// A status store that fails every periodic Running write and then panics on
+    /// the terminal write, so one settlement carries a distinct periodic failure
+    /// AND a worker-join failure at the same time.
+    struct PeriodicFailThenTerminalPanicStore;
+
+    impl StatusStore for PeriodicFailThenTerminalPanicStore {
+        fn write(&mut self, status: &PumpStatus) -> Result<(), String> {
+            match status.state {
+                PumpState::Running => Err("simulated periodic write failure".to_string()),
+                _ => panic!("simulated terminal status store panic"),
+            }
+        }
+    }
+
+    #[test]
+    fn composite_status_failure_retains_periodic_and_worker_diagnostics() {
+        // B4: a composite status failure preserves every distinct diagnostic — the
+        // immutable primary, the best-effort periodic failure, and the worker-join
+        // (panic) failure — in separate typed fields rather than collapsing them.
+        // `next_work` drains the pending periodic before the terminal, so the
+        // periodic write fails (latching `periodic_error`) before the terminal write
+        // panics (latching `worker_error`), regardless of worker scheduling.
+        let latch = Arc::new(FirstFault::default());
+        let mut coordinator = StatusCoordinator::spawn(
+            Box::new(PeriodicFailThenTerminalPanicStore),
+            Some(Arc::clone(&latch)),
+        )
+        .unwrap();
+
+        coordinator.submit_periodic(running_status());
+        let settlement =
+            coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
+
+        let err = settlement
+            .terminal_failure()
+            .expect("a worker panic is a terminal failure, never silent success");
+        assert_eq!(
+            err.worker_error(),
+            Some(STATUS_WORKER_PANIC),
+            "the worker-join failure is retained in its own field: {err:?}"
+        );
+        assert!(
+            err.periodic_error()
+                .is_some_and(|e| e.contains("periodic write failure")),
+            "the earlier best-effort periodic failure is retained distinctly, not \
+             overwritten by the worker panic: {err:?}"
+        );
+        assert!(
+            err.message().contains("panicked"),
+            "the immutable primary names the worker panic: {err}"
+        );
+        assert!(
+            err.transport().is_some_and(|t| t.is_balanced()),
+            "the balanced transport diagnostics are preserved: {err:?}"
+        );
+    }
+
     /// A status store whose every write panics, modelling a status worker that
     /// unwinds mid-persist.
     struct PanicStore;
