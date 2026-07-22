@@ -1702,11 +1702,35 @@ fn mark_task_failed_attempt_needs_user(
         // rolls back — the authoritative terminal state persisted above.
         match write_task_error_handoff(project_root, work_item_id, attempt_id, task_id, failure) {
             Ok(handoff_path) => {
-                item.attempts[attempt_index].artifacts.push(ArtifactRef {
-                    producer_id: task_id.to_string(),
-                    path: handoff_path,
+                // Attach the reference through a FRESH lock-held mutation that
+                // re-reads the Work Item, rather than writing back the stale
+                // in-memory snapshot from the authoritative persistence above. A
+                // peer that mutated the item in the window between the two writes
+                // (for example another Task recording its own terminal state, or
+                // the notification effect below) is preserved instead of clobbered.
+                // The attach is idempotent — the reference is added only when absent
+                // — so a supported resume that re-runs this path never duplicates it.
+                let attach = store.mutate_work_item(work_item_id, |item| {
+                    let Some((attempt_index, _task_index)) =
+                        find_attempt_task_indexes(item, attempt_id, task_id)
+                    else {
+                        return Err(crate::work_model::WorkModelError::TaskNotFound {
+                            id: task_id.to_string(),
+                        });
+                    };
+                    let artifacts = &mut item.attempts[attempt_index].artifacts;
+                    if !artifacts
+                        .iter()
+                        .any(|a| a.producer_id.as_str() == task_id && a.path == handoff_path)
+                    {
+                        artifacts.push(ArtifactRef {
+                            producer_id: task_id.to_string(),
+                            path: handoff_path.clone(),
+                        });
+                    }
+                    Ok(())
                 });
-                if let Err(err) = store.write_work_item(&item) {
+                if let Err(err) = attach {
                     eprintln!(
                         "  Warning: recorded terminal Task state but could not attach its \
                          needs-user handoff reference: {err}"
@@ -7638,6 +7662,112 @@ mod tests {
             notifications[0].1.contains("transport"),
             "the notification should point at the transport: {}",
             notifications[0].1
+        );
+    }
+
+    #[test]
+    fn needs_user_handoff_attach_preserves_a_concurrent_peer_write() {
+        // B7: the handoff-reference attach is a SECOND durable write after the
+        // authoritative terminal Task/Attempt state is persisted. It must re-read
+        // the Work Item under the model lock rather than write back the stale
+        // snapshot, so a peer that mutates the item in the window between the two
+        // writes is preserved, not clobbered. The notification effect fires in
+        // exactly that window, so a peer write performed from the notify hook
+        // interleaves deterministically between the terminal write and the attach.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Interleaved handoff attach".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            post_merge_review_fix_depth: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+
+        // The notify effect runs between the terminal write and the handoff attach.
+        // A peer records its own artifact reference there; the attach must keep it.
+        // Idempotent so a resumed second terminalization does not accumulate copies.
+        let peer_ref_path = ".fluent/work/artifacts/work-1/attempt-1/peer.md".to_string();
+        let peer_ref_for_notify = peer_ref_path.clone();
+        let notify = |_title: &str, _body: &str| {
+            store
+                .mutate_work_item("work-1", |item| {
+                    let artifacts = &mut item.attempts[0].artifacts;
+                    if !artifacts.iter().any(|a| a.producer_id == "peer-task") {
+                        artifacts.push(crate::work_model::ArtifactRef {
+                            producer_id: "peer-task".to_string(),
+                            path: peer_ref_for_notify.clone(),
+                        });
+                    }
+                    Ok(())
+                })
+                .expect("the peer write in the interleaving window succeeds");
+        };
+
+        mark_task_failed_attempt_needs_user(
+            &store,
+            tmp.path(),
+            "work-1",
+            "attempt-1",
+            "attempt-1-write-1",
+            &TaskFailure::TranscriptPump("write transcript: no space left on device".to_string()),
+            &notify,
+        )
+        .unwrap();
+
+        let stored = store.read_work_item("work-1").unwrap();
+        let artifacts = &stored.attempts[0].artifacts;
+        // The peer's concurrent write survives the attach (no stale-snapshot clobber).
+        assert!(
+            artifacts
+                .iter()
+                .any(|a| a.producer_id == "peer-task" && a.path == peer_ref_path),
+            "the attach must preserve a peer artifact written in the interleaving window: {artifacts:?}"
+        );
+        // The handoff reference is attached exactly once.
+        let handoff_count = artifacts
+            .iter()
+            .filter(|a| a.path.contains("needs-user-attempt-1-write-1.md"))
+            .count();
+        assert_eq!(
+            handoff_count, 1,
+            "the handoff reference must be attached exactly once: {artifacts:?}"
+        );
+
+        // A resumed terminalization re-runs this path; the idempotent attach must
+        // not duplicate the handoff reference, and the peer artifact stays intact.
+        mark_task_failed_attempt_needs_user(
+            &store,
+            tmp.path(),
+            "work-1",
+            "attempt-1",
+            "attempt-1-write-1",
+            &TaskFailure::TranscriptPump("write transcript: no space left on device".to_string()),
+            &notify,
+        )
+        .unwrap();
+
+        let stored = store.read_work_item("work-1").unwrap();
+        let artifacts = &stored.attempts[0].artifacts;
+        let handoff_count = artifacts
+            .iter()
+            .filter(|a| a.path.contains("needs-user-attempt-1-write-1.md"))
+            .count();
+        assert_eq!(
+            handoff_count, 1,
+            "a resumed terminalization must not duplicate the handoff reference: {artifacts:?}"
+        );
+        assert!(
+            artifacts
+                .iter()
+                .any(|a| a.producer_id == "peer-task" && a.path == peer_ref_path),
+            "the peer artifact must remain after a resumed terminalization: {artifacts:?}"
         );
     }
 
