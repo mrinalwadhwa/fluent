@@ -618,9 +618,16 @@ fn run_with_transcript(mut cmd: Command, transcript_file: Option<&Path>) -> Resu
                     }
                 }
                 if let Some(status) = child.try_wait()? {
-                    // The coder exited; let the pump drain the last bytes to EOF.
-                    let terminal = pump.wait_terminal();
+                    // The leader exited. Terminate any surviving descendants in
+                    // the group before waiting for the pump: a backgrounded
+                    // descendant that inherited stdout would otherwise hold the
+                    // pipe's write end open and the pump would wait for EOF
+                    // forever. The leader's bytes are already buffered in the
+                    // pipe, so closing the group lets the pump drain them to EOF
+                    // and finish. Killing the group here reaps the descendants
+                    // rather than racing a managed import against them.
                     terminate_process_group(child_id);
+                    let terminal = pump.wait_terminal();
                     pump.join();
                     return match terminal {
                         Ok(_summary) => Ok(status.code().unwrap_or(1)),
@@ -1120,6 +1127,62 @@ mod pump_supervision_tests {
         let body = std::fs::read_to_string(&transcript).unwrap();
         assert!(body.contains("\"type\":\"a\""));
         assert!(body.contains("\"type\":\"b\""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transcript_capture_returns_when_descendant_holds_stdout_open() {
+        // The leader emits a record and exits while a same-group descendant
+        // inherits stdout and sleeps, holding the pipe's write end open. The
+        // pump would wait for EOF forever unless supervision terminates the
+        // surviving descendant first. Fluent must return promptly, reap the
+        // descendant, preserve the leader's output, and leave terminal pump
+        // status — not wait out the descendant's 30-second sleep.
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let pid_path = dir.path().join("descendant.pid");
+
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg("sleep 30 & echo $! > descendant.pid; printf '{\"type\":\"leader\"}\\n'; exit 0")
+            .current_dir(dir.path());
+
+        let started = Instant::now();
+        let exit = run_with_transcript(cmd, Some(&transcript)).unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(exit, 0);
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "supervision must not wait out the descendant's sleep; took {elapsed:?}"
+        );
+
+        let body = std::fs::read_to_string(&transcript).unwrap();
+        assert!(
+            body.contains("\"type\":\"leader\""),
+            "the leader's output must be preserved: {body:?}"
+        );
+
+        let pid = std::fs::read_to_string(&pid_path).unwrap();
+        let alive = Command::new("/bin/kill")
+            .args(["-0", pid.trim()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(
+            !alive.success(),
+            "the same-group descendant must be reaped before returning"
+        );
+
+        let status_path = crate::transcript_pump::status_path_for(&transcript);
+        let status: crate::transcript_pump::PumpStatus =
+            serde_json::from_slice(&std::fs::read(&status_path).unwrap()).unwrap();
+        assert_eq!(
+            status.state,
+            crate::transcript_pump::PumpState::Complete,
+            "terminal pump status must record completed capture"
+        );
     }
 }
 
