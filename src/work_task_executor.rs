@@ -4370,7 +4370,15 @@ mod tests {
         .unwrap();
 
         let item = review_item_with_role("architecture");
-        let review_task_id = item.attempts[0].tasks[1].id.clone();
+        // `add_review_tasks` pushes a Tester task before the review tasks, so select
+        // the review task by role rather than a positional index.
+        let review_task_id = item.attempts[0]
+            .tasks
+            .iter()
+            .find(|t| t.role == "architecture")
+            .expect("the architecture review task exists")
+            .id
+            .clone();
 
         let artifact_dir = project_root.join("artifacts");
         fs::create_dir_all(&artifact_dir).unwrap();
