@@ -28,6 +28,37 @@ Host-owned Learner run evidence (transcript, submitted-draft snapshot, error, no
 
 ---
 
+## The transcript pump's console renderer and config are process-wide
+
+The `transcript_pump` module renders console previews through a single
+process-wide bounded renderer (`console_preview_sink`, a `OnceLock`) and reads
+its thresholds from a process-wide installed config (`install_config` /
+`active_config`, a `Mutex`). This is deliberate, not a hidden global smell.
+`Coder::run`'s signature is kept stable for non-transcript callers, so the pump
+cannot take per-call config through the trait; the executor resolves the layered
+thresholds once per project (`install_transcript_pump_config`) and installs them
+before launching a coder. One renderer for the whole process is the point: a
+blocked console must not accumulate one stuck thread per Task, and previews are
+dropped (`try_send`) rather than backpressuring capture. The renderer thread is
+never joined so a blocked stderr cannot keep the process alive at shutdown. Do
+not "fix" this by threading config through `Coder::run` or by spawning a renderer
+per pump.
+
+---
+
+## Transcript age and pump-status timestamps are diagnostics, never authority
+
+`transcript-pump.json` records state, timestamps, and byte/record/drop counters
+next to each transcript so an operator can tell a quiet coder from a blocked
+console, a failed pump, or completed capture. It is explicitly not a liveness
+lease or heartbeat. Executing-Task recovery decides liveness solely from the
+process-held flock lease (`executing_task_is_live`), never from how old a
+transcript or its status file is. Do not add a transcript-age watchdog or use
+pump-status timestamps to reclaim or signal a Task; durable Task ownership is a
+separate, dependent Work Item that consumes the pump's terminal signal.
+
+---
+
 ## The Learner schema-repair prompt is built inline, not bundled
 
 The bounded schema-repair prompt (`schema_repair_prompt` in `work_task_executor`) is constructed inline rather than added as a file under `prompts/`. It is a short, host-authored instruction that embeds the rejected draft and exact validation error, and it is never resolved through the project→user→bundled content layers the way `learner-user.md` is. Keeping it inline avoids expanding the `prompts/` bundling surface and its naming-guardrail allowlist for a prompt that has no per-project override story. Do not flag the absence of a `prompts/learner-schema-repair.md`.

@@ -2178,6 +2178,123 @@ exit 0
     );
 }
 
+/// Wait for a child up to `timeout`, killing it on expiry so a capture
+/// regression that blocks the writer cannot hang the whole suite.
+fn wait_with_timeout(
+    child: &mut std::process::Child,
+    timeout: std::time::Duration,
+) -> Option<std::process::ExitStatus> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait().unwrap() {
+            Some(status) => return Some(status),
+            None => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+}
+
+#[test]
+fn writer_completes_when_oversized_transcript_record_cannot_be_mirrored() {
+    // Reproduce the original failure: a transcript record larger than the
+    // 64 KiB stderr pipe capacity followed by another record, with the writer's
+    // stderr left unread. The byte pump must persist every byte and drain
+    // through coder exit without the unread console stalling capture, so the
+    // writer completes and both records land in the transcript.
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+big=$(head -c 70350 /dev/zero | tr '\0' 'x')
+printf '{"type":"big","data":"%s"}\n' "$big"
+printf '{"type":"after-oversized-record"}\n'
+printf 'task output\n' > task-output.txt
+git add task-output.txt
+git commit -m "Add task output" >/dev/null
+exit 0
+"##,
+    );
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Pump test"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    // Launch the writer directly with its console (stderr) piped but never
+    // drained, so the console sink cannot be emptied while the coder streams its
+    // oversized record. stdout is drained on a thread: it carries unrelated
+    // inherited coder output and is not the console path under test.
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_fluent"))
+        .current_dir(&main_dir)
+        .args([
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_NO_UPDATE_CHECK", "1")
+        .env("FLUENT_MAX_TASK_RETRIES", "0")
+        .env_remove("FLUENT_TASK_KIND")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut stdout = child.stdout.take().unwrap();
+    let drain_stdout = std::thread::spawn(move || {
+        let mut sink = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stdout, &mut sink);
+    });
+
+    let status = wait_with_timeout(&mut child, std::time::Duration::from_secs(60))
+        .expect("writer must complete instead of blocking on an unread console");
+    let _ = drain_stdout.join();
+    assert!(
+        status.success(),
+        "writer should complete despite the unread oversized console preview"
+    );
+
+    let transcript =
+        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/transcript.jsonl");
+    let content = fs::read(&transcript).unwrap();
+    assert!(
+        content.len() > 70_350,
+        "the full oversized record must persist; got {} bytes",
+        content.len()
+    );
+    assert!(
+        content
+            .windows(b"after-oversized-record".len())
+            .any(|w| w == b"after-oversized-record"),
+        "the record after the oversized one must still be captured"
+    );
+
+    // The pump status is a durable diagnostic recording completed capture.
+    let status_file = main_dir
+        .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/transcript-pump.json");
+    let status_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&status_file).unwrap()).unwrap();
+    assert_eq!(status_json["state"], "complete");
+    assert_eq!(status_json["schema_version"], 1);
+}
+
 #[test]
 fn seed_failure_does_not_abort_attempt() {
     let tmp = TempDir::new().unwrap();
