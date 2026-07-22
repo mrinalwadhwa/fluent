@@ -16,6 +16,10 @@ pub const DEFAULT_READ_CHUNK_SIZE: usize = 64 * 1024;
 /// the pump truncates it. The full record always lands in the transcript.
 pub const DEFAULT_CONSOLE_PREVIEW_LIMIT: usize = 8 * 1024;
 
+/// Appended to a preview whose record exceeded the console preview limit. It
+/// points a reader at the canonical transcript, which alone holds every byte.
+pub const TRUNCATION_MARKER: &[u8] = b"...[preview truncated; full record in transcript]";
+
 /// Operator-facing thresholds that shape console previews and status flushes.
 /// Resolved from layered configuration; see `config::resolve_transcript_pump_config`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -81,11 +85,13 @@ impl std::fmt::Display for TranscriptPumpError {
 
 impl std::error::Error for TranscriptPumpError {}
 
-/// What a completed drain observed: total bytes persisted and records seen.
+/// What a completed drain observed: total bytes persisted, records seen, and
+/// previews a saturated or disconnected console could not accept.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PumpSummary {
     pub bytes: u64,
     pub records: u64,
+    pub dropped_console: u64,
 }
 
 /// Drain `reader` into the transcript at `transcript_path`, writing every byte
@@ -131,7 +137,9 @@ pub fn drain(
         for &byte in chunk {
             if byte == b'\n' {
                 summary.records += 1;
-                line.flush(preview);
+                if !line.flush(preview) {
+                    summary.dropped_console += 1;
+                }
             } else {
                 line.push(byte);
             }
@@ -142,7 +150,9 @@ pub fn drain(
     // emitted; count it and offer its preview before completing.
     if line.has_bytes() {
         summary.records += 1;
-        line.flush(preview);
+        if !line.flush(preview) {
+            summary.dropped_console += 1;
+        }
     }
 
     file.flush().map_err(|err| {
@@ -156,8 +166,8 @@ pub fn drain(
 }
 
 /// Accumulates one record's bytes up to a bound so an oversized record yields a
-/// bounded preview instead of an unbounded console write. Truncation state is
-/// tracked but the marker is applied by a later slice of this work.
+/// bounded, lossy preview with a truncation marker instead of an unbounded
+/// console write. The full record is untouched in the canonical transcript.
 struct PreviewLine {
     limit: usize,
     buf: Vec<u8>,
@@ -188,12 +198,20 @@ impl PreviewLine {
         self.any
     }
 
-    fn flush(&mut self, preview: &dyn PreviewSink) {
-        let _ = self.truncated;
-        preview.deliver(&self.buf);
+    /// Offer the accumulated record as a bounded preview. Returns whether the
+    /// sink accepted it, then resets for the next record.
+    fn flush(&mut self, preview: &dyn PreviewSink) -> bool {
+        let delivered = if self.truncated {
+            let mut bounded = self.buf.clone();
+            bounded.extend_from_slice(TRUNCATION_MARKER);
+            preview.deliver(&bounded)
+        } else {
+            preview.deliver(&self.buf)
+        };
         self.buf.clear();
         self.truncated = false;
         self.any = false;
+        delivered
     }
 }
 
@@ -252,6 +270,106 @@ mod tests {
         );
         assert_eq!(summary.bytes, input.len() as u64);
         assert_eq!(summary.records, 2, "draining must continue past the oversized record");
+    }
+
+    /// A sink that refuses every preview, modelling a blocked or disconnected
+    /// console, but records how many it was offered.
+    struct SaturatedSink {
+        offered: Mutex<u64>,
+    }
+
+    impl SaturatedSink {
+        fn new() -> Self {
+            Self {
+                offered: Mutex::new(0),
+            }
+        }
+    }
+
+    impl PreviewSink for SaturatedSink {
+        fn deliver(&self, _preview: &[u8]) -> bool {
+            *self.offered.lock().unwrap() += 1;
+            false
+        }
+    }
+
+    #[test]
+    fn saturated_console_does_not_stop_transcript_capture() {
+        // A console that refuses every preview must not stop canonical capture:
+        // every byte still persists and the pump accounts for each dropped
+        // preview.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+
+        let mut input = Vec::new();
+        for i in 0..5 {
+            input.extend_from_slice(format!("{{\"type\":\"rec\",\"n\":{i}}}\n").as_bytes());
+        }
+
+        let sink = SaturatedSink::new();
+        let summary = drain(
+            Cursor::new(input.clone()),
+            &path,
+            &sink,
+            &TranscriptPumpConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            input,
+            "a saturated console must not cost the transcript any bytes"
+        );
+        assert_eq!(summary.records, 5);
+        assert_eq!(
+            summary.dropped_console, 5,
+            "every undelivered preview must be counted"
+        );
+        assert_eq!(*sink.offered.lock().unwrap(), 5);
+    }
+
+    #[test]
+    fn oversized_console_preview_is_bounded() {
+        // A record far larger than the console preview limit yields a bounded,
+        // lossy preview ending in the truncation marker, while the full record
+        // survives only in the canonical transcript.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+
+        let limit = 128;
+        let big = "y".repeat(4096);
+        let mut input = Vec::new();
+        input.extend_from_slice(format!("{{\"big\":\"{big}\"}}\n").as_bytes());
+
+        let sink = RecordingSink::new();
+        let config = TranscriptPumpConfig {
+            console_preview_limit: limit,
+            ..TranscriptPumpConfig::default()
+        };
+        drain(Cursor::new(input.clone()), &path, &sink, &config).unwrap();
+
+        let previews = sink.previews.lock().unwrap();
+        assert_eq!(previews.len(), 1);
+        let preview = &previews[0];
+        assert!(
+            preview.ends_with(TRUNCATION_MARKER),
+            "an oversized preview must carry the truncation marker"
+        );
+        assert!(
+            preview.len() <= limit + TRUNCATION_MARKER.len(),
+            "the preview must stay bounded, got {} bytes",
+            preview.len()
+        );
+
+        let persisted = std::fs::read(&path).unwrap();
+        assert_eq!(
+            persisted, input,
+            "the complete record is preserved only in the canonical transcript"
+        );
+        assert!(
+            persisted.len() > preview.len(),
+            "the transcript record must exceed its bounded preview"
+        );
     }
 
     #[test]

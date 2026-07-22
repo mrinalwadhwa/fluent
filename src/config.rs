@@ -23,6 +23,10 @@ pub const DEFAULT_LOCAL_SCHEDULER_CONCURRENCY: u32 = 4;
 /// Built-in number of bounded schema repairs a rejected Learner draft may
 /// attempt before the run fails. Layered configuration may override it.
 pub const DEFAULT_LEARNER_SCHEMA_REPAIR_BUDGET: u32 = 2;
+/// Built-in upper bound, in bytes, on one rendered transcript console preview.
+pub const DEFAULT_TRANSCRIPT_CONSOLE_PREVIEW_LIMIT: u32 = 8 * 1024;
+/// Built-in interval, in milliseconds, between transcript-pump status flushes.
+pub const DEFAULT_TRANSCRIPT_STATUS_FLUSH_INTERVAL_MS: u32 = 1000;
 
 /// Which configuration layer supplied a resolved leaf.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +159,15 @@ impl ResolvedFollowUpPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSchedulerConfig {
     pub max_local_concurrency: ResolvedLeaf<u32>,
+}
+
+/// Operator-facing transcript-pump thresholds resolved from project, then user,
+/// then built-in defaults. The pump uses these to bound console previews and to
+/// pace status flushes; they never affect canonical byte capture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedTranscriptPumpConfig {
+    pub console_preview_limit: ResolvedLeaf<u32>,
+    pub status_flush_interval_ms: ResolvedLeaf<u32>,
 }
 
 /// A configured follow-up or scheduler value that could not be parsed or
@@ -402,6 +415,40 @@ fn resolve_learner_schema_repair_budget_from(
         convert_count,
     )?;
     Ok(budget.value)
+}
+
+/// Resolve the transcript-pump thresholds for a project, layering project over
+/// user over built-in defaults. A malformed configured value fails closed.
+pub fn resolve_transcript_pump_config(
+    project_root: &Path,
+) -> Result<ResolvedTranscriptPumpConfig, FollowUpConfigError> {
+    resolve_transcript_pump_config_from(
+        &project_config_path(project_root),
+        user_config_path().as_deref(),
+    )
+}
+
+fn resolve_transcript_pump_config_from(
+    project_path: &Path,
+    user_path: Option<&Path>,
+) -> Result<ResolvedTranscriptPumpConfig, FollowUpConfigError> {
+    let layers = load_policy_layers(project_path, user_path)?;
+    let console_preview_limit = resolve_leaf(
+        &layers,
+        &["transcript", "console-preview-limit"],
+        DEFAULT_TRANSCRIPT_CONSOLE_PREVIEW_LIMIT,
+        convert_positive_count,
+    )?;
+    let status_flush_interval_ms = resolve_leaf(
+        &layers,
+        &["transcript", "status-flush-interval-ms"],
+        DEFAULT_TRANSCRIPT_STATUS_FLUSH_INTERVAL_MS,
+        convert_positive_count,
+    )?;
+    Ok(ResolvedTranscriptPumpConfig {
+        console_preview_limit,
+        status_flush_interval_ms,
+    })
 }
 
 fn load_policy_layers(
@@ -700,6 +747,58 @@ coders:
         let budget = resolve_learner_schema_repair_budget_from(&project, Some(&user)).unwrap();
 
         assert_eq!(budget, 5, "the project layer wins over the user layer");
+    }
+
+    #[test]
+    fn transcript_pump_config_layers_project_over_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = write_yaml(
+            dir.path(),
+            "project.yaml",
+            "transcript:\n  console-preview-limit: 4096\n",
+        );
+        let user = write_yaml(
+            dir.path(),
+            "user.yaml",
+            "transcript:\n  console-preview-limit: 1024\n  status-flush-interval-ms: 250\n",
+        );
+
+        let resolved = resolve_transcript_pump_config_from(&project, Some(&user)).unwrap();
+
+        assert_eq!(
+            resolved.console_preview_limit.value, 4096,
+            "the project layer wins over the user layer"
+        );
+        assert_eq!(resolved.console_preview_limit.source, ConfigSource::Project);
+        assert_eq!(
+            resolved.status_flush_interval_ms.value, 250,
+            "a key only the user layer sets falls through to the user value"
+        );
+        assert_eq!(
+            resolved.status_flush_interval_ms.source,
+            ConfigSource::User
+        );
+    }
+
+    #[test]
+    fn transcript_pump_config_defaults_when_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("absent.yaml");
+
+        let resolved = resolve_transcript_pump_config_from(&project, None).unwrap();
+
+        assert_eq!(
+            resolved.console_preview_limit.value,
+            DEFAULT_TRANSCRIPT_CONSOLE_PREVIEW_LIMIT
+        );
+        assert_eq!(
+            resolved.console_preview_limit.source,
+            ConfigSource::Default
+        );
+        assert_eq!(
+            resolved.status_flush_interval_ms.value,
+            DEFAULT_TRANSCRIPT_STATUS_FLUSH_INTERVAL_MS
+        );
     }
 
     #[test]
