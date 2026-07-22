@@ -174,7 +174,7 @@ fn run_write_task(
         effort,
     );
     let mut retries = 0;
-    while run_result.is_err() && !is_auth_error(&run_result) && retries < max_task_retries() {
+    while should_retry_coder_error(&run_result) && retries < max_task_retries() {
         retries += 1;
         eprintln!(
             "  Retrying coder (attempt {}/{})",
@@ -474,7 +474,7 @@ fn run_review_task(
         effort,
     );
     let mut retries = 0;
-    while run_result.is_err() && !is_auth_error(&run_result) && retries < max_task_retries() {
+    while should_retry_coder_error(&run_result) && retries < max_task_retries() {
         retries += 1;
         eprintln!(
             "  Retrying coder (attempt {}/{})",
@@ -996,6 +996,25 @@ fn is_auth_error(result: &Result<()>) -> bool {
         .map_or(false, |e| e.is::<crate::claude_auth::AuthError>())
 }
 
+/// A transcript-pump infrastructure failure is not a retryable coder error:
+/// the coder may have already mutated the workspace invisibly, so restarting it
+/// through the generic retry budget would repeat that work.
+fn is_transcript_pump_error(result: &Result<()>) -> bool {
+    result
+        .as_ref()
+        .err()
+        .map_or(false, |e| {
+            e.is::<crate::transcript_pump::TranscriptPumpError>()
+        })
+}
+
+/// Whether a failed coder run should be retried through the generic retry
+/// budget. Auth failures and transcript-pump infrastructure failures are
+/// terminal for the Task and must not spawn another coder.
+fn should_retry_coder_error(result: &Result<()>) -> bool {
+    result.is_err() && !is_auth_error(result) && !is_transcript_pump_error(result)
+}
+
 fn mark_task_failed_attempt_needs_user(
     store: &WorkModelStore,
     project_root: &Path,
@@ -1390,6 +1409,23 @@ fn capture_coder_info(coder_kind: CoderKind, model: &str, artifact_dir: &Path) {
     }
 }
 
+/// Resolve the layered transcript-pump thresholds for this project and install
+/// them process-wide before launching a coder, so the pump bounds console
+/// previews and paces status flushes per configuration. A malformed
+/// configuration leaves the built-in defaults in place rather than failing the
+/// coder launch: capture correctness never depends on these diagnostics knobs.
+fn install_transcript_pump_config(project_root: &Path) {
+    if let Ok(resolved) = crate::config::resolve_transcript_pump_config(project_root) {
+        crate::transcript_pump::install_config(crate::transcript_pump::TranscriptPumpConfig {
+            console_preview_limit: resolved.console_preview_limit.value as usize,
+            status_flush_interval: std::time::Duration::from_millis(
+                resolved.status_flush_interval_ms.value as u64,
+            ),
+            ..crate::transcript_pump::TranscriptPumpConfig::default()
+        });
+    }
+}
+
 fn run_task_coder(
     item: &WorkItem,
     attempt_id: &str,
@@ -1409,6 +1445,8 @@ fn run_task_coder(
         credential::inject_credentials()?;
         credential::setup_git_signing();
     }
+
+    install_transcript_pump_config(project_root);
 
     let task = item
         .attempts
@@ -2297,6 +2335,8 @@ fn run_review_coder(
         credential::setup_git_signing();
     }
 
+    install_transcript_pump_config(project_root);
+
     // Planning artifacts and bundled expertise were materialized earlier (in
     // run_review_task, before the source-checkout review guard snapshotted
     // the workspace). Build prompts here only; a missing review-<role> skill
@@ -3102,6 +3142,39 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn transcript_pump_failure_is_not_retried() {
+        // A transcript-pump infrastructure failure must not spawn another coder
+        // through the generic retry budget, while an ordinary coder error still
+        // retries and an auth error stays terminal.
+        let pump_failure: Result<()> = Err(anyhow::Error::new(
+            crate::transcript_pump::TranscriptPumpError::new("write transcript: broken pipe"),
+        ));
+        assert!(is_transcript_pump_error(&pump_failure));
+        assert!(
+            !should_retry_coder_error(&pump_failure),
+            "a pump infrastructure failure must not be retried"
+        );
+
+        let ordinary: Result<()> = Err(anyhow::anyhow!("Coder exited with code 1"));
+        assert!(!is_transcript_pump_error(&ordinary));
+        assert!(
+            should_retry_coder_error(&ordinary),
+            "an ordinary coder error is still retryable"
+        );
+
+        let auth: Result<()> = Err(anyhow::Error::new(
+            crate::claude_auth::AuthError::Expired { expires_at: 0 },
+        ));
+        assert!(
+            !should_retry_coder_error(&auth),
+            "an auth error stays terminal for the Task"
+        );
+
+        let success: Result<()> = Ok(());
+        assert!(!should_retry_coder_error(&success));
+    }
 
     fn review_item() -> WorkItem {
         review_item_with_role("tests")

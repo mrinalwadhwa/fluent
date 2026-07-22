@@ -566,8 +566,13 @@ impl Coder for PiCode {
     }
 }
 
-/// Run a command, optionally piping stdout to a transcript file (like `tee`).
-/// When `transcript_file` is `None`, stdout inherits from the parent process.
+/// How often the supervisor polls the child and pump for a terminal outcome.
+/// It is a correctness poll for capture failure, not a stale-session timer.
+const SUPERVISOR_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// Run a command, optionally draining stdout into a transcript file through the
+/// byte-oriented pump. When `transcript_file` is `None`, stdout inherits from
+/// the parent process.
 fn run_with_transcript(mut cmd: Command, transcript_file: Option<&Path>) -> Result<i32> {
     #[cfg(unix)]
     {
@@ -580,23 +585,50 @@ fn run_with_transcript(mut cmd: Command, transcript_file: Option<&Path>) -> Resu
             let mut child = cmd.spawn()?;
             let child_id = child.id();
             let stdout = child.stdout.take().expect("stdout was piped");
-            let transcript_path = path.to_path_buf();
-            let transcript = std::thread::spawn(move || -> std::io::Result<()> {
-                let mut file = File::create(transcript_path)?;
-                let reader = BufReader::new(stdout);
-                for line in reader.lines() {
-                    let line = line?;
-                    writeln!(file, "{}", line)?;
-                    eprintln!("{}", line);
+
+            let config = crate::transcript_pump::active_config();
+            let status_path = crate::transcript_pump::status_path_for(path);
+            let mut pump = crate::transcript_pump::spawn_pump(
+                stdout,
+                path.to_path_buf(),
+                Some(status_path),
+                crate::transcript_pump::console_preview_sink(),
+                config,
+            );
+
+            // Supervise the child and pump together. A pump that fails while the
+            // coder is still alive terminates and reaps the process group at
+            // once, rather than letting the coder run on invisibly until it
+            // exits on its own.
+            loop {
+                if let Some(terminal) = pump.try_terminal() {
+                    match terminal {
+                        Ok(_summary) => {
+                            let status = child.wait()?;
+                            terminate_process_group(child_id);
+                            pump.join();
+                            return Ok(status.code().unwrap_or(1));
+                        }
+                        Err(pump_err) => {
+                            terminate_process_group(child_id);
+                            let _ = child.wait();
+                            pump.join();
+                            return Err(anyhow::Error::new(pump_err));
+                        }
+                    }
                 }
-                Ok(())
-            });
-            let status = child.wait()?;
-            terminate_process_group(child_id);
-            transcript
-                .join()
-                .map_err(|_| anyhow::anyhow!("coder transcript reader panicked"))??;
-            Ok(status.code().unwrap_or(1))
+                if let Some(status) = child.try_wait()? {
+                    // The coder exited; let the pump drain the last bytes to EOF.
+                    let terminal = pump.wait_terminal();
+                    terminate_process_group(child_id);
+                    pump.join();
+                    return match terminal {
+                        Ok(_summary) => Ok(status.code().unwrap_or(1)),
+                        Err(pump_err) => Err(anyhow::Error::new(pump_err)),
+                    };
+                }
+                std::thread::sleep(SUPERVISOR_POLL_INTERVAL);
+            }
         }
         None => {
             let mut child = cmd.spawn()?;
@@ -1025,6 +1057,69 @@ where
         _extra_env: &[(String, String)],
     ) -> Result<i32> {
         Ok(0)
+    }
+}
+
+#[cfg(test)]
+mod pump_supervision_tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn pump_failure_terminates_and_reaps_live_coder() {
+        // The pump cannot open its transcript because the path is a directory,
+        // so it fails immediately while the coder is still sleeping. Supervision
+        // must terminate and reap the live coder at once, persist the specific
+        // pump error, and return a typed infrastructure failure — not wait out
+        // the coder's 30-second sleep.
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        std::fs::create_dir(&transcript).unwrap();
+
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg("printf 'starting\\n'; sleep 30");
+
+        let started = Instant::now();
+        let result = run_with_transcript(cmd, Some(&transcript));
+        let elapsed = started.elapsed();
+
+        let err = result.expect_err("a pump failure must surface as an error");
+        assert!(
+            err.downcast_ref::<crate::transcript_pump::TranscriptPumpError>()
+                .is_some(),
+            "the failure must be a typed transcript-pump infrastructure error: {err}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "the live coder must be terminated promptly, not waited out; took {elapsed:?}"
+        );
+
+        let status_path = crate::transcript_pump::status_path_for(&transcript);
+        let status: crate::transcript_pump::PumpStatus =
+            serde_json::from_slice(&std::fs::read(&status_path).unwrap()).unwrap();
+        assert_eq!(status.state, crate::transcript_pump::PumpState::Failed);
+        assert!(
+            status.error.is_some(),
+            "the persisted status must name the specific pump error"
+        );
+    }
+
+    #[test]
+    fn successful_capture_returns_coder_exit_and_persists_bytes() {
+        // The ordinary path: the coder writes records and exits 0. Every byte is
+        // captured and the coder's exit code is returned.
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg("printf '{\"type\":\"a\"}\\n{\"type\":\"b\"}\\n'; exit 0");
+
+        let exit = run_with_transcript(cmd, Some(&transcript)).unwrap();
+        assert_eq!(exit, 0);
+        let body = std::fs::read_to_string(&transcript).unwrap();
+        assert!(body.contains("\"type\":\"a\""));
+        assert!(body.contains("\"type\":\"b\""));
     }
 }
 

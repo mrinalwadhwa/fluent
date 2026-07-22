@@ -359,12 +359,7 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                 let mut has_live = false;
                 let mut stale_ids = Vec::new();
                 for task_id in &executing_tasks {
-                    let lock_path = crate::lease::task_lock_path(
-                        config.project_root,
-                        config.work_item_id,
-                        task_id,
-                    );
-                    if crate::lease::is_leased(&lock_path) {
+                    if executing_task_is_live(config.project_root, config.work_item_id, task_id) {
                         has_live = true;
                     } else {
                         stale_ids.push(task_id.clone());
@@ -1208,6 +1203,15 @@ fn try_learn(
     let handoff_ref =
         crate::learner::write_handoff(project_root, &work_item_id, &attempt_id, &handoff)?;
     Ok(handoff_ref)
+}
+
+/// Whether an executing Task is still live. Liveness is owned by the Task's
+/// process-held lease, never by transcript age or pump-status timestamps: those
+/// are diagnostics only and carry no authority to reclaim a Task. Recovery must
+/// not resurrect or abandon a Task on the strength of how old its transcript is.
+fn executing_task_is_live(project_root: &Path, work_item_id: &str, task_id: &str) -> bool {
+    let lock_path = crate::lease::task_lock_path(project_root, work_item_id, task_id);
+    crate::lease::is_leased(&lock_path)
 }
 
 /// Recover the immutable accepted base for an already-merged legacy Attempt
@@ -2361,6 +2365,73 @@ mod tests {
     use crate::work_model::AttemptKind;
     use crate::work_model::WorkItemAbandonment;
     use crate::work_model::{Attempt, CoderMapping, TaskArtifactArea, WorkspaceAccess};
+
+    /// Acquire a Task lease, retrying to absorb macOS flock release-visibility
+    /// latency under the thread-per-test harness.
+    fn acquire_task_lease_eventually(
+        project_root: &Path,
+        work_item_id: &str,
+        task_id: &str,
+    ) -> crate::lease::TaskLease {
+        let lock = crate::lease::task_lock_path(project_root, work_item_id, task_id);
+        for _ in 0..50 {
+            if let Ok(lease) = crate::lease::acquire(&lock) {
+                return lease;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("could not acquire task lease");
+    }
+
+    #[test]
+    fn task_recovery_does_not_consult_transcript_age() {
+        // Liveness is decided solely by the process-held lease. A held lease
+        // keeps a Task live even with no transcript at all, and a released lease
+        // makes it stale even when a transcript was just written — recovery
+        // never consults transcript age.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let work = "work-1";
+        let task = "attempt-1-write-1";
+
+        // A leased Task is live even though no transcript or pump status exists.
+        let lease = acquire_task_lease_eventually(root, work, task);
+        assert!(
+            executing_task_is_live(root, work, task),
+            "a leased Task is live regardless of transcript presence or age"
+        );
+        drop(lease);
+
+        // Write a brand-new transcript and pump status for the same Task. If
+        // recovery consulted transcript age, this fresh evidence would keep the
+        // Task live; it must not.
+        let artifact_dir = root
+            .join(".fluent/work/artifacts")
+            .join(work)
+            .join("attempt-1")
+            .join(task);
+        fs::create_dir_all(&artifact_dir).unwrap();
+        fs::write(artifact_dir.join("transcript.jsonl"), b"{\"type\":\"fresh\"}\n").unwrap();
+        fs::write(
+            artifact_dir.join("transcript-pump.json"),
+            b"{\"schema_version\":1,\"state\":\"running\"}",
+        )
+        .unwrap();
+
+        // Freed direction: bounded retry to absorb flock release-visibility.
+        let mut stale = false;
+        for _ in 0..50 {
+            if !executing_task_is_live(root, work, task) {
+                stale = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            stale,
+            "a released lease makes the Task stale even with a freshly written transcript"
+        );
+    }
 
     fn walk_files(root: &Path) -> Vec<PathBuf> {
         let mut pending = vec![root.to_path_buf()];
