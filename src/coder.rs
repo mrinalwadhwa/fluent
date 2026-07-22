@@ -206,7 +206,29 @@ pub struct TranscriptCapture<'a> {
 }
 
 impl<'a> TranscriptCapture<'a> {
-    pub(crate) fn new(
+    /// Construct a capture boundary for a launch: persist the canonical transcript
+    /// at `transcript_path`, resolving this project's layered pump thresholds from
+    /// `project_root`. This is the intentional public constructor for external
+    /// [`Coder`] implementations — it never requires the caller to name the private
+    /// pump configuration. Internal callers that have already resolved the config
+    /// once (to retain it across retry phases) use the crate-private `with_config`.
+    pub fn new(transcript_path: &'a Path, project_root: &Path) -> Self {
+        Self {
+            path: transcript_path,
+            config: crate::transcript_pump::resolve_config(project_root),
+        }
+    }
+
+    /// The transcript path this capture persists to, for external `Coder`
+    /// implementations that pipe stdout themselves.
+    pub fn path(&self) -> &Path {
+        self.path
+    }
+
+    /// Construct from an already-resolved configuration. Crate-private: the resolved
+    /// config is threaded through a launch's retry phases so a concurrent launch can
+    /// never overwrite it, and the config type is not part of the public API.
+    pub(crate) fn with_config(
         path: &'a Path,
         config: crate::transcript_pump::TranscriptPumpConfig,
     ) -> Self {
@@ -284,7 +306,7 @@ impl Coder for SandboxedClaudeCode {
         extra_env: &[(String, String)],
         transcript_file: Option<&Path>,
     ) -> Result<i32> {
-        let capture = transcript_file.map(|path| TranscriptCapture::new(path, Default::default()));
+        let capture = transcript_file.map(|path| TranscriptCapture::with_config(path, Default::default()));
         self.run_captured(
             prompt,
             system_prompt,
@@ -401,7 +423,7 @@ impl Coder for BareClaudeCode {
         extra_env: &[(String, String)],
         transcript_file: Option<&Path>,
     ) -> Result<i32> {
-        let capture = transcript_file.map(|path| TranscriptCapture::new(path, Default::default()));
+        let capture = transcript_file.map(|path| TranscriptCapture::with_config(path, Default::default()));
         self.run_captured(
             prompt,
             system_prompt,
@@ -491,7 +513,7 @@ impl Coder for CodexCode {
         extra_env: &[(String, String)],
         transcript_file: Option<&Path>,
     ) -> Result<i32> {
-        let capture = transcript_file.map(|path| TranscriptCapture::new(path, Default::default()));
+        let capture = transcript_file.map(|path| TranscriptCapture::with_config(path, Default::default()));
         self.run_captured(
             prompt,
             system_prompt,
@@ -645,7 +667,7 @@ impl Coder for PiCode {
         extra_env: &[(String, String)],
         transcript_file: Option<&Path>,
     ) -> Result<i32> {
-        let capture = transcript_file.map(|path| TranscriptCapture::new(path, Default::default()));
+        let capture = transcript_file.map(|path| TranscriptCapture::with_config(path, Default::default()));
         self.run_captured(
             prompt,
             system_prompt,
@@ -1627,6 +1649,34 @@ fn run_with_transcript_retrying<F>(
 where
     F: Fn() -> Command,
 {
+    run_with_transcript_retrying_using(
+        build_cmd,
+        transcript_file,
+        config,
+        notify_fn,
+        refresh_fn,
+        &|cmd, transcript, cfg| run_with_transcript(cmd, transcript, cfg),
+    )
+}
+
+/// The retry loop, parameterized by the per-attempt run function so tests can
+/// observe the exact config threaded into each auth/rate-limit retry phase without
+/// spawning a real pump.
+fn run_with_transcript_retrying_using<F>(
+    build_cmd: F,
+    transcript_file: Option<&Path>,
+    config: &crate::transcript_pump::TranscriptPumpConfig,
+    notify_fn: &dyn Fn(&str, &str),
+    refresh_fn: &dyn Fn(),
+    run_fn: &dyn Fn(
+        Command,
+        Option<&Path>,
+        &crate::transcript_pump::TranscriptPumpConfig,
+    ) -> Result<i32>,
+) -> Result<i32>
+where
+    F: Fn() -> Command,
+{
     let mut attempt: u32 = 0;
     let mut rl_state = RateLimitState::Normal;
     let mut auth_refreshed = false;
@@ -1639,7 +1689,7 @@ where
         // The one resolved config value is retained across every auth/rate-limit
         // phase of this launch, so a mid-launch retry never re-resolves or picks
         // up a different value.
-        let exit = run_with_transcript(build_cmd(), transcript_file, config)?;
+        let exit = run_fn(build_cmd(), transcript_file, config)?;
         if exit == 0 {
             if auth_refreshed {
                 notify_fn("Fluent", "Recovered after credential refresh.");
@@ -3310,6 +3360,61 @@ printf '%s' "$count" > "{counter}"
 echo '{{"type":"result","api_error_status":401,"request_id":"req-test"}}'
 exit 1"#
         )
+    }
+
+    #[test]
+    fn capture_config_is_stable_across_retry_phases() {
+        // B8: one immutable resolved config is retained across a launch's auth-refresh
+        // retry phase — the same distinctive value flows into every attempt, never
+        // re-resolved (which a concurrent launch could once perturb).
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let counter = dir.path().join("counter");
+        let capture = TranscriptCapture::with_config(
+            &transcript,
+            crate::transcript_pump::TranscriptPumpConfig {
+                console_preview_limit: 4321,
+                ..Default::default()
+            },
+        );
+
+        let seen: Arc<Mutex<Vec<crate::transcript_pump::TranscriptPumpConfig>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let seen_run = Arc::clone(&seen);
+        // 401 on the first call, success on the second.
+        let script = make_401_script(&counter, Some(2));
+        let run_fn = move |cmd: Command,
+                           tf: Option<&Path>,
+                           cfg: &crate::transcript_pump::TranscriptPumpConfig|
+              -> Result<i32> {
+            seen_run.lock().unwrap().push(cfg.clone());
+            run_with_transcript(cmd, tf, cfg)
+        };
+
+        let result = run_with_transcript_retrying_using(
+            move || {
+                let mut cmd = Command::new("/bin/sh");
+                cmd.arg("-c").arg(&script);
+                cmd
+            },
+            Some(&transcript),
+            &capture.config,
+            &|_, _| {},
+            &|| {},
+            &run_fn,
+        );
+        assert_eq!(result.unwrap(), 0, "the retry recovers");
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "the original attempt plus one auth-refresh retry");
+        assert_eq!(
+            seen[0], seen[1],
+            "the same resolved config flows into every retry phase"
+        );
+        assert_eq!(
+            seen[0].console_preview_limit, 4321,
+            "the distinctive resolved config is retained, not re-resolved to defaults"
+        );
     }
 
     #[test]

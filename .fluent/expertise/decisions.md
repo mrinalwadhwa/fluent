@@ -28,16 +28,31 @@ Host-owned Learner run evidence (transcript, submitted-draft snapshot, error, no
 
 ---
 
-## The transcript pump's console sink is synchronous, terminal-only, and process-wide
+## The transcript pump's console sink is synchronous and terminal-only; config is per-capture and status has one coordinator
 
 The `transcript_pump` module renders console previews through a single
-process-wide sink (`console_preview_sink`, a `OnceLock`) and reads its thresholds
-from a process-wide installed config (`install_config` / `active_config`, a
-`Mutex`). This is deliberate, not a hidden global smell. `Coder::run`'s signature
-is kept stable for non-transcript callers, so the pump cannot take per-call
-config through the trait; the executor resolves the layered thresholds once per
-project (`install_transcript_pump_config`) and installs them before launching a
-coder.
+process-wide sink (`console_preview_sink`, a `OnceLock`). Its operator thresholds
+are **not** process-global: they are resolved once per launch (`resolve_config`)
+into an immutable `coder::TranscriptCapture` value that is threaded through
+`Coder::run_captured` and retained across a launch's auth/rate-limit retry phases.
+This replaced the earlier process-wide installed config (a `Mutex` of
+`install_config` / `active_config`), under which a concurrent launch could
+overwrite another capture's thresholds between resolution and pump spawn. The
+public `TranscriptCapture::new(transcript_path, project_root)` constructor resolves
+the config internally, so an external `Coder` never names the private config type.
+
+Every persisted `transcript-pump.json` write for one capture is owned by a single
+`StatusCoordinator` over an injectable `StatusStore`. It coalesces best-effort
+periodic snapshots through a latest-only slot behind a capacity-one wake, processes
+required Running and terminal statuses FIFO with acknowledgement (so a terminal
+acknowledgement can never be followed by a persisted Running state), balances
+every submission across written/coalesced/dropped/disconnected/write-failed
+categories, and falls back from an unpersistable Complete to a Failed status. This
+replaced the earlier split of a background `StatusWriter` plus a synchronous
+`persist_status_sync`; do not reintroduce a second writer or a synchronous
+side-channel write. The capture path and the status worker publish the immutable
+first fault to a per-pump latch before terminal settlement, so a blocked or slow
+status store can never hide a fault from coder supervision.
 
 Preview delivery is **synchronous and best-effort**, deliberately not a
 background renderer over a bounded queue. `PreviewSink::deliver` decides the fate
@@ -66,10 +81,11 @@ Declining touches no descriptor and no Rust process-global stderr lock, so
 capture is never backpressured and control-plane output never stalls behind the
 console. The canonical transcript already holds every byte.
 
-Do not "fix" this by threading config through `Coder::run`, by mirroring previews
-to any stderr, or by reintroducing a background renderer thread. Re-enabling live
-previews is a separate change that must first move all Fluent-owned stderr writes
-behind one independently nonblocking console bus.
+Do not "fix" the declining sink by mirroring previews to any stderr or by
+reintroducing a background renderer thread. Re-enabling live previews is a separate
+change that must first move all Fluent-owned stderr writes behind one independently
+nonblocking console bus. (Per-launch config now travels with each capture through
+`run_captured`; that is the shipped design, not a thing to undo.)
 
 ---
 

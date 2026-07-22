@@ -1041,7 +1041,7 @@ fn rebase_candidate(
     // entry point rather than a prior operation's state.
     let pump_config =
         crate::transcript_pump::resolve_config(config.project_root);
-    let capture = crate::coder::TranscriptCapture::new(&transcript_path, pump_config);
+    let capture = crate::coder::TranscriptCapture::with_config(&transcript_path, pump_config);
 
     let coder = config.coder_kind.boxed(sandbox);
     let exit_code = coder.run_captured(

@@ -1972,7 +1972,7 @@ fn run_task_coder(
     let pump_config = crate::transcript_pump::resolve_config(project_root);
     let capture = transcript_path
         .as_deref()
-        .map(|p| crate::coder::TranscriptCapture::new(p, pump_config.clone()));
+        .map(|p| crate::coder::TranscriptCapture::with_config(p, pump_config.clone()));
     let exit_code = coder.run_captured(
         &prompt,
         &system_prompt,
@@ -2552,7 +2552,7 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
     let pump_config = crate::transcript_pump::resolve_config(inputs.project_root);
     let capture = inputs
         .transcript_path
-        .map(|p| crate::coder::TranscriptCapture::new(p, pump_config.clone()));
+        .map(|p| crate::coder::TranscriptCapture::with_config(p, pump_config.clone()));
     let exit_code = coder.run_captured(
         &prompt,
         &system_prompt,
@@ -2820,7 +2820,7 @@ fn run_review_coder(
     let transcript_path = artifact_dir.join("transcript.jsonl");
     let coder = coder_kind.boxed_with_model(sandbox, model, effort);
     let pump_config = crate::transcript_pump::resolve_config(project_root);
-    let capture = crate::coder::TranscriptCapture::new(&transcript_path, pump_config);
+    let capture = crate::coder::TranscriptCapture::with_config(&transcript_path, pump_config);
     let exit_code = coder.run_captured(
         &prompts.review_prompt,
         &prompts.system_prompt,
