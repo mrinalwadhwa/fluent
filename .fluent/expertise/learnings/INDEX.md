@@ -1,7 +1,9 @@
 # Learnings Index
 
+- [atomic-task-start-reservation](atomic-task-start-reservation.md) — Task starts run read-only preflight, then a single lock-held reservation that honors the precedence boundary, then CAS rollback — never mark Executing while discarding the transition verdict
 - [backward-compatible-serde-fields](backward-compatible-serde-fields.md) — Persisted Work model field additions and renames must preserve backward compatibility with existing on-disk JSON
 - [behaviors-test-citation-sync](behaviors-test-citation-sync.md) — Test renames must update all Test: citations in behaviors.md in the same commit
+- [capture-pump-terminate-descendants-before-eof](capture-pump-terminate-descendants-before-eof.md) — When a thread drains a child's piped stdout to EOF, terminate the whole process group before waiting for EOF; a backgrounded descendant can hold the pipe open forever
 - [config-fails-open-only-for-diagnostics](config-fails-open-only-for-diagnostics.md) — Layered config fails closed by default; only diagnostic-only knobs may fail open, and that must be justified in the docstring
 - [doc-comment-attachment-in-rust](doc-comment-attachment-in-rust.md) — Inserting a function between a doc comment and its target silently re-attaches the comment to the wrong item
 - [expertise-testing-patterns-are-copyable-templates](expertise-testing-patterns-are-copyable-templates.md) — Files under .fluent/expertise/testing/patterns are copied verbatim by future test authors, so stale paths or removed mechanisms block review
