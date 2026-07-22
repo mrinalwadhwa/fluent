@@ -265,7 +265,10 @@ fn drain_with_counters(
             // Record the failure terminally, best-effort — it must not mask the
             // original error. A retained periodic error is folded in for context.
             let message = match periodic_error {
-                Some(periodic) => format!("{}; periodic status write failed: {periodic}", err.message()),
+                Some(periodic) => format!(
+                    "{}; periodic status write failed: {periodic}",
+                    err.message()
+                ),
                 None => err.message().to_string(),
             };
             let _ = persist_status_sync(
@@ -503,9 +506,9 @@ impl PumpHandle {
         match self.terminal.try_recv() {
             Ok(outcome) => Some(outcome),
             Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => {
-                Some(Err(TranscriptPumpError::new("transcript pump thread vanished")))
-            }
+            Err(TryRecvError::Disconnected) => Some(Err(TranscriptPumpError::new(
+                "transcript pump thread vanished",
+            ))),
         }
     }
 
@@ -721,7 +724,10 @@ mod tests {
             "every emitted byte must persist exactly and in order"
         );
         assert_eq!(summary.bytes, input.len() as u64);
-        assert_eq!(summary.records, 2, "draining must continue past the oversized record");
+        assert_eq!(
+            summary.records, 2,
+            "draining must continue past the oversized record"
+        );
     }
 
     /// A sink that refuses every preview, modelling a blocked or disconnected
@@ -832,7 +838,11 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&bad_status).unwrap()).unwrap();
         assert_eq!(failed.state, PumpState::Failed);
         assert!(
-            failed.error.as_deref().unwrap_or_default().contains("create transcript"),
+            failed
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("create transcript"),
             "the terminal failure must name the specific pump error"
         );
     }
@@ -855,11 +865,7 @@ mod tests {
             console_preview_limit: limit,
             ..TranscriptPumpConfig::default()
         };
-        drain(
-            Cursor::new(input.clone()),
-            &path,
-            None,
-            &sink, &config).unwrap();
+        drain(Cursor::new(input.clone()), &path, None, &sink, &config).unwrap();
 
         let previews = sink.previews.lock().unwrap();
         assert_eq!(previews.len(), 1);
@@ -942,7 +948,10 @@ mod tests {
             input,
             "the trailing record's bytes must be preserved without a synthesized newline"
         );
-        assert_eq!(summary.records, 2, "the newline-less trailing record is counted");
+        assert_eq!(
+            summary.records, 2,
+            "the newline-less trailing record is counted"
+        );
         assert_eq!(
             summary.dropped_console, 2,
             "the trailing record's preview participates in drop accounting"
@@ -1063,7 +1072,10 @@ mod tests {
         let elapsed = started.elapsed();
         pump.join();
 
-        assert!(outcome.is_err(), "a panicking pump must report a typed failure");
+        assert!(
+            outcome.is_err(),
+            "a panicking pump must report a typed failure"
+        );
         assert!(
             elapsed < Duration::from_secs(5),
             "panic recovery must be prompt, not blocked; took {elapsed:?}"
@@ -1149,13 +1161,17 @@ mod tests {
         assert_eq!(summary.records, 6);
         let samples = poll_status.lock().unwrap();
         assert!(
-            samples.iter().any(|(state, _)| *state == PumpState::Running),
+            samples
+                .iter()
+                .any(|(state, _)| *state == PumpState::Running),
             "a Running state must be observable during capture"
         );
         assert!(
             samples
                 .iter()
-                .any(|(state, records)| *state == PumpState::Running && *records > 0 && *records < 6),
+                .any(|(state, records)| *state == PumpState::Running
+                    && *records > 0
+                    && *records < 6),
             "at least one Running snapshot must show an advancing record count"
         );
         // The terminal Complete status is written synchronously before drain

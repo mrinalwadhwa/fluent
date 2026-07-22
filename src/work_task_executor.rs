@@ -147,7 +147,10 @@ fn plan_task_start(
     let attempt = &item.attempts[attempt_index];
     let task = &attempt.tasks[task_index];
     if task.kind != expected_kind {
-        bail!("Task {task_id:?} is kind {}; expected {expected_kind}", task.kind);
+        bail!(
+            "Task {task_id:?} is kind {}; expected {expected_kind}",
+            task.kind
+        );
     }
     if task.status != TaskStatus::Planned {
         bail!("Task {task_id:?} is {}; expected planned", task.status);
@@ -681,7 +684,10 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
                 );
             }
             let review_context = task.review_context.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("Review Task {:?} must declare review context", config.task_id)
+                anyhow::anyhow!(
+                    "Review Task {:?} must declare review context",
+                    config.task_id
+                )
             })?;
             if task.artifact_area.is_none() {
                 bail!(
@@ -1393,12 +1399,9 @@ fn is_auth_error(result: &Result<()>) -> bool {
 /// the coder may have already mutated the workspace invisibly, so restarting it
 /// through the generic retry budget would repeat that work.
 fn is_transcript_pump_error(result: &Result<()>) -> bool {
-    result
-        .as_ref()
-        .err()
-        .map_or(false, |e| {
-            e.is::<crate::transcript_pump::TranscriptPumpError>()
-        })
+    result.as_ref().err().map_or(false, |e| {
+        e.is::<crate::transcript_pump::TranscriptPumpError>()
+    })
 }
 
 /// Whether a failed coder run should be retried through the generic retry
@@ -3683,9 +3686,9 @@ mod tests {
             "an ordinary coder error is still retryable"
         );
 
-        let auth: Result<()> = Err(anyhow::Error::new(
-            crate::claude_auth::AuthError::Expired { expires_at: 0 },
-        ));
+        let auth: Result<()> = Err(anyhow::Error::new(crate::claude_auth::AuthError::Expired {
+            expires_at: 0,
+        }));
         assert!(
             !should_retry_coder_error(&auth),
             "an auth error stays terminal for the Task"
@@ -4035,7 +4038,11 @@ mod tests {
             "a rejected start must not create the write worktree"
         );
         let baseline_sidecar = project_root
-            .join(work_artifact_path("work-1", "attempt-1", "attempt-1-write-1"))
+            .join(work_artifact_path(
+                "work-1",
+                "attempt-1",
+                "attempt-1-write-1",
+            ))
             .join("write-baseline-commit");
         assert!(
             !baseline_sidecar.exists(),
@@ -4103,7 +4110,10 @@ mod tests {
         .expect_err("a worktree setup failure must surface an error");
         // The setup error is truthful (not a StartRejected): the start was
         // reserved, then setup failed.
-        assert!(!is_start_rejected(&error), "expected the setup error: {error}");
+        assert!(
+            !is_start_rejected(&error),
+            "expected the setup error: {error}"
+        );
 
         let stored = store.read_work_item("work-1").unwrap();
         // The reservation was rolled back: the Task is recoverable (Planned) and
@@ -4165,12 +4175,14 @@ mod tests {
             store_lock: None,
         })
         .expect_err("a rejected tester start must surface StartRejected");
-        assert!(is_start_rejected(&error), "typed rejection expected: {error}");
+        assert!(
+            is_start_rejected(&error),
+            "typed rejection expected: {error}"
+        );
 
         let stored = store.read_work_item("work-1").unwrap();
         assert_eq!(stored.attempts[0].status, AttemptStatus::NeedsUser);
-        let tester = stored
-            .attempts[0]
+        let tester = stored.attempts[0]
             .tasks
             .iter()
             .find(|t| t.kind == TaskKind::Tester)
@@ -4239,12 +4251,14 @@ mod tests {
             store_lock: None,
         })
         .expect_err("a rejected review start must surface StartRejected");
-        assert!(is_start_rejected(&error), "typed rejection expected: {error}");
+        assert!(
+            is_start_rejected(&error),
+            "typed rejection expected: {error}"
+        );
 
         let stored = store.read_work_item("work-1").unwrap();
         assert_eq!(stored.attempts[0].status, AttemptStatus::NeedsUser);
-        let reviewer = stored
-            .attempts[0]
+        let reviewer = stored.attempts[0]
             .tasks
             .iter()
             .find(|t| t.id == review_task_id)
@@ -4296,11 +4310,13 @@ mod tests {
             store_lock: None,
         })
         .expect_err("a preflight failure must surface an error");
-        assert!(!is_start_rejected(&error), "expected the setup error: {error}");
+        assert!(
+            !is_start_rejected(&error),
+            "expected the setup error: {error}"
+        );
 
         let stored = store.read_work_item("work-1").unwrap();
-        let reviewer = stored
-            .attempts[0]
+        let reviewer = stored.attempts[0]
             .tasks
             .iter()
             .find(|t| t.id == review_task_id)
@@ -4364,11 +4380,13 @@ mod tests {
             store_lock: None,
         })
         .expect_err("an artifact-directory failure must surface an error");
-        assert!(!is_start_rejected(&error), "expected the setup error: {error}");
+        assert!(
+            !is_start_rejected(&error),
+            "expected the setup error: {error}"
+        );
 
         let stored = store.read_work_item("work-1").unwrap();
-        let tester = stored
-            .attempts[0]
+        let tester = stored.attempts[0]
             .tasks
             .iter()
             .find(|t| t.kind == TaskKind::Tester)
@@ -6334,7 +6352,8 @@ mod tests {
         );
 
         // A malformed value fails closed to defaults and does not leak the prior.
-        let malformed = write_project_config("transcript:\n  console-preview-limit: not-a-number\n");
+        let malformed =
+            write_project_config("transcript:\n  console-preview-limit: not-a-number\n");
         install_transcript_pump_config(malformed.path());
         assert_eq!(
             crate::transcript_pump::active_config().console_preview_limit,

@@ -2468,8 +2468,7 @@ exit 0
 
     // Break the transport: occupy the write transcript path with a directory so
     // the pump's File::create fails immediately while the coder is alive.
-    let artifact_dir =
-        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1");
+    let artifact_dir = main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1");
     let transcript = artifact_dir.join("transcript.jsonl");
     fs::create_dir_all(&transcript).unwrap();
 
@@ -2507,10 +2506,9 @@ exit 0
     );
 
     // The pump status is the durable diagnostic that named the transport fault.
-    let pump_status: serde_json::Value = serde_json::from_slice(
-        &fs::read(artifact_dir.join("transcript-pump.json")).unwrap(),
-    )
-    .unwrap();
+    let pump_status: serde_json::Value =
+        serde_json::from_slice(&fs::read(artifact_dir.join("transcript-pump.json")).unwrap())
+            .unwrap();
     assert_eq!(pump_status["state"], "failed");
 
     // Fix the transport, then resume. The Attempt reopens, retries the write
@@ -2605,8 +2603,7 @@ exit 0
 
     // Occupy the write transcript's phase-0 slot with a directory so the 401's
     // phase preservation fails late — after the coder has already committed.
-    let artifact_dir =
-        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1");
+    let artifact_dir = main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1");
     fs::create_dir_all(artifact_dir.join("transcript.0.jsonl")).unwrap();
 
     // First run: commit, then late pump failure. A generous retry budget must

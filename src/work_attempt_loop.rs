@@ -2433,7 +2433,11 @@ mod tests {
             .join("attempt-1")
             .join(task);
         fs::create_dir_all(&artifact_dir).unwrap();
-        fs::write(artifact_dir.join("transcript.jsonl"), b"{\"type\":\"fresh\"}\n").unwrap();
+        fs::write(
+            artifact_dir.join("transcript.jsonl"),
+            b"{\"type\":\"fresh\"}\n",
+        )
+        .unwrap();
         fs::write(
             artifact_dir.join("transcript-pump.json"),
             b"{\"schema_version\":1,\"state\":\"running\"}",

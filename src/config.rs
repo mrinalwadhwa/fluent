@@ -774,10 +774,7 @@ coders:
             resolved.status_flush_interval_ms.value, 250,
             "a key only the user layer sets falls through to the user value"
         );
-        assert_eq!(
-            resolved.status_flush_interval_ms.source,
-            ConfigSource::User
-        );
+        assert_eq!(resolved.status_flush_interval_ms.source, ConfigSource::User);
     }
 
     #[test]
@@ -791,10 +788,7 @@ coders:
             resolved.console_preview_limit.value,
             DEFAULT_TRANSCRIPT_CONSOLE_PREVIEW_LIMIT
         );
-        assert_eq!(
-            resolved.console_preview_limit.source,
-            ConfigSource::Default
-        );
+        assert_eq!(resolved.console_preview_limit.source, ConfigSource::Default);
         assert_eq!(
             resolved.status_flush_interval_ms.value,
             DEFAULT_TRANSCRIPT_STATUS_FLUSH_INTERVAL_MS

@@ -3535,12 +3535,11 @@ impl WorkModelStore {
         let path = self.work_item_path(id)?;
         let _lock = self.lock_work_item_model(id)?;
         let mut work_item = self.read_work_item_under_model_lock(id)?;
-        let output = reducer(&mut work_item).map_err(|source| {
-            WorkModelStorageError::InvalidModel {
+        let output =
+            reducer(&mut work_item).map_err(|source| WorkModelStorageError::InvalidModel {
                 path: path.clone(),
                 source,
-            }
-        })?;
+            })?;
         work_item
             .validate()
             .map_err(|source| WorkModelStorageError::InvalidModel { path, source })?;
@@ -6415,7 +6414,11 @@ mod tests {
         store
             .create_work_item(&work_item_with_completed_write("work-1"))
             .unwrap();
-        let base_revision = store.read_work_item("work-1").unwrap().storage_revision.get();
+        let base_revision = store
+            .read_work_item("work-1")
+            .unwrap()
+            .storage_revision
+            .get();
 
         // A reducer that mutates commits its change and returns its value.
         let returned = store
@@ -6438,7 +6441,11 @@ mod tests {
         let changed_revision = after_change.storage_revision.get();
         store.mutate_work_item("work-1", |_item| Ok(())).unwrap();
         assert_eq!(
-            store.read_work_item("work-1").unwrap().storage_revision.get(),
+            store
+                .read_work_item("work-1")
+                .unwrap()
+                .storage_revision
+                .get(),
             changed_revision,
             "an unchanged reducer must not advance the revision"
         );
@@ -6451,10 +6458,7 @@ mod tests {
                 })
             })
             .unwrap_err();
-        assert!(matches!(
-            error,
-            WorkModelStorageError::InvalidModel { .. }
-        ));
+        assert!(matches!(error, WorkModelStorageError::InvalidModel { .. }));
         assert_eq!(store.read_work_item("work-1").unwrap().title, "Reduced");
     }
 

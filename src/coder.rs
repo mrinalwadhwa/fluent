@@ -1207,7 +1207,10 @@ mod pump_supervision_tests {
         for pidfile in ["leader.pid", "descendant.pid"] {
             let pid = std::fs::read_to_string(dir.path().join(pidfile))
                 .unwrap_or_else(|_| panic!("{pidfile} must have been recorded"));
-            assert!(!is_alive(&pid), "{pidfile} process survived the pump failure");
+            assert!(
+                !is_alive(&pid),
+                "{pidfile} process survived the pump failure"
+            );
         }
 
         // Wait past the 1s side-effect delay: neither the leader nor the reaped
