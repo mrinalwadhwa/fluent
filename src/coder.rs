@@ -782,77 +782,319 @@ fn terminate_process_group(_leader: u32) -> bool {
     true
 }
 
-/// Owns a coder child and (once spawned) its transcript pump for the duration of
-/// supervision. Its `Drop` is the single structured-cleanup point: it terminates
-/// and reaps the coder's whole process group and settles the pump thread on every
-/// exit path, so an error propagated by `?` — or a panic while wiring up the pump
-/// — cannot leak a live coder, a surviving descendant, or a stuck pump thread.
-struct CoderSupervisor {
-    child: Child,
-    child_id: u32,
-    /// `None` until a pump is attached (the no-transcript branch never attaches
-    /// one, and the transcript branch attaches it only after a successful spawn).
-    pump: Option<crate::transcript_pump::PumpHandle>,
-    /// Whether the direct child has already been reaped. Once reaped, its PGID may
-    /// be recycled, so cleanup must never re-signal the group.
-    reaped: bool,
+/// Read the originating pid from a `siginfo_t` filled by `waitid`. The field is a
+/// union accessor on Linux and a plain field on the BSD-derived platforms.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+unsafe fn siginfo_pid(info: &libc::siginfo_t) -> libc::pid_t {
+    unsafe { info.si_pid() }
 }
 
-impl CoderSupervisor {
-    fn new(child: Child, child_id: u32) -> Self {
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+unsafe fn siginfo_pid(info: &libc::siginfo_t) -> libc::pid_t {
+    info.si_pid
+}
+
+/// Observe whether the leader has exited WITHOUT reaping it, so its PID keeps
+/// pinning the process-group identity until the group has been swept. `block`
+/// waits for the exit; otherwise it polls. `WNOWAIT` leaves the zombie waitable so
+/// a later `Child::wait` still reaps it exactly once.
+#[cfg(unix)]
+fn observe_exit(pid: u32, block: bool) -> ExitObservation {
+    let Ok(pid_t) = i32::try_from(pid) else {
+        return ExitObservation::Unknown;
+    };
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let mut flags = libc::WEXITED | libc::WNOWAIT;
+    if !block {
+        flags |= libc::WNOHANG;
+    }
+    let rc = unsafe { libc::waitid(libc::P_PID, pid_t as libc::id_t, &mut info, flags) };
+    if rc != 0 {
+        // ECHILD (already reaped) or another error: the state cannot be observed.
+        return ExitObservation::Unknown;
+    }
+    // Under WNOHANG with no state change, `si_pid` stays zero.
+    let si_pid = unsafe { siginfo_pid(&info) };
+    if si_pid == 0 {
+        ExitObservation::Running
+    } else {
+        ExitObservation::Exited
+    }
+}
+
+#[cfg(not(unix))]
+fn observe_exit(_pid: u32, _block: bool) -> ExitObservation {
+    ExitObservation::Unknown
+}
+
+/// Whether the leader process has been observed to exit, without reaping it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ExitObservation {
+    /// The leader is still running.
+    Running,
+    /// The leader has exited and is waitable, but has not been reaped, so its PID
+    /// still pins the process-group identity.
+    Exited,
+    /// The exit state could not be observed (already reaped, or no platform support).
+    Unknown,
+}
+
+/// The process operations a [`ManagedChild`] performs, behind a narrow seam so
+/// cleanup ordering and failure paths are deterministically testable without real
+/// processes.
+trait LeaderProcess: Send {
+    fn id(&self) -> u32;
+    fn take_stdout(&mut self) -> Option<std::process::ChildStdout>;
+    /// Non-blocking: observe leader exit without reaping (identity stays pinned).
+    fn poll_exit(&mut self) -> ExitObservation;
+    /// Block until the leader exits, without reaping it.
+    fn wait_exit(&mut self) -> ExitObservation;
+    /// SIGKILL the leader's whole process group. Returns whether it settled
+    /// (delivered, or already gone).
+    fn signal_group(&mut self) -> bool;
+    /// SIGKILL the direct leader — the fallback when a verified group signal fails.
+    /// Returns whether the kill was issued or the leader was already gone.
+    fn kill_leader(&mut self) -> bool;
+    /// Reap the leader exactly once, returning its exit code, or `None` if the reap
+    /// could not be completed.
+    fn reap(&mut self) -> Option<i32>;
+}
+
+/// The production leader: a real child process launched as its own group leader.
+struct SystemLeader {
+    child: Child,
+    id: u32,
+    /// A cached exit code from a non-Unix poll (which must reap to observe), so the
+    /// later `reap` returns it without a double wait. Unused on Unix, where
+    /// `observe_exit` never reaps.
+    cached_code: Option<i32>,
+}
+
+impl SystemLeader {
+    fn new(child: Child, id: u32) -> Self {
         Self {
             child,
-            child_id,
-            pump: None,
-            reaped: false,
+            id,
+            cached_code: None,
         }
+    }
+}
+
+impl LeaderProcess for SystemLeader {
+    fn id(&self) -> u32 {
+        self.id
     }
 
     fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
         self.child.stdout.take()
     }
 
+    fn poll_exit(&mut self) -> ExitObservation {
+        #[cfg(unix)]
+        {
+            observe_exit(self.id, false)
+        }
+        #[cfg(not(unix))]
+        {
+            // Without `waitid`, observation must reap; cache the code for `reap`.
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    self.cached_code = Some(status.code().unwrap_or(1));
+                    ExitObservation::Exited
+                }
+                Ok(None) => ExitObservation::Running,
+                Err(_) => ExitObservation::Unknown,
+            }
+        }
+    }
+
+    fn wait_exit(&mut self) -> ExitObservation {
+        #[cfg(unix)]
+        {
+            observe_exit(self.id, true)
+        }
+        #[cfg(not(unix))]
+        {
+            match self.child.wait() {
+                Ok(status) => {
+                    self.cached_code = Some(status.code().unwrap_or(1));
+                    ExitObservation::Exited
+                }
+                Err(_) => ExitObservation::Unknown,
+            }
+        }
+    }
+
+    fn signal_group(&mut self) -> bool {
+        terminate_process_group(self.id)
+    }
+
+    fn kill_leader(&mut self) -> bool {
+        self.child.kill().is_ok()
+    }
+
+    fn reap(&mut self) -> Option<i32> {
+        if let Some(code) = self.cached_code {
+            return Some(code);
+        }
+        self.child.wait().ok().map(|status| status.code().unwrap_or(1))
+    }
+}
+
+/// Records each cleanup outcome so the terminal path stays truthful: an unsuccessful
+/// reap remains incomplete (and can be retried), while a successful one makes
+/// repeated cleanup a no-op.
+#[derive(Default)]
+struct CleanupOutcome {
+    /// Whether the terminate (group-signal, plus any direct-kill fallback) phase ran.
+    terminated: bool,
+    /// The verified group-signal result, once attempted.
+    group_signal: Option<bool>,
+    /// The direct-child kill result, once attempted as a fallback.
+    direct_kill: Option<bool>,
+    /// The leader's cached exit code, once reaped.
+    exit_code: Option<i32>,
+    /// Whether the leader has been reaped exactly once.
+    reaped: bool,
+}
+
+/// The stateful owner of a coder leader, its process group, cleanup attempts, and
+/// cached exit status. It preserves the leader's PID/PGID identity until the group
+/// is swept, reaps the leader exactly once, and caches every outcome so repeated
+/// explicit cleanup or a later `Drop` is idempotent — without falsely recording a
+/// failed reap as complete.
+struct ManagedChild {
+    leader: Box<dyn LeaderProcess>,
+    outcome: CleanupOutcome,
+}
+
+impl ManagedChild {
+    fn new(leader: Box<dyn LeaderProcess>) -> Self {
+        Self {
+            leader,
+            outcome: CleanupOutcome::default(),
+        }
+    }
+
+    fn id(&self) -> u32 {
+        self.leader.id()
+    }
+
+    fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
+        self.leader.take_stdout()
+    }
+
+    fn poll_exit(&mut self) -> ExitObservation {
+        self.leader.poll_exit()
+    }
+
+    fn exit_code(&self) -> Option<i32> {
+        self.outcome.exit_code
+    }
+
+    /// Sweep the leader's process group while its PID still pins the group identity,
+    /// then reap the leader exactly once. Idempotent and truthful: a successful reap
+    /// makes a repeat a no-op; an unsuccessful reap leaves the state incomplete so a
+    /// later `Drop` can retry, and its diagnostics survive.
+    fn terminate_and_reap(&mut self) -> Option<i32> {
+        if self.outcome.reaped {
+            return self.outcome.exit_code;
+        }
+        if !self.outcome.terminated {
+            // Observe the leader's exit without reaping so the group is swept while
+            // the leader still pins PID/PGID identity. Pump EOF or a leader exit
+            // never means descendants are already gone.
+            let _ = self.leader.poll_exit();
+            let settled = self.leader.signal_group();
+            self.outcome.group_signal = Some(settled);
+            if !settled {
+                // The group signal failed for a real reason (not already-gone); fall
+                // back to killing the direct leader while it is still owned.
+                self.outcome.direct_kill = Some(self.leader.kill_leader());
+            }
+            self.outcome.terminated = true;
+        }
+        // Reap exactly once. A failed reap stays truthfully incomplete.
+        if let Some(code) = self.leader.reap() {
+            self.outcome.exit_code = Some(code);
+            self.outcome.reaped = true;
+        }
+        self.outcome.exit_code
+    }
+
+    /// Block until the leader exits (without reaping), then sweep the group and reap.
+    /// The no-transcript path uses this: it has no pump to observe EOF.
+    fn await_exit_then_cleanup(&mut self) -> Option<i32> {
+        if !self.outcome.reaped {
+            let _ = self.leader.wait_exit();
+        }
+        self.terminate_and_reap()
+    }
+}
+
+/// Owns a [`ManagedChild`] and (once spawned) its transcript pump for the duration
+/// of supervision. Its `Drop` is the single structured-cleanup point: it sweeps and
+/// reaps the coder through the managed child and settles the pump thread on every
+/// exit path, so an error propagated by `?` — or a panic while wiring up the pump —
+/// cannot leak a live coder, a surviving descendant, or a stuck pump thread.
+struct CoderSupervisor {
+    managed: ManagedChild,
+    /// `None` until a pump is attached (the no-transcript branch never attaches
+    /// one, and the transcript branch attaches it only after a successful spawn).
+    pump: Option<crate::transcript_pump::PumpHandle>,
+}
+
+impl CoderSupervisor {
+    fn new(child: Child, child_id: u32) -> Self {
+        Self {
+            managed: ManagedChild::new(Box::new(SystemLeader::new(child, child_id))),
+            pump: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_leader(leader: Box<dyn LeaderProcess>) -> Self {
+        Self {
+            managed: ManagedChild::new(leader),
+            pump: None,
+        }
+    }
+
+    fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
+        self.managed.take_stdout()
+    }
+
     fn attach_pump(&mut self, pump: crate::transcript_pump::PumpHandle) {
         self.pump = Some(pump);
     }
 
-    /// Terminate the coder's group; if the group signal fails outright (not merely
-    /// already-gone), fall back to killing the direct child, so a live coder is
-    /// never left behind when its PGID is unusable.
-    fn terminate_group_or_child(&mut self) {
-        if !terminate_process_group(self.child_id) {
-            let _ = self.child.kill();
-        }
-    }
-
-    /// Poll the child and pump together until one reaches a terminal outcome. A
-    /// pump failure while the coder is still alive returns at once (its Drop then
-    /// terminates the live coder); a coder exit terminates any surviving
-    /// descendants so the pump can observe EOF, then returns the coder's status.
+    /// Poll the pump and leader together until one reaches a terminal outcome. A
+    /// first fault or a pump failure while the coder is alive sweeps and reaps the
+    /// coder at once; a leader exit sweeps any surviving descendants before reaping,
+    /// then lets the pump drain to EOF. Pump EOF is never treated as leader
+    /// completion — the group is always swept before the leader is reaped.
     fn supervise(&mut self) -> Result<i32> {
         loop {
             // First-fault fast path: the pump published its immutable first fault
             // (capture, preview, phase-preservation, or status persistence) before
-            // attempting terminal settlement. Terminate and reap the coder NOW —
-            // only then wait for the pump's terminal outcome, which a blocked or slow
-            // status store may still be delaying. This is what stops a delayed status
-            // write from extending invisible coder work.
+            // attempting terminal settlement. Sweep and reap the coder NOW — only
+            // then wait for the pump's terminal outcome, which a blocked or slow
+            // status store may still be delaying. This stops a delayed status write
+            // from extending invisible coder work.
             if self
                 .pump
                 .as_ref()
                 .expect("supervise runs only after a pump is attached")
                 .first_fault_observed()
             {
-                self.terminate_group_or_child();
-                let _ = self.child.wait();
-                self.reaped = true;
+                self.managed.terminate_and_reap();
                 let outcome = self
                     .pump
                     .as_mut()
                     .expect("supervise runs only after a pump is attached")
                     .wait_terminal();
                 return match outcome {
-                    Ok(_summary) => Ok(0),
+                    Ok(_summary) => Ok(self.managed.exit_code().unwrap_or(0)),
                     Err(pump_err) => Err(anyhow::Error::new(pump_err)),
                 };
             }
@@ -864,33 +1106,29 @@ impl CoderSupervisor {
             {
                 return match terminal {
                     Ok(_summary) => {
-                        // The coder closed stdout and the pump drained to EOF
-                        // cleanly. Reap the leader for its status; because it is
-                        // exiting, cleanup will not re-signal a recyclable group.
-                        let status = self.child.wait()?;
-                        self.reaped = true;
-                        Ok(status.code().unwrap_or(1))
+                        // The pump drained to EOF. EOF is NOT proof the leader or its
+                        // descendants are done: sweep the group before reaping.
+                        self.managed.terminate_and_reap();
+                        Ok(self.managed.exit_code().unwrap_or(1))
                     }
-                    // Drop terminates the still-live coder group.
+                    // Drop sweeps and reaps the still-live coder group.
                     Err(pump_err) => Err(anyhow::Error::new(pump_err)),
                 };
             }
-            if let Some(status) = self.child.try_wait()? {
-                // The leader exited. Terminate any surviving descendants in the
-                // group before waiting for the pump: a backgrounded descendant
-                // that inherited stdout would otherwise hold the pipe's write end
-                // open and the pump would wait for EOF forever. Those descendants
-                // keep the group alive, so signaling it here is safe; the leader's
-                // buffered bytes then drain to EOF and the pump finishes.
-                let _ = terminate_process_group(self.child_id);
-                self.reaped = true;
+            if self.managed.poll_exit() == ExitObservation::Exited {
+                // The leader exited. Sweep any surviving descendants in the group
+                // BEFORE reaping, while the leader's PID still pins the group
+                // identity — a backgrounded descendant that inherited stdout would
+                // otherwise hold the pipe's write end open and the pump would wait
+                // for EOF forever. Then let the pump drain to EOF.
+                self.managed.terminate_and_reap();
                 let outcome = self
                     .pump
                     .as_mut()
                     .expect("supervise runs only after a pump is attached")
                     .wait_terminal();
                 return match outcome {
-                    Ok(_summary) => Ok(status.code().unwrap_or(1)),
+                    Ok(_summary) => Ok(self.managed.exit_code().unwrap_or(1)),
                     Err(pump_err) => Err(anyhow::Error::new(pump_err)),
                 };
             }
@@ -898,28 +1136,27 @@ impl CoderSupervisor {
         }
     }
 
-    /// Wait a coder launched without a transcript pump. A `wait` error still
-    /// routes through the guard, so the group is terminated and reaped rather than
-    /// leaked. After the leader exits, sweep any descendants that inherited stdio.
+    /// Wait a coder launched without a transcript pump. Blocking for the leader's
+    /// exit, sweeping any descendants that inherited stdio, and reaping all route
+    /// through the managed child, so a reap error still runs cleanup rather than
+    /// leaking the group.
     fn wait_no_pump(&mut self) -> Result<i32> {
-        let status = self.child.wait()?;
-        self.reaped = true;
-        let _ = terminate_process_group(self.child_id);
-        Ok(status.code().unwrap_or(1))
+        match self.managed.await_exit_then_cleanup() {
+            Some(code) => Ok(code),
+            None => Err(anyhow::anyhow!(
+                "failed to reap coder process {}",
+                self.managed.id()
+            )),
+        }
     }
 }
 
 impl Drop for CoderSupervisor {
     fn drop(&mut self) {
-        // Terminate and reap the coder, then settle the pump. Idempotent: this is
-        // the sole cleanup after a `?` early return or a panic, and a no-op after
-        // a happy path already reaped. Once the leader is reaped its PGID may be
-        // recycled, so never re-signal the group after that.
-        if !self.reaped {
-            self.terminate_group_or_child();
-            let _ = self.child.wait();
-            self.reaped = true;
-        }
+        // Sweep and reap the coder, then settle the pump. Idempotent: this is the
+        // sole cleanup after a `?` early return or a panic, and a no-op after a
+        // happy path already reaped.
+        self.managed.terminate_and_reap();
         if let Some(pump) = self.pump.as_mut() {
             pump.join();
         }
@@ -1400,6 +1637,7 @@ where
 #[cfg(test)]
 mod pump_supervision_tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
     /// A pump reader that panics on its first read, modelling a pump that crashes
@@ -1636,6 +1874,279 @@ mod pump_supervision_tests {
             status.state,
             crate::transcript_pump::PumpState::Complete,
             "terminal pump status must record completed capture"
+        );
+    }
+
+    /// A programmable leader for deterministic cleanup-ordering and failure tests.
+    /// It records every operation the managed child performs, so the sweep-before-
+    /// reap order, the direct-kill fallback, and exactly-once reaping are observable
+    /// without spawning real processes.
+    struct FakeLeader {
+        id: u32,
+        calls: Arc<Mutex<Vec<&'static str>>>,
+        poll: ExitObservation,
+        group_settles: bool,
+        reap_result: Option<i32>,
+    }
+
+    impl LeaderProcess for FakeLeader {
+        fn id(&self) -> u32 {
+            self.id
+        }
+        fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
+            None
+        }
+        fn poll_exit(&mut self) -> ExitObservation {
+            self.calls.lock().unwrap().push("poll_exit");
+            self.poll
+        }
+        fn wait_exit(&mut self) -> ExitObservation {
+            self.calls.lock().unwrap().push("wait_exit");
+            ExitObservation::Exited
+        }
+        fn signal_group(&mut self) -> bool {
+            self.calls.lock().unwrap().push("signal_group");
+            self.group_settles
+        }
+        fn kill_leader(&mut self) -> bool {
+            self.calls.lock().unwrap().push("kill_leader");
+            true
+        }
+        fn reap(&mut self) -> Option<i32> {
+            self.calls.lock().unwrap().push("reap");
+            self.reap_result
+        }
+    }
+
+    #[test]
+    fn group_signal_failure_falls_back_to_child_kill_and_reaps_once() {
+        // B6: when the verified group signal fails, cleanup falls back to killing the
+        // direct child while it is still owned, and reaps the leader exactly once
+        // even across a repeated cleanup call.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let leader = FakeLeader {
+            id: 4242,
+            calls: Arc::clone(&calls),
+            poll: ExitObservation::Running,
+            group_settles: false,
+            reap_result: Some(0),
+        };
+        let mut managed = ManagedChild::new(Box::new(leader));
+        managed.terminate_and_reap();
+        managed.terminate_and_reap();
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls.iter().filter(|c| **c == "signal_group").count(),
+            1,
+            "the group is signaled once"
+        );
+        assert_eq!(
+            calls.iter().filter(|c| **c == "kill_leader").count(),
+            1,
+            "a failed group signal falls back to a direct child kill"
+        );
+        assert_eq!(
+            calls.iter().filter(|c| **c == "reap").count(),
+            1,
+            "the leader is reaped exactly once"
+        );
+        // The group is swept before the leader is reaped.
+        let signal_at = calls.iter().position(|c| *c == "signal_group").unwrap();
+        let reap_at = calls.iter().position(|c| *c == "reap").unwrap();
+        assert!(signal_at < reap_at, "the group is swept before reaping");
+    }
+
+    #[test]
+    fn repeated_cleanup_is_a_no_op_after_success() {
+        // B6: once cleanup succeeds, a repeated explicit cleanup (or a later Drop) is
+        // a no-op — it never re-signals the group or re-reaps the leader.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let leader = FakeLeader {
+            id: 4243,
+            calls: Arc::clone(&calls),
+            poll: ExitObservation::Exited,
+            group_settles: true,
+            reap_result: Some(7),
+        };
+        let mut managed = ManagedChild::new(Box::new(leader));
+        assert_eq!(managed.terminate_and_reap(), Some(7));
+        assert_eq!(managed.terminate_and_reap(), Some(7));
+        assert_eq!(managed.terminate_and_reap(), Some(7));
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.iter().filter(|c| **c == "signal_group").count(), 1);
+        assert_eq!(calls.iter().filter(|c| **c == "reap").count(), 1);
+        assert_eq!(
+            calls.iter().filter(|c| **c == "kill_leader").count(),
+            0,
+            "a settled group signal never falls back to a direct kill"
+        );
+    }
+
+    #[test]
+    fn no_transcript_wait_error_uses_managed_cleanup() {
+        // B6: a no-transcript coder whose reap fails still routes through managed
+        // cleanup — the group is swept — and the error surfaces rather than leaking.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let leader = FakeLeader {
+            id: 4244,
+            calls: Arc::clone(&calls),
+            poll: ExitObservation::Exited,
+            group_settles: true,
+            reap_result: None,
+        };
+        let mut supervisor = CoderSupervisor::with_leader(Box::new(leader));
+        let result = supervisor.wait_no_pump();
+        assert!(result.is_err(), "a failed reap surfaces as an error");
+        assert!(
+            calls.lock().unwrap().iter().any(|c| *c == "signal_group"),
+            "managed cleanup swept the group despite the reap failure"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn natural_exit_sweeps_group_before_reaping() {
+        // B5: the leader exits naturally and the pump reaches EOF, but a same-group
+        // descendant (with stdout redirected away, so it does not hold the pipe) is
+        // still swept before the boundary returns.
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let pid_path = dir.path().join("descendant.pid");
+
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg(
+                "( sleep 5 >/dev/null 2>&1 ) & echo $! > descendant.pid; \
+                 printf '{\"type\":\"leader\"}\\n'; exit 0",
+            )
+            .current_dir(dir.path());
+
+        let started = Instant::now();
+        let exit = run_with_transcript(
+            cmd,
+            Some(&transcript),
+            &crate::transcript_pump::TranscriptPumpConfig::default(),
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(exit, 0, "the leader's natural exit code is returned");
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "must not wait out the descendant's sleep; took {elapsed:?}"
+        );
+
+        let pid = std::fs::read_to_string(&pid_path).unwrap();
+        let alive = Command::new("/bin/kill")
+            .args(["-0", pid.trim()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(
+            !alive,
+            "the same-group descendant must be swept before the leader is reaped"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pump_eof_does_not_end_child_supervision() {
+        // B5: the leader closes its own stdout and keeps running. The pump reaches
+        // EOF immediately, but EOF is not proof the leader is done — supervision must
+        // still terminate the still-live leader rather than leaking it.
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let d = dir.path().display();
+
+        // Close stdout, record pid, then sleep and touch a delayed side effect.
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg(format!(
+            "echo $$ > {d}/leader.pid; exec 1>&-; sleep 5; : > {d}/leader-ran"
+        ));
+
+        let started = Instant::now();
+        let exit = run_with_transcript(
+            cmd,
+            Some(&transcript),
+            &crate::transcript_pump::TranscriptPumpConfig::default(),
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "EOF must not make supervision wait out the leader's sleep; took {elapsed:?}"
+        );
+        let _ = exit;
+
+        let pid = std::fs::read_to_string(dir.path().join("leader.pid")).unwrap();
+        let alive = Command::new("/bin/kill")
+            .args(["-0", pid.trim()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(!alive, "the leader that closed stdout must still be terminated");
+
+        std::thread::sleep(Duration::from_millis(700));
+        assert!(
+            !dir.path().join("leader-ran").exists(),
+            "the leader ran a delayed side effect after EOF was treated as completion"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descendant_that_closes_stdout_is_still_terminated() {
+        // B5: a backgrounded descendant closes the inherited stdout (so the pump
+        // reaches EOF) but keeps running. It must be swept before the boundary
+        // returns, not left to run its delayed side effect.
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let d = dir.path().display();
+
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg(format!(
+            "( exec 1>&-; sleep 5; : > {d}/descendant-ran ) & echo $! > {d}/descendant.pid; \
+             printf '{{\"type\":\"leader\"}}\\n'; exit 0"
+        ));
+
+        let started = Instant::now();
+        let exit = run_with_transcript(
+            cmd,
+            Some(&transcript),
+            &crate::transcript_pump::TranscriptPumpConfig::default(),
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(exit, 0);
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "must not wait out the descendant's sleep; took {elapsed:?}"
+        );
+
+        let pid = std::fs::read_to_string(dir.path().join("descendant.pid")).unwrap();
+        let alive = Command::new("/bin/kill")
+            .args(["-0", pid.trim()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(
+            !alive,
+            "the descendant that closed stdout must still be swept"
+        );
+        std::thread::sleep(Duration::from_millis(700));
+        assert!(
+            !dir.path().join("descendant-ran").exists(),
+            "the swept descendant must not run its delayed side effect"
         );
     }
 
