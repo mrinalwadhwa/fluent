@@ -1226,8 +1226,10 @@ impl ManagedChild {
         if observed == ExitObservation::IdentityLost {
             // The leader was reaped out from under us; its PID/PGID may already be
             // recycled. Signaling or reaping it could hit an unrelated process, so do
-            // NEITHER. Record the group as gone and surface the identity loss.
-            self.outcome.group_signal = Some(GroupSweep::AlreadyGone);
+            // NEITHER. Identity loss does NOT prove the process group or its
+            // descendants are gone, so the group stays unswept (`group_signal`
+            // remains None → `group_swept()` is false) and Drop will not join a pump
+            // whose descendant may still hold stdout open.
             return Err(CleanupError::IdentityLost { id });
         }
         let sweep = self.leader.signal_group();
@@ -2440,6 +2442,51 @@ mod pump_supervision_tests {
             calls.iter().filter(|c| **c == "reap").count(),
             1,
             "the leader is never reaped a second time"
+        );
+    }
+
+    #[test]
+    fn identity_lost_leader_is_never_signaled_and_stays_unswept() {
+        // B5/B6: an ECHILD identity loss must never signal, kill, or reap the
+        // possibly-recycled PID, and it must NOT be recorded as swept — the group and
+        // its descendants are not proven gone, so `group_swept()` stays false and a
+        // pump join is never attempted on Drop. The result is cached one-shot.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let leader = FakeLeader {
+            poll: ExitObservation::IdentityLost,
+            ..FakeLeader::new(Arc::clone(&calls), Some(0))
+        };
+        let mut managed = ManagedChild::new(Box::new(leader));
+        assert!(matches!(
+            managed.terminate_and_reap(),
+            Err(CleanupError::IdentityLost { .. })
+        ));
+        assert!(
+            !managed.group_swept(),
+            "identity loss does not prove the group swept"
+        );
+        // A repeat returns the cached identity loss without re-observing or touching
+        // the recycled PID.
+        assert!(matches!(
+            managed.terminate_and_reap(),
+            Err(CleanupError::IdentityLost { .. })
+        ));
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls.iter().filter(|c| **c == "poll_exit").count(),
+            1,
+            "the leader is observed once, then the identity loss is cached"
+        );
+        assert_eq!(
+            calls.iter().filter(|c| **c == "signal_group").count(),
+            0,
+            "a recycled PID/PGID is never signaled"
+        );
+        assert_eq!(calls.iter().filter(|c| **c == "kill_leader").count(), 0);
+        assert_eq!(
+            calls.iter().filter(|c| **c == "reap").count(),
+            0,
+            "a recycled PID is never reaped"
         );
     }
 
