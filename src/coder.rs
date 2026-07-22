@@ -955,6 +955,10 @@ enum CleanupError {
     /// Neither the verified group signal nor the direct-child kill settled the
     /// group, so the coder cannot be guaranteed terminated.
     NotTerminated { id: u32 },
+    /// The leader was killed directly because the group signal failed, but the
+    /// process group and any descendants were not verifiably swept. The leader is
+    /// reaped, but this cleanup gap is retained rather than reported as clean.
+    GroupNotSwept { id: u32 },
     /// The leader could not be reaped.
     NotReaped { id: u32 },
 }
@@ -964,6 +968,9 @@ impl std::fmt::Display for CleanupError {
         match self {
             CleanupError::NotTerminated { id } => {
                 write!(f, "coder process {id} could not be terminated (group signal and direct kill both failed)")
+            }
+            CleanupError::GroupNotSwept { id } => {
+                write!(f, "coder process {id} was killed directly but its process group was not verifiably swept")
             }
             CleanupError::NotReaped { id } => {
                 write!(f, "coder process {id} could not be reaped")
@@ -979,19 +986,26 @@ impl std::error::Error for CleanupError {}
 /// repeated cleanup a no-op.
 #[derive(Default)]
 struct CleanupOutcome {
-    /// The verified group-signal result, once attempted.
+    /// The verified group-signal result, once attempted. `Some(true)` is the only
+    /// state that proves the group and its descendants were swept.
     group_signal: Option<bool>,
-    /// The direct-child kill result, once attempted as a fallback.
+    /// The direct-child kill result, once attempted as a fallback. It terminates the
+    /// leader but never proves the group was swept.
     direct_kill: Option<bool>,
     /// The leader's cached exit code, once reaped. `Some` marks the leader reaped.
     exit_code: Option<i32>,
 }
 
 impl CleanupOutcome {
-    /// Whether the group has been settled by either a verified group signal or a
-    /// direct-child kill.
-    fn signal_settled(&self) -> bool {
+    /// Whether the leader is terminated (the group was swept, or the direct kill
+    /// succeeded). Only a swept group also guarantees descendants are gone.
+    fn leader_terminated(&self) -> bool {
         self.group_signal == Some(true) || self.direct_kill == Some(true)
+    }
+
+    /// Whether the group and its descendants were verifiably swept.
+    fn group_swept(&self) -> bool {
+        self.group_signal == Some(true)
     }
 }
 
@@ -1036,36 +1050,58 @@ impl ManagedChild {
     /// the state unsettled so a retry can re-attempt; a failed reap likewise stays
     /// incomplete and retryable. Its diagnostics survive on the outcome.
     fn terminate_and_reap(&mut self) -> Result<i32, CleanupError> {
-        if let Some(code) = self.outcome.exit_code {
-            return Ok(code);
+        let id = self.leader.id();
+        // Resolve a cached terminal outcome first (idempotent). A reaped leader is
+        // clean ONLY if its group was verifiably swept; a direct-kill-only cleanup
+        // retains its group-sweep failure on every repeat rather than flipping to
+        // success.
+        if self.outcome.exit_code.is_some() {
+            return if self.outcome.group_swept() {
+                Ok(self.outcome.exit_code.unwrap())
+            } else {
+                Err(CleanupError::GroupNotSwept { id })
+            };
         }
-        // Ensure the group is settled, retrying if a prior attempt failed entirely.
-        if !self.outcome.signal_settled() {
+        // Sweep the group, retrying if no prior attempt terminated the leader.
+        if !self.outcome.leader_terminated() {
             // Observe the leader's exit without reaping so the group is swept while
             // the leader still pins PID/PGID identity. Pump EOF or a leader exit
             // never means descendants are already gone.
-            let _ = self.leader.poll_exit();
-            let settled = self.leader.signal_group();
-            self.outcome.group_signal = Some(settled);
-            if !settled {
-                // The verified group signal failed for a real reason (not
-                // already-gone); fall back to killing the direct leader while it is
-                // still owned.
+            let observed = self.leader.poll_exit();
+            let signaled = self.leader.signal_group();
+            // A group signal that fails on an ALREADY-EXITED leader means the group
+            // has no live members left to signal — any live descendant would keep it
+            // signalable (some platforms return EPERM for a zombie-only group). So an
+            // exited leader whose signal fails is effectively swept.
+            let swept = signaled || observed == ExitObservation::Exited;
+            self.outcome.group_signal = Some(swept);
+            if !swept {
+                // The verified group signal failed while the leader was still alive;
+                // fall back to killing the direct leader while it is still owned. This
+                // terminates the leader but does NOT sweep the group or its
+                // descendants.
                 self.outcome.direct_kill = Some(self.leader.kill_leader());
             }
         }
-        if !self.outcome.signal_settled() {
+        if !self.outcome.leader_terminated() {
             // Both the group signal and the direct kill failed. Do not block on a
             // reap that may never complete; surface a retryable cleanup failure.
-            return Err(CleanupError::NotTerminated { id: self.leader.id() });
+            return Err(CleanupError::NotTerminated { id });
         }
-        // Reap exactly once. A failed reap stays incomplete and retryable.
-        match self.leader.reap() {
-            Some(code) => {
-                self.outcome.exit_code = Some(code);
-                Ok(code)
-            }
-            None => Err(CleanupError::NotReaped { id: self.leader.id() }),
+        // The leader is terminated. Reap it exactly once; a failed reap stays
+        // incomplete and retryable.
+        let code = match self.leader.reap() {
+            Some(code) => code,
+            None => return Err(CleanupError::NotReaped { id }),
+        };
+        self.outcome.exit_code = Some(code);
+        if self.outcome.group_swept() {
+            Ok(code)
+        } else {
+            // The leader was reaped via a direct kill, but the group and any
+            // descendants were not verifiably swept — a retained cleanup failure,
+            // never a clean success.
+            Err(CleanupError::GroupNotSwept { id })
         }
     }
 
@@ -2029,8 +2065,19 @@ mod pump_supervision_tests {
             ..FakeLeader::new(Arc::clone(&calls), Some(0))
         };
         let mut managed = ManagedChild::new(Box::new(leader));
-        assert!(managed.terminate_and_reap().is_ok());
-        let _ = managed.terminate_and_reap();
+        // A direct-kill fallback terminates and reaps the leader, but the group was
+        // not verifiably swept — a retained cleanup failure, persisted on repeat.
+        assert!(matches!(
+            managed.terminate_and_reap(),
+            Err(CleanupError::GroupNotSwept { .. })
+        ));
+        assert!(
+            matches!(
+                managed.terminate_and_reap(),
+                Err(CleanupError::GroupNotSwept { .. })
+            ),
+            "the group-sweep failure is retained on repeat, never flipped to success"
+        );
 
         let calls = calls.lock().unwrap();
         assert_eq!(
@@ -2048,10 +2095,10 @@ mod pump_supervision_tests {
             1,
             "the leader is reaped exactly once"
         );
-        // The group is swept before the leader is reaped.
+        // The group is signaled before the leader is reaped.
         let signal_at = calls.iter().position(|c| *c == "signal_group").unwrap();
         let reap_at = calls.iter().position(|c| *c == "reap").unwrap();
-        assert!(signal_at < reap_at, "the group is swept before reaping");
+        assert!(signal_at < reap_at, "the group is signaled before reaping");
     }
 
     #[test]
