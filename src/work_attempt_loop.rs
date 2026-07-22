@@ -2282,15 +2282,23 @@ fn interpret_reviews(
                 crate::work_model::PauseKind::RoundCap,
             );
             store.write_work_item(&item)?;
-            // Write the operator handoff second and attach its reference in a later
-            // durable mutation; the pause above is already durable.
+            // Write the operator handoff second and attach its reference through a
+            // FRESH lock-held mutation, so the attachment composes onto the latest
+            // durable state rather than this stale snapshot — closing the
+            // read-modify-write race a separate write would leave open. The pause is
+            // already durable, so a failure here cannot roll it back or strand the
+            // attempt.
             let handoff_path =
                 write_budget_exhausted_handoff(project_root, &item.id, attempt_id, &failed)?;
-            item.attempts[attempt_index].artifacts.push(ArtifactRef {
-                producer_id: "attempt-loop".to_string(),
-                path: handoff_path.clone(),
-            });
-            store.write_work_item(&item)?;
+            store.mutate_work_item(&item.id, |fresh| {
+                if let Some(attempt) = fresh.attempts.get_mut(attempt_index) {
+                    attempt.artifacts.push(ArtifactRef {
+                        producer_id: "attempt-loop".to_string(),
+                        path: handoff_path.clone(),
+                    });
+                }
+                Ok(())
+            })?;
             return Ok(WorkAttemptRunOutcome::NeedsUser { handoff_path });
         }
         item.attempts[attempt_index].status = AttemptStatus::Planned;
@@ -2308,15 +2316,22 @@ fn interpret_reviews(
             crate::work_model::PauseKind::Uncertain,
         );
         store.write_work_item(&item)?;
-        // Write the operator handoff second and attach its reference in a later
-        // durable mutation; the pause above is already durable.
+        // Write the operator handoff second and attach its reference through a FRESH
+        // lock-held mutation, so the attachment composes onto the latest durable
+        // state rather than this stale snapshot — closing the read-modify-write race
+        // a separate write would leave open. The pause is already durable, so a
+        // failure here cannot roll it back or strand the attempt.
         let handoff_path =
             write_needs_user_handoff(project_root, &item.id, attempt_id, &uncertain)?;
-        item.attempts[attempt_index].artifacts.push(ArtifactRef {
-            producer_id: "attempt-loop".to_string(),
-            path: handoff_path.clone(),
-        });
-        store.write_work_item(&item)?;
+        store.mutate_work_item(&item.id, |fresh| {
+            if let Some(attempt) = fresh.attempts.get_mut(attempt_index) {
+                attempt.artifacts.push(ArtifactRef {
+                    producer_id: "attempt-loop".to_string(),
+                    path: handoff_path.clone(),
+                });
+            }
+            Ok(())
+        })?;
         return Ok(WorkAttemptRunOutcome::NeedsUser { handoff_path });
     }
 
@@ -4534,6 +4549,13 @@ mod tests {
             Some(crate::work_model::PauseKind::RoundCap),
             "budget exhaustion should record RoundCap pause kind"
         );
+        assert!(
+            stored.attempts[0]
+                .artifacts
+                .iter()
+                .any(|a| a.producer_id == "attempt-loop"),
+            "the budget-exhausted handoff reference is attached through the fresh lock-held mutation"
+        );
     }
 
     #[test]
@@ -4553,6 +4575,13 @@ mod tests {
             stored.attempts[0].pause_kind,
             Some(crate::work_model::PauseKind::Uncertain),
             "uncertain review should record Uncertain pause kind"
+        );
+        assert!(
+            stored.attempts[0]
+                .artifacts
+                .iter()
+                .any(|a| a.producer_id == "attempt-loop"),
+            "the needs-user handoff reference is attached through the fresh lock-held mutation"
         );
     }
 
