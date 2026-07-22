@@ -10713,7 +10713,13 @@ fn work_task_run_rejects_existing_directory_that_is_not_worktree() {
             "exists but is not a registered git worktree",
         ));
 
-    assert_eq!(fs::read_to_string(&item_path).unwrap(), before);
+    // Landing gate: a rejected setup must not revise the durable aggregate.
+    // Fix the reservation boundary; do not weaken this byte-equality contract.
+    assert_eq!(
+        fs::read_to_string(&item_path).unwrap(),
+        before,
+        "LANDING GATE: preserve the byte-identical aggregate by fixing the setup/reservation boundary; do not weaken this regression"
+    );
 }
 
 #[test]
