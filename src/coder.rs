@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -841,12 +841,36 @@ fn real_credential_refresh() {
 /// before the next attempt truncates the live path. Each retried phase (a 401
 /// refresh or a rate-limit wait) leaves its own durable `.<n>.jsonl` artifact,
 /// so a session-ending 401 is not overwritten by the attempt that recovers it.
-fn preserve_transcript_phase(transcript_file: Option<&Path>, phase: &mut u32) {
-    if let Some(path) = transcript_file {
-        let preserved = phase_transcript_path(path, *phase);
-        let _ = std::fs::copy(path, &preserved);
-        *phase += 1;
-    }
+///
+/// The sibling is opened create-new so an existing per-phase artifact is never
+/// overwritten, and every failure propagates: a lost transcript record must not
+/// pass silently, since it is the only durable evidence of the recovered phase.
+fn preserve_transcript_phase(transcript_file: Option<&Path>, phase: &mut u32) -> Result<()> {
+    let Some(path) = transcript_file else {
+        return Ok(());
+    };
+    let preserved = phase_transcript_path(path, *phase);
+    let contents = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "read live transcript at {} before phase preservation",
+                    path.display()
+                )
+            });
+        }
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&preserved)
+        .with_context(|| format!("preserve transcript phase to {}", preserved.display()))?;
+    file.write_all(&contents)
+        .with_context(|| format!("write preserved transcript phase to {}", preserved.display()))?;
+    *phase += 1;
+    Ok(())
 }
 
 /// The immutable per-phase transcript path derived from a live transcript path:
@@ -905,7 +929,7 @@ where
             if !auth_refreshed {
                 auth_refreshed = true;
                 eprintln!("  Auth 401 detected — refreshing credentials and retrying.");
-                preserve_transcript_phase(transcript_file, &mut phase);
+                preserve_transcript_phase(transcript_file, &mut phase)?;
                 refresh_fn();
                 continue;
             }
@@ -949,7 +973,7 @@ where
             attempt + 1,
             wait.as_secs()
         );
-        preserve_transcript_phase(transcript_file, &mut phase);
+        preserve_transcript_phase(transcript_file, &mut phase)?;
         std::thread::sleep(wait);
         attempt += 1;
     }
@@ -1892,6 +1916,54 @@ exit 1"#
         assert!(
             body.contains("\"api_error_status\":401"),
             "the preserved phase must capture the session-ending 401: {body}"
+        );
+    }
+
+    #[test]
+    fn preserve_transcript_phase_refuses_to_overwrite_an_existing_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        std::fs::write(&transcript, "live phase\n").unwrap();
+        // A per-phase sibling already occupies phase 0's slot.
+        let occupied = dir.path().join("transcript.0.jsonl");
+        std::fs::write(&occupied, "earlier immutable record\n").unwrap();
+
+        let mut phase = 0;
+        let err = preserve_transcript_phase(Some(&transcript), &mut phase)
+            .expect_err("create-new must refuse to overwrite an existing artifact");
+        assert!(
+            err.to_string().contains("preserve transcript phase"),
+            "the failure must surface, not pass silently: {err}"
+        );
+        assert_eq!(phase, 0, "a failed preservation must not advance the phase");
+        assert_eq!(
+            std::fs::read_to_string(&occupied).unwrap(),
+            "earlier immutable record\n",
+            "the earlier immutable record must be left intact"
+        );
+    }
+
+    #[test]
+    fn preserve_transcript_phase_copies_live_bytes_and_advances() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        std::fs::write(&transcript, "phase zero body\n").unwrap();
+
+        let mut phase = 0;
+        preserve_transcript_phase(Some(&transcript), &mut phase).unwrap();
+        assert_eq!(phase, 1, "a successful preservation advances the phase");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("transcript.0.jsonl")).unwrap(),
+            "phase zero body\n"
+        );
+
+        // The next phase writes a distinct immutable sibling.
+        std::fs::write(&transcript, "phase one body\n").unwrap();
+        preserve_transcript_phase(Some(&transcript), &mut phase).unwrap();
+        assert_eq!(phase, 2);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("transcript.1.jsonl")).unwrap(),
+            "phase one body\n"
         );
     }
 

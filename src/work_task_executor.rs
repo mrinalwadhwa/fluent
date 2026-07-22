@@ -1966,57 +1966,71 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
     // The managed Learner surface is the last trusted host boundary before
     // environment filtering and Seatbelt. When the coder launches effectively
     // sandboxed, resolve the coder's supported credentials on the host — where
-    // the sandbox denies the credential store — and give the coder a unique
-    // private writable scratch directory beneath its managed surface. The
-    // shared macOS temp trees and live project roots stay non-writable, so a
+    // the sandbox denies the credential store — and give the coder a distinct
+    // private writable temporary directory beneath its staging scope. The shared
+    // macOS temp trees, the host-owned run surface (transcript and submitted-
+    // draft evidence), and the live project roots all stay non-writable, so a
     // coder tool that needs temporary files uses its own confined scratch.
     let mut extra_env: Vec<(String, String)> = Vec::new();
     let mut private_temp_roots: Vec<PathBuf> = Vec::new();
+    // Held alive until after the coder run so the private temp is not reclaimed
+    // while the launch is still using it.
+    let mut _private_temp_guard: Option<tempfile::TempDir> = None;
     if effectively_sandboxed {
         os::check_prerequisites_for(inputs.coder_kind)?;
         credential::inject_credentials()?;
         credential::setup_git_signing();
 
-        let scratch = inputs.handoff_dir.join("scratch");
-        if scratch.exists() {
-            fs::remove_dir_all(&scratch).with_context(|| {
-                format!("clear Learner scratch dir at {}", scratch.display())
-            })?;
-        }
-        fs::create_dir_all(&scratch)
-            .with_context(|| format!("create Learner scratch dir at {}", scratch.display()))?;
-        let scratch_str = scratch.to_string_lossy().to_string();
+        let private_temp = create_private_launch_temp(inputs.handoff_dir)?;
+        let scratch_str = private_temp.path().to_string_lossy().to_string();
         extra_env.push(("TMPDIR".to_string(), scratch_str.clone()));
         extra_env.push(("TMP".to_string(), scratch_str.clone()));
         extra_env.push(("TEMP".to_string(), scratch_str));
-        private_temp_roots.push(scratch);
+        private_temp_roots.push(private_temp.path().to_path_buf());
+        _private_temp_guard = Some(private_temp);
     }
 
-    // A post-land retry handles persisted merged state, so `--no-sandbox`
-    // cannot weaken its boundary. It always uses the trusted system Seatbelt
-    // launcher and fails closed when the host cannot apply that profile.
+    // Every effectively sandboxed branch renders through the denied-writes
+    // helper, which strips the shared `/private/tmp` and per-user
+    // `/private/var/folders` temp grants. A coder tool that needs temporary
+    // files therefore uses its private launch scratch, never a shared tree.
     let (sandbox, _sandbox_profile) = if !effectively_sandboxed {
         (CoderSandbox::None, None)
     } else {
         let common_git_dir = worktree::git_common_dir(workspace_path)?;
         readable_roots.push(workspace_path.to_path_buf());
+        let home = std::env::var("HOME").unwrap_or_default();
         if learner_expertise_writable(inputs.handoff_only) {
-            let mut writable = vec![inputs.handoff_dir.to_path_buf(), common_git_dir];
+            let mut writable = vec![
+                expertise_dir.clone(),
+                inputs.handoff_dir.to_path_buf(),
+                common_git_dir,
+            ];
             writable.extend(private_temp_roots.iter().cloned());
-            build_coder_sandbox_with_writable_and_read_only_roots(
-                inputs.coder_kind,
+            // No live root is writable here, so the staging directory is the
+            // only writable path beneath the host-owned run surface; the
+            // transcript and submitted-draft evidence are siblings the coder
+            // cannot reach.
+            let profile = os::render_profile_for_access_for_coder_with_denied_writes(
                 inputs.resolver,
-                &expertise_dir,
+                &home,
                 &writable,
                 &readable_roots,
-            )?
+                &[],
+                inputs.coder_kind,
+            )?;
+            let sandbox =
+                CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
+            (sandbox, Some(profile))
         } else {
             // Handoff-only: deny expertise writes. Expertise stays readable, but
-            // only the managed handoff surface is writable. Git metadata is
-            // readable for the accepted-change diff but never writable.
+            // only the isolated staging surface is writable. Git metadata is
+            // readable for the accepted-change diff but never writable. A post-
+            // land retry handles persisted merged state, so `--no-sandbox`
+            // cannot weaken its boundary: it uses the trusted system Seatbelt
+            // launcher and fails closed when the host cannot apply that profile.
             readable_roots.push(expertise_dir.clone());
             readable_roots.push(common_git_dir.clone());
-            let home = std::env::var("HOME").unwrap_or_default();
             let mut denied = vec![workspace_path.to_path_buf(), common_git_dir];
             denied.extend(inputs.denied_write_roots.iter().cloned());
             denied.sort();
@@ -2037,16 +2051,12 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
         }
     };
 
-    if let Some(transcript_path) = inputs.transcript_path {
-        if let Some(parent) = transcript_path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("create Learner transcript dir at {}", parent.display())
-            })?;
-        }
-        // Preserve a prior run's transcript as an immutable per-run sibling
-        // before this run truncates the live path, so every Learner run on this
-        // Attempt leaves a durable record on the managed surface.
-        preserve_prior_run_transcript(transcript_path)?;
+    if let Some(transcript_path) = inputs.transcript_path
+        && let Some(parent) = transcript_path.parent()
+    {
+        fs::create_dir_all(parent).with_context(|| {
+            format!("create Learner transcript dir at {}", parent.display())
+        })?;
     }
 
     let coder = inputs
@@ -2067,33 +2077,34 @@ pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Rotate an existing transcript to the next immutable `transcript.run<N>.jsonl`
-/// sibling before a new Learner run truncates the live path. Each Learner run on
-/// an Attempt therefore leaves its own durable transcript, so a later run cannot
-/// erase the record of an earlier one.
-fn preserve_prior_run_transcript(transcript_path: &Path) -> Result<()> {
-    if !transcript_path.exists() {
-        return Ok(());
+/// Create a distinct private temporary directory for one coder launch beneath
+/// its writable staging scope. `tempfile` creates it mode 0700 with a unique
+/// name, so two launches never share a path and no other sandboxed process can
+/// read the launch's scratch. The returned guard must be held alive for the
+/// duration of the launch.
+fn create_private_launch_temp(staging_dir: &Path) -> Result<tempfile::TempDir> {
+    fs::create_dir_all(staging_dir)
+        .with_context(|| format!("create Learner staging dir at {}", staging_dir.display()))?;
+    let temp = tempfile::Builder::new()
+        .prefix("launch-")
+        .tempdir_in(staging_dir)
+        .with_context(|| {
+            format!(
+                "create private launch temp beneath {}",
+                staging_dir.display()
+            )
+        })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).with_context(|| {
+            format!(
+                "restrict private launch temp {} to mode 0700",
+                temp.path().display()
+            )
+        })?;
     }
-    let parent = transcript_path.parent().unwrap_or(Path::new("."));
-    let stem = transcript_path
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let ext = transcript_path
-        .extension()
-        .map(|e| format!(".{}", e.to_string_lossy()))
-        .unwrap_or_default();
-    for n in 0.. {
-        let preserved = parent.join(format!("{stem}.run{n}{ext}"));
-        if !preserved.exists() {
-            fs::rename(transcript_path, &preserved).with_context(|| {
-                format!("preserve prior Learner transcript at {}", preserved.display())
-            })?;
-            return Ok(());
-        }
-    }
-    Ok(())
+    Ok(temp)
 }
 
 fn render_path_list(paths: &[PathBuf]) -> String {
@@ -3835,35 +3846,28 @@ mod tests {
     }
 
     #[test]
-    fn preserve_prior_run_transcript_rotates_into_immutable_siblings() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let transcript = tmp.path().join("transcript.jsonl");
+    fn create_private_launch_temp_gives_distinct_mode_0700_dirs() {
+        let staging = tempfile::TempDir::new().unwrap();
 
-        // No live transcript yet: nothing to preserve.
-        preserve_prior_run_transcript(&transcript).unwrap();
-        assert!(!tmp.path().join("transcript.run0.jsonl").exists());
+        let first = create_private_launch_temp(staging.path()).unwrap();
+        let second = create_private_launch_temp(staging.path()).unwrap();
 
-        // Each run preserves the prior transcript into the next sibling index,
-        // leaving earlier runs immutable.
-        fs::write(&transcript, "first run\n").unwrap();
-        preserve_prior_run_transcript(&transcript).unwrap();
-        assert!(!transcript.exists(), "the live path is rotated away");
-        assert_eq!(
-            fs::read_to_string(tmp.path().join("transcript.run0.jsonl")).unwrap(),
-            "first run\n"
+        assert_ne!(
+            first.path(),
+            second.path(),
+            "two launches must receive different private temp paths"
         );
+        assert!(first.path().starts_with(staging.path()));
+        assert!(second.path().starts_with(staging.path()));
 
-        fs::write(&transcript, "second run\n").unwrap();
-        preserve_prior_run_transcript(&transcript).unwrap();
-        assert_eq!(
-            fs::read_to_string(tmp.path().join("transcript.run0.jsonl")).unwrap(),
-            "first run\n",
-            "the earlier run's transcript is not overwritten"
-        );
-        assert_eq!(
-            fs::read_to_string(tmp.path().join("transcript.run1.jsonl")).unwrap(),
-            "second run\n"
-        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for temp in [&first, &second] {
+                let mode = fs::metadata(temp.path()).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o700, "the private temp must be mode 0700");
+            }
+        }
     }
 
     #[test]

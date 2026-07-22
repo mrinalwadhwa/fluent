@@ -1019,14 +1019,23 @@ fn try_learn(
         .unwrap_or(workspace_path.as_path());
     let real_handoff_dir =
         project_root.join(crate::learner::handoff_dir_rel(&work_item_id, &attempt_id));
-    // The transcript lives on the durable managed surface even for an isolated
-    // handoff-only run: the host writes it outside the sandbox, so it survives
-    // the disposable clone and lets the one-refresh auth policy classify a 401.
-    let transcript_path = real_handoff_dir.join("transcript.jsonl");
+    // Allocate a collision-safe, host-owned run directory from on-disk state. It
+    // holds the transcript and submitted-draft evidence the coder cannot reach;
+    // the coder-writable staging directory is a separate sibling beneath it.
+    let run_dir = allocate_learner_run_dir(&real_handoff_dir.join("runs"))?;
+    // The transcript lives on the host-owned run surface, outside every coder-
+    // writable root: the host writes it, so it survives the disposable clone and
+    // lets the one-refresh auth policy classify a 401.
+    let transcript_path = run_dir.join("transcript.jsonl");
+    // Pre-land the coder stages its draft in a writable subdir beneath the run
+    // surface; post-land it stages inside the isolated clone because the live
+    // project root is denied. Either way the host-owned evidence stays a non-
+    // writable sibling of the staging directory.
+    let pre_land_staging = run_dir.join("staging");
     let handoff_dir = isolated_workspace
         .as_ref()
         .map(|isolated| isolated.handoff_dir.as_path())
-        .unwrap_or(real_handoff_dir.as_path());
+        .unwrap_or(pre_land_staging.as_path());
     let learner_review_artifact_paths = isolated_workspace
         .as_ref()
         .map(|isolated| isolated.review_artifact_paths.as_slice())
@@ -1081,9 +1090,15 @@ fn try_learn(
     // live target or shared-Git changes from another actor.
     let confinement = confinement_result?;
     coder_result?;
+    // Publish the coder's staged draft to the canonical managed handoff path,
+    // then snapshot it as immutable submitted-draft evidence on the host-owned
+    // run surface the coder cannot reach.
     if let Some(isolated) = &isolated_workspace {
         isolated.publish_draft(project_root, &work_item_id, &attempt_id)?;
+    } else {
+        publish_pre_land_draft(project_root, &work_item_id, &attempt_id, handoff_dir)?;
     }
+    record_submitted_draft(project_root, &work_item_id, &attempt_id, &run_dir)?;
 
     let mut draft = crate::learner::read_draft(project_root, &work_item_id, &attempt_id)?;
     for path in &confinement.denied_paths {
@@ -1401,6 +1416,95 @@ impl HandoffOnlyWorkspace {
         atomic_write_confined(project_root, Path::new(&relative), &bytes)?;
         Ok(())
     }
+}
+
+/// Allocate a collision-safe, host-owned run directory for one Learner
+/// invocation from on-disk state. It scans existing `run-<N>` siblings and
+/// creates the next free index with an exclusive create, so a deleted or absent
+/// in-memory Learning record can never reuse an earlier run identity, and two
+/// concurrent retries never share one directory.
+fn allocate_learner_run_dir(runs_dir: &Path) -> Result<PathBuf> {
+    fs::create_dir_all(runs_dir)
+        .with_context(|| format!("create Learner runs dir at {}", runs_dir.display()))?;
+    let mut next = 1u64;
+    for entry in fs::read_dir(runs_dir)
+        .with_context(|| format!("scan Learner runs dir at {}", runs_dir.display()))?
+    {
+        if let Some(index) = entry?
+            .file_name()
+            .to_str()
+            .and_then(|name| name.strip_prefix("run-"))
+            .and_then(|digits| digits.parse::<u64>().ok())
+        {
+            next = next.max(index + 1);
+        }
+    }
+    loop {
+        let candidate = runs_dir.join(format!("run-{next}"));
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => next += 1,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("allocate Learner run dir at {}", candidate.display()));
+            }
+        }
+    }
+}
+
+/// Publish a pre-land Learner's staged draft to the canonical managed handoff
+/// path. The staged draft is read through symlink/size confinement so the coder
+/// cannot redirect the host to an arbitrary file. A Learner that wrote no draft
+/// still succeeds: `read_draft` then yields an empty draft.
+fn publish_pre_land_draft(
+    project_root: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    staging_dir: &Path,
+) -> Result<()> {
+    let source = staging_dir.join(crate::learner::DRAFT_FILE_NAME);
+    if !source.exists() {
+        return Ok(());
+    }
+    let bytes = read_confined_regular_file(
+        staging_dir,
+        &source,
+        MAX_HANDOFF_DRAFT_BYTES,
+        "Learner draft",
+    )?;
+    let relative = crate::learner::draft_path_rel(work_item_id, attempt_id);
+    atomic_write_confined(project_root, Path::new(&relative), &bytes)?;
+    Ok(())
+}
+
+/// Snapshot the canonical published draft as immutable submitted-draft evidence
+/// on the host-owned run surface the coder cannot reach. The exclusive create
+/// means the record cannot be silently overwritten; a Learner that produced no
+/// draft records nothing.
+fn record_submitted_draft(
+    project_root: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    run_dir: &Path,
+) -> Result<()> {
+    let canonical = project_root.join(crate::learner::draft_path_rel(work_item_id, attempt_id));
+    let bytes = match fs::read(&canonical) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read published draft at {}", canonical.display()));
+        }
+    };
+    let evidence = run_dir.join("submitted-draft.json");
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&evidence)
+        .with_context(|| format!("record submitted draft evidence at {}", evidence.display()))?;
+    file.write_all(&bytes)
+        .with_context(|| format!("write submitted draft evidence at {}", evidence.display()))?;
+    Ok(())
 }
 
 fn copy_learner_artifacts(
@@ -2300,6 +2404,34 @@ mod tests {
                 .join(crate::learner::draft_path_rel("work-1", "attempt-1"))
                 .exists()
         );
+    }
+
+    #[test]
+    fn allocate_learner_run_dir_never_reuses_an_identity_from_disk() {
+        let runs = tempfile::TempDir::new().unwrap();
+        // Existing on-disk run identities, including a gap, are never reused.
+        fs::create_dir(runs.path().join("run-1")).unwrap();
+        fs::create_dir(runs.path().join("run-3")).unwrap();
+        fs::create_dir(runs.path().join("not-a-run")).unwrap();
+
+        let allocated = allocate_learner_run_dir(runs.path()).unwrap();
+        assert_eq!(
+            allocated.file_name().unwrap().to_str().unwrap(),
+            "run-4",
+            "allocation advances past the highest existing on-disk index"
+        );
+
+        // A second allocation, even with the in-memory index forgotten, cannot
+        // collide with the first.
+        let second = allocate_learner_run_dir(runs.path()).unwrap();
+        assert_eq!(second.file_name().unwrap().to_str().unwrap(), "run-5");
+        assert_ne!(allocated, second);
+
+        // Deleting the newest directory does not let a later allocation reclaim
+        // the identity of a directory that already existed.
+        fs::create_dir(runs.path().join("run-9")).unwrap();
+        let third = allocate_learner_run_dir(runs.path()).unwrap();
+        assert_eq!(third.file_name().unwrap().to_str().unwrap(), "run-10");
     }
 
     #[test]

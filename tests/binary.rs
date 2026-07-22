@@ -3000,26 +3000,35 @@ fn merged_commit_of(main_dir: &Path) -> String {
         .to_string()
 }
 
-/// Concatenate every durable Learner transcript for work-1/attempt-1: the live
-/// `transcript.jsonl` plus the immutable `transcript.run<N>.jsonl` siblings a
-/// later run preserves. The sandboxed handoff-only retry cannot write shared
-/// temp, so it records its observability on stdout, which the host captures
-/// here on the managed surface.
+/// Concatenate every durable Learner transcript for work-1/attempt-1 across all
+/// host-owned run directories: each `learner/runs/run-<N>/transcript.jsonl` plus
+/// the immutable `transcript.<phase>.jsonl` siblings a refreshing retry
+/// preserves. The sandboxed handoff-only retry cannot write shared temp, so it
+/// records its observability on stdout, which the host captures here on the
+/// managed run surface.
 fn learner_transcripts(main_dir: &Path) -> String {
-    let dir = main_dir.join(".fluent/work/artifacts/work-1/attempt-1/learner");
-    let mut names: Vec<String> = fs::read_dir(&dir)
-        .map(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .map(|e| e.file_name().to_string_lossy().to_string())
-                .filter(|n| n.starts_with("transcript") && n.ends_with(".jsonl"))
-                .collect()
-        })
-        .unwrap_or_default();
-    names.sort();
-    names
-        .iter()
-        .filter_map(|n| fs::read_to_string(dir.join(n)).ok())
+    let runs = main_dir.join(".fluent/work/artifacts/work-1/attempt-1/learner/runs");
+    let mut transcripts: Vec<(String, String)> = Vec::new();
+    if let Ok(run_dirs) = fs::read_dir(&runs) {
+        for run in run_dirs.filter_map(|e| e.ok()) {
+            let run_name = run.file_name().to_string_lossy().to_string();
+            if let Ok(entries) = fs::read_dir(run.path()) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with("transcript")
+                        && name.ends_with(".jsonl")
+                        && let Ok(body) = fs::read_to_string(entry.path())
+                    {
+                        transcripts.push((format!("{run_name}/{name}"), body));
+                    }
+                }
+            }
+        }
+    }
+    transcripts.sort_by(|a, b| a.0.cmp(&b.0));
+    transcripts
+        .into_iter()
+        .map(|(_, body)| body)
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -4886,7 +4895,11 @@ fn trusted_learner_has_private_temp_without_shared_temp_access() {
         "shared /private/tmp must stay non-writable: {summary}"
     );
     assert!(
-        summary.contains("/scratch"),
+        summary.contains("/launch-"),
+        "the private temp must be a distinct per-launch directory: {summary}"
+    );
+    assert!(
+        summary.contains("learner/"),
         "the private temp must live beneath the managed Learner surface: {summary}"
     );
 }
@@ -4923,25 +4936,37 @@ fn trusted_learner_auth_401_refreshes_from_transcript() {
         "the Learner must continue automatically after one refresh: {stderr}"
     );
 
-    let transcript = main_dir.join(".fluent/work/artifacts/work-1/attempt-1/learner/transcript.jsonl");
-    assert!(transcript.exists(), "a transcript must be preserved");
+    // The host captures each run's transcript on the host-owned run surface.
+    // The refreshing retry truncates its live transcript, so the session-ending
+    // 401 is preserved in an immutable per-phase sibling the sandboxed coder
+    // cannot write.
+    let runs = main_dir.join(".fluent/work/artifacts/work-1/attempt-1/learner/runs");
+    let mut has_live_transcript = false;
+    let mut preserved_401 = false;
+    for run in fs::read_dir(&runs)
+        .expect("the host-owned run surface must exist")
+        .filter_map(|e| e.ok())
+    {
+        let live = run.path().join("transcript.jsonl");
+        if live.exists() && !fs::read_to_string(&live).unwrap().trim().is_empty() {
+            has_live_transcript = true;
+        }
+        let phase = run.path().join("transcript.0.jsonl");
+        if phase.exists()
+            && fs::read_to_string(&phase)
+                .unwrap()
+                .contains("req-learner-401")
+        {
+            preserved_401 = true;
+        }
+    }
     assert!(
-        !fs::read_to_string(&transcript).unwrap().trim().is_empty(),
-        "the preserved transcript must capture the coder session"
+        has_live_transcript,
+        "a non-empty transcript must be captured on the host-owned run surface"
     );
-    // The refreshing retry truncates the live transcript, so the session-ending
-    // 401 is preserved in an immutable per-phase sibling artifact.
-    let preserved =
-        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/learner/transcript.0.jsonl");
     assert!(
-        preserved.exists(),
-        "the pre-refresh transcript phase must be preserved as an immutable artifact"
-    );
-    assert!(
-        fs::read_to_string(&preserved)
-            .unwrap()
-            .contains("req-learner-401"),
-        "the preserved phase must capture the session-ending 401"
+        preserved_401,
+        "the pre-refresh phase must capture the session-ending 401 as an immutable artifact"
     );
 
     let handoff: serde_json::Value = read_json_path(
@@ -5023,6 +5048,38 @@ fn sandboxed_post_land_coder_runs_and_is_denied() {
             "the real handoff-only sandbox must deny {operation}: {sandbox_results}"
         );
     }
+
+    // The host records the run's evidence on its own run surface, which the
+    // sandboxed coder — confined to a disposable clone with no path to the live
+    // project — cannot replace, delete, or truncate. The transcript and the
+    // submitted-draft snapshot survive the hostile run intact.
+    let runs = main_dir.join(".fluent/work/artifacts/work-1/attempt-1/learner/runs");
+    let mut recorded_submitted_draft = false;
+    let mut recorded_transcript = false;
+    for run in fs::read_dir(&runs)
+        .expect("the host-owned run surface must exist")
+        .filter_map(|e| e.ok())
+    {
+        let submitted = run.path().join("submitted-draft.json");
+        if submitted.exists()
+            && fs::read_to_string(&submitted)
+                .unwrap()
+                .contains("hostile project=")
+        {
+            recorded_submitted_draft = true;
+        }
+        if run.path().join("transcript.jsonl").exists() {
+            recorded_transcript = true;
+        }
+    }
+    assert!(
+        recorded_submitted_draft,
+        "the host must snapshot the submitted draft as immutable run evidence"
+    );
+    assert!(
+        recorded_transcript,
+        "the host must own the run transcript on its own run surface"
+    );
 
     let candidate = main_dir.join("../work-6-work-1-attempt-1");
     assert_eq!(git_head(&main_dir), merged);
