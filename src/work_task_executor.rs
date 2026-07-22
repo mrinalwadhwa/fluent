@@ -943,7 +943,9 @@ fn finalize_review_outcome(
             )),
         };
         let failure = classify_task_failure(&error);
-        lock_mark_task_failed_attempt_needs_user(
+        // A failure to persist the terminal state is attached as secondary context
+        // and never masks the composed primary (still downcastable).
+        if let Err(state_error) = lock_mark_task_failed_attempt_needs_user(
             config.store,
             config.store_lock,
             config.project_root,
@@ -952,34 +954,47 @@ fn finalize_review_outcome(
             config.task_id,
             &failure,
             notify_fn,
-        )?;
+        ) {
+            return Err(error.context(format!(
+                "additionally failed to persist terminal Task state: {state_error:#}"
+            )));
+        }
         return Err(error);
     }
 
     if let Err(error) = cleanup_result {
-        lock_mark_task_failed(
+        if let Err(state_error) = lock_mark_task_failed(
             config.store,
             config.store_lock,
             config.work_item_id,
             config.attempt_id,
             config.task_id,
-        )?;
+        ) {
+            return Err(error.context(format!(
+                "additionally failed to persist terminal Task state: {state_error:#}"
+            )));
+        }
         return Err(error);
     }
 
     if !review_path.is_file() {
-        lock_mark_task_failed(
+        let error = anyhow::anyhow!(
+            "Review Task {:?} completed without writing {}",
+            config.task_id,
+            review_path.display()
+        );
+        if let Err(state_error) = lock_mark_task_failed(
             config.store,
             config.store_lock,
             config.work_item_id,
             config.attempt_id,
             config.task_id,
-        )?;
-        bail!(
-            "Review Task {:?} completed without writing {}",
-            config.task_id,
-            review_path.display()
-        );
+        ) {
+            return Err(error.context(format!(
+                "additionally failed to persist terminal Task state: {state_error:#}"
+            )));
+        }
+        return Err(error);
     }
 
     // Route every post-reservation completion failure — completion read/find and the
@@ -988,13 +1003,17 @@ fn finalize_review_outcome(
     match complete_review_task(config, review_path) {
         Ok(result) => Ok(result),
         Err(error) => {
-            lock_mark_task_failed(
+            if let Err(state_error) = lock_mark_task_failed(
                 config.store,
                 config.store_lock,
                 config.work_item_id,
                 config.attempt_id,
                 config.task_id,
-            )?;
+            ) {
+                return Err(error.context(format!(
+                    "additionally failed to persist terminal Task state: {state_error:#}"
+                )));
+            }
             Err(error)
         }
     }
