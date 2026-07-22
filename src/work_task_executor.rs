@@ -834,13 +834,20 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     ) {
         Ok(workspaces) => workspaces,
         Err(error) => {
-            lock_mark_task_failed(
+            // Preserve the readable-workspace resolution failure as the primary. If
+            // marking the Task failed cannot be persisted, compose it as secondary
+            // context rather than replacing the primary via `?`.
+            if let Err(state_error) = lock_mark_task_failed(
                 config.store,
                 config.store_lock,
                 config.work_item_id,
                 config.attempt_id,
                 config.task_id,
-            )?;
+            ) {
+                return Err(error.context(format!(
+                    "additionally failed to persist terminal Task state: {state_error:#}"
+                )));
+            }
             return Err(error);
         }
     };
