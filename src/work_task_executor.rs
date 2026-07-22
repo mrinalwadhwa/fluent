@@ -918,14 +918,28 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     )
 }
 
+/// A terminal review failure that a supported resume can retry: an expired auth
+/// token or a transcript-pump infrastructure failure. These pause the Attempt
+/// (`NeedsUser`) rather than hard-failing it, so the operator can fix the transport
+/// and resume the same Task.
+fn is_resumable_task_failure(error: &anyhow::Error) -> bool {
+    matches!(
+        classify_task_failure(error),
+        TaskFailure::Auth(_) | TaskFailure::TranscriptPump(_)
+    )
+}
+
 /// Compose a Reviewer's coder/pump outcome with its workspace-confinement cleanup
 /// outcome and durably terminalize the Task before returning.
 ///
-/// A confinement cleanup failure never masks or erases a coder/pump primary: when
-/// the coder failed, that typed primary is preserved and any cleanup failure is
-/// attached as secondary context (so the typed [`crate::transcript_pump::TranscriptPumpError`]
-/// stays discoverable by downcast); when only cleanup failed, it is the primary.
-/// On success the completion is persisted through the same terminal boundary.
+/// A typed transcript-pump/auth primary is resumable: it is preserved (still
+/// discoverable by downcast), the Attempt is paused for a supported resume, and any
+/// cleanup failure is composed as secondary context so cleanup never masks it. A
+/// workspace-confinement cleanup failure is a hard integrity failure that fails the
+/// Task/Attempt. A non-resumable coder error with a clean workspace pauses the Task
+/// for needs-user handling. On success the completion is persisted through the same
+/// terminal boundary. A terminal-state persistence failure is always composed as
+/// secondary context and never masks the primary.
 fn finalize_review_outcome(
     config: &WorkTaskRunConfig<'_>,
     run_result: Result<()>,
@@ -933,9 +947,10 @@ fn finalize_review_outcome(
     review_path: &Path,
     notify_fn: &dyn Fn(&str, &str),
 ) -> Result<WorkTaskRunResult> {
-    if let Err(error) = run_result {
-        // The coder/pump failure is the primary. Retain a confinement cleanup
-        // failure as secondary context without letting it displace the primary.
+    // A resumable typed primary (transcript-pump/auth) wins over a cleanup failure:
+    // preserve it, pause the Attempt, and keep the cleanup failure as secondary.
+    let run_result = if matches!(&run_result, Err(error) if is_resumable_task_failure(error)) {
+        let error = run_result.err().expect("checked Err above");
         let error = match cleanup_result {
             Ok(()) => error,
             Err(cleanup_error) => error.context(format!(
@@ -943,8 +958,6 @@ fn finalize_review_outcome(
             )),
         };
         let failure = classify_task_failure(&error);
-        // A failure to persist the terminal state is attached as secondary context
-        // and never masks the composed primary (still downcastable).
         if let Err(state_error) = lock_mark_task_failed_attempt_needs_user(
             config.store,
             config.store_lock,
@@ -960,15 +973,47 @@ fn finalize_review_outcome(
             )));
         }
         return Err(error);
-    }
+    } else {
+        run_result
+    };
 
-    if let Err(error) = cleanup_result {
+    // A workspace-confinement cleanup failure is a hard integrity failure: the
+    // reviewer left the candidate workspace unclean. It fails the Task/Attempt and
+    // is the primary reason returned; a non-resumable coder error is retained as
+    // secondary context.
+    if let Err(cleanup_error) = cleanup_result {
+        let error = match run_result {
+            Err(coder_error) => cleanup_error
+                .context(format!("the reviewer coder also failed: {coder_error:#}")),
+            Ok(()) => cleanup_error,
+        };
         if let Err(state_error) = lock_mark_task_failed(
             config.store,
             config.store_lock,
             config.work_item_id,
             config.attempt_id,
             config.task_id,
+        ) {
+            return Err(error.context(format!(
+                "additionally failed to persist terminal Task state: {state_error:#}"
+            )));
+        }
+        return Err(error);
+    }
+
+    // A non-resumable coder error with a clean workspace pauses the Task for
+    // needs-user handling.
+    if let Err(error) = run_result {
+        let failure = classify_task_failure(&error);
+        if let Err(state_error) = lock_mark_task_failed_attempt_needs_user(
+            config.store,
+            config.store_lock,
+            config.project_root,
+            config.work_item_id,
+            config.attempt_id,
+            config.task_id,
+            &failure,
+            notify_fn,
         ) {
             return Err(error.context(format!(
                 "additionally failed to persist terminal Task state: {state_error:#}"
