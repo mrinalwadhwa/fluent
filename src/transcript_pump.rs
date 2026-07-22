@@ -2393,6 +2393,7 @@ mod tests {
         let last_error = settlement
             .diagnostics
             .last_error
+            .clone()
             .expect("a failed write records a last error");
         assert!(
             last_error.len() <= MAX_STATUS_ERROR_LEN,
