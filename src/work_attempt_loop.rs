@@ -976,13 +976,13 @@ fn finalize_learning(
                     kind,
                 ));
                 if let Err(store_err) = store.write_work_item(item) {
-                    // The handoff-write failure is the primary fault. A failure to
-                    // persist the terminal learning record is composed as a SECONDARY
-                    // so the typed primary stays discoverable rather than being masked
-                    // by the store error.
-                    return Err(err.context(format!(
-                        "additionally failed to persist the terminal learning record: {store_err:#}"
-                    )));
+                    // The handoff-write failure is the primary fault. The store failure
+                    // is retained STRUCTURALLY as a secondary (still downcastable), not
+                    // flattened to a string, so both typed diagnostics stay recoverable
+                    // and the primary is never masked.
+                    return Err(err
+                        .context(store_err)
+                        .context("failed to persist the terminal learning record"));
                 }
             }
         },
@@ -998,12 +998,12 @@ fn finalize_learning(
                 kind,
             ));
             if let Err(store_err) = store.write_work_item(item) {
-                // The coder/confinement/handoff failure is the PRIMARY. A failure to
-                // persist the terminal learning record is composed as a SECONDARY so
-                // the typed primary is never masked by the store error.
-                return Err(err.context(format!(
-                    "additionally failed to persist the terminal learning record: {store_err:#}"
-                )));
+                // The coder/confinement/handoff failure is the PRIMARY. The store
+                // failure is retained STRUCTURALLY as a secondary (still downcastable),
+                // not flattened to a string, so the typed primary is never masked.
+                return Err(err
+                    .context(store_err)
+                    .context("failed to persist the terminal learning record"));
             }
         }
     }
@@ -4360,17 +4360,23 @@ mod tests {
         })
         .expect_err("a terminal store-write failure surfaces as an error");
 
-        // The typed primary is preserved as the cause, still downcastable for the
+        // The typed primary is preserved in the chain, still downcastable for the
         // pause-kind classification.
         assert!(
             err.downcast_ref::<crate::transcript_pump::TranscriptPumpError>()
                 .is_some(),
             "the typed primary is preserved as the cause: {err:#}"
         );
-        // The store failure is composed as a secondary, never the returned cause.
+        // The store failure is retained STRUCTURALLY as a secondary — downcastable,
+        // not flattened to a string — so both typed diagnostics stay recoverable.
+        assert!(
+            err.downcast_ref::<crate::work_model::WorkModelStorageError>()
+                .is_some(),
+            "the store failure is retained as a downcastable secondary: {err:#}"
+        );
         assert!(
             format!("{err:#}").contains("failed to persist the terminal learning record"),
-            "the store failure is composed as a secondary: {err:#}"
+            "the composite names the terminal-store persistence failure: {err:#}"
         );
     }
 
