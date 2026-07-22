@@ -962,7 +962,7 @@ impl StatusCoordinator {
                 // joining) and returns a settlement carrying the worker error rather
                 // than poisoning the join.
                 std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    run_status_worker(&worker_shared, &wake_rx, &mut *store)
+                    run_status_worker(&worker_shared, &wake_rx, &mut *store, first_fault.as_ref())
                 }))
                 .unwrap_or_else(|_| {
                     if let Some(latch) = &first_fault {
@@ -1113,6 +1113,7 @@ fn run_status_worker(
     shared: &Arc<SharedStatusState>,
     wake_rx: &Receiver<()>,
     store: &mut dyn StatusStore,
+    first_fault: Option<&Arc<FirstFault>>,
 ) -> StatusSettlement {
     loop {
         loop {
@@ -1127,7 +1128,7 @@ fn run_status_worker(
                     shared.record_write(&result, WriteKind::Periodic);
                 }
                 Work::Terminal(spec) => {
-                    return finalize_terminal(shared, store, spec);
+                    return finalize_terminal(shared, store, spec, first_fault);
                 }
                 Work::Idle => break,
             }
@@ -1155,6 +1156,7 @@ fn finalize_terminal(
     shared: &Arc<SharedStatusState>,
     store: &mut dyn StatusStore,
     spec: TerminalStatusSpec,
+    first_fault: Option<&Arc<FirstFault>>,
 ) -> StatusSettlement {
     let settlement_error = match write_accounted_terminal(shared, store, &spec) {
         Ok(()) => {
@@ -1169,6 +1171,12 @@ fn finalize_terminal(
     // Record the Complete error in shared state BEFORE the fallback, so a fallback
     // that itself panics still surfaces the original Complete error.
     shared.set_settlement_error(&settlement_error);
+    // Publish the terminal-settlement failure to the first-fault latch BEFORE the
+    // fallback, so supervision reacts even if the Failed fallback write blocks. A
+    // capture fault already published first wins; this is a no-op then.
+    if let Some(latch) = first_fault {
+        latch.publish(&TranscriptPumpError::new(settlement_error.clone()));
+    }
     // A Complete that could not be persisted attempts exactly one Failed fallback,
     // itself accounted as a real submission.
     if spec.state == PumpState::Complete {
@@ -1212,11 +1220,17 @@ fn write_accounted_terminal(
     result
 }
 
+/// The thread names whose panics are caught and reported through durable status
+/// rather than the default hook: the capture pump and its status worker. Both are
+/// recovered — the status worker publishes to the first-fault latch and reconciles
+/// its work — so their panics must never block writing a saturated stderr first.
+const PUMP_THREAD_NAMES: [&str; 2] = ["transcript-pump", "transcript-pump-status"];
+
 /// Install, once per process, a panic hook that suppresses the default hook's
-/// blocking stderr write for transcript-pump threads. The pump's panic is caught
-/// and reported through durable status instead, so a saturated stderr can never
-/// block panic recovery. Non-pump panics keep the previous hook's behavior. This
-/// is a single process-wide install, not a racy per-thread swap of the hook.
+/// blocking stderr write for transcript-pump threads. A pump or status-worker panic
+/// is caught and reported through durable status instead, so a saturated stderr can
+/// never block panic recovery. Non-pump panics keep the previous hook's behavior.
+/// This is a single process-wide install, not a racy per-thread swap of the hook.
 fn ensure_pump_panic_hook() {
     static INIT: OnceLock<()> = OnceLock::new();
     INIT.get_or_init(|| {
@@ -1224,7 +1238,7 @@ fn ensure_pump_panic_hook() {
         std::panic::set_hook(Box::new(move |info| {
             let is_pump = std::thread::current()
                 .name()
-                .is_some_and(|name| name == "transcript-pump");
+                .is_some_and(|name| PUMP_THREAD_NAMES.contains(&name));
             if !is_pump {
                 previous(info);
             }
@@ -1851,6 +1865,56 @@ mod tests {
             settlement.periodic_error.is_none(),
             "a required write failure is not a periodic error: {:?}",
             settlement.periodic_error
+        );
+    }
+
+    /// A store that persists Running but panics on the terminal write, modelling a
+    /// status worker that unwinds while persisting the terminal state.
+    struct PanicOnTerminalStore;
+
+    impl StatusStore for PanicOnTerminalStore {
+        fn write(&mut self, status: &PumpStatus) -> Result<(), String> {
+            if status.state == PumpState::Running {
+                Ok(())
+            } else {
+                panic!("simulated terminal status store panic");
+            }
+        }
+    }
+
+    #[test]
+    fn status_worker_panic_recovers_pump_promptly() {
+        // Re-audit regression: a status worker panic (the `transcript-pump-status`
+        // thread) is caught and recovered without blocking — the process-wide hook
+        // suppresses its blocking default stderr output — so the pump surfaces a
+        // typed failure promptly and latches the first fault.
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let mut pump = spawn_pump_with_store(
+            Cursor::new(b"{\"rec\":1}\n".to_vec()),
+            transcript,
+            Some(Box::new(PanicOnTerminalStore)),
+            console_preview_sink(),
+            TranscriptPumpConfig::default(),
+        )
+        .unwrap();
+
+        let started = Instant::now();
+        let outcome = pump.wait_terminal();
+        let elapsed = started.elapsed();
+        pump.join();
+
+        assert!(
+            outcome.is_err(),
+            "a status worker panic surfaces a typed pump failure"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "panic recovery must be prompt, not blocked; took {elapsed:?}"
+        );
+        assert!(
+            pump.first_fault_observed(),
+            "the status worker panic latched the first fault"
         );
     }
 

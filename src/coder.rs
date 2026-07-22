@@ -2160,11 +2160,25 @@ mod pump_supervision_tests {
         }
     }
 
-    /// A status store that persists Running immediately but blocks every terminal
-    /// write until the test releases it, so terminal settlement is deterministically
-    /// delayed.
+    /// A pump reader that reaches EOF immediately, so capture succeeds and the
+    /// coordinator settles a Complete status.
+    struct EofReader;
+
+    impl std::io::Read for EofReader {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    /// A status store that persists Running immediately but announces when it enters
+    /// a terminal write and then blocks it until the test releases the gate. The
+    /// handshake proves the store is blocked inside terminal persistence before the
+    /// test observes the coder being reaped. It can also fail the Complete write, so
+    /// the blocked write is the Failed fallback.
     struct GateTerminalStore {
+        entered: std::sync::mpsc::Sender<crate::transcript_pump::PumpState>,
         gate: std::sync::mpsc::Receiver<()>,
+        fail_complete: bool,
     }
 
     impl crate::transcript_pump::StatusStore for GateTerminalStore {
@@ -2172,25 +2186,35 @@ mod pump_supervision_tests {
             &mut self,
             status: &crate::transcript_pump::PumpStatus,
         ) -> Result<(), String> {
-            if status.state != crate::transcript_pump::PumpState::Running {
-                let _ = self.gate.recv();
+            use crate::transcript_pump::PumpState;
+            match status.state {
+                PumpState::Running => Ok(()),
+                PumpState::Complete if self.fail_complete => {
+                    Err("simulated complete write failure".to_string())
+                }
+                _ => {
+                    // Announce entry into the terminal write, then block on the gate.
+                    let _ = self.entered.send(status.state);
+                    let _ = self.gate.recv();
+                    Ok(())
+                }
             }
-            Ok(())
         }
     }
 
+    /// Drive supervision against a coder and a gated terminal store, proving the
+    /// coder is terminated and reaped while the store is blocked inside terminal
+    /// persistence — the first fault reaches supervision before settlement unblocks.
     #[cfg(unix)]
-    #[test]
-    fn first_fault_reaches_supervisor_before_terminal_status_unblocks() {
-        // B2: a gated status store delays terminal settlement. The pump publishes its
-        // first fault before settlement, so supervision terminates and reaps the
-        // still-live coder WITHOUT waiting for the blocked terminal status write.
+    fn assert_first_fault_reaps_before_settlement<R>(reader: R, fail_complete: bool, coder: &str)
+    where
+        R: std::io::Read + Send + 'static,
+    {
         let dir = tempfile::tempdir().unwrap();
         let transcript = dir.path().join("transcript.jsonl");
 
-        // A live coder that would outlive the fault by seconds.
         let mut cmd = Command::new("/bin/sh");
-        cmd.arg("-c").arg("sleep 5");
+        cmd.arg("-c").arg(coder);
         {
             use std::os::unix::process::CommandExt;
             cmd.process_group(0);
@@ -2198,10 +2222,15 @@ mod pump_supervision_tests {
         let child = cmd.spawn().unwrap();
         let child_id = child.id();
 
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
-        let store = GateTerminalStore { gate: gate_rx };
+        let store = GateTerminalStore {
+            entered: entered_tx,
+            gate: gate_rx,
+            fail_complete,
+        };
         let pump = crate::transcript_pump::spawn_pump_with_store(
-            ErrorOnFirstRead,
+            reader,
             transcript.clone(),
             Some(Box::new(store)),
             crate::transcript_pump::console_preview_sink(),
@@ -2211,11 +2240,15 @@ mod pump_supervision_tests {
 
         let mut supervisor = CoderSupervisor::new(child, child_id);
         supervisor.attach_pump(pump);
-
-        // Supervise on another thread so the test can observe the coder reaped while
-        // the terminal write is still gated shut.
         let handle = std::thread::spawn(move || supervisor.supervise());
 
+        // Handshake: the store has entered terminal persistence and is now blocked.
+        let entered = entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the store must enter a blocked terminal write");
+        assert_ne!(entered, crate::transcript_pump::PumpState::Running);
+
+        // While it is blocked, the coder must be terminated and reaped.
         let is_alive = |pid: u32| {
             Command::new("/bin/kill")
                 .args(["-0", &pid.to_string()])
@@ -2231,11 +2264,10 @@ mod pump_supervision_tests {
         }
         assert!(
             !is_alive(child_id),
-            "the coder must be reaped before the terminal status unblocks, well before its 5s sleep"
+            "the coder must be reaped while the terminal write is still blocked"
         );
 
-        // Only now release the gated terminal settlement; supervision returns the
-        // typed pump failure.
+        // Only now release the blocked terminal write; supervision returns typed.
         let _ = gate_tx.send(());
         let result = handle.join().unwrap();
         let err = result.expect_err("the first fault must surface as a typed failure");
@@ -2244,6 +2276,34 @@ mod pump_supervision_tests {
                 .is_some(),
             "the failure must be a typed transcript-pump error: {err}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn first_fault_reaches_supervisor_before_terminal_status_unblocks() {
+        // B2: a capture read fault publishes the first fault before terminal
+        // settlement; supervision reaps the still-live coder while the terminal
+        // (Failed) write is blocked.
+        assert_first_fault_reaps_before_settlement(ErrorOnFirstRead, false, "sleep 5");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_panic_first_fault_reaches_supervisor_before_settlement() {
+        // B2: a capture PANIC (not just a returned error) is caught, its first fault
+        // published before settlement, and supervision reaps the still-live coder
+        // while the terminal write is blocked.
+        assert_first_fault_reaps_before_settlement(PanicOnRead, false, "sleep 5");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn complete_write_failure_first_fault_reaches_supervisor_before_fallback() {
+        // Re-audit regression: capture succeeds but the Complete write fails and the
+        // Failed fallback blocks. The Complete failure must publish the first fault
+        // BEFORE the blocked fallback, so supervision reaps the still-running coder
+        // without waiting for the fallback to unblock.
+        assert_first_fault_reaps_before_settlement(EofReader, true, "sleep 5");
     }
 }
 
