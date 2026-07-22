@@ -963,7 +963,14 @@ fn cmd_task(
                 no_sandbox: no_sandbox || global_no_sandbox,
                 store_lock: None,
             })?;
-            println!("Completed Task {} at {}", result.task_id, result.output);
+            match result {
+                Some(result) => {
+                    println!("Completed Task {} at {}", result.task_id, result.output)
+                }
+                None => println!(
+                    "Task {task_id} did not start: the Attempt was already resolved by a peer"
+                ),
+            }
         }
     }
     Ok(())
@@ -1028,10 +1035,15 @@ fn cmd_tester(project_root: &Path, command: TesterCommands, global_no_sandbox: b
                 no_sandbox: no_sandbox || global_no_sandbox,
                 store_lock: None,
             })?;
-            println!(
-                "Completed Tester Task {} at {}",
-                result.task_id, result.output
-            );
+            match result {
+                Some(result) => println!(
+                    "Completed Tester Task {} at {}",
+                    result.task_id, result.output
+                ),
+                None => println!(
+                    "Tester Task {task_id} did not start: the Attempt was already resolved by a peer"
+                ),
+            }
         }
     }
     Ok(())
