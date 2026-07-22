@@ -1054,7 +1054,7 @@ impl LeaderProcess for SystemLeader {
 /// A cleanup step that could not be completed. It is a diagnostic outcome the
 /// caller composes with any primary pump failure rather than discards, so a coder
 /// that could not be terminated or reaped is never silently reported as clean.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum CleanupError {
     /// Neither the verified group signal nor the direct-child kill settled the
     /// group, so the coder cannot be guaranteed terminated. Retains both OS errors.
@@ -1070,6 +1070,10 @@ enum CleanupError {
     GroupNotSwept { id: u32, signal: ProcessOpError },
     /// The leader could not be reaped; retains the reap operation's OS error.
     NotReaped { id: u32, source: ProcessOpError },
+    /// The leader's identity was already lost (`ECHILD`: reaped out from under the
+    /// managed child). Its PID/PGID may now be recycled, so it was deliberately NOT
+    /// signaled or reaped — doing so could hit an unrelated process.
+    IdentityLost { id: u32 },
 }
 
 impl std::fmt::Display for CleanupError {
@@ -1083,6 +1087,9 @@ impl std::fmt::Display for CleanupError {
             }
             CleanupError::NotReaped { id, source } => {
                 write!(f, "coder process {id} could not be reaped ({source})")
+            }
+            CleanupError::IdentityLost { id } => {
+                write!(f, "coder process {id} identity was already lost (ECHILD); not signaled or reaped to avoid a recycled PID")
             }
         }
     }
@@ -1104,6 +1111,11 @@ struct CleanupOutcome {
     direct_kill: Option<Result<(), ProcessOpError>>,
     /// The leader's cached exit code, once reaped. `Some` marks the leader reaped.
     exit_code: Option<i32>,
+    /// The finalized cleanup result, computed exactly once. Once set, every repeated
+    /// cleanup (explicit or `Drop`) returns it verbatim without any further
+    /// signal/kill/reap — success AND failure are cached, so a stale or recycled PID
+    /// is never signaled or reaped twice.
+    finalized: Option<Result<i32, CleanupError>>,
 }
 
 impl CleanupOutcome {
@@ -1189,50 +1201,55 @@ impl ManagedChild {
     /// the state unsettled so a retry can re-attempt; a failed reap likewise stays
     /// incomplete and retryable. Its diagnostics survive on the outcome.
     fn terminate_and_reap(&mut self) -> Result<i32, CleanupError> {
+        // One-shot: the first call computes and caches the terminal outcome; every
+        // later call (an explicit retry or Drop) returns it verbatim WITHOUT any
+        // further signal/kill/reap. Caching failure too is what guarantees a stale or
+        // recycled PID is never signaled or reaped twice.
+        if let Some(finalized) = self.outcome.finalized {
+            return finalized;
+        }
+        let result = self.finalize_cleanup();
+        self.outcome.finalized = Some(result);
+        result
+    }
+
+    /// Compute the cleanup outcome exactly once. Sweeps the group while the leader
+    /// still pins its PID/PGID identity, then reaps. A leader whose identity was
+    /// already lost (`ECHILD`) is NEVER signaled or reaped — its PID may be recycled.
+    fn finalize_cleanup(&mut self) -> Result<i32, CleanupError> {
         let id = self.leader.id();
-        // Resolve a cached terminal outcome first (idempotent). A reaped leader is
-        // clean ONLY if its group was verifiably swept; a direct-kill-only cleanup
-        // retains its group-sweep failure on every repeat rather than flipping to
-        // success.
-        if self.outcome.exit_code.is_some() {
-            return if self.outcome.group_swept() {
-                Ok(self.outcome.exit_code.unwrap())
-            } else {
-                Err(CleanupError::GroupNotSwept {
-                    id,
-                    signal: self.outcome.group_sweep_error(),
-                })
-            };
+        // Observe the leader's exit without reaping so the group is swept while the
+        // leader still pins PID/PGID identity. Pump EOF or a leader exit never means
+        // descendants are already gone. The observation is not used to infer the
+        // sweep — only the structured signal result decides that.
+        let observed = self.leader.poll_exit();
+        if observed == ExitObservation::IdentityLost {
+            // The leader was reaped out from under us; its PID/PGID may already be
+            // recycled. Signaling or reaping it could hit an unrelated process, so do
+            // NEITHER. Record the group as gone and surface the identity loss.
+            self.outcome.group_signal = Some(GroupSweep::AlreadyGone);
+            return Err(CleanupError::IdentityLost { id });
         }
-        // Sweep the group, retrying if no prior attempt terminated the leader.
-        if !self.outcome.leader_terminated() {
-            // Observe the leader's exit without reaping so the group is swept while
-            // the leader still pins PID/PGID identity. Pump EOF or a leader exit
-            // never means descendants are already gone. The observation is not used
-            // to infer the sweep — only the structured signal result decides that.
-            let _observed = self.leader.poll_exit();
-            let sweep = self.leader.signal_group();
-            let swept = sweep.swept();
-            self.outcome.group_signal = Some(sweep);
-            if !swept {
-                // The verified group signal failed; fall back to killing the direct
-                // leader while it is still owned. This terminates the leader but does
-                // NOT sweep the group or its descendants.
-                self.outcome.direct_kill = Some(self.leader.kill_leader());
-            }
+        let sweep = self.leader.signal_group();
+        let swept = sweep.swept();
+        self.outcome.group_signal = Some(sweep);
+        if !swept {
+            // The verified group signal failed; fall back to killing the direct
+            // leader while it is still owned. This terminates the leader but does NOT
+            // sweep the group or its descendants.
+            self.outcome.direct_kill = Some(self.leader.kill_leader());
         }
         if !self.outcome.leader_terminated() {
-            // Both the group signal and the direct kill failed. Do not block on a
-            // reap that may never complete; surface a retryable cleanup failure that
-            // retains both OS errors.
+            // Both the group signal and the direct kill failed; surface a cleanup
+            // failure retaining both OS errors, without blocking on a reap.
             return Err(CleanupError::NotTerminated {
                 id,
                 signal: self.outcome.group_sweep_error(),
                 kill: self.outcome.direct_kill_error(),
             });
         }
-        // The leader is terminated. Reap it exactly once; a failed reap stays
-        // incomplete and retryable, retaining its OS error.
+        // The leader is terminated. Reap it exactly once, retaining the reap's OS
+        // error on failure.
         let code = match self.leader.reap() {
             Ok(code) => code,
             Err(source) => return Err(CleanupError::NotReaped { id, source }),
@@ -2357,10 +2374,11 @@ mod pump_supervision_tests {
     }
 
     #[test]
-    fn double_termination_failure_is_retryable_not_latched() {
+    fn double_termination_failure_is_cached_not_retried() {
         // B6: when both the group signal and the direct kill fail, cleanup returns a
-        // retryable NotTerminated failure without blocking on a reap, and a later
-        // attempt re-signals rather than latching a permanent terminated state.
+        // NotTerminated failure without blocking on a reap, and — because cleanup is
+        // one-shot — a later call returns the cached failure verbatim without
+        // re-signaling a PID that may by then be recycled.
         let calls = Arc::new(Mutex::new(Vec::new()));
         let leader = FakeLeader {
             group_settles: false,
@@ -2382,8 +2400,8 @@ mod pump_supervision_tests {
         let calls = calls.lock().unwrap();
         assert_eq!(
             calls.iter().filter(|c| **c == "signal_group").count(),
-            2,
-            "termination is retried, not permanently latched"
+            1,
+            "the failed termination is cached, never re-signaled"
         );
         assert_eq!(
             calls.iter().filter(|c| **c == "reap").count(),
@@ -2393,9 +2411,10 @@ mod pump_supervision_tests {
     }
 
     #[test]
-    fn reap_failure_is_retryable_after_termination() {
-        // B6: once the group is settled, a failed reap is retryable — the second
-        // attempt reaps without re-signaling the already-settled group.
+    fn reap_failure_is_cached_not_retried() {
+        // B6: a failed reap is cached, not retried — a later call returns the cached
+        // NotReaped failure without a second reap that, on a recycled PID, could reap
+        // an unrelated process. One-shot cleanup is the safety contract.
         let calls = Arc::new(Mutex::new(Vec::new()));
         let mut leader = FakeLeader::new(Arc::clone(&calls), None);
         leader.reaps = std::collections::VecDeque::from([None, Some(5)]);
@@ -2404,18 +2423,24 @@ mod pump_supervision_tests {
             managed.terminate_and_reap(),
             Err(CleanupError::NotReaped { .. })
         ));
-        assert_eq!(
-            managed.terminate_and_reap().unwrap(),
-            5,
-            "the retried reap succeeds"
+        assert!(
+            matches!(
+                managed.terminate_and_reap(),
+                Err(CleanupError::NotReaped { .. })
+            ),
+            "the failed reap is cached, not retried into a second reap"
         );
         let calls = calls.lock().unwrap();
         assert_eq!(
             calls.iter().filter(|c| **c == "signal_group").count(),
             1,
-            "the settled group is not re-signaled on the reap retry"
+            "the settled group is not re-signaled"
         );
-        assert_eq!(calls.iter().filter(|c| **c == "reap").count(), 2);
+        assert_eq!(
+            calls.iter().filter(|c| **c == "reap").count(),
+            1,
+            "the leader is never reaped a second time"
+        );
     }
 
     #[test]
