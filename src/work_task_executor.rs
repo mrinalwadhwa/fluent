@@ -2569,7 +2569,17 @@ pub fn expertise_proposal_follow_up(
 /// The coder is sandboxed to write only `.fluent/expertise/`, the designated
 /// managed handoff surface, and the Git metadata an expertise commit needs — not
 /// the Observation backlog, the Work model, or the rest of the workspace.
-pub fn run_learner(
+/// Public entry point, source-compatible for external callers: runs the Learner
+/// with no host-resolved transcript capture. The production Attempt loop uses the
+/// crate-private [`run_learner_captured`] to thread its immutable resolved capture,
+/// so no transient capture state ever appears on the public signature or inputs.
+pub fn run_learner(inputs: LearnerRunInputs<'_>) -> Result<()> {
+    run_learner_captured(inputs, None)
+}
+
+/// Crate-private captured entry: threads the immutable resolved [`TranscriptCapture`]
+/// the Attempt adapter resolved once, without exposing it on the public API.
+pub(crate) fn run_learner_captured(
     inputs: LearnerRunInputs<'_>,
     capture: Option<crate::coder::TranscriptCapture<'_>>,
 ) -> Result<()> {

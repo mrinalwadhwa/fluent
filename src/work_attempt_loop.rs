@@ -470,7 +470,7 @@ fn default_learner_run_coder(
     // LearnerRunInputs; the public constructor never names the private pump config.
     let capture =
         crate::coder::TranscriptCapture::new(request.transcript_path, config.project_root);
-    work_task_executor::run_learner(
+    work_task_executor::run_learner_captured(
         work_task_executor::LearnerRunInputs {
             workspace_path: request.workspace_path,
             resolver: config.resolver,
