@@ -7,12 +7,13 @@
 //! detected incrementally only to drive a bounded, best-effort console preview
 //! and to count records; they never gate the canonical byte path.
 
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -23,7 +24,11 @@ use serde::{Deserialize, Serialize};
 ///
 /// v2 adds `periodic_error`: a best-effort periodic status write may fail without
 /// failing capture, and that last failure is retained on the terminal status.
-pub const PUMP_STATUS_SCHEMA_VERSION: u32 = 2;
+///
+/// v3 adds `transport`: the status coordinator's exact accounting of every status
+/// submission (written, coalesced, dropped, disconnected, write-failed) plus the
+/// last error, so a terminal status proves it lost nothing silently.
+pub const PUMP_STATUS_SCHEMA_VERSION: u32 = 3;
 
 /// Built-in size, in bytes, of each read chunk pulled from coder stdout.
 pub const DEFAULT_READ_CHUNK_SIZE: usize = 64 * 1024;
@@ -128,26 +133,89 @@ pub trait PreviewSink: Send + Sync {
 /// A typed transcript-pump infrastructure failure. Coder supervision converts
 /// this into a terminal error that bypasses the generic coder retry budget, so a
 /// capture failure never masquerades as a retryable coder error.
-#[derive(Debug, Clone)]
+///
+/// The `message` is the immutable primary fault — the first thing that went
+/// wrong. Bounded secondary diagnostics ride alongside it rather than overwriting
+/// it, so a Complete-to-Failed fallback failure, a periodic write failure, or a
+/// status-worker panic that happens WHILE the primary fault is being reported can
+/// all be preserved without ever masking the primary cause.
+#[derive(Debug, Clone, Default)]
 pub struct TranscriptPumpError {
     message: String,
+    /// The last best-effort periodic status write failure, retained as evidence.
+    periodic_error: Option<String>,
+    /// A terminal-settlement failure (the Complete/Failed status could not be
+    /// persisted) observed while reporting the primary fault.
+    settlement_error: Option<String>,
+    /// A Complete-to-Failed fallback write failure.
+    fallback_error: Option<String>,
+    /// A status-coordinator worker panic or join failure.
+    worker_error: Option<String>,
+    /// The coordinator's balanced transport accounting, when a status coordinator
+    /// was involved.
+    transport: Option<StatusTransportDiagnostics>,
 }
 
 impl TranscriptPumpError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            ..Self::default()
         }
     }
 
     pub fn message(&self) -> &str {
         &self.message
     }
+
+    pub fn periodic_error(&self) -> Option<&str> {
+        self.periodic_error.as_deref()
+    }
+
+    pub fn settlement_error(&self) -> Option<&str> {
+        self.settlement_error.as_deref()
+    }
+
+    pub fn fallback_error(&self) -> Option<&str> {
+        self.fallback_error.as_deref()
+    }
+
+    pub fn worker_error(&self) -> Option<&str> {
+        self.worker_error.as_deref()
+    }
+
+    pub fn transport(&self) -> Option<&StatusTransportDiagnostics> {
+        self.transport.as_ref()
+    }
+
+    /// Fold a completed status settlement's secondary diagnostics onto this
+    /// primary fault without overwriting the primary `message`.
+    fn with_settlement(mut self, settlement: &StatusSettlement) -> Self {
+        self.periodic_error = settlement.diagnostics.last_error.clone();
+        self.settlement_error = settlement.settlement_error.clone();
+        self.fallback_error = settlement.fallback_error.clone();
+        self.worker_error = settlement.worker_error.clone();
+        self.transport = Some(settlement.diagnostics.clone());
+        self
+    }
 }
 
 impl std::fmt::Display for TranscriptPumpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "transcript pump failure: {}", self.message)
+        write!(f, "transcript pump failure: {}", self.message)?;
+        if let Some(err) = &self.settlement_error {
+            write!(f, "; terminal-status settlement failed: {err}")?;
+        }
+        if let Some(err) = &self.fallback_error {
+            write!(f, "; failed-status fallback failed: {err}")?;
+        }
+        if let Some(err) = &self.periodic_error {
+            write!(f, "; last periodic status error: {err}")?;
+        }
+        if let Some(err) = &self.worker_error {
+            write!(f, "; status worker error: {err}")?;
+        }
+        Ok(())
     }
 }
 
@@ -195,6 +263,47 @@ pub struct PumpStatus {
     /// flaky status filesystem is observable without failing canonical capture.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub periodic_error: Option<String>,
+    /// The status coordinator's transport accounting at the time this status was
+    /// written. On a terminal status it balances every submission and proves no
+    /// snapshot remained pending; on an intermediate status it is the running tally.
+    #[serde(default)]
+    pub transport: StatusTransportDiagnostics,
+}
+
+/// Exact, balanced accounting of every status submission a [`StatusCoordinator`]
+/// handled. Each submission lands in exactly one terminal category, so a terminal
+/// status can prove it discarded nothing without an operator noticing.
+///
+/// The balance invariant
+/// `submitted == written + coalesced + dropped + disconnected + write_failures`
+/// holds at every terminal settlement.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusTransportDiagnostics {
+    /// Total status submissions the coordinator was asked to persist.
+    pub submitted: u64,
+    /// Submissions the store persisted successfully.
+    pub written: u64,
+    /// Periodic snapshots replaced in the pending slot by a newer snapshot before
+    /// the worker could write them.
+    pub coalesced: u64,
+    /// Periodic snapshots dropped because terminal sealing had already begun.
+    pub dropped: u64,
+    /// Submissions refused because the coordinator's worker had already shut down.
+    pub disconnected: u64,
+    /// Submissions the store attempted but failed to persist.
+    pub write_failures: u64,
+    /// The most recent write failure message, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+impl StatusTransportDiagnostics {
+    /// Whether the balance invariant holds: every submission is accounted for in
+    /// exactly one terminal category.
+    pub fn is_balanced(&self) -> bool {
+        self.submitted
+            == self.written + self.coalesced + self.dropped + self.disconnected + self.write_failures
+    }
 }
 
 /// Shared, panic-safe pump counters. They live behind atomics so the pump's
@@ -256,91 +365,93 @@ pub fn drain(
     config: &TranscriptPumpConfig,
 ) -> Result<PumpSummary, TranscriptPumpError> {
     let counters = SharedCounters::default();
-    drain_with_counters(
-        reader,
-        transcript_path,
-        status_path,
-        preview,
-        config,
-        &counters,
-    )
+    let store = status_path.map(file_status_store);
+    drain_with_counters(reader, transcript_path, store, preview, config, &counters)
+}
+
+/// Drive a drain against an injected [`StatusStore`], so tests can gate, fail, or
+/// disconnect status writes deterministically instead of relying on timing.
+#[cfg(test)]
+pub(crate) fn drain_with_store(
+    reader: impl Read,
+    transcript_path: &Path,
+    store: Option<Box<dyn StatusStore>>,
+    preview: &dyn PreviewSink,
+    config: &TranscriptPumpConfig,
+) -> Result<PumpSummary, TranscriptPumpError> {
+    let counters = SharedCounters::default();
+    drain_with_counters(reader, transcript_path, store, preview, config, &counters)
 }
 
 fn drain_with_counters(
     reader: impl Read,
     transcript_path: &Path,
-    status_path: Option<&Path>,
+    store: Option<Box<dyn StatusStore>>,
     preview: &dyn PreviewSink,
     config: &TranscriptPumpConfig,
     counters: &SharedCounters,
 ) -> Result<PumpSummary, TranscriptPumpError> {
     let started = now_ms();
-    let mut writer = status_path
-        .map(|path| StatusWriter::spawn(path.to_path_buf()))
-        .transpose()?;
+    // One coordinator owns every persisted status write for this capture.
+    let mut coordinator = match store {
+        Some(store) => Some(StatusCoordinator::spawn(store)?),
+        None => None,
+    };
 
     let result = capture(
         reader,
         transcript_path,
-        status_path,
+        coordinator.as_ref(),
         preview,
         config,
         counters,
         started,
-        writer.as_ref(),
     );
 
-    // Settle the periodic writer BEFORE the terminal write, so the terminal status
-    // serializes after all queued periodic work and no late snapshot can overwrite
-    // it. Its `Drop` also settles it on unwind, so a pump panic cannot leave a
-    // queued periodic `Running` to land after the panic handler writes `Failed`.
-    // Retain its last persistence failure for the terminal diagnostic.
-    let periodic_error = writer.as_mut().and_then(StatusWriter::shutdown);
     let summary = counters.snapshot();
 
     match result {
         Ok(()) => {
-            // The terminal Complete status is required and typed: if it cannot be
-            // persisted the capture is not independently observable, which is a
-            // terminal infrastructure failure. A retained periodic error rides
-            // along as a non-fatal diagnostic.
-            persist_status_sync(
-                status_path,
-                PumpState::Complete,
-                started,
-                &summary,
-                None,
-                periodic_error.as_deref(),
-            )?;
-            Ok(summary)
+            // The terminal Complete status is required and typed. Settle it through
+            // the coordinator, which drains any pending periodic first, then writes
+            // the terminal state and proves nothing remained pending. If Complete
+            // cannot be persisted the capture is not independently observable, so a
+            // Failed fallback is attempted and the composite typed failure preserves
+            // the settlement and fallback diagnostics.
+            match coordinator.as_mut() {
+                Some(coordinator) => {
+                    let settlement =
+                        coordinator.finish(TerminalStatusSpec::complete(started, summary));
+                    if let Some(err) = settlement.complete_failure() {
+                        return Err(err);
+                    }
+                    Ok(summary)
+                }
+                None => Ok(summary),
+            }
         }
         Err(err) => {
-            // Record the failure terminally, best-effort — it must not mask the
-            // original error. The retained periodic error is kept in its own field
-            // rather than folded into the primary cause.
-            let _ = persist_status_sync(
-                status_path,
-                PumpState::Failed,
-                started,
-                &summary,
-                Some(err.message()),
-                periodic_error.as_deref(),
-            );
+            // Record the failure terminally without masking the primary fault. The
+            // terminal Failed status and its settlement diagnostics ride alongside
+            // the primary cause rather than replacing it.
+            if let Some(coordinator) = coordinator.as_mut() {
+                let settlement =
+                    coordinator.finish(TerminalStatusSpec::failed(started, summary, err.message()));
+                return Err(err.with_settlement(&settlement));
+            }
             Err(err)
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn capture(
     reader: impl Read,
     transcript_path: &Path,
-    status_path: Option<&Path>,
+    coordinator: Option<&StatusCoordinator>,
     preview: &dyn PreviewSink,
     config: &TranscriptPumpConfig,
     counters: &SharedCounters,
     started: u64,
-    writer: Option<&StatusWriter>,
 ) -> Result<(), TranscriptPumpError> {
     let mut file = std::fs::File::create(transcript_path).map_err(|err| {
         TranscriptPumpError::new(format!(
@@ -348,15 +459,18 @@ fn capture(
             transcript_path.display()
         ))
     })?;
-    // The initial Running status is required and typed.
-    persist_status_sync(
-        status_path,
-        PumpState::Running,
-        started,
-        &counters.snapshot(),
-        None,
-        None,
-    )?;
+    // The initial Running status is required and typed: it is submitted to the
+    // coordinator and its acknowledged persistence failure fails the drain.
+    if let Some(coordinator) = coordinator {
+        coordinator.submit_required(build_status(
+            PumpState::Running,
+            started,
+            &counters.snapshot(),
+            None,
+            None,
+            StatusTransportDiagnostics::default(),
+        ))?;
+    }
 
     let mut reader = reader;
     let chunk_size = config.read_chunk_size.max(1);
@@ -375,15 +489,16 @@ fn capture(
         persist_chunk(&mut file, chunk, &mut line, preview, counters, transcript_path)?;
 
         if last_flush.elapsed() >= config.status_flush_interval {
-            // Periodic snapshots go through the coalescing writer, never blocking
-            // canonical capture on a slow status filesystem.
-            if let Some(writer) = writer {
-                writer.submit(build_status(
+            // Periodic snapshots go through the coordinator's coalescing slot, never
+            // blocking canonical capture on a slow status filesystem.
+            if let Some(coordinator) = coordinator {
+                coordinator.submit_periodic(build_status(
                     PumpState::Running,
                     started,
                     &counters.snapshot(),
                     None,
                     None,
+                    StatusTransportDiagnostics::default(),
                 ));
             }
             last_flush = Instant::now();
@@ -479,12 +594,14 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_status(
     state: PumpState,
     started_at_ms: u64,
     summary: &PumpSummary,
     error: Option<&str>,
     periodic_error: Option<&str>,
+    transport: StatusTransportDiagnostics,
 ) -> PumpStatus {
     PumpStatus {
         schema_version: PUMP_STATUS_SCHEMA_VERSION,
@@ -496,6 +613,7 @@ fn build_status(
         dropped_console: summary.dropped_console,
         error: error.map(str::to_string),
         periodic_error: periodic_error.map(str::to_string),
+        transport,
     }
 }
 
@@ -506,85 +624,418 @@ fn persist_status_to(path: &Path, status: &PumpStatus) -> Result<(), String> {
     crate::atomic_write::atomic_write(path, &bytes).map_err(|err| err.to_string())
 }
 
-/// Persist a required status synchronously. A persistence failure is a typed
-/// terminal infrastructure error, because the durable diagnostic must be
-/// independently observable.
-fn persist_status_sync(
-    status_path: Option<&Path>,
-    state: PumpState,
-    started_at_ms: u64,
-    summary: &PumpSummary,
-    error: Option<&str>,
-    periodic_error: Option<&str>,
-) -> Result<(), TranscriptPumpError> {
-    let Some(path) = status_path else {
-        return Ok(());
-    };
-    let status = build_status(state, started_at_ms, summary, error, periodic_error);
-    persist_status_to(path, &status).map_err(|err| {
-        TranscriptPumpError::new(format!("persist pump status at {}: {err}", path.display()))
+/// The durable sink for pump status documents. It is the coordinator's sole
+/// persistence dependency, injected so tests can gate, delay, fail, disconnect, or
+/// panic status writes deterministically rather than relying on timing.
+///
+/// A `write` returns a fully-formed error message on failure — including the
+/// target path — so the message can flow into a required-status failure, a
+/// terminal-settlement failure, or a retained periodic error unchanged.
+pub(crate) trait StatusStore: Send {
+    fn write(&mut self, status: &PumpStatus) -> Result<(), String>;
+}
+
+/// The production status store: atomically persist to `transcript-pump.json`.
+struct FileStatusStore {
+    path: PathBuf,
+}
+
+impl StatusStore for FileStatusStore {
+    fn write(&mut self, status: &PumpStatus) -> Result<(), String> {
+        persist_status_to(&self.path, status)
+            .map_err(|err| format!("persist pump status at {}: {err}", self.path.display()))
+    }
+}
+
+fn file_status_store(path: &Path) -> Box<dyn StatusStore> {
+    Box::new(FileStatusStore {
+        path: path.to_path_buf(),
     })
 }
 
-/// A background writer for periodic `Running` snapshots. The drain thread submits
-/// snapshots without blocking; the writer coalesces (a full one-slot queue drops
-/// the older snapshot in favor of the periodic cadence) and performs the atomic
-/// writes off the canonical drain thread, so a slow status filesystem never
-/// backpressures stdout capture. Its last persistence failure is retained.
-struct StatusWriter {
-    /// `None` once the writer has been shut down. Dropping the sender ends the
-    /// worker loop.
-    sender: Option<SyncSender<PumpStatus>>,
-    join: Option<JoinHandle<Option<String>>>,
+/// A partially-built terminal status. The drain thread decides the terminal state,
+/// counters, and primary error; the coordinator worker fills in the balanced
+/// transport diagnostics and proves no snapshot remained pending before writing it.
+struct TerminalStatusSpec {
+    state: PumpState,
+    started_at_ms: u64,
+    summary: PumpSummary,
+    error: Option<String>,
 }
 
-impl StatusWriter {
-    fn spawn(path: PathBuf) -> Result<Self, TranscriptPumpError> {
-        let (sender, receiver) = sync_channel::<PumpStatus>(1);
+impl TerminalStatusSpec {
+    fn complete(started_at_ms: u64, summary: PumpSummary) -> Self {
+        Self {
+            state: PumpState::Complete,
+            started_at_ms,
+            summary,
+            error: None,
+        }
+    }
+
+    fn failed(started_at_ms: u64, summary: PumpSummary, error: &str) -> Self {
+        Self {
+            state: PumpState::Failed,
+            started_at_ms,
+            summary,
+            error: Some(error.to_string()),
+        }
+    }
+
+    /// The Failed fallback for a Complete status that could not be persisted.
+    fn as_failed(&self, settlement_error: &str) -> Self {
+        Self {
+            state: PumpState::Failed,
+            started_at_ms: self.started_at_ms,
+            summary: self.summary,
+            error: Some(format!(
+                "complete status could not be persisted: {settlement_error}"
+            )),
+        }
+    }
+
+    fn build(&self, transport: StatusTransportDiagnostics) -> PumpStatus {
+        let periodic_error = transport.last_error.clone();
+        build_status(
+            self.state,
+            self.started_at_ms,
+            &self.summary,
+            self.error.as_deref(),
+            periodic_error.as_deref(),
+            transport,
+        )
+    }
+}
+
+/// The outcome of settling a status coordinator at terminal time. It carries the
+/// balanced transport diagnostics and any terminal-settlement, fallback, or worker
+/// failure so the drain can build a composite typed error that never masks the
+/// primary fault.
+#[derive(Debug, Default)]
+struct StatusSettlement {
+    diagnostics: StatusTransportDiagnostics,
+    /// The terminal status (Complete or Failed) could not be persisted.
+    settlement_error: Option<String>,
+    /// A Complete-to-Failed fallback also failed to persist.
+    fallback_error: Option<String>,
+    /// The coordinator worker panicked or could not be joined.
+    worker_error: Option<String>,
+}
+
+impl StatusSettlement {
+    /// A Complete status that could not be persisted is a terminal infrastructure
+    /// failure even though a Failed fallback may have landed, because capture is not
+    /// independently observable. Build the composite typed error, or `None` when the
+    /// Complete status was persisted.
+    fn complete_failure(&self) -> Option<TranscriptPumpError> {
+        let settlement_error = self.settlement_error.clone()?;
+        Some(TranscriptPumpError {
+            message: settlement_error,
+            periodic_error: self.diagnostics.last_error.clone(),
+            settlement_error: None,
+            fallback_error: self.fallback_error.clone(),
+            worker_error: self.worker_error.clone(),
+            transport: Some(self.diagnostics.clone()),
+        })
+    }
+}
+
+/// A required status command awaiting acknowledgement. The submitter blocks on the
+/// one-shot `ack` until the worker has attempted its persistence, so a terminal
+/// acknowledgement can never be followed by a later Running write.
+struct RequiredCommand {
+    status: PumpStatus,
+    ack: SyncSender<Result<(), String>>,
+}
+
+/// What the worker does next, decided atomically under one lock so required
+/// statuses drain FIFO, the newest periodic drains before the terminal, and the
+/// terminal write is always last.
+enum Work {
+    Required(RequiredCommand),
+    Periodic(PumpStatus),
+    Terminal(TerminalStatusSpec),
+    Idle,
+}
+
+/// Shared coordinator state. Every submission mutates it under one lock and every
+/// category the submitter can decide (coalesced, dropped, disconnected) is recorded
+/// there immediately, so the balance invariant holds even for submissions the
+/// worker never sees.
+struct CoordinatorInner {
+    /// The newest pending periodic snapshot; a replaced one is counted coalesced.
+    periodic: Option<PumpStatus>,
+    /// Required statuses awaiting the worker, processed front-first.
+    required: VecDeque<RequiredCommand>,
+    /// The terminal status, set once by `finish`; the worker writes it last.
+    terminal: Option<TerminalStatusSpec>,
+    /// Exact accounting of every submission.
+    diagnostics: StatusTransportDiagnostics,
+    /// Terminal sealing has begun; no further periodic snapshot is written.
+    sealed: bool,
+    /// The worker has fully shut down; further submissions are disconnected.
+    shutdown: bool,
+}
+
+struct SharedStatusState {
+    inner: Mutex<CoordinatorInner>,
+}
+
+impl SharedStatusState {
+    fn next_work(&self) -> Work {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(cmd) = inner.required.pop_front() {
+            return Work::Required(cmd);
+        }
+        // Drain the newest periodic before the terminal so no Running write can
+        // follow the terminal state.
+        if let Some(status) = inner.periodic.take() {
+            return Work::Periodic(status);
+        }
+        if let Some(spec) = inner.terminal.take() {
+            return Work::Terminal(spec);
+        }
+        Work::Idle
+    }
+
+    fn record_write(&self, result: &Result<(), String>) {
+        let mut inner = self.inner.lock().unwrap();
+        match result {
+            Ok(()) => inner.diagnostics.written += 1,
+            Err(err) => {
+                inner.diagnostics.write_failures += 1;
+                inner.diagnostics.last_error = Some(err.clone());
+            }
+        }
+    }
+
+    fn diagnostics(&self) -> StatusTransportDiagnostics {
+        self.inner.lock().unwrap().diagnostics.clone()
+    }
+}
+
+/// The single worker that owns a [`StatusStore`] and performs every persisted write
+/// for one capture. Periodic snapshots coalesce through a latest-only slot; required
+/// statuses are acknowledged FIFO; the terminal state is written last after all
+/// pending work drains, proving no snapshot remained pending.
+struct StatusCoordinator {
+    shared: Arc<SharedStatusState>,
+    /// A capacity-one wake: it only signals that shared state changed. A full slot
+    /// is harmless because the newest value already lives in the shared slot.
+    wake: Option<SyncSender<()>>,
+    join: Option<JoinHandle<StatusSettlement>>,
+}
+
+impl StatusCoordinator {
+    fn spawn(mut store: Box<dyn StatusStore>) -> Result<Self, TranscriptPumpError> {
+        let shared = Arc::new(SharedStatusState {
+            inner: Mutex::new(CoordinatorInner {
+                periodic: None,
+                required: VecDeque::new(),
+                terminal: None,
+                diagnostics: StatusTransportDiagnostics::default(),
+                sealed: false,
+                shutdown: false,
+            }),
+        });
+        let (wake_tx, wake_rx) = sync_channel::<()>(1);
+        let worker_shared = Arc::clone(&shared);
         let join = std::thread::Builder::new()
             .name("transcript-pump-status".to_string())
-            .spawn(move || {
-                let mut last_error = None;
-                for status in receiver {
-                    if let Err(err) = persist_status_to(&path, &status) {
-                        last_error = Some(err);
-                    }
-                }
-                last_error
-            })
+            .spawn(move || run_status_worker(&worker_shared, &wake_rx, &mut *store))
             .map_err(|err| {
                 TranscriptPumpError::new(format!("spawn transcript pump status writer: {err}"))
             })?;
         Ok(Self {
-            sender: Some(sender),
+            shared,
+            wake: Some(wake_tx),
             join: Some(join),
         })
     }
 
-    fn submit(&self, status: PumpStatus) {
-        // Never block the drain thread: if the writer is mid-write, drop this
-        // snapshot; the next periodic tick carries fresher counters.
-        if let Some(sender) = &self.sender {
-            let _ = sender.try_send(status);
+    fn wake(&self) {
+        if let Some(wake) = &self.wake {
+            let _ = wake.try_send(());
         }
     }
 
-    /// Close the queue, flush all pending periodic writes, and return the last
-    /// persistence failure the writer observed, if any. Idempotent: a second call
-    /// (for example from `Drop` after an explicit shutdown) is a no-op.
-    fn shutdown(&mut self) -> Option<String> {
-        // Drop the sender first so the worker's receive loop ends, then join it.
-        self.sender = None;
-        self.join.take().and_then(|join| join.join().ok().flatten())
+    /// Submit a required status and block until the worker acknowledges its
+    /// persistence. A write failure or a worker that already shut down is a typed
+    /// terminal infrastructure failure, because the durable diagnostic must be
+    /// independently observable.
+    fn submit_required(&self, status: PumpStatus) -> Result<(), TranscriptPumpError> {
+        let (ack_tx, ack_rx) = sync_channel::<Result<(), String>>(1);
+        {
+            let mut inner = self.shared.inner.lock().unwrap();
+            inner.diagnostics.submitted += 1;
+            if inner.shutdown {
+                inner.diagnostics.disconnected += 1;
+                return Err(TranscriptPumpError::new(
+                    "persist pump status: status coordinator already shut down",
+                ));
+            }
+            inner.required.push_back(RequiredCommand {
+                status,
+                ack: ack_tx,
+            });
+        }
+        self.wake();
+        match ack_rx.recv() {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(err)) => Err(TranscriptPumpError::new(err)),
+            Err(_) => Err(TranscriptPumpError::new(
+                "persist pump status: status worker disconnected",
+            )),
+        }
+    }
+
+    /// Submit a best-effort periodic snapshot. It never blocks canonical capture:
+    /// a newer snapshot replaces an older pending one (counted coalesced), and once
+    /// terminal sealing has begun the snapshot is dropped rather than written.
+    fn submit_periodic(&self, status: PumpStatus) {
+        {
+            let mut inner = self.shared.inner.lock().unwrap();
+            inner.diagnostics.submitted += 1;
+            if inner.shutdown {
+                inner.diagnostics.disconnected += 1;
+                return;
+            }
+            if inner.sealed {
+                inner.diagnostics.dropped += 1;
+                return;
+            }
+            if inner.periodic.replace(status).is_some() {
+                inner.diagnostics.coalesced += 1;
+            }
+        }
+        self.wake();
+    }
+
+    /// The coordinator's current transport accounting.
+    #[cfg(test)]
+    fn diagnostics(&self) -> StatusTransportDiagnostics {
+        self.shared.diagnostics()
+    }
+
+    /// Seal the coordinator, drain pending work, write the terminal status last, and
+    /// join the worker. Returns the balanced diagnostics and any terminal-settlement,
+    /// fallback, or worker failure.
+    fn finish(&mut self, spec: TerminalStatusSpec) -> StatusSettlement {
+        {
+            let mut inner = self.shared.inner.lock().unwrap();
+            inner.sealed = true;
+            inner.terminal = Some(spec);
+        }
+        self.wake();
+        let settlement = match self.join.take() {
+            Some(join) => join.join().unwrap_or_else(|_| {
+                // The worker panicked while persisting a status. Its terminal write
+                // may not have landed; surface it without losing the diagnostics.
+                StatusSettlement {
+                    diagnostics: self.shared.diagnostics(),
+                    worker_error: Some(
+                        "status coordinator worker panicked while persisting a status".to_string(),
+                    ),
+                    ..StatusSettlement::default()
+                }
+            }),
+            None => StatusSettlement {
+                diagnostics: self.shared.diagnostics(),
+                ..StatusSettlement::default()
+            },
+        };
+        // Drop the wake sender and mark shutdown so any later submission is accounted
+        // as disconnected rather than silently ignored.
+        self.wake = None;
+        self.shared.inner.lock().unwrap().shutdown = true;
+        settlement
     }
 }
 
-impl Drop for StatusWriter {
+impl Drop for StatusCoordinator {
     fn drop(&mut self) {
-        // On unwind (a pump panic) the writer is dropped here before the panic
-        // reaches the pump's catch handler. Settling it now guarantees no queued
-        // periodic `Running` snapshot can land after the handler writes `Failed`.
-        let _ = self.shutdown();
+        // On an unwind that skipped `finish`, end the worker so no periodic write
+        // lands after the caller stops using the coordinator: dropping the wake
+        // sender disconnects the worker's receive, and joining it settles the thread.
+        if let Some(join) = self.join.take() {
+            self.wake = None;
+            let _ = join.join();
+            if let Ok(mut inner) = self.shared.inner.lock() {
+                inner.shutdown = true;
+            }
+        }
+    }
+}
+
+/// The coordinator worker loop. It drains all available work, then blocks on the
+/// wake channel; a disconnected wake with no terminal settles the worker with the
+/// diagnostics observed so far.
+fn run_status_worker(
+    shared: &Arc<SharedStatusState>,
+    wake_rx: &Receiver<()>,
+    store: &mut dyn StatusStore,
+) -> StatusSettlement {
+    loop {
+        loop {
+            match shared.next_work() {
+                Work::Required(cmd) => {
+                    let result = store.write(&cmd.status);
+                    shared.record_write(&result);
+                    let _ = cmd.ack.send(result);
+                }
+                Work::Periodic(status) => {
+                    let result = store.write(&status);
+                    shared.record_write(&result);
+                }
+                Work::Terminal(spec) => {
+                    return finalize_terminal(shared, store, spec);
+                }
+                Work::Idle => break,
+            }
+        }
+        if wake_rx.recv().is_err() {
+            return StatusSettlement {
+                diagnostics: shared.diagnostics(),
+                ..StatusSettlement::default()
+            };
+        }
+    }
+}
+
+/// Construct and persist the terminal status. The pending periodic slot is already
+/// drained (required-then-periodic-then-terminal ordering), so the embedded
+/// diagnostics balance and prove no snapshot remained pending. A Complete write
+/// failure triggers exactly one Failed fallback.
+fn finalize_terminal(
+    shared: &Arc<SharedStatusState>,
+    store: &mut dyn StatusStore,
+    spec: TerminalStatusSpec,
+) -> StatusSettlement {
+    let diagnostics = shared.diagnostics();
+    let status = spec.build(diagnostics.clone());
+    match store.write(&status) {
+        Ok(()) => StatusSettlement {
+            diagnostics,
+            ..StatusSettlement::default()
+        },
+        Err(settlement_error) => {
+            if spec.state == PumpState::Complete {
+                let fallback = spec.as_failed(&settlement_error).build(diagnostics.clone());
+                let fallback_error = store.write(&fallback).err();
+                StatusSettlement {
+                    diagnostics,
+                    settlement_error: Some(settlement_error),
+                    fallback_error,
+                    worker_error: None,
+                }
+            } else {
+                StatusSettlement {
+                    diagnostics,
+                    settlement_error: Some(settlement_error),
+                    ..StatusSettlement::default()
+                }
+            }
+        }
     }
 }
 
@@ -668,11 +1119,12 @@ where
         .name("transcript-pump".to_string())
         .spawn(move || {
             let started = now_ms();
+            let store = status_path.as_deref().map(file_status_store);
             let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 drain_with_counters(
                     reader,
                     &transcript_path,
-                    status_path.as_deref(),
+                    store,
                     preview,
                     &config,
                     &counters,
@@ -681,17 +1133,21 @@ where
             .unwrap_or_else(|_| {
                 let err = TranscriptPumpError::new("transcript pump panicked");
                 // Preserve the counters accumulated before the panic. The drain's
-                // status writer was already settled during unwind, so this Failed
-                // write is the last word — no queued Running can overwrite it.
+                // status coordinator was already settled during unwind, so this
+                // Failed write is the last word — no queued Running can overwrite it.
                 let summary = counters_for_panic.snapshot();
-                let _ = persist_status_sync(
-                    status_path.as_deref(),
-                    PumpState::Failed,
-                    started,
-                    &summary,
-                    Some(err.message()),
-                    None,
-                );
+                if let Some(path) = status_path.as_deref() {
+                    let mut store = file_status_store(path);
+                    let status = build_status(
+                        PumpState::Failed,
+                        started,
+                        &summary,
+                        Some(err.message()),
+                        None,
+                        StatusTransportDiagnostics::default(),
+                    );
+                    let _ = store.write(&status);
+                }
                 Err(err)
             });
             let _ = tx.send(outcome);
@@ -803,6 +1259,332 @@ mod tests {
     use super::*;
     use std::io::Cursor;
     use std::sync::Mutex;
+    use std::sync::mpsc;
+
+    /// An in-memory status store that records every status it is asked to persist.
+    struct RecordingStore {
+        writes: Arc<Mutex<Vec<PumpStatus>>>,
+    }
+
+    impl RecordingStore {
+        fn new() -> (Self, Arc<Mutex<Vec<PumpStatus>>>) {
+            let writes = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    writes: Arc::clone(&writes),
+                },
+                writes,
+            )
+        }
+    }
+
+    impl StatusStore for RecordingStore {
+        fn write(&mut self, status: &PumpStatus) -> Result<(), String> {
+            self.writes.lock().unwrap().push(status.clone());
+            Ok(())
+        }
+    }
+
+    /// A status store whose every write blocks on a gate until the test releases it,
+    /// so the coalescing slot can be observed deterministically. Each write announces
+    /// itself on `entered` before blocking on `gate`.
+    struct GatedStore {
+        writes: Arc<Mutex<Vec<PumpStatus>>>,
+        entered: mpsc::Sender<PumpState>,
+        gate: mpsc::Receiver<()>,
+    }
+
+    impl StatusStore for GatedStore {
+        fn write(&mut self, status: &PumpStatus) -> Result<(), String> {
+            let _ = self.entered.send(status.state);
+            let _ = self.gate.recv();
+            self.writes.lock().unwrap().push(status.clone());
+            Ok(())
+        }
+    }
+
+    /// A status store that fails writes of a chosen terminal state, recording each
+    /// attempt so a fallback can be observed.
+    struct FailStateStore {
+        attempts: Arc<Mutex<Vec<(PumpState, bool)>>>,
+        fail: Vec<PumpState>,
+    }
+
+    impl StatusStore for FailStateStore {
+        fn write(&mut self, status: &PumpStatus) -> Result<(), String> {
+            let ok = !self.fail.contains(&status.state);
+            self.attempts.lock().unwrap().push((status.state, ok));
+            if ok {
+                Ok(())
+            } else {
+                Err(format!(
+                    "persist pump status: simulated {:?} write failure",
+                    status.state
+                ))
+            }
+        }
+    }
+
+    fn running_status() -> PumpStatus {
+        build_status(
+            PumpState::Running,
+            0,
+            &PumpSummary::default(),
+            None,
+            None,
+            StatusTransportDiagnostics::default(),
+        )
+    }
+
+    #[test]
+    fn latest_periodic_snapshot_replaces_older_pending_snapshot() {
+        // B1: while the worker is blocked writing the first snapshot, two more are
+        // submitted; the newest replaces the older pending one in the single slot,
+        // and the replaced snapshot is accounted exactly once as coalesced.
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (gate_tx, gate_rx) = mpsc::channel();
+        let store = GatedStore {
+            writes: Arc::clone(&writes),
+            entered: entered_tx,
+            gate: gate_rx,
+        };
+        let mut coordinator = StatusCoordinator::spawn(Box::new(store)).unwrap();
+
+        // A: taken from the slot and blocked mid-write.
+        coordinator.submit_periodic(running_status());
+        assert_eq!(entered_rx.recv().unwrap(), PumpState::Running);
+
+        // B then C: B lands in the slot, C replaces B → B is coalesced.
+        coordinator.submit_periodic(running_status());
+        coordinator.submit_periodic(running_status());
+
+        // Release every blocked write (A, C, and the terminal) and settle.
+        for _ in 0..8 {
+            let _ = gate_tx.send(());
+        }
+        let settlement = coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
+
+        assert_eq!(settlement.diagnostics.submitted, 3);
+        assert_eq!(settlement.diagnostics.coalesced, 1, "the replaced snapshot B");
+        assert_eq!(settlement.diagnostics.written, 2, "A and C reach the store");
+        assert!(settlement.diagnostics.is_balanced());
+        // Only A and C were persisted; B never reached the store.
+        assert_eq!(writes.lock().unwrap().len(), 3, "A, C, and the terminal");
+    }
+
+    #[test]
+    fn required_statuses_are_fifo_and_acknowledged() {
+        // B1: required statuses are persisted in submission order, and each submitter
+        // is acknowledged only after its own status is written.
+        let (store, writes) = RecordingStore::new();
+        let coordinator = StatusCoordinator::spawn(Box::new(store)).unwrap();
+
+        for records in [1u64, 2, 3] {
+            let status = build_status(
+                PumpState::Running,
+                0,
+                &PumpSummary {
+                    records,
+                    ..PumpSummary::default()
+                },
+                None,
+                None,
+                StatusTransportDiagnostics::default(),
+            );
+            // Blocks until the worker acknowledges this exact status.
+            coordinator
+                .submit_required(status)
+                .expect("a writable required status is acknowledged");
+            // By the time submit_required returns, the store already holds it.
+            let persisted = writes.lock().unwrap();
+            assert_eq!(
+                persisted.last().unwrap().records,
+                records,
+                "acknowledgement follows the write of this required status"
+            );
+        }
+        let order: Vec<u64> = writes.lock().unwrap().iter().map(|s| s.records).collect();
+        assert_eq!(order, vec![1, 2, 3], "required statuses persist FIFO");
+    }
+
+    #[test]
+    fn terminal_ack_cannot_be_followed_by_running() {
+        // B1: once the terminal status is acknowledged, no later Running status can
+        // reach the store — a late submission is refused, never written.
+        let (store, writes) = RecordingStore::new();
+        let mut coordinator = StatusCoordinator::spawn(Box::new(store)).unwrap();
+
+        coordinator.submit_required(running_status()).unwrap();
+        let _ = coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
+
+        // A Running submitted after the terminal acknowledgement is disconnected.
+        coordinator.submit_periodic(running_status());
+        assert!(
+            coordinator.submit_required(running_status()).is_err(),
+            "a required Running after the terminal is refused"
+        );
+
+        let persisted = writes.lock().unwrap();
+        assert_eq!(
+            persisted.last().unwrap().state,
+            PumpState::Complete,
+            "the terminal Complete is the final persisted state"
+        );
+        assert_eq!(
+            persisted
+                .iter()
+                .filter(|s| s.state == PumpState::Running)
+                .count(),
+            1,
+            "only the initial Running was ever written; none followed the terminal"
+        );
+    }
+
+    #[test]
+    fn terminal_status_diagnostics_balance() {
+        // B3: the terminal diagnostics account every submission exactly once and
+        // satisfy submitted = written + coalesced + dropped + disconnected +
+        // write_failures, with no snapshot left pending. The persisted terminal
+        // document carries the same balanced accounting.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript-pump.json");
+        let mut coordinator = StatusCoordinator::spawn(file_status_store(&path)).unwrap();
+
+        coordinator.submit_required(running_status()).unwrap();
+        for _ in 0..5 {
+            coordinator.submit_periodic(running_status());
+        }
+        let settlement = coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
+
+        assert!(
+            settlement.diagnostics.is_balanced(),
+            "diagnostics balance: {:?}",
+            settlement.diagnostics
+        );
+        assert_eq!(
+            settlement.diagnostics.submitted,
+            settlement.diagnostics.written
+                + settlement.diagnostics.coalesced
+                + settlement.diagnostics.dropped
+                + settlement.diagnostics.disconnected
+                + settlement.diagnostics.write_failures,
+            "every submission is accounted in exactly one category"
+        );
+        assert!(
+            settlement.diagnostics.submitted >= 1,
+            "at least the required Running plus the periodics were submitted"
+        );
+
+        // The persisted terminal document carries the same balanced accounting.
+        let persisted: PumpStatus = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted.state, PumpState::Complete);
+        assert!(persisted.transport.is_balanced());
+    }
+
+    #[test]
+    fn disconnected_status_submission_is_accounted() {
+        // B3: a status submitted after the coordinator has shut down is accounted as
+        // disconnected rather than silently ignored, and never reaches the store.
+        let (store, writes) = RecordingStore::new();
+        let mut coordinator = StatusCoordinator::spawn(Box::new(store)).unwrap();
+        coordinator.submit_required(running_status()).unwrap();
+        let _ = coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
+        let written_before = writes.lock().unwrap().len();
+
+        coordinator.submit_periodic(running_status());
+        assert!(coordinator.submit_required(running_status()).is_err());
+
+        let diagnostics = coordinator.diagnostics();
+        assert_eq!(
+            diagnostics.disconnected, 2,
+            "both post-shutdown submissions are accounted disconnected"
+        );
+        assert_eq!(
+            writes.lock().unwrap().len(),
+            written_before,
+            "no disconnected submission reaches the store"
+        );
+        assert!(diagnostics.is_balanced());
+    }
+
+    #[test]
+    fn complete_write_failure_falls_back_to_failed() {
+        // B4: when a Complete status cannot be persisted, the coordinator attempts a
+        // Failed fallback and the drain surfaces a typed failure that names the
+        // Complete write problem.
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let store = FailStateStore {
+            attempts: Arc::clone(&attempts),
+            fail: vec![PumpState::Complete],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let sink = SaturatedSink::new();
+        let err = drain_with_store(
+            Cursor::new(b"{\"a\":1}\n".to_vec()),
+            &transcript,
+            Some(Box::new(store)),
+            &sink,
+            &TranscriptPumpConfig::default(),
+        )
+        .expect_err("an unpersistable Complete status fails the drain");
+        assert!(
+            err.message().contains("simulated Complete write failure"),
+            "the primary names the Complete write failure: {err}"
+        );
+        assert!(
+            err.fallback_error().is_none(),
+            "the Failed fallback persisted, so no fallback error"
+        );
+
+        let attempts = attempts.lock().unwrap();
+        assert!(
+            attempts.iter().any(|(s, ok)| *s == PumpState::Complete && !ok),
+            "a Complete write was attempted and failed"
+        );
+        assert!(
+            attempts.iter().any(|(s, ok)| *s == PumpState::Failed && *ok),
+            "a Failed fallback was attempted and succeeded"
+        );
+    }
+
+    #[test]
+    fn composite_status_failures_preserve_primary_and_settlement_errors() {
+        // B4: when capture fails AND the terminal status cannot be persisted, the
+        // typed error preserves the immutable primary fault alongside the settlement
+        // diagnostics rather than discarding or overwriting either.
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let store = FailStateStore {
+            attempts: Arc::clone(&attempts),
+            fail: vec![PumpState::Failed],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let sink = SaturatedSink::new();
+        let err = drain_with_store(
+            ErrorAfterOneRecord { emitted: false },
+            &transcript,
+            Some(Box::new(store)),
+            &sink,
+            &TranscriptPumpConfig::default(),
+        )
+        .expect_err("a mid-stream read failure fails the drain");
+
+        assert!(
+            err.message().contains("read coder stdout"),
+            "the immutable primary fault is preserved: {err}"
+        );
+        assert!(
+            err.settlement_error()
+                .is_some_and(|s| s.contains("simulated Failed write failure")),
+            "the terminal-settlement failure rides alongside the primary: {err:?}"
+        );
+        assert!(
+            err.transport().is_some_and(|t| t.is_balanced()),
+            "the balanced transport diagnostics are preserved"
+        );
+    }
 
     /// A sink that records every delivered preview and always accepts.
     struct RecordingSink {
