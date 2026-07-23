@@ -2260,12 +2260,6 @@ impl Default for Attempt {
 }
 
 impl Attempt {
-    /// The single advancement-readiness contract. An Attempt's change may advance —
-    /// reach `MergeCandidateReady`, pass Merge Candidate landing validation, and
-    /// land — only once its Learner run has SUCCEEDED. Any other learning state
-    /// (absent, in-progress, prepared/HandoffPending, or failed whether relaunchable
-    /// or not) blocks advancement with one durable reason, so no boundary can
-    /// advance over a non-succeeded Learner.
     /// Materialize the authoritative `## Required completion` section into the
     /// current required-progress content when this Attempt carries a progress
     /// contract and the section is not already present. Idempotent: an existing
@@ -2366,6 +2360,12 @@ impl Attempt {
         Ok(())
     }
 
+    /// The single advancement-readiness contract. An Attempt's change may advance —
+    /// reach `MergeCandidateReady`, pass Merge Candidate landing validation, and
+    /// land — only once its Learner run has SUCCEEDED. Any other learning state
+    /// (absent, in-progress, prepared/HandoffPending, or failed whether relaunchable
+    /// or not) blocks advancement with one durable reason, so no boundary can
+    /// advance over a non-succeeded Learner.
     pub fn learning_advancement_readiness(&self) -> Result<(), WorkModelError> {
         let state = match self.learning.as_ref() {
             Some(learning) if learning.is_succeeded() => return Ok(()),
