@@ -5121,6 +5121,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn materialize_required_progress_propagates_read_error_without_clobbering() {
+        // A non-NotFound read error on the current progress file must propagate, not
+        // be treated as empty: rendering a fresh section over an unreadable file would
+        // clobber it. Here the progress path is obstructed by a directory, so the read
+        // fails with a non-NotFound error and the function surfaces it.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let store = WorkModelStore::new(project_root);
+
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Required progress".to_string(),
+            planning_context: Some(crate::work_model::PlanningContext {
+                plan: Some(
+                    "| # | State reached | Req? |\n\
+                     |---|---------------|------|\n\
+                     | 1 | First requirement | Yes |\n"
+                        .to_string(),
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+        let stored = store.read_work_item("work-1").unwrap();
+
+        // Obstruct the progress path with a directory, so the read fails with a
+        // non-NotFound error.
+        let progress_path = project_root.join(".fluent/work/progress/work-1/attempt-1/progress.md");
+        fs::create_dir_all(&progress_path).unwrap();
+
+        let result = crate::work_task_executor::materialize_required_progress_before_writer(
+            project_root,
+            &stored,
+            "attempt-1",
+        );
+        assert!(
+            result.is_err(),
+            "an unreadable progress file must surface as an error, not be treated as empty"
+        );
+        assert!(
+            progress_path.is_dir(),
+            "the obstructing path is left untouched rather than clobbered"
+        );
+    }
+
     /// Mark the fixture Attempt with a one-entry progress contract and write the
     /// given `## Required completion` content, so the required-progress gate can be
     /// driven through `interpret_reviews` with passing reviews.

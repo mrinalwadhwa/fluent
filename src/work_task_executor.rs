@@ -628,7 +628,13 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     // Route every post-reservation completion failure — head lookup, completion
     // read/find, and the terminal write — through one durable terminal-state
     // boundary, so no raw `?` after the reservation can leave the Task Executing.
-    let completion = complete_write_task(&config, &workspace, &workspace_path, source_branch, baseline_commit);
+    let completion = complete_write_task(
+        &config,
+        &workspace,
+        &workspace_path,
+        source_branch,
+        baseline_commit,
+    );
     match completion {
         Ok(result) => Ok(result),
         Err(error) => {
@@ -1054,8 +1060,9 @@ fn finalize_review_outcome(
     // secondary context.
     if let Err(cleanup_error) = cleanup_result {
         let error = match run_result {
-            Err(coder_error) => cleanup_error
-                .context(format!("the reviewer coder also failed: {coder_error:#}")),
+            Err(coder_error) => {
+                cleanup_error.context(format!("the reviewer coder also failed: {coder_error:#}"))
+            }
             Ok(()) => cleanup_error,
         };
         if let Err(state_error) = lock_mark_task_failed(
@@ -3058,25 +3065,36 @@ pub(crate) fn materialize_required_progress_before_writer(
         )
     })?;
     let progress_path = progress_dir.join("progress.md");
-    let existing = fs::read_to_string(&progress_path).unwrap_or_default();
+    // Distinguish a genuinely absent file from an unreadable one: only NotFound is an
+    // empty starting point. A UTF-8/permission/other read error must propagate rather
+    // than be treated as empty, which would render a fresh section and clobber the
+    // existing (unreadable) file.
+    let existing = match fs::read_to_string(&progress_path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "Failed to read required progress at {}",
+                    progress_path.display()
+                )
+            });
+        }
+    };
     let Some(new_content) = attempt.materialize_required_progress(&existing) else {
         return Ok(());
     };
-    // Write to a sibling temp file and rename over the target, so a crash mid-write
-    // never leaves a half-written checklist for the gate to reconcile.
-    let tmp = progress_dir.join("progress.md.materialize.tmp");
-    fs::write(&tmp, new_content).with_context(|| {
-        format!(
-            "Failed to write required-progress section to {}",
-            tmp.display()
-        )
-    })?;
-    fs::rename(&tmp, &progress_path).with_context(|| {
-        format!(
-            "Failed to atomically install required progress at {}",
-            progress_path.display()
-        )
-    })?;
+    // Install atomically through the shared unique-temp-file writer, so a crash
+    // mid-write never leaves a half-written checklist and concurrent materialization
+    // races cannot collide on a fixed temp name.
+    crate::atomic_write::atomic_write(&progress_path, new_content.as_bytes()).with_context(
+        || {
+            format!(
+                "Failed to atomically install required progress at {}",
+                progress_path.display()
+            )
+        },
+    )?;
     Ok(())
 }
 
@@ -4403,8 +4421,10 @@ mod tests {
             capture: Option<&crate::coder::TranscriptCapture<'_>>,
         ) -> Result<i32> {
             if let Some(capture) = capture {
-                *self.recorded.lock().unwrap() =
-                    Some((capture.path.to_path_buf(), capture.config.console_preview_limit));
+                *self.recorded.lock().unwrap() = Some((
+                    capture.path.to_path_buf(),
+                    capture.config.console_preview_limit,
+                ));
             }
             Ok(0)
         }
@@ -4748,8 +4768,7 @@ mod tests {
             capture: Option<&crate::coder::TranscriptCapture<'_>>,
         ) -> crate::coder::CoderRunCompletion {
             if let Some(capture) = capture {
-                *self.recorded_dir.lock().unwrap() =
-                    capture.path.parent().map(|p| p.to_path_buf());
+                *self.recorded_dir.lock().unwrap() = capture.path.parent().map(|p| p.to_path_buf());
             }
             crate::coder::CoderRunCompletion {
                 terminal: Ok(0),
@@ -5251,14 +5270,9 @@ mod tests {
             written_attempt_completed_at: None,
         };
 
-        let err = rollback_reservation(
-            &store,
-            "work-1",
-            "attempt-1",
-            "attempt-1-write-1",
-            &receipt,
-        )
-        .expect_err("a structurally missing reserved entity fails the rollback");
+        let err =
+            rollback_reservation(&store, "work-1", "attempt-1", "attempt-1-write-1", &receipt)
+                .expect_err("a structurally missing reserved entity fails the rollback");
         // The reducer's model error surfaces as a typed storage error, never a clean Ok.
         assert!(
             matches!(err, WorkModelStorageError::InvalidModel { .. }),
@@ -5347,8 +5361,9 @@ mod tests {
                 "write transcript-pump status: no space left on device",
             ),
         ));
-        let cleanup_failure: Result<()> =
-            Err(anyhow::anyhow!("restore reviewer worktree confinement failed"));
+        let cleanup_failure: Result<()> = Err(anyhow::anyhow!(
+            "restore reviewer worktree confinement failed"
+        ));
 
         let error = finalize_review_outcome(
             &config,
@@ -6111,9 +6126,13 @@ mod tests {
 
         // Create a real, registered, clean worktree for the readable candidate so the
         // read-only preflight passes and the reservation is reached.
-        let candidate_path =
-            resolve_managed_readable_workspace_path(project_root, &read_path, "work-1", "attempt-1")
-                .unwrap();
+        let candidate_path = resolve_managed_readable_workspace_path(
+            project_root,
+            &read_path,
+            "work-1",
+            "attempt-1",
+        )
+        .unwrap();
         fs::create_dir_all(candidate_path.parent().unwrap()).unwrap();
         git(&[
             "worktree",
@@ -6125,7 +6144,8 @@ mod tests {
 
         // Obstruct the artifact directory's parent with a file so the post-reservation
         // create_dir_all fails AFTER the reservation has marked the Task Executing.
-        let artifact_dir = resolve_managed_artifact_area_path(project_root, &artifact_area).unwrap();
+        let artifact_dir =
+            resolve_managed_artifact_area_path(project_root, &artifact_area).unwrap();
         let obstruction = artifact_dir.parent().unwrap().to_path_buf();
         fs::create_dir_all(obstruction.parent().unwrap()).unwrap();
         fs::write(&obstruction, "not a directory").unwrap();
