@@ -364,6 +364,31 @@ fn execute_merge(
     target_workspace: &Path,
     artifact_dir: &Path,
 ) -> Result<WorkMergeOutcome> {
+    execute_merge_with_coder(
+        config,
+        item,
+        candidate,
+        source_workspace,
+        target_workspace,
+        artifact_dir,
+        |sandbox| config.coder_kind.boxed(sandbox),
+    )
+}
+
+/// Execute a merge with a caller-supplied rebase-coder factory. Production builds
+/// the real coder for the resolved kind; tests inject a fake to drive the rebase
+/// failure route and prove the Task and Merge Candidate settle together. The
+/// factory is consumed only by the rebase step; merge checks and post-merge review
+/// build their own coders unchanged.
+fn execute_merge_with_coder(
+    config: &WorkMergeConfig<'_>,
+    item: &WorkItem,
+    candidate: &crate::work_model::MergeCandidate,
+    source_workspace: &Path,
+    target_workspace: &Path,
+    artifact_dir: &Path,
+    make_rebase_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
+) -> Result<WorkMergeOutcome> {
     ensure_same_git_repository(config.project_root, source_workspace)?;
     ensure_same_git_repository(config.project_root, target_workspace)?;
     ensure_registered_worktree(config.project_root, source_workspace)?;
@@ -377,14 +402,31 @@ fn execute_merge(
     )?;
 
     ensure_clean_worktree(source_workspace)?;
-    let rebase_outcome = rebase_candidate(
+    let rebase_outcome = match rebase_candidate_with_coder(
         config,
         item,
         candidate,
         source_workspace,
         &candidate.target_branch,
         artifact_dir,
-    )?;
+        make_rebase_coder,
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            // The rebase finalizer already durably terminalized the reserved Rebase
+            // Task. Settle the Merge Candidate together with it before returning — a
+            // resumable transcript-pump fault to NeedsUser, any other fault to Failed
+            // — so post-run recovery never records a Candidate status out of step
+            // with its Task. A settlement failure composes as a typed secondary.
+            let error = match settle_candidate_for_rebase_failure(config, candidate, &error) {
+                Ok(()) => error,
+                Err(settle_err) => error.context(format!(
+                    "additionally failed to settle the Merge Candidate with the rebase failure: {settle_err:#}"
+                )),
+            };
+            return Err(error);
+        }
+    };
     match rebase_outcome {
         RebaseOutcome::NeedsUser { diagnostic } => {
             record_candidate_needs_user(
@@ -797,6 +839,39 @@ fn record_candidate_failure(
     })
 }
 
+/// Settle a Merge Candidate together with a rebase failure that already
+/// terminalized the reserved Rebase Task. A resumable transcript-pump fault is
+/// recorded as `NeedsUser` (the transport, not the merge, is the fault) so a
+/// supported resume can retry; any other fault is a hard `Failed`. Recording the
+/// matching Candidate state here — rather than leaving the Candidate `Executing`
+/// for post-run recovery to reclassify — keeps the Task and its Candidate in step.
+fn settle_candidate_for_rebase_failure(
+    config: &WorkMergeConfig<'_>,
+    candidate: &MergeCandidate,
+    error: &anyhow::Error,
+) -> Result<()> {
+    if error
+        .downcast_ref::<crate::transcript_pump::TranscriptPumpError>()
+        .is_some()
+    {
+        record_candidate_needs_user(
+            config.store,
+            config.work_item_id,
+            &candidate.id,
+            error.to_string(),
+        )
+    } else {
+        record_candidate_failure(
+            config.store,
+            config.work_item_id,
+            &candidate.id,
+            error.to_string(),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+}
+
 fn record_candidate_merged(
     store: &WorkModelStore,
     work_item_id: &str,
@@ -948,25 +1023,6 @@ fn resolve_managed_candidate_workspace_path(
         attempt_id,
         "Merge Candidate source",
     )?)
-}
-
-fn rebase_candidate(
-    config: &WorkMergeConfig<'_>,
-    item: &WorkItem,
-    candidate: &MergeCandidate,
-    source_workspace: &Path,
-    target_branch: &str,
-    artifact_dir: &Path,
-) -> Result<RebaseOutcome> {
-    rebase_candidate_with_coder(
-        config,
-        item,
-        candidate,
-        source_workspace,
-        target_branch,
-        artifact_dir,
-        |sandbox| config.coder_kind.boxed(sandbox),
-    )
 }
 
 /// Rebase a Merge Candidate with a caller-supplied coder factory.
@@ -1861,6 +1917,182 @@ mod tests {
             TaskStatus::NeedsUser,
             "a transcript-pump fault terminalizes the Rebase Task to resumable NeedsUser, \
              never left Executing and never a hard Failed"
+        );
+    }
+
+    #[test]
+    fn settle_candidate_for_rebase_failure_matches_task_disposition() {
+        // B7: a rebase failure settles the Merge Candidate together with its Task, so
+        // post-run recovery never records a Candidate status out of step with the Task
+        // the rebase finalizer already terminalized. A resumable transcript-pump fault
+        // settles the Candidate to NeedsUser (matching the Task's resumable pause);
+        // any other fault settles it to a hard Failed.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let resolver = ContentResolver::new(None);
+        let ws = tmp.path().join("ws");
+
+        // Two independent Work Items so each holds exactly one Candidate for its
+        // Attempt (a single Attempt owns at most one Merge Candidate).
+        let make_item = |work_id: &str, candidate_id: &str| {
+            let mut item = WorkItem {
+                id: work_id.to_string(),
+                title: "Rebase failure settlement".to_string(),
+                ..Default::default()
+            };
+            item.add_initial_attempt("attempt-1").unwrap();
+            let mut candidate = merge_candidate_fixture(&ws);
+            candidate.id = candidate_id.to_string();
+            candidate.merge_state.status = MergeCandidateMergeStatus::Executing;
+            item.merge_candidates = vec![candidate.clone()];
+            store.create_work_item(&item).unwrap();
+            candidate
+        };
+        let pump_candidate = make_item("work-pump", "mc-pump");
+        let hard_candidate = make_item("work-hard", "mc-hard");
+
+        let config = |work_id: &'static str, candidate_id: &'static str| WorkMergeConfig {
+            project_root: tmp.path(),
+            store: &store,
+            work_item_id: work_id,
+            merge_candidate_id: candidate_id,
+            resolver: &resolver,
+            extra_args: &[],
+            coder_kind: CoderKind::Codex,
+            no_sandbox: true,
+            skip_post_merge_review: false,
+        };
+
+        settle_candidate_for_rebase_failure(
+            &config("work-pump", "mc-pump"),
+            &pump_candidate,
+            &anyhow::Error::new(crate::transcript_pump::TranscriptPumpError::new(
+                "write transcript-pump status: no space left on device".to_string(),
+            )),
+        )
+        .expect("settling a pump-fault candidate succeeds");
+        settle_candidate_for_rebase_failure(
+            &config("work-hard", "mc-hard"),
+            &hard_candidate,
+            &anyhow::anyhow!("rebase agent failed (exit code 3)"),
+        )
+        .expect("settling a hard-fault candidate succeeds");
+
+        let pump_stored = store.read_work_item("work-pump").unwrap();
+        let pump_status = &pump_stored.merge_candidates[0].merge_state.status;
+        assert!(
+            matches!(pump_status, MergeCandidateMergeStatus::NeedsUser),
+            "a resumable transcript-pump rebase fault settles the Candidate to NeedsUser, \
+             matching its Task: {pump_status:?}"
+        );
+        let hard_stored = store.read_work_item("work-hard").unwrap();
+        let hard_status = &hard_stored.merge_candidates[0].merge_state.status;
+        assert!(
+            matches!(hard_status, MergeCandidateMergeStatus::Failed),
+            "any other rebase fault settles the Candidate to a hard Failed: {hard_status:?}"
+        );
+    }
+
+    #[test]
+    fn rebase_pump_failure_settles_task_and_candidate_together_through_merge_route() {
+        // B7: driving the real execute_merge route (not the rebase seam in isolation),
+        // a transcript-pump fault during the rebase launch settles BOTH the reserved
+        // Rebase Task and the Merge Candidate to resumable NeedsUser before returning,
+        // so post-run recovery never finds a still-Executing Candidate to reclassify
+        // Failed out of step with its NeedsUser Task. The typed pump primary is kept.
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Nest the project so any managed sibling resolves inside this TempDir.
+        let project_root = tmp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let git = |args: &[&str]| {
+            crate::git::run(&project_root, args, "merge route test setup").unwrap();
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t.co"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "baseline"]);
+
+        // A registered source worktree for the candidate; the clean main checkout is
+        // the target worktree on the same repository.
+        let source_workspace = tmp.path().join("source");
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            source_workspace.to_str().unwrap(),
+        ]);
+        let target_workspace = project_root.clone();
+        let artifact_dir = tmp.path().join("artifacts");
+        fs::create_dir_all(&artifact_dir).unwrap();
+
+        let store = WorkModelStore::new(project_root.as_path());
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Merge route pump failure".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        let mut candidate = merge_candidate_fixture(&source_workspace);
+        candidate.merge_state.status = MergeCandidateMergeStatus::Executing;
+        item.merge_candidates = vec![candidate.clone()];
+        store.create_work_item(&item).unwrap();
+        let item = store.read_work_item("work-1").unwrap();
+
+        let resolver = ContentResolver::new(None);
+        let config = WorkMergeConfig {
+            project_root: project_root.as_path(),
+            store: &store,
+            work_item_id: "work-1",
+            merge_candidate_id: "attempt-1-merge-candidate",
+            resolver: &resolver,
+            extra_args: &[],
+            coder_kind: CoderKind::Codex,
+            no_sandbox: true,
+            skip_post_merge_review: true,
+        };
+
+        let error = execute_merge_with_coder(
+            &config,
+            &item,
+            &candidate,
+            &source_workspace,
+            &target_workspace,
+            &artifact_dir,
+            |_sandbox| {
+                Box::new(RecordingRebaseCoder {
+                    recorded: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                    outcome: FakeOutcome::PumpError(
+                        "write transcript-pump status: no space left on device".to_string(),
+                    ),
+                })
+            },
+        )
+        .expect_err("a transcript-pump failure must return an error");
+
+        assert!(
+            error
+                .downcast_ref::<crate::transcript_pump::TranscriptPumpError>()
+                .is_some(),
+            "the typed transcript-pump primary must be preserved through the merge route"
+        );
+
+        let after = store.read_work_item("work-1").unwrap();
+        let rebase_task = after.attempts[0]
+            .tasks
+            .iter()
+            .find(|t| t.kind == TaskKind::Rebase)
+            .expect("the rebase task was reserved");
+        assert_eq!(
+            rebase_task.status,
+            TaskStatus::NeedsUser,
+            "the reserved Rebase Task is durably NeedsUser, never left Executing"
+        );
+        let candidate_status = &after.merge_candidates[0].merge_state.status;
+        assert!(
+            matches!(candidate_status, MergeCandidateMergeStatus::NeedsUser),
+            "the Merge Candidate settles to NeedsUser together with its Task, not a hard \
+             Failed and never left Executing: {candidate_status:?}"
         );
     }
 
