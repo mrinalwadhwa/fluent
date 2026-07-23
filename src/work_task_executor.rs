@@ -703,6 +703,20 @@ fn complete_write_task(
 }
 
 fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
+    run_review_task_with_coder(config, None)
+}
+
+/// Run a Review Task, optionally injecting the reviewer coder factory.
+///
+/// Production passes `None` and launches the resolved coder. A full-route
+/// regression passes a factory that faults deterministically, so the real
+/// reservation, post-reservation setup, workspace-confinement guard, retry
+/// decision, and composed terminalization are all exercised — never fabricated
+/// finalizer inputs.
+fn run_review_task_with_coder(
+    config: WorkTaskRunConfig<'_>,
+    coder_override: Option<&dyn Fn(CoderSandbox) -> Box<dyn crate::coder::Coder>>,
+) -> Result<WorkTaskRunResult> {
     let lock_path =
         crate::lease::task_lock_path(config.project_root, config.work_item_id, config.task_id);
     let _lease = crate::lease::acquire(&lock_path)
@@ -902,6 +916,7 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         reservation.model.as_deref(),
         reservation.effort.as_deref(),
         &pump_config,
+        coder_override,
     );
     let mut retries = 0;
     while should_retry_coder_error(&run_result) && retries < max_task_retries() {
@@ -928,6 +943,7 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             reservation.model.as_deref(),
             reservation.effort.as_deref(),
             &pump_config,
+            coder_override,
         );
     }
 
@@ -3076,10 +3092,14 @@ fn run_review_coder(
     model: Option<&str>,
     effort: Option<&str>,
     pump_config: &crate::transcript_pump::TranscriptPumpConfig,
+    coder_override: Option<&dyn Fn(CoderSandbox) -> Box<dyn crate::coder::Coder>>,
 ) -> Result<()> {
     // Production launches the resolved coder; the `_with_coder` seam lets route
     // tests inject a recording coder to prove the resolved capture threads through
-    // this route unchanged, mirroring the Learner and rebase launch seams.
+    // this route unchanged, mirroring the Learner and rebase launch seams. A
+    // `coder_override` lets a full-route regression drive the real reservation,
+    // confinement guard, and terminalization while injecting a coder that faults
+    // deterministically.
     run_review_coder_with_coder(
         item,
         attempt_id,
@@ -3097,7 +3117,10 @@ fn run_review_coder(
         model,
         effort,
         pump_config,
-        move |sandbox| coder_kind.boxed_with_model(sandbox, model, effort),
+        move |sandbox| match coder_override {
+            Some(make) => make(sandbox),
+            None => coder_kind.boxed_with_model(sandbox, model, effort),
+        },
     )
 }
 
@@ -4877,6 +4900,173 @@ mod tests {
             after.attempts[0].pause_kind,
             Some(crate::work_model::PauseKind::TranscriptPump),
             "the preserved typed pump primary classifies the pause, not the cleanup failure"
+        );
+    }
+
+    /// A reviewer coder that mutates its readable candidate workspace and then faults
+    /// with a typed transcript-pump primary, so the real confinement guard's cleanup
+    /// fails on the dirtied worktree. This drives the composite failure through the
+    /// production route rather than fabricating finalizer inputs.
+    struct DirtyingPumpFaultCoder {
+        candidate_path: PathBuf,
+    }
+
+    impl crate::coder::Coder for DirtyingPumpFaultCoder {
+        fn run(
+            &self,
+            _prompt: &str,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+            _transcript_file: Option<&Path>,
+        ) -> Result<i32> {
+            unreachable!("the review route launches through run_captured")
+        }
+
+        fn run_captured(
+            &self,
+            _prompt: &str,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+            _capture: Option<&crate::coder::TranscriptCapture<'_>>,
+        ) -> Result<i32> {
+            // Simulate a coder that mutated the readable workspace invisibly before
+            // the pump transport failed: leave an untracked file so the confinement
+            // guard's ensure_clean_worktree fails on finish.
+            fs::write(self.candidate_path.join("coder-scratch.txt"), b"dirty").unwrap();
+            Err(anyhow::Error::new(
+                crate::transcript_pump::TranscriptPumpError::new(
+                    "write transcript-pump status: no space left on device",
+                ),
+            ))
+        }
+
+        fn run_interactive(
+            &self,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+        ) -> Result<i32> {
+            unreachable!("the review route never runs interactively")
+        }
+    }
+
+    #[test]
+    fn reviewer_route_composes_pump_and_confinement_failures() {
+        // B7: the FULL Reviewer route — real reservation, post-reservation setup,
+        // workspace-confinement guard, retry decision, and composed terminalization —
+        // when the injected reviewer coder faults with a typed transcript-pump primary
+        // AND has dirtied the readable candidate so the real confinement cleanup fails.
+        // The composed outcome preserves the typed pump primary (still downcastable, so
+        // it classifies as a resumable pump pause), retains the confinement failure as
+        // secondary context, and durably terminalizes the Task to NeedsUser — never
+        // fabricated finalizer inputs.
+        //
+        // Nest the project under its own parent so the managed candidate sibling
+        // resolves inside this test's TempDir rather than the shared temp root.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path().join("project");
+        let project_root = project_root.as_path();
+        fs::create_dir_all(project_root).unwrap();
+        let git = |args: &[&str]| {
+            crate::git::run(project_root, args, "test git setup").unwrap();
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t.co"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "baseline"]);
+
+        let store = WorkModelStore::new(project_root);
+        let item = review_item_with_role("architecture");
+        let review_task = item.attempts[0]
+            .tasks
+            .iter()
+            .find(|t| t.kind == TaskKind::Review)
+            .expect("the fixture has a review task");
+        let review_task_id = review_task.id.clone();
+        let read_path = review_task.workspace_access.reads[0].path.clone();
+        store.create_work_item(&item).unwrap();
+
+        // A real, registered, clean worktree for the readable candidate so preflight
+        // and reservation pass and the coder route is reached.
+        let candidate_path =
+            resolve_managed_readable_workspace_path(project_root, &read_path, "work-1", "attempt-1")
+                .unwrap();
+        fs::create_dir_all(candidate_path.parent().unwrap()).unwrap();
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            candidate_path.to_str().unwrap(),
+        ]);
+
+        // The review task reads the tester's output artifact; materialize it so the
+        // read-only input-artifact preflight passes and the coder route is reached.
+        for input in &review_task.input_artifacts {
+            let input_path = project_root.join(&input.path);
+            fs::create_dir_all(input_path.parent().unwrap()).unwrap();
+            fs::write(&input_path, b"{}").unwrap();
+        }
+
+        let resolver = ContentResolver::new(Some(project_root));
+        let candidate_for_coder = candidate_path.clone();
+        let make_coder = move |_sandbox: CoderSandbox| -> Box<dyn crate::coder::Coder> {
+            Box::new(DirtyingPumpFaultCoder {
+                candidate_path: candidate_for_coder.clone(),
+            })
+        };
+        let error = run_review_task_with_coder(
+            WorkTaskRunConfig {
+                project_root,
+                store: &store,
+                work_item_id: "work-1",
+                attempt_id: "attempt-1",
+                task_id: &review_task_id,
+                resolver: &resolver,
+                extra_args: &[],
+                no_sandbox: true,
+                store_lock: None,
+            },
+            Some(&make_coder),
+        )
+        .expect_err("a composite coder+confinement failure must return an error");
+
+        // The typed pump primary survives composition through the real route.
+        assert!(
+            error
+                .downcast_ref::<crate::transcript_pump::TranscriptPumpError>()
+                .is_some(),
+            "the transcript-pump primary must remain discoverable by downcast: {error:#}"
+        );
+        // The real confinement cleanup failure is retained as secondary context.
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("confinement"),
+            "the confinement cleanup failure must be retained as secondary context: {rendered}"
+        );
+
+        // The Task is durably terminalized as a resumable transcript-pump pause,
+        // classified from the preserved typed primary — never left Executing.
+        let after = store.read_work_item("work-1").unwrap();
+        let review = after.attempts[0]
+            .tasks
+            .iter()
+            .find(|t| t.id == review_task_id)
+            .unwrap();
+        assert_eq!(
+            review.status,
+            TaskStatus::NeedsUser,
+            "the Review Task is durably terminalized through the real route, never left Executing"
+        );
+        assert_eq!(
+            after.attempts[0].pause_kind,
+            Some(crate::work_model::PauseKind::TranscriptPump),
+            "the preserved typed pump primary classifies the pause, not the confinement failure"
         );
     }
 
