@@ -906,6 +906,18 @@ fn run_learner_step(
     handoff_only: bool,
     config: &LearnerConfig<'_>,
 ) -> Result<()> {
+    // A prior run that already launched the coder but could not persist its host
+    // evidence leaves a non-relaunchable disposition. Repairing that evidence is an
+    // out-of-band operator path; relaunching the coder here would duplicate its
+    // expertise effects. Leave the durable record untouched and never call the coder.
+    if item.attempts[attempt_index]
+        .learning
+        .as_ref()
+        .is_some_and(|learning| !learning.is_relaunchable())
+    {
+        return Ok(());
+    }
+
     let runs = item.attempts[attempt_index]
         .learning
         .as_ref()
@@ -1010,23 +1022,30 @@ fn finalize_learning(
     Ok(())
 }
 
-/// Classify a failed Learner run for the durable learning record: a typed
-/// transcript-pump infrastructure failure anywhere in the error chain is preserved
-/// as such rather than collapsed to a generic string.
+/// Classify a failed Learner run for the durable learning record. The two
+/// infrastructure faults are kept distinct because they carry opposite recovery
+/// contracts: a supervision-sidecar persistence fault means the coder already ran
+/// and its evidence is pending, so recovery must NOT relaunch it, whereas a
+/// transcript-pump transport fault stopped the coder before durable side effects
+/// and stays resumable. A generic coder-logic failure is safe to rerun.
 fn classify_learning_failure(err: &anyhow::Error) -> crate::work_model::LearningFailureKind {
-    // A transcript-pump transport fault OR a supervision-sidecar persistence fault is a
-    // non-retryable infrastructure failure: the Learner coder already ran (its expertise
-    // effects may be on disk), so the durable record must classify it as infrastructure
-    // rather than a generic coder-logic failure that could invite a relaunch.
-    let is_infrastructure = err.chain().any(|cause| {
-        cause.is::<crate::transcript_pump::TranscriptPumpError>()
-            || cause.is::<crate::coder::SupervisionSidecarError>()
-    });
-    if is_infrastructure {
-        crate::work_model::LearningFailureKind::TranscriptPump
-    } else {
-        crate::work_model::LearningFailureKind::Generic
+    // A supervision-sidecar fault takes precedence: the Learner coder already ran
+    // (its expertise effects may be on disk), so it must record a non-relaunchable
+    // evidence-pending disposition rather than a resumable transcript-pump one, even
+    // when both appear in the chain.
+    if err
+        .chain()
+        .any(|cause| cause.is::<crate::coder::SupervisionSidecarError>())
+    {
+        return crate::work_model::LearningFailureKind::EvidencePending;
     }
+    if err
+        .chain()
+        .any(|cause| cause.is::<crate::transcript_pump::TranscriptPumpError>())
+    {
+        return crate::work_model::LearningFailureKind::TranscriptPump;
+    }
+    crate::work_model::LearningFailureKind::Generic
 }
 
 fn try_learn(
@@ -2568,9 +2587,9 @@ mod tests {
             LearningFailureKind::Generic
         );
 
-        // A supervision-sidecar persistence fault is infrastructure, not Generic: the
-        // Learner coder already ran, so it is a durable non-retryable disposition rather
-        // than a generic coder-logic failure that could invite a relaunch.
+        // A supervision-sidecar persistence fault records the evidence-pending
+        // disposition, not Generic or TranscriptPump: the Learner coder already ran,
+        // so recovery must never relaunch it, unlike a resumable transcript-pump fault.
         let sidecar: anyhow::Error = {
             let dir = tempfile::tempdir().unwrap();
             let obstruction = dir.path().join("file");
@@ -2602,8 +2621,8 @@ mod tests {
         );
         assert_eq!(
             classify_learning_failure(&sidecar),
-            LearningFailureKind::TranscriptPump,
-            "a supervision-sidecar fault is a non-retryable infrastructure disposition"
+            LearningFailureKind::EvidencePending,
+            "a supervision-sidecar fault records the non-relaunchable evidence-pending disposition"
         );
     }
 
@@ -4372,6 +4391,125 @@ mod tests {
         assert!(
             diagnostic.contains("handoff") && diagnostic.contains("persisting it failed"),
             "the composite diagnostic preserves that the handoff write failed: {diagnostic}"
+        );
+    }
+
+    /// Build a typed `SupervisionSidecarError` by obstructing the sidecar write of
+    /// a non-clean supervision report — the coder already ran, so this stands in for
+    /// a post-launch host-evidence persistence fault.
+    fn learner_sidecar_error() -> anyhow::Error {
+        let dir = tempfile::tempdir().unwrap();
+        let obstruction = dir.path().join("file");
+        std::fs::write(&obstruction, b"x").unwrap();
+        let completion = crate::coder::CoderRunCompletion {
+            terminal: Ok(0),
+            report: crate::coder::CoderSupervisionReport {
+                launches: vec![crate::coder::CoderLaunchSupervision {
+                    exit_code: Some(0),
+                    group_sweep: crate::coder::GroupSweepDisposition::Unconfirmed(
+                        crate::coder::ProcessOpDiagnostic {
+                            operation: "kill process group".to_string(),
+                            kind: None,
+                            errno: Some(1),
+                            message: None,
+                        },
+                    ),
+                }],
+            },
+        };
+        crate::coder::finish_supervised_coder_run(completion, &obstruction)
+            .expect_err("obstructed sidecar")
+    }
+
+    #[test]
+    fn learner_sidecar_failure_recovery_calls_coder_once() {
+        // Learner recovery B1: the Learner coder runs, but persisting its supervision
+        // sidecar fails afterward. The run records the non-relaunchable
+        // evidence-pending disposition, and a second recovery pass never relaunches
+        // the coder — its expertise effects may already be on disk. Across two runs
+        // the coder is launched exactly once, and the diagnostic stays distinct from a
+        // resumable transcript-pump failure.
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, _workspace, _base) =
+            make_learner_passing_fixture(tmp.path(), 1);
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_coder = Arc::clone(&calls);
+        let run_coder = move |_request: &LearnerCoderRequest<'_>| -> Result<()> {
+            // The coder launches; then its supervision sidecar cannot be persisted.
+            calls_for_coder.fetch_add(1, AtomicOrdering::SeqCst);
+            Err(learner_sidecar_error())
+        };
+
+        // First pass: the coder launches once and the sidecar fault records the
+        // non-relaunchable evidence-pending disposition.
+        let item = store.read_work_item("work-1").unwrap();
+        let outcome = interpret_reviews(
+            &project_root,
+            &store,
+            item,
+            "attempt-1",
+            true,
+            Some(LearnerConfig {
+                run_coder: &run_coder,
+            }),
+        )
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            WorkAttemptRunOutcome::MergeCandidateReady { .. }
+        ));
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            1,
+            "the coder launches once on the first run"
+        );
+        let stored = store.read_work_item("work-1").unwrap();
+        let learning = stored.attempts[0].learning.as_ref().unwrap();
+        assert!(learning.is_failed());
+        assert_eq!(learning.runs, 1);
+        assert_eq!(
+            learning.failure_kind,
+            Some(LearningFailureKind::EvidencePending),
+            "a sidecar fault records the non-relaunchable evidence-pending disposition"
+        );
+        assert!(!learning.is_relaunchable());
+        assert_ne!(
+            learning.failure_kind,
+            Some(LearningFailureKind::TranscriptPump),
+            "the diagnostic is distinct from a resumable transcript-pump failure"
+        );
+
+        // Second pass (recovery): the disposition is non-relaunchable, so the coder
+        // is never launched again — the count stays at one.
+        let item = store.read_work_item("work-1").unwrap();
+        interpret_reviews(
+            &project_root,
+            &store,
+            item,
+            "attempt-1",
+            true,
+            Some(LearnerConfig {
+                run_coder: &run_coder,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            1,
+            "recovery must not relaunch the already-ran coder"
+        );
+        let stored = store.read_work_item("work-1").unwrap();
+        let learning = stored.attempts[0].learning.as_ref().unwrap();
+        assert_eq!(
+            learning.failure_kind,
+            Some(LearningFailureKind::EvidencePending),
+            "the evidence-pending diagnostic is preserved across recovery"
+        );
+        assert_eq!(
+            learning.runs, 1,
+            "the run count is not advanced by recovery"
         );
     }
 

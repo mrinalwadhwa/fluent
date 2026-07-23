@@ -1613,10 +1613,55 @@ pub struct AttemptLearning {
 #[serde(rename_all = "snake_case")]
 pub enum LearningFailureKind {
     /// A transcript-pump infrastructure failure — the console/transcript transport,
-    /// not the coder's learning, is the fault.
+    /// not the coder's learning, is the fault. It stopped the coder before durable
+    /// side effects, so a supported resume relaunches it safely.
     TranscriptPump,
+    /// The Learner coder already ran, but persisting its host-side run evidence
+    /// (the supervision sidecar) failed. Its expertise effects may already be on
+    /// disk, so recovery must repair the evidence rather than relaunch the coder.
+    EvidencePending,
     /// Any other persistent Learner failure.
     Generic,
+}
+
+impl LearningFailureKind {
+    /// The generic per-phase recovery disposition this Learner failure consumes.
+    pub fn phase_recovery(&self) -> CoderPhaseRecovery {
+        match self {
+            // The coder already ran; only host evidence persistence failed.
+            Self::EvidencePending => CoderPhaseRecovery::CoderAlreadyRanEvidencePending,
+            // A transcript-pump transport fault stops the coder before durable side
+            // effects, and a generic coder-logic failure is safe to rerun.
+            Self::TranscriptPump | Self::Generic => CoderPhaseRecovery::Relaunchable,
+        }
+    }
+}
+
+/// How recovery must treat a coder-backed phase after a post-launch failure.
+///
+/// Every coder-backed phase (Writer, Reviewer, Tester, Learner) reserves durable
+/// state, launches its coder, then persists host-side evidence of the run. This
+/// disposition separates a failure that stopped the coder *before* any durable
+/// side effect — safe to relaunch — from one where the coder already ran and only
+/// host evidence persistence failed. In the latter case the coder's side effects
+/// may already be on disk, so recovery must repair the evidence out of band and
+/// must never relaunch the coder, which would duplicate those effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoderPhaseRecovery {
+    /// The failure stopped the coder before any durable side effect. Recovery may
+    /// safely relaunch the coder.
+    Relaunchable,
+    /// The coder already ran but its host evidence could not be durably persisted.
+    /// Recovery must repair the evidence and must NOT relaunch the coder.
+    CoderAlreadyRanEvidencePending,
+}
+
+impl CoderPhaseRecovery {
+    /// Whether recovery may relaunch the phase's coder.
+    pub fn is_relaunchable(&self) -> bool {
+        matches!(self, Self::Relaunchable)
+    }
 }
 
 impl AttemptLearning {
@@ -1684,6 +1729,17 @@ impl AttemptLearning {
     /// failed run, or a durable in-progress reservation left by a crash.
     pub fn is_pending(&self) -> bool {
         !self.is_succeeded()
+    }
+
+    /// Whether recovery may relaunch the Learner coder for this record. A
+    /// coder-already-ran/evidence-pending disposition is pending (non-succeeded)
+    /// yet must never relaunch, since the coder's expertise effects may already be
+    /// on disk. Every other state is safe to (re)launch.
+    pub fn is_relaunchable(&self) -> bool {
+        match self.failure_kind {
+            Some(kind) => kind.phase_recovery().is_relaunchable(),
+            None => true,
+        }
     }
 }
 
@@ -4530,6 +4586,55 @@ pub fn from_json<T: for<'de> Deserialize<'de>>(content: &str) -> Result<T, serde
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coder_already_ran_evidence_pending_is_non_relaunchable() {
+        // The generic per-phase disposition: a coder that already ran but whose
+        // host evidence could not be persisted must never be relaunched, while a
+        // pre-side-effect failure stays relaunchable.
+        assert!(!CoderPhaseRecovery::CoderAlreadyRanEvidencePending.is_relaunchable());
+        assert!(CoderPhaseRecovery::Relaunchable.is_relaunchable());
+
+        // The Learner specialization maps its evidence-pending failure onto the
+        // generic non-relaunchable disposition, distinct from a resumable
+        // transcript-pump fault and a rerunnable generic failure.
+        assert_eq!(
+            LearningFailureKind::EvidencePending.phase_recovery(),
+            CoderPhaseRecovery::CoderAlreadyRanEvidencePending
+        );
+        assert!(
+            !LearningFailureKind::EvidencePending
+                .phase_recovery()
+                .is_relaunchable()
+        );
+        assert!(
+            LearningFailureKind::TranscriptPump
+                .phase_recovery()
+                .is_relaunchable()
+        );
+        assert!(
+            LearningFailureKind::Generic
+                .phase_recovery()
+                .is_relaunchable()
+        );
+
+        // A learning record carrying the evidence-pending kind is itself
+        // non-relaunchable, yet remains pending so it still blocks advancement.
+        let evidence_pending = AttemptLearning::failed_with_kind(
+            1,
+            "learner produced a handoff but persisting it failed",
+            LearningFailureKind::EvidencePending,
+        );
+        assert!(!evidence_pending.is_relaunchable());
+        assert!(evidence_pending.is_pending());
+
+        // A transcript-pump failure stays relaunchable; a succeeded record has no
+        // failure kind and is trivially relaunchable (never re-run because it is
+        // not pending).
+        let pump =
+            AttemptLearning::failed_with_kind(1, "pump", LearningFailureKind::TranscriptPump);
+        assert!(pump.is_relaunchable());
+    }
 
     fn workspace(id: &str) -> WorkspaceRef {
         WorkspaceRef {
