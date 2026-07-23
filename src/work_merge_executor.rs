@@ -1316,6 +1316,10 @@ enum RebaseSettlement {
 /// hard failure — or either peer already `Failed` — settles both `Failed`; otherwise
 /// a resumable fault settles both `NeedsUser`. An equal joint terminal state is a
 /// no-op that keeps the first reason and timestamps.
+///
+/// Invariant: a `Complete` Rebase Task is valid only beside a `Merged` Candidate, so a
+/// non-Merged disposition forces the Task off any inconsistent `Complete` rather than
+/// leaving a `Complete`-Task / `Failed`- or `NeedsUser`-Candidate split.
 fn settle_reserved_rebase_together(
     config: &WorkMergeConfig<'_>,
     attempt_id: &str,
@@ -1369,12 +1373,18 @@ fn settle_reserved_rebase_together(
                 RebaseSettlement::NeedsUser
             };
 
-            // Apply the SAME joint disposition to both entities.
+            // Apply the SAME joint disposition to both entities. Only the Merged arm may
+            // leave (or complete) the Task in a preserved state; a non-Merged disposition
+            // FORCES the Task to match its Candidate — including downgrading an
+            // inconsistent pre-existing `Complete`, which is only ever valid beside a
+            // Merged Candidate — so the peers can never be persisted as a split.
             let task = &mut item.attempts[attempt_idx].tasks[task_idx];
             match settlement {
                 RebaseSettlement::Merged => settle_task_terminal(task, TaskStatus::Complete),
-                RebaseSettlement::Failed => settle_task_terminal(task, TaskStatus::Failed),
-                RebaseSettlement::NeedsUser => settle_task_terminal(task, TaskStatus::NeedsUser),
+                RebaseSettlement::Failed => force_non_merged_task_terminal(task, TaskStatus::Failed),
+                RebaseSettlement::NeedsUser => {
+                    force_non_merged_task_terminal(task, TaskStatus::NeedsUser)
+                }
             }
             let candidate = &mut item.merge_candidates[candidate_idx];
             match settlement {
@@ -1406,6 +1416,24 @@ fn settle_task_terminal(task: &mut Task, terminal: TaskStatus) {
         (TaskStatus::NeedsUser, TaskStatus::Failed) => true,
         (TaskStatus::NeedsUser, _) => false,
         // Planned / Executing / Reviewing accept any terminal transition.
+        _ => true,
+    };
+    if applies {
+        crate::work_model::set_task_terminal(task, terminal);
+    }
+}
+
+/// Force a reserved Rebase Task to a non-Merged joint terminal, downgrading an
+/// inconsistent pre-existing `Complete` so the Task can never disagree with its
+/// non-Merged Candidate. A Complete Rebase Task is only valid beside a Merged Candidate
+/// (handled by the Merged arm), so beside a non-Merged Candidate it is resolved toward
+/// the joint disposition rather than preserved as a split. An already-`Failed` Task is
+/// preserved (idempotent, keeps the first reason and timestamps), and an equal
+/// `NeedsUser` is likewise preserved while a hard `Failed` still upgrades it.
+fn force_non_merged_task_terminal(task: &mut Task, terminal: TaskStatus) {
+    let applies = match (&task.status, &terminal) {
+        (TaskStatus::Failed, _) => false,
+        (TaskStatus::NeedsUser, TaskStatus::NeedsUser) => false,
         _ => true,
     };
     if applies {
@@ -2314,6 +2342,118 @@ mod tests {
                 .status,
             TaskStatus::Complete,
             "the active Rebase Task is completed in step with a Merged Candidate"
+        );
+    }
+
+    #[test]
+    fn settle_reserved_rebase_forces_a_complete_task_off_a_non_merged_split() {
+        // B7 fidelity: an (inconsistent) already-`Complete` Rebase Task beside a
+        // non-Merged Candidate must be resolved toward the joint disposition, never
+        // persisted as a Complete-Task / Failed- or NeedsUser-Candidate split. A
+        // Complete Rebase Task is only valid beside a Merged Candidate.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let resolver = ContentResolver::new(None);
+        let ws = tmp.path().join("ws");
+
+        // Reserve a *Complete* Rebase Task under an Executing (non-Merged) Candidate.
+        let reserve = |work_id: &str| -> (String, String) {
+            let (mut item, candidate) = executing_candidate_item(work_id, &ws);
+            let rebase_task_id = next_rebase_task_id(&item, "attempt-1");
+            let now = crate::work_model::now_iso8601();
+            item.attempts[0].tasks.push(Task {
+                id: rebase_task_id.clone(),
+                kind: TaskKind::Rebase,
+                status: TaskStatus::Complete,
+                role: "rebase".to_string(),
+                instructions: None,
+                work_item_id: work_id.to_string(),
+                attempt_id: Some("attempt-1".to_string()),
+                workspace_access: WorkspaceAccess {
+                    reads: Vec::new(),
+                    writes: vec![candidate.source_workspace.clone()],
+                },
+                artifact_area: Some(crate::work_model::TaskArtifactArea {
+                    path: work_artifact_path(work_id, "attempt-1", &rebase_task_id),
+                }),
+                review_context: None,
+                input_artifacts: Vec::new(),
+                depends_on: None,
+                output: None,
+                created_at: Some(now.clone()),
+                started_at: Some(now.clone()),
+                completed_at: Some(now),
+            });
+            let stored = item.merge_candidates[0].id.clone();
+            store.create_work_item(&item).unwrap();
+            (stored, rebase_task_id)
+        };
+        let config = |work_id: &'static str| WorkMergeConfig {
+            project_root: tmp.path(),
+            store: &store,
+            work_item_id: work_id,
+            merge_candidate_id: "attempt-1-merge-candidate",
+            resolver: &resolver,
+            extra_args: &[],
+            coder_kind: CoderKind::Codex,
+            no_sandbox: true,
+            skip_post_merge_review: false,
+        };
+        let rebase_status = |work_id: &str| -> TaskStatus {
+            store
+                .read_work_item(work_id)
+                .unwrap()
+                .attempts[0]
+                .tasks
+                .iter()
+                .find(|t| t.kind == TaskKind::Rebase)
+                .unwrap()
+                .status
+                .clone()
+        };
+
+        // A hard/generic fault → BOTH Failed, never Complete/Failed.
+        let (hard_candidate, hard_task) = reserve("work-complete-hard");
+        settle_reserved_rebase_failure(
+            &config("work-complete-hard"),
+            "attempt-1",
+            &hard_task,
+            &hard_candidate,
+            anyhow::anyhow!("rebase agent failed (exit code 3)"),
+        );
+        assert_eq!(
+            rebase_status("work-complete-hard"),
+            TaskStatus::Failed,
+            "an inconsistent Complete Task is forced to Failed, never a Complete/Failed split"
+        );
+        assert_eq!(
+            store.read_work_item("work-complete-hard").unwrap().merge_candidates[0]
+                .merge_state
+                .status,
+            MergeCandidateMergeStatus::Failed,
+        );
+
+        // A resumable pump fault → BOTH NeedsUser, never Complete/NeedsUser.
+        let (pump_candidate, pump_task) = reserve("work-complete-pump");
+        settle_reserved_rebase_failure(
+            &config("work-complete-pump"),
+            "attempt-1",
+            &pump_task,
+            &pump_candidate,
+            anyhow::Error::new(crate::transcript_pump::TranscriptPumpError::new(
+                "write transcript-pump status: no space left on device".to_string(),
+            )),
+        );
+        assert_eq!(
+            rebase_status("work-complete-pump"),
+            TaskStatus::NeedsUser,
+            "an inconsistent Complete Task is forced to NeedsUser, never a Complete/NeedsUser split"
+        );
+        assert_eq!(
+            store.read_work_item("work-complete-pump").unwrap().merge_candidates[0]
+                .merge_state
+                .status,
+            MergeCandidateMergeStatus::NeedsUser,
         );
     }
 
