@@ -854,13 +854,18 @@ enum Work {
     Idle,
 }
 
-/// Which submission a write persisted, so periodic failures stay distinct from
-/// required and terminal failures in the diagnostics.
+/// Which submission a write persisted, so periodic and Complete-to-Failed fallback
+/// failures stay distinct from required and terminal failures in the diagnostics.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WriteKind {
     Periodic,
     Required,
     Terminal,
+    /// The Failed fallback written after a Complete status could not be persisted.
+    /// Tracked distinctly so a fallback failure — including a panic mid-fallback —
+    /// lands in its own `fallback_error` rather than masquerading as a generic
+    /// terminal or worker failure.
+    Fallback,
 }
 
 /// Shared coordinator state. Every submission mutates it under one lock and every
@@ -888,6 +893,10 @@ struct CoordinatorInner {
     /// A terminal (Complete) status write failure, recorded before any Failed
     /// fallback so a fallback panic cannot lose the primary Complete error.
     settlement_error: Option<String>,
+    /// The Complete-to-Failed fallback write failure, kept distinct from the primary
+    /// settlement failure so a fallback that fails — or panics mid-write — is
+    /// attributable to the fallback rather than folded into the generic worker error.
+    fallback_error: Option<String>,
     /// Terminal sealing has begun; no further periodic snapshot is written.
     sealed: bool,
     /// The worker has fully shut down; further submissions are disconnected.
@@ -931,8 +940,10 @@ impl SharedStatusState {
                 let bounded = bound_error(err);
                 inner.diagnostics.write_failures += 1;
                 inner.diagnostics.last_error = Some(bounded.clone());
-                if kind == WriteKind::Periodic {
-                    inner.periodic_error = Some(bounded);
+                match kind {
+                    WriteKind::Periodic => inner.periodic_error = Some(bounded),
+                    WriteKind::Fallback => inner.fallback_error = Some(bounded),
+                    _ => {}
                 }
             }
         }
@@ -962,6 +973,10 @@ impl SharedStatusState {
         self.inner.lock().unwrap().periodic_error.clone()
     }
 
+    fn fallback_error(&self) -> Option<String> {
+        self.inner.lock().unwrap().fallback_error.clone()
+    }
+
     /// Test-only proof that settlement left nothing pending: no coalescing slot, no
     /// queued required status, no unwritten terminal, and no in-flight write.
     #[cfg(test)]
@@ -987,8 +1002,10 @@ impl SharedStatusState {
             let bounded = bound_error(STATUS_WORKER_PANIC);
             inner.diagnostics.write_failures += 1;
             inner.diagnostics.last_error = Some(bounded.clone());
-            if kind == WriteKind::Periodic {
-                inner.periodic_error = Some(bounded);
+            match kind {
+                WriteKind::Periodic => inner.periodic_error = Some(bounded),
+                WriteKind::Fallback => inner.fallback_error = Some(bounded),
+                _ => {}
             }
         }
         while let Some(cmd) = inner.required.pop_front() {
@@ -1036,6 +1053,7 @@ impl StatusCoordinator {
                 active_write: None,
                 periodic_error: None,
                 settlement_error: None,
+                fallback_error: None,
                 sealed: false,
                 shutdown: false,
             }),
@@ -1064,9 +1082,9 @@ impl StatusCoordinator {
                     StatusSettlement {
                         diagnostics: inner.diagnostics.clone(),
                         settlement_error: inner.settlement_error.clone(),
+                        fallback_error: inner.fallback_error.clone(),
                         periodic_error: inner.periodic_error.clone(),
                         worker_error: Some(STATUS_WORKER_PANIC.to_string()),
-                        ..StatusSettlement::default()
                     }
                 })
             })
@@ -1277,7 +1295,8 @@ fn finalize_terminal(
 ) -> StatusSettlement {
     // Bound every retained/returned error so a pathological message cannot bloat the
     // settlement (and, UTF-8-safe, cannot split a multibyte boundary).
-    let settlement_error = match write_accounted_terminal(shared, store, &spec) {
+    let settlement_error = match write_accounted_terminal(shared, store, &spec, WriteKind::Terminal)
+    {
         Ok(()) => {
             return StatusSettlement {
                 diagnostics: shared.diagnostics(),
@@ -1300,13 +1319,15 @@ fn finalize_terminal(
     // itself accounted as a real submission.
     if spec.state == PumpState::Complete {
         let fallback = spec.as_failed(&settlement_error);
-        let fallback_error = write_accounted_terminal(shared, store, &fallback)
-            .err()
-            .map(|err| bound_error(&err));
+        // The fallback write records its own failure into the distinct `fallback_error`
+        // (via `record_write`), so a fallback that returns Err — or panics, which
+        // `reconcile_abandoned` then attributes to the fallback — is never folded into
+        // the generic terminal or worker error.
+        let _ = write_accounted_terminal(shared, store, &fallback, WriteKind::Fallback);
         StatusSettlement {
             diagnostics: shared.diagnostics(),
             settlement_error: Some(settlement_error),
-            fallback_error,
+            fallback_error: shared.fallback_error(),
             periodic_error: shared.periodic_error(),
             worker_error: None,
         }
@@ -1326,19 +1347,22 @@ fn write_accounted_terminal(
     shared: &Arc<SharedStatusState>,
     store: &mut dyn StatusStore,
     spec: &TerminalStatusSpec,
+    kind: WriteKind,
 ) -> Result<(), String> {
     // Count this terminal write as a submission and project it as written so the
-    // persisted document balances including itself.
+    // persisted document balances including itself. The `kind` (Terminal or the
+    // Complete-to-Failed Fallback) marks the active write so an unwind mid-write is
+    // attributed to the right category.
     let (projected, periodic_error) = {
         let mut inner = shared.inner.lock().unwrap();
         inner.diagnostics.submitted += 1;
-        inner.active_write = Some(WriteKind::Terminal);
+        inner.active_write = Some(kind);
         let mut projected = inner.diagnostics.clone();
         projected.written += 1;
         (projected, inner.periodic_error.clone())
     };
     let result = store.write(&spec.build(projected, periodic_error.as_deref()));
-    shared.record_write(&result, WriteKind::Terminal);
+    shared.record_write(&result, kind);
     result
 }
 
@@ -2350,6 +2374,15 @@ mod tests {
             settlement.worker_error.as_deref(),
             Some(STATUS_WORKER_PANIC),
             "the fallback panic is preserved distinctly as the worker error"
+        );
+        assert!(
+            settlement
+                .fallback_error
+                .as_deref()
+                .is_some_and(|e| e.contains(STATUS_WORKER_PANIC)),
+            "the fallback write's own failure is attributed to the distinct fallback_error, \
+             not only the generic worker error: {:?}",
+            settlement.fallback_error
         );
         assert!(
             latch.observed(),
