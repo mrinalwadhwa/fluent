@@ -4903,15 +4903,18 @@ mod tests {
         );
     }
 
-    /// A reviewer coder that mutates its readable candidate workspace and then faults
-    /// with a typed transcript-pump primary, so the real confinement guard's cleanup
-    /// fails on the dirtied worktree. This drives the composite failure through the
-    /// production route rather than fabricating finalizer inputs.
-    struct DirtyingPumpFaultCoder {
-        candidate_path: PathBuf,
+    /// A reviewer coder that mutates a tracked source file and locks the git index,
+    /// then faults with a typed transcript-pump primary, so the real source-checkout
+    /// confinement guard's RESTORE (`git restore --staged --worktree`) genuinely fails
+    /// on the lock. It counts its launches so the test can assert the pump fault is not
+    /// retried. This drives the composite failure through the production route rather
+    /// than fabricating finalizer inputs.
+    struct SourceRestoreFaultCoder {
+        source_root: PathBuf,
+        launches: Arc<Mutex<usize>>,
     }
 
-    impl crate::coder::Coder for DirtyingPumpFaultCoder {
+    impl crate::coder::Coder for SourceRestoreFaultCoder {
         fn run(
             &self,
             _prompt: &str,
@@ -4933,10 +4936,11 @@ mod tests {
             _extra_env: &[(String, String)],
             _capture: Option<&crate::coder::TranscriptCapture<'_>>,
         ) -> Result<i32> {
-            // Simulate a coder that mutated the readable workspace invisibly before
-            // the pump transport failed: leave an untracked file so the confinement
-            // guard's ensure_clean_worktree fails on finish.
-            fs::write(self.candidate_path.join("coder-scratch.txt"), b"dirty").unwrap();
+            *self.launches.lock().unwrap() += 1;
+            // Mutate a tracked (non-Fluent) source file so the guard detects a change,
+            // then hold the git index lock so the guard's restore genuinely fails.
+            fs::write(self.source_root.join("tracked.txt"), b"coder mutation").unwrap();
+            fs::write(self.source_root.join(".git/index.lock"), b"held").unwrap();
             Err(anyhow::Error::new(
                 crate::transcript_pump::TranscriptPumpError::new(
                     "write transcript-pump status: no space left on device",
@@ -4956,18 +4960,16 @@ mod tests {
     }
 
     #[test]
-    fn reviewer_route_composes_pump_and_confinement_failures() {
-        // B7: the FULL Reviewer route — real reservation, post-reservation setup,
-        // workspace-confinement guard, retry decision, and composed terminalization —
-        // when the injected reviewer coder faults with a typed transcript-pump primary
-        // AND has dirtied the readable candidate so the real confinement cleanup fails.
-        // The composed outcome preserves the typed pump primary (still downcastable, so
-        // it classifies as a resumable pump pause), retains the confinement failure as
-        // secondary context, and durably terminalizes the Task to NeedsUser — never
-        // fabricated finalizer inputs.
-        //
-        // Nest the project under its own parent so the managed candidate sibling
-        // resolves inside this test's TempDir rather than the shared temp root.
+    fn reviewer_route_composes_pump_and_confinement_restore_failure() {
+        // B7: the FULL Reviewer route — real reservation, post-reservation setup, the
+        // real source-checkout confinement guard, retry decision, and composed
+        // terminalization — when the injected reviewer coder faults with a typed
+        // transcript-pump primary AND has mutated a tracked source file while holding
+        // the git index lock, so the guard's real RESTORE fails. The composed outcome
+        // preserves the typed pump primary (still downcastable, classifying a resumable
+        // pump pause), retains the confinement restore failure as secondary context,
+        // does NOT retry the pump fault, and durably terminalizes the Task and Attempt
+        // to NeedsUser — never fabricated finalizer inputs.
         let tmp = tempfile::TempDir::new().unwrap();
         let project_root = tmp.path().join("project");
         let project_root = project_root.as_path();
@@ -4978,46 +4980,32 @@ mod tests {
         git(&["init", "-q", "-b", "main"]);
         git(&["config", "user.email", "t@t.co"]);
         git(&["config", "user.name", "t"]);
-        git(&["commit", "-q", "--allow-empty", "-m", "baseline"]);
+        fs::write(project_root.join("tracked.txt"), b"original").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-q", "-m", "baseline"]);
+        let head = crate::git::run_stdout(project_root, &["rev-parse", "HEAD"], "head").unwrap();
 
+        // A ReviewOnly source-checkout attempt: the readable workspace IS the project
+        // root at HEAD, so run_review_task uses the SourceCheckoutReviewGuard.
         let store = WorkModelStore::new(project_root);
-        let item = review_item_with_role("architecture");
-        let review_task = item.attempts[0]
-            .tasks
-            .iter()
-            .find(|t| t.kind == TaskKind::Review)
-            .expect("the fixture has a review task");
-        let review_task_id = review_task.id.clone();
-        let read_path = review_task.workspace_access.reads[0].path.clone();
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Reviewer confinement restore failure".to_string(),
+            ..Default::default()
+        };
+        item.add_review_only_attempt("attempt-1", &["architecture"], "main", head.trim(), true)
+            .unwrap();
+        let review_task_id = "attempt-1-review-architecture".to_string();
         store.create_work_item(&item).unwrap();
 
-        // A real, registered, clean worktree for the readable candidate so preflight
-        // and reservation pass and the coder route is reached.
-        let candidate_path =
-            resolve_managed_readable_workspace_path(project_root, &read_path, "work-1", "attempt-1")
-                .unwrap();
-        fs::create_dir_all(candidate_path.parent().unwrap()).unwrap();
-        git(&[
-            "worktree",
-            "add",
-            "-q",
-            "--detach",
-            candidate_path.to_str().unwrap(),
-        ]);
-
-        // The review task reads the tester's output artifact; materialize it so the
-        // read-only input-artifact preflight passes and the coder route is reached.
-        for input in &review_task.input_artifacts {
-            let input_path = project_root.join(&input.path);
-            fs::create_dir_all(input_path.parent().unwrap()).unwrap();
-            fs::write(&input_path, b"{}").unwrap();
-        }
-
         let resolver = ContentResolver::new(Some(project_root));
-        let candidate_for_coder = candidate_path.clone();
+        let launches = Arc::new(Mutex::new(0usize));
+        let source_root = project_root.to_path_buf();
+        let launches_for_coder = Arc::clone(&launches);
         let make_coder = move |_sandbox: CoderSandbox| -> Box<dyn crate::coder::Coder> {
-            Box::new(DirtyingPumpFaultCoder {
-                candidate_path: candidate_for_coder.clone(),
+            Box::new(SourceRestoreFaultCoder {
+                source_root: source_root.clone(),
+                launches: Arc::clone(&launches_for_coder),
             })
         };
         let error = run_review_task_with_coder(
@@ -5034,7 +5022,7 @@ mod tests {
             },
             Some(&make_coder),
         )
-        .expect_err("a composite coder+confinement failure must return an error");
+        .expect_err("a composite coder+confinement-restore failure must return an error");
 
         // The typed pump primary survives composition through the real route.
         assert!(
@@ -5043,15 +5031,21 @@ mod tests {
                 .is_some(),
             "the transcript-pump primary must remain discoverable by downcast: {error:#}"
         );
-        // The real confinement cleanup failure is retained as secondary context.
+        // The real confinement restore failure is retained as secondary context.
         let rendered = format!("{error:#}");
         assert!(
-            rendered.contains("confinement"),
-            "the confinement cleanup failure must be retained as secondary context: {rendered}"
+            rendered.contains("confinement") && rendered.to_lowercase().contains("restore"),
+            "the confinement RESTORE failure must be retained as secondary context: {rendered}"
+        );
+        // The pump fault is not retried: the coder launched exactly once.
+        assert_eq!(
+            *launches.lock().unwrap(),
+            1,
+            "a transcript-pump fault must not spawn a retry coder"
         );
 
-        // The Task is durably terminalized as a resumable transcript-pump pause,
-        // classified from the preserved typed primary — never left Executing.
+        // The Task AND Attempt are durably terminalized as a resumable transcript-pump
+        // pause, classified from the preserved typed primary — never left Executing.
         let after = store.read_work_item("work-1").unwrap();
         let review = after.attempts[0]
             .tasks
@@ -5064,9 +5058,19 @@ mod tests {
             "the Review Task is durably terminalized through the real route, never left Executing"
         );
         assert_eq!(
+            after.attempts[0].status,
+            AttemptStatus::NeedsUser,
+            "the Attempt is paused, never left Reviewing"
+        );
+        assert_eq!(
             after.attempts[0].pause_kind,
             Some(crate::work_model::PauseKind::TranscriptPump),
             "the preserved typed pump primary classifies the pause, not the confinement failure"
+        );
+        // The lock residue is real: the coder's git-index lock is still present.
+        assert!(
+            project_root.join(".git/index.lock").exists(),
+            "the held git index lock is real residue the restore could not clear"
         );
     }
 
