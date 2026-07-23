@@ -3194,6 +3194,157 @@ fn land_work_1(main_dir: &Path, bin_dir: &Path, no_post_merge_review: bool) {
         .success();
 }
 
+/// Create and run work-1/attempt-1 with a first Learner that fails: reviews pass
+/// and the merge candidate materializes with its worktree, branch, and reflog,
+/// but the failed Learner withholds the ready banner and leaves the candidate
+/// non-landable. This mirrors [`create_and_run_learner_attempt`] for the
+/// post-land recovery scenarios, whose mocks intentionally fail the first run —
+/// the landing gate now rejects a non-succeeded Learner, so the ready banner
+/// those scenarios must not assert never appears.
+fn create_and_run_failed_learner_attempt(main_dir: &Path, bin_dir: &Path) {
+    fluent_cmd()
+        .current_dir(main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Learner"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(bin_dir))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("is ready").not())
+        .stderr(predicate::str::contains(
+            "re-run the Learner before landing",
+        ));
+}
+
+/// Reproduce the durable state a legacy or interrupted land left behind for a
+/// candidate whose Learner failed: the target branch fast-forwarded to the
+/// candidate tip and the candidate recorded Merged, while the Attempt's Learning
+/// stays failed and the managed candidate worktree, branch, and reflog remain
+/// registered for a handoff-only retry.
+///
+/// The real land route now refuses to advance a non-succeeded Learner, so
+/// post-land recovery scenarios can no longer drive it to reach the merged
+/// state. This mirrors `finalize_merge`/`record_candidate_merged` exactly: it
+/// rebases the retained candidate onto its target (a no-op when the candidate is
+/// already based, and the same immutable rebase provenance when the target
+/// diverged), fast-forwards the target, and stamps the terminal Merged state.
+fn simulate_legacy_land(main_dir: &Path) {
+    use fluent::work_model::{
+        MergeCandidateMergeState, MergeCandidateMergeStatus, MergeReviewState, TaskKind,
+        TaskStatus, WorkModelStore, set_merge_candidate_terminal,
+    };
+
+    let store = WorkModelStore::new(main_dir);
+    let mut item = store
+        .read_work_item("work-1")
+        .expect("read work-1 after the failed Learner run");
+    let candidate = item
+        .merge_candidates
+        .first()
+        .expect("a merge candidate exists after the failed Learner run")
+        .clone();
+    let candidate_id = candidate.id.clone();
+    let attempt_id = candidate.attempt_id.clone();
+    let target_branch = candidate.target_branch.clone();
+    let source_dir = main_dir.join(&candidate.source_workspace.path);
+
+    let accepted_base = git::run_stdout(
+        main_dir,
+        &["rev-parse", &target_branch],
+        "resolve target head",
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    let tip_before = git::run_stdout(&source_dir, &["rev-parse", "HEAD"], "candidate tip")
+        .unwrap()
+        .trim()
+        .to_string();
+    git::run(
+        &source_dir,
+        &["rebase", &target_branch],
+        "rebase retained candidate onto target",
+    )
+    .unwrap();
+    let merged_commit =
+        git::run_stdout(&source_dir, &["rev-parse", "HEAD"], "resolve candidate tip")
+            .unwrap()
+            .trim()
+            .to_string();
+    git::run(
+        main_dir,
+        &["checkout", &target_branch],
+        "checkout target branch",
+    )
+    .unwrap();
+    git::run(
+        main_dir,
+        &["merge", "--ff-only", &merged_commit],
+        "fast-forward target branch",
+    )
+    .unwrap();
+
+    // When a diverged target forced a real rebase, mirror the provenance rewrite
+    // the merge executor performs: Write outputs and their commit artifacts move
+    // to the new tip so the candidate stays structurally valid. An already based
+    // candidate is a no-op and keeps its original recorded provenance.
+    if merged_commit != tip_before
+        && let Some(attempt) = item
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.id == attempt_id)
+    {
+        let write_task_ids: std::collections::HashSet<String> = attempt
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+            .map(|task| task.id.clone())
+            .collect();
+        for task in &mut attempt.tasks {
+            if task.kind == TaskKind::Write && task.status == TaskStatus::Complete {
+                if let Some(output) = &mut task.output {
+                    output.base_commit = Some(accepted_base.clone());
+                    output.commit = merged_commit.clone();
+                }
+            }
+        }
+        for artifact in &mut attempt.artifacts {
+            if write_task_ids.contains(&artifact.producer_id) {
+                artifact.path = merged_commit.clone();
+            }
+        }
+    }
+
+    let candidate = item
+        .merge_candidates
+        .iter_mut()
+        .find(|entry| entry.id == candidate_id)
+        .expect("the resolved candidate remains present");
+    candidate.candidate_commit = merged_commit.clone();
+    candidate.merge_review_state = MergeReviewState::Passed;
+    candidate.merge_state = MergeCandidateMergeState {
+        status: MergeCandidateMergeStatus::Merged,
+        merged_commit: Some(merged_commit),
+        failure_reason: None,
+        check_artifacts: Vec::new(),
+        review_artifacts: Vec::new(),
+        auto_merge_skipped: None,
+        follow_up_failure: None,
+    };
+    set_merge_candidate_terminal(candidate, MergeCandidateMergeStatus::Merged);
+    store
+        .write_work_item(&item)
+        .expect("persist the merged candidate");
+}
+
 /// A learner mock that fails its first run and succeeds on retry, keyed by a
 /// counter guard file so a post-land retry (which runs after land) drives the
 /// handoff-only path. The sandboxed retry cannot write shared temp, so it
@@ -3340,6 +3491,68 @@ if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
   # Announce the serialized mutation window twice: a shared-temp marker for an
   # unsandboxed pre-land race, and a stdout marker the host captures in the
   # durable transcript for a sandboxed post-land retry that cannot write it.
+  echo "RETRY_STARTED"
+  touch "{}" 2>/dev/null
+  while [ ! -f "{}" ]; do sleep 0.02; done
+  git commit -m "Update expertise" >/dev/null 2>&1
+  DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
+  mkdir -p "$(dirname "$DRAFT")"
+  printf '%s\n' '{{"learning_summary":"won before land","follow_ups":[]}}' > "$DRAFT"
+  exit 0
+fi
+case "$PWD" in
+  */work-6-work-1-attempt-1)
+    printf 'loop output\n' > loop-output.txt
+    git add loop-output.txt
+    git commit -m "Add loop output" >/dev/null 2>&1
+    ;;
+  *)
+    printf 'Verdict: pass\n\nLoop review.\n' > review.md
+    ;;
+esac
+exit 0
+"##,
+        counter.display(),
+        counter.display(),
+        retry_started.display(),
+        retry_release.display(),
+    )
+}
+
+/// A pre-land Learner race mock: the first run fails so the Attempt keeps a real
+/// pending Merge Candidate, and the retry recovers by committing a confined
+/// expertise change under `.fluent/expertise/` and returning a valid handoff, so
+/// the retry's Learning reaches Succeeded. It announces a serialized mutation
+/// window (a `RETRY_STARTED` stdout marker and a shared-temp file) and waits on a
+/// release file inside that window, so a concurrent land can be observed
+/// contending for the shared land boundary before the retry persists Succeeded.
+fn preland_race_learner_mock_script(
+    counter: &Path,
+    retry_started: &Path,
+    retry_release: &Path,
+) -> String {
+    format!(
+        r##"#!/bin/bash
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
+done
+if [ -z "$PROMPT" ]; then exit 0; fi
+if printf '%s' "$PROMPT" | grep -q "Rebase the candidate branch"; then
+  TARGET=$(printf '%s' "$PROMPT" | grep -o 'onto `[^`]*`' | sed 's/onto `//;s/`//')
+  git rebase "$TARGET" 2>/dev/null
+  exit $?
+fi
+if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
+  if [ ! -f "{}" ]; then
+    touch "{}"
+    exit 1
+  fi
+  mkdir -p .fluent/expertise/learnings
+  printf 'won before land\n' > .fluent/expertise/learnings/won.md
+  git add .fluent/expertise/learnings/won.md 2>/dev/null
   echo "RETRY_STARTED"
   touch "{}" 2>/dev/null
   while [ ! -f "{}" ]; do sleep 0.02; done
@@ -4352,8 +4565,8 @@ fn post_land_learner_retry_materializes_recovered_handoff() {
     );
 
     // The first Learner run fails, so land materializes nothing.
-    create_and_run_learner_attempt(&main_dir, &bin_dir);
-    land_work_1(&main_dir, &bin_dir, true);
+    create_and_run_failed_learner_attempt(&main_dir, &bin_dir);
+    simulate_legacy_land(&main_dir);
     let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
     assert!(
         candidate_workspace.is_dir(),
@@ -4412,8 +4625,8 @@ fn learner_schema_failure_repairs_prior_draft() {
     let bin_dir = tmp.path().join("bin-repair");
     write_mock_claude(&bin_dir, &schema_repair_learner_mock_script(&counter));
 
-    create_and_run_learner_attempt(&main_dir, &bin_dir);
-    land_work_1(&main_dir, &bin_dir, true);
+    create_and_run_failed_learner_attempt(&main_dir, &bin_dir);
+    simulate_legacy_land(&main_dir);
 
     // The retry's first draft fails schema validation; a bounded schema repair
     // corrects it and the handoff materializes.
@@ -4465,8 +4678,8 @@ fn learner_rejected_drafts_are_immutable_run_artifacts() {
         ),
     );
 
-    create_and_run_learner_attempt(&main_dir, &bin_dir);
-    land_work_1(&main_dir, &bin_dir, true);
+    create_and_run_failed_learner_attempt(&main_dir, &bin_dir);
+    simulate_legacy_land(&main_dir);
     let merged = merged_commit_of(&main_dir);
 
     let retry_output = rerun_learner_attempt(&main_dir, &bin_dir);
@@ -4532,8 +4745,8 @@ fn missing_legacy_learning_record_retries_after_land() {
         ),
     );
 
-    create_and_run_learner_attempt(&main_dir, &bin_dir);
-    land_work_1(&main_dir, &bin_dir, true);
+    create_and_run_failed_learner_attempt(&main_dir, &bin_dir);
+    simulate_legacy_land(&main_dir);
     let attempt_path = main_dir.join(".fluent/work/attempts/work-1/attempt-1.json");
     let mut attempt = read_json_value(&attempt_path);
     attempt.as_object_mut().unwrap().remove("learning");
@@ -4573,8 +4786,8 @@ fn successful_learning_resumes_failed_materialization_without_rerunning_coder() 
         ),
     );
 
-    create_and_run_learner_attempt(&main_dir, &bin_dir);
-    land_work_1(&main_dir, &bin_dir, true);
+    create_and_run_failed_learner_attempt(&main_dir, &bin_dir);
+    simulate_legacy_land(&main_dir);
     fs::write(
         main_dir.join(".fluent/observations"),
         "block observation directory\n",
@@ -4644,8 +4857,8 @@ fn cleanup_apply_retains_merged_origin_with_tampered_or_missing_operation_eviden
         ),
     );
 
-    create_and_run_learner_attempt(&main_dir, &bin_dir);
-    land_work_1(&main_dir, &bin_dir, true);
+    create_and_run_failed_learner_attempt(&main_dir, &bin_dir);
+    simulate_legacy_land(&main_dir);
     require_successful_trusted_retry!(rerun_learner_attempt(&main_dir, &bin_dir));
     let follow_ups_root = fluent::follow_up::follow_ups_root(&main_dir);
     let operation_dir = fs::read_dir(&follow_ups_root)
@@ -4697,7 +4910,7 @@ fn post_land_learner_retry_preserves_merged_commit() {
         ),
     );
 
-    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    create_and_run_failed_learner_attempt(&main_dir, &bin_dir);
     let candidate = main_dir.join("../work-6-work-1-attempt-1");
     fs::write(candidate.join("merge-fix.txt"), "accepted merge fix\n").unwrap();
     git::run(
@@ -4730,7 +4943,7 @@ fn post_land_learner_retry_preserves_merged_commit() {
     )
     .unwrap();
     let accepted_base = git_head(&main_dir);
-    land_work_1(&main_dir, &bin_dir, true);
+    simulate_legacy_land(&main_dir);
     let merged_before = merged_commit_of(&main_dir);
 
     // Simulate an already-merged legacy TaskOutput written before base_commit
@@ -4820,8 +5033,8 @@ fn post_land_legacy_recovery_rejects_a_wrong_ref_reflog_session() {
         ),
     );
 
-    create_and_run_learner_attempt(&main_dir, &bin_dir);
-    land_work_1(&main_dir, &bin_dir, true);
+    create_and_run_failed_learner_attempt(&main_dir, &bin_dir);
+    simulate_legacy_land(&main_dir);
     let merged = merged_commit_of(&main_dir);
     let candidate = main_dir.join("../work-6-work-1-attempt-1");
     let task_path = work_task_record_path(&main_dir, "work-1", "attempt-1", "attempt-1-write-1");
@@ -4896,10 +5109,10 @@ fn concurrent_learner_retry_and_land_never_mutate_after_merge() {
     let bin_dir = tmp.path().join("bin-serialize");
     write_mock_claude(
         &bin_dir,
-        &contended_learner_mock_script(&counter, &retry_started, &retry_release),
+        &preland_race_learner_mock_script(&counter, &retry_started, &retry_release),
     );
 
-    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    create_and_run_failed_learner_attempt(&main_dir, &bin_dir);
 
     let retry = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
         .current_dir(&main_dir)
@@ -4977,10 +5190,39 @@ fn concurrent_learner_retry_and_land_never_mutate_after_merge() {
         String::from_utf8_lossy(&land_output.stderr)
     );
 
-    // The retry's out-of-bounds commit is confined and discarded before land
-    // inspects the candidate workspace.
-    assert!(!main_dir.join("transient-learner.txt").exists());
+    // Serialized behind the shared land boundary, the retry recovered the Learner
+    // to Succeeded before releasing it, so the real land observed a landable
+    // Attempt and merged exactly once. The racing retry's work stayed confined to
+    // `.fluent/expertise/`, so only that confined change reached the merged tip.
     assert!(is_merged(&main_dir));
+    let state = work_item_value(&main_dir, "work-1");
+    assert_eq!(
+        state["attempts"][0]["learning"]["status"], "succeeded",
+        "the retry Learner reached Succeeded before land observed it"
+    );
+    let merged = merged_commit_of(&main_dir);
+    git::run(
+        &main_dir,
+        &[
+            "cat-file",
+            "-e",
+            &format!("{merged}:.fluent/expertise/learnings/won.md"),
+        ],
+        "confined expertise merged",
+    )
+    .expect("the racing retry's confined expertise merged into the landed commit");
+    let learner_changed = git::run_stdout(
+        &main_dir,
+        &["diff", "--name-only", &format!("{merged}^"), &merged],
+        "list the landed learner commit's paths",
+    )
+    .unwrap();
+    assert!(
+        learner_changed
+            .lines()
+            .all(|path| path.is_empty() || path.starts_with(".fluent/expertise/")),
+        "the racing retry's merged changes stay confined to expertise: {learner_changed}"
+    );
 }
 
 #[test]
@@ -4996,8 +5238,8 @@ fn cleanup_waits_for_recovery_then_rereads_the_completed_origin() {
         &contended_learner_mock_script(&counter, &retry_started, &retry_release),
     );
 
-    create_and_run_learner_attempt(&main_dir, &bin_dir);
-    land_work_1(&main_dir, &bin_dir, true);
+    create_and_run_failed_learner_attempt(&main_dir, &bin_dir);
+    simulate_legacy_land(&main_dir);
     if !real_sandbox_exec_is_usable() {
         let retry = rerun_learner_attempt(&main_dir, &bin_dir);
         assert!(!retry.status.success());
@@ -5103,8 +5345,8 @@ fn post_land_handoff_only_ignores_no_sandbox_and_preserves_live_git() {
         ),
     );
 
-    create_and_run_learner_attempt(&main_dir, &bin_dir);
-    land_work_1(&main_dir, &bin_dir, true);
+    create_and_run_failed_learner_attempt(&main_dir, &bin_dir);
+    simulate_legacy_land(&main_dir);
     let merged = merged_commit_of(&main_dir);
     fs::write(
         main_dir.join("preexisting-staged.txt"),
@@ -5515,8 +5757,8 @@ fn trusted_learner_hydrates_credentials_before_sandbox() {
     write_mock_claude(&bin_dir, &credential_probe_learner_mock_script(&counter));
     write_mock_security(&bin_dir, "injected-oauth-b1");
 
-    create_and_run_learner_attempt(&main_dir, &bin_dir);
-    land_work_1(&main_dir, &bin_dir, true);
+    create_and_run_failed_learner_attempt(&main_dir, &bin_dir);
+    simulate_legacy_land(&main_dir);
 
     let retry_output = rerun_learner_trusted(&main_dir, &bin_dir, &[]);
     if !real_sandbox_exec_is_usable() {
@@ -5551,8 +5793,8 @@ fn trusted_learner_has_private_temp_without_shared_temp_access() {
     write_mock_claude(&bin_dir, &temp_probe_learner_mock_script(&counter));
     write_mock_security(&bin_dir, "temp-probe-token");
 
-    create_and_run_learner_attempt(&main_dir, &bin_dir);
-    land_work_1(&main_dir, &bin_dir, true);
+    create_and_run_failed_learner_attempt(&main_dir, &bin_dir);
+    simulate_legacy_land(&main_dir);
 
     let retry_output = rerun_learner_trusted(&main_dir, &bin_dir, &[]);
     if !real_sandbox_exec_is_usable() {
@@ -5595,8 +5837,8 @@ fn trusted_learner_auth_401_refreshes_from_transcript() {
     write_mock_claude(&bin_dir, &auth_401_learner_mock_script(&counter));
     write_mock_security(&bin_dir, "auth-probe-token");
 
-    create_and_run_learner_attempt(&main_dir, &bin_dir);
-    land_work_1(&main_dir, &bin_dir, true);
+    create_and_run_failed_learner_attempt(&main_dir, &bin_dir);
+    simulate_legacy_land(&main_dir);
 
     let retry_output = rerun_learner_trusted(
         &main_dir,
@@ -5678,8 +5920,8 @@ fn sandboxed_post_land_coder_runs_and_is_denied() {
         ),
     );
 
-    create_and_run_learner_attempt(&main_dir, &bin_dir);
-    land_work_1(&main_dir, &bin_dir, true);
+    create_and_run_failed_learner_attempt(&main_dir, &bin_dir);
+    simulate_legacy_land(&main_dir);
     let merged = merged_commit_of(&main_dir);
     let retry_output = rerun_learner_attempt_sandboxed(&main_dir, &bin_dir);
 
@@ -5796,8 +6038,8 @@ fn failed_post_land_coder_still_restores_candidate_index_and_worktree() {
         &failing_dirty_post_land_learner_mock_script(&counter),
     );
 
-    create_and_run_learner_attempt(&main_dir, &bin_dir);
-    land_work_1(&main_dir, &bin_dir, true);
+    create_and_run_failed_learner_attempt(&main_dir, &bin_dir);
+    simulate_legacy_land(&main_dir);
     assert!(!rerun_learner_attempt(&main_dir, &bin_dir).status.success());
 
     let candidate = main_dir.join("../work-6-work-1-attempt-1");
@@ -5829,8 +6071,8 @@ fn concurrent_post_land_retries_run_the_learner_once() {
         ),
     );
 
-    create_and_run_learner_attempt(&main_dir, &bin_dir);
-    land_work_1(&main_dir, &bin_dir, true);
+    create_and_run_failed_learner_attempt(&main_dir, &bin_dir);
+    simulate_legacy_land(&main_dir);
     write_mock_sandbox_exec(&bin_dir);
 
     let spawn_retry = || {
@@ -5879,8 +6121,8 @@ fn post_land_retry_ignores_a_malformed_retained_candidate() {
         ),
     );
 
-    create_and_run_learner_attempt(&main_dir, &bin_dir);
-    land_work_1(&main_dir, &bin_dir, true);
+    create_and_run_failed_learner_attempt(&main_dir, &bin_dir);
+    simulate_legacy_land(&main_dir);
     let merged = merged_commit_of(&main_dir);
     let candidate = main_dir.join("../work-6-work-1-attempt-1");
     fs::write(candidate.join("interrupted.txt"), "unauthorized\n").unwrap();
@@ -5951,8 +6193,8 @@ fn post_land_expertise_proposal_materializes_observation_only() {
         ),
     );
 
-    create_and_run_learner_attempt(&main_dir, &bin_dir);
-    land_work_1(&main_dir, &bin_dir, true);
+    create_and_run_failed_learner_attempt(&main_dir, &bin_dir);
+    simulate_legacy_land(&main_dir);
     require_successful_trusted_retry!(rerun_learner_attempt(&main_dir, &bin_dir));
 
     let observations = open_observation_files(&main_dir);
