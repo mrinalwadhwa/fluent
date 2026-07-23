@@ -1375,10 +1375,9 @@ fn settle_reserved_rebase_together(
             let candidate_state = &item.merge_candidates[candidate_idx].merge_state;
             let candidate_merged = candidate_state.status == MergeCandidateMergeStatus::Merged
                 && candidate_state.merged_commit.is_some();
-            let candidate_failed =
-                candidate_state.status == MergeCandidateMergeStatus::Failed;
-            let task_failed = item.attempts[attempt_idx].tasks[task_idx].status
-                == TaskStatus::Failed;
+            let candidate_failed = candidate_state.status == MergeCandidateMergeStatus::Failed;
+            let task_failed =
+                item.attempts[attempt_idx].tasks[task_idx].status == TaskStatus::Failed;
             let settlement = if candidate_merged {
                 RebaseSettlement::Merged
             } else if hard_failure || task_failed || candidate_failed {
@@ -1395,7 +1394,9 @@ fn settle_reserved_rebase_together(
             let task = &mut item.attempts[attempt_idx].tasks[task_idx];
             match settlement {
                 RebaseSettlement::Merged => settle_task_terminal(task, TaskStatus::Complete),
-                RebaseSettlement::Failed => force_non_merged_task_terminal(task, TaskStatus::Failed),
+                RebaseSettlement::Failed => {
+                    force_non_merged_task_terminal(task, TaskStatus::Failed)
+                }
                 RebaseSettlement::NeedsUser => {
                     force_non_merged_task_terminal(task, TaskStatus::NeedsUser)
                 }
@@ -1853,8 +1854,10 @@ mod tests {
             capture: Option<&crate::coder::TranscriptCapture<'_>>,
         ) -> Result<i32> {
             if let Some(capture) = capture {
-                *self.recorded.lock().unwrap() =
-                    Some((capture.path.to_path_buf(), capture.config.console_preview_limit));
+                *self.recorded.lock().unwrap() = Some((
+                    capture.path.to_path_buf(),
+                    capture.config.console_preview_limit,
+                ));
             }
             match &self.outcome {
                 FakeOutcome::PumpError(message) => Err(anyhow::Error::new(
@@ -2524,10 +2527,7 @@ mod tests {
             skip_post_merge_review: false,
         };
         let rebase_status = |work_id: &str| -> TaskStatus {
-            store
-                .read_work_item(work_id)
-                .unwrap()
-                .attempts[0]
+            store.read_work_item(work_id).unwrap().attempts[0]
                 .tasks
                 .iter()
                 .find(|t| t.kind == TaskKind::Rebase)
@@ -2551,7 +2551,10 @@ mod tests {
             "an inconsistent Complete Task is forced to Failed, never a Complete/Failed split"
         );
         assert_eq!(
-            store.read_work_item("work-complete-hard").unwrap().merge_candidates[0]
+            store
+                .read_work_item("work-complete-hard")
+                .unwrap()
+                .merge_candidates[0]
                 .merge_state
                 .status,
             MergeCandidateMergeStatus::Failed,
@@ -2574,7 +2577,10 @@ mod tests {
             "an inconsistent Complete Task is forced to NeedsUser, never a Complete/NeedsUser split"
         );
         assert_eq!(
-            store.read_work_item("work-complete-pump").unwrap().merge_candidates[0]
+            store
+                .read_work_item("work-complete-pump")
+                .unwrap()
+                .merge_candidates[0]
                 .merge_state
                 .status,
             MergeCandidateMergeStatus::NeedsUser,

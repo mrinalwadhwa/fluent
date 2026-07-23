@@ -332,7 +332,8 @@ impl Coder for SandboxedClaudeCode {
         extra_env: &[(String, String)],
         transcript_file: Option<&Path>,
     ) -> Result<i32> {
-        let capture = transcript_file.map(|path| TranscriptCapture::with_config(path, Default::default()));
+        let capture =
+            transcript_file.map(|path| TranscriptCapture::with_config(path, Default::default()));
         self.run_captured(
             prompt,
             system_prompt,
@@ -471,7 +472,8 @@ impl Coder for BareClaudeCode {
         extra_env: &[(String, String)],
         transcript_file: Option<&Path>,
     ) -> Result<i32> {
-        let capture = transcript_file.map(|path| TranscriptCapture::with_config(path, Default::default()));
+        let capture =
+            transcript_file.map(|path| TranscriptCapture::with_config(path, Default::default()));
         self.run_captured(
             prompt,
             system_prompt,
@@ -583,7 +585,8 @@ impl Coder for CodexCode {
         extra_env: &[(String, String)],
         transcript_file: Option<&Path>,
     ) -> Result<i32> {
-        let capture = transcript_file.map(|path| TranscriptCapture::with_config(path, Default::default()));
+        let capture =
+            transcript_file.map(|path| TranscriptCapture::with_config(path, Default::default()));
         self.run_captured(
             prompt,
             system_prompt,
@@ -757,7 +760,8 @@ impl Coder for PiCode {
         extra_env: &[(String, String)],
         transcript_file: Option<&Path>,
     ) -> Result<i32> {
-        let capture = transcript_file.map(|path| TranscriptCapture::with_config(path, Default::default()));
+        let capture =
+            transcript_file.map(|path| TranscriptCapture::with_config(path, Default::default()));
         self.run_captured(
             prompt,
             system_prompt,
@@ -980,7 +984,11 @@ pub struct SupervisionSidecarError(anyhow::Error);
 
 impl std::fmt::Display for SupervisionSidecarError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "failed to persist coder supervision sidecar: {:#}", self.0)
+        write!(
+            f,
+            "failed to persist coder supervision sidecar: {:#}",
+            self.0
+        )
     }
 }
 
@@ -1466,13 +1474,19 @@ impl std::fmt::Display for CleanupError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CleanupError::NotTerminated { id, signal, kill } => {
-                write!(f, "coder process {id} could not be terminated (group signal {signal} and direct kill {kill} both failed)")
+                write!(
+                    f,
+                    "coder process {id} could not be terminated (group signal {signal} and direct kill {kill} both failed)"
+                )
             }
             CleanupError::NotReaped { id, source } => {
                 write!(f, "coder process {id} could not be reaped ({source})")
             }
             CleanupError::IdentityLost { id } => {
-                write!(f, "coder process {id} identity was already lost (ECHILD); not signaled or reaped to avoid a recycled PID")
+                write!(
+                    f,
+                    "coder process {id} identity was already lost (ECHILD); not signaled or reaped to avoid a recycled PID"
+                )
             }
         }
     }
@@ -2339,10 +2353,12 @@ where
         aggregate.extend_ordered(completion.report);
         let exit = match completion.terminal {
             Ok(exit) => exit,
-            Err(err) => return CoderRunCompletion {
-                terminal: Err(err),
-                report: aggregate,
-            },
+            Err(err) => {
+                return CoderRunCompletion {
+                    terminal: Err(err),
+                    report: aggregate,
+                };
+            }
         };
         if exit == 0 {
             if auth_refreshed {
@@ -2568,10 +2584,7 @@ mod pump_supervision_tests {
         // The terminal status names the panic.
         let persisted: crate::transcript_pump::PumpStatus =
             serde_json::from_slice(&std::fs::read(&status).unwrap()).unwrap();
-        assert_eq!(
-            persisted.state,
-            crate::transcript_pump::PumpState::Failed
-        );
+        assert_eq!(persisted.state, crate::transcript_pump::PumpState::Failed);
         assert!(persisted.error.is_some());
     }
 
@@ -2599,7 +2612,11 @@ mod pump_supervision_tests {
         ));
 
         let started = Instant::now();
-        let result = run_with_transcript(cmd, Some(&transcript), &crate::transcript_pump::TranscriptPumpConfig::default());
+        let result = run_with_transcript(
+            cmd,
+            Some(&transcript),
+            &crate::transcript_pump::TranscriptPumpConfig::default(),
+        );
         let elapsed = started.elapsed();
 
         let err = result.expect_err("a pump failure must surface as an error");
@@ -2664,7 +2681,12 @@ mod pump_supervision_tests {
         cmd.arg("-c")
             .arg("printf '{\"type\":\"a\"}\\n{\"type\":\"b\"}\\n'; exit 0");
 
-        let exit = run_with_transcript(cmd, Some(&transcript), &crate::transcript_pump::TranscriptPumpConfig::default()).unwrap();
+        let exit = run_with_transcript(
+            cmd,
+            Some(&transcript),
+            &crate::transcript_pump::TranscriptPumpConfig::default(),
+        )
+        .unwrap();
         assert_eq!(exit, 0);
         let body = std::fs::read_to_string(&transcript).unwrap();
         assert!(body.contains("\"type\":\"a\""));
@@ -2690,7 +2712,12 @@ mod pump_supervision_tests {
             .current_dir(dir.path());
 
         let started = Instant::now();
-        let exit = run_with_transcript(cmd, Some(&transcript), &crate::transcript_pump::TranscriptPumpConfig::default()).unwrap();
+        let exit = run_with_transcript(
+            cmd,
+            Some(&transcript),
+            &crate::transcript_pump::TranscriptPumpConfig::default(),
+        )
+        .unwrap();
         let elapsed = started.elapsed();
 
         assert_eq!(exit, 0);
@@ -3188,8 +3215,7 @@ mod pump_supervision_tests {
             ..FakeLeader::new(Arc::clone(&calls), Some(0))
         };
         let mut supervisor = CoderSupervisor::with_leader(Box::new(leader));
-        let err =
-            supervisor.finalize_setup_error(anyhow::anyhow!("coder stdout was not piped"));
+        let err = supervisor.finalize_setup_error(anyhow::anyhow!("coder stdout was not piped"));
 
         assert!(
             format!("{err:#}").contains("coder stdout was not piped"),
@@ -3228,7 +3254,10 @@ mod pump_supervision_tests {
         let code = managed
             .await_exit_then_cleanup()
             .expect("the leader is reaped");
-        assert_eq!(code, 7, "the natural exit code is preserved through cleanup");
+        assert_eq!(
+            code, 7,
+            "the natural exit code is preserved through cleanup"
+        );
 
         // Zombie-sensitive: no waitable child remains for this PID. A missed reap
         // would leave a waitable zombie; a double reap is impossible because the code
@@ -3465,10 +3494,7 @@ mod pump_supervision_tests {
     }
 
     impl crate::transcript_pump::StatusStore for GateTerminalStore {
-        fn write(
-            &mut self,
-            status: &crate::transcript_pump::PumpStatus,
-        ) -> Result<(), String> {
+        fn write(&mut self, status: &crate::transcript_pump::PumpStatus) -> Result<(), String> {
             use crate::transcript_pump::PumpState;
             match status.state {
                 PumpState::Running => Ok(()),
@@ -3678,7 +3704,10 @@ mod pump_supervision_tests {
         let code = finish_supervised_coder_run(completion, dir.path()).unwrap();
         assert_eq!(code, 0, "the terminal outcome passes through unchanged");
         let path = dir.path().join(CODER_SUPERVISION_SIDECAR);
-        assert!(path.exists(), "a non-clean report is persisted as a sidecar");
+        assert!(
+            path.exists(),
+            "a non-clean report is persisted as a sidecar"
+        );
         let persisted: CoderSupervisionReport =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         match &persisted.launches[0].group_sweep {
@@ -4342,7 +4371,15 @@ mod model_default_tests {
             )
             .current_dir(dir.path());
 
-        assert_eq!(run_with_transcript(command, None, &crate::transcript_pump::TranscriptPumpConfig::default()).unwrap(), 0);
+        assert_eq!(
+            run_with_transcript(
+                command,
+                None,
+                &crate::transcript_pump::TranscriptPumpConfig::default()
+            )
+            .unwrap(),
+            0
+        );
         assert!(
             launched_path.exists(),
             "hostile descendant actually executed"
@@ -4610,7 +4647,11 @@ exit 1"#
         assert_eq!(result.unwrap(), 0, "the retry recovers");
 
         let seen = seen.lock().unwrap();
-        assert_eq!(seen.len(), 2, "the original attempt plus one auth-refresh retry");
+        assert_eq!(
+            seen.len(),
+            2,
+            "the original attempt plus one auth-refresh retry"
+        );
         assert_eq!(
             seen[0], seen[1],
             "the same resolved config flows into every retry phase"

@@ -98,7 +98,10 @@ pub(crate) fn resolve_config_from(
 }
 
 fn map_resolved_config(
-    resolved: Result<crate::config::ResolvedTranscriptPumpConfig, crate::config::FollowUpConfigError>,
+    resolved: Result<
+        crate::config::ResolvedTranscriptPumpConfig,
+        crate::config::FollowUpConfigError,
+    >,
 ) -> TranscriptPumpConfig {
     match resolved {
         Ok(resolved) => TranscriptPumpConfig {
@@ -333,7 +336,11 @@ impl StatusTransportDiagnostics {
     /// exactly one terminal category.
     pub fn is_balanced(&self) -> bool {
         self.submitted
-            == self.written + self.coalesced + self.dropped + self.disconnected + self.write_failures
+            == self.written
+                + self.coalesced
+                + self.dropped
+                + self.disconnected
+                + self.write_failures
     }
 }
 
@@ -398,7 +405,15 @@ pub fn drain(
 ) -> Result<PumpSummary, TranscriptPumpError> {
     let counters = SharedCounters::default();
     let store = status_path.map(file_status_store);
-    drain_with_first_fault(reader, transcript_path, store, preview, config, &counters, None)
+    drain_with_first_fault(
+        reader,
+        transcript_path,
+        store,
+        preview,
+        config,
+        &counters,
+        None,
+    )
 }
 
 /// Drive a drain against an injected [`StatusStore`], so tests can gate, fail, or
@@ -412,7 +427,15 @@ pub(crate) fn drain_with_store(
     config: &TranscriptPumpConfig,
 ) -> Result<PumpSummary, TranscriptPumpError> {
     let counters = SharedCounters::default();
-    drain_with_first_fault(reader, transcript_path, store, preview, config, &counters, None)
+    drain_with_first_fault(
+        reader,
+        transcript_path,
+        store,
+        preview,
+        config,
+        &counters,
+        None,
+    )
 }
 
 /// Drain into the transcript, owning the status coordinator across a caught capture
@@ -532,7 +555,14 @@ fn capture(
             break;
         }
         let chunk = &buf[..read];
-        persist_chunk(&mut file, chunk, &mut line, preview, counters, transcript_path)?;
+        persist_chunk(
+            &mut file,
+            chunk,
+            &mut line,
+            preview,
+            counters,
+            transcript_path,
+        )?;
 
         if last_flush.elapsed() >= config.status_flush_interval {
             // Periodic snapshots go through the coordinator's coalescing slot, never
@@ -1009,15 +1039,14 @@ impl SharedStatusState {
             }
         }
         while let Some(cmd) = inner.required.pop_front() {
-            let _ = cmd
-                .ack
-                .send(Err("persist pump status: status worker disconnected".to_string()));
+            let _ = cmd.ack.send(Err(
+                "persist pump status: status worker disconnected".to_string()
+            ));
         }
         inner.periodic = None;
         inner.shutdown = true;
         let d = &inner.diagnostics;
-        let accounted =
-            d.written + d.coalesced + d.dropped + d.disconnected + d.write_failures;
+        let accounted = d.written + d.coalesced + d.dropped + d.disconnected + d.write_failures;
         if d.submitted > accounted {
             inner.diagnostics.disconnected += d.submitted - accounted;
         }
@@ -1712,11 +1741,15 @@ mod tests {
         for _ in 0..8 {
             let _ = gate_tx.send(());
         }
-        let settlement = coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
+        let settlement =
+            coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
 
         // A, B, C periodics plus the terminal write are all submissions.
         assert_eq!(settlement.diagnostics.submitted, 4);
-        assert_eq!(settlement.diagnostics.coalesced, 1, "the replaced snapshot B");
+        assert_eq!(
+            settlement.diagnostics.coalesced, 1,
+            "the replaced snapshot B"
+        );
         assert_eq!(
             settlement.diagnostics.written, 3,
             "A, C, and the terminal reach the store"
@@ -1808,7 +1841,8 @@ mod tests {
         for _ in 0..5 {
             coordinator.submit_periodic(running_status());
         }
-        let settlement = coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
+        let settlement =
+            coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
 
         assert!(
             settlement.diagnostics.is_balanced(),
@@ -1899,11 +1933,15 @@ mod tests {
 
         let attempts = attempts.lock().unwrap();
         assert!(
-            attempts.iter().any(|(s, ok)| *s == PumpState::Complete && !ok),
+            attempts
+                .iter()
+                .any(|(s, ok)| *s == PumpState::Complete && !ok),
             "a Complete write was attempted and failed"
         );
         assert!(
-            attempts.iter().any(|(s, ok)| *s == PumpState::Failed && *ok),
+            attempts
+                .iter()
+                .any(|(s, ok)| *s == PumpState::Failed && *ok),
             "a Failed fallback was attempted and succeeded"
         );
     }
@@ -2023,7 +2061,8 @@ mod tests {
         // The worker panics writing this required status; the submitter is
         // disconnected rather than acknowledged.
         assert!(coordinator.submit_required(running_status()).is_err());
-        let settlement = coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
+        let settlement =
+            coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
 
         assert!(latch.observed(), "the worker panic latched the first fault");
         assert_eq!(latch.message().as_deref(), Some(STATUS_WORKER_PANIC));
@@ -2062,7 +2101,8 @@ mod tests {
             coordinator.submit_required(running_status()).is_err(),
             "the submitter is disconnected, not hung, when the worker panics"
         );
-        let settlement = coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
+        let settlement =
+            coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
         // Exactly the initial Running and the terminal are submitted. The Running
         // write is the one the worker crashed on mid-persist, so it is accounted as
         // a write failure; the terminal was never reached by the dead worker, so it
@@ -2102,7 +2142,11 @@ mod tests {
             coordinator.submit_required(running_status()).is_err(),
             "a failed required write is a typed failure"
         );
-        let settlement = coordinator.finish(TerminalStatusSpec::failed(0, PumpSummary::default(), "primary"));
+        let settlement = coordinator.finish(TerminalStatusSpec::failed(
+            0,
+            PumpSummary::default(),
+            "primary",
+        ));
         assert!(
             settlement.periodic_error.is_none(),
             "a required write failure is not a periodic error: {:?}",
@@ -2320,7 +2364,9 @@ mod tests {
             err.message().len() <= MAX_STATUS_ERROR_LEN,
             "the primary is bounded"
         );
-        let fallback = err.fallback_error().expect("the Failed fallback also failed");
+        let fallback = err
+            .fallback_error()
+            .expect("the Failed fallback also failed");
         assert!(fallback.starts_with('F'), "the fallback error is distinct");
         assert!(
             fallback.len() <= MAX_STATUS_ERROR_LEN,
@@ -2499,8 +2545,7 @@ mod tests {
             coordinator.finish(TerminalStatusSpec::failed(0, PumpSummary::default(), &long));
 
         // Read the document the coordinator actually wrote to disk.
-        let persisted: PumpStatus =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let persisted: PumpStatus = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(persisted.state, PumpState::Failed);
         let persisted_error = persisted
             .error
@@ -2530,8 +2575,11 @@ mod tests {
         // diagnostics, and the balance still holds.
         let mut coordinator = StatusCoordinator::spawn(Box::new(LongErrorStore), None).unwrap();
         let _ = coordinator.submit_required(running_status());
-        let settlement =
-            coordinator.finish(TerminalStatusSpec::failed(0, PumpSummary::default(), "primary"));
+        let settlement = coordinator.finish(TerminalStatusSpec::failed(
+            0,
+            PumpSummary::default(),
+            "primary",
+        ));
         let last_error = settlement
             .diagnostics
             .last_error
@@ -2604,7 +2652,8 @@ mod tests {
         let path = dir.path().join("transcript-pump.json");
         let mut coordinator = StatusCoordinator::spawn(file_status_store(&path), None).unwrap();
         coordinator.submit_required(running_status()).unwrap();
-        let settlement = coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
+        let settlement =
+            coordinator.finish(TerminalStatusSpec::complete(0, PumpSummary::default()));
 
         // One required Running plus the terminal write.
         assert_eq!(settlement.diagnostics.submitted, 2, "Running + terminal");
@@ -3035,8 +3084,7 @@ mod tests {
             err2.message().contains("read coder stdout"),
             "the failure must name the read error: {err2}"
         );
-        let failed: PumpStatus =
-            serde_json::from_slice(&std::fs::read(&status2).unwrap()).unwrap();
+        let failed: PumpStatus = serde_json::from_slice(&std::fs::read(&status2).unwrap()).unwrap();
         assert_eq!(failed.state, PumpState::Failed);
         assert_eq!(
             failed.records, 1,
@@ -3211,8 +3259,14 @@ mod tests {
             (ha.join().unwrap(), hb.join().unwrap())
         });
 
-        assert!(a <= 64, "capture A must honor its own 64-byte limit, got {a}");
-        assert!(b <= 256, "capture B must honor its own 256-byte limit, got {b}");
+        assert!(
+            a <= 64,
+            "capture A must honor its own 64-byte limit, got {a}"
+        );
+        assert!(
+            b <= 256,
+            "capture B must honor its own 256-byte limit, got {b}"
+        );
         assert_ne!(
             a, b,
             "each concurrent capture used its own config, not a shared global"
