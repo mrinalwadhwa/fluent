@@ -995,11 +995,14 @@ fn run_learner_step(
     // Learner and must never launch a second coder; a crash releases the OS-held
     // lease so a later recovery run can reacquire it and resume the work.
     let lease_path = crate::lease::learner_lock_path(project_root, &work_item_id, &attempt_id);
-    let _lease = match crate::lease::acquire(&lease_path) {
-        Ok(lease) => lease,
-        Err(_) => {
+    let _lease = match crate::lease::try_acquire(&lease_path)? {
+        crate::lease::LeaseAttempt::Acquired(lease) => lease,
+        crate::lease::LeaseAttempt::Contended => {
             // A live peer owns this run. Refresh the in-memory snapshot so the caller
-            // observes the peer's durable progress, and launch nothing.
+            // observes the peer's durable progress, and launch nothing. Only genuine
+            // contention lands here; an infrastructure failure on the lock path
+            // propagates through the `?` above rather than masquerading as a busy peer
+            // and silently skipping the Learner.
             *item = store.read_work_item(&work_item_id)?;
             return Ok(());
         }
@@ -4721,6 +4724,59 @@ mod tests {
         assert_eq!(
             learning.runs, 1,
             "the run count is not advanced by recovery"
+        );
+    }
+
+    #[test]
+    fn learner_lease_infrastructure_failure_launches_no_coder() {
+        // The per-Attempt Learner lease distinguishes a live peer from an
+        // infrastructure fault on the lock path. An obstructed lock parent is not a
+        // busy peer: recovery must surface the error rather than silently skip the
+        // Learner and stall advancement forever. No coder is launched and the durable
+        // learning state is left unchanged.
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, _workspace, _base) = make_learner_passing_fixture(tmp.path(), 1);
+
+        // Obstruct the Learner lock path with a directory where the lock file must
+        // be, so opening the lock for writing fails with an infrastructure error
+        // rather than reporting a busy peer.
+        let lock_path = crate::lease::learner_lock_path(&project_root, "work-1", "attempt-1");
+        std::fs::create_dir_all(&lock_path).unwrap();
+
+        let before = store.read_work_item("work-1").unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_coder = Arc::clone(&calls);
+        let run_coder = move |_request: &LearnerCoderRequest<'_>| -> Result<()> {
+            calls_for_coder.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(())
+        };
+
+        let item = store.read_work_item("work-1").unwrap();
+        let result = interpret_reviews(
+            &project_root,
+            &store,
+            item,
+            "attempt-1",
+            true,
+            Some(LearnerConfig {
+                run_coder: &run_coder,
+            }),
+        );
+        assert!(
+            result.is_err(),
+            "an infrastructure lease failure must surface as an error, not a silent skip"
+        );
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            0,
+            "no coder is launched when the lock path is obstructed"
+        );
+        let after = store.read_work_item("work-1").unwrap();
+        assert_eq!(
+            before.attempts[0].learning, after.attempts[0].learning,
+            "the durable learning state is unchanged by an obstructed lease"
         );
     }
 
