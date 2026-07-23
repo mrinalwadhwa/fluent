@@ -789,7 +789,12 @@ impl StatusSettlement {
         Some(TranscriptPumpError {
             message: bound_error(&message),
             periodic_error: self.periodic_error.as_deref().map(bound_error),
-            settlement_error: None,
+            // Attach the terminal-settlement failure to its dedicated field rather
+            // than clearing it: the message may name either the settlement or the
+            // worker failure, but a caller inspecting the typed error must still find
+            // the settlement failure distinctly, kept separate from periodic, fallback,
+            // and worker diagnostics.
+            settlement_error: self.settlement_error.as_deref().map(bound_error),
             fallback_error: self.fallback_error.as_deref().map(bound_error),
             worker_error: self.worker_error.as_deref().map(bound_error),
             transport: Some(self.diagnostics.clone()),
@@ -1858,6 +1863,12 @@ mod tests {
             "the primary names the Complete write failure: {err}"
         );
         assert!(
+            err.settlement_error()
+                .is_some_and(|s| s.contains("simulated Complete write failure")),
+            "the terminal-settlement failure is attached to its dedicated field, not \
+             only folded into the message: {err:?}"
+        );
+        assert!(
             err.fallback_error().is_none(),
             "the Failed fallback persisted, so no fallback error"
         );
@@ -2436,6 +2447,47 @@ mod tests {
             "the persisted periodic error is bounded, got {}",
             persisted_periodic.len()
         );
+    }
+
+    #[test]
+    fn persisted_on_disk_multibyte_failed_document_is_bounded() {
+        // B4: drive the REAL coordinator through a file-backed store and read the
+        // persisted Failed document back FROM DISK. A pathological multibyte primary
+        // error is bounded within the total cap, stays valid UTF-8 (deserialization
+        // would fail if a codepoint were split), and the on-disk transport accounting
+        // is balanced — proving the bound holds at the actual persisted boundary, not
+        // only in the in-memory builder.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript-pump.json");
+        let mut coordinator = StatusCoordinator::spawn(file_status_store(&path), None).unwrap();
+        coordinator.submit_required(running_status()).unwrap();
+        let long = "€".repeat(5000);
+        let settlement =
+            coordinator.finish(TerminalStatusSpec::failed(0, PumpSummary::default(), &long));
+
+        // Read the document the coordinator actually wrote to disk.
+        let persisted: PumpStatus =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted.state, PumpState::Failed);
+        let persisted_error = persisted
+            .error
+            .expect("the on-disk Failed document carries its error");
+        assert!(
+            persisted_error.len() <= MAX_STATUS_ERROR_LEN,
+            "the on-disk primary error is bounded, got {}",
+            persisted_error.len()
+        );
+        assert!(
+            persisted_error.chars().next() == Some('€'),
+            "the bound preserved whole codepoints, never splitting one"
+        );
+        assert!(
+            persisted.transport.is_balanced(),
+            "the on-disk transport accounting is balanced: {:?}",
+            persisted.transport
+        );
+        // The returned settlement agrees with what landed on disk.
+        assert!(settlement.diagnostics.is_balanced());
     }
 
     #[test]
