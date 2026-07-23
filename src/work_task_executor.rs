@@ -972,6 +972,27 @@ fn is_resumable_task_failure(error: &anyhow::Error) -> bool {
     )
 }
 
+/// A workspace-confinement cleanup failure raised when finishing a Reviewer's readable
+/// workspace — the candidate-worktree check or the source-checkout guard's
+/// `git restore`. Wrapping it in a concrete type keeps it discoverable by `downcast_ref`
+/// once it is composed as secondary context onto a preserved typed coder/pump primary,
+/// so both the primary and this cleanup failure survive composition rather than being
+/// flattened into a rendered string.
+#[derive(Debug)]
+struct ReviewerConfinementError(anyhow::Error);
+
+impl std::fmt::Display for ReviewerConfinementError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "reviewer workspace confinement could not be finished: {:#}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for ReviewerConfinementError {}
+
 /// Compose a Reviewer's coder/pump outcome with its workspace-confinement cleanup
 /// outcome and durably terminalize the Task before returning.
 ///
@@ -996,9 +1017,12 @@ fn finalize_review_outcome(
         let error = run_result.err().expect("checked Err above");
         let error = match cleanup_result {
             Ok(()) => error,
-            Err(cleanup_error) => error.context(format!(
-                "additionally failed to finish reviewer workspace confinement: {cleanup_error:#}"
-            )),
+            // Attach the cleanup failure as a downcastable typed secondary rather than a
+            // rendered string, so both the typed pump primary and the confinement error
+            // survive `downcast_ref` on the composed result.
+            Err(cleanup_error) => error
+                .context(ReviewerConfinementError(cleanup_error))
+                .context("additionally failed to finish reviewer workspace confinement"),
         };
         let failure = classify_task_failure(&error);
         if let Err(state_error) = lock_mark_task_failed_attempt_needs_user(
@@ -5031,7 +5055,13 @@ mod tests {
                 .is_some(),
             "the transcript-pump primary must remain discoverable by downcast: {error:#}"
         );
-        // The real confinement restore failure is retained as secondary context.
+        // The real confinement restore failure is retained as a downcastable typed
+        // secondary — not flattened into a rendered string — so both the pump primary
+        // and the confinement failure survive composition.
+        assert!(
+            error.downcast_ref::<ReviewerConfinementError>().is_some(),
+            "the confinement cleanup failure must remain discoverable by downcast: {error:#}"
+        );
         let rendered = format!("{error:#}");
         assert!(
             rendered.contains("confinement") && rendered.to_lowercase().contains("restore"),
