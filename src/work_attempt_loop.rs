@@ -1014,10 +1014,15 @@ fn finalize_learning(
 /// transcript-pump infrastructure failure anywhere in the error chain is preserved
 /// as such rather than collapsed to a generic string.
 fn classify_learning_failure(err: &anyhow::Error) -> crate::work_model::LearningFailureKind {
-    if err
-        .chain()
-        .any(|cause| cause.is::<crate::transcript_pump::TranscriptPumpError>())
-    {
+    // A transcript-pump transport fault OR a supervision-sidecar persistence fault is a
+    // non-retryable infrastructure failure: the Learner coder already ran (its expertise
+    // effects may be on disk), so the durable record must classify it as infrastructure
+    // rather than a generic coder-logic failure that could invite a relaunch.
+    let is_infrastructure = err.chain().any(|cause| {
+        cause.is::<crate::transcript_pump::TranscriptPumpError>()
+            || cause.is::<crate::coder::SupervisionSidecarError>()
+    });
+    if is_infrastructure {
         crate::work_model::LearningFailureKind::TranscriptPump
     } else {
         crate::work_model::LearningFailureKind::Generic
@@ -2561,6 +2566,44 @@ mod tests {
         assert_eq!(
             classify_learning_failure(&generic),
             LearningFailureKind::Generic
+        );
+
+        // A supervision-sidecar persistence fault is infrastructure, not Generic: the
+        // Learner coder already ran, so it is a durable non-retryable disposition rather
+        // than a generic coder-logic failure that could invite a relaunch.
+        let sidecar: anyhow::Error = {
+            let dir = tempfile::tempdir().unwrap();
+            let obstruction = dir.path().join("file");
+            std::fs::write(&obstruction, b"x").unwrap();
+            let completion = crate::coder::CoderRunCompletion {
+                terminal: Ok(0),
+                report: crate::coder::CoderSupervisionReport {
+                    launches: vec![crate::coder::CoderLaunchSupervision {
+                        exit_code: Some(0),
+                        group_sweep: crate::coder::GroupSweepDisposition::Unconfirmed(
+                            crate::coder::ProcessOpDiagnostic {
+                                operation: "kill process group".to_string(),
+                                kind: None,
+                                errno: Some(1),
+                                message: None,
+                            },
+                        ),
+                    }],
+                },
+            };
+            crate::coder::finish_supervised_coder_run(completion, &obstruction)
+                .expect_err("obstructed sidecar")
+        };
+        assert!(
+            sidecar
+                .downcast_ref::<crate::coder::SupervisionSidecarError>()
+                .is_some(),
+            "the constructed error is a supervision-sidecar error"
+        );
+        assert_eq!(
+            classify_learning_failure(&sidecar),
+            LearningFailureKind::TranscriptPump,
+            "a supervision-sidecar fault is a non-retryable infrastructure disposition"
         );
     }
 

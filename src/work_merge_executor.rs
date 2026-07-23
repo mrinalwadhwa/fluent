@@ -2017,6 +2017,116 @@ mod tests {
         );
     }
 
+    /// A rebase coder that reports a non-clean supervision report, so the production
+    /// rebase boundary must persist it as a sidecar.
+    struct SupervisionRebaseCoder;
+
+    impl crate::coder::Coder for SupervisionRebaseCoder {
+        fn run(
+            &self,
+            _prompt: &str,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+            _transcript_file: Option<&Path>,
+        ) -> Result<i32> {
+            unreachable!("the rebase route launches through run_captured_reported")
+        }
+
+        fn run_captured_reported(
+            &self,
+            _prompt: &str,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+            _capture: Option<&crate::coder::TranscriptCapture<'_>>,
+        ) -> crate::coder::CoderRunCompletion {
+            crate::coder::CoderRunCompletion {
+                terminal: Ok(0),
+                report: crate::coder::CoderSupervisionReport {
+                    launches: vec![crate::coder::CoderLaunchSupervision {
+                        exit_code: Some(0),
+                        group_sweep: crate::coder::GroupSweepDisposition::Unconfirmed(
+                            crate::coder::ProcessOpDiagnostic {
+                                operation: "kill process group".to_string(),
+                                kind: Some("PermissionDenied".to_string()),
+                                errno: Some(1),
+                                message: Some("Operation not permitted".to_string()),
+                            },
+                        ),
+                    }],
+                },
+            }
+        }
+
+        fn run_interactive(
+            &self,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+        ) -> Result<i32> {
+            unreachable!("the rebase route never runs interactively")
+        }
+    }
+
+    #[test]
+    fn rebase_route_persists_the_coder_supervision_sidecar() {
+        // B5/B6: the production rebase boundary persists the per-launch supervision
+        // report as coder-supervision.json in the rebase artifact dir, before the
+        // post-coder verification runs.
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let source_workspace = project_root.join("workspace");
+        std::fs::create_dir_all(&source_workspace).unwrap();
+        let artifact_dir = project_root.join("artifacts");
+
+        let store = WorkModelStore::new(project_root);
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Rebase supervision sidecar".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+        let item = store.read_work_item("work-1").unwrap();
+
+        let candidate = merge_candidate_fixture(&source_workspace);
+        let resolver = ContentResolver::new(None);
+        let config = WorkMergeConfig {
+            project_root,
+            store: &store,
+            work_item_id: "work-1",
+            merge_candidate_id: "attempt-1-merge-candidate",
+            resolver: &resolver,
+            extra_args: &[],
+            coder_kind: CoderKind::Codex,
+            no_sandbox: true,
+            skip_post_merge_review: false,
+        };
+
+        // The coder exits 0 with an unconfirmed sweep; the post-coder verification then
+        // fails on the non-repo workspace, but the sidecar is persisted beforehand.
+        let _ = rebase_candidate_with_coder(
+            &config,
+            &item,
+            &candidate,
+            &source_workspace,
+            "main",
+            &artifact_dir,
+            move |_sandbox| Box::new(SupervisionRebaseCoder),
+        );
+        assert!(
+            artifact_dir
+                .join("attempt-1-rebase")
+                .join(crate::coder::CODER_SUPERVISION_SIDECAR)
+                .exists(),
+            "the production rebase boundary persists coder-supervision.json"
+        );
+    }
+
     #[test]
     fn rebase_pump_failure_terminalizes_task_before_return() {
         // B7: a typed transcript-pump failure during the rebase launch — after the

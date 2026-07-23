@@ -991,7 +991,11 @@ impl std::fmt::Display for ReviewerConfinementError {
     }
 }
 
-impl std::error::Error for ReviewerConfinementError {}
+impl std::error::Error for ReviewerConfinementError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
 
 /// Compose a Reviewer's coder/pump outcome with its workspace-confinement cleanup
 /// outcome and durably terminalize the Task before returning.
@@ -4129,14 +4133,7 @@ mod tests {
             fs::write(&obstruction, b"x").unwrap();
             let completion = crate::coder::CoderRunCompletion {
                 terminal: Ok(0),
-                report: crate::coder::CoderSupervisionReport {
-                    group_sweep_unconfirmed: Some(crate::coder::ProcessOpDiagnostic {
-                        operation: "s".to_string(),
-                        kind: None,
-                        errno: Some(1),
-                        message: None,
-                    }),
-                },
+                report: nonclean_supervision_report(),
             };
             crate::coder::finish_supervised_coder_run(completion, &obstruction).map(|_| ())
         };
@@ -4436,6 +4433,54 @@ mod tests {
     }
 
     #[test]
+    fn learner_route_persists_the_coder_supervision_sidecar() {
+        // B5/B6: the production Learner boundary persists the per-launch supervision
+        // report as coder-supervision.json beside the learner transcript.
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let workspace = project_root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let handoff_dir = project_root.join("handoff");
+        fs::create_dir_all(&handoff_dir).unwrap();
+        let transcript_path = project_root.join("learner-transcript.jsonl");
+        let resolver = ContentResolver::new(None);
+        let recorded = Arc::new(Mutex::new(None));
+        let recorded_for_coder = Arc::clone(&recorded);
+        let capture = crate::coder::TranscriptCapture::new(&transcript_path, project_root);
+        run_learner_with_coder(
+            LearnerRunInputs {
+                workspace_path: &workspace,
+                resolver: &resolver,
+                extra_args: &[],
+                coder_kind: CoderKind::Codex,
+                no_sandbox: true,
+                model: None,
+                effort: None,
+                review_artifact_paths: &[],
+                tester_artifact_paths: &[],
+                diff_command: "git diff",
+                handoff_dir: &handoff_dir,
+                denied_write_roots: &[],
+                handoff_only: false,
+                repair: None,
+            },
+            Some(capture),
+            move |_sandbox| {
+                Box::new(SupervisionReportingCoder {
+                    recorded_dir: recorded_for_coder,
+                })
+            },
+        )
+        .expect("the learner route runs the injected coder and persists its report");
+        assert!(
+            project_root
+                .join(crate::coder::CODER_SUPERVISION_SIDECAR)
+                .exists(),
+            "the production Learner boundary persists coder-supervision.json"
+        );
+    }
+
+    #[test]
     fn writer_launch_threads_resolved_capture() {
         // B8: the Writer launch route (`run_task_coder`) threads the project's
         // resolved, immutable TranscriptCapture into run_captured — a distinctive
@@ -4597,6 +4642,24 @@ mod tests {
         );
     }
 
+    /// A one-launch non-clean supervision report (a reaped leader whose group could not
+    /// be verifiably swept), for driving the production sidecar boundary.
+    fn nonclean_supervision_report() -> crate::coder::CoderSupervisionReport {
+        crate::coder::CoderSupervisionReport {
+            launches: vec![crate::coder::CoderLaunchSupervision {
+                exit_code: Some(0),
+                group_sweep: crate::coder::GroupSweepDisposition::Unconfirmed(
+                    crate::coder::ProcessOpDiagnostic {
+                        operation: "kill process group".to_string(),
+                        kind: Some("PermissionDenied".to_string()),
+                        errno: Some(1),
+                        message: Some("Operation not permitted".to_string()),
+                    },
+                ),
+            }],
+        }
+    }
+
     /// An injected coder that reports a non-clean supervision report (a reaped leader
     /// whose group could not be verifiably swept), so the production role boundary must
     /// persist it as a sidecar.
@@ -4632,14 +4695,7 @@ mod tests {
             }
             crate::coder::CoderRunCompletion {
                 terminal: Ok(0),
-                report: crate::coder::CoderSupervisionReport {
-                    group_sweep_unconfirmed: Some(crate::coder::ProcessOpDiagnostic {
-                        operation: "kill process group".to_string(),
-                        kind: Some("PermissionDenied".to_string()),
-                        errno: Some(1),
-                        message: Some("Operation not permitted".to_string()),
-                    }),
-                },
+                report: nonclean_supervision_report(),
             }
         }
 
@@ -4713,9 +4769,10 @@ mod tests {
         );
         let persisted: crate::coder::CoderSupervisionReport =
             serde_json::from_slice(&fs::read(&sidecar).unwrap()).unwrap();
-        let diag = persisted
-            .group_sweep_unconfirmed
-            .expect("the persisted sidecar carries the group-sweep diagnostic");
+        let diag = match &persisted.launches[0].group_sweep {
+            crate::coder::GroupSweepDisposition::Unconfirmed(diag) => diag,
+            other => panic!("expected a persisted unconfirmed sweep, got {other:?}"),
+        };
         assert_eq!(diag.operation, "kill process group");
         assert_eq!(diag.errno, Some(1));
     }
@@ -4751,14 +4808,7 @@ mod tests {
             *self.launches.lock().unwrap() += 1;
             crate::coder::CoderRunCompletion {
                 terminal: Ok(0),
-                report: crate::coder::CoderSupervisionReport {
-                    group_sweep_unconfirmed: Some(crate::coder::ProcessOpDiagnostic {
-                        operation: "kill process group".to_string(),
-                        kind: None,
-                        errno: Some(1),
-                        message: None,
-                    }),
-                },
+                report: nonclean_supervision_report(),
             }
         }
 
@@ -4918,6 +4968,59 @@ mod tests {
         assert_eq!(
             *limit, 7777,
             "the resolved project pump threshold must be threaded verbatim, not defaulted"
+        );
+    }
+
+    #[test]
+    fn reviewer_route_persists_the_coder_supervision_sidecar() {
+        // B5/B6: the production Reviewer boundary persists the per-launch supervision
+        // report as coder-supervision.json in the review artifact dir.
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let item = review_item_with_role("architecture");
+        let review_task_id = item.attempts[0]
+            .tasks
+            .iter()
+            .find(|t| t.role == "architecture")
+            .expect("the architecture review task exists")
+            .id
+            .clone();
+        let artifact_dir = project_root.join("artifacts");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        let review_path = artifact_dir.join("review.md");
+        let resolver = ContentResolver::new(Some(project_root));
+        let pump_config = crate::transcript_pump::resolve_config(project_root);
+        let recorded = Arc::new(Mutex::new(None));
+        let recorded_for_coder = Arc::clone(&recorded);
+        run_review_coder_with_coder(
+            &item,
+            "attempt-1",
+            &review_task_id,
+            project_root,
+            &artifact_dir,
+            &review_path,
+            &[],
+            &[],
+            false,
+            &resolver,
+            &[],
+            CoderKind::Codex,
+            true,
+            None,
+            None,
+            &pump_config,
+            move |_sandbox| {
+                Box::new(SupervisionReportingCoder {
+                    recorded_dir: recorded_for_coder,
+                })
+            },
+        )
+        .expect("the reviewer route runs the injected coder and persists its report");
+        assert!(
+            artifact_dir
+                .join(crate::coder::CODER_SUPERVISION_SIDECAR)
+                .exists(),
+            "the production Reviewer boundary persists coder-supervision.json"
         );
     }
 
@@ -5406,6 +5509,13 @@ mod tests {
         assert!(
             project_root.join(".git/index.lock").exists(),
             "the held git index lock is real residue the restore could not clear"
+        );
+        // The failed restore genuinely left the coder's tracked-file mutation on disk,
+        // proving the guard could not roll the source checkout back.
+        assert_eq!(
+            fs::read(project_root.join("tracked.txt")).unwrap(),
+            b"coder mutation",
+            "the failed restore left the coder's tracked mutation, not the baseline"
         );
     }
 

@@ -842,15 +842,6 @@ impl Coder for PiCode {
 /// It is a correctness poll for capture failure, not a stale-session timer.
 const SUPERVISOR_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
-/// Run a command, optionally draining stdout into a transcript file through the
-/// byte-oriented pump configured by `config`. When `transcript_file` is `None`,
-/// stdout inherits from the parent process.
-///
-/// The child is owned by a [`CoderSupervisor`] guard from the instant it is
-/// spawned — before stdout is taken and before the pump thread is spawned — so
-/// any failure or panic in that window still terminates and reaps the coder
-/// process group rather than leaking a live child. Both branches route through
-/// the same guard, so a `wait`/`try_wait` error can never bypass cleanup.
 /// A serializable projection of a [`ProcessOpError`] for the durable supervision
 /// sidecar: the failed operation, its OS `ErrorKind`, errno, and original message, so
 /// the diagnostic persisted at a role artifact boundary is lossless.
@@ -873,29 +864,82 @@ impl ProcessOpDiagnostic {
     }
 }
 
-/// A per-launch coder supervision report surfaced from the supervisor so its
-/// group-sweep diagnostic — an unconfirmed sweep after a reaped leader — is carried out
-/// of the coder and persisted at the role's artifact boundary rather than dropped when
-/// the `ManagedChild` is dropped.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CoderSupervisionReport {
-    /// The retained process-group sweep failure when the leader was reaped but its
-    /// group could not be verifiably swept (`killpg` returned `EPERM`, or another
-    /// non-`ESRCH` error). `None` when the group was verifiably swept — or no
-    /// pump/sweep ran — which is the clean, nothing-to-persist case.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub group_sweep_unconfirmed: Option<ProcessOpDiagnostic>,
+/// A truthful per-launch group-sweep disposition. It distinguishes the states an
+/// `Option<ProcessOpDiagnostic>` would collapse: a delivered SIGKILL, an already-gone
+/// group, a sweep that was never attempted, an identity-lost leader (`ECHILD` — the
+/// group is NOT proven gone), and an unconfirmed sweep retaining its OS error.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum GroupSweepDisposition {
+    /// SIGKILL was delivered to the group: its descendants are gone.
+    Delivered,
+    /// The group was already gone (`ESRCH`): nothing remained to sweep.
+    AlreadyGone,
+    /// No sweep was attempted on this launch (no cleanup ran).
+    NotAttempted,
+    /// The leader's identity was already lost (`ECHILD`): it was NEITHER signaled nor
+    /// reaped to avoid a recycled PID, and the group is NOT proven gone.
+    IdentityLost,
+    /// The group signal failed for another reason; the group is not verifiably swept.
+    Unconfirmed(ProcessOpDiagnostic),
 }
 
-impl CoderSupervisionReport {
-    /// Whether the report carries no diagnostic worth persisting.
+impl GroupSweepDisposition {
+    /// Whether this disposition proves the group and its descendants are gone, so there
+    /// is nothing worth persisting. `IdentityLost` and `Unconfirmed` are NOT clean.
     pub fn is_clean(&self) -> bool {
-        self.group_sweep_unconfirmed.is_none()
+        matches!(
+            self,
+            Self::Delivered | Self::AlreadyGone | Self::NotAttempted
+        )
     }
 }
 
-/// A coder run's terminal outcome paired with its per-launch supervision report. The
-/// legacy `run_captured -> Result<i32>` entry points delegate through `into_result`,
+/// One launch's supervision outcome: its reaped exit code (when reaped) and its
+/// truthful group-sweep disposition.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoderLaunchSupervision {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub exit_code: Option<i32>,
+    pub group_sweep: GroupSweepDisposition,
+}
+
+impl CoderLaunchSupervision {
+    fn is_clean(&self) -> bool {
+        self.group_sweep.is_clean()
+    }
+}
+
+/// The ORDERED per-launch coder supervision report surfaced from the supervisor so a
+/// group-sweep diagnostic reaches the role artifact boundary rather than being dropped
+/// with the `ManagedChild`. It retains EVERY auth/rate-limit phase's launch in order,
+/// so an earlier phase's unconfirmed sweep is never dropped by a later clean retry.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoderSupervisionReport {
+    pub launches: Vec<CoderLaunchSupervision>,
+}
+
+impl CoderSupervisionReport {
+    /// A single-launch report from the supervisor.
+    fn of_launch(launch: CoderLaunchSupervision) -> Self {
+        Self {
+            launches: vec![launch],
+        }
+    }
+
+    /// Append a later phase's launches after the earlier ones, preserving order.
+    fn extend_ordered(&mut self, other: CoderSupervisionReport) {
+        self.launches.extend(other.launches);
+    }
+
+    /// Whether every launch's sweep is clean, so there is nothing worth persisting.
+    pub fn is_clean(&self) -> bool {
+        self.launches.iter().all(CoderLaunchSupervision::is_clean)
+    }
+}
+
+/// A coder run's terminal outcome paired with its ordered per-launch supervision report.
+/// The legacy `run_captured -> Result<i32>` entry points delegate through `into_result`,
 /// discarding the report; the reported entry points persist it at the role boundary.
 pub struct CoderRunCompletion {
     pub terminal: Result<i32>,
@@ -903,8 +947,8 @@ pub struct CoderRunCompletion {
 }
 
 impl CoderRunCompletion {
-    /// A completion carrying a terminal outcome and no supervision diagnostic — used by
-    /// external coders and the spawn/setup-error paths that never supervised a pump.
+    /// A completion carrying a terminal outcome and no supervision launch — used by
+    /// external coders and the spawn-error paths that never supervised a child.
     fn terminal_only(terminal: Result<i32>) -> Self {
         Self {
             terminal,
@@ -922,10 +966,15 @@ impl CoderRunCompletion {
 /// transcript artifacts.
 pub(crate) const CODER_SUPERVISION_SIDECAR: &str = "coder-supervision.json";
 
+/// A per-process sequence so concurrent sidecar writes into distinct artifact dirs (or
+/// a retried write into the same one) never collide on a fixed temp name.
+static SIDECAR_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// A failure to persist the coder supervision sidecar at a role artifact boundary. It
 /// is a NON-retryable infrastructure fault: the coder already ran, so relaunching it
 /// through the generic retry budget would repeat its side effects. It stays a
-/// downcastable typed error so a role boundary composes it without masking the primary.
+/// downcastable typed error, and exposes the underlying cause through `Error::source`,
+/// so a role boundary composes it without masking the primary or truncating its chain.
 #[derive(Debug)]
 pub struct SupervisionSidecarError(anyhow::Error);
 
@@ -935,11 +984,16 @@ impl std::fmt::Display for SupervisionSidecarError {
     }
 }
 
-impl std::error::Error for SupervisionSidecarError {}
+impl std::error::Error for SupervisionSidecarError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
 
 /// Persist a non-clean supervision report as `coder-supervision.json` in the role
-/// artifact directory, written atomically via a temp file and rename. A clean report
-/// has nothing to persist. A write obstruction returns a typed non-retryable error.
+/// artifact directory, written atomically via a unique temp file and rename. A clean
+/// report has nothing to persist. A write obstruction returns a typed non-retryable
+/// error.
 fn persist_coder_supervision(
     report: &CoderSupervisionReport,
     artifact_dir: &Path,
@@ -951,7 +1005,11 @@ fn persist_coder_supervision(
         std::fs::create_dir_all(artifact_dir)
             .with_context(|| format!("create artifact dir {}", artifact_dir.display()))?;
         let json = serde_json::to_vec_pretty(report)?;
-        let tmp = artifact_dir.join(format!("{CODER_SUPERVISION_SIDECAR}.tmp"));
+        let seq = SIDECAR_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = artifact_dir.join(format!(
+            ".{CODER_SUPERVISION_SIDECAR}.{}.{seq}.tmp",
+            std::process::id()
+        ));
         std::fs::write(&tmp, &json).with_context(|| format!("write {}", tmp.display()))?;
         std::fs::rename(&tmp, artifact_dir.join(CODER_SUPERVISION_SIDECAR))
             .with_context(|| "rename supervision sidecar into place".to_string())?;
@@ -980,6 +1038,8 @@ pub(crate) fn finish_supervised_coder_run(
     }
 }
 
+/// A test-only `Result<i32>` wrapper over [`run_with_transcript_reported`], discarding
+/// the supervision report for tests that only assert the terminal outcome.
 #[cfg(test)]
 fn run_with_transcript(
     cmd: Command,
@@ -989,9 +1049,17 @@ fn run_with_transcript(
     run_with_transcript_reported(cmd, transcript_file, config).into_result()
 }
 
-/// Launch a coder, supervise its pump, and return both the terminal outcome AND the
+/// Run a command, optionally draining stdout into a transcript file through the
+/// byte-oriented pump configured by `config`. When `transcript_file` is `None`, stdout
+/// inherits from the parent process. Returns both the terminal outcome AND the
 /// per-launch supervision report, so the group-sweep diagnostic reaches the role
 /// artifact boundary instead of being dropped with the `ManagedChild`.
+///
+/// The child is owned by a [`CoderSupervisor`] guard from the instant it is spawned —
+/// before stdout is taken and before the pump thread is spawned — so any failure or
+/// panic in that window still terminates and reaps the coder process group rather than
+/// leaking a live child. The supervision launch is read AFTER the outcome settles (on
+/// every exit path, including setup-error), so a retained diagnostic always surfaces.
 fn run_with_transcript_reported(
     mut cmd: Command,
     transcript_file: Option<&Path>,
@@ -1026,7 +1094,7 @@ fn run_with_transcript_reported(
                     let terminal = Err(supervisor
                         .finalize_setup_error(anyhow::anyhow!("coder stdout was not piped")));
                     return CoderRunCompletion {
-                        report: supervisor.report(),
+                        report: CoderSupervisionReport::of_launch(supervisor.launch_supervision()),
                         terminal,
                     };
                 }
@@ -1043,7 +1111,7 @@ fn run_with_transcript_reported(
                 Err(err) => {
                     let terminal = Err(supervisor.finalize_setup_error(anyhow::Error::new(err)));
                     return CoderRunCompletion {
-                        report: supervisor.report(),
+                        report: CoderSupervisionReport::of_launch(supervisor.launch_supervision()),
                         terminal,
                     };
                 }
@@ -1051,7 +1119,7 @@ fn run_with_transcript_reported(
             supervisor.attach_pump(pump);
             let terminal = supervisor.supervise();
             CoderRunCompletion {
-                report: supervisor.report(),
+                report: CoderSupervisionReport::of_launch(supervisor.launch_supervision()),
                 terminal,
             }
         }
@@ -1064,7 +1132,7 @@ fn run_with_transcript_reported(
             let mut supervisor = CoderSupervisor::new(child, child_id);
             let terminal = supervisor.wait_no_pump();
             CoderRunCompletion {
-                report: supervisor.report(),
+                report: CoderSupervisionReport::of_launch(supervisor.launch_supervision()),
                 terminal,
             }
         }
@@ -1508,11 +1576,35 @@ impl ManagedChild {
     /// non-`ESRCH` error). `None` when the group was verifiably swept or no signal was
     /// attempted. This is a non-blocking, structured diagnostic so an unconfirmed
     /// sweep stays inspectable without writing to a possibly-saturated stderr during
-    /// finalization.
+    /// finalization. Production reads the richer [`group_sweep_disposition`]; this
+    /// remains for the focused cleanup-outcome tests.
+    ///
+    /// [`group_sweep_disposition`]: ManagedChild::group_sweep_disposition
+    #[cfg(test)]
     fn unconfirmed_group_sweep(&self) -> Option<ProcessOpError> {
         match &self.outcome.group_signal {
             Some(GroupSweep::Failed(err)) => Some(err.clone()),
             _ => None,
+        }
+    }
+
+    /// The truthful per-launch group-sweep disposition for the supervision report,
+    /// distinguishing a delivered SIGKILL, an already-gone group, a sweep never
+    /// attempted, an identity-lost leader (`ECHILD`), and an unconfirmed sweep — states
+    /// an `Option<ProcessOpError>` alone would collapse.
+    fn group_sweep_disposition(&self) -> GroupSweepDisposition {
+        match &self.outcome.group_signal {
+            Some(GroupSweep::Delivered) => GroupSweepDisposition::Delivered,
+            Some(GroupSweep::AlreadyGone) => GroupSweepDisposition::AlreadyGone,
+            Some(GroupSweep::Failed(err)) => {
+                GroupSweepDisposition::Unconfirmed(ProcessOpDiagnostic::from_process_op_error(err))
+            }
+            // No signal recorded: either the leader's identity was lost (ECHILD, so it
+            // was never signaled or reaped) or no cleanup ran on this launch at all.
+            None => match &self.outcome.finalized {
+                Some(Err(CleanupError::IdentityLost { .. })) => GroupSweepDisposition::IdentityLost,
+                _ => GroupSweepDisposition::NotAttempted,
+            },
         }
     }
 
@@ -1642,17 +1734,13 @@ impl CoderSupervisor {
         self.managed.take_stdout()
     }
 
-    /// The per-launch supervision report read from the managed child after its outcome
-    /// settled: an unconfirmed group sweep (a reaped leader whose group could not be
-    /// verifiably swept) is projected into a serializable diagnostic so the role
-    /// artifact boundary can persist it instead of dropping it with the child.
-    fn report(&self) -> CoderSupervisionReport {
-        CoderSupervisionReport {
-            group_sweep_unconfirmed: self
-                .managed
-                .unconfirmed_group_sweep()
-                .as_ref()
-                .map(ProcessOpDiagnostic::from_process_op_error),
+    /// This launch's supervision outcome, read from the managed child after its outcome
+    /// settled: its reaped exit code and its truthful group-sweep disposition. The retry
+    /// loop appends each launch so an earlier phase's diagnostic is never dropped.
+    fn launch_supervision(&self) -> CoderLaunchSupervision {
+        CoderLaunchSupervision {
+            exit_code: self.managed.exit_code(),
+            group_sweep: self.managed.group_sweep_disposition(),
         }
     }
 
@@ -2239,20 +2327,21 @@ where
     // Task never overwrites or collides with `.N.jsonl` evidence a prior run
     // preserved; the process-local counter alone would restart at 0.
     let mut phase: u32 = next_transcript_phase(transcript_file);
+    // Accumulate EVERY phase's supervision launch in order, so an earlier auth/rate-limit
+    // phase's unconfirmed sweep is never dropped when a later retry runs clean.
+    let mut aggregate = CoderSupervisionReport::default();
 
     loop {
         // The one resolved config value is retained across every auth/rate-limit
         // phase of this launch, so a mid-launch retry never re-resolves or picks
         // up a different value.
         let completion = run_fn(build_cmd(), transcript_file, config);
-        // Retain this attempt's supervision report; the loop returns the final
-        // attempt's report so a group-sweep diagnostic is never dropped by a retry.
-        let report = completion.report;
+        aggregate.extend_ordered(completion.report);
         let exit = match completion.terminal {
             Ok(exit) => exit,
             Err(err) => return CoderRunCompletion {
                 terminal: Err(err),
-                report,
+                report: aggregate,
             },
         };
         if exit == 0 {
@@ -2266,14 +2355,14 @@ where
             }
             return CoderRunCompletion {
                 terminal: Ok(exit),
-                report,
+                report: aggregate,
             };
         }
 
         let Some(path) = transcript_file else {
             return CoderRunCompletion {
                 terminal: Ok(exit),
-                report,
+                report: aggregate,
             };
         };
 
@@ -2284,7 +2373,7 @@ where
                 if let Err(err) = preserve_transcript_phase(transcript_file, &mut phase) {
                     return CoderRunCompletion {
                         terminal: Err(anyhow::Error::new(err)),
-                        report,
+                        report: aggregate,
                     };
                 }
                 refresh_fn();
@@ -2292,7 +2381,7 @@ where
             }
             return CoderRunCompletion {
                 terminal: Err(anyhow::Error::new(auth_err)),
-                report,
+                report: aggregate,
             };
         }
 
@@ -2303,7 +2392,7 @@ where
         if !is_rate_limited {
             return CoderRunCompletion {
                 terminal: Ok(exit),
-                report,
+                report: aggregate,
             };
         }
 
@@ -2314,7 +2403,7 @@ where
             );
             return CoderRunCompletion {
                 terminal: Ok(exit),
-                report,
+                report: aggregate,
             };
         }
 
@@ -2342,7 +2431,7 @@ where
         if let Err(err) = preserve_transcript_phase(transcript_file, &mut phase) {
             return CoderRunCompletion {
                 terminal: Err(anyhow::Error::new(err)),
-                report,
+                report: aggregate,
             };
         }
         std::thread::sleep(wait);
@@ -3518,14 +3607,16 @@ mod pump_supervision_tests {
             .wait_no_pump()
             .expect("the reaped-but-unswept run still succeeds");
         assert_eq!(exit, 0);
-        let report = supervisor.report();
-        assert!(
-            !report.is_clean(),
-            "an unconfirmed group sweep is a non-clean report worth persisting"
+        let launch = supervisor.launch_supervision();
+        assert_eq!(
+            launch.exit_code,
+            Some(0),
+            "the reaped exit code rides on the launch"
         );
-        let diag = report
-            .group_sweep_unconfirmed
-            .expect("the sweep diagnostic is surfaced from the supervisor");
+        let diag = match &launch.group_sweep {
+            GroupSweepDisposition::Unconfirmed(diag) => diag,
+            other => panic!("expected an unconfirmed sweep disposition, got {other:?}"),
+        };
         assert_eq!(
             diag.errno,
             Some(libc::EPERM),
@@ -3534,6 +3625,10 @@ mod pump_supervision_tests {
         assert!(
             diag.message.is_some(),
             "the original OS message is retained on the durable diagnostic"
+        );
+        assert!(
+            !CoderSupervisionReport::of_launch(launch).is_clean(),
+            "an unconfirmed group sweep is a non-clean report worth persisting"
         );
     }
 
@@ -3547,27 +3642,38 @@ mod pump_supervision_tests {
         };
         let mut supervisor = CoderSupervisor::with_leader(Box::new(leader));
         supervisor.wait_no_pump().unwrap();
+        let launch = supervisor.launch_supervision();
+        assert_eq!(
+            launch.group_sweep,
+            GroupSweepDisposition::Delivered,
+            "a delivered SIGKILL is a truthful clean disposition"
+        );
         assert!(
-            supervisor.report().is_clean(),
+            CoderSupervisionReport::of_launch(launch).is_clean(),
             "a swept group produces no supervision diagnostic"
         );
+    }
+
+    /// A one-launch report carrying an unconfirmed group sweep with the given errno.
+    fn unconfirmed_report(errno: i32) -> CoderSupervisionReport {
+        CoderSupervisionReport::of_launch(CoderLaunchSupervision {
+            exit_code: Some(0),
+            group_sweep: GroupSweepDisposition::Unconfirmed(ProcessOpDiagnostic {
+                operation: "kill process group".to_string(),
+                kind: Some("PermissionDenied".to_string()),
+                errno: Some(errno),
+                message: Some("Operation not permitted".to_string()),
+            }),
+        })
     }
 
     #[test]
     fn finish_supervised_run_persists_a_non_clean_report() {
         // The role artifact boundary persists a non-clean report as coder-supervision.json.
         let dir = tempfile::tempdir().unwrap();
-        let report = CoderSupervisionReport {
-            group_sweep_unconfirmed: Some(ProcessOpDiagnostic {
-                operation: "fake group signal".to_string(),
-                kind: Some("PermissionDenied".to_string()),
-                errno: Some(libc::EPERM),
-                message: Some("Operation not permitted".to_string()),
-            }),
-        };
         let completion = CoderRunCompletion {
             terminal: Ok(0),
-            report,
+            report: unconfirmed_report(libc::EPERM),
         };
         let code = finish_supervised_coder_run(completion, dir.path()).unwrap();
         assert_eq!(code, 0, "the terminal outcome passes through unchanged");
@@ -3575,10 +3681,77 @@ mod pump_supervision_tests {
         assert!(path.exists(), "a non-clean report is persisted as a sidecar");
         let persisted: CoderSupervisionReport =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        match &persisted.launches[0].group_sweep {
+            GroupSweepDisposition::Unconfirmed(diag) => assert_eq!(
+                diag.errno,
+                Some(libc::EPERM),
+                "the persisted sidecar retains the structured OS error"
+            ),
+            other => panic!("expected a persisted unconfirmed sweep, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn retry_report_retains_an_earlier_phase_unconfirmed_sweep() {
+        // The retry loop aggregates EVERY phase's launch in order, so an earlier phase's
+        // unconfirmed sweep survives even when the final retry runs clean. Two attempts:
+        // the first reports an unconfirmed sweep, the second a delivered sweep.
+        let phase = std::sync::atomic::AtomicUsize::new(0);
+        let run_fn = |_cmd: Command,
+                      _t: Option<&Path>,
+                      _c: &crate::transcript_pump::TranscriptPumpConfig|
+         -> CoderRunCompletion {
+            let n = phase.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                // A non-zero exit on the first phase drives one auth retry.
+                CoderRunCompletion {
+                    terminal: Ok(1),
+                    report: unconfirmed_report(libc::EPERM),
+                }
+            } else {
+                CoderRunCompletion {
+                    terminal: Ok(0),
+                    report: CoderSupervisionReport::of_launch(CoderLaunchSupervision {
+                        exit_code: Some(0),
+                        group_sweep: GroupSweepDisposition::Delivered,
+                    }),
+                }
+            }
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        // A 401 result event on the first phase so the loop takes exactly one auth retry.
+        std::fs::write(
+            &transcript,
+            b"{\"type\":\"result\",\"api_error_status\":401}\n",
+        )
+        .unwrap();
+
+        let completion = run_with_transcript_retrying_reported_using(
+            || Command::new("/bin/true"),
+            Some(&transcript),
+            &crate::transcript_pump::TranscriptPumpConfig::default(),
+            &|_, _| {},
+            &|| {},
+            &run_fn,
+        );
+        assert_eq!(completion.terminal.unwrap(), 0, "the final retry succeeds");
         assert_eq!(
-            persisted.group_sweep_unconfirmed.unwrap().errno,
-            Some(libc::EPERM),
-            "the persisted sidecar retains the structured OS error"
+            completion.report.launches.len(),
+            2,
+            "both phases' launches are retained in order"
+        );
+        assert!(
+            matches!(
+                completion.report.launches[0].group_sweep,
+                GroupSweepDisposition::Unconfirmed(_)
+            ),
+            "the earlier phase's unconfirmed sweep is not dropped by the clean retry"
+        );
+        assert!(
+            !completion.report.is_clean(),
+            "a report with any non-clean launch is persisted"
         );
     }
 
@@ -3602,14 +3775,7 @@ mod pump_supervision_tests {
         let dir = tempfile::tempdir().unwrap();
         let obstruction = dir.path().join("not-a-dir");
         std::fs::write(&obstruction, b"x").unwrap();
-        let report = CoderSupervisionReport {
-            group_sweep_unconfirmed: Some(ProcessOpDiagnostic {
-                operation: "s".to_string(),
-                kind: None,
-                errno: Some(libc::EPERM),
-                message: None,
-            }),
-        };
+        let report = unconfirmed_report(libc::EPERM);
 
         // A successful run whose sidecar write fails returns the typed sidecar error.
         let ok = CoderRunCompletion {
