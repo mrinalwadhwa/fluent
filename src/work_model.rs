@@ -1575,6 +1575,14 @@ pub enum LearningStatus {
     /// mid-run leaves a retryable record rather than an orphan handoff with no
     /// durable learning state. Treated as pending (retryable) by the loop.
     InProgress,
+    /// A durable, non-landable prepared state: the Learner coder ran and its output
+    /// was accepted for the canonical handoff, but the handoff has not been exposed
+    /// and `Succeeded` has not been persisted yet. Persisting this before writing
+    /// the handoff means a crash in that window leaves a durable pending record
+    /// rather than an exposed handoff with no learning state, and advancement stays
+    /// blocked until the terminal `Succeeded`. Treated as pending (retryable) by the
+    /// loop.
+    HandoffPending,
     Succeeded,
     Failed,
 }
@@ -1679,6 +1687,21 @@ impl AttemptLearning {
         }
     }
 
+    /// A durable, non-landable prepared state persisted after the Learner's output
+    /// is accepted but BEFORE the canonical handoff is exposed. It carries no
+    /// handoff reference yet and is pending, so advancement stays blocked and a
+    /// crash before the handoff write leaves a retryable record rather than an
+    /// exposed handoff with no durable learning state.
+    pub fn handoff_pending(runs: u32) -> Self {
+        Self {
+            status: LearningStatus::HandoffPending,
+            runs,
+            handoff: None,
+            last_failure: None,
+            failure_kind: None,
+        }
+    }
+
     /// A completed learning record carrying its single handoff reference.
     pub fn succeeded(runs: u32, handoff: crate::follow_up::ArtifactRef) -> Self {
         Self {
@@ -1723,6 +1746,13 @@ impl AttemptLearning {
     /// retried rather than mistaken for a completed one.
     pub fn is_in_progress(&self) -> bool {
         self.status == LearningStatus::InProgress
+    }
+
+    /// A durable, non-landable prepared state: the coder ran and its output was
+    /// accepted, but the canonical handoff has not been exposed and the terminal
+    /// `Succeeded` has not been persisted. Pending, so advancement stays blocked.
+    pub fn is_handoff_pending(&self) -> bool {
+        self.status == LearningStatus::HandoffPending
     }
 
     /// Whether the Learner still needs a (re)run for this Attempt: no record yet, a

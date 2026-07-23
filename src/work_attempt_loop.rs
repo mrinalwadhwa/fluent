@@ -894,6 +894,68 @@ struct LearnerConfig<'a> {
     run_coder: &'a dyn Fn(&LearnerCoderRequest<'_>) -> Result<()>,
 }
 
+/// The verdict of a fresh, serialized Learner reservation.
+enum LearnerReservation {
+    /// This runner won the reservation and must launch the coder for run `runs`.
+    Launch { runs: u32 },
+    /// This runner must not launch: a peer already succeeded, the record is
+    /// non-relaunchable (its coder already ran), or the Attempt is no longer a
+    /// landing-eligible target for a Learner run.
+    Skip,
+}
+
+/// Reserve a Learner run in one fresh, lock-held transaction with landing
+/// validation, so a runner racing a peer sees exactly the state it commits.
+///
+/// Under the model lock it re-reads the durable state, validates the Attempt is
+/// still a landing-eligible target (Complete and review-Passed), and only then
+/// reserves a durable in-progress state for a record that is missing, failed, or a
+/// crash-left in-progress. A record that already succeeded or is non-relaunchable,
+/// or an Attempt a peer took ineligible, mutates nothing (a durable no-op) and
+/// yields [`LearnerReservation::Skip`].
+fn reserve_learner_run(
+    store: &WorkModelStore,
+    work_item_id: &str,
+    attempt_id: &str,
+) -> Result<LearnerReservation> {
+    let reservation = store.mutate_work_item(work_item_id, |fresh| {
+        let attempt = fresh
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.id == attempt_id)
+            .ok_or_else(|| crate::work_model::WorkModelError::AttemptNotFound {
+                id: attempt_id.to_string(),
+            })?;
+
+        // Landing validation: only a Complete, review-Passed Attempt is a target for
+        // a Learner run. A peer that paused or otherwise took the Attempt off this
+        // path is honored rather than revived.
+        let landing_eligible = attempt.status == AttemptStatus::Complete
+            && attempt.review_state == Some(AttemptReviewState::Passed);
+        if !landing_eligible {
+            return Ok(LearnerReservation::Skip);
+        }
+
+        // A record that already succeeded needs no run; a non-relaunchable one
+        // (its coder already ran, only host evidence is pending) must never relaunch.
+        if let Some(learning) = attempt.learning.as_ref()
+            && (learning.is_succeeded() || !learning.is_relaunchable())
+        {
+            return Ok(LearnerReservation::Skip);
+        }
+
+        let runs = attempt
+            .learning
+            .as_ref()
+            .map(|learning| learning.runs)
+            .unwrap_or(0)
+            + 1;
+        attempt.learning = Some(AttemptLearning::in_progress(runs));
+        Ok(LearnerReservation::Launch { runs })
+    })?;
+    Ok(reservation)
+}
+
 /// Run the Learner for a passing code-producing Attempt and record its durable,
 /// retryable outcome on the Attempt. A failure warns the operator and leaves the
 /// Merge Candidate unaffected; the record can be retried later.
@@ -906,34 +968,41 @@ fn run_learner_step(
     handoff_only: bool,
     config: &LearnerConfig<'_>,
 ) -> Result<()> {
-    // A prior run that already launched the coder but could not persist its host
-    // evidence leaves a non-relaunchable disposition. Repairing that evidence is an
-    // out-of-band operator path; relaunching the coder here would duplicate its
-    // expertise effects. Leave the durable record untouched and never call the coder.
-    if item.attempts[attempt_index]
-        .learning
-        .as_ref()
-        .is_some_and(|learning| !learning.is_relaunchable())
-    {
-        return Ok(());
-    }
-
-    let runs = item.attempts[attempt_index]
-        .learning
-        .as_ref()
-        .map(|learning| learning.runs)
-        .unwrap_or(0)
-        + 1;
-
-    // Reserve a durable, crash-observable in-progress state BEFORE the coder runs
-    // and before any handoff is written. A crash mid-run then leaves a retryable
-    // record rather than an orphan handoff with no durable learning state — the
-    // durable transition is never kept only in memory.
-    item.attempts[attempt_index].learning = Some(AttemptLearning::in_progress(runs));
-    store.write_work_item(item)?;
-
     let work_item_id = item.id.clone();
     let attempt_id = item.attempts[attempt_index].id.clone();
+
+    // Serialize concurrent runners on a per-Attempt Learner lease held across the
+    // whole run. A runner that cannot acquire it has a LIVE peer already running the
+    // Learner and must never launch a second coder; a crash releases the OS-held
+    // lease so a later recovery run can reacquire it and resume the work.
+    let lease_path = crate::lease::learner_lock_path(project_root, &work_item_id, &attempt_id);
+    let _lease = match crate::lease::acquire(&lease_path) {
+        Ok(lease) => lease,
+        Err(_) => {
+            // A live peer owns this run. Refresh the in-memory snapshot so the caller
+            // observes the peer's durable progress, and launch nothing.
+            *item = store.read_work_item(&work_item_id)?;
+            return Ok(());
+        }
+    };
+
+    // A fresh, lock-held reservation with landing validation. It re-reads the durable
+    // state under the model lock and decides whether THIS runner launches, so a
+    // record a peer already succeeded, took non-relaunchable (its coder already ran
+    // but host evidence is pending), or made ineligible is never relaunched — the
+    // reservation, not this stale snapshot, is authoritative. A crash after it
+    // reserves the in-progress state leaves a retryable record rather than an orphan
+    // handoff with no durable learning state.
+    let runs = match reserve_learner_run(store, &work_item_id, &attempt_id)? {
+        LearnerReservation::Skip => {
+            *item = store.read_work_item(&work_item_id)?;
+            return Ok(());
+        }
+        LearnerReservation::Launch { runs } => runs,
+    };
+    // The reservation wrote the in-progress state; refresh the in-memory snapshot so
+    // `try_learn`/`finalize_learning` operate on the reserved durable record.
+    *item = store.read_work_item(&work_item_id)?;
 
     // Run the Learner coder, confinement, and draft stamping, producing the handoff
     // to write. The handoff is written LAST, by `finalize_learning`, after the
@@ -952,12 +1021,14 @@ fn run_learner_step(
 }
 
 /// Persist the Learner's terminal durable outcome and write the canonical handoff
-/// last. A successful run writes the handoff and records `Succeeded` with its
-/// reference; a handoff-write failure is composed into a retryable `Failed` record
-/// that preserves the typed classification, so the outcome is never dropped and the
-/// in-progress reservation is always resolved to a terminal record. A Learner logic
-/// failure records a typed `Failed` record. A learner failure does not fail the
-/// Attempt (the record is retryable); only a durable store-write failure propagates.
+/// last. When the run's output is accepted, it persists a non-landable
+/// prepared/HandoffPending state BEFORE exposing the handoff, then writes the
+/// handoff and records `Succeeded` with its reference; a handoff-write failure is
+/// composed into a retryable `Failed` record that preserves the typed
+/// classification, so the outcome is never dropped and the reservation is always
+/// resolved to a terminal record. A Learner logic failure records a typed `Failed`
+/// record. A learner failure does not fail the Attempt (the record is retryable);
+/// only a durable store-write failure propagates.
 fn finalize_learning(
     store: &WorkModelStore,
     item: &mut WorkItem,
@@ -969,35 +1040,47 @@ fn finalize_learning(
     ) -> Result<crate::follow_up::ArtifactRef>,
 ) -> Result<()> {
     match learned {
-        Ok(handoff) => match write_handoff(&handoff) {
-            Ok(handoff_ref) => {
-                item.attempts[attempt_index].learning =
-                    Some(AttemptLearning::succeeded(runs, handoff_ref));
-                store.write_work_item(item)?;
-            }
-            Err(err) => {
-                // The Learner produced a valid handoff, but writing the canonical
-                // handoff failed. Preserve a composite, retryable failure that keeps
-                // the typed classification discoverable rather than dropping the
-                // outcome or stranding the in-progress reservation.
-                eprintln!("  Warning: learner produced a handoff but writing it failed: {err:#}");
-                let kind = classify_learning_failure(&err);
-                item.attempts[attempt_index].learning = Some(AttemptLearning::failed_with_kind(
-                    runs,
-                    format!("learner produced a handoff but persisting it failed: {err:#}"),
-                    kind,
-                ));
-                if let Err(store_err) = store.write_work_item(item) {
-                    // The handoff-write failure is the primary fault. The store failure
-                    // is retained STRUCTURALLY as a secondary (still downcastable), not
-                    // flattened to a string, so both typed diagnostics stay recoverable
-                    // and the primary is never masked.
-                    return Err(err
-                        .context(store_err)
-                        .context("failed to persist the terminal learning record"));
+        Ok(handoff) => {
+            // Persist a non-landable prepared/HandoffPending state BEFORE exposing the
+            // canonical handoff. If a crash lands between this write and the handoff
+            // write, recovery sees a durable pending record rather than an exposed
+            // handoff with no learning state, and advancement stays blocked until the
+            // terminal Succeeded is persisted afterward with its reference.
+            item.attempts[attempt_index].learning = Some(AttemptLearning::handoff_pending(runs));
+            store.write_work_item(item)?;
+            match write_handoff(&handoff) {
+                Ok(handoff_ref) => {
+                    item.attempts[attempt_index].learning =
+                        Some(AttemptLearning::succeeded(runs, handoff_ref));
+                    store.write_work_item(item)?;
+                }
+                Err(err) => {
+                    // The Learner produced a valid handoff, but writing the canonical
+                    // handoff failed. Preserve a composite, retryable failure that keeps
+                    // the typed classification discoverable rather than dropping the
+                    // outcome or stranding the prepared reservation.
+                    eprintln!(
+                        "  Warning: learner produced a handoff but writing it failed: {err:#}"
+                    );
+                    let kind = classify_learning_failure(&err);
+                    item.attempts[attempt_index].learning =
+                        Some(AttemptLearning::failed_with_kind(
+                            runs,
+                            format!("learner produced a handoff but persisting it failed: {err:#}"),
+                            kind,
+                        ));
+                    if let Err(store_err) = store.write_work_item(item) {
+                        // The handoff-write failure is the primary fault. The store
+                        // failure is retained STRUCTURALLY as a secondary (still
+                        // downcastable), not flattened to a string, so both typed
+                        // diagnostics stay recoverable and the primary is never masked.
+                        return Err(err
+                            .context(store_err)
+                            .context("failed to persist the terminal learning record"));
+                    }
                 }
             }
-        },
+        }
         Err(err) => {
             eprintln!("  Warning: learner failed, continuing without handoff: {err:#}");
             // Preserve the typed transcript-pump classification on the durable
@@ -2390,6 +2473,10 @@ fn interpret_reviews(
     // handoff can reference it and a confined expertise commit can update its
     // tip.
     let candidate_id = item.create_or_get_merge_candidate(attempt_id)?;
+    // Persist the terminal Passed/Complete state and the Merge Candidate identity
+    // BEFORE the Learner runs, so the Learner's fresh, landing-validated reservation
+    // reads an eligible durable target rather than this pre-terminal snapshot.
+    store.write_work_item(&item)?;
     // Run the Learner for every code-producing Attempt, whether or not a
     // reviewer raised a finding.
     if let Some(ref learner_config) = learner_config {
@@ -2554,7 +2641,9 @@ mod tests {
     use crate::content::ContentResolver;
     use crate::work_model::AttemptKind;
     use crate::work_model::WorkItemAbandonment;
-    use crate::work_model::{Attempt, CoderMapping, LearningFailureKind, TaskArtifactArea, WorkspaceAccess};
+    use crate::work_model::{
+        Attempt, CoderMapping, LearningFailureKind, TaskArtifactArea, WorkspaceAccess,
+    };
 
     #[test]
     fn learner_preserves_typed_pump_failure() {
@@ -2577,7 +2666,10 @@ mod tests {
             format!("{wrapped:#}"),
             classify_learning_failure(&wrapped),
         );
-        assert_eq!(learning.failure_kind, Some(LearningFailureKind::TranscriptPump));
+        assert_eq!(
+            learning.failure_kind,
+            Some(LearningFailureKind::TranscriptPump)
+        );
         assert!(learning.last_failure.unwrap().contains("disk full"));
 
         // A generic error stays Generic.
@@ -2632,8 +2724,7 @@ mod tests {
         // before it existed (no `failure_kind` field) still deserializes, with the
         // kind absent.
         let legacy = r#"{"status":"failed","runs":2,"last_failure":"old failure"}"#;
-        let learning: crate::work_model::AttemptLearning =
-            serde_json::from_str(legacy).unwrap();
+        let learning: crate::work_model::AttemptLearning = serde_json::from_str(legacy).unwrap();
         assert!(learning.is_failed());
         assert_eq!(learning.runs, 2);
         assert_eq!(learning.failure_kind, None, "absent on legacy records");
@@ -4308,8 +4399,7 @@ mod tests {
         // the outcome is never dropped and the in-progress reservation is never
         // stranded.
         let tmp = tempfile::TempDir::new().unwrap();
-        let (store, project_root, _workspace, _base) =
-            make_learner_passing_fixture(tmp.path(), 1);
+        let (store, project_root, _workspace, _base) = make_learner_passing_fixture(tmp.path(), 1);
 
         // Prove the durable in-progress reservation is persisted before the coder
         // runs: when the coder is invoked, the durable record already exists and is
@@ -4431,8 +4521,7 @@ mod tests {
         // resumable transcript-pump failure.
         use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
         let tmp = tempfile::TempDir::new().unwrap();
-        let (store, project_root, _workspace, _base) =
-            make_learner_passing_fixture(tmp.path(), 1);
+        let (store, project_root, _workspace, _base) = make_learner_passing_fixture(tmp.path(), 1);
 
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_for_coder = Arc::clone(&calls);
@@ -4514,14 +4603,219 @@ mod tests {
     }
 
     #[test]
+    fn learner_prepares_before_exposing_handoff() {
+        // Learner recovery B2: when a run's output is accepted for the canonical
+        // handoff, finalize persists a non-landable prepared/HandoffPending state
+        // BEFORE exposing the handoff, then persists Succeeded plus its reference
+        // afterward. A crash in that window leaves a durable pending record, never an
+        // exposed handoff with no learning state.
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, _workspace, _base) = make_learner_passing_fixture(tmp.path(), 1);
+        let mut item = store.read_work_item("work-1").unwrap();
+
+        let handoff = crate::follow_up::LearnerHandoffV1::new(
+            "work-1",
+            "attempt-1",
+            crate::follow_up::LearningRecord {
+                summary: "learned".to_string(),
+                expertise: Vec::new(),
+            },
+        );
+
+        // The handoff-write step probes the durable record at the moment the handoff
+        // is exposed: it must already be the non-landable prepared state, never
+        // in-progress and never yet Succeeded, and carry no handoff reference.
+        let probe_root = project_root.clone();
+        let observed_prepared = Arc::new(AtomicBool::new(false));
+        let observed_for_write = Arc::clone(&observed_prepared);
+        let write_handoff = move |_handoff: &crate::follow_up::LearnerHandoffV1| {
+            let probe = WorkModelStore::new(&probe_root)
+                .read_work_item("work-1")
+                .unwrap();
+            let learning = probe.attempts[0]
+                .learning
+                .as_ref()
+                .expect("a durable prepared record precedes the exposed handoff");
+            assert!(
+                learning.is_handoff_pending(),
+                "the non-landable prepared state is persisted before the handoff is exposed"
+            );
+            assert!(
+                !learning.is_succeeded(),
+                "Succeeded is not persisted until after the handoff is exposed"
+            );
+            assert!(
+                learning.handoff.is_none(),
+                "the prepared state carries no handoff reference yet"
+            );
+            observed_for_write.store(true, AtomicOrdering::SeqCst);
+            Ok(crate::follow_up::ArtifactRef {
+                path: "handoff.json".to_string(),
+                digest: "sha256:test".to_string(),
+            })
+        };
+
+        finalize_learning(&store, &mut item, 0, 1, Ok(handoff), write_handoff).unwrap();
+
+        assert!(
+            observed_prepared.load(AtomicOrdering::SeqCst),
+            "the prepared state must be durably observable before the handoff is exposed"
+        );
+        let stored = store.read_work_item("work-1").unwrap();
+        let learning = stored.attempts[0].learning.as_ref().unwrap();
+        assert!(
+            learning.is_succeeded(),
+            "the terminal Succeeded state is persisted after the handoff is exposed"
+        );
+        assert_eq!(learning.runs, 1);
+        let handoff_ref = learning
+            .handoff
+            .as_ref()
+            .expect("Succeeded carries its handoff reference");
+        assert_eq!(handoff_ref.path, "handoff.json");
+    }
+
+    #[test]
+    fn concurrent_learner_reservation_launches_once() {
+        // Learner recovery B3: two Attempt runners race to run the Learner for the
+        // same passing Attempt. A per-Attempt lease plus a fresh, landing-validated
+        // reservation serialize them so at most ONE launches the coder, and crash-
+        // left work (a dropped lease over an in-progress record) remains recoverable.
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use std::time::Duration;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, _workspace, _base) = make_learner_passing_fixture(tmp.path(), 1);
+
+        // Drive the Attempt to its terminal Passed/Complete state and allocate the
+        // candidate durably, so both racing reservations see a landing-eligible
+        // target rather than a pre-terminal snapshot.
+        let candidate_id = {
+            let mut item = store.read_work_item("work-1").unwrap();
+            item.attempts[0].review_state = Some(AttemptReviewState::Passed);
+            crate::work_model::set_attempt_terminal(&mut item.attempts[0], AttemptStatus::Complete);
+            let candidate_id = item.create_or_get_merge_candidate("attempt-1").unwrap();
+            store.write_work_item(&item).unwrap();
+            candidate_id
+        };
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let project_root = Arc::new(project_root);
+        let candidate_id = Arc::new(candidate_id);
+
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let calls = Arc::clone(&calls);
+                let project_root = Arc::clone(&project_root);
+                let candidate_id = Arc::clone(&candidate_id);
+                std::thread::spawn(move || {
+                    let store = WorkModelStore::new(project_root.as_path());
+                    let calls_for_coder = Arc::clone(&calls);
+                    let run_coder = move |request: &LearnerCoderRequest<'_>| -> Result<()> {
+                        calls_for_coder.fetch_add(1, AtomicOrdering::SeqCst);
+                        // Hold the lease long enough that the peer reaches its
+                        // reservation while this run is still live.
+                        std::thread::sleep(Duration::from_millis(200));
+                        fs::create_dir_all(request.handoff_dir).unwrap();
+                        fs::write(
+                            request.handoff_dir.join(crate::learner::DRAFT_FILE_NAME),
+                            r#"{"learning_summary":"learned","follow_ups":[]}"#,
+                        )
+                        .unwrap();
+                        Ok(())
+                    };
+                    let mut item = store.read_work_item("work-1").unwrap();
+                    run_learner_step(
+                        &store,
+                        project_root.as_path(),
+                        &mut item,
+                        0,
+                        &candidate_id,
+                        false,
+                        &LearnerConfig {
+                            run_coder: &run_coder,
+                        },
+                    )
+                    .unwrap();
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            1,
+            "the per-Attempt lease serializes racing runners so exactly one launches the coder"
+        );
+        let stored = store.read_work_item("work-1").unwrap();
+        let learning = stored.attempts[0]
+            .learning
+            .as_ref()
+            .expect("the winning runner records a learning outcome");
+        assert!(
+            learning.is_succeeded(),
+            "the winning run completes to Succeeded"
+        );
+        assert_eq!(learning.runs, 1, "only one run is counted across the race");
+
+        // A later run over the Succeeded record launches nothing.
+        {
+            let calls_after = Arc::new(AtomicUsize::new(0));
+            let calls_for_coder = Arc::clone(&calls_after);
+            let run_coder = move |_request: &LearnerCoderRequest<'_>| -> Result<()> {
+                calls_for_coder.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(())
+            };
+            let mut item = store.read_work_item("work-1").unwrap();
+            run_learner_step(
+                &store,
+                project_root.as_path(),
+                &mut item,
+                0,
+                &candidate_id,
+                false,
+                &LearnerConfig {
+                    run_coder: &run_coder,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                calls_after.load(AtomicOrdering::SeqCst),
+                0,
+                "a Succeeded record needs no relaunch"
+            );
+        }
+
+        // Crash-left recovery: a crashed run leaves a durable in-progress record and a
+        // released lease. A fresh reservation over it returns Launch (relaunchable),
+        // so a later runner resumes the work rather than skipping it.
+        {
+            let mut item = store.read_work_item("work-1").unwrap();
+            item.attempts[0].learning = Some(AttemptLearning::in_progress(1));
+            store.write_work_item(&item).unwrap();
+            match reserve_learner_run(&store, "work-1", "attempt-1").unwrap() {
+                LearnerReservation::Launch { runs } => assert_eq!(
+                    runs, 2,
+                    "a crash-left in-progress record is relaunched with the next run index"
+                ),
+                LearnerReservation::Skip => {
+                    panic!("crash-left in-progress work must remain recoverable, not skipped")
+                }
+            }
+        }
+    }
+
+    #[test]
     fn learner_store_write_failure_preserves_primary_over_secondary() {
         // B7: when the Learner fails with a typed coder/confinement/handoff PRIMARY
         // and the terminal learning-record store write ALSO fails, the reducer
         // returns the primary as the cause with the store failure composed as a
         // SECONDARY — the typed primary is never masked behind the store error.
         let tmp = tempfile::TempDir::new().unwrap();
-        let (store, _project_root, _workspace, _base) =
-            make_learner_passing_fixture(tmp.path(), 1);
+        let (store, _project_root, _workspace, _base) = make_learner_passing_fixture(tmp.path(), 1);
         let mut item = store.read_work_item("work-1").unwrap();
 
         // Obstruct the durable work-item write deterministically: replace its file

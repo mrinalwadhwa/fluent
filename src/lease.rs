@@ -11,6 +11,17 @@ pub fn task_lock_path(project_root: &Path, work_item_id: &str, task_id: &str) ->
         .join(format!("{task_id}.lock"))
 }
 
+/// The per-Attempt Learner lease path. A live runner holds this across its whole
+/// Learner run, so a concurrent runner that cannot acquire it knows a peer is
+/// already running and must not launch a second coder, while a crash releases the
+/// OS-held lease and leaves the run recoverable.
+pub fn learner_lock_path(project_root: &Path, work_item_id: &str, attempt_id: &str) -> PathBuf {
+    project_root
+        .join(".fluent/work/locks")
+        .join(work_item_id)
+        .join(format!("{attempt_id}-learner.lock"))
+}
+
 pub struct TaskLease {
     _file: File,
 }
