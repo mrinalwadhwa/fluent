@@ -2571,9 +2571,17 @@ for arg in "$@"; do
   if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
 done
 if printf '%s' "$PROMPT" | grep -q "seeding fluent"; then exit 0; fi
-# The Learner runs in the attempt worktree too; let it fail rather than count as
-# a writer invocation. A failed Learner still yields the Merge Candidate.
-if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then exit 1; fi
+# The Learner runs in the attempt worktree too. It must succeed so the
+# advancement gate admits the Merge Candidate; it writes an empty handoff and
+# never touches the writer counter.
+if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
+  DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
+  if [ -n "$DRAFT" ]; then
+    mkdir -p "$(dirname "$DRAFT")"
+    printf '%s\n' '{"learning_summary":"none","follow_ups":[]}' > "$DRAFT"
+  fi
+  exit 0
+fi
 case "$PWD" in
   */work-*-work-1-attempt-1)
     C="__COUNTER__"
@@ -2781,7 +2789,7 @@ exit 0
 }
 
 #[test]
-fn learner_failure_is_retryable_and_does_not_block_candidate() {
+fn learner_failure_blocks_candidate_readiness() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     let bin_dir = tmp.path().join("bin-learner-fail");
@@ -2807,13 +2815,19 @@ fn learner_failure_is_retryable_and_does_not_block_candidate() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
+    // Reviews pass and the run itself does not error, but a non-succeeded Learner
+    // blocks advancement: the candidate is not ready and cannot land.
     assert!(
         output.status.success(),
-        "run should succeed despite learner failure: stdout={stdout} stderr={stderr}"
+        "the run reports the block without erroring: stdout={stdout} stderr={stderr}"
     );
     assert!(
-        stdout.contains("Merge Candidate attempt-1-merge-candidate is ready"),
-        "candidate is produced despite the learner failure; got:\n{stdout}"
+        stdout.contains("is not ready") && stdout.contains("Learner run is failed"),
+        "a failed learner blocks candidate readiness with the durable reason; got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Merge Candidate attempt-1-merge-candidate is ready"),
+        "a failed learner must not advance the candidate to ready; got:\n{stdout}"
     );
     assert!(
         stderr.contains("learner failed"),
