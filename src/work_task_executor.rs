@@ -2254,6 +2254,13 @@ fn run_task_coder_with_coder(
             progress_dir.display()
         )
     })?;
+    // Materialize the authoritative `## Required completion` section BEFORE the
+    // first Writer launches, so a marked Attempt's current checklist reflects its
+    // immutable manifest and the Writer preserves and checks those stable ids.
+    // Idempotent and crash-safe: an existing section is left untouched.
+    if task.kind == TaskKind::Write {
+        materialize_required_progress_before_writer(project_root, item, attempt_id)?;
+    }
     let prompt = build_write_task_prompt_with_workspace(
         item,
         attempt_id,
@@ -2406,6 +2413,13 @@ fn build_write_task_prompt_with_workspace(
         .as_ref()
         .map(|p| p.exists())
         .unwrap_or(false);
+    let has_required_progress = item
+        .attempts
+        .iter()
+        .find(|a| a.id == attempt_id)
+        .and_then(|a| a.progress_contract.as_ref())
+        .is_some();
+    let has_required_progress_value = if has_required_progress { "yes" } else { "" };
     let has_prior_reviews = !prior_reviews.is_empty();
     let planning = project_root
         .map(|root| compute_planning_paths(item, root))
@@ -2479,6 +2493,7 @@ fn build_write_task_prompt_with_workspace(
             ("bootstrap_extract_script", bootstrap_extract_value),
             ("has_prior_reviews", has_prior_reviews_value),
             ("has_progress_md", has_progress_md_value),
+            ("has_required_progress", has_required_progress_value),
             ("general_expertise_index", &general_expertise_index),
             ("project_expertise_index", &project_expertise_index),
             (
@@ -3020,6 +3035,49 @@ fn progress_md_dir(project_root: &Path, work_item_id: &str, attempt_id: &str) ->
 
 fn progress_md_path_for(project_root: &Path, work_item_id: &str, attempt_id: &str) -> PathBuf {
     progress_md_dir(project_root, work_item_id, attempt_id).join("progress.md")
+}
+
+/// Materialize an Attempt's immutable required-progress manifest into the
+/// authoritative `## Required completion` section of its progress file, atomically
+/// and idempotently, before the first Writer launches. An Attempt without a progress
+/// contract, or one whose section already exists, leaves the file untouched. This is
+/// the exact function the write route calls before launching the Writer coder.
+pub(crate) fn materialize_required_progress_before_writer(
+    project_root: &Path,
+    item: &WorkItem,
+    attempt_id: &str,
+) -> Result<()> {
+    let Some(attempt) = item.attempts.iter().find(|a| a.id == attempt_id) else {
+        return Ok(());
+    };
+    let progress_dir = progress_md_dir(project_root, &item.id, attempt_id);
+    fs::create_dir_all(&progress_dir).with_context(|| {
+        format!(
+            "Failed to create progress dir at {}",
+            progress_dir.display()
+        )
+    })?;
+    let progress_path = progress_dir.join("progress.md");
+    let existing = fs::read_to_string(&progress_path).unwrap_or_default();
+    let Some(new_content) = attempt.materialize_required_progress(&existing) else {
+        return Ok(());
+    };
+    // Write to a sibling temp file and rename over the target, so a crash mid-write
+    // never leaves a half-written checklist for the gate to reconcile.
+    let tmp = progress_dir.join("progress.md.materialize.tmp");
+    fs::write(&tmp, new_content).with_context(|| {
+        format!(
+            "Failed to write required-progress section to {}",
+            tmp.display()
+        )
+    })?;
+    fs::rename(&tmp, &progress_path).with_context(|| {
+        format!(
+            "Failed to atomically install required progress at {}",
+            progress_path.display()
+        )
+    })?;
+    Ok(())
 }
 
 /// Compute the absolute paths the writer/reviewer prompts reference for each
@@ -7427,6 +7485,69 @@ mod tests {
         assert!(
             !prompt.contains("Create progress.md"),
             "follow-up-round prompt (progress.md exists) should NOT include the Create instruction; got prompt:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn writer_prompts_preserve_required_progress_schema() {
+        // Required-progress production B1: when an Attempt carries a progress
+        // contract, the Writer prompt names the authoritative `## Required completion`
+        // section and instructs preserving the stable ids and requirements and
+        // attaching concrete evidence. An Attempt without a contract omits it.
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Required progress".to_string(),
+            planning_context: Some(crate::work_model::PlanningContext {
+                plan: Some(
+                    "| # | State reached | Req? |\n\
+                     |---|---------------|------|\n\
+                     | 1 | Do the thing | Yes |\n"
+                        .to_string(),
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        assert!(
+            item.attempts[0].progress_contract.is_some(),
+            "a Plan with required rows stamps the contract"
+        );
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let prompt = build_write_task_prompt_with_workspace(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            &[],
+            None,
+            Some(tmp.path()),
+        );
+        assert!(
+            prompt.contains("## Required completion"),
+            "the prompt names the authoritative required-progress section; got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("preserve every stable id"),
+            "the prompt instructs preserving stable ids and requirements; got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("Evidence:"),
+            "the prompt instructs attaching concrete evidence; got:\n{prompt}"
+        );
+
+        // An unmarked (legacy) Attempt omits the required-progress schema entirely.
+        let plain_prompt = build_write_task_prompt_with_workspace(
+            &review_item(),
+            "attempt-1",
+            "attempt-1-write-1",
+            &[],
+            None,
+            Some(tmp.path()),
+        );
+        assert!(
+            !plain_prompt.contains("## Required completion"),
+            "an unmarked Attempt omits the required-progress schema; got:\n{plain_prompt}"
         );
     }
 

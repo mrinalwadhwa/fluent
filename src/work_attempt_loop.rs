@@ -4892,6 +4892,91 @@ mod tests {
     }
 
     #[test]
+    fn new_attempt_materializes_required_progress_before_writer() {
+        // Required-progress production B1: creating a planned Attempt from a Plan with
+        // required rows stamps its immutable manifest, and the host materializes
+        // exactly one stable current-required-progress entry per required row into the
+        // authoritative section BEFORE the first Writer launches. Materialization is
+        // idempotent (crash-retry safe), never rewrites a Writer's checkmarks, and the
+        // manifest survives persistence unchanged.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let store = WorkModelStore::new(project_root);
+
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Required progress".to_string(),
+            planning_context: Some(crate::work_model::PlanningContext {
+                plan: Some(
+                    "| # | State reached | Req? |\n\
+                     |---|---------------|------|\n\
+                     | 1 | First requirement | Yes |\n\
+                     | 2 | Second requirement | Yes |\n\
+                     | 3 | Optional cleanup | No |\n"
+                        .to_string(),
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+
+        // The immutable manifest is stamped on the new planned Attempt and survives
+        // persistence, carrying exactly one entry per required Plan row.
+        let stored = store.read_work_item("work-1").unwrap();
+        let contract = stored.attempts[0]
+            .progress_contract
+            .as_ref()
+            .expect("a Plan with required rows stamps the contract");
+        assert_eq!(
+            contract
+                .required
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["step-1", "step-2"],
+            "the manifest carries one stable id per required Plan row, excluding non-required rows"
+        );
+
+        // The host materializes the section BEFORE the first Writer would run — this
+        // is the exact function the write route calls before launching the Writer.
+        crate::work_task_executor::materialize_required_progress_before_writer(
+            project_root,
+            &stored,
+            "attempt-1",
+        )
+        .unwrap();
+        let progress_path = project_root.join(".fluent/work/progress/work-1/attempt-1/progress.md");
+        let content = fs::read_to_string(&progress_path).unwrap();
+        assert!(content.contains("## Required completion"));
+        assert!(content.contains("- [ ] step-1 — First requirement"));
+        assert!(content.contains("- [ ] step-2 — Second requirement"));
+        assert!(
+            !content.contains("Optional cleanup"),
+            "non-required rows are excluded from the required-progress section"
+        );
+
+        // Crash-retry / follow-up Writer: a checked entry with evidence survives a
+        // second materialization untouched, so the checklist is never overwritten.
+        let checked = "## Required completion\n\n\
+             - [x] step-1 — First requirement; Evidence: src/x.rs\n\
+             - [ ] step-2 — Second requirement\n";
+        fs::write(&progress_path, checked).unwrap();
+        crate::work_task_executor::materialize_required_progress_before_writer(
+            project_root,
+            &stored,
+            "attempt-1",
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(&progress_path).unwrap(),
+            checked,
+            "re-materialization preserves the Writer's checkmarks"
+        );
+    }
+
+    #[test]
     fn learner_store_write_failure_preserves_primary_over_secondary() {
         // B7: when the Learner fails with a typed coder/confinement/handoff PRIMARY
         // and the terminal learning-record store write ALSO fails, the reducer

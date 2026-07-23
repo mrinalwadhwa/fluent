@@ -432,6 +432,15 @@ impl WorkItem {
         let task_id = format!("{attempt_id}-write-1");
         let workspace_path = initial_candidate_workspace_path(&self.id, &attempt_id);
         let artifact_path = work_artifact_path(&self.id, &attempt_id, &task_id);
+        // Stamp the immutable progress contract from the Plan's required rows before
+        // the Attempt is persisted, so a marked Attempt carries its expected manifest
+        // and the advancement gate can fail closed against it. A Plan with no
+        // required rows leaves the Attempt unmarked and legacy-compatible.
+        let progress_contract = self
+            .planning_context
+            .as_ref()
+            .and_then(|context| context.plan.as_deref())
+            .and_then(ProgressContract::from_plan);
         self.attempts.push(Attempt {
             id: attempt_id.clone(),
             work_item_id: self.id.clone(),
@@ -469,6 +478,7 @@ impl WorkItem {
             artifacts: Vec::new(),
             created_at: Some(now_iso8601()),
             completed_at: None,
+            progress_contract,
             ..Default::default()
         });
 
@@ -1687,6 +1697,111 @@ impl CoderPhaseRecovery {
     }
 }
 
+/// The current progress-contract schema version. A new planned Attempt carries this
+/// marker so a marked ("progress-contract") Attempt is distinguishable from a legacy
+/// Attempt that deserializes without it, letting the advancement gate fail closed
+/// only for marked Attempts.
+pub const PROGRESS_CONTRACT_VERSION: u32 = 1;
+
+/// The heading of the only authoritative section of an Attempt's progress file:
+/// `## Required completion`. Every other section, historical Attempt file, banner,
+/// and review prose is non-authoritative for advancement.
+pub const REQUIRED_COMPLETION_HEADING: &str = "## Required completion";
+
+/// One immutable expected required-progress entry: a stable id and the requirement
+/// text derived from a required Plan row. The manifest is the authority the
+/// advancement gate reconciles the current required-progress checklist against.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequiredProgressEntry {
+    /// Stable top-level checklist id, e.g. `step-1`.
+    pub id: String,
+    /// The requirement text, derived from the required Plan row.
+    pub requirement: String,
+}
+
+/// The durable progress contract stamped on a new planned Attempt with required
+/// Plan rows: the schema version plus the immutable expected stable-id/requirement
+/// manifest. Once stamped it never changes, so deletion, duplication, insertion, or
+/// requirement rewriting in the current checklist cannot manufacture closure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgressContract {
+    /// The progress-contract schema version this Attempt was marked with.
+    pub version: u32,
+    /// The immutable expected required-progress manifest, one entry per required
+    /// Plan row, in Plan order.
+    pub required: Vec<RequiredProgressEntry>,
+}
+
+impl ProgressContract {
+    /// Derive an immutable manifest from a Plan's markdown step table, one entry per
+    /// required row (`Req?` column `Yes`). Returns `None` when the Plan has no
+    /// required rows, so an Attempt without required work carries no marker and
+    /// stays legacy-compatible. Stable ids are `step-<#>` from the row's `#` column;
+    /// requirements are the row's `State reached` cell.
+    pub fn from_plan(plan: &str) -> Option<Self> {
+        let required = parse_required_plan_rows(plan);
+        if required.is_empty() {
+            None
+        } else {
+            Some(Self {
+                version: PROGRESS_CONTRACT_VERSION,
+                required,
+            })
+        }
+    }
+
+    /// Render the authoritative `## Required completion` section from this manifest:
+    /// one unchecked top-level entry per required row, in manifest order. This is the
+    /// exact section the host materializes before the first Writer.
+    pub fn render_required_completion_section(&self) -> String {
+        let mut out = format!("{REQUIRED_COMPLETION_HEADING}\n\n");
+        for entry in &self.required {
+            out.push_str(&format!("- [ ] {} — {}\n", entry.id, entry.requirement));
+        }
+        out
+    }
+}
+
+/// Parse a Plan's markdown step table into its required rows. A data row is a
+/// pipe-delimited line whose first cell is a step number and whose last cell is the
+/// `Req?` verdict; a row counts as required when that verdict is `Yes` (case-
+/// insensitive). The header and separator rows are skipped. Requirement text is the
+/// `State reached` cell (the second column).
+fn parse_required_plan_rows(plan: &str) -> Vec<RequiredProgressEntry> {
+    let mut rows = Vec::new();
+    for line in plan.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('|') {
+            continue;
+        }
+        // Split interior cells, dropping the empty leading/trailing splits a
+        // `| a | b |` row produces.
+        let cells: Vec<&str> = trimmed
+            .trim_matches('|')
+            .split('|')
+            .map(|cell| cell.trim())
+            .collect();
+        if cells.len() < 3 {
+            continue;
+        }
+        let number = cells[0];
+        if !number.chars().all(|c| c.is_ascii_digit()) || number.is_empty() {
+            // Header row (`#`), separator row (`---`), or a non-row line.
+            continue;
+        }
+        let req = cells[cells.len() - 1];
+        if !req.eq_ignore_ascii_case("yes") {
+            continue;
+        }
+        let requirement = cells[1].to_string();
+        rows.push(RequiredProgressEntry {
+            id: format!("step-{number}"),
+            requirement,
+        });
+    }
+    rows
+}
+
 impl AttemptLearning {
     /// A durable in-progress reservation persisted before the Learner's coder runs
     /// and before any handoff is written. It is crash-observable and retryable: a
@@ -2049,6 +2164,12 @@ pub struct Attempt {
     /// this code-producing Attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub learning: Option<AttemptLearning>,
+    /// The durable progress contract: the schema version and immutable expected
+    /// required-progress manifest derived from the Plan's required rows. A new
+    /// planned Attempt with required Plan rows is stamped with it; a legacy Attempt
+    /// deserializes without it and stays compatible with the advancement gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_contract: Option<ProgressContract>,
 }
 
 impl Default for Attempt {
@@ -2066,6 +2187,7 @@ impl Default for Attempt {
             created_at: None,
             completed_at: None,
             learning: None,
+            progress_contract: None,
         }
     }
 }
@@ -2077,6 +2199,26 @@ impl Attempt {
     /// (absent, in-progress, prepared/HandoffPending, or failed whether relaunchable
     /// or not) blocks advancement with one durable reason, so no boundary can
     /// advance over a non-succeeded Learner.
+    /// Materialize the authoritative `## Required completion` section into the
+    /// current required-progress content when this Attempt carries a progress
+    /// contract and the section is not already present. Idempotent: an existing
+    /// section (from a prior materialization or a Writer's checkmarks) is preserved
+    /// untouched, so a crash-retry or a follow-up Writer never overwrites checked
+    /// entries. Returns the content to persist, or `None` when nothing must change.
+    pub fn materialize_required_progress(&self, existing: &str) -> Option<String> {
+        let contract = self.progress_contract.as_ref()?;
+        if existing.contains(REQUIRED_COMPLETION_HEADING) {
+            return None;
+        }
+        let section = contract.render_required_completion_section();
+        let new_content = if existing.trim().is_empty() {
+            section
+        } else {
+            format!("{}\n\n{section}", existing.trim_end())
+        };
+        Some(new_content)
+    }
+
     pub fn learning_advancement_readiness(&self) -> Result<(), WorkModelError> {
         let state = match self.learning.as_ref() {
             Some(learning) if learning.is_succeeded() => return Ok(()),
@@ -3466,6 +3608,8 @@ struct AttemptRecord {
     completed_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     learning: Option<AttemptLearning>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    progress_contract: Option<ProgressContract>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3533,6 +3677,7 @@ impl AttemptRecord {
             created_at: attempt.created_at.clone(),
             completed_at: attempt.completed_at.clone(),
             learning: attempt.learning.clone(),
+            progress_contract: attempt.progress_contract.clone(),
         }
     }
 }
@@ -3552,6 +3697,7 @@ impl From<AttemptRecord> for Attempt {
             created_at: record.created_at,
             completed_at: record.completed_at,
             learning: record.learning,
+            progress_contract: record.progress_contract,
         }
     }
 }
@@ -4730,6 +4876,92 @@ mod tests {
         let pump =
             AttemptLearning::failed_with_kind(1, "pump", LearningFailureKind::TranscriptPump);
         assert!(pump.is_relaunchable());
+    }
+
+    #[test]
+    fn progress_contract_derives_immutable_manifest_from_required_plan_rows() {
+        // Required-progress production B1: a Plan's required rows (Req? = Yes) derive
+        // an immutable manifest of stable-id/requirement entries; non-required rows
+        // are excluded, and a Plan with no required rows leaves the Attempt unmarked
+        // and legacy-compatible.
+        let plan = "\
+| # | State reached | Behaviors | Verification | Req? |
+|---|---------------|-----------|--------------|------|
+| 1 | Model records disposition | B1 | tests | Yes |
+| 2 | Learner reserves once | B2 | tests | Yes |
+| 3 | Optional cleanup | B3 | tests | No |
+";
+        let contract = ProgressContract::from_plan(plan).expect("required rows derive a contract");
+        assert_eq!(contract.version, PROGRESS_CONTRACT_VERSION);
+        assert_eq!(
+            contract.required,
+            vec![
+                RequiredProgressEntry {
+                    id: "step-1".to_string(),
+                    requirement: "Model records disposition".to_string(),
+                },
+                RequiredProgressEntry {
+                    id: "step-2".to_string(),
+                    requirement: "Learner reserves once".to_string(),
+                },
+            ],
+            "only required (Req? = Yes) rows become manifest entries, with step-<#> ids"
+        );
+
+        // The rendered section is exactly one unchecked top-level entry per required
+        // row, in manifest order, under the authoritative heading.
+        assert_eq!(
+            contract.render_required_completion_section(),
+            "## Required completion\n\n\
+             - [ ] step-1 — Model records disposition\n\
+             - [ ] step-2 — Learner reserves once\n"
+        );
+
+        // A Plan with no required rows carries no marker.
+        let plan_no_required = "\
+| # | State reached | Req? |
+|---|---------------|------|
+| 1 | Optional | No |
+";
+        assert!(ProgressContract::from_plan(plan_no_required).is_none());
+        assert!(ProgressContract::from_plan("no table here").is_none());
+    }
+
+    #[test]
+    fn materialize_required_progress_is_idempotent_and_preserves_checkmarks() {
+        // Required-progress production B1: the host materializes the section into
+        // empty progress content, but leaves an existing section untouched — so a
+        // crash-retry or a follow-up Writer never overwrites checked entries.
+        let contract = ProgressContract {
+            version: PROGRESS_CONTRACT_VERSION,
+            required: vec![RequiredProgressEntry {
+                id: "step-1".to_string(),
+                requirement: "Do the thing".to_string(),
+            }],
+        };
+        let attempt = Attempt {
+            progress_contract: Some(contract),
+            ..Default::default()
+        };
+
+        // Empty content: the section is materialized.
+        let materialized = attempt
+            .materialize_required_progress("")
+            .expect("an empty file is materialized");
+        assert!(materialized.contains("## Required completion"));
+        assert!(materialized.contains("- [ ] step-1 — Do the thing"));
+
+        // A follow-up Writer checked the item with evidence; re-materialization is a
+        // no-op that never rewrites the checkmark.
+        let checked = "## Required completion\n\n- [x] step-1 — Do the thing; Evidence: src/x.rs\n";
+        assert!(
+            attempt.materialize_required_progress(checked).is_none(),
+            "an existing section is preserved untouched"
+        );
+
+        // An Attempt without a contract materializes nothing.
+        let legacy = Attempt::default();
+        assert!(legacy.materialize_required_progress("").is_none());
     }
 
     fn workspace(id: &str) -> WorkspaceRef {

@@ -88,6 +88,10 @@ progress.md is a `- [ ]` to-do list that persists across rounds. Each item can h
     - [ ] Implement chunk dispatch
     - [ ] Write integration test
 
+{{#if has_required_progress}}
+progress.md contains an authoritative `## Required completion` section the Fluent materialized from the Plan's required rows. Each top-level entry is exactly `- [ ] <stable-id> — <requirement>` or, once satisfied, `- [x] <stable-id> — <requirement>; Evidence: <source/test>`. You MUST preserve every stable id and its requirement text exactly — never add, remove, reorder, or reword an entry. Mark an entry `- [x]` only by appending `; Evidence: <the source file or test that proves it>` once it is genuinely complete. This section is the advancement gate's authority: a candidate cannot advance while any required entry is unchecked, and a review disagreement is resolved by a follow-up Writer checking the current item with concrete evidence, never by editing the schema.
+
+{{/if}}
 {{#if has_progress_md}}
 1. Read progress.md at {{progress_md_path}}.
 {{else}}
