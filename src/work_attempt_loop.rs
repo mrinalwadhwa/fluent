@@ -2335,6 +2335,34 @@ fn latest_tester_results_path(project_root: &Path, attempt: &Attempt) -> Option<
         .map(|dir| dir.join("tester-results.json"))
 }
 
+/// When a marked Attempt's current required progress does not reconcile with its
+/// immutable manifest, produce a synthetic review finding pointing at the progress
+/// file so a follow-up Writer materializes checked evidence. An unmarked Attempt or
+/// a reconciled one produces nothing, so a passing review advances normally.
+fn required_progress_finding(project_root: &Path, attempt: &Attempt) -> Option<ArtifactRef> {
+    attempt.progress_contract.as_ref()?;
+    let progress_rel = format!(
+        "{}/{}/{}/progress.md",
+        crate::work_model::WORK_PROGRESS_DIR,
+        attempt.work_item_id,
+        attempt.id
+    );
+    let source = fs::read_to_string(project_root.join(&progress_rel)).unwrap_or_default();
+    match attempt.reconcile_required_progress(&source) {
+        Ok(()) => None,
+        Err(reason) => {
+            eprintln!(
+                "  Required progress for Attempt {} is not satisfied: {reason}",
+                attempt.id
+            );
+            Some(ArtifactRef {
+                producer_id: "required-progress".to_string(),
+                path: progress_rel,
+            })
+        }
+    }
+}
+
 fn interpret_reviews(
     project_root: &Path,
     store: &WorkModelStore,
@@ -2376,6 +2404,21 @@ fn interpret_reviews(
         .as_ref()
         .map(|p| tester_errored(p))
         .unwrap_or(false);
+
+    // Advancement gate B2: when reviews and the tester would otherwise pass, a marked
+    // Attempt must not pass over incomplete or mismatched required progress. A
+    // violation is surfaced as a synthetic finding so a follow-up Writer materializes
+    // checked current-progress evidence before a later pass — never an ad hoc bypass.
+    // An unmarked (legacy) Attempt has no contract, so this never scans its prose.
+    let reviews_would_pass =
+        failed.is_empty() && uncertain.is_empty() && tester_fail_count == 0 && !tester_has_error;
+    if reviews_would_pass {
+        if let Some(finding) =
+            required_progress_finding(project_root, &item.attempts[attempt_index])
+        {
+            failed.push(finding);
+        }
+    }
 
     let has_failures = !failed.is_empty() || tester_fail_count > 0 || tester_has_error;
 
@@ -4973,6 +5016,143 @@ mod tests {
             fs::read_to_string(&progress_path).unwrap(),
             checked,
             "re-materialization preserves the Writer's checkmarks"
+        );
+    }
+
+    /// Mark the fixture Attempt with a one-entry progress contract and write the
+    /// given `## Required completion` content, so the required-progress gate can be
+    /// driven through `interpret_reviews` with passing reviews.
+    fn mark_required_progress(store: &WorkModelStore, project_root: &Path, section: &str) {
+        let mut item = store.read_work_item("work-1").unwrap();
+        item.attempts[0].progress_contract = Some(crate::work_model::ProgressContract {
+            version: crate::work_model::PROGRESS_CONTRACT_VERSION,
+            required: vec![crate::work_model::RequiredProgressEntry {
+                id: "step-1".to_string(),
+                requirement: "Do the thing".to_string(),
+            }],
+        });
+        store.write_work_item(&item).unwrap();
+        let progress_path = project_root.join(".fluent/work/progress/work-1/attempt-1/progress.md");
+        fs::create_dir_all(progress_path.parent().unwrap()).unwrap();
+        fs::write(&progress_path, section).unwrap();
+    }
+
+    #[test]
+    fn unchecked_required_progress_blocks_review_pass() {
+        // Advancement gates B2: reviews pass, but the marked Attempt's required entry
+        // is unchecked. The pass transition is rejected — no Merge Candidate, no
+        // Learner — and a follow-up write round is planned so a later Writer can
+        // materialize checked evidence.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, _workspace, _base) = make_learner_passing_fixture(tmp.path(), 1);
+        mark_required_progress(
+            &store,
+            &project_root,
+            "## Required completion\n\n- [ ] step-1 — Do the thing\n",
+        );
+
+        let run_coder = |_: &LearnerCoderRequest<'_>| -> Result<()> {
+            panic!("the Learner must not launch when required progress blocks the pass")
+        };
+        let item = store.read_work_item("work-1").unwrap();
+        let outcome = interpret_reviews(
+            &project_root,
+            &store,
+            item,
+            "attempt-1",
+            true,
+            Some(LearnerConfig {
+                run_coder: &run_coder,
+            }),
+        )
+        .unwrap();
+
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::PlannedWriteRound { .. }),
+            "unchecked required progress blocks the pass and plans a follow-up write round; got {outcome:?}"
+        );
+        let stored = store.read_work_item("work-1").unwrap();
+        assert!(
+            stored.merge_candidates.is_empty(),
+            "no Merge Candidate is created over unchecked required progress"
+        );
+        assert!(
+            stored.attempts[0].learning.is_none(),
+            "the Learner is never launched over unchecked required progress"
+        );
+        assert_ne!(
+            stored.attempts[0].review_state,
+            Some(AttemptReviewState::Passed),
+            "the passing review transition is rejected"
+        );
+    }
+
+    #[test]
+    fn deleted_required_progress_entry_blocks_review_pass() {
+        // Advancement gates B2: reviews pass, but a manifest entry was deleted from
+        // the current section. Set equality with the immutable manifest cannot be
+        // manufactured by deletion, so the pass is rejected — no Merge Candidate, no
+        // Learner.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, _workspace, _base) = make_learner_passing_fixture(tmp.path(), 1);
+        // The section exists but its only required entry has been deleted.
+        mark_required_progress(&store, &project_root, "## Required completion\n\n");
+
+        let run_coder = |_: &LearnerCoderRequest<'_>| -> Result<()> {
+            panic!("the Learner must not launch when required progress blocks the pass")
+        };
+        let item = store.read_work_item("work-1").unwrap();
+        let outcome = interpret_reviews(
+            &project_root,
+            &store,
+            item,
+            "attempt-1",
+            true,
+            Some(LearnerConfig {
+                run_coder: &run_coder,
+            }),
+        )
+        .unwrap();
+
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::PlannedWriteRound { .. }),
+            "a deleted required entry blocks the pass; got {outcome:?}"
+        );
+        let stored = store.read_work_item("work-1").unwrap();
+        assert!(stored.merge_candidates.is_empty());
+        assert!(stored.attempts[0].learning.is_none());
+    }
+
+    #[test]
+    fn checked_required_progress_admits_review_pass() {
+        // Advancement gates B2 (positive): the section exactly matches the manifest
+        // with every entry checked and carrying evidence, so a passing review
+        // advances to a ready Merge Candidate and the Learner runs.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, _workspace, _base) = make_learner_passing_fixture(tmp.path(), 1);
+        mark_required_progress(
+            &store,
+            &project_root,
+            "## Required completion\n\n- [x] step-1 — Do the thing; Evidence: src/x.rs\n",
+        );
+
+        let run_coder = draft_only_coder(r#"{"learning_summary":"learned","follow_ups":[]}"#);
+        let item = store.read_work_item("work-1").unwrap();
+        let outcome = interpret_reviews(
+            &project_root,
+            &store,
+            item,
+            "attempt-1",
+            true,
+            Some(LearnerConfig {
+                run_coder: &run_coder,
+            }),
+        )
+        .unwrap();
+
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
+            "checked required progress admits the pass; got {outcome:?}"
         );
     }
 

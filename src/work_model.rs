@@ -1762,6 +1762,73 @@ impl ProgressContract {
     }
 }
 
+/// One parsed top-level entry of the current `## Required completion` section.
+struct ParsedRequiredEntry {
+    id: String,
+    requirement: String,
+    checked: bool,
+    evidence: String,
+}
+
+/// Extract the lines of the authoritative `## Required completion` section: the
+/// lines after its heading up to the next `## ` heading or end of file. Returns
+/// `None` when the section heading is absent, so historical Attempt files, banners,
+/// and every other section are never scanned.
+fn extract_required_completion_section(source: &str) -> Option<Vec<&str>> {
+    let mut lines = source.lines();
+    lines
+        .by_ref()
+        .find(|line| line.trim() == REQUIRED_COMPLETION_HEADING)?;
+    let mut section = Vec::new();
+    for line in lines {
+        if line.trim_start().starts_with("## ") {
+            break;
+        }
+        section.push(line);
+    }
+    Some(section)
+}
+
+/// Parse one top-level checklist line of the required-progress section. A top-level
+/// entry is exactly `- [ ] <id> — <requirement>` or
+/// `- [x] <id> — <requirement>; Evidence: <source>`; anything else is malformed.
+fn parse_required_entry(line: &str) -> Result<ParsedRequiredEntry, String> {
+    let (checked, rest) = if let Some(rest) = line.strip_prefix("- [x] ") {
+        (true, rest)
+    } else if let Some(rest) = line.strip_prefix("- [ ] ") {
+        (false, rest)
+    } else {
+        return Err(format!("malformed required-progress line: {line:?}"));
+    };
+    let (id, after) = rest.split_once(" — ").ok_or_else(|| {
+        format!("malformed required-progress entry (missing ` — ` separator): {line:?}")
+    })?;
+    let id = id.trim().to_string();
+    if id.is_empty() {
+        return Err(format!(
+            "malformed required-progress entry (empty id): {line:?}"
+        ));
+    }
+    if checked {
+        let (requirement, evidence) = after.split_once("; Evidence:").ok_or_else(|| {
+            format!("checked required-progress entry missing `; Evidence:`: {line:?}")
+        })?;
+        Ok(ParsedRequiredEntry {
+            id,
+            requirement: requirement.trim().to_string(),
+            checked: true,
+            evidence: evidence.trim().to_string(),
+        })
+    } else {
+        Ok(ParsedRequiredEntry {
+            id,
+            requirement: after.trim().to_string(),
+            checked: false,
+            evidence: String::new(),
+        })
+    }
+}
+
 /// Parse a Plan's markdown step table into its required rows. A data row is a
 /// pipe-delimited line whose first cell is a step number and whose last cell is the
 /// `Req?` verdict; a row counts as required when that verdict is `Yes` (case-
@@ -2217,6 +2284,86 @@ impl Attempt {
             format!("{}\n\n{section}", existing.trim_end())
         };
         Some(new_content)
+    }
+
+    /// Reconcile the current required-progress content against this Attempt's
+    /// immutable manifest before a passing review may advance.
+    ///
+    /// An unmarked (legacy) Attempt has no contract, so this is `Ok(())` without
+    /// scanning any prose. For a marked Attempt it reads ONLY the `## Required
+    /// completion` section (historical files, banners, and other sections are
+    /// ignored) and returns the durable reason a review pass must be rejected: a
+    /// missing or malformed section, a set that differs from the manifest (a
+    /// deleted, unknown, duplicate, or rewritten entry), or an unchecked or
+    /// evidence-less required entry. It is `Ok(())` only when the section is exactly
+    /// the manifest with every entry checked and carrying evidence.
+    pub fn reconcile_required_progress(&self, source: &str) -> Result<(), String> {
+        let Some(contract) = self.progress_contract.as_ref() else {
+            return Ok(());
+        };
+        let section = extract_required_completion_section(source).ok_or_else(|| {
+            format!("required progress is missing the `{REQUIRED_COMPLETION_HEADING}` section")
+        })?;
+
+        // Parse every top-level checklist line; a non-conforming line is malformed.
+        let mut entries = Vec::new();
+        for line in section {
+            if !line.starts_with("- ") {
+                continue;
+            }
+            entries.push(parse_required_entry(line)?);
+        }
+
+        let manifest: std::collections::HashMap<&str, &str> = contract
+            .required
+            .iter()
+            .map(|entry| (entry.id.as_str(), entry.requirement.as_str()))
+            .collect();
+
+        let mut seen = std::collections::HashSet::new();
+        for entry in &entries {
+            if !seen.insert(entry.id.as_str()) {
+                return Err(format!("duplicate required-progress entry `{}`", entry.id));
+            }
+            match manifest.get(entry.id.as_str()) {
+                None => {
+                    return Err(format!(
+                        "unknown required-progress entry `{}` is not in the manifest",
+                        entry.id
+                    ));
+                }
+                Some(&requirement) if requirement != entry.requirement => {
+                    return Err(format!(
+                        "required-progress entry `{}` requirement was rewritten",
+                        entry.id
+                    ));
+                }
+                Some(_) => {}
+            }
+            if !entry.checked {
+                return Err(format!(
+                    "required-progress entry `{}` is unchecked",
+                    entry.id
+                ));
+            }
+            if entry.evidence.is_empty() {
+                return Err(format!(
+                    "required-progress entry `{}` is checked without evidence",
+                    entry.id
+                ));
+            }
+        }
+
+        // Every manifest entry must be present: a deletion cannot manufacture closure.
+        for required in &contract.required {
+            if !seen.contains(required.id.as_str()) {
+                return Err(format!(
+                    "required-progress entry `{}` is missing from the section",
+                    required.id
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn learning_advancement_readiness(&self) -> Result<(), WorkModelError> {
@@ -4962,6 +5109,83 @@ mod tests {
         // An Attempt without a contract materializes nothing.
         let legacy = Attempt::default();
         assert!(legacy.materialize_required_progress("").is_none());
+    }
+
+    #[test]
+    fn reconcile_required_progress_enforces_manifest_and_checks() {
+        // Advancement gates B2: a marked Attempt's current required progress must be
+        // exactly its manifest with every entry checked and carrying evidence; every
+        // other divergence is rejected, while a legacy Attempt and historical prose
+        // are never scanned.
+        let marked = Attempt {
+            progress_contract: Some(ProgressContract {
+                version: PROGRESS_CONTRACT_VERSION,
+                required: vec![
+                    RequiredProgressEntry {
+                        id: "step-1".to_string(),
+                        requirement: "First".to_string(),
+                    },
+                    RequiredProgressEntry {
+                        id: "step-2".to_string(),
+                        requirement: "Second".to_string(),
+                    },
+                ],
+            }),
+            ..Default::default()
+        };
+
+        // A legacy Attempt (no contract) is never gated, whatever the content.
+        let legacy = Attempt::default();
+        assert!(
+            legacy
+                .reconcile_required_progress("anything at all")
+                .is_ok()
+        );
+        assert!(legacy.reconcile_required_progress("").is_ok());
+
+        // Exactly the manifest, every entry checked with evidence, plus unrelated
+        // historical prose in other sections that is ignored.
+        let ok = "\
+# Progress
+
+- [x] some old historical note
+
+## Required completion
+
+- [x] step-1 — First; Evidence: src/a.rs
+- [x] step-2 — Second; Evidence: tests/b.rs
+
+## Notes
+
+random banner prose that must be ignored
+";
+        assert!(marked.reconcile_required_progress(ok).is_ok());
+
+        // Each violation is rejected.
+        let cases = [
+            // Missing section.
+            "# Progress\n\n- [x] step-1 — First; Evidence: x\n",
+            // Unchecked entry.
+            "## Required completion\n\n- [x] step-1 — First; Evidence: x\n- [ ] step-2 — Second\n",
+            // Checked without evidence.
+            "## Required completion\n\n- [x] step-1 — First\n- [x] step-2 — Second; Evidence: y\n",
+            // Deleted entry (step-2 missing).
+            "## Required completion\n\n- [x] step-1 — First; Evidence: x\n",
+            // Unknown entry.
+            "## Required completion\n\n- [x] step-1 — First; Evidence: x\n- [x] step-2 — Second; Evidence: y\n- [x] step-9 — Ghost; Evidence: z\n",
+            // Duplicate entry.
+            "## Required completion\n\n- [x] step-1 — First; Evidence: x\n- [x] step-1 — First; Evidence: x\n- [x] step-2 — Second; Evidence: y\n",
+            // Rewritten requirement.
+            "## Required completion\n\n- [x] step-1 — Rewritten; Evidence: x\n- [x] step-2 — Second; Evidence: y\n",
+            // Malformed checklist line.
+            "## Required completion\n\n- step-1 First\n- [x] step-2 — Second; Evidence: y\n",
+        ];
+        for source in cases {
+            assert!(
+                marked.reconcile_required_progress(source).is_err(),
+                "expected a required-progress violation for:\n{source}"
+            );
+        }
     }
 
     fn workspace(id: &str) -> WorkspaceRef {
