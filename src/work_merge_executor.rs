@@ -1051,13 +1051,13 @@ fn rebase_candidate_with_coder(
         make_coder,
     ) {
         Ok(RebaseOutcome::NeedsUser { diagnostic }) => {
+            // A give-up is a resumable pause, not a hard failure.
             settle_reserved_rebase_together(
                 config,
                 &candidate.attempt_id,
                 &rebase_task_id,
                 &candidate.id,
-                TaskStatus::NeedsUser,
-                MergeCandidateMergeStatus::NeedsUser,
+                false,
                 &diagnostic,
             )?;
             Ok(RebaseOutcome::NeedsUser { diagnostic })
@@ -1275,21 +1275,15 @@ fn settle_reserved_rebase_failure(
     candidate_id: &str,
     primary: anyhow::Error,
 ) -> anyhow::Error {
-    let (task_terminal, candidate_terminal) = if primary
+    let hard_failure = primary
         .downcast_ref::<crate::transcript_pump::TranscriptPumpError>()
-        .is_some()
-    {
-        (TaskStatus::NeedsUser, MergeCandidateMergeStatus::NeedsUser)
-    } else {
-        (TaskStatus::Failed, MergeCandidateMergeStatus::Failed)
-    };
+        .is_none();
     match settle_reserved_rebase_together(
         config,
         attempt_id,
         rebase_task_id,
         candidate_id,
-        task_terminal,
-        candidate_terminal,
+        hard_failure,
         &primary.to_string(),
     ) {
         Ok(()) => primary,
@@ -1299,18 +1293,35 @@ fn settle_reserved_rebase_failure(
     }
 }
 
-/// Settle the reserved Rebase Task and its Candidate to matching terminal states in
-/// one `mutate_work_item` transaction. Missing entities are model-integrity failures,
-/// never silent no-ops. Precedence is monotonic: a `Merged` Candidate is preserved, a
-/// hard `Failed` dominates a resumable `NeedsUser`, and an equal terminal state keeps
-/// the first diagnostic and timestamps.
+/// The joint terminal disposition of a reserved Rebase Task and its Merge Candidate.
+/// Computed once from BOTH freshly-read peer states so the two entities can never be
+/// persisted in disagreement (never Failed/NeedsUser, Merged/NeedsUser, or
+/// Complete/Failed splits).
+#[derive(Clone, Copy)]
+enum RebaseSettlement {
+    /// The Candidate already landed: preserve it and complete an active Rebase Task.
+    Merged,
+    /// Both settle to a hard terminal failure.
+    Failed,
+    /// Both settle to a resumable pause a supported resume can retry.
+    NeedsUser,
+}
+
+/// Settle the reserved Rebase Task and its Candidate together in one
+/// `mutate_work_item` transaction, deciding ONE joint disposition from both peers'
+/// freshly-read states before mutating either. Missing entities are model-integrity
+/// failures, never silent no-ops.
+///
+/// Precedence: a `Merged` Candidate is preserved and its active Task is completed; a
+/// hard failure — or either peer already `Failed` — settles both `Failed`; otherwise
+/// a resumable fault settles both `NeedsUser`. An equal joint terminal state is a
+/// no-op that keeps the first reason and timestamps.
 fn settle_reserved_rebase_together(
     config: &WorkMergeConfig<'_>,
     attempt_id: &str,
     rebase_task_id: &str,
     candidate_id: &str,
-    task_terminal: TaskStatus,
-    candidate_terminal: MergeCandidateMergeStatus,
+    hard_failure: bool,
     diagnostic: &str,
 ) -> Result<()> {
     let attempt_id = attempt_id.to_string();
@@ -1320,30 +1331,66 @@ fn settle_reserved_rebase_together(
     config
         .store
         .mutate_work_item(config.work_item_id, move |item| {
-            let attempt = item
+            let attempt_idx = item
                 .attempts
-                .iter_mut()
-                .find(|a| a.id == attempt_id)
+                .iter()
+                .position(|a| a.id == attempt_id)
                 .ok_or(WorkModelError::AttemptNotFound {
                     id: attempt_id.clone(),
                 })?;
-            let task = attempt
+            let task_idx = item.attempts[attempt_idx]
                 .tasks
-                .iter_mut()
-                .find(|t| t.id == rebase_task_id)
+                .iter()
+                .position(|t| t.id == rebase_task_id)
                 .ok_or(WorkModelError::TaskNotFound {
                     id: rebase_task_id.clone(),
                 })?;
-            settle_rebase_task_terminal(task, task_terminal.clone());
-
-            let candidate = item
+            let candidate_idx = item
                 .merge_candidates
-                .iter_mut()
-                .find(|c| c.id == candidate_id)
+                .iter()
+                .position(|c| c.id == candidate_id)
                 .ok_or(WorkModelError::MergeCandidateNotFound {
                     candidate_id: candidate_id.clone(),
                 })?;
-            settle_candidate_terminal(candidate, candidate_terminal.clone(), &diagnostic);
+
+            // Decide ONE joint disposition from both peers' current states first.
+            let candidate_state = &item.merge_candidates[candidate_idx].merge_state;
+            let candidate_merged = candidate_state.status == MergeCandidateMergeStatus::Merged
+                && candidate_state.merged_commit.is_some();
+            let candidate_failed =
+                candidate_state.status == MergeCandidateMergeStatus::Failed;
+            let task_failed = item.attempts[attempt_idx].tasks[task_idx].status
+                == TaskStatus::Failed;
+            let settlement = if candidate_merged {
+                RebaseSettlement::Merged
+            } else if hard_failure || task_failed || candidate_failed {
+                RebaseSettlement::Failed
+            } else {
+                RebaseSettlement::NeedsUser
+            };
+
+            // Apply the SAME joint disposition to both entities.
+            let task = &mut item.attempts[attempt_idx].tasks[task_idx];
+            match settlement {
+                RebaseSettlement::Merged => settle_task_terminal(task, TaskStatus::Complete),
+                RebaseSettlement::Failed => settle_task_terminal(task, TaskStatus::Failed),
+                RebaseSettlement::NeedsUser => settle_task_terminal(task, TaskStatus::NeedsUser),
+            }
+            let candidate = &mut item.merge_candidates[candidate_idx];
+            match settlement {
+                // A landed Candidate is left exactly as it merged.
+                RebaseSettlement::Merged => {}
+                RebaseSettlement::Failed => settle_candidate_terminal(
+                    candidate,
+                    MergeCandidateMergeStatus::Failed,
+                    &diagnostic,
+                ),
+                RebaseSettlement::NeedsUser => settle_candidate_terminal(
+                    candidate,
+                    MergeCandidateMergeStatus::NeedsUser,
+                    &diagnostic,
+                ),
+            }
             Ok(())
         })?;
     Ok(())
@@ -1351,8 +1398,9 @@ fn settle_reserved_rebase_together(
 
 /// Terminalize a reserved Rebase Task with monotonic precedence: a recorded
 /// `Complete`/`Failed` terminal is preserved and a hard `Failed` upgrades a resumable
-/// `NeedsUser`, so an idempotent re-settlement or a dominating fault never regresses.
-fn settle_rebase_task_terminal(task: &mut Task, terminal: TaskStatus) {
+/// `NeedsUser`, so an idempotent re-settlement or a dominating fault never regresses,
+/// and an equal terminal state keeps the first timestamps.
+fn settle_task_terminal(task: &mut Task, terminal: TaskStatus) {
     let applies = match (&task.status, &terminal) {
         (TaskStatus::Complete | TaskStatus::Failed, _) => false,
         (TaskStatus::NeedsUser, TaskStatus::Failed) => true,
@@ -2047,7 +2095,9 @@ mod tests {
                     reads: Vec::new(),
                     writes: vec![candidate.source_workspace.clone()],
                 },
-                artifact_area: None,
+                artifact_area: Some(crate::work_model::TaskArtifactArea {
+                    path: work_artifact_path(work_id, "attempt-1", &rebase_task_id),
+                }),
                 review_context: None,
                 input_artifacts: Vec::new(),
                 depends_on: None,
@@ -2145,6 +2195,125 @@ mod tests {
         assert!(
             rendered.contains("primary rebase fault") && rendered.contains("not found"),
             "a missing entity composes as context on the preserved primary: {rendered}"
+        );
+    }
+
+    #[test]
+    fn settle_reserved_rebase_computes_one_joint_disposition_never_a_split() {
+        // B7: the settlement decides ONE joint disposition from BOTH freshly-read peer
+        // states, so the Task and Candidate can never be persisted in disagreement.
+        // A resumable pump fault whose peer Candidate is already Failed settles BOTH
+        // Failed (Failed dominates); a Merged Candidate is preserved and its active Task
+        // is Completed even under a hard fault (never Merged/Failed or Merged/NeedsUser).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let resolver = ContentResolver::new(None);
+        let ws = tmp.path().join("ws");
+
+        // Reserve an Executing Rebase Task under a valid Candidate, then force the
+        // Candidate into `status` before settling.
+        let reserve = |work_id: &str, status: MergeCandidateMergeStatus| -> (String, String) {
+            let (mut item, candidate) = executing_candidate_item(work_id, &ws);
+            let rebase_task_id = next_rebase_task_id(&item, "attempt-1");
+            let now = crate::work_model::now_iso8601();
+            item.attempts[0].tasks.push(Task {
+                id: rebase_task_id.clone(),
+                kind: TaskKind::Rebase,
+                status: TaskStatus::Executing,
+                role: "rebase".to_string(),
+                instructions: None,
+                work_item_id: work_id.to_string(),
+                attempt_id: Some("attempt-1".to_string()),
+                workspace_access: WorkspaceAccess {
+                    reads: Vec::new(),
+                    writes: vec![candidate.source_workspace.clone()],
+                },
+                artifact_area: Some(crate::work_model::TaskArtifactArea {
+                    path: work_artifact_path(work_id, "attempt-1", &rebase_task_id),
+                }),
+                review_context: None,
+                input_artifacts: Vec::new(),
+                depends_on: None,
+                output: None,
+                created_at: Some(now.clone()),
+                started_at: Some(now),
+                completed_at: None,
+            });
+            let stored = item.merge_candidates[0].id.clone();
+            let is_merged = status == MergeCandidateMergeStatus::Merged;
+            let candidate = &mut item.merge_candidates[0];
+            candidate.merge_state.status = status;
+            if is_merged {
+                candidate.merge_state.merged_commit = Some("deadbeef".to_string());
+            }
+            store.create_work_item(&item).unwrap();
+            (stored, rebase_task_id)
+        };
+        let config = |work_id: &'static str| WorkMergeConfig {
+            project_root: tmp.path(),
+            store: &store,
+            work_item_id: work_id,
+            merge_candidate_id: "attempt-1-merge-candidate",
+            resolver: &resolver,
+            extra_args: &[],
+            coder_kind: CoderKind::Codex,
+            no_sandbox: true,
+            skip_post_merge_review: false,
+        };
+
+        // Peer Candidate already Failed + a resumable pump fault → BOTH Failed.
+        let (peer_candidate, peer_task) =
+            reserve("work-peer-failed", MergeCandidateMergeStatus::Failed);
+        settle_reserved_rebase_failure(
+            &config("work-peer-failed"),
+            "attempt-1",
+            &peer_task,
+            &peer_candidate,
+            anyhow::Error::new(crate::transcript_pump::TranscriptPumpError::new(
+                "write transcript-pump status: no space left on device".to_string(),
+            )),
+        );
+        let stored = store.read_work_item("work-peer-failed").unwrap();
+        assert_eq!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .find(|t| t.kind == TaskKind::Rebase)
+                .unwrap()
+                .status,
+            TaskStatus::Failed,
+            "a peer-Failed Candidate drives the Task to Failed, never a NeedsUser/Failed split"
+        );
+        assert_eq!(
+            stored.merge_candidates[0].merge_state.status,
+            MergeCandidateMergeStatus::Failed
+        );
+
+        // Merged Candidate + a hard fault → Candidate preserved Merged, Task Completed.
+        let (merged_candidate, merged_task) =
+            reserve("work-merged", MergeCandidateMergeStatus::Merged);
+        settle_reserved_rebase_failure(
+            &config("work-merged"),
+            "attempt-1",
+            &merged_task,
+            &merged_candidate,
+            anyhow::anyhow!("rebase agent failed (exit code 3)"),
+        );
+        let stored = store.read_work_item("work-merged").unwrap();
+        assert_eq!(
+            stored.merge_candidates[0].merge_state.status,
+            MergeCandidateMergeStatus::Merged,
+            "a landed Candidate is preserved, never regressed to Failed/NeedsUser"
+        );
+        assert_eq!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .find(|t| t.kind == TaskKind::Rebase)
+                .unwrap()
+                .status,
+            TaskStatus::Complete,
+            "the active Rebase Task is completed in step with a Merged Candidate"
         );
     }
 
