@@ -2052,7 +2052,7 @@ mod tests {
             skip_post_merge_review: true,
         };
 
-        let error = execute_merge_with_coder(
+        let Err(error) = execute_merge_with_coder(
             &config,
             &item,
             &candidate,
@@ -2067,8 +2067,9 @@ mod tests {
                     ),
                 })
             },
-        )
-        .expect_err("a transcript-pump failure must return an error");
+        ) else {
+            panic!("a transcript-pump failure must return an error");
+        };
 
         assert!(
             error
