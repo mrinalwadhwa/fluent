@@ -1757,6 +1757,49 @@ mod tests {
         }
     }
 
+    /// Build a Work Item whose Attempt carries a completed Write Task and one valid
+    /// Merge Candidate in `Executing` merge state, rooted at `source_workspace`. The
+    /// model rejects a candidate without a completed Write Task and matching
+    /// source/target/branch/commit provenance, so the rebase-settlement fixtures
+    /// construct the full valid state (via `create_or_get_merge_candidate`) rather
+    /// than attaching a bare candidate that `create_work_item` would refuse.
+    fn executing_candidate_item(
+        work_id: &str,
+        source_workspace: &Path,
+    ) -> (WorkItem, MergeCandidate) {
+        let mut item = WorkItem {
+            id: work_id.to_string(),
+            title: "Rebase failure settlement".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+
+        let attempt = item.attempts.first_mut().unwrap();
+        attempt.status = AttemptStatus::Complete;
+        attempt.review_state = Some(AttemptReviewState::Passed);
+
+        let task = attempt.tasks.first_mut().unwrap();
+        let workspace_id = task.workspace_access.writes.first().unwrap().id.clone();
+        task.status = TaskStatus::Complete;
+        task.output = Some(TaskOutput {
+            workspace_id,
+            workspace_path: source_workspace.to_string_lossy().into_owned(),
+            source_branch: "main".to_string(),
+            base_commit: None,
+            commit: "abc123".to_string(),
+        });
+
+        let candidate_id = item.create_or_get_merge_candidate("attempt-1").unwrap();
+        let candidate = item
+            .merge_candidates
+            .iter_mut()
+            .find(|candidate| candidate.id == candidate_id)
+            .unwrap();
+        candidate.merge_state.status = MergeCandidateMergeStatus::Executing;
+        let candidate = candidate.clone();
+        (item, candidate)
+    }
+
     #[test]
     fn rebase_launch_threads_resolved_capture() {
         // B8: the rebase launch route threads the project's resolved, immutable
@@ -1932,30 +1975,20 @@ mod tests {
         let resolver = ContentResolver::new(None);
         let ws = tmp.path().join("ws");
 
-        // Two independent Work Items so each holds exactly one Candidate for its
-        // Attempt (a single Attempt owns at most one Merge Candidate).
-        let make_item = |work_id: &str, candidate_id: &str| {
-            let mut item = WorkItem {
-                id: work_id.to_string(),
-                title: "Rebase failure settlement".to_string(),
-                ..Default::default()
-            };
-            item.add_initial_attempt("attempt-1").unwrap();
-            let mut candidate = merge_candidate_fixture(&ws);
-            candidate.id = candidate_id.to_string();
-            candidate.merge_state.status = MergeCandidateMergeStatus::Executing;
-            item.merge_candidates = vec![candidate.clone()];
-            store.create_work_item(&item).unwrap();
-            candidate
-        };
-        let pump_candidate = make_item("work-pump", "mc-pump");
-        let hard_candidate = make_item("work-hard", "mc-hard");
+        // Two independent Work Items so each holds exactly one valid Candidate for
+        // its Attempt (a single Attempt owns at most one Merge Candidate). Each
+        // Candidate is built from a completed Write Task so `create_work_item`
+        // accepts it.
+        let (pump_item, pump_candidate) = executing_candidate_item("work-pump", &ws);
+        store.create_work_item(&pump_item).unwrap();
+        let (hard_item, hard_candidate) = executing_candidate_item("work-hard", &ws);
+        store.create_work_item(&hard_item).unwrap();
 
-        let config = |work_id: &'static str, candidate_id: &'static str| WorkMergeConfig {
+        let config = |work_id: &'static str| WorkMergeConfig {
             project_root: tmp.path(),
             store: &store,
             work_item_id: work_id,
-            merge_candidate_id: candidate_id,
+            merge_candidate_id: "attempt-1-merge-candidate",
             resolver: &resolver,
             extra_args: &[],
             coder_kind: CoderKind::Codex,
@@ -1964,7 +1997,7 @@ mod tests {
         };
 
         settle_candidate_for_rebase_failure(
-            &config("work-pump", "mc-pump"),
+            &config("work-pump"),
             &pump_candidate,
             &anyhow::Error::new(crate::transcript_pump::TranscriptPumpError::new(
                 "write transcript-pump status: no space left on device".to_string(),
@@ -1972,7 +2005,7 @@ mod tests {
         )
         .expect("settling a pump-fault candidate succeeds");
         settle_candidate_for_rebase_failure(
-            &config("work-hard", "mc-hard"),
+            &config("work-hard"),
             &hard_candidate,
             &anyhow::anyhow!("rebase agent failed (exit code 3)"),
         )
@@ -2027,15 +2060,7 @@ mod tests {
         fs::create_dir_all(&artifact_dir).unwrap();
 
         let store = WorkModelStore::new(project_root.as_path());
-        let mut item = WorkItem {
-            id: "work-1".to_string(),
-            title: "Merge route pump failure".to_string(),
-            ..Default::default()
-        };
-        item.add_initial_attempt("attempt-1").unwrap();
-        let mut candidate = merge_candidate_fixture(&source_workspace);
-        candidate.merge_state.status = MergeCandidateMergeStatus::Executing;
-        item.merge_candidates = vec![candidate.clone()];
+        let (item, candidate) = executing_candidate_item("work-1", &source_workspace);
         store.create_work_item(&item).unwrap();
         let item = store.read_work_item("work-1").unwrap();
 
