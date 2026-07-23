@@ -1,6 +1,7 @@
 # Learnings Index
 
 - [atomic-task-start-reservation](atomic-task-start-reservation.md) — Task starts run read-only preflight, then a single lock-held reservation that honors the precedence boundary, then CAS rollback — never mark Executing while discarding the transition verdict
+- [atomic-write-replace-through-utility](atomic-write-replace-through-utility.md) — Replace a durable file through crate::atomic_write::atomic_write (unique temp + persist), never a fixed-name temp + rename; distinguish NotFound from other read errors instead of unwrap_or_default
 - [backward-compatible-serde-fields](backward-compatible-serde-fields.md) — Persisted Work model field additions and renames must preserve backward compatibility with existing on-disk JSON
 - [behaviors-test-citation-sync](behaviors-test-citation-sync.md) — Test renames must update all Test: citations in behaviors.md in the same commit
 - [capture-pump-terminate-descendants-before-eof](capture-pump-terminate-descendants-before-eof.md) — When a thread drains a child's piped stdout to EOF, terminate the whole process group before waiting for EOF; a backgrounded descendant can hold the pipe open forever
@@ -14,12 +15,14 @@
 - [host-evidence-writes-use-exclusive-create](host-evidence-writes-use-exclusive-create.md) — Host-owned run/handoff evidence is written with exclusive create-new and propagates every write error — never a best-effort copy
 - [inject-side-effects-for-testability](inject-side-effects-for-testability.md) — Side-effect functions like notify() must be injected via &dyn Fn parameters so tests can capture and assert
 - [keep-architecture-doc-in-sync](keep-architecture-doc-in-sync.md) — documentation/architecture.md is a living present-tense doc; subsystem changes must update its file map and subsystem sections in the same change
+- [lease-acquire-types-contention-vs-infrastructure](lease-acquire-types-contention-vs-infrastructure.md) — Lock/lease acquisition must return a typed result — only a non-blocking flock WouldBlock is a live peer (fail open); every other lock-path IO error propagates as a real failure
 - [lock-ordering-across-subsystems](lock-ordering-across-subsystems.md) — Release the queue lock before mutating the Work model; the codebase has a lock hierarchy that must not be inverted
 - [needs-user-not-terminal-for-cleanup](needs-user-not-terminal-for-cleanup.md) — NeedsUser attempts are not terminal for cleanup; only Complete and Failed are reapable
 - [post-land-effects-are-idempotent-and-land-safe](post-land-effects-are-idempotent-and-land-safe.md) — A completed land is durable; post-land side effects run only after merge, replay at-most-once via deterministic ids, and never undo the land on failure
 - [production-lock-test-hooks](production-lock-test-hooks.md) — Lock-contention pause hooks must stay test-only, scoped, bounded, and panic-safe
-- [public-api-surface-test](public-api-surface-test.md) — A capability for external callers gets a tests/public_api.rs test that compiles only against the public API, proving it is usable without private internals
 - [prompt-file-naming-guardrail](prompt-file-naming-guardrail.md) — Adding or renaming prompt files under prompts/ requires updating the no_legacy_prompt_files_in_prompts_dir allowlist test
+- [public-api-surface-test](public-api-surface-test.md) — A capability for external callers gets a tests/public_api.rs test that compiles only against the public API, proving it is usable without private internals
+- [readiness-gate-at-selection-not-permanent-skip](readiness-gate-at-selection-not-permanent-skip.md) — A shared readiness predicate must gate at every projection including auto-merge selection, and a retryable gate must withhold selection, never select-then-fail-then-mark a permanent skip
 - [record-divergence-in-decisions-md](record-divergence-in-decisions-md.md) — Deliberate divergences from approach.md belong in decisions.md (durable), not just progress.md (round-scoped)
 - [reserved-phase-terminal-finalizer](reserved-phase-terminal-finalizer.md) — Once a phase reserves durable state, its whole failure path funnels through one finalizer that persists authoritative state before any handoff/artifact — never a raw ? or panic out of the reserved body
 - [route-tests-drive-real-launch-wiring](route-tests-drive-real-launch-wiring.md) — A launch-route regression must drive the real phase launch path and fail if it drops the threaded value; a helper test asserting resolver/config layering does not verify the wiring
