@@ -81,6 +81,14 @@ pub enum WorkAttemptRunOutcome {
         stage: String,
         next_action: String,
     },
+    /// The Attempt passed review, but its Learner has not SUCCEEDED, so the
+    /// candidate is not ready to land. Carries the same durable reason emitted by
+    /// Merge Candidate validation and landing. The candidate is left intact; a
+    /// later run re-runs the Learner.
+    LearnerNotReady {
+        candidate_id: String,
+        reason: String,
+    },
     PlannedWriteRound {
         task_id: String,
     },
@@ -306,6 +314,16 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             } else {
                 config.store.write_work_item(&item)?;
             }
+            // Advancement gate: a non-succeeded Learner blocks readiness with the same
+            // durable reason as Merge Candidate validation and landing, so a failed or
+            // prepared learning state can never reach MergeCandidateReady.
+            if let Err(block) = item.attempt_learning_advancement(config.attempt_id) {
+                outcomes.push(WorkAttemptRunOutcome::LearnerNotReady {
+                    candidate_id,
+                    reason: block.to_string(),
+                });
+                return Ok(WorkAttemptRunResult { outcomes });
+            }
             outcomes.push(WorkAttemptRunOutcome::MergeCandidateReady { candidate_id });
             return Ok(WorkAttemptRunResult { outcomes });
         }
@@ -438,6 +456,7 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                 outcome,
                 WorkAttemptRunOutcome::MergeCandidateReady { .. }
                     | WorkAttemptRunOutcome::FollowUpRecoveryPending { .. }
+                    | WorkAttemptRunOutcome::LearnerNotReady { .. }
                     | WorkAttemptRunOutcome::NeedsUser { .. }
                     | WorkAttemptRunOutcome::ReviewOnlyComplete
                     | WorkAttemptRunOutcome::ReviewOnlyFailed
@@ -2490,6 +2509,16 @@ fn interpret_reviews(
             false,
             learner_config,
         )?;
+        // Advancement gate: a Learner ran in this path, so its result gates
+        // readiness. A non-succeeded Learner blocks MergeCandidateReady with the same
+        // durable reason surfaced by Merge Candidate validation and landing, rather
+        // than falsely advancing over failed or prepared learning.
+        if let Err(block) = item.attempt_learning_advancement(attempt_id) {
+            return Ok(WorkAttemptRunOutcome::LearnerNotReady {
+                candidate_id,
+                reason: block.to_string(),
+            });
+        }
     }
     store.write_work_item(&item)?;
     Ok(WorkAttemptRunOutcome::MergeCandidateReady { candidate_id })
@@ -4448,10 +4477,12 @@ mod tests {
         )
         .unwrap();
 
-        // A learner failure never fails the Attempt: the candidate is still ready.
+        // A learner failure never fails the Attempt, but a non-succeeded Learner now
+        // blocks readiness: the candidate is not advanced, and the durable reason is
+        // surfaced through a learner recovery-pending outcome.
         assert!(
-            matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
-            "a handoff-write failure leaves the candidate ready; got {outcome:?}"
+            matches!(outcome, WorkAttemptRunOutcome::LearnerNotReady { .. }),
+            "a handoff-write failure blocks readiness rather than advancing; got {outcome:?}"
         );
 
         assert!(
@@ -4545,10 +4576,12 @@ mod tests {
             }),
         )
         .unwrap();
-        assert!(matches!(
-            outcome,
-            WorkAttemptRunOutcome::MergeCandidateReady { .. }
-        ));
+        // The evidence-pending disposition is non-succeeded, so it blocks readiness
+        // rather than advancing to MergeCandidateReady.
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::LearnerNotReady { .. }),
+            "a sidecar (evidence-pending) failure blocks readiness; got {outcome:?}"
+        );
         assert_eq!(
             calls.load(AtomicOrdering::SeqCst),
             1,
@@ -4806,6 +4839,56 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn non_succeeded_learning_blocks_candidate_readiness() {
+        // Advancement gates B1: a non-succeeded Learner blocks MergeCandidateReady.
+        // The Learner fails, so interpret_reviews returns a learner recovery-pending
+        // outcome carrying the durable readiness reason instead of advancing the
+        // candidate — and the same durable reason gates Merge Candidate validation.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, _workspace, _base) = make_learner_passing_fixture(tmp.path(), 1);
+
+        let run_coder =
+            |_request: &LearnerCoderRequest<'_>| -> Result<()> { bail!("learner logic failed") };
+        let item = store.read_work_item("work-1").unwrap();
+        let outcome = interpret_reviews(
+            &project_root,
+            &store,
+            item,
+            "attempt-1",
+            true,
+            Some(LearnerConfig {
+                run_coder: &run_coder,
+            }),
+        )
+        .unwrap();
+
+        match outcome {
+            WorkAttemptRunOutcome::LearnerNotReady { reason, .. } => {
+                assert!(
+                    reason.contains("not succeeded"),
+                    "the block carries the durable advancement reason: {reason}"
+                );
+            }
+            other => panic!("a non-succeeded Learner must block readiness, not advance: {other:?}"),
+        }
+
+        let stored = store.read_work_item("work-1").unwrap();
+        assert!(
+            stored.attempts[0].learning.as_ref().unwrap().is_failed(),
+            "the durable learning record is the failed run that blocked advancement"
+        );
+        // The same shared predicate gates Merge Candidate validation and landing.
+        let candidate = stored.merge_candidates[0].clone();
+        let error = candidate
+            .validate_advancement(&stored)
+            .expect_err("the landing gate rejects the same non-succeeded learning");
+        assert!(
+            error.to_string().contains("not succeeded"),
+            "validation and readiness reject with the same durable reason: {error}"
+        );
     }
 
     #[test]
@@ -5464,8 +5547,8 @@ mod tests {
         .unwrap();
 
         assert!(
-            matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
-            "the candidate is still produced when the learner commit is discarded"
+            matches!(outcome, WorkAttemptRunOutcome::LearnerNotReady { .. }),
+            "a discarded (failed) learner commit blocks readiness; got {outcome:?}"
         );
         let head_after = git::run_stdout(&workspace, &["rev-parse", "HEAD"], "after").unwrap();
         assert_eq!(

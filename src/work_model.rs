@@ -1171,6 +1171,21 @@ impl WorkItem {
         }
         Ok(())
     }
+
+    /// The shared advancement-readiness gate for one Attempt: delegates to
+    /// [`Attempt::learning_advancement_readiness`] so Attempt readiness, Merge
+    /// Candidate validation, and landing consume one contract and reject a
+    /// non-succeeded Learner with the same durable reason.
+    pub fn attempt_learning_advancement(&self, attempt_id: &str) -> Result<(), WorkModelError> {
+        let attempt = self
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .ok_or_else(|| WorkModelError::AttemptNotFound {
+                id: attempt_id.to_string(),
+            })?;
+        attempt.learning_advancement_readiness()
+    }
 }
 
 /// Durable marker that a Work Item was explicitly abandoned.
@@ -2056,6 +2071,29 @@ impl Default for Attempt {
 }
 
 impl Attempt {
+    /// The single advancement-readiness contract. An Attempt's change may advance —
+    /// reach `MergeCandidateReady`, pass Merge Candidate landing validation, and
+    /// land — only once its Learner run has SUCCEEDED. Any other learning state
+    /// (absent, in-progress, prepared/HandoffPending, or failed whether relaunchable
+    /// or not) blocks advancement with one durable reason, so no boundary can
+    /// advance over a non-succeeded Learner.
+    pub fn learning_advancement_readiness(&self) -> Result<(), WorkModelError> {
+        let state = match self.learning.as_ref() {
+            Some(learning) if learning.is_succeeded() => return Ok(()),
+            None => "absent",
+            Some(learning) if learning.is_in_progress() => "in progress",
+            Some(learning) if learning.is_handoff_pending() => "prepared (handoff pending)",
+            Some(learning) if !learning.is_relaunchable() => {
+                "failed and non-relaunchable (evidence pending)"
+            }
+            Some(_) => "failed",
+        };
+        Err(WorkModelError::AttemptLearningNotSucceeded {
+            attempt_id: self.id.clone(),
+            state,
+        })
+    }
+
     pub fn validate(&self, work_item_id: &str) -> Result<(), WorkModelError> {
         for task in &self.tasks {
             if task.work_item_id != work_item_id {
@@ -2677,6 +2715,24 @@ impl MergeCandidate {
         }
         Ok(())
     }
+
+    /// The landing-readiness gate: a candidate may pass validation and land only
+    /// once its Attempt's Learner has SUCCEEDED. An already-merged or terminally
+    /// failed candidate is exempt — it is not advancing over a pending Learner but
+    /// resuming idempotent post-land work or is already terminal. Shares the one
+    /// durable reason [`Attempt::learning_advancement_readiness`] emits, so Merge
+    /// Candidate validation and landing reject a non-succeeded Learner identically.
+    /// This is a landing gate, kept separate from the structural [`Self::validate`]
+    /// so persisting a candidate before its Learner runs stays valid.
+    pub fn validate_advancement(&self, work_item: &WorkItem) -> Result<(), WorkModelError> {
+        if matches!(
+            self.merge_state.status,
+            MergeCandidateMergeStatus::Merged | MergeCandidateMergeStatus::Failed
+        ) {
+            return Ok(());
+        }
+        work_item.attempt_learning_advancement(&self.attempt_id)
+    }
 }
 
 /// Merge-time review lifecycle state for a merge candidate.
@@ -2982,6 +3038,10 @@ pub enum WorkModelError {
     CorrectiveContextIncomplete {
         field: &'static str,
     },
+    AttemptLearningNotSucceeded {
+        attempt_id: String,
+        state: &'static str,
+    },
 }
 
 impl fmt::Display for WorkModelError {
@@ -3170,6 +3230,12 @@ impl fmt::Display for WorkModelError {
                 write!(
                     f,
                     "corrective context is incomplete: field {field:?} must not be empty"
+                )
+            }
+            Self::AttemptLearningNotSucceeded { attempt_id, state } => {
+                write!(
+                    f,
+                    "Attempt {attempt_id:?} cannot advance: its Learner run is {state}, not succeeded"
                 )
             }
         }
@@ -6052,6 +6118,81 @@ mod tests {
         assert_eq!(first, "attempt-1-merge-candidate");
         assert_eq!(second, first);
         assert_eq!(work_item.merge_candidates.len(), 1);
+    }
+
+    #[test]
+    fn merge_candidate_validation_rejects_non_succeeded_learning() {
+        // Advancement gates B1: Merge Candidate validation (the landing gate) rejects
+        // every non-succeeded Learner — absent, in-progress, prepared/HandoffPending,
+        // or failed whether relaunchable or not — with one durable reason, and admits
+        // only a SUCCEEDED Learner. An already-merged candidate is exempt so
+        // idempotent post-land work still resumes.
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Advancement gate".to_string(),
+            attempts: vec![Attempt {
+                id: "attempt-1".to_string(),
+                work_item_id: "work-1".to_string(),
+                kind: AttemptKind::Write,
+                status: AttemptStatus::Complete,
+                coder_mapping: CoderMapping::default(),
+                tasks: vec![completed_write_task("attempt-1-write-1", "original")],
+                review_state: Some(AttemptReviewState::Passed),
+                ..Default::default()
+            }],
+            merge_candidates: Vec::new(),
+            ..Default::default()
+        };
+        work_item
+            .create_or_get_merge_candidate("attempt-1")
+            .unwrap();
+        let handoff = crate::follow_up::ArtifactRef {
+            path: "handoff.json".to_string(),
+            digest: "sha256:x".to_string(),
+        };
+
+        // Every non-succeeded state blocks with the shared advancement reason.
+        for learning in [
+            None,
+            Some(AttemptLearning::in_progress(1)),
+            Some(AttemptLearning::handoff_pending(1)),
+            Some(AttemptLearning::failed(1, "boom")),
+            Some(AttemptLearning::failed_with_kind(
+                1,
+                "evidence pending",
+                LearningFailureKind::EvidencePending,
+            )),
+        ] {
+            work_item.attempts[0].learning = learning.clone();
+            let candidate = work_item.merge_candidates[0].clone();
+            let error = candidate
+                .validate_advancement(&work_item)
+                .expect_err("a non-succeeded Learner must block the landing gate");
+            assert!(
+                matches!(error, WorkModelError::AttemptLearningNotSucceeded { .. }),
+                "the block is the shared advancement reason for {learning:?}: {error}"
+            );
+            assert!(
+                error.to_string().contains("not succeeded"),
+                "the durable reason names the non-succeeded Learner: {error}"
+            );
+        }
+
+        // A succeeded Learner admits landing.
+        work_item.attempts[0].learning = Some(AttemptLearning::succeeded(1, handoff));
+        let candidate = work_item.merge_candidates[0].clone();
+        candidate
+            .validate_advancement(&work_item)
+            .expect("a succeeded Learner passes the landing gate");
+
+        // An already-merged candidate is exempt even with a non-succeeded Learner, so
+        // idempotent post-land processing still resumes.
+        work_item.attempts[0].learning = Some(AttemptLearning::failed(1, "boom"));
+        let mut merged = work_item.merge_candidates[0].clone();
+        merged.merge_state.status = MergeCandidateMergeStatus::Merged;
+        merged
+            .validate_advancement(&work_item)
+            .expect("a merged candidate is exempt from the learner gate");
     }
 
     #[test]

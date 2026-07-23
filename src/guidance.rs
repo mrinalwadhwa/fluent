@@ -99,6 +99,10 @@ pub fn after_attempt_run(
         WorkAttemptRunOutcome::FollowUpRecoveryPending { next_action, .. } => {
             Some(format!("\n→ Next: {next_action}"))
         }
+        WorkAttemptRunOutcome::LearnerNotReady { .. } => Some(
+            "\n→ Next: fluent attempt run <work-item-id> to re-run the Learner before landing"
+                .to_string(),
+        ),
         WorkAttemptRunOutcome::PlannedWriteRound { .. } => Some(
             "\n→ Next: a follow-up write round was planned from failed reviewers; fluent attempt run <work-item-id> to keep iterating".to_string(),
         ),

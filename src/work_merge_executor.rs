@@ -75,6 +75,15 @@ pub fn merge_candidate(config: WorkMergeConfig<'_>) -> Result<WorkMergeOutcome> 
         bail!("{error}");
     }
 
+    // Advancement gate: a candidate may land only once its Attempt's Learner has
+    // SUCCEEDED. A non-succeeded Learner blocks landing with the same durable reason
+    // as Merge Candidate validation and Attempt readiness. The block is retryable —
+    // the candidate is left intact so it lands once the Learner succeeds — so it is
+    // not recorded as a candidate failure.
+    if let Err(error) = candidate.validate_advancement(&item) {
+        bail!("{error}");
+    }
+
     if candidate.merge_state.status == MergeCandidateMergeStatus::Merged
         && let Some(merged_commit) = candidate.merge_state.merged_commit.clone()
     {

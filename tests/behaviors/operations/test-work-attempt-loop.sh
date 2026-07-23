@@ -49,6 +49,17 @@ write_mock_claude() {
 if [ "\$1" = "--version" ]; then
   exit 0
 fi
+# A Learner invocation: satisfy it by writing a minimal valid follow-up draft to
+# the path its prompt names and make no commit, so learning succeeds and the
+# candidate can advance under the learning-readiness gate.
+if printf '%s' "\$*" | grep -q 'follow-up draft as JSON'; then
+  DRAFT_PATH="\$(printf '%s' "\$*" | grep -oE '/[^[:space:]]*follow-up-draft\.json' | head -1)"
+  if [ -n "\$DRAFT_PATH" ]; then
+    mkdir -p "\$(dirname "\$DRAFT_PATH")"
+    printf '{"learning_summary":"loop learning","follow_ups":[]}\n' > "\$DRAFT_PATH"
+  fi
+  exit 0
+fi
 case "\$PWD" in
   */work-6-work-1-attempt-1)
     if [ "${write_mode}" = "fail" ]; then
@@ -347,7 +358,7 @@ test_attempt_loop_stops_after_task_executor_failure() {
   return $RESULT
 }
 
-test_attempt_loop_invalid_request_preserves_state_and_terminal_retry_records_learning() {
+test_attempt_loop_invalid_request_preserves_state_and_completes_learning() {
   setup_test_project
   trap cleanup_test_project RETURN
   write_mock_claude pass
@@ -360,13 +371,19 @@ test_attempt_loop_invalid_request_preserves_state_and_terminal_retry_records_lea
   assert_fails "$FLUENT_BIN" attempt run work-1 ../escape --no-sandbox || RESULT=1
   [ "$(cat .fluent/work/items/work-1.json)" = "$BEFORE" ] || RESULT=1
 
+  # A passing round runs the Learner exactly once and records a succeeded run, so
+  # the candidate is ready under the learning-readiness gate.
   run_attempt_loop > "$TEST_DIR/stdout" || RESULT=1
-  TERMINAL_REVISION="$(jq -r '.storage_revision' .fluent/work/items/work-1.json)"
-  TERMINAL_RUNS="$(json_value '.attempts[0].learning.runs')"
+  assert_contains "$(cat "$TEST_DIR/stdout")" "Merge Candidate attempt-1-merge-candidate is ready" || RESULT=1
+  [ "$(json_value '.attempts[0].learning.status')" = "succeeded" ] || RESULT=1
+  FIRST_RUNS="$(json_value '.attempts[0].learning.runs')"
+  [ "$FIRST_RUNS" -ge 1 ] || RESULT=1
+
+  # A rerun is idempotent: the candidate stays ready and a succeeded Learner is not
+  # re-run, so the run count does not advance.
   run_attempt_loop > "$TEST_DIR/rerun-stdout" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/rerun-stdout")" "Merge Candidate attempt-1-merge-candidate is ready" || RESULT=1
-  [ "$(jq -r '.storage_revision' .fluent/work/items/work-1.json)" -gt "$TERMINAL_REVISION" ] || RESULT=1
-  [ "$(json_value '.attempts[0].learning.runs')" -eq "$((TERMINAL_RUNS + 1))" ] || RESULT=1
+  [ "$(json_value '.attempts[0].learning.runs')" -eq "$FIRST_RUNS" ] || RESULT=1
   return $RESULT
 }
 
@@ -381,6 +398,6 @@ run_test "attempt loop counts preplanned follow-up against budget" test_attempt_
 run_test "attempt loop marks uncertain reviews needs-user" test_attempt_loop_marks_uncertain_reviews_needs_user
 run_test "attempt loop marks missing verdict needs-user" test_attempt_loop_marks_missing_verdict_needs_user
 run_test "attempt loop stops after Task executor failure" test_attempt_loop_stops_after_task_executor_failure
-run_test "attempt loop preserves invalid state and records terminal Learning retries" test_attempt_loop_invalid_request_preserves_state_and_terminal_retry_records_learning
+run_test "attempt loop preserves invalid state and completes Learning" test_attempt_loop_invalid_request_preserves_state_and_completes_learning
 
 summarize_and_exit

@@ -613,6 +613,15 @@ fn cmd_attempt(
                         );
                         pending_recovery = Some((candidate_id, next_action));
                     }
+                    WorkAttemptRunOutcome::LearnerNotReady {
+                        candidate_id,
+                        reason,
+                    } => {
+                        println!(
+                            "Attempt {attempt_id} reviews passed, but Merge Candidate \
+                             {candidate_id} is not ready: {reason}"
+                        );
+                    }
                     WorkAttemptRunOutcome::PlannedWriteRound { task_id } => {
                         println!("Planned write Task {task_id}");
                     }
