@@ -2591,7 +2591,7 @@ fn attempt_kind_is_write(kind: &AttemptKind) -> bool {
 }
 
 /// Why an Attempt suspended to `NeedsUser`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PauseKind {
     Auth,

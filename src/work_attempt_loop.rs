@@ -2363,6 +2363,90 @@ fn required_progress_finding(project_root: &Path, attempt: &Attempt) -> Option<A
     }
 }
 
+/// Settle a RoundCap or Uncertain review pause through a fresh, precedence-aware
+/// reducer, treating the operator handoff and the notification as auxiliary.
+///
+/// The pause is persisted first through a fresh lock-held `transition_attempt`, so a
+/// harder peer transition (a hard `Failed`) is preserved rather than clobbered by a
+/// stale snapshot. The handoff is written and its reference attached only when this
+/// frontier still owns the pause, at most once (idempotent) and without rewriting a
+/// newer peer artifact. The injected `notify` fires LAST, after the pause and
+/// handoff are durable, so a slow or failing notification can never precede or undo
+/// core state. `notify` is not called when a harder peer already owns the state.
+fn settle_review_pause(
+    store: &WorkModelStore,
+    project_root: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    review_state: AttemptReviewState,
+    pause_kind: crate::work_model::PauseKind,
+    findings: &[ArtifactRef],
+    write_handoff: impl FnOnce(&Path, &str, &str, &[ArtifactRef]) -> Result<String>,
+    notify: &dyn Fn(&str),
+) -> Result<WorkAttemptRunOutcome> {
+    // 1. Persist a fresh, precedence-aware pause. `transition_attempt` preserves a
+    //    harder peer transition and no-ops an equal-rank one, so ownership is decided
+    //    by the RESULTING state — this frontier owns the pause when the attempt ends
+    //    in exactly our pause. A crash-retry that finds the pause already ours still
+    //    owns it (so the handoff attach can complete); a harder peer does not.
+    let owns_pause = store.mutate_work_item(work_item_id, |fresh| {
+        let attempt = fresh
+            .attempts
+            .iter_mut()
+            .find(|a| a.id == attempt_id)
+            .ok_or_else(|| crate::work_model::WorkModelError::AttemptNotFound {
+                id: attempt_id.to_string(),
+            })?;
+        crate::work_model::transition_attempt(attempt, AttemptStatus::NeedsUser, Some(pause_kind));
+        let owns =
+            attempt.status == AttemptStatus::NeedsUser && attempt.pause_kind == Some(pause_kind);
+        if owns {
+            attempt.review_state = Some(review_state);
+        }
+        Ok(owns)
+    })?;
+
+    // A harder peer transition already owns the terminal state: preserve it, expose
+    // no handoff, and notify nothing.
+    if !owns_pause {
+        return Ok(WorkAttemptRunOutcome::NeedsUser {
+            handoff_path: String::new(),
+        });
+    }
+
+    // 2. Expose the operator handoff (auxiliary). The pause is already durable, so a
+    //    failure here cannot roll it back or strand the attempt.
+    let handoff_path = write_handoff(project_root, work_item_id, attempt_id, findings)?;
+
+    // 3. Attach the handoff reference through a FRESH ownership re-check: only if the
+    //    same frontier still owns the pause, and only once, so a repeated or
+    //    interleaved settle attaches at most one reference and never overwrites a
+    //    newer peer artifact from a stale snapshot.
+    store.mutate_work_item(work_item_id, |fresh| {
+        let attempt = fresh
+            .attempts
+            .iter_mut()
+            .find(|a| a.id == attempt_id)
+            .ok_or_else(|| crate::work_model::WorkModelError::AttemptNotFound {
+                id: attempt_id.to_string(),
+            })?;
+        let still_owns =
+            attempt.status == AttemptStatus::NeedsUser && attempt.pause_kind == Some(pause_kind);
+        if still_owns && !attempt.artifacts.iter().any(|a| a.path == handoff_path) {
+            attempt.artifacts.push(ArtifactRef {
+                producer_id: "attempt-loop".to_string(),
+                path: handoff_path.clone(),
+            });
+        }
+        Ok(())
+    })?;
+
+    // 4. Notify LAST, after the pause and handoff are durable.
+    notify(&handoff_path);
+
+    Ok(WorkAttemptRunOutcome::NeedsUser { handoff_path })
+}
+
 fn interpret_reviews(
     project_root: &Path,
     store: &WorkModelStore,
@@ -2444,40 +2528,21 @@ fn interpret_reviews(
             return Ok(WorkAttemptRunOutcome::ReviewOnlyFailed);
         }
         if !followup_budget_available {
-            // Persist the authoritative RoundCap pause FIRST so a handoff-write
-            // failure can never roll the pause back or leave the attempt executing.
-            crate::work_model::suspend_attempt(
-                &mut item.attempts[attempt_index],
+            // Settle the RoundCap pause through the fresh, precedence-aware reducer:
+            // it persists the pause first (preserving a harder peer transition), then
+            // writes and attaches the handoff only while this frontier owns the pause,
+            // and notifies last.
+            return settle_review_pause(
+                store,
+                project_root,
+                &item.id,
+                attempt_id,
+                AttemptReviewState::Failed,
                 crate::work_model::PauseKind::RoundCap,
+                &failed,
+                write_budget_exhausted_handoff,
+                &|_| {},
             );
-            store.write_work_item(&item)?;
-            // Write the operator handoff second and attach its reference through a
-            // FRESH lock-held mutation, so the attachment composes onto the latest
-            // durable state rather than this stale snapshot — closing the
-            // read-modify-write race a separate write would leave open. The pause is
-            // already durable, so a failure here cannot roll it back or strand the
-            // attempt.
-            let handoff_path =
-                write_budget_exhausted_handoff(project_root, &item.id, attempt_id, &failed)?;
-            store.mutate_work_item(&item.id, |fresh| {
-                let attempt = fresh
-                    .attempts
-                    .iter_mut()
-                    .find(|a| a.id == attempt_id)
-                    .ok_or_else(|| crate::work_model::WorkModelError::AttemptNotFound {
-                        id: attempt_id.to_string(),
-                    })?;
-                // Idempotent: attach the handoff reference only if a fresh reread has
-                // not already recorded it, so a retry cannot duplicate it.
-                if !attempt.artifacts.iter().any(|a| a.path == handoff_path) {
-                    attempt.artifacts.push(ArtifactRef {
-                        producer_id: "attempt-loop".to_string(),
-                        path: handoff_path.clone(),
-                    });
-                }
-                Ok(())
-            })?;
-            return Ok(WorkAttemptRunOutcome::NeedsUser { handoff_path });
         }
         item.attempts[attempt_index].status = AttemptStatus::Planned;
         let task_id = item.add_next_write_round(attempt_id, failed)?;
@@ -2486,40 +2551,21 @@ fn interpret_reviews(
     }
 
     if !uncertain.is_empty() {
-        // Persist the authoritative Uncertain pause FIRST so a handoff-write failure
-        // can never roll the pause back or leave the attempt executing.
-        item.attempts[attempt_index].review_state = Some(AttemptReviewState::Uncertain);
-        crate::work_model::suspend_attempt(
-            &mut item.attempts[attempt_index],
+        // Settle the Uncertain pause through the fresh, precedence-aware reducer: it
+        // persists the pause first (preserving a harder peer transition), then writes
+        // and attaches the handoff only while this frontier owns the pause, and
+        // notifies last.
+        return settle_review_pause(
+            store,
+            project_root,
+            &item.id,
+            attempt_id,
+            AttemptReviewState::Uncertain,
             crate::work_model::PauseKind::Uncertain,
+            &uncertain,
+            write_needs_user_handoff,
+            &|_| {},
         );
-        store.write_work_item(&item)?;
-        // Write the operator handoff second and attach its reference through a FRESH
-        // lock-held mutation, so the attachment composes onto the latest durable
-        // state rather than this stale snapshot — closing the read-modify-write race
-        // a separate write would leave open. The pause is already durable, so a
-        // failure here cannot roll it back or strand the attempt.
-        let handoff_path =
-            write_needs_user_handoff(project_root, &item.id, attempt_id, &uncertain)?;
-        store.mutate_work_item(&item.id, |fresh| {
-            let attempt = fresh
-                .attempts
-                .iter_mut()
-                .find(|a| a.id == attempt_id)
-                .ok_or_else(|| crate::work_model::WorkModelError::AttemptNotFound {
-                    id: attempt_id.to_string(),
-                })?;
-            // Idempotent: attach the handoff reference only if a fresh reread has not
-            // already recorded it, so a retry cannot duplicate it.
-            if !attempt.artifacts.iter().any(|a| a.path == handoff_path) {
-                attempt.artifacts.push(ArtifactRef {
-                    producer_id: "attempt-loop".to_string(),
-                    path: handoff_path.clone(),
-                });
-            }
-            Ok(())
-        })?;
-        return Ok(WorkAttemptRunOutcome::NeedsUser { handoff_path });
     }
 
     item.attempts[attempt_index].review_state = Some(AttemptReviewState::Passed);
@@ -5153,6 +5199,232 @@ mod tests {
         assert!(
             matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
             "checked required progress admits the pass; got {outcome:?}"
+        );
+    }
+
+    /// A minimal store holding one Write Attempt in an active (Planned) state, so a
+    /// review pause can be settled against it.
+    fn pause_reducer_fixture(project_root: &Path) -> WorkModelStore {
+        let store = WorkModelStore::new(project_root);
+        let mut item = WorkItem::planned("work-1", "Pause");
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+        store
+    }
+
+    #[test]
+    fn pause_reducer_preserves_peer_transition_and_notifies_last() {
+        // Pause durability B1: the reducer persists the pause and attaches the handoff
+        // durably BEFORE notifying, and preserves a harder peer transition rather than
+        // clobbering it (writing no handoff and never notifying in that case).
+        use crate::work_model::PauseKind;
+        use std::sync::atomic::{AtomicBool, Ordering as O};
+
+        // Owning frontier: notify observes the durable pause and handoff.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let store = pause_reducer_fixture(project_root);
+
+        let notify_root = project_root.to_path_buf();
+        let durable_before_notify = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&durable_before_notify);
+        let notify = move |handoff_path: &str| {
+            let fresh = WorkModelStore::new(&notify_root)
+                .read_work_item("work-1")
+                .unwrap();
+            let attempt = &fresh.attempts[0];
+            if attempt.status == AttemptStatus::NeedsUser
+                && attempt.pause_kind == Some(PauseKind::Uncertain)
+                && attempt.artifacts.iter().any(|a| a.path == handoff_path)
+            {
+                flag.store(true, O::SeqCst);
+            }
+        };
+        let write_handoff = |_: &Path, _: &str, _: &str, _: &[ArtifactRef]| {
+            Ok("artifacts/needs-user.md".to_string())
+        };
+        let outcome = settle_review_pause(
+            &store,
+            project_root,
+            "work-1",
+            "attempt-1",
+            AttemptReviewState::Uncertain,
+            PauseKind::Uncertain,
+            &[],
+            write_handoff,
+            &notify,
+        )
+        .unwrap();
+        assert!(matches!(outcome, WorkAttemptRunOutcome::NeedsUser { .. }));
+        assert!(
+            durable_before_notify.load(O::SeqCst),
+            "notify fires only after the pause and handoff are durable"
+        );
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.attempts[0].pause_kind, Some(PauseKind::Uncertain));
+        assert_eq!(
+            stored.attempts[0].review_state,
+            Some(AttemptReviewState::Uncertain)
+        );
+        assert_eq!(
+            stored.attempts[0]
+                .artifacts
+                .iter()
+                .filter(|a| a.path == "artifacts/needs-user.md")
+                .count(),
+            1
+        );
+
+        // A harder peer transition (hard Failed) is preserved: no clobber, no handoff,
+        // no notification.
+        let tmp2 = tempfile::TempDir::new().unwrap();
+        let project_root2 = tmp2.path();
+        let store2 = pause_reducer_fixture(project_root2);
+        store2
+            .mutate_work_item("work-1", |fresh| {
+                crate::work_model::transition_attempt(
+                    &mut fresh.attempts[0],
+                    AttemptStatus::Failed,
+                    None,
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        let notified = Arc::new(AtomicBool::new(false));
+        let nflag = Arc::clone(&notified);
+        let notify2 = move |_: &str| {
+            nflag.store(true, O::SeqCst);
+        };
+        let write_handoff2 = |_: &Path, _: &str, _: &str, _: &[ArtifactRef]| -> Result<String> {
+            panic!("no handoff is written when a harder peer owns the terminal state")
+        };
+        let outcome2 = settle_review_pause(
+            &store2,
+            project_root2,
+            "work-1",
+            "attempt-1",
+            AttemptReviewState::Failed,
+            PauseKind::RoundCap,
+            &[],
+            write_handoff2,
+            &notify2,
+        )
+        .unwrap();
+        assert!(matches!(outcome2, WorkAttemptRunOutcome::NeedsUser { .. }));
+        let stored2 = store2.read_work_item("work-1").unwrap();
+        assert_eq!(
+            stored2.attempts[0].status,
+            AttemptStatus::Failed,
+            "a harder peer transition is preserved, not clobbered by the pause"
+        );
+        assert!(stored2.attempts[0].pause_kind.is_none());
+        assert!(
+            !notified.load(O::SeqCst),
+            "notify never fires when a harder peer owns the state"
+        );
+    }
+
+    #[test]
+    fn pause_interleavings_are_idempotent_and_precedence_aware() {
+        // Pause durability B2: repeated and interleaved task-origin/review-origin
+        // settles attach at most one reference, preserve a harder (or first equal-rank)
+        // peer transition, and never overwrite a newer peer artifact from a stale
+        // snapshot.
+        use crate::work_model::PauseKind;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let store = pause_reducer_fixture(project_root);
+        let handoff = |path: &'static str| {
+            move |_: &Path, _: &str, _: &str, _: &[ArtifactRef]| Ok(path.to_string())
+        };
+        let noop = |_: &str| {};
+
+        // A review-origin Uncertain settle wins the pause and attaches one handoff.
+        settle_review_pause(
+            &store,
+            project_root,
+            "work-1",
+            "attempt-1",
+            AttemptReviewState::Uncertain,
+            PauseKind::Uncertain,
+            &[],
+            handoff("artifacts/uncertain.md"),
+            &noop,
+        )
+        .unwrap();
+
+        // A peer writes a newer artifact between settles.
+        store
+            .mutate_work_item("work-1", |fresh| {
+                fresh.attempts[0].artifacts.push(ArtifactRef {
+                    producer_id: "peer".to_string(),
+                    path: "artifacts/peer.md".to_string(),
+                });
+                Ok(())
+            })
+            .unwrap();
+
+        // A task-origin RoundCap settle interleaves: equal-rank, so it never displaces
+        // the Uncertain owner and attaches nothing.
+        settle_review_pause(
+            &store,
+            project_root,
+            "work-1",
+            "attempt-1",
+            AttemptReviewState::Failed,
+            PauseKind::RoundCap,
+            &[],
+            handoff("artifacts/roundcap.md"),
+            &noop,
+        )
+        .unwrap();
+
+        // A repeated Uncertain settle re-owns the pause but attaches no duplicate.
+        settle_review_pause(
+            &store,
+            project_root,
+            "work-1",
+            "attempt-1",
+            AttemptReviewState::Uncertain,
+            PauseKind::Uncertain,
+            &[],
+            handoff("artifacts/uncertain.md"),
+            &noop,
+        )
+        .unwrap();
+
+        let stored = store.read_work_item("work-1").unwrap();
+        let attempt = &stored.attempts[0];
+        assert_eq!(
+            attempt.pause_kind,
+            Some(PauseKind::Uncertain),
+            "the first pause frontier is preserved against an equal-rank peer"
+        );
+        assert_eq!(
+            attempt
+                .artifacts
+                .iter()
+                .filter(|a| a.path == "artifacts/uncertain.md")
+                .count(),
+            1,
+            "at most one handoff reference is attached across repeats"
+        );
+        assert_eq!(
+            attempt
+                .artifacts
+                .iter()
+                .filter(|a| a.path == "artifacts/roundcap.md")
+                .count(),
+            0,
+            "the non-owning RoundCap settle attaches nothing"
+        );
+        assert!(
+            attempt
+                .artifacts
+                .iter()
+                .any(|a| a.path == "artifacts/peer.md"),
+            "a newer peer artifact is never overwritten by a stale snapshot"
         );
     }
 
