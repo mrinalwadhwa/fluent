@@ -55,6 +55,21 @@ side-channel write. The capture path and the status worker publish the immutable
 first fault to a per-pump latch before terminal settlement, so a blocked or slow
 status store can never hide a fault from coder supervision.
 
+A coder launch's per-launch supervision diagnostic — most importantly a reaped
+leader whose process group could not be *verifiably* swept (`killpg` returned
+`EPERM`, or another non-`ESRCH` error) — is surfaced out of the supervisor through
+the additive `Coder::run_captured_reported -> CoderRunCompletion`, which pairs the
+terminal `Result<i32>` with a serializable `CoderSupervisionReport`. Built-in
+coders override it; external coders and mocks use the default that wraps the legacy
+`run_captured` with an empty report. Each role artifact boundary
+(Writer/Reviewer/Learner/rebase) calls `finish_supervised_coder_run`, which
+atomically persists a non-clean report as `coder-supervision.json` beside the
+transcript and composes a sidecar-write obstruction as a typed, non-retryable
+`SupervisionSidecarError` secondary without relaunching the coder. This is the
+durable, non-blocking supervision channel: a group-sweep diagnostic is never
+written to a possibly-saturated stderr and never dropped with the `ManagedChild`,
+and `Drop` still never publishes a supervision outcome.
+
 Preview delivery is **synchronous and best-effort**, deliberately not a
 background renderer over a bounded queue. `PreviewSink::deliver` decides the fate
 of the preview on the pump's own thread and returns whether it was delivered, so

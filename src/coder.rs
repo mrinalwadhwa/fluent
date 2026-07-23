@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -278,6 +278,32 @@ pub trait Coder: Send + Sync {
         )
     }
 
+    /// Like [`run_captured`], but also surfaces the per-launch supervision report so a
+    /// role artifact boundary can persist a group-sweep diagnostic instead of dropping
+    /// it with the `ManagedChild`. The default wraps the legacy `run_captured` with an
+    /// empty report — enough for external coders and mocks that run no byte pump;
+    /// built-in coders override it to carry the real report out of the supervisor.
+    ///
+    /// [`run_captured`]: Coder::run_captured
+    fn run_captured_reported(
+        &self,
+        prompt: &str,
+        system_prompt: &str,
+        working_dir: &Path,
+        extra_args: &[String],
+        extra_env: &[(String, String)],
+        capture: Option<&TranscriptCapture<'_>>,
+    ) -> CoderRunCompletion {
+        CoderRunCompletion::terminal_only(self.run_captured(
+            prompt,
+            system_prompt,
+            working_dir,
+            extra_args,
+            extra_env,
+            capture,
+        ))
+    }
+
     /// Launch an interactive session (no -p flag).
     fn run_interactive(
         &self,
@@ -326,11 +352,33 @@ impl Coder for SandboxedClaudeCode {
         extra_env: &[(String, String)],
         capture: Option<&TranscriptCapture<'_>>,
     ) -> Result<i32> {
-        ensure_not_expired_with_refresh()?;
+        self.run_captured_reported(
+            prompt,
+            system_prompt,
+            working_dir,
+            extra_args,
+            extra_env,
+            capture,
+        )
+        .into_result()
+    }
+
+    fn run_captured_reported(
+        &self,
+        prompt: &str,
+        system_prompt: &str,
+        working_dir: &Path,
+        extra_args: &[String],
+        extra_env: &[(String, String)],
+        capture: Option<&TranscriptCapture<'_>>,
+    ) -> CoderRunCompletion {
+        if let Err(err) = ensure_not_expired_with_refresh() {
+            return CoderRunCompletion::terminal_only(Err(err.into()));
+        }
         let want_transcript = capture.is_some();
         let transcript_file = capture.map(|c| c.path);
         let config = capture.map(|c| c.config.clone()).unwrap_or_default();
-        run_with_transcript_retrying(
+        run_with_transcript_retrying_reported(
             || {
                 let mut cmd = self.build_command(working_dir);
                 apply_coder_env(&mut cmd, extra_env);
@@ -443,13 +491,35 @@ impl Coder for BareClaudeCode {
         extra_env: &[(String, String)],
         capture: Option<&TranscriptCapture<'_>>,
     ) -> Result<i32> {
-        ensure_not_expired_with_refresh()?;
+        self.run_captured_reported(
+            prompt,
+            system_prompt,
+            working_dir,
+            extra_args,
+            extra_env,
+            capture,
+        )
+        .into_result()
+    }
+
+    fn run_captured_reported(
+        &self,
+        prompt: &str,
+        system_prompt: &str,
+        working_dir: &Path,
+        extra_args: &[String],
+        extra_env: &[(String, String)],
+        capture: Option<&TranscriptCapture<'_>>,
+    ) -> CoderRunCompletion {
+        if let Err(err) = ensure_not_expired_with_refresh() {
+            return CoderRunCompletion::terminal_only(Err(err.into()));
+        }
         let want_transcript = capture.is_some();
         let transcript_file = capture.map(|c| c.path);
         let config = capture.map(|c| c.config.clone()).unwrap_or_default();
         let model = self.effective_model();
         let effort = self.effort.clone();
-        run_with_transcript_retrying(
+        run_with_transcript_retrying_reported(
             || {
                 let mut cmd = Command::new("claude");
                 cmd.current_dir(working_dir);
@@ -533,11 +603,31 @@ impl Coder for CodexCode {
         extra_env: &[(String, String)],
         capture: Option<&TranscriptCapture<'_>>,
     ) -> Result<i32> {
+        self.run_captured_reported(
+            prompt,
+            system_prompt,
+            working_dir,
+            extra_args,
+            extra_env,
+            capture,
+        )
+        .into_result()
+    }
+
+    fn run_captured_reported(
+        &self,
+        prompt: &str,
+        system_prompt: &str,
+        working_dir: &Path,
+        extra_args: &[String],
+        extra_env: &[(String, String)],
+        capture: Option<&TranscriptCapture<'_>>,
+    ) -> CoderRunCompletion {
         let want_transcript = capture.is_some();
         let transcript_file = capture.map(|c| c.path);
         let config = capture.map(|c| c.config.clone()).unwrap_or_default();
         let combined_prompt = format!("{system_prompt}\n\n---\n\n{prompt}");
-        run_with_transcript_retrying(
+        run_with_transcript_retrying_reported(
             || {
                 let mut cmd = self.build_command(working_dir, true);
                 apply_coder_env(&mut cmd, extra_env);
@@ -687,10 +777,30 @@ impl Coder for PiCode {
         extra_env: &[(String, String)],
         capture: Option<&TranscriptCapture<'_>>,
     ) -> Result<i32> {
+        self.run_captured_reported(
+            prompt,
+            system_prompt,
+            working_dir,
+            extra_args,
+            extra_env,
+            capture,
+        )
+        .into_result()
+    }
+
+    fn run_captured_reported(
+        &self,
+        prompt: &str,
+        system_prompt: &str,
+        working_dir: &Path,
+        extra_args: &[String],
+        extra_env: &[(String, String)],
+        capture: Option<&TranscriptCapture<'_>>,
+    ) -> CoderRunCompletion {
         let want_transcript = capture.is_some();
         let transcript_file = capture.map(|c| c.path);
         let config = capture.map(|c| c.config.clone()).unwrap_or_default();
-        run_with_transcript_retrying(
+        run_with_transcript_retrying_reported(
             || {
                 let mut cmd = self.build_command(working_dir);
                 apply_coder_env(&mut cmd, extra_env);
@@ -741,11 +851,152 @@ const SUPERVISOR_POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// any failure or panic in that window still terminates and reaps the coder
 /// process group rather than leaking a live child. Both branches route through
 /// the same guard, so a `wait`/`try_wait` error can never bypass cleanup.
+/// A serializable projection of a [`ProcessOpError`] for the durable supervision
+/// sidecar: the failed operation, its OS `ErrorKind`, errno, and original message, so
+/// the diagnostic persisted at a role artifact boundary is lossless.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProcessOpDiagnostic {
+    pub operation: String,
+    pub kind: Option<String>,
+    pub errno: Option<i32>,
+    pub message: Option<String>,
+}
+
+impl ProcessOpDiagnostic {
+    fn from_process_op_error(err: &ProcessOpError) -> Self {
+        Self {
+            operation: err.op.to_string(),
+            kind: err.kind.map(|k| format!("{k:?}")),
+            errno: err.errno,
+            message: err.message.clone(),
+        }
+    }
+}
+
+/// A per-launch coder supervision report surfaced from the supervisor so its
+/// group-sweep diagnostic — an unconfirmed sweep after a reaped leader — is carried out
+/// of the coder and persisted at the role's artifact boundary rather than dropped when
+/// the `ManagedChild` is dropped.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoderSupervisionReport {
+    /// The retained process-group sweep failure when the leader was reaped but its
+    /// group could not be verifiably swept (`killpg` returned `EPERM`, or another
+    /// non-`ESRCH` error). `None` when the group was verifiably swept — or no
+    /// pump/sweep ran — which is the clean, nothing-to-persist case.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub group_sweep_unconfirmed: Option<ProcessOpDiagnostic>,
+}
+
+impl CoderSupervisionReport {
+    /// Whether the report carries no diagnostic worth persisting.
+    pub fn is_clean(&self) -> bool {
+        self.group_sweep_unconfirmed.is_none()
+    }
+}
+
+/// A coder run's terminal outcome paired with its per-launch supervision report. The
+/// legacy `run_captured -> Result<i32>` entry points delegate through `into_result`,
+/// discarding the report; the reported entry points persist it at the role boundary.
+pub struct CoderRunCompletion {
+    pub terminal: Result<i32>,
+    pub report: CoderSupervisionReport,
+}
+
+impl CoderRunCompletion {
+    /// A completion carrying a terminal outcome and no supervision diagnostic — used by
+    /// external coders and the spawn/setup-error paths that never supervised a pump.
+    fn terminal_only(terminal: Result<i32>) -> Self {
+        Self {
+            terminal,
+            report: CoderSupervisionReport::default(),
+        }
+    }
+
+    /// Discard the report and return the terminal outcome for the legacy callers.
+    pub(crate) fn into_result(self) -> Result<i32> {
+        self.terminal
+    }
+}
+
+/// The durable per-launch supervision sidecar filename written beside a role's other
+/// transcript artifacts.
+pub(crate) const CODER_SUPERVISION_SIDECAR: &str = "coder-supervision.json";
+
+/// A failure to persist the coder supervision sidecar at a role artifact boundary. It
+/// is a NON-retryable infrastructure fault: the coder already ran, so relaunching it
+/// through the generic retry budget would repeat its side effects. It stays a
+/// downcastable typed error so a role boundary composes it without masking the primary.
+#[derive(Debug)]
+pub struct SupervisionSidecarError(anyhow::Error);
+
+impl std::fmt::Display for SupervisionSidecarError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "failed to persist coder supervision sidecar: {:#}", self.0)
+    }
+}
+
+impl std::error::Error for SupervisionSidecarError {}
+
+/// Persist a non-clean supervision report as `coder-supervision.json` in the role
+/// artifact directory, written atomically via a temp file and rename. A clean report
+/// has nothing to persist. A write obstruction returns a typed non-retryable error.
+fn persist_coder_supervision(
+    report: &CoderSupervisionReport,
+    artifact_dir: &Path,
+) -> Result<(), SupervisionSidecarError> {
+    if report.is_clean() {
+        return Ok(());
+    }
+    let write = || -> Result<()> {
+        std::fs::create_dir_all(artifact_dir)
+            .with_context(|| format!("create artifact dir {}", artifact_dir.display()))?;
+        let json = serde_json::to_vec_pretty(report)?;
+        let tmp = artifact_dir.join(format!("{CODER_SUPERVISION_SIDECAR}.tmp"));
+        std::fs::write(&tmp, &json).with_context(|| format!("write {}", tmp.display()))?;
+        std::fs::rename(&tmp, artifact_dir.join(CODER_SUPERVISION_SIDECAR))
+            .with_context(|| "rename supervision sidecar into place".to_string())?;
+        Ok(())
+    };
+    write().map_err(SupervisionSidecarError)
+}
+
+/// Persist the coder's supervision report at the role artifact boundary, then return
+/// its terminal outcome. A sidecar obstruction is composed as a typed non-retryable
+/// secondary — onto the run error if the run also failed, or returned as the error if
+/// the run succeeded — so the group-sweep diagnostic is never silently dropped and the
+/// already-run coder is never relaunched.
+pub(crate) fn finish_supervised_coder_run(
+    completion: CoderRunCompletion,
+    artifact_dir: &Path,
+) -> Result<i32> {
+    let sidecar = persist_coder_supervision(&completion.report, artifact_dir);
+    match (completion.terminal, sidecar) {
+        (Ok(code), Ok(())) => Ok(code),
+        (Ok(_), Err(sidecar_err)) => Err(anyhow::Error::new(sidecar_err)),
+        (Err(run_err), Ok(())) => Err(run_err),
+        // Keep the typed primary as the base of the context chain (still downcastable)
+        // and attach the typed sidecar error as a downcastable secondary.
+        (Err(run_err), Err(sidecar_err)) => Err(run_err.context(sidecar_err)),
+    }
+}
+
+#[cfg(test)]
 fn run_with_transcript(
-    mut cmd: Command,
+    cmd: Command,
     transcript_file: Option<&Path>,
     config: &crate::transcript_pump::TranscriptPumpConfig,
 ) -> Result<i32> {
+    run_with_transcript_reported(cmd, transcript_file, config).into_result()
+}
+
+/// Launch a coder, supervise its pump, and return both the terminal outcome AND the
+/// per-launch supervision report, so the group-sweep diagnostic reaches the role
+/// artifact boundary instead of being dropped with the `ManagedChild`.
+fn run_with_transcript_reported(
+    mut cmd: Command,
+    transcript_file: Option<&Path>,
+    config: &crate::transcript_pump::TranscriptPumpConfig,
+) -> CoderRunCompletion {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -754,7 +1005,10 @@ fn run_with_transcript(
     match transcript_file {
         Some(path) => {
             cmd.stdout(Stdio::piped());
-            let child = cmd.spawn()?;
+            let child = match cmd.spawn() {
+                Ok(child) => child,
+                Err(err) => return CoderRunCompletion::terminal_only(Err(err.into())),
+            };
             let child_id = child.id();
             // Own the child immediately: from here every exit path — a missing
             // stdout, a failed pump-thread spawn, or a `?` return — terminates and
@@ -764,12 +1018,17 @@ fn run_with_transcript(
             // Finalize any stdout/pump SETUP failure explicitly through the managed
             // child — composing the setup error with any cleanup failure — rather
             // than escaping via `?` and leaving the sweep/reap (and its outcome) to
-            // Drop.
+            // Drop. The supervision report is read AFTER the outcome settles, so even a
+            // setup-error path surfaces any retained group-sweep diagnostic.
             let stdout = match supervisor.take_stdout() {
                 Some(stdout) => stdout,
                 None => {
-                    return Err(supervisor
+                    let terminal = Err(supervisor
                         .finalize_setup_error(anyhow::anyhow!("coder stdout was not piped")));
+                    return CoderRunCompletion {
+                        report: supervisor.report(),
+                        terminal,
+                    };
                 }
             };
             let status_path = crate::transcript_pump::status_path_for(path);
@@ -782,17 +1041,32 @@ fn run_with_transcript(
             ) {
                 Ok(pump) => pump,
                 Err(err) => {
-                    return Err(supervisor.finalize_setup_error(anyhow::Error::new(err)));
+                    let terminal = Err(supervisor.finalize_setup_error(anyhow::Error::new(err)));
+                    return CoderRunCompletion {
+                        report: supervisor.report(),
+                        terminal,
+                    };
                 }
             };
             supervisor.attach_pump(pump);
-            supervisor.supervise()
+            let terminal = supervisor.supervise();
+            CoderRunCompletion {
+                report: supervisor.report(),
+                terminal,
+            }
         }
         None => {
-            let child = cmd.spawn()?;
+            let child = match cmd.spawn() {
+                Ok(child) => child,
+                Err(err) => return CoderRunCompletion::terminal_only(Err(err.into())),
+            };
             let child_id = child.id();
             let mut supervisor = CoderSupervisor::new(child, child_id);
-            supervisor.wait_no_pump()
+            let terminal = supervisor.wait_no_pump();
+            CoderRunCompletion {
+                report: supervisor.report(),
+                terminal,
+            }
         }
     }
 }
@@ -1368,6 +1642,20 @@ impl CoderSupervisor {
         self.managed.take_stdout()
     }
 
+    /// The per-launch supervision report read from the managed child after its outcome
+    /// settled: an unconfirmed group sweep (a reaped leader whose group could not be
+    /// verifiably swept) is projected into a serializable diagnostic so the role
+    /// artifact boundary can persist it instead of dropping it with the child.
+    fn report(&self) -> CoderSupervisionReport {
+        CoderSupervisionReport {
+            group_sweep_unconfirmed: self
+                .managed
+                .unconfirmed_group_sweep()
+                .as_ref()
+                .map(ProcessOpDiagnostic::from_process_op_error),
+        }
+    }
+
     fn attach_pump(&mut self, pump: crate::transcript_pump::PumpHandle) {
         self.pump = Some(pump);
     }
@@ -1858,6 +2146,7 @@ fn phase_transcript_path(path: &Path, phase: u32) -> PathBuf {
 /// timing from the transcript, apply per-run jitter, and sleep before
 /// retrying. Falls back to the configured fixed wait when no structured
 /// timing is available. Fires notifications on rate-limit state transitions.
+#[cfg(test)]
 fn run_with_transcript_retrying<F>(
     build_cmd: F,
     transcript_file: Option<&Path>,
@@ -1868,19 +2157,37 @@ fn run_with_transcript_retrying<F>(
 where
     F: Fn() -> Command,
 {
-    run_with_transcript_retrying_using(
+    run_with_transcript_retrying_reported(build_cmd, transcript_file, config, notify_fn, refresh_fn)
+        .into_result()
+}
+
+/// The reported retry loop: identical retry behavior, but it returns the terminal
+/// outcome AND the final attempt's supervision report, so an unconfirmed group sweep
+/// survives auth/rate-limit retries and reaches the role artifact boundary.
+fn run_with_transcript_retrying_reported<F>(
+    build_cmd: F,
+    transcript_file: Option<&Path>,
+    config: &crate::transcript_pump::TranscriptPumpConfig,
+    notify_fn: &dyn Fn(&str, &str),
+    refresh_fn: &dyn Fn(),
+) -> CoderRunCompletion
+where
+    F: Fn() -> Command,
+{
+    run_with_transcript_retrying_reported_using(
         build_cmd,
         transcript_file,
         config,
         notify_fn,
         refresh_fn,
-        &|cmd, transcript, cfg| run_with_transcript(cmd, transcript, cfg),
+        &|cmd, transcript, cfg| run_with_transcript_reported(cmd, transcript, cfg),
     )
 }
 
-/// The retry loop, parameterized by the per-attempt run function so tests can
-/// observe the exact config threaded into each auth/rate-limit retry phase without
-/// spawning a real pump.
+/// The retry loop returning a `Result<i32>`, parameterized by a per-attempt run
+/// function. Retained for tests that observe the exact config threaded into each
+/// auth/rate-limit retry phase without spawning a real pump.
+#[cfg(test)]
 fn run_with_transcript_retrying_using<F>(
     build_cmd: F,
     transcript_file: Option<&Path>,
@@ -1896,6 +2203,35 @@ fn run_with_transcript_retrying_using<F>(
 where
     F: Fn() -> Command,
 {
+    run_with_transcript_retrying_reported_using(
+        build_cmd,
+        transcript_file,
+        config,
+        notify_fn,
+        refresh_fn,
+        &|cmd, transcript, cfg| CoderRunCompletion::terminal_only(run_fn(cmd, transcript, cfg)),
+    )
+    .into_result()
+}
+
+/// The retry loop core, parameterized by a per-attempt run function that returns a
+/// [`CoderRunCompletion`]. The final attempt's supervision report is retained across
+/// every auth/rate-limit retry and returned alongside the terminal outcome.
+fn run_with_transcript_retrying_reported_using<F>(
+    build_cmd: F,
+    transcript_file: Option<&Path>,
+    config: &crate::transcript_pump::TranscriptPumpConfig,
+    notify_fn: &dyn Fn(&str, &str),
+    refresh_fn: &dyn Fn(),
+    run_fn: &dyn Fn(
+        Command,
+        Option<&Path>,
+        &crate::transcript_pump::TranscriptPumpConfig,
+    ) -> CoderRunCompletion,
+) -> CoderRunCompletion
+where
+    F: Fn() -> Command,
+{
     let mut attempt: u32 = 0;
     let mut rl_state = RateLimitState::Normal;
     let mut auth_refreshed = false;
@@ -1908,7 +2244,17 @@ where
         // The one resolved config value is retained across every auth/rate-limit
         // phase of this launch, so a mid-launch retry never re-resolves or picks
         // up a different value.
-        let exit = run_fn(build_cmd(), transcript_file, config)?;
+        let completion = run_fn(build_cmd(), transcript_file, config);
+        // Retain this attempt's supervision report; the loop returns the final
+        // attempt's report so a group-sweep diagnostic is never dropped by a retry.
+        let report = completion.report;
+        let exit = match completion.terminal {
+            Ok(exit) => exit,
+            Err(err) => return CoderRunCompletion {
+                terminal: Err(err),
+                report,
+            },
+        };
         if exit == 0 {
             if auth_refreshed {
                 notify_fn("Fluent", "Recovered after credential refresh.");
@@ -1918,22 +2264,36 @@ where
                 notify_fn("Fluent", "Fluent resumed after rate-limit pause.");
                 eprintln!("  Rate-limit cleared — resuming.");
             }
-            return Ok(exit);
+            return CoderRunCompletion {
+                terminal: Ok(exit),
+                report,
+            };
         }
 
         let Some(path) = transcript_file else {
-            return Ok(exit);
+            return CoderRunCompletion {
+                terminal: Ok(exit),
+                report,
+            };
         };
 
         if let Some(auth_err) = crate::claude_auth::classify_transcript_401(path) {
             if !auth_refreshed {
                 auth_refreshed = true;
                 eprintln!("  Auth 401 detected — refreshing credentials and retrying.");
-                preserve_transcript_phase(transcript_file, &mut phase)?;
+                if let Err(err) = preserve_transcript_phase(transcript_file, &mut phase) {
+                    return CoderRunCompletion {
+                        terminal: Err(anyhow::Error::new(err)),
+                        report,
+                    };
+                }
                 refresh_fn();
                 continue;
             }
-            return Err(anyhow::Error::new(auth_err));
+            return CoderRunCompletion {
+                terminal: Err(anyhow::Error::new(auth_err)),
+                report,
+            };
         }
 
         // Try structured parsing first, then fall back to text detection.
@@ -1941,7 +2301,10 @@ where
         let is_rate_limited = parsed.is_some() || transcript_indicates_rate_limit(path);
 
         if !is_rate_limited {
-            return Ok(exit);
+            return CoderRunCompletion {
+                terminal: Ok(exit),
+                report,
+            };
         }
 
         if attempt >= RATE_LIMIT_MAX_RETRIES {
@@ -1949,7 +2312,10 @@ where
                 "  Rate-limit detected on attempt {}; retry budget exhausted, propagating exit code {exit}.",
                 attempt + 1
             );
-            return Ok(exit);
+            return CoderRunCompletion {
+                terminal: Ok(exit),
+                report,
+            };
         }
 
         let jitter = rate_limit_jitter();
@@ -1973,7 +2339,12 @@ where
             attempt + 1,
             wait.as_secs()
         );
-        preserve_transcript_phase(transcript_file, &mut phase)?;
+        if let Err(err) = preserve_transcript_phase(transcript_file, &mut phase) {
+            return CoderRunCompletion {
+                terminal: Err(anyhow::Error::new(err)),
+                report,
+            };
+        }
         std::thread::sleep(wait);
         attempt += 1;
     }
@@ -3127,6 +3498,150 @@ mod pump_supervision_tests {
         // BEFORE the blocked fallback, so supervision reaps the still-running coder
         // without waiting for the fallback to unblock.
         assert_first_fault_reaps_before_settlement(EofReader, true, "sleep 5");
+    }
+
+    #[test]
+    fn supervise_report_carries_an_unconfirmed_group_sweep() {
+        // B5/B6: the supervisor SURFACES a per-launch report, so a reaped-but-unswept
+        // group's diagnostic reaches the role artifact boundary instead of being
+        // dropped with the ManagedChild. A run whose group signal fails (EPERM) but
+        // whose direct kill and reap succeed is a successful run with an unconfirmed
+        // sweep, and the report carries the structured OS error.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let leader = FakeLeader {
+            group_settles: false,
+            poll: ExitObservation::Exited,
+            ..FakeLeader::new(Arc::clone(&calls), Some(0))
+        };
+        let mut supervisor = CoderSupervisor::with_leader(Box::new(leader));
+        let exit = supervisor
+            .wait_no_pump()
+            .expect("the reaped-but-unswept run still succeeds");
+        assert_eq!(exit, 0);
+        let report = supervisor.report();
+        assert!(
+            !report.is_clean(),
+            "an unconfirmed group sweep is a non-clean report worth persisting"
+        );
+        let diag = report
+            .group_sweep_unconfirmed
+            .expect("the sweep diagnostic is surfaced from the supervisor");
+        assert_eq!(
+            diag.errno,
+            Some(libc::EPERM),
+            "the EPERM errno is retained structurally, not only in rendered text"
+        );
+        assert!(
+            diag.message.is_some(),
+            "the original OS message is retained on the durable diagnostic"
+        );
+    }
+
+    #[test]
+    fn supervise_report_is_clean_when_the_group_is_swept() {
+        // A verifiably swept group leaves nothing to persist: the report is clean.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let leader = FakeLeader {
+            poll: ExitObservation::Exited,
+            ..FakeLeader::new(Arc::clone(&calls), Some(0))
+        };
+        let mut supervisor = CoderSupervisor::with_leader(Box::new(leader));
+        supervisor.wait_no_pump().unwrap();
+        assert!(
+            supervisor.report().is_clean(),
+            "a swept group produces no supervision diagnostic"
+        );
+    }
+
+    #[test]
+    fn finish_supervised_run_persists_a_non_clean_report() {
+        // The role artifact boundary persists a non-clean report as coder-supervision.json.
+        let dir = tempfile::tempdir().unwrap();
+        let report = CoderSupervisionReport {
+            group_sweep_unconfirmed: Some(ProcessOpDiagnostic {
+                operation: "fake group signal".to_string(),
+                kind: Some("PermissionDenied".to_string()),
+                errno: Some(libc::EPERM),
+                message: Some("Operation not permitted".to_string()),
+            }),
+        };
+        let completion = CoderRunCompletion {
+            terminal: Ok(0),
+            report,
+        };
+        let code = finish_supervised_coder_run(completion, dir.path()).unwrap();
+        assert_eq!(code, 0, "the terminal outcome passes through unchanged");
+        let path = dir.path().join(CODER_SUPERVISION_SIDECAR);
+        assert!(path.exists(), "a non-clean report is persisted as a sidecar");
+        let persisted: CoderSupervisionReport =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            persisted.group_sweep_unconfirmed.unwrap().errno,
+            Some(libc::EPERM),
+            "the persisted sidecar retains the structured OS error"
+        );
+    }
+
+    #[test]
+    fn finish_supervised_run_skips_a_clean_report() {
+        // A clean report has nothing to persist, so no sidecar is written.
+        let dir = tempfile::tempdir().unwrap();
+        finish_supervised_coder_run(CoderRunCompletion::terminal_only(Ok(0)), dir.path()).unwrap();
+        assert!(
+            !dir.path().join(CODER_SUPERVISION_SIDECAR).exists(),
+            "a clean supervision report writes no sidecar"
+        );
+    }
+
+    #[test]
+    fn finish_supervised_run_composes_a_sidecar_obstruction_as_typed_secondary() {
+        // A sidecar obstruction (the artifact dir path is a FILE) is a typed
+        // non-retryable error. When the run also failed, the typed run primary is
+        // preserved as the base of the chain and the sidecar error rides along as a
+        // downcastable secondary — neither is flattened, and the coder is never relaunched.
+        let dir = tempfile::tempdir().unwrap();
+        let obstruction = dir.path().join("not-a-dir");
+        std::fs::write(&obstruction, b"x").unwrap();
+        let report = CoderSupervisionReport {
+            group_sweep_unconfirmed: Some(ProcessOpDiagnostic {
+                operation: "s".to_string(),
+                kind: None,
+                errno: Some(libc::EPERM),
+                message: None,
+            }),
+        };
+
+        // A successful run whose sidecar write fails returns the typed sidecar error.
+        let ok = CoderRunCompletion {
+            terminal: Ok(0),
+            report: report.clone(),
+        };
+        let err = finish_supervised_coder_run(ok, &obstruction)
+            .expect_err("an obstructed sidecar surfaces an error");
+        assert!(
+            err.downcast_ref::<SupervisionSidecarError>().is_some(),
+            "the sidecar obstruction is a downcastable typed error: {err:#}"
+        );
+
+        // A failed run whose sidecar ALSO fails preserves the typed run primary and
+        // composes the sidecar error as a downcastable secondary.
+        let pump = crate::transcript_pump::TranscriptPumpError::new("pump fault".to_string());
+        let both = CoderRunCompletion {
+            terminal: Err(anyhow::Error::new(pump)),
+            report,
+        };
+        let composed = finish_supervised_coder_run(both, &obstruction)
+            .expect_err("the composed failure still surfaces");
+        assert!(
+            composed
+                .downcast_ref::<crate::transcript_pump::TranscriptPumpError>()
+                .is_some(),
+            "the typed run primary is preserved: {composed:#}"
+        );
+        assert!(
+            composed.downcast_ref::<SupervisionSidecarError>().is_some(),
+            "the sidecar error rides as a downcastable secondary: {composed:#}"
+        );
     }
 }
 

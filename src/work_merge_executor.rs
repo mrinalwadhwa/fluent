@@ -1139,14 +1139,19 @@ fn run_reserved_rebase(
     let capture = crate::coder::TranscriptCapture::with_config(&transcript_path, pump_config);
 
     let coder = make_coder(sandbox);
-    let exit_code = match coder.run_captured(
+    // Persist the coder's supervision report in the rebase artifact directory, then
+    // take its terminal outcome, so a group-sweep diagnostic is durable rather than
+    // dropped with the ManagedChild.
+    let completion = coder.run_captured_reported(
         &prompt,
         &system_prompt,
         source_workspace,
         config.extra_args,
         &[],
         Some(&capture),
-    ) {
+    );
+    let exit_code = match crate::coder::finish_supervised_coder_run(completion, rebase_artifact_dir)
+    {
         Ok(code) => code,
         Err(err) => {
             // A typed pump/coder failure returns to the terminal finalizer, which

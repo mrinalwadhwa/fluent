@@ -1649,11 +1649,25 @@ fn is_transcript_pump_error(result: &Result<()>) -> bool {
     })
 }
 
+/// A coder supervision-sidecar persistence failure is not a retryable coder error:
+/// the coder already ran, so relaunching it through the generic retry budget would
+/// repeat its side effects.
+fn is_supervision_sidecar_error(result: &Result<()>) -> bool {
+    result
+        .as_ref()
+        .err()
+        .map_or(false, |e| e.is::<crate::coder::SupervisionSidecarError>())
+}
+
 /// Whether a failed coder run should be retried through the generic retry
-/// budget. Auth failures and transcript-pump infrastructure failures are
-/// terminal for the Task and must not spawn another coder.
+/// budget. Auth failures, transcript-pump infrastructure failures, and
+/// supervision-sidecar failures are terminal for the Task and must not spawn another
+/// coder.
 fn should_retry_coder_error(result: &Result<()>) -> bool {
-    result.is_err() && !is_auth_error(result) && !is_transcript_pump_error(result)
+    result.is_err()
+        && !is_auth_error(result)
+        && !is_transcript_pump_error(result)
+        && !is_supervision_sidecar_error(result)
 }
 
 /// How a Task's terminal failure should be recorded in durable Attempt state and
@@ -2307,14 +2321,22 @@ fn run_task_coder_with_coder(
     let capture = transcript_path
         .as_deref()
         .map(|p| crate::coder::TranscriptCapture::with_config(p, pump_config.clone()));
-    let exit_code = coder.run_captured(
+    // Persist the coder's per-launch supervision report at the artifact boundary, then
+    // take its terminal outcome: an unconfirmed group sweep lands in
+    // coder-supervision.json rather than being dropped with the ManagedChild, and a
+    // sidecar obstruction rides along as a typed non-retryable secondary.
+    let completion = coder.run_captured_reported(
         &prompt,
         &system_prompt,
         workspace_path,
         extra_args,
         &[],
         capture.as_ref(),
-    )?;
+    );
+    let exit_code = match transcript_path.as_deref().and_then(Path::parent) {
+        Some(artifact_dir) => crate::coder::finish_supervised_coder_run(completion, artifact_dir)?,
+        None => completion.into_result()?,
+    };
     if let Some(tp) = &transcript_path {
         crate::usage::log_usage_from_transcript(
             tp,
@@ -2902,14 +2924,21 @@ fn run_learner_with_coder(
     }
 
     let coder = make_coder(sandbox);
-    let exit_code = coder.run_captured(
+    // Persist the coder's supervision report at the Learner artifact boundary, then
+    // take its terminal outcome, so a group-sweep diagnostic is durable rather than
+    // dropped with the ManagedChild.
+    let completion = coder.run_captured_reported(
         &prompt,
         &system_prompt,
         workspace_path,
         inputs.extra_args,
         &extra_env,
         capture.as_ref(),
-    )?;
+    );
+    let exit_code = match capture.as_ref().and_then(|c| c.path().parent()) {
+        Some(artifact_dir) => crate::coder::finish_supervised_coder_run(completion, artifact_dir)?,
+        None => completion.into_result()?,
+    };
     if exit_code != 0 {
         bail!("Learner coder exited with code {exit_code}");
     }
@@ -3226,14 +3255,17 @@ fn run_review_coder_with_coder(
     // every outer retry threads the SAME immutable config rather than re-resolving.
     let capture =
         crate::coder::TranscriptCapture::with_config(&transcript_path, pump_config.clone());
-    let exit_code = coder.run_captured(
+    // Persist the coder's supervision report beside the review transcript, then take
+    // its terminal outcome, so a group-sweep diagnostic is durable rather than dropped.
+    let completion = coder.run_captured_reported(
         &prompts.review_prompt,
         &prompts.system_prompt,
         artifact_dir,
         extra_args,
         &[],
         Some(&capture),
-    )?;
+    );
+    let exit_code = crate::coder::finish_supervised_coder_run(completion, artifact_dir)?;
     crate::usage::log_usage_from_transcript(
         &transcript_path,
         coder_kind.as_str(),
@@ -4088,6 +4120,31 @@ mod tests {
 
         let success: Result<()> = Ok(());
         assert!(!should_retry_coder_error(&success));
+
+        // A supervision-sidecar persistence failure must not be retried: the coder
+        // already ran, so relaunching would repeat its side effects.
+        let sidecar: Result<()> = {
+            let dir = tempfile::tempdir().unwrap();
+            let obstruction = dir.path().join("file");
+            fs::write(&obstruction, b"x").unwrap();
+            let completion = crate::coder::CoderRunCompletion {
+                terminal: Ok(0),
+                report: crate::coder::CoderSupervisionReport {
+                    group_sweep_unconfirmed: Some(crate::coder::ProcessOpDiagnostic {
+                        operation: "s".to_string(),
+                        kind: None,
+                        errno: Some(1),
+                        message: None,
+                    }),
+                },
+            };
+            crate::coder::finish_supervised_coder_run(completion, &obstruction).map(|_| ())
+        };
+        assert!(is_supervision_sidecar_error(&sidecar));
+        assert!(
+            !should_retry_coder_error(&sidecar),
+            "a supervision-sidecar failure is terminal, never relaunches the coder"
+        );
     }
 
     #[test]
@@ -4537,6 +4594,254 @@ mod tests {
         assert_eq!(
             *limit, 7777,
             "the retry threads the resolve-once config, not the changed on-disk 4321"
+        );
+    }
+
+    /// An injected coder that reports a non-clean supervision report (a reaped leader
+    /// whose group could not be verifiably swept), so the production role boundary must
+    /// persist it as a sidecar.
+    struct SupervisionReportingCoder {
+        recorded_dir: Arc<Mutex<Option<PathBuf>>>,
+    }
+
+    impl crate::coder::Coder for SupervisionReportingCoder {
+        fn run(
+            &self,
+            _prompt: &str,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+            _transcript_file: Option<&Path>,
+        ) -> Result<i32> {
+            unreachable!("the writer route launches through run_captured_reported")
+        }
+
+        fn run_captured_reported(
+            &self,
+            _prompt: &str,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+            capture: Option<&crate::coder::TranscriptCapture<'_>>,
+        ) -> crate::coder::CoderRunCompletion {
+            if let Some(capture) = capture {
+                *self.recorded_dir.lock().unwrap() =
+                    capture.path.parent().map(|p| p.to_path_buf());
+            }
+            crate::coder::CoderRunCompletion {
+                terminal: Ok(0),
+                report: crate::coder::CoderSupervisionReport {
+                    group_sweep_unconfirmed: Some(crate::coder::ProcessOpDiagnostic {
+                        operation: "kill process group".to_string(),
+                        kind: Some("PermissionDenied".to_string()),
+                        errno: Some(1),
+                        message: Some("Operation not permitted".to_string()),
+                    }),
+                },
+            }
+        }
+
+        fn run_interactive(
+            &self,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+        ) -> Result<i32> {
+            unreachable!("the writer route never runs interactively")
+        }
+    }
+
+    #[test]
+    fn writer_route_persists_the_coder_supervision_sidecar() {
+        // B5/B6: the production Writer boundary threads the per-launch supervision
+        // report out of the coder and PERSISTS it at the artifact boundary. An injected
+        // coder that reports an unconfirmed group sweep drives the real
+        // run_task_coder_with_coder route; the boundary writes coder-supervision.json
+        // beside the transcript rather than dropping the diagnostic. This is the
+        // production-route evidence a test-only accessor cannot provide.
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let workspace = project_root.join("workspace");
+        fs::create_dir_all(workspace.join(".fluent/expertise")).unwrap();
+        fs::write(workspace.join(".fluent/expertise/INDEX.md"), "# Index\n").unwrap();
+
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Writer supervision sidecar".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+
+        let resolver = ContentResolver::new(Some(project_root));
+        let pump_config = crate::transcript_pump::resolve_config(project_root);
+        let recorded_dir = Arc::new(Mutex::new(None));
+        let recorded_for_coder = Arc::clone(&recorded_dir);
+        run_task_coder_with_coder(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            project_root,
+            &workspace,
+            &[],
+            &resolver,
+            &[],
+            CoderKind::Codex,
+            true,
+            None,
+            None,
+            &pump_config,
+            move |_sandbox| {
+                Box::new(SupervisionReportingCoder {
+                    recorded_dir: recorded_for_coder,
+                })
+            },
+        )
+        .expect("the writer route runs the injected coder and persists its report");
+
+        let artifact_dir = recorded_dir
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the writer route passed a capture whose parent is the artifact dir");
+        let sidecar = artifact_dir.join(crate::coder::CODER_SUPERVISION_SIDECAR);
+        assert!(
+            sidecar.exists(),
+            "the production Writer boundary persists coder-supervision.json"
+        );
+        let persisted: crate::coder::CoderSupervisionReport =
+            serde_json::from_slice(&fs::read(&sidecar).unwrap()).unwrap();
+        let diag = persisted
+            .group_sweep_unconfirmed
+            .expect("the persisted sidecar carries the group-sweep diagnostic");
+        assert_eq!(diag.operation, "kill process group");
+        assert_eq!(diag.errno, Some(1));
+    }
+
+    /// A launch-counting coder that reports a non-clean supervision report, to prove a
+    /// sidecar obstruction never relaunches the already-run coder.
+    struct CountingSupervisionCoder {
+        launches: Arc<Mutex<usize>>,
+    }
+
+    impl crate::coder::Coder for CountingSupervisionCoder {
+        fn run(
+            &self,
+            _prompt: &str,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+            _transcript_file: Option<&Path>,
+        ) -> Result<i32> {
+            unreachable!("the writer route launches through run_captured_reported")
+        }
+
+        fn run_captured_reported(
+            &self,
+            _prompt: &str,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+            _capture: Option<&crate::coder::TranscriptCapture<'_>>,
+        ) -> crate::coder::CoderRunCompletion {
+            *self.launches.lock().unwrap() += 1;
+            crate::coder::CoderRunCompletion {
+                terminal: Ok(0),
+                report: crate::coder::CoderSupervisionReport {
+                    group_sweep_unconfirmed: Some(crate::coder::ProcessOpDiagnostic {
+                        operation: "kill process group".to_string(),
+                        kind: None,
+                        errno: Some(1),
+                        message: None,
+                    }),
+                },
+            }
+        }
+
+        fn run_interactive(
+            &self,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+        ) -> Result<i32> {
+            unreachable!("the writer route never runs interactively")
+        }
+    }
+
+    #[test]
+    fn writer_route_sidecar_obstruction_is_a_non_retryable_typed_error() {
+        // B5/B6: at the production Writer boundary a sidecar-write obstruction is a
+        // typed, NON-retryable SupervisionSidecarError — the coder already ran, so it is
+        // never relaunched. Obstruct the sidecar by pre-creating coder-supervision.json
+        // as a directory (the atomic rename onto it fails), drive the real route, and
+        // assert the typed error plus a coder launch count of exactly one.
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let workspace = project_root.join("workspace");
+        fs::create_dir_all(workspace.join(".fluent/expertise")).unwrap();
+        fs::write(workspace.join(".fluent/expertise/INDEX.md"), "# Index\n").unwrap();
+
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Writer sidecar obstruction".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+
+        // Pre-create the write task's artifact dir and obstruct the sidecar path.
+        let write_task = item.attempts[0]
+            .tasks
+            .iter()
+            .find(|t| t.id == "attempt-1-write-1")
+            .expect("the initial attempt has a write task");
+        let artifact_dir = project_root.join(&write_task.artifact_area.as_ref().unwrap().path);
+        fs::create_dir_all(artifact_dir.join(crate::coder::CODER_SUPERVISION_SIDECAR)).unwrap();
+
+        let resolver = ContentResolver::new(Some(project_root));
+        let pump_config = crate::transcript_pump::resolve_config(project_root);
+        let launches = Arc::new(Mutex::new(0usize));
+        let launches_for_coder = Arc::clone(&launches);
+        let error = run_task_coder_with_coder(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            project_root,
+            &workspace,
+            &[],
+            &resolver,
+            &[],
+            CoderKind::Codex,
+            true,
+            None,
+            None,
+            &pump_config,
+            move |_sandbox| {
+                Box::new(CountingSupervisionCoder {
+                    launches: Arc::clone(&launches_for_coder),
+                })
+            },
+        )
+        .expect_err("an obstructed sidecar surfaces an error from the writer route");
+
+        assert!(
+            error
+                .downcast_ref::<crate::coder::SupervisionSidecarError>()
+                .is_some(),
+            "the obstruction is a downcastable typed sidecar error: {error:#}"
+        );
+        assert!(
+            !should_retry_coder_error(&Err(error)),
+            "a sidecar obstruction is never retried through the generic budget"
+        );
+        assert_eq!(
+            *launches.lock().unwrap(),
+            1,
+            "the already-run coder is never relaunched after a sidecar obstruction"
         );
     }
 
