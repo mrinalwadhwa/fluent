@@ -2811,6 +2811,9 @@ pub enum WorkModelError {
     MergeCandidateAlreadyExists {
         id: String,
     },
+    MergeCandidateNotFound {
+        candidate_id: String,
+    },
     MergeCandidateAttemptAlreadyExists {
         attempt_id: String,
     },
@@ -2933,6 +2936,9 @@ impl fmt::Display for WorkModelError {
             }
             Self::MergeCandidateAlreadyExists { id } => {
                 write!(f, "Merge Candidate {id:?} already exists")
+            }
+            Self::MergeCandidateNotFound { candidate_id } => {
+                write!(f, "Merge Candidate {candidate_id:?} not found")
             }
             Self::MergeCandidateAttemptAlreadyExists { attempt_id } => {
                 write!(f, "Attempt {attempt_id:?} already has a Merge Candidate")
