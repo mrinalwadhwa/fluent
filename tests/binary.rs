@@ -12493,6 +12493,17 @@ if echo "$PROMPT" | grep -q "Rebase the candidate branch"; then
   exit $?
 fi
 
+# The Learner runs in the candidate worktree too; satisfy it with a valid empty
+# draft and no commit so learning succeeds and the candidate can land.
+if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
+  DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
+  if [ -n "$DRAFT" ]; then
+    mkdir -p "$(dirname "$DRAFT")"
+    printf '{"learning_summary":"learned","follow_ups":[]}\n' > "$DRAFT"
+  fi
+  exit 0
+fi
+
 case "$PWD" in
   */work-6-work-1-attempt-1)
     printf 'shared content\n' >> shared.txt
