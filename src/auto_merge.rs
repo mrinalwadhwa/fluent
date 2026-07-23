@@ -113,6 +113,19 @@ pub fn find_ready_candidate(wi: &WorkItem) -> Option<&MergeCandidate> {
         return None;
     }
 
+    // The shared advancement gate rejects a candidate whose Attempt has not reached
+    // a SUCCEEDED Learner at Merge Candidate validation and at land. Selecting such a
+    // candidate here would drive a merge that fails that gate, and the driver would
+    // then permanently mark it auto-merge-skipped — freezing out a candidate that
+    // merely needs its in-progress or retryable Learner to finish. Leave it
+    // unselected so a later poll retries it once the Learner succeeds.
+    if wi
+        .attempt_learning_advancement(&candidate.attempt_id)
+        .is_err()
+    {
+        return None;
+    }
+
     Some(candidate)
 }
 
@@ -211,10 +224,22 @@ fn sleep_with_shutdown_check(duration: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::follow_up::ArtifactRef;
     use crate::work_model::{
-        Attempt, AttemptKind, CoderMapping, MergeCandidateMergeState, MergeReviewState, Task,
-        TaskKind, TaskOutput, TaskStatus, WorkItem, WorkspaceAccess, WorkspaceRef,
+        Attempt, AttemptKind, AttemptLearning, CoderMapping, MergeCandidateMergeState,
+        MergeReviewState, Task, TaskKind, TaskOutput, TaskStatus, WorkItem, WorkspaceAccess,
+        WorkspaceRef,
     };
+
+    fn succeeded_learning() -> AttemptLearning {
+        AttemptLearning::succeeded(
+            1,
+            ArtifactRef {
+                path: ".fluent/work/handoffs/attempt-1.json".to_string(),
+                digest: "sha256:abc".to_string(),
+            },
+        )
+    }
 
     fn make_work_item_with_candidate(
         review_state: AttemptReviewState,
@@ -269,6 +294,10 @@ mod tests {
                 review_state: Some(review_state),
                 pause_kind: None,
                 artifacts: vec![],
+                // A genuinely landable candidate's Attempt has a SUCCEEDED Learner;
+                // the negative tests override this to prove non-succeeded learning
+                // withholds selection.
+                learning: Some(succeeded_learning()),
                 created_at: None,
                 completed_at: None,
                 ..Default::default()
@@ -433,6 +462,62 @@ mod tests {
             MergeCandidateMergeStatus::Pending,
             None,
         );
+        assert!(find_ready_candidate(&wi).is_none());
+    }
+
+    #[test]
+    fn find_ready_candidate_returns_none_when_learner_in_progress() {
+        // A review-Passed candidate whose Learner is still running is Pending and not
+        // skipped, but the shared advancement gate would reject its merge. Selecting
+        // it and failing the merge would permanently mark it auto-merge-skipped, so it
+        // must simply not be selected until the Learner finishes.
+        let mut wi = make_work_item_with_candidate(
+            AttemptReviewState::Passed,
+            AttemptStatus::Complete,
+            MergeReviewState::Pending,
+            MergeCandidateMergeStatus::Pending,
+            None,
+        );
+        wi.attempts[0].learning = Some(AttemptLearning::in_progress(1));
+        assert!(find_ready_candidate(&wi).is_none());
+    }
+
+    #[test]
+    fn find_ready_candidate_returns_none_when_learner_handoff_pending() {
+        let mut wi = make_work_item_with_candidate(
+            AttemptReviewState::Passed,
+            AttemptStatus::Complete,
+            MergeReviewState::Pending,
+            MergeCandidateMergeStatus::Pending,
+            None,
+        );
+        wi.attempts[0].learning = Some(AttemptLearning::handoff_pending(1));
+        assert!(find_ready_candidate(&wi).is_none());
+    }
+
+    #[test]
+    fn find_ready_candidate_returns_none_when_learner_failed() {
+        let mut wi = make_work_item_with_candidate(
+            AttemptReviewState::Passed,
+            AttemptStatus::Complete,
+            MergeReviewState::Pending,
+            MergeCandidateMergeStatus::Pending,
+            None,
+        );
+        wi.attempts[0].learning = Some(AttemptLearning::failed(1, "learner failed"));
+        assert!(find_ready_candidate(&wi).is_none());
+    }
+
+    #[test]
+    fn find_ready_candidate_returns_none_when_learning_absent() {
+        let mut wi = make_work_item_with_candidate(
+            AttemptReviewState::Passed,
+            AttemptStatus::Complete,
+            MergeReviewState::Pending,
+            MergeCandidateMergeStatus::Pending,
+            None,
+        );
+        wi.attempts[0].learning = None;
         assert!(find_ready_candidate(&wi).is_none());
     }
 
