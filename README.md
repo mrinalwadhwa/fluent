@@ -1,16 +1,24 @@
 # fluent
 
-Fluent is an autonomous, self-improving software factory.
+Fluent is an autonomous, self-improving software factory delivered as an Agent Skill.
 
-Fluent is distributed as an Agent Skill backed by a local CLI. The skill guides planning and delegation from your agent conversation; the `fluent` binary keeps durable state and runs work in isolated worktrees. The binary also carries the full skill, so the bootstrap can install a version that matches the CLI.
+You use Fluent by chatting with Claude Code, Codex, or another coding agent that can load Agent Skills. Your agent conversation is the primary interface; you do not need to switch to a separate Fluent app to shape or run Work.
 
-From your agent conversation, Fluent turns a change request into a reviewed Merge Candidate, then carries concrete findings and project knowledge into future work. In the current Local Preview, you decide what runs and what lands.
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/fluent-overall-flow-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset=".github/assets/fluent-overall-flow-light.png">
+    <img alt="Fluent separates human attention from execution capacity. You shape Work by chatting with an agent that has the Fluent skill. Execution-ready Work Items wait to run, then Fluent writes, tests, reviews, and learns. Durable questions and ready candidates wait for a person without occupying an execution slot. Accepted candidates pass the land gate, while Observations and Expertise feed future Work." src=".github/assets/fluent-overall-flow-light.png" width="100%">
+  </picture>
+</p>
 
-Fluent runs on macOS (Apple Silicon and Intel).
+The Agent Skill shapes the conversation and drives the local `fluent` CLI underneath it. The CLI keeps durable state, manages isolated worktrees, schedules execution, and records evidence. You rarely need to invoke it yourself.
+
+People supply intent, judgment, domain knowledge, and authority to land changes. Execution environments supply model access, compute, tools, and hardware. Fluent keeps work that can run separate from work that needs a person: execution-ready Work Items wait for execution capacity, while questions and ready candidates wait for human attention. A scheduled Attempt that pauses for a person releases its execution slot, so other Work can continue.
 
 ## How you tell Fluent what to build
 
-Start the Fluent skill with a feature, a bug, or an Observation you recorded earlier. You do not need to arrive with a complete specification. Fluent reads the relevant parts of the project, asks about decisions it cannot safely infer, and works through four questions with you:
+In the same agent conversation, start with a feature, a bug, or an Observation you recorded earlier. You do not need to arrive with a complete specification. The Fluent skill reads the relevant parts of the project, asks about decisions it cannot safely infer, and works through four questions with you:
 
 | Artifact | What it settles |
 |---|---|
@@ -35,7 +43,7 @@ For example, “add machine-readable JSON output to our CLI's status command” 
 
 ## How Fluent builds it
 
-A Work Item runs as an Attempt in an isolated worktree. In the Local Preview, the Attempt runs locally in the foreground, where you can watch each round.
+When you ask Fluent to run a Work Item, it starts an Attempt in an isolated worktree. In the Local Preview, the Attempt runs locally in the foreground, where you can watch each round.
 
 The Writer implements the approved Plan and commits a candidate. The Tester runs the project's configured test commands. Five reviewers then inspect the same commit through separate tasks for behaviors, architecture, tests, documentation, and skills. Review tasks run in parallel up to the configured concurrency limit.
 
@@ -71,24 +79,11 @@ An Observation becomes corrective Work only when the change is bounded, testable
   </picture>
 </p>
 
-In the default `propose` mode, you start corrective Work explicitly:
-
-```sh
-fluent work-item authorize <work-item-id>
-fluent scheduler run
-```
-
-Authorization adds the Work to the queue; it does not run or land anything. The scheduler uses the same build loop and stops at another ready Merge Candidate for you to inspect and land.
+In the default `propose` mode, the skill shows you the corrective Work and waits. If you authorize it and ask Fluent to run queued Work, the same build loop starts. Authorization does not run or land anything by itself, and the scheduler stops at another ready Merge Candidate for you to inspect and land.
 
 A project can choose `execute` mode to authorize and queue trusted corrective Work automatically within its follow-up limits. The scheduler still runs only when you start it, and every candidate still needs your acceptance before land. The Fluent skill offers this choice before it initializes a new project.
 
-Post-merge review is a separate, per-land opt-in:
-
-```sh
-fluent merge-candidate land <work-item-id> --post-merge-review
-```
-
-On a clean fresh land, the option schedules a detached Tester and reviewer pass against the landed change. A failing or uncertain review creates and runs a forward-fix Attempt. The Attempt can produce another candidate, but it cannot land it.
+You can also ask Fluent to add a post-merge review when you land a candidate. On a clean fresh land, this separate opt-in schedules a detached Tester and reviewer pass against the landed change. A failing or uncertain review creates and runs a forward-fix Attempt. The Attempt can produce another candidate, but it cannot land it.
 
 In the running example, Fluent might notice that another CI script still parses the human-readable status output. If the project already says machine callers must use versioned JSON, Fluent can propose a bounded correction. Without that rule, it records the finding as an Observation instead.
 
@@ -114,47 +109,16 @@ Follow-up Work changes what Fluent does next. Expertise changes how Fluent does 
 
 ## Install
 
-### As an Agent Skill
-
 ```sh
 npx skills add mrinalwadhwa/fluent --skill fluent
 ```
 
-This installs a bootstrap Agent Skill. On first run, the skill installs the `fluent` binary if it is missing, then materializes the version-matched full skill from the binary and continues.
+This installs the bootstrap Agent Skill. Open your coding agent in a Git repository and ask it to use Fluent:
 
-### From the binary
+> Use Fluent to add machine-readable JSON output to the status command.
 
-```sh
-curl -fsSL fluent.computer/install | sh
-fluent skills add
-```
-
-The first command installs the `fluent` binary to `~/.local/bin`. The second installs the full Fluent skill for Claude Code. Use `fluent skills add --agent codex` for Codex, or `fluent skills add --agent '*'` for both.
-
-## Use it with your coding agent
-
-Start the installed `fluent` skill from your agent conversation. For example, in Claude Code:
-
-```
-/fluent
-```
-
-## In a project
-
-Start from inside your project's git repository:
-
-```
-/fluent
-```
-
-On first run, the skill asks whether corrective follow-up Work should remain proposed for your authorization or be authorized and queued automatically. It then runs `fluent init` and starts the planning conversation.
+On first use, the skill installs the version-matched local CLI if it is missing, asks whether corrective follow-up Work should wait for your authorization or enter the execution queue automatically, initializes the project, and starts shaping the Work with you.
 
 Fluent creates its work in sibling git worktrees next to your repo, so your working tree stays clean while it builds. Place your repo at `<project>/main/` so worktrees land as `<project>/work-*` siblings grouped under the project directory. Initialization prints a reminder if the directory is not named `main`.
 
-## Staying up to date
-
-```sh
-fluent update
-```
-
-Downloads and installs the latest release, then refreshes the default Claude Code skill installation. If you use Codex, run `fluent skills add --agent codex` after the update.
+Fluent currently runs on macOS, on both Apple Silicon and Intel.
