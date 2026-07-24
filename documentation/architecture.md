@@ -453,6 +453,38 @@ creations. This prevents mixed-generation reads and makes a failed or crashed
 write retryable without allowing a stale snapshot to overwrite its successor.
 Storage-revision exhaustion fails closed.
 
+A pre-land Learner runs inside one host-owned Git transaction over the managed
+candidate workspace, so a successful run leaves exactly one committed,
+expertise-only result and a clean workspace, and any rejection restores the
+baseline. The transaction first verifies the workspace `HEAD` equals the Learner
+baseline with a clean index and worktree; a dirty entry launches no coder, moves
+no pointer, and settles relaunchable failed Learning. It stays open across the
+initial coder, every bounded schema repair, and final draft validation. Right
+after each coder invocation returns — before its result is inspected, its draft
+published, or another invocation launched — the host pins that return's `HEAD`,
+reachable per-commit paths, and staged, unstaged, and untracked paths into a
+cumulative ledger a later reset cannot erase. At finalization it classifies the
+union of every retained snapshot plus the final pre-normalization state using
+raw NUL-delimited paths, so a newline-bearing name stays one path and a
+non-UTF-8 name is rejected rather than decoded lossily. A snapshot whose `HEAD`
+is not an unambiguous linear descendant of the baseline is unaccountable, and any
+accounted path outside `.fluent/expertise/` — including one a later commit or
+repair reverted or reset away — rejects the whole result. When every accounted
+path is expertise, the host moves `HEAD` and the index back to the baseline while
+retaining the final worktree, stages the complete `.fluent/expertise/` delta
+including deletions, and authors zero or one `Update expertise` commit whose sole
+parent is the baseline; a result with no net expertise delta keeps the baseline
+without an empty commit. The Write output and Merge Candidate pointers move only
+after the canonical result is verified exactly clean, and the handoff is written
+last. Any pre-acceptance failure runs one restoring rollback that hard-resets and
+cleans back to the proven baseline; an obstructed rollback composes a distinct
+restoration diagnostic under the primary without changing its typed kind or
+relaunchability. Every ordinary completed-call rejection settles terminal failed
+Learning and withholds Merge Candidate readiness. If canonical-handoff
+publication fails after a clean successor is verified, that successor is retained
+as both pointers while Learning stays relaunchable `Generic` failed with no
+handoff reference.
+
 A Learner run that failed before its candidate landed recovers through
 `fluent attempt run`, which retries only the Learner. When the candidate
 has already merged, that retry runs in handoff-only mode: it serializes
@@ -526,6 +558,18 @@ schema repair — not a fresh audit — under a fresh run identity, and accepts 
 corrected draft only when it preserves every prior follow-up id and its
 non-schema content. The prompt keeps the artifact-evidence array empty until the
 handoff transport can publish referenced evidence artifacts.
+
+The pre-land and post-land schema-repair loops remain separate for the
+Local Preview. They share the draft-validation protocol and repair budget,
+but enforce different Git boundaries. Pre-land must capture every coder
+return in the Learner Git transaction before inspecting the result or
+publishing its draft, and it cannot attach expertise references until the
+host has normalized the canonical result. Post-land runs in a disposable
+handoff-only clone, cannot change landed state, and stamps the expertise
+references already produced by confinement. A shared loop would have to
+hide these ordering requirements behind callbacks. Fluent accepts the
+duplicated repair plumbing for now; unifying it should be a separate
+refactor with tests that prove both Git boundaries.
 
 Land takes that lock before it reads or mutates candidate state, resolves
 workspaces, or checks cleanliness, and holds it through merge finalization and

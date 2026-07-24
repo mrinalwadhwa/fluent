@@ -4681,6 +4681,13 @@ accepted Write result; a review-only Attempt is not code-producing. The
 independently identifiable follow-ups; it is not itself an Observation or
 Work Item.
 
+A **relaunchable** Learning failure permits a later
+`fluent attempt run` to invoke the Learner again. Fluent derives
+relaunchability from the stored `LearningFailureKind`. An **ordinary
+completed-call failure** is a rejection Fluent can settle while the host
+process and Work-model store remain available; host death and a Work-model
+persistence outage are outside this contract.
+
 ### B1
 
 WHEN a code-producing Attempt's reviews pass,
@@ -4726,7 +4733,8 @@ constrained by the Learner prompt.
 
 WHERE the Learner finds no durable project knowledge,
 THE SYSTEM SHALL leave `.fluent/expertise/` unchanged without creating an
-expertise commit.
+expertise commit, and verify the candidate workspace is exactly clean at
+the baseline before accepting the no-change result.
 Test: src/work_attempt_loop.rs (learner_without_expertise_change_keeps_candidate_commit)
 
 ### B7
@@ -4748,10 +4756,13 @@ Test: tests/binary.rs (learner_handoff_does_not_materialize_before_land)
 ### B10
 
 IF the Learner fails,
-THEN THE SYSTEM SHALL record a durable, retryable learner-failure state
-associated with the originating Attempt, warn the operator, and continue
-producing the Merge Candidate without changing its land eligibility.
-Test: tests/binary.rs (learner_failure_is_retryable_and_does_not_block_candidate)
+THEN THE SYSTEM SHALL record a durable learner-failure state associated
+with the originating Attempt, carrying its typed `LearningFailureKind`
+and corresponding relaunchability, warn the operator, and still create
+the Merge Candidate record while withholding its readiness and land
+eligibility until the Learner succeeds.
+Test: src/work_attempt_loop.rs (learner_completed_failure_matrix_persists_typed_terminal_records)
+Test: tests/binary.rs (learner_failure_blocks_candidate_readiness)
 
 ### B11
 
@@ -4771,19 +4782,30 @@ Test: tests/binary.rs (attempt_run_retries_only_failed_learner)
 
 ### B12
 
-WHEN a pre-land Learner run produces an expertise commit whose changes are
-confined to `.fluent/expertise/`,
-THE SYSTEM SHALL record that commit as the Merge Candidate's candidate
-commit.
+WHEN a pre-land Learner run leaves accepted expertise changes — committed,
+staged, unstaged, or untracked — all confined to `.fluent/expertise/`,
+THE SYSTEM SHALL host-author exactly one `Update expertise` commit whose
+sole parent is the Learner baseline, folding the complete accounted
+expertise delta (including deletions) rather than merely the Learner's
+current `HEAD`, and record that commit as the Merge Candidate's candidate
+commit only after verifying the workspace exactly clean.
 Test: src/work_attempt_loop.rs (learner_expertise_commit_becomes_candidate_commit)
+Test: src/work_attempt_loop.rs (learner_host_finalizes_uncommitted_expertise)
+Test: src/work_attempt_loop.rs (learner_squashes_committed_and_residual_expertise)
+Test: src/work_attempt_loop.rs (learner_hook_rewritten_topology_is_rejected_and_restored)
+Test: src/work_attempt_loop.rs (learner_hook_rewritten_subject_is_rejected_and_restored)
+Test: src/work_attempt_loop.rs (learner_canonicalizes_deletion_without_handoff_blob_reference)
 
 ### B13
 
-IF a Learner commit changes a path outside `.fluent/expertise/`,
-THEN THE SYSTEM SHALL discard that commit, retain the pre-Learner
-candidate commit, record the Learner run as failed and retryable, and
-leave Merge Candidate creation unblocked.
+IF a Learner leaves any accounted committed, staged, unstaged, or
+untracked change outside `.fluent/expertise/` — even one a later commit
+or schema repair reverted or reset out of reachable history,
+THEN THE SYSTEM SHALL reject the complete Learner Git result and classify
+the primary failure as relaunchable `Generic`.
 Test: src/work_attempt_loop.rs (learner_commit_touching_source_is_discarded)
+Test: src/work_attempt_loop.rs (learner_out_of_bounds_dirty_state_is_restored_and_blocks_readiness)
+Test: src/work_attempt_loop.rs (learner_reverted_out_of_bounds_commit_is_still_rejected)
 
 ### B14
 
@@ -4874,6 +4896,108 @@ THE SYSTEM SHALL preserve the submitted bytes, full validation error, and
 run identity as immutable Attempt artifacts before another draft may be
 published.
 Test: tests/binary.rs (learner_rejected_drafts_are_immutable_run_artifacts)
+
+### B25
+
+WHEN a passing code-producing Attempt is about to launch its pre-land
+Learner,
+THE SYSTEM SHALL verify that the managed candidate workspace has `HEAD`
+at the Learner baseline with no staged, unstaged, or untracked change.
+Test: src/work_attempt_loop.rs (learner_dirty_baseline_fails_closed_before_coder_launch)
+
+### B25a
+
+IF the transaction-entry verification fails,
+THEN THE SYSTEM SHALL launch no Learner coder, leave the Write output and
+Merge Candidate pointers unchanged, and classify the failure as
+relaunchable `Generic`.
+Test: src/work_attempt_loop.rs (learner_dirty_baseline_fails_closed_before_coder_launch)
+
+### B26
+
+WHEN an initial or schema-repair coder invocation returns for a pre-land
+Learner,
+THE SYSTEM SHALL capture and retain its returned `HEAD`, reachable
+commit-history paths, staged paths, unstaged paths, and untracked paths
+before inspecting the result, publishing or validating the draft, or
+launching another invocation.
+Test: src/work_attempt_loop.rs (learner_inventory_covers_commits_index_worktree_and_untracked)
+Test: src/work_attempt_loop.rs (learner_cumulative_history_survives_schema_repair_hard_reset)
+
+### B26a
+
+WHEN the initial Learner invocation, every schema-repair invocation, and
+final draft validation succeed,
+THE SYSTEM SHALL classify the cumulative union of every retained
+invocation-return snapshot with the final pre-normalization state before
+accepting any Git result.
+Test: src/work_attempt_loop.rs (learner_inventory_covers_commits_index_worktree_and_untracked)
+Test: src/work_attempt_loop.rs (learner_cumulative_history_survives_schema_repair_hard_reset)
+
+### B27
+
+IF a pre-land Learner snapshot's `HEAD` is not a descendant of the
+Learner baseline or its history is not an unambiguous linear
+Learner-created sequence,
+THEN THE SYSTEM SHALL treat the complete Learner Git result as
+unaccounted and reject it.
+Test: src/work_attempt_loop.rs (learner_ambiguous_history_is_rejected_and_restored)
+
+### B27a
+
+WHEN an accounted Learner path contains a newline,
+THE SYSTEM SHALL classify the exact complete path without splitting it
+or omitting any bytes.
+Test: src/work_attempt_loop.rs (learner_newline_path_is_accounted_without_splitting)
+
+### B27b
+
+IF an accounted Learner path contains non-UTF-8 bytes,
+THEN THE SYSTEM SHALL reject the complete Learner Git result rather than
+classify the path lossily.
+Test: src/work_attempt_loop.rs (learner_non_utf8_path_is_rejected_and_restored)
+
+### B28
+
+WHEN an ordinary completed-call pre-land Learner rejection occurs after
+transaction-entry verification succeeds and before a clean canonical
+expertise result is accepted,
+THE SYSTEM SHALL restore the exact clean Learner baseline, retain the
+pre-Learner pointers, persist terminal `Failed` Learning with no handoff
+reference and with the original primary diagnostic, its typed
+`LearningFailureKind`, and corresponding relaunchability, and withhold
+Merge Candidate readiness.
+Test: src/work_attempt_loop.rs (learner_completed_failure_matrix_persists_typed_terminal_records)
+Test: src/work_attempt_loop.rs (learner_coder_failure_rolls_back_all_git_state_and_persists_typed_failure)
+Test: src/work_attempt_loop.rs (learner_schema_repair_failure_rolls_back_all_git_state_and_persists_typed_failure)
+Test: src/work_attempt_loop.rs (learner_invalid_final_draft_rolls_back_when_repair_budget_is_zero)
+
+### B29
+
+IF restoration cannot prove both the exact baseline `HEAD` and an empty
+staged, unstaged, and untracked state,
+THEN THE SYSTEM SHALL record the restoration failure as a distinctly
+labelled secondary diagnostic without replacing the original primary
+diagnostic, its `LearningFailureKind`, or its relaunchability.
+Test: src/work_attempt_loop.rs (learner_rollback_failure_preserves_primary_kind_and_distinct_restoration_diagnostic)
+
+### B30
+
+WHEN Fluent records a pre-land Learner as succeeded,
+THE SYSTEM SHALL expose a Write output and Merge Candidate that both name
+the same clean canonical expertise result with no uncommitted portion.
+Test: src/work_attempt_loop.rs (learner_success_requires_complete_clean_expertise_result)
+Test: src/work_attempt_loop.rs (learner_success_updates_pointers_only_after_clean_verification)
+
+### B30a
+
+IF canonical-handoff publication fails after a clean canonical expertise
+result is verified,
+THEN THE SYSTEM SHALL retain that result as both the Write output and
+Merge Candidate candidate commit and record relaunchable `Generic`
+failed Learning with no handoff reference and a
+canonical-handoff-publication diagnostic.
+Test: src/work_attempt_loop.rs (learner_handoff_failure_retains_clean_typed_failed_result)
 
 ## Corrective classification and Work authorization
 

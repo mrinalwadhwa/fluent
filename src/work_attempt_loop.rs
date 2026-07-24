@@ -1304,6 +1304,54 @@ fn try_learn(
         Vec::new()
     };
 
+    if !handoff_only {
+        // Pre-land: one host-owned Git transaction spans the initial coder, every
+        // schema repair, and final draft validation. It verifies a clean exact
+        // entry, pins each coder return's raw history and dirty state, accounts for
+        // the cumulative union, then host-normalizes one clean expertise-only
+        // result. Any pre-acceptance failure restores the exact baseline before the
+        // caller settles a typed terminal record.
+        let mut transaction = LearnerGitTransaction::begin(&workspace_path, &baseline_commit)?;
+        let result = run_pre_land_learner(
+            project_root,
+            &workspace_path,
+            item,
+            attempt_index,
+            write_task_index,
+            &write_output,
+            candidate_id,
+            &work_item_id,
+            &attempt_id,
+            config,
+            &mut transaction,
+            PreLandLearnerContext {
+                review_artifact_paths: &review_artifact_paths,
+                tester_artifact_paths: &tester_artifact_paths,
+                diff_command: &diff_command,
+                handoff_dir,
+                transcript_path: &transcript_path,
+                run_dir,
+                real_handoff_dir: &real_handoff_dir,
+                coder_kind,
+                model: model.as_deref(),
+                effort: effort.as_deref(),
+            },
+        );
+        return match result {
+            Ok(handoff) => Ok(handoff),
+            Err(primary) => match transaction.restore(&workspace_path) {
+                Ok(()) => Err(primary),
+                // A rollback obstruction is composed structurally UNDER the primary,
+                // so the primary's typed classification stays discoverable and both
+                // diagnostics survive as distinct labelled failures. (Failure
+                // closure B4)
+                Err(restore) => Err(primary
+                    .context(restore)
+                    .context("learner rollback could not restore the clean Learner baseline")),
+            },
+        };
+    }
+
     let coder_result = (config.run_coder)(&LearnerCoderRequest {
         workspace_path: learner_workspace_path,
         review_artifact_paths: learner_review_artifact_paths,
@@ -1318,21 +1366,11 @@ fn try_learn(
         handoff_only,
         repair: None,
     });
-    // Confine the Learner's commit. In the normal case an expertise commit is
-    // accepted and advances the Merge Candidate tip. In a post-land handoff-only
-    // run any mutation is denied and discarded, leaving the merged commit and
-    // target branch untouched; the denied paths are recorded so the missed
-    // expertise can be captured as non-corrective follow-ups.
-    let confinement_result = apply_learner_confinement(
-        learner_workspace_path,
-        item,
-        attempt_index,
-        write_task_index,
-        &write_output,
-        candidate_id,
-        handoff_only,
-        &baseline_commit,
-    );
+    // Confine the Learner's commit for a post-land handoff-only run: any mutation
+    // is denied and discarded, leaving the merged commit and target branch
+    // untouched; the denied paths are recorded so the missed expertise can be
+    // captured as non-corrective follow-ups.
+    let confinement_result = apply_learner_confinement(learner_workspace_path, &baseline_commit);
     // Always attempt candidate cleanup, even when the coder fails. Handoff-only
     // cleanup acts on the disposable clone, so no restoration can overwrite
     // live target or shared-Git changes from another actor.
@@ -1453,6 +1491,170 @@ fn try_learn(
     // learning outcome and writing the canonical handoff is the caller's ordered
     // responsibility (see `finalize_learning`), so the handoff is never written
     // before a durable learning record exists.
+    Ok(handoff)
+}
+
+/// The pre-land Learner's fixed run inputs, grouped so the transaction body reads
+/// as one logical run rather than a long argument list.
+struct PreLandLearnerContext<'a> {
+    review_artifact_paths: &'a [PathBuf],
+    tester_artifact_paths: &'a [PathBuf],
+    diff_command: &'a str,
+    handoff_dir: &'a Path,
+    transcript_path: &'a Path,
+    run_dir: PathBuf,
+    real_handoff_dir: &'a Path,
+    coder_kind: CoderKind,
+    model: Option<&'a str>,
+    effort: Option<&'a str>,
+}
+
+/// Run the whole pre-land logical Learner: the initial coder, the bounded
+/// schema-repair loop, cumulative accounting, and canonical normalization. Each
+/// coder return is pinned to the transaction ledger before its result is
+/// inspected or its draft published, so a later repair reset cannot erase an
+/// earlier out-of-bounds effect. The Work-model pointers move only after the
+/// canonical result is verified exactly clean, and the returned handoff is not yet
+/// written. Any error leaves the transaction for the caller to roll back.
+#[allow(clippy::too_many_arguments)]
+fn run_pre_land_learner(
+    project_root: &Path,
+    workspace_path: &Path,
+    item: &mut WorkItem,
+    attempt_index: usize,
+    write_task_index: usize,
+    write_output: &TaskOutput,
+    candidate_id: &str,
+    work_item_id: &str,
+    attempt_id: &str,
+    config: &LearnerConfig<'_>,
+    transaction: &mut LearnerGitTransaction,
+    ctx: PreLandLearnerContext<'_>,
+) -> Result<crate::follow_up::LearnerHandoffV1> {
+    // Initial Learner invocation. Capture its return BEFORE inspecting the result,
+    // publishing its draft, or launching any repair. (B3)
+    let coder_result = (config.run_coder)(&LearnerCoderRequest {
+        workspace_path,
+        review_artifact_paths: ctx.review_artifact_paths,
+        tester_artifact_paths: ctx.tester_artifact_paths,
+        diff_command: ctx.diff_command,
+        handoff_dir: ctx.handoff_dir,
+        transcript_path: ctx.transcript_path,
+        denied_write_roots: &[],
+        coder_kind: ctx.coder_kind,
+        model: ctx.model,
+        effort: ctx.effort,
+        handoff_only: false,
+        repair: None,
+    });
+    transaction.capture_return(workspace_path)?;
+    coder_result?;
+
+    publish_pre_land_draft(project_root, work_item_id, attempt_id, ctx.handoff_dir)?;
+    record_submitted_draft(project_root, work_item_id, attempt_id, &ctx.run_dir)?;
+
+    let draft = crate::learner::read_draft(project_root, work_item_id, attempt_id)?;
+    let (draft, normalizations) = crate::learner::normalize_draft(draft);
+    record_run_normalizations(&ctx.run_dir, &normalizations)?;
+
+    // Bounded schema-repair loop. The draft is validated with NO final expertise
+    // references — only the accepted draft survives the loop; the canonical
+    // expertise is folded in after accounting and normalization. Each repair coder
+    // return is pinned to the transaction before its draft is read.
+    let mut repair_budget = crate::config::resolve_learner_schema_repair_budget(project_root)
+        .unwrap_or(crate::config::DEFAULT_LEARNER_SCHEMA_REPAIR_BUDGET);
+    let mut current_draft = draft;
+    let mut current_run_dir = ctx.run_dir;
+    let accepted_draft = loop {
+        let prior = current_draft.clone();
+        match crate::learner::stamp_handoff(
+            current_draft.clone(),
+            work_item_id,
+            attempt_id,
+            candidate_id,
+            Vec::new(),
+        ) {
+            Ok(_) => break current_draft,
+            Err(error) => {
+                record_run_rejection(&current_run_dir, &error)?;
+                if repair_budget == 0 {
+                    return Err(error);
+                }
+                repair_budget -= 1;
+
+                let repair_run_dir = allocate_learner_run_dir(&ctx.real_handoff_dir.join("runs"))?;
+                let repair_transcript = repair_run_dir.join("transcript.jsonl");
+                let repair_staging = repair_run_dir.join("staging");
+                let rejected_draft = serde_json::to_string(&prior)?;
+                let validation_error = format!("{error:#}");
+
+                let repair_result = (config.run_coder)(&LearnerCoderRequest {
+                    workspace_path,
+                    review_artifact_paths: ctx.review_artifact_paths,
+                    tester_artifact_paths: ctx.tester_artifact_paths,
+                    diff_command: ctx.diff_command,
+                    handoff_dir: &repair_staging,
+                    transcript_path: &repair_transcript,
+                    denied_write_roots: &[],
+                    coder_kind: ctx.coder_kind,
+                    model: ctx.model,
+                    effort: ctx.effort,
+                    handoff_only: false,
+                    repair: Some(work_task_executor::SchemaRepairInput {
+                        rejected_draft: &rejected_draft,
+                        validation_error: &validation_error,
+                    }),
+                });
+                transaction.capture_return(workspace_path)?;
+                repair_result?;
+
+                publish_pre_land_draft(project_root, work_item_id, attempt_id, &repair_staging)?;
+                record_submitted_draft(project_root, work_item_id, attempt_id, &repair_run_dir)?;
+
+                let repaired = crate::learner::read_draft(project_root, work_item_id, attempt_id)?;
+                if let Err(reject) = crate::learner::accept_schema_repair(&prior, &repaired) {
+                    record_run_rejection(&repair_run_dir, &reject)?;
+                    return Err(reject);
+                }
+                let (repaired, repair_notes) = crate::learner::normalize_draft(repaired);
+                record_run_normalizations(&repair_run_dir, &repair_notes)?;
+                current_draft = repaired;
+                current_run_dir = repair_run_dir;
+            }
+        }
+    };
+
+    // Account for the cumulative union plus the final pre-normalization state, then
+    // host-normalize one canonical expertise-only result. (B4, Complete expertise
+    // finalization B1/B2/B3)
+    transaction.inventory(workspace_path)?;
+    let normalized = transaction.normalize(workspace_path)?;
+
+    // Stamp the final handoff — a last validation of the accepted draft — with the
+    // canonical expertise references. Only after BOTH the canonical result verified
+    // clean and the handoff stamped do the Work-model pointers move, so no rejection
+    // can leave a pointer naming a rolled-back commit. (Complete expertise
+    // finalization B4)
+    let handoff = crate::learner::stamp_handoff(
+        accepted_draft,
+        work_item_id,
+        attempt_id,
+        candidate_id,
+        normalized.expertise,
+    )?;
+    if let Some(canonical) = normalized.canonical_commit {
+        item.attempts[attempt_index].tasks[write_task_index].output = Some(TaskOutput {
+            commit: canonical.clone(),
+            ..write_output.clone()
+        });
+        if let Some(candidate) = item
+            .merge_candidates
+            .iter_mut()
+            .find(|candidate| candidate.id == candidate_id)
+        {
+            candidate.candidate_commit = canonical;
+        }
+    }
     Ok(handoff)
 }
 
@@ -2083,20 +2285,315 @@ fn sanitize_denied_path(path: &str) -> String {
     out
 }
 
-/// Confine the Learner's commit. In a post-land handoff-only run, any commit is
-/// discarded and its changed paths are returned as denied, leaving the merged
-/// commit and target branch untouched. Otherwise an expertise commit confined to
-/// `.fluent/expertise/` is promoted to the candidate tip and its changed files
-/// returned; an out-of-bounds commit is discarded and reported as an error,
-/// retaining the pre-Learner candidate tip.
+/// One raw, lossless snapshot of the Git state a pre-land Learner coder
+/// invocation left behind, captured immediately after the invocation returns and
+/// before any later invocation can move Git state.
+struct InvocationSnapshot {
+    /// Whether the returned `HEAD` is the baseline or an unambiguous linear
+    /// descendant of it. A non-descendant or merged history is unaccountable.
+    linear: bool,
+    /// Raw NUL-safe paths from every reachable intervening commit plus the index,
+    /// worktree, and untracked set. Bytes are retained exactly, so a
+    /// newline-bearing or non-UTF-8 path is neither split nor lossily decoded here.
+    paths: Vec<Vec<u8>>,
+}
+
+/// The result of host-normalizing the accounted expertise into the candidate.
+struct NormalizedExpertise {
+    /// The host-authored canonical commit, or `None` when the final tree has no
+    /// net expertise delta and the baseline is retained.
+    canonical_commit: Option<String>,
+    /// Handoff artifact references for the expertise blobs present in the result.
+    expertise: Vec<crate::follow_up::ArtifactRef>,
+}
+
+/// The host-owned Git transaction that spans a whole pre-land Learner run: the
+/// clean exact entry check, one immutable snapshot per coder return, the
+/// cumulative path accounting, the canonical normalization, and the restoring
+/// rollback. It is deliberately private to the Learner orchestration and operates
+/// only on the resolved managed candidate workspace.
+struct LearnerGitTransaction {
+    baseline: String,
+    snapshots: Vec<InvocationSnapshot>,
+}
+
+impl LearnerGitTransaction {
+    /// Verify the managed candidate workspace is at the exact Learner baseline with
+    /// a clean index and worktree before any coder launches. A failed entry check
+    /// launches no coder and mutates no pointer, so the caller settles a typed
+    /// relaunchable `Failed` record. (Transaction entry and accounting B1/B2)
+    fn begin(workspace: &Path, baseline: &str) -> Result<Self> {
+        let head = git::run_stdout(
+            workspace,
+            &["rev-parse", "HEAD"],
+            "resolve learner entry HEAD",
+        )?;
+        if head != baseline {
+            bail!(
+                "learner candidate workspace HEAD {head} is not the persisted baseline {baseline}"
+            );
+        }
+        let status = git::run_stdout(
+            workspace,
+            &["status", "--porcelain", "--untracked-files=all"],
+            "verify clean learner entry",
+        )?;
+        if !status.is_empty() {
+            bail!("learner candidate workspace is not clean at the baseline before the coder runs");
+        }
+        Ok(Self {
+            baseline: baseline.to_string(),
+            snapshots: Vec::new(),
+        })
+    }
+
+    /// Pin one coder invocation's returned history and dirty state into the
+    /// cumulative ledger, before its result is inspected, its draft is published or
+    /// validated, or another coder invocation runs. (Transaction entry and
+    /// accounting B3)
+    fn capture_return(&mut self, workspace: &Path) -> Result<()> {
+        self.snapshots
+            .push(capture_invocation_snapshot(workspace, &self.baseline)?);
+        Ok(())
+    }
+
+    /// Classify the cumulative union of every retained snapshot plus the final
+    /// pre-normalization state. Rejects an unaccountable history that is not a
+    /// linear descendant of the baseline (B6), a non-UTF-8 path the expertise
+    /// model cannot represent (B8), and any accounted path outside
+    /// `.fluent/expertise/` — including one a later commit reverted or a repair
+    /// reset out of reachable history (Failure closure B2). Newline-bearing paths
+    /// are classified whole (B7). (Transaction entry and accounting B4)
+    fn inventory(&mut self, workspace: &Path) -> Result<()> {
+        // The final pre-normalization state is one more snapshot in the union.
+        self.capture_return(workspace)?;
+        if self.snapshots.iter().any(|snapshot| !snapshot.linear) {
+            bail!(
+                "learner produced an unaccountable Git history that is not an unambiguous linear \
+                 descendant of the baseline"
+            );
+        }
+        for raw in self
+            .snapshots
+            .iter()
+            .flat_map(|snapshot| snapshot.paths.iter())
+        {
+            let path = std::str::from_utf8(raw).map_err(|_| {
+                anyhow::anyhow!(
+                    "learner changed a non-UTF-8 path that the expertise-reference model cannot \
+                     represent"
+                )
+            })?;
+            if !is_learner_path_in_bounds(path) {
+                bail!("learner changed out-of-bounds path {path:?} outside .fluent/expertise/");
+            }
+        }
+        Ok(())
+    }
+
+    /// Host-author one canonical `Update expertise` commit whose sole parent is the
+    /// baseline — folding all accounted committed, staged, unstaged, and untracked
+    /// expertise, and any deletions — or retain the baseline when the final tree
+    /// has no net expertise delta. Verifies the workspace is exactly clean at the
+    /// accepted result before returning. (Complete expertise finalization B1/B2/B3/B4)
+    fn normalize(&self, workspace: &Path) -> Result<NormalizedExpertise> {
+        // Move HEAD and the index back to the baseline, retaining the final
+        // worktree; every dirty path is accounted expertise, so staging all of it
+        // stages exactly the expertise delta.
+        git::run(
+            workspace,
+            &["reset", "--mixed", &self.baseline],
+            "reset learner tree to baseline",
+        )?;
+        git::run(workspace, &["add", "--all"], "stage learner expertise")?;
+        let staged = git::run_stdout(
+            workspace,
+            &["diff", "--cached", "--name-only"],
+            "detect staged expertise delta",
+        )?;
+        if staged.is_empty() {
+            // No net expertise change: retain the baseline, create no empty commit,
+            // and verify the workspace is exactly clean. (B3)
+            self.restore(workspace)?;
+            return Ok(NormalizedExpertise {
+                canonical_commit: None,
+                expertise: Vec::new(),
+            });
+        }
+        git::run(
+            workspace,
+            &["commit", "--message", "Update expertise"],
+            "author canonical expertise commit",
+        )?;
+        let head = git::run_stdout(workspace, &["rev-parse", "HEAD"], "resolve canonical HEAD")?;
+        let parents = git::run_stdout(
+            workspace,
+            &["show", "--no-patch", "--format=%P", &head],
+            "resolve canonical commit parents",
+        )?;
+        let mut parents = parents.split_whitespace();
+        if parents.next() != Some(self.baseline.as_str()) || parents.next().is_some() {
+            bail!("canonical expertise commit must have the Learner baseline as its sole parent");
+        }
+        let subject = git::run_stdout(
+            workspace,
+            &["show", "--no-patch", "--format=%s", &head],
+            "resolve canonical commit subject",
+        )?;
+        if subject != "Update expertise" {
+            bail!("canonical expertise commit has an unexpected subject {subject:?}");
+        }
+        let status = git::run_stdout(
+            workspace,
+            &["status", "--porcelain", "--untracked-files=all"],
+            "verify clean canonical result",
+        )?;
+        if !status.is_empty() {
+            bail!("canonical expertise result left the candidate workspace dirty");
+        }
+        // The commit is the authority for deletions; produce artifact references
+        // only for the expertise blobs present in the accepted result.
+        let changed = git::run_raw(
+            workspace,
+            &["diff", "--name-only", "-z", &self.baseline, &head],
+        )?;
+        if !changed.status.success() {
+            bail!("failed to inventory the canonical expertise commit");
+        }
+        let mut expertise = Vec::new();
+        for raw in split_nul(&changed.stdout) {
+            let path = std::str::from_utf8(&raw).map_err(|_| {
+                anyhow::anyhow!("canonical expertise commit contains a non-UTF-8 path")
+            })?;
+            if !is_learner_path_in_bounds(path) {
+                bail!("canonical expertise commit contains out-of-bounds path {path:?}");
+            }
+            let blob = git::run_raw(workspace, &["rev-parse", &format!("{head}:{path}")])?;
+            if !blob.status.success() {
+                // A deletion: the commit records it, but there is no blob to cite.
+                continue;
+            }
+            let digest = String::from_utf8_lossy(&blob.stdout);
+            expertise.push(crate::follow_up::ArtifactRef {
+                path: path.to_string(),
+                digest: format!("git:{}", digest.trim()),
+            });
+        }
+        Ok(NormalizedExpertise {
+            canonical_commit: Some(head),
+            expertise,
+        })
+    }
+
+    /// Restore the managed candidate workspace to the exact clean Learner baseline
+    /// and prove both the baseline `HEAD` and an empty index, worktree, and
+    /// untracked state. A clean entry precondition makes this reset-and-clean safe.
+    /// (Failure closure B3/B4)
+    fn restore(&self, workspace: &Path) -> Result<()> {
+        git::run(
+            workspace,
+            &["reset", "--hard", &self.baseline],
+            "restore learner baseline",
+        )?;
+        git::run(workspace, &["clean", "-fd"], "clean learner worktree")?;
+        let head = git::run_stdout(workspace, &["rev-parse", "HEAD"], "verify restored HEAD")?;
+        let status = git::run_stdout(
+            workspace,
+            &["status", "--porcelain", "--untracked-files=all"],
+            "verify restored clean state",
+        )?;
+        if head != self.baseline || !status.is_empty() {
+            bail!("could not restore the clean Learner baseline");
+        }
+        Ok(())
+    }
+}
+
+/// Capture one raw, lossless snapshot of a pre-land Learner invocation's Git
+/// return. Raw NUL-delimited output keeps adversarial paths (newline-bearing or
+/// non-UTF-8) exact; classification is deferred to [`LearnerGitTransaction::inventory`].
+fn capture_invocation_snapshot(workspace: &Path, baseline: &str) -> Result<InvocationSnapshot> {
+    let head = git::run_stdout(
+        workspace,
+        &["rev-parse", "HEAD"],
+        "capture learner return HEAD",
+    )?;
+    let mut paths = Vec::new();
+    let mut linear = true;
+    if head != baseline {
+        let ancestor = git::run_raw(workspace, &["merge-base", "--is-ancestor", baseline, &head])?;
+        if ancestor.status.success() {
+            // Every intervening commit must have exactly one parent; a merge (or a
+            // commit with no parent) is not an unambiguous linear Learner sequence.
+            let parents = git::run_stdout(
+                workspace,
+                &["rev-list", "--parents", &format!("{baseline}..{head}")],
+                "capture learner return parents",
+            )?;
+            linear = parents
+                .lines()
+                .all(|line| line.split_whitespace().count() == 2);
+        } else {
+            linear = false;
+        }
+        if linear {
+            let commits = git::run_stdout(
+                workspace,
+                &["rev-list", &format!("{baseline}..{head}")],
+                "list learner return commits",
+            )?;
+            for commit in commits.lines() {
+                let out = git::run_raw(
+                    workspace,
+                    &[
+                        "diff-tree",
+                        "--no-commit-id",
+                        "--name-only",
+                        "-r",
+                        "-z",
+                        commit,
+                    ],
+                )?;
+                if !out.status.success() {
+                    bail!("failed to inventory learner commit {commit}");
+                }
+                paths.extend(split_nul(&out.stdout));
+            }
+        }
+    }
+    for args in [
+        &["diff", "--cached", "--name-only", "-z"][..],
+        &["diff", "--name-only", "-z"][..],
+        &["ls-files", "--others", "--exclude-standard", "-z"][..],
+    ] {
+        let out = git::run_raw(workspace, args)?;
+        if !out.status.success() {
+            bail!("failed to inventory learner dirty state");
+        }
+        paths.extend(split_nul(&out.stdout));
+    }
+    Ok(InvocationSnapshot { linear, paths })
+}
+
+/// Split raw NUL-delimited Git output into exact path byte strings, dropping empty
+/// trailing records without decoding or splitting on any other byte.
+fn split_nul(bytes: &[u8]) -> Vec<Vec<u8>> {
+    bytes
+        .split(|&byte| byte == 0)
+        .filter(|segment| !segment.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect()
+}
+
+/// Confine a post-land handoff-only Learner run: any commit, staged, unstaged, or
+/// untracked change is discarded and its changed paths are returned as denied, so
+/// the missed expertise becomes non-corrective follow-ups while the merged commit
+/// and target branch stay untouched. Resetting and cleaning restores both the
+/// candidate branch and its index before the handoff is accepted. The pre-land
+/// path does not use this helper; it runs the host-owned
+/// [`LearnerGitTransaction`] instead.
 fn apply_learner_confinement(
     workspace_path: &Path,
-    item: &mut WorkItem,
-    attempt_index: usize,
-    write_task_index: usize,
-    write_output: &TaskOutput,
-    candidate_id: &str,
-    handoff_only: bool,
     baseline_commit: &str,
 ) -> Result<LearnerConfinement> {
     let new_head = git::run_stdout(
@@ -2115,115 +2612,70 @@ fn apply_learner_confinement(
         .map(str::to_string)
         .collect();
 
-    // A post-land retry may not mutate expertise or the merged branch. Discard
-    // committed, staged, unstaged, and untracked changes and report their paths
-    // so they become non-corrective follow-ups. Resetting and cleaning restores
-    // both the candidate branch and its index before accepting the handoff.
-    if handoff_only {
-        for args in [
-            vec!["diff", "--name-only"],
-            vec!["diff", "--cached", "--name-only"],
-            vec!["ls-files", "--others", "--exclude-standard"],
-        ] {
-            let changed = git::run_stdout(workspace_path, &args, "list denied learner changes")?;
-            changed_paths.extend(
-                changed
-                    .lines()
-                    .filter(|line| !line.is_empty())
-                    .map(str::to_string),
-            );
-        }
-        changed_paths.sort();
-        changed_paths.dedup();
-        git::run(
-            workspace_path,
-            &["reset", "--hard", baseline_commit],
-            "discard post-land learner commit",
-        )?;
-        git::run(
-            workspace_path,
-            &["clean", "-fd"],
-            "discard untracked post-land learner changes",
-        )?;
-        let restored_head = git::run_stdout(
-            workspace_path,
-            &["rev-parse", "HEAD"],
-            "verify restored candidate HEAD",
-        )?;
-        let restored_status = git::run_stdout(
-            workspace_path,
-            &["status", "--porcelain", "--untracked-files=all"],
-            "verify restored candidate index and worktree",
-        )?;
-        if restored_head != baseline_commit || !restored_status.is_empty() {
-            bail!("handoff-only Learner candidate Git state could not be restored");
-        }
-        return Ok(LearnerConfinement {
-            expertise: Vec::new(),
-            denied_paths: changed_paths,
-        });
+    for args in [
+        vec!["diff", "--name-only"],
+        vec!["diff", "--cached", "--name-only"],
+        vec!["ls-files", "--others", "--exclude-standard"],
+    ] {
+        let changed = git::run_stdout(workspace_path, &args, "list denied learner changes")?;
+        changed_paths.extend(
+            changed
+                .lines()
+                .filter(|line| !line.is_empty())
+                .map(str::to_string),
+        );
     }
-
-    if new_head == baseline_commit {
-        return Ok(LearnerConfinement {
-            expertise: Vec::new(),
-            denied_paths: Vec::new(),
-        });
+    changed_paths.sort();
+    changed_paths.dedup();
+    git::run(
+        workspace_path,
+        &["reset", "--hard", baseline_commit],
+        "discard post-land learner commit",
+    )?;
+    git::run(
+        workspace_path,
+        &["clean", "-fd"],
+        "discard untracked post-land learner changes",
+    )?;
+    let restored_head = git::run_stdout(
+        workspace_path,
+        &["rev-parse", "HEAD"],
+        "verify restored candidate HEAD",
+    )?;
+    let restored_status = git::run_stdout(
+        workspace_path,
+        &["status", "--porcelain", "--untracked-files=all"],
+        "verify restored candidate index and worktree",
+    )?;
+    if restored_head != baseline_commit || !restored_status.is_empty() {
+        bail!("handoff-only Learner candidate Git state could not be restored");
     }
-
-    let out_of_bounds: Vec<&str> = changed_paths
-        .iter()
-        .map(String::as_str)
-        .filter(|path| !is_learner_path_in_bounds(path))
-        .collect();
-    if !out_of_bounds.is_empty() {
-        for path in &out_of_bounds {
-            eprintln!("  Warning: learner changed out-of-bounds path: {path}");
-        }
-        git::run(
-            workspace_path,
-            &["reset", "--hard", &write_output.commit],
-            "discard out-of-bounds learner commit",
-        )?;
-        bail!("learner commit changed paths outside .fluent/expertise/");
-    }
-
-    // Confined expertise commit becomes the Merge Candidate's candidate commit.
-    item.attempts[attempt_index].tasks[write_task_index].output = Some(TaskOutput {
-        commit: new_head.clone(),
-        ..write_output.clone()
-    });
-    if let Some(candidate) = item
-        .merge_candidates
-        .iter_mut()
-        .find(|candidate| candidate.id == candidate_id)
-    {
-        candidate.candidate_commit = new_head.clone();
-    }
-
-    let expertise = changed_paths
-        .iter()
-        .map(|path| {
-            let digest = git::run_stdout(
-                workspace_path,
-                &["rev-parse", &format!("{new_head}:{path}")],
-                "digest expertise blob",
-            )
-            .unwrap_or_default();
-            crate::follow_up::ArtifactRef {
-                path: path.to_string(),
-                digest: format!("git:{}", digest.trim()),
-            }
-        })
-        .collect();
     Ok(LearnerConfinement {
-        expertise,
-        denied_paths: Vec::new(),
+        expertise: Vec::new(),
+        denied_paths: changed_paths,
     })
 }
 
+/// Whether an accounted Learner path is a file strictly beneath
+/// `.fluent/expertise/`. The check is component-aware, not a textual prefix: it
+/// rejects the directory itself, sibling prefixes such as
+/// `.fluent/expertise-notes`, absolute paths, and any `.`/`..`/empty component,
+/// so a lexical near-miss can never be accepted as expertise.
 fn is_learner_path_in_bounds(path: &str) -> bool {
-    path.starts_with(".fluent/expertise/")
+    let mut components = path.split('/');
+    if components.next() != Some(".fluent") {
+        return false;
+    }
+    if components.next() != Some("expertise") {
+        return false;
+    }
+    let rest: Vec<&str> = components.collect();
+    // Require at least one further component (reject the directory itself and a
+    // trailing slash), and reject any empty, `.`, or `..` component.
+    !rest.is_empty()
+        && rest
+            .iter()
+            .all(|c| !c.is_empty() && *c != "." && *c != "..")
 }
 
 fn all_tester_artifact_paths(
@@ -6087,11 +6539,23 @@ mod tests {
             ".fluent/expertise-notes/something.md"
         ));
         assert!(!is_learner_path_in_bounds("documentation/behaviors.md"));
+        for path in [
+            ".fluent/expertise/../escape",
+            ".fluent/expertise/./x",
+            ".fluent/expertise//x",
+            "/.fluent/expertise/x",
+        ] {
+            assert!(
+                !is_learner_path_in_bounds(path),
+                "path {path:?} must be rejected"
+            );
+        }
     }
 
     #[test]
     fn learner_path_expertise_without_trailing_slash_is_out_of_bounds() {
         assert!(!is_learner_path_in_bounds(".fluent/expertise"));
+        assert!(!is_learner_path_in_bounds(".fluent/expertise/"));
     }
 
     #[test]
@@ -6204,6 +6668,1332 @@ mod tests {
         assert!(
             stored.attempts[0].learning.as_ref().unwrap().is_failed(),
             "an out-of-bounds learner commit records a retryable failure"
+        );
+        // The candidate workspace is restored to the exact clean baseline, not just
+        // left with an unchanged pointer.
+        assert!(
+            learner_workspace_is_clean_at(&workspace, &base),
+            "an out-of-bounds source commit restores the exact clean baseline"
+        );
+        let learning = stored.attempts[0].learning.as_ref().unwrap();
+        assert_eq!(learning.failure_kind, Some(LearningFailureKind::Generic));
+        assert!(
+            learning.is_relaunchable(),
+            "a generic out-of-bounds rejection is relaunchable"
+        );
+    }
+
+    /// Whether the candidate workspace is at `commit` with a clean index, worktree,
+    /// and untracked set — the exact invariant the Learner transaction proves.
+    fn learner_workspace_is_clean_at(workspace: &Path, commit: &str) -> bool {
+        let head = git::run_stdout(workspace, &["rev-parse", "HEAD"], "head").unwrap();
+        let status = git::run_stdout(
+            workspace,
+            &["status", "--porcelain", "--untracked-files=all"],
+            "status",
+        )
+        .unwrap();
+        head == commit && status.is_empty()
+    }
+
+    /// Write a schema-valid Learner draft into the coder's handoff surface.
+    fn write_valid_learner_draft(request: &LearnerCoderRequest<'_>) {
+        fs::create_dir_all(request.handoff_dir).unwrap();
+        fs::write(
+            request.handoff_dir.join(crate::learner::DRAFT_FILE_NAME),
+            r#"{"learning_summary":"x","follow_ups":[]}"#,
+        )
+        .unwrap();
+    }
+
+    /// Commit an expertise file inside the candidate workspace.
+    fn commit_expertise_file(workspace: &Path, rel: &str, contents: &str, message: &str) {
+        let path = workspace.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, contents).unwrap();
+        git::run(workspace, &["add", "-A"], "add").unwrap();
+        git::run(workspace, &["commit", "-m", message], "commit").unwrap();
+    }
+
+    fn run_pre_land_learner_outcome(
+        project_root: &Path,
+        store: &WorkModelStore,
+        run_coder: &dyn Fn(&LearnerCoderRequest<'_>) -> Result<()>,
+    ) -> WorkAttemptRunOutcome {
+        let item = store.read_work_item("work-1").unwrap();
+        interpret_reviews(
+            project_root,
+            store,
+            item,
+            "attempt-1",
+            true,
+            Some(LearnerConfig { run_coder }),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn learner_dirty_baseline_fails_closed_before_coder_launch() {
+        // Transaction entry and accounting B1/B2: a pre-land Learner launches only
+        // from the exact persisted Write tip and a clean managed candidate
+        // workspace. A dirty entry launches no coder, moves no pointer, and settles
+        // a typed relaunchable Failed record.
+        let cases: [(&str, fn(&Path)); 4] = [
+            ("unstaged", |workspace| {
+                fs::write(workspace.join("src.rs"), "fn changed() {}").unwrap();
+            }),
+            ("staged", |workspace| {
+                fs::write(workspace.join("src.rs"), "fn staged() {}").unwrap();
+                git::run(workspace, &["add", "src.rs"], "stage entry change").unwrap();
+            }),
+            ("untracked", |workspace| {
+                fs::write(workspace.join("residual.txt"), "left over").unwrap();
+            }),
+            ("divergent HEAD", |workspace| {
+                fs::write(workspace.join("diverged.rs"), "fn diverged() {}").unwrap();
+                git::run(workspace, &["add", "diverged.rs"], "stage divergent commit").unwrap();
+                git::run(
+                    workspace,
+                    &["commit", "-m", "diverge before learner"],
+                    "commit divergent entry",
+                )
+                .unwrap();
+            }),
+        ];
+
+        for (name, prepare) in cases {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let (store, project_root, workspace, base) =
+                make_learner_passing_fixture(tmp.path(), 1);
+            prepare(&workspace);
+            let entry_head =
+                git::run_stdout(&workspace, &["rev-parse", "HEAD"], "entry HEAD").unwrap();
+            let entry_status = git::run_stdout(
+                &workspace,
+                &["status", "--porcelain", "--untracked-files=all"],
+                "entry status",
+            )
+            .unwrap();
+
+            let launched = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let launched_probe = Arc::clone(&launched);
+            let run_coder = move |_: &LearnerCoderRequest<'_>| -> Result<()> {
+                launched_probe.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            };
+            let outcome = run_pre_land_learner_outcome(&project_root, &store, &run_coder);
+
+            assert!(
+                matches!(outcome, WorkAttemptRunOutcome::LearnerNotReady { .. }),
+                "{name}: an invalid entry blocks readiness; got {outcome:?}"
+            );
+            assert!(
+                !launched.load(std::sync::atomic::Ordering::SeqCst),
+                "{name}: no Learner coder launches from an invalid entry"
+            );
+            let stored = store.read_work_item("work-1").unwrap();
+            assert_eq!(
+                stored.merge_candidates[0].candidate_commit, base,
+                "{name}: a failed entry leaves the Merge Candidate pointer unchanged"
+            );
+            let write_commit = stored.attempts[0]
+                .tasks
+                .iter()
+                .rev()
+                .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+                .and_then(|task| task.output.as_ref())
+                .map(|output| output.commit.as_str())
+                .unwrap();
+            assert_eq!(
+                write_commit, base,
+                "{name}: a failed entry leaves the Write output pointer unchanged"
+            );
+            assert_eq!(
+                git::run_stdout(&workspace, &["rev-parse", "HEAD"], "preserved entry HEAD")
+                    .unwrap(),
+                entry_head,
+                "{name}: entry verification preserves the pre-existing HEAD"
+            );
+            assert_eq!(
+                git::run_stdout(
+                    &workspace,
+                    &["status", "--porcelain", "--untracked-files=all"],
+                    "preserved entry status",
+                )
+                .unwrap(),
+                entry_status,
+                "{name}: entry verification preserves the pre-existing dirty state"
+            );
+            let learning = stored.attempts[0].learning.as_ref().unwrap();
+            assert!(learning.is_failed(), "{name}: Learning is terminal Failed");
+            assert_eq!(
+                learning.failure_kind,
+                Some(LearningFailureKind::Generic),
+                "{name}: the failure is typed Generic"
+            );
+            assert!(
+                learning.is_relaunchable(),
+                "{name}: failure is relaunchable"
+            );
+            assert!(learning.handoff.is_none(), "{name}: no handoff is exposed");
+            assert!(
+                learning.last_failure.is_some(),
+                "{name}: the entry failure diagnostic is retained"
+            );
+        }
+    }
+
+    #[test]
+    fn learner_inventory_covers_commits_index_worktree_and_untracked() {
+        // Transaction entry and accounting B3/B4 and Complete expertise
+        // finalization B1: the accounting union spans committed, staged, unstaged,
+        // and untracked expertise, and all four fold into the canonical result.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
+
+        let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            let ws = request.workspace_path;
+            let expertise = ws.join(".fluent/expertise");
+            fs::create_dir_all(&expertise).unwrap();
+            // Committed, then modified again in the worktree (committed + unstaged).
+            fs::write(expertise.join("committed.md"), "v1").unwrap();
+            git::run(ws, &["add", "-A"], "add").unwrap();
+            git::run(ws, &["commit", "-m", "learner commit"], "commit").unwrap();
+            fs::write(expertise.join("committed.md"), "v2").unwrap();
+            // Staged but not committed.
+            fs::write(expertise.join("staged.md"), "staged").unwrap();
+            git::run(ws, &["add", ".fluent/expertise/staged.md"], "stage").unwrap();
+            // Untracked.
+            fs::write(expertise.join("untracked.md"), "untracked").unwrap();
+            write_valid_learner_draft(request);
+            Ok(())
+        };
+        let outcome = run_pre_land_learner_outcome(&project_root, &store, &run_coder);
+
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
+            "all-in-bounds expertise across every category is accepted; got {outcome:?}"
+        );
+        let head = git::run_stdout(&workspace, &["rev-parse", "HEAD"], "head").unwrap();
+        assert_ne!(head, base);
+        let tree =
+            git::run_stdout(&workspace, &["ls-tree", "-r", "--name-only", "HEAD"], "ls").unwrap();
+        for path in [
+            ".fluent/expertise/committed.md",
+            ".fluent/expertise/staged.md",
+            ".fluent/expertise/untracked.md",
+        ] {
+            assert!(tree.contains(path), "canonical result must include {path}");
+        }
+        // The committed file's final (unstaged) content wins.
+        let content = git::run_stdout(
+            &workspace,
+            &["show", "HEAD:.fluent/expertise/committed.md"],
+            "show",
+        )
+        .unwrap();
+        assert_eq!(content, "v2");
+        assert!(learner_workspace_is_clean_at(&workspace, &head));
+    }
+
+    #[test]
+    fn learner_cumulative_history_survives_schema_repair_hard_reset() {
+        // Transaction entry and accounting B5: an out-of-bounds commit captured
+        // after the initial invocation stays forbidden even when a later schema
+        // repair hard-resets it out of reachable history.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
+
+        let run_coder = move |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            let ws = request.workspace_path;
+            if request.repair.is_none() {
+                // Initial run: commit an out-of-bounds file and submit an invalid
+                // draft to force a schema repair.
+                fs::write(ws.join("evil.rs"), "fn main() {}").unwrap();
+                git::run(ws, &["add", "-A"], "add").unwrap();
+                git::run(ws, &["commit", "-m", "stray"], "commit").unwrap();
+                fs::create_dir_all(request.handoff_dir).unwrap();
+                fs::write(
+                    request.handoff_dir.join(crate::learner::DRAFT_FILE_NAME),
+                    r#"{"learning_summary":"x","follow_ups":[{"id":"","summary":"needs id"}]}"#,
+                )
+                .unwrap();
+            } else {
+                // Repair run: erase the forbidden commit from reachable history and
+                // submit a valid draft.
+                git::run(ws, &["reset", "--hard", "HEAD~1"], "erase").unwrap();
+                write_valid_learner_draft(request);
+            }
+            Ok(())
+        };
+        let outcome = run_pre_land_learner_outcome(&project_root, &store, &run_coder);
+
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::LearnerNotReady { .. }),
+            "an erased-but-earlier forbidden commit is still rejected; got {outcome:?}"
+        );
+        assert!(
+            learner_workspace_is_clean_at(&workspace, &base),
+            "the reset-away forbidden commit still rolls back to the clean baseline"
+        );
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.merge_candidates[0].candidate_commit, base);
+        assert!(stored.attempts[0].learning.as_ref().unwrap().is_failed());
+    }
+
+    #[test]
+    fn learner_ambiguous_history_is_rejected_and_restored() {
+        // Transaction entry and accounting B6: a merged (non-linear) history cannot
+        // be classified as an unambiguous linear Learner sequence and is rejected.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
+
+        let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            let ws = request.workspace_path;
+            let expertise = ws.join(".fluent/expertise");
+            fs::create_dir_all(&expertise).unwrap();
+            git::run(ws, &["checkout", "-b", "side"], "branch").unwrap();
+            fs::write(expertise.join("a.md"), "a").unwrap();
+            git::run(ws, &["add", "-A"], "add").unwrap();
+            git::run(ws, &["commit", "-m", "side"], "commit").unwrap();
+            git::run(ws, &["checkout", "main"], "back").unwrap();
+            fs::create_dir_all(&expertise).unwrap();
+            fs::write(expertise.join("b.md"), "b").unwrap();
+            git::run(ws, &["add", "-A"], "add").unwrap();
+            git::run(ws, &["commit", "-m", "main"], "commit").unwrap();
+            git::run(ws, &["merge", "--no-ff", "-m", "merge", "side"], "merge").unwrap();
+            write_valid_learner_draft(request);
+            Ok(())
+        };
+        let outcome = run_pre_land_learner_outcome(&project_root, &store, &run_coder);
+
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::LearnerNotReady { .. }),
+            "an ambiguous merged history is rejected; got {outcome:?}"
+        );
+        assert!(
+            learner_workspace_is_clean_at(&workspace, &base),
+            "a rejected ambiguous history restores the clean baseline"
+        );
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.merge_candidates[0].candidate_commit, base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn learner_newline_path_is_accounted_without_splitting() {
+        // Transaction entry and accounting B7: a newline-bearing path is accounted
+        // as one exact path. Were it split on the newline, its `not-expertise`
+        // fragment would read as out-of-bounds and block; accepting it proves the
+        // path stayed whole.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
+
+        let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            let ws = request.workspace_path;
+            let expertise = ws.join(".fluent/expertise");
+            fs::create_dir_all(&expertise).unwrap();
+            fs::write(expertise.join("a.md\nnot-expertise"), "note").unwrap();
+            git::run(ws, &["add", "-A"], "add").unwrap();
+            git::run(ws, &["commit", "-m", "newline"], "commit").unwrap();
+            write_valid_learner_draft(request);
+            Ok(())
+        };
+        let outcome = run_pre_land_learner_outcome(&project_root, &store, &run_coder);
+
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
+            "a newline path stays one in-bounds expertise path; got {outcome:?}"
+        );
+        let head = git::run_stdout(&workspace, &["rev-parse", "HEAD"], "head").unwrap();
+        assert_ne!(head, base);
+        assert!(learner_workspace_is_clean_at(&workspace, &head));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn learner_non_utf8_path_is_rejected_and_restored() {
+        // Transaction entry and accounting B8: a non-UTF-8 path cannot be
+        // represented in the persisted expertise-reference model, so the Git result
+        // is rejected and the clean baseline restored rather than classified lossily.
+        //
+        // macOS APFS refuses a non-UTF-8 filename in the worktree, so the commit is
+        // authored through Git plumbing directly into a tree object — the path bytes
+        // travel on stdin via `update-index --index-info`, never through the
+        // filesystem. `diff-tree -z` then emits the raw bytes the production
+        // inventory must reject.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
+
+        let run_coder = move |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            let ws = request.workspace_path;
+            // A blob for the non-UTF-8 path.
+            let blob_src = ws.join("blob-src");
+            fs::write(&blob_src, "x").unwrap();
+            let blob = git::run_stdout(ws, &["hash-object", "-w", "blob-src"], "hash").unwrap();
+            fs::remove_file(&blob_src).unwrap();
+            // Stage the non-UTF-8 path with its raw bytes on stdin, never on disk.
+            let mut index_info = format!("100644 {blob}\t").into_bytes();
+            index_info.extend_from_slice(b".fluent/expertise/\xff.md\n");
+            git::run_with_stdin(
+                ws,
+                &["update-index", "--add", "--index-info"],
+                &index_info,
+                "stage binary path",
+            )
+            .unwrap();
+            let tree = git::run_stdout(ws, &["write-tree"], "tree").unwrap();
+            let commit = git::run_stdout(
+                ws,
+                &["commit-tree", &tree, "-p", "HEAD", "-m", "binary"],
+                "commit",
+            )
+            .unwrap();
+            // Advance the branch without a worktree checkout the filesystem rejects.
+            git::run(ws, &["update-ref", "HEAD", &commit], "advance").unwrap();
+            write_valid_learner_draft(request);
+            Ok(())
+        };
+        let outcome = run_pre_land_learner_outcome(&project_root, &store, &run_coder);
+
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::LearnerNotReady { .. }),
+            "a non-UTF-8 path is rejected; got {outcome:?}"
+        );
+        assert!(
+            learner_workspace_is_clean_at(&workspace, &base),
+            "a rejected non-UTF-8 path restores the clean baseline"
+        );
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.merge_candidates[0].candidate_commit, base);
+        assert!(stored.attempts[0].learning.as_ref().unwrap().is_failed());
+    }
+
+    #[test]
+    fn learner_host_finalizes_uncommitted_expertise() {
+        // Complete expertise finalization B1/B2: a valid expertise result the
+        // Learner never committed still becomes exactly one host-authored
+        // `Update expertise` commit whose sole parent is the baseline.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
+
+        let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            let expertise = request.workspace_path.join(".fluent/expertise");
+            fs::create_dir_all(&expertise).unwrap();
+            fs::write(expertise.join("note.md"), "learned").unwrap();
+            write_valid_learner_draft(request);
+            Ok(())
+        };
+        let outcome = run_pre_land_learner_outcome(&project_root, &store, &run_coder);
+
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
+            "uncommitted expertise is host-finalized; got {outcome:?}"
+        );
+        let head = git::run_stdout(&workspace, &["rev-parse", "HEAD"], "head").unwrap();
+        let parent = git::run_stdout(&workspace, &["rev-parse", "HEAD^"], "parent").unwrap();
+        assert_eq!(
+            parent, base,
+            "the canonical commit's sole parent is the baseline"
+        );
+        let subject =
+            git::run_stdout(&workspace, &["log", "-1", "--format=%s"], "subject").unwrap();
+        assert_eq!(subject, "Update expertise");
+        let tree =
+            git::run_stdout(&workspace, &["ls-tree", "-r", "--name-only", "HEAD"], "ls").unwrap();
+        assert!(tree.contains(".fluent/expertise/note.md"));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.merge_candidates[0].candidate_commit, head);
+        assert!(stored.attempts[0].learning.as_ref().unwrap().is_succeeded());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn learner_hook_rewritten_topology_is_rejected_and_restored() {
+        // Complete expertise finalization B1/B2: inspect the complete canonical
+        // parent list after Git hooks return. `HEAD^` alone sees only the first
+        // parent and would accept this clean merge replacement.
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
+        let hook = workspace.join(".git/hooks/post-commit");
+        fs::write(
+            &hook,
+            r#"#!/bin/sh
+set -eu
+host="$(git rev-parse HEAD)"
+base="$(git rev-parse HEAD^)"
+tree="$(git rev-parse 'HEAD^{tree}')"
+replacement="$(printf 'hook replacement\n' | git commit-tree "$tree" -p "$base" -p "$host")"
+git update-ref HEAD "$replacement" "$host"
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&hook).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&hook, permissions).unwrap();
+
+        let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            let expertise = request.workspace_path.join(".fluent/expertise");
+            fs::create_dir_all(&expertise).unwrap();
+            fs::write(expertise.join("note.md"), "learned").unwrap();
+            write_valid_learner_draft(request);
+            Ok(())
+        };
+        let outcome = run_pre_land_learner_outcome(&project_root, &store, &run_coder);
+
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::LearnerNotReady { .. }),
+            "a hook-rewritten merge topology blocks readiness; got {outcome:?}"
+        );
+        assert!(
+            learner_workspace_is_clean_at(&workspace, &base),
+            "the rejected hook topology restores the exact clean baseline"
+        );
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(
+            stored.merge_candidates[0].candidate_commit, base,
+            "the Merge Candidate pointer remains at the baseline"
+        );
+        let write_commit = stored.attempts[0]
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+            .and_then(|task| task.output.as_ref())
+            .map(|output| output.commit.as_str())
+            .unwrap();
+        assert_eq!(
+            write_commit, base,
+            "the Write output remains at the baseline"
+        );
+        let learning = stored.attempts[0].learning.as_ref().unwrap();
+        assert!(learning.is_failed());
+        assert_eq!(learning.failure_kind, Some(LearningFailureKind::Generic));
+        assert!(learning.is_relaunchable());
+        assert!(learning.handoff.is_none());
+        assert!(
+            learning
+                .last_failure
+                .as_deref()
+                .unwrap_or_default()
+                .contains("sole parent"),
+            "the topology diagnostic identifies the violated invariant"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn learner_hook_rewritten_subject_is_rejected_and_restored() {
+        // The canonical commit identity includes its fixed subject. A hook can
+        // replace the just-authored commit while preserving its tree and sole
+        // parent, so parent verification alone is insufficient.
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
+        let hook = workspace.join(".git/hooks/post-commit");
+        fs::write(
+            &hook,
+            r#"#!/bin/sh
+set -eu
+host="$(git rev-parse HEAD)"
+base="$(git rev-parse HEAD^)"
+tree="$(git rev-parse 'HEAD^{tree}')"
+replacement="$(printf 'not the canonical subject\n' | git commit-tree "$tree" -p "$base")"
+git update-ref HEAD "$replacement" "$host"
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&hook).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&hook, permissions).unwrap();
+
+        let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            let expertise = request.workspace_path.join(".fluent/expertise");
+            fs::create_dir_all(&expertise).unwrap();
+            fs::write(expertise.join("note.md"), "learned").unwrap();
+            write_valid_learner_draft(request);
+            Ok(())
+        };
+        let outcome = run_pre_land_learner_outcome(&project_root, &store, &run_coder);
+
+        assert!(matches!(
+            outcome,
+            WorkAttemptRunOutcome::LearnerNotReady { .. }
+        ));
+        assert!(learner_workspace_is_clean_at(&workspace, &base));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.merge_candidates[0].candidate_commit, base);
+        let learning = stored.attempts[0].learning.as_ref().unwrap();
+        assert!(learning.is_failed());
+        assert_eq!(learning.failure_kind, Some(LearningFailureKind::Generic));
+        assert!(learning.is_relaunchable());
+        assert!(learning.handoff.is_none());
+        assert!(
+            learning
+                .last_failure
+                .as_deref()
+                .unwrap_or_default()
+                .contains("unexpected subject")
+        );
+    }
+
+    #[test]
+    fn learner_squashes_committed_and_residual_expertise() {
+        // Complete expertise finalization B1/B2: committed and residual expertise
+        // fold into exactly one canonical commit over the baseline.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
+
+        let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            let ws = request.workspace_path;
+            commit_expertise_file(ws, ".fluent/expertise/a.md", "a", "learner a");
+            // Residual untracked expertise left after the commit.
+            fs::write(ws.join(".fluent/expertise/b.md"), "b").unwrap();
+            write_valid_learner_draft(request);
+            Ok(())
+        };
+        let outcome = run_pre_land_learner_outcome(&project_root, &store, &run_coder);
+
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
+            "committed and residual expertise are squashed; got {outcome:?}"
+        );
+        let head = git::run_stdout(&workspace, &["rev-parse", "HEAD"], "head").unwrap();
+        let parent = git::run_stdout(&workspace, &["rev-parse", "HEAD^"], "parent").unwrap();
+        assert_eq!(parent, base, "exactly one commit over the baseline");
+        let tree =
+            git::run_stdout(&workspace, &["ls-tree", "-r", "--name-only", "HEAD"], "ls").unwrap();
+        assert!(tree.contains(".fluent/expertise/a.md"));
+        assert!(tree.contains(".fluent/expertise/b.md"));
+        assert!(learner_workspace_is_clean_at(&workspace, &head));
+    }
+
+    #[test]
+    fn learner_canonicalizes_deletion_without_handoff_blob_reference() {
+        // Complete expertise finalization B1/B2: deletion is part of the canonical
+        // Git delta, but a deleted path has no blob and therefore no handoff
+        // artifact reference.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, _initial) =
+            make_learner_passing_fixture(tmp.path(), 1);
+        commit_expertise_file(
+            &workspace,
+            ".fluent/expertise/obsolete.md",
+            "obsolete",
+            "seed expertise",
+        );
+        let baseline =
+            git::run_stdout(&workspace, &["rev-parse", "HEAD"], "expertise baseline").unwrap();
+        let mut item = store.read_work_item("work-1").unwrap();
+        item.attempts[0]
+            .tasks
+            .iter_mut()
+            .rev()
+            .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+            .and_then(|task| task.output.as_mut())
+            .expect("completed Write output")
+            .commit = baseline.clone();
+        store.write_work_item(&item).unwrap();
+
+        let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            fs::remove_file(request.workspace_path.join(".fluent/expertise/obsolete.md")).unwrap();
+            write_valid_learner_draft(request);
+            Ok(())
+        };
+        let outcome = run_pre_land_learner_outcome(&project_root, &store, &run_coder);
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
+            "an expertise deletion reaches a ready candidate; got {outcome:?}"
+        );
+
+        let head = git::run_stdout(&workspace, &["rev-parse", "HEAD"], "head").unwrap();
+        let parents = git::run_stdout(
+            &workspace,
+            &["show", "--no-patch", "--format=%P", &head],
+            "parents",
+        )
+        .unwrap();
+        assert_eq!(parents, baseline, "the deletion is one canonical child");
+        assert_eq!(
+            git::run_stdout(
+                &workspace,
+                &["diff", "--name-status", &baseline, &head],
+                "deletion delta",
+            )
+            .unwrap(),
+            "D\t.fluent/expertise/obsolete.md"
+        );
+        assert!(learner_workspace_is_clean_at(&workspace, &head));
+
+        let stored = store.read_work_item("work-1").unwrap();
+        let write_commit = stored.attempts[0]
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+            .and_then(|task| task.output.as_ref())
+            .map(|output| output.commit.as_str())
+            .unwrap();
+        assert_eq!(write_commit, head);
+        assert_eq!(stored.merge_candidates[0].candidate_commit, head);
+        let learning = stored.attempts[0].learning.as_ref().unwrap();
+        assert!(learning.is_succeeded());
+        let handoff = crate::learner::load_verified_handoff(
+            &project_root,
+            learning.handoff.as_ref().expect("successful handoff"),
+        )
+        .unwrap();
+        assert!(
+            handoff.learning.expertise.is_empty(),
+            "a deleted expertise path has no blob reference"
+        );
+    }
+
+    #[test]
+    fn learner_success_updates_pointers_only_after_clean_verification() {
+        // Complete expertise finalization B4/B5: on success the Write output, the
+        // Merge Candidate, and the workspace HEAD all name one clean canonical
+        // expertise result.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
+
+        let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            let expertise = request.workspace_path.join(".fluent/expertise");
+            fs::create_dir_all(&expertise).unwrap();
+            fs::write(expertise.join("note.md"), "learned").unwrap();
+            write_valid_learner_draft(request);
+            Ok(())
+        };
+        let outcome = run_pre_land_learner_outcome(&project_root, &store, &run_coder);
+        assert!(matches!(
+            outcome,
+            WorkAttemptRunOutcome::MergeCandidateReady { .. }
+        ));
+
+        let head = git::run_stdout(&workspace, &["rev-parse", "HEAD"], "head").unwrap();
+        assert_ne!(head, base);
+        let stored = store.read_work_item("work-1").unwrap();
+        let write_commit = stored.attempts[0]
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+            .and_then(|task| task.output.as_ref())
+            .map(|output| output.commit.clone())
+            .unwrap();
+        assert_eq!(
+            write_commit, head,
+            "the Write output names the canonical result"
+        );
+        assert_eq!(
+            stored.merge_candidates[0].candidate_commit, head,
+            "the Merge Candidate names the canonical result"
+        );
+        assert!(
+            learner_workspace_is_clean_at(&workspace, &head),
+            "no uncommitted portion of the learning result remains"
+        );
+    }
+
+    #[test]
+    fn learner_out_of_bounds_dirty_state_is_restored_and_blocks_readiness() {
+        // Failure closure B2: an out-of-bounds path in the dirty (uncommitted) state
+        // — which the old final-HEAD diff missed — is rejected, the baseline is
+        // restored, pointers are retained, and readiness is refused.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
+
+        let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            let ws = request.workspace_path;
+            // In-bounds expertise plus an out-of-bounds untracked file; nothing is
+            // committed, so only the dirty-state inventory catches the violation.
+            let expertise = ws.join(".fluent/expertise");
+            fs::create_dir_all(&expertise).unwrap();
+            fs::write(expertise.join("note.md"), "ok").unwrap();
+            fs::write(ws.join("evil.rs"), "fn main() {}").unwrap();
+            write_valid_learner_draft(request);
+            Ok(())
+        };
+        let outcome = run_pre_land_learner_outcome(&project_root, &store, &run_coder);
+
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::LearnerNotReady { .. }),
+            "an out-of-bounds dirty path blocks readiness; got {outcome:?}"
+        );
+        assert!(
+            learner_workspace_is_clean_at(&workspace, &base),
+            "the out-of-bounds dirty state is restored to the clean baseline"
+        );
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.merge_candidates[0].candidate_commit, base);
+        let learning = stored.attempts[0].learning.as_ref().unwrap();
+        assert!(learning.is_failed());
+        assert_eq!(learning.failure_kind, Some(LearningFailureKind::Generic));
+        assert!(learning.is_relaunchable());
+        assert!(
+            learning
+                .last_failure
+                .as_deref()
+                .unwrap_or_default()
+                .contains("evil.rs")
+        );
+    }
+
+    #[test]
+    fn learner_reverted_out_of_bounds_commit_is_still_rejected() {
+        // Failure closure B2: an out-of-bounds file a later commit reverts leaves a
+        // clean net HEAD diff, but the per-commit history keeps it accounted and
+        // rejected.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
+
+        let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            let ws = request.workspace_path;
+            fs::write(ws.join("evil.rs"), "fn main() {}").unwrap();
+            git::run(ws, &["add", "-A"], "add").unwrap();
+            git::run(ws, &["commit", "-m", "add stray"], "commit").unwrap();
+            git::run(ws, &["rm", "evil.rs"], "rm").unwrap();
+            git::run(ws, &["commit", "-m", "revert stray"], "commit").unwrap();
+            write_valid_learner_draft(request);
+            Ok(())
+        };
+        let outcome = run_pre_land_learner_outcome(&project_root, &store, &run_coder);
+
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::LearnerNotReady { .. }),
+            "a reverted out-of-bounds commit is still rejected; got {outcome:?}"
+        );
+        assert!(learner_workspace_is_clean_at(&workspace, &base));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.merge_candidates[0].candidate_commit, base);
+    }
+
+    #[test]
+    fn learner_coder_failure_rolls_back_all_git_state_and_persists_typed_failure() {
+        // Failure closure B3: a coder failure after it left Git effects restores the
+        // exact baseline and persists a terminal typed Failed record.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
+
+        let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            commit_expertise_file(
+                request.workspace_path,
+                ".fluent/expertise/note.md",
+                "x",
+                "learner note",
+            );
+            fs::write(request.workspace_path.join("untracked.txt"), "stray").unwrap();
+            bail!("coder boom")
+        };
+        let outcome = run_pre_land_learner_outcome(&project_root, &store, &run_coder);
+
+        assert!(matches!(
+            outcome,
+            WorkAttemptRunOutcome::LearnerNotReady { .. }
+        ));
+        assert!(
+            learner_workspace_is_clean_at(&workspace, &base),
+            "a coder failure rolls back committed and untracked Git effects"
+        );
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.merge_candidates[0].candidate_commit, base);
+        let learning = stored.attempts[0].learning.as_ref().unwrap();
+        assert!(learning.is_failed());
+        assert_eq!(learning.failure_kind, Some(LearningFailureKind::Generic));
+        assert!(
+            learning
+                .last_failure
+                .as_deref()
+                .unwrap_or_default()
+                .contains("coder boom")
+        );
+    }
+
+    #[test]
+    fn learner_schema_repair_failure_rolls_back_all_git_state_and_persists_typed_failure() {
+        // Failure closure B3: a schema-repair coder failure rolls back every Git
+        // effect from the whole transaction and persists a terminal typed Failed.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
+
+        let run_coder = move |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            if request.repair.is_none() {
+                commit_expertise_file(
+                    request.workspace_path,
+                    ".fluent/expertise/note.md",
+                    "x",
+                    "learner note",
+                );
+                fs::create_dir_all(request.handoff_dir).unwrap();
+                fs::write(
+                    request.handoff_dir.join(crate::learner::DRAFT_FILE_NAME),
+                    r#"{"learning_summary":"x","follow_ups":[{"id":"","summary":"needs id"}]}"#,
+                )
+                .unwrap();
+                Ok(())
+            } else {
+                bail!("repair boom")
+            }
+        };
+        let outcome = run_pre_land_learner_outcome(&project_root, &store, &run_coder);
+
+        assert!(matches!(
+            outcome,
+            WorkAttemptRunOutcome::LearnerNotReady { .. }
+        ));
+        assert!(
+            learner_workspace_is_clean_at(&workspace, &base),
+            "a schema-repair failure rolls back the whole transaction's Git state"
+        );
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.merge_candidates[0].candidate_commit, base);
+        let learning = stored.attempts[0].learning.as_ref().unwrap();
+        assert!(learning.is_failed());
+        assert!(
+            learning
+                .last_failure
+                .as_deref()
+                .unwrap_or_default()
+                .contains("repair boom")
+        );
+    }
+
+    #[test]
+    fn learner_invalid_final_draft_rolls_back_when_repair_budget_is_zero() {
+        // Failure closure B3: validation rejection after the coder returns is part
+        // of the same Git transaction. With no repair available, every Git effect
+        // rolls back and neither durable pointer advances.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
+        fs::write(
+            project_root.join(".fluent/config.yaml"),
+            "learner:\n  schema-repair-budget: 0\n",
+        )
+        .unwrap();
+
+        let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            commit_expertise_file(
+                request.workspace_path,
+                ".fluent/expertise/note.md",
+                "must roll back",
+                "learner note",
+            );
+            fs::create_dir_all(request.handoff_dir).unwrap();
+            fs::write(
+                request.handoff_dir.join(crate::learner::DRAFT_FILE_NAME),
+                r#"{"learning_summary":"invalid","follow_ups":[{"id":"","summary":"missing id"}]}"#,
+            )
+            .unwrap();
+            Ok(())
+        };
+        let outcome = run_pre_land_learner_outcome(&project_root, &store, &run_coder);
+
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::LearnerNotReady { .. }),
+            "an invalid final draft blocks readiness; got {outcome:?}"
+        );
+        assert!(
+            learner_workspace_is_clean_at(&workspace, &base),
+            "draft validation failure restores the exact clean baseline"
+        );
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.merge_candidates[0].candidate_commit, base);
+        let write_commit = stored.attempts[0]
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+            .and_then(|task| task.output.as_ref())
+            .map(|output| output.commit.as_str())
+            .unwrap();
+        assert_eq!(write_commit, base);
+        let learning = stored.attempts[0].learning.as_ref().unwrap();
+        assert!(learning.is_failed());
+        assert_eq!(learning.failure_kind, Some(LearningFailureKind::Generic));
+        assert!(learning.is_relaunchable());
+        assert!(learning.handoff.is_none());
+        assert!(
+            learning
+                .last_failure
+                .as_deref()
+                .unwrap_or_default()
+                .contains("stable id")
+        );
+    }
+
+    #[test]
+    fn learner_schema_repair_succeeds_with_clean_canonical_result() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_coder = Arc::clone(&calls);
+
+        let run_coder = move |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            let invocation = calls_for_coder.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match invocation {
+                0 => {
+                    let expertise = request.workspace_path.join(".fluent/expertise");
+                    fs::create_dir_all(&expertise).unwrap();
+                    fs::write(expertise.join("repaired.md"), "learned after repair").unwrap();
+                    fs::create_dir_all(request.handoff_dir).unwrap();
+                    fs::write(
+                        request.handoff_dir.join(crate::learner::DRAFT_FILE_NAME),
+                        r#"{"learning_summary":"learned after repair","follow_ups":[{"id":"keep","summary":"Keep this observation"},{"id":"","summary":"Assign this observation an id"}]}"#,
+                    )
+                    .unwrap();
+                }
+                1 => {
+                    let repair = request
+                        .repair
+                        .as_ref()
+                        .expect("the second invocation is a schema repair");
+                    assert!(repair.rejected_draft.contains(r#""id":"""#));
+                    assert!(
+                        repair.validation_error.contains("stable id"),
+                        "the repair sees the exact validation failure: {}",
+                        repair.validation_error
+                    );
+                    fs::create_dir_all(request.handoff_dir).unwrap();
+                    fs::write(
+                        request.handoff_dir.join(crate::learner::DRAFT_FILE_NAME),
+                        r#"{"learning_summary":"learned after repair","follow_ups":[{"id":"keep","summary":"Keep this observation"},{"id":"assigned","summary":"Assign this observation an id"}]}"#,
+                    )
+                    .unwrap();
+                }
+                other => panic!("unexpected Learner invocation {other}"),
+            }
+            Ok(())
+        };
+
+        let outcome = run_pre_land_learner_outcome(&project_root, &store, &run_coder);
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
+            "an accepted repair reaches a ready candidate; got {outcome:?}"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "one rejected draft receives exactly one successful repair"
+        );
+
+        let head = git::run_stdout(&workspace, &["rev-parse", "HEAD"], "head").unwrap();
+        let parent = git::run_stdout(&workspace, &["rev-parse", "HEAD^"], "parent").unwrap();
+        let subject = git::run_stdout(
+            &workspace,
+            &["show", "-s", "--format=%s", "HEAD"],
+            "subject",
+        )
+        .unwrap();
+        let changed = git::run_stdout(
+            &workspace,
+            &["diff", "--name-only", &base, &head],
+            "changed paths",
+        )
+        .unwrap();
+        assert_ne!(head, base);
+        assert_eq!(parent, base, "the host authors exactly one successor");
+        assert_eq!(subject, "Update expertise");
+        assert_eq!(changed, ".fluent/expertise/repaired.md");
+        assert!(learner_workspace_is_clean_at(&workspace, &head));
+
+        let stored = store.read_work_item("work-1").unwrap();
+        let learning = stored.attempts[0].learning.as_ref().unwrap();
+        assert!(learning.is_succeeded());
+        let handoff_ref = learning.handoff.as_ref().expect("successful handoff");
+        let handoff = crate::learner::load_verified_handoff(&project_root, handoff_ref).unwrap();
+        let ids: Vec<&str> = handoff
+            .follow_ups
+            .iter()
+            .map(|follow_up| follow_up.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["keep", "assigned"]);
+        assert_eq!(
+            handoff.learning.expertise[0].path,
+            ".fluent/expertise/repaired.md"
+        );
+        assert_eq!(stored.merge_candidates[0].candidate_commit, head);
+
+        let runs = project_root
+            .join(crate::learner::handoff_dir_rel("work-1", "attempt-1"))
+            .join("runs");
+        assert!(runs.join("run-1/error.txt").exists());
+        assert!(runs.join("run-1/submitted-draft.json").exists());
+        assert!(runs.join("run-2/submitted-draft.json").exists());
+    }
+
+    #[test]
+    fn learner_completed_failure_matrix_persists_typed_terminal_records() {
+        // Failure closure B1: every ordinary completed-call rejection settles a
+        // terminal typed Failed record with its kind and relaunchability, retains
+        // the pre-Learner pointers, and blocks readiness.
+        struct Case {
+            name: &'static str,
+            coder: Box<dyn Fn(&LearnerCoderRequest<'_>) -> Result<()>>,
+            kind: LearningFailureKind,
+            relaunchable: bool,
+        }
+        let cases = vec![
+            Case {
+                name: "generic coder error",
+                coder: Box::new(|_: &LearnerCoderRequest<'_>| bail!("coder boom")),
+                kind: LearningFailureKind::Generic,
+                relaunchable: true,
+            },
+            Case {
+                name: "out-of-bounds dirty state",
+                coder: Box::new(|request: &LearnerCoderRequest<'_>| {
+                    fs::write(request.workspace_path.join("evil.rs"), "x").unwrap();
+                    write_valid_learner_draft(request);
+                    Ok(())
+                }),
+                kind: LearningFailureKind::Generic,
+                relaunchable: true,
+            },
+            Case {
+                name: "transcript-pump transport",
+                coder: Box::new(|_: &LearnerCoderRequest<'_>| {
+                    Err(anyhow::Error::new(
+                        crate::transcript_pump::TranscriptPumpError::new("disk full"),
+                    ))
+                }),
+                kind: LearningFailureKind::TranscriptPump,
+                relaunchable: true,
+            },
+            Case {
+                name: "supervision-sidecar evidence pending",
+                coder: Box::new(|_: &LearnerCoderRequest<'_>| Err(learner_sidecar_error())),
+                kind: LearningFailureKind::EvidencePending,
+                relaunchable: false,
+            },
+        ];
+
+        for case in cases {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let (store, project_root, workspace, base) =
+                make_learner_passing_fixture(tmp.path(), 1);
+            let outcome = run_pre_land_learner_outcome(&project_root, &store, case.coder.as_ref());
+            assert!(
+                matches!(outcome, WorkAttemptRunOutcome::LearnerNotReady { .. }),
+                "{}: a completed-call failure blocks readiness; got {outcome:?}",
+                case.name
+            );
+            assert!(
+                learner_workspace_is_clean_at(&workspace, &base),
+                "{}: the baseline is restored",
+                case.name
+            );
+            let stored = store.read_work_item("work-1").unwrap();
+            assert_eq!(
+                stored.merge_candidates[0].candidate_commit, base,
+                "{}: pointers are retained",
+                case.name
+            );
+            let learning = stored.attempts[0].learning.as_ref().unwrap();
+            assert!(learning.is_failed(), "{}: terminal Failed", case.name);
+            assert_eq!(
+                learning.failure_kind,
+                Some(case.kind),
+                "{}: typed failure kind",
+                case.name
+            );
+            assert_eq!(
+                learning.is_relaunchable(),
+                case.relaunchable,
+                "{}: relaunchability",
+                case.name
+            );
+            assert!(
+                learning.last_failure.is_some(),
+                "{}: primary diagnostic retained",
+                case.name
+            );
+            assert!(learning.handoff.is_none(), "{}: no handoff", case.name);
+        }
+    }
+
+    #[test]
+    fn learner_rollback_failure_preserves_primary_kind_and_distinct_restoration_diagnostic() {
+        // Failure closure B4: when restoration cannot prove the clean baseline, the
+        // durable record keeps the original primary failure and a distinct
+        // restoration diagnostic, and derives its kind and relaunchability from the
+        // primary. A nested Git repository survives `git clean -fd`, so the
+        // restoration verification fails.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
+
+        let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            let ws = request.workspace_path;
+            // Primary failure: an out-of-bounds path (rejected at accounting).
+            fs::write(ws.join("evil.rs"), "x").unwrap();
+            // Obstruct restoration: an untracked nested Git repo that `clean -fd`
+            // refuses to remove, so the baseline cannot be proven clean.
+            let nested = ws.join("nested");
+            fs::create_dir_all(&nested).unwrap();
+            init_learner_repo(&nested);
+            fs::write(nested.join("keep.txt"), "x").unwrap();
+            write_valid_learner_draft(request);
+            Ok(())
+        };
+        let outcome = run_pre_land_learner_outcome(&project_root, &store, &run_coder);
+
+        assert!(matches!(
+            outcome,
+            WorkAttemptRunOutcome::LearnerNotReady { .. }
+        ));
+        // HEAD is reset, but the nested repo the clean could not remove proves the
+        // restoration genuinely failed its verification.
+        let head = git::run_stdout(&workspace, &["rev-parse", "HEAD"], "head").unwrap();
+        assert_eq!(head, base);
+        assert!(
+            workspace.join("nested").is_dir(),
+            "the un-removable obstruction remains, so restoration could not prove clean"
+        );
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(
+            stored.merge_candidates[0].candidate_commit, base,
+            "an obstructed rollback still moves no pointer"
+        );
+        let learning = stored.attempts[0].learning.as_ref().unwrap();
+        assert!(learning.is_failed());
+        assert_eq!(
+            learning.failure_kind,
+            Some(LearningFailureKind::Generic),
+            "the kind derives from the original out-of-bounds primary"
+        );
+        assert!(learning.is_relaunchable());
+        let diagnostic = learning.last_failure.as_deref().unwrap_or_default();
+        assert!(
+            diagnostic.contains("evil.rs"),
+            "the primary out-of-bounds diagnostic is preserved: {diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("rollback") || diagnostic.contains("restore"),
+            "a distinct restoration diagnostic is present: {diagnostic}"
+        );
+    }
+
+    #[test]
+    fn learner_success_requires_complete_clean_expertise_result() {
+        // Complete expertise finalization B5: a succeeded pre-land Learner exposes a
+        // Write output and Merge Candidate that both name the same clean canonical
+        // expertise result with no uncommitted portion.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
+
+        let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            // A mix the host must fold into one clean commit.
+            commit_expertise_file(
+                request.workspace_path,
+                ".fluent/expertise/a.md",
+                "a",
+                "learner a",
+            );
+            fs::write(request.workspace_path.join(".fluent/expertise/b.md"), "b").unwrap();
+            write_valid_learner_draft(request);
+            Ok(())
+        };
+        let outcome = run_pre_land_learner_outcome(&project_root, &store, &run_coder);
+        assert!(matches!(
+            outcome,
+            WorkAttemptRunOutcome::MergeCandidateReady { .. }
+        ));
+
+        let head = git::run_stdout(&workspace, &["rev-parse", "HEAD"], "head").unwrap();
+        assert_ne!(head, base);
+        let stored = store.read_work_item("work-1").unwrap();
+        let learning = stored.attempts[0].learning.as_ref().unwrap();
+        assert!(learning.is_succeeded());
+        assert!(learning.handoff.is_some());
+        let write_commit = stored.attempts[0]
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+            .and_then(|task| task.output.as_ref())
+            .map(|output| output.commit.clone())
+            .unwrap();
+        assert_eq!(write_commit, head);
+        assert_eq!(stored.merge_candidates[0].candidate_commit, head);
+        assert!(learner_workspace_is_clean_at(&workspace, &head));
+        // Every path in the accepted commit is beneath .fluent/expertise/.
+        let changed = git::run_stdout(
+            &workspace,
+            &["diff", "--name-only", &base, &head],
+            "changed",
+        )
+        .unwrap();
+        assert!(
+            changed
+                .lines()
+                .all(|line| line.is_empty() || is_learner_path_in_bounds(line)),
+            "the accepted commit is expertise-only: {changed}"
+        );
+    }
+
+    #[test]
+    fn learner_handoff_failure_retains_clean_typed_failed_result() {
+        // Failure closure B5: a canonical-handoff publication failure after a clean
+        // successor is verified retains that successor as the Write output and Merge
+        // Candidate tip, and persists relaunchable Generic Failed with no handoff.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
+
+        let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            let expertise = request.workspace_path.join(".fluent/expertise");
+            fs::create_dir_all(&expertise).unwrap();
+            fs::write(expertise.join("note.md"), "learned").unwrap();
+            write_valid_learner_draft(request);
+            Ok(())
+        };
+        // Obstruct the canonical handoff write: pre-create the handoff file path as a
+        // directory so `write_handoff` fails after a clean successor is verified.
+        let handoff_path =
+            project_root.join(crate::learner::handoff_path_rel("work-1", "attempt-1"));
+        fs::create_dir_all(&handoff_path).unwrap();
+
+        let outcome = run_pre_land_learner_outcome(&project_root, &store, &run_coder);
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::LearnerNotReady { .. }),
+            "a handoff-write failure blocks readiness; got {outcome:?}"
+        );
+
+        let head = git::run_stdout(&workspace, &["rev-parse", "HEAD"], "head").unwrap();
+        assert_ne!(head, base, "the verified clean successor is retained");
+        assert!(learner_workspace_is_clean_at(&workspace, &head));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(
+            stored.merge_candidates[0].candidate_commit, head,
+            "the clean successor stays the Merge Candidate tip"
+        );
+        let write_commit = stored.attempts[0]
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+            .and_then(|task| task.output.as_ref())
+            .map(|output| output.commit.as_str())
+            .unwrap();
+        assert_eq!(
+            write_commit, head,
+            "the clean successor stays the completed Write output"
+        );
+        let learning = stored.attempts[0].learning.as_ref().unwrap();
+        assert!(learning.is_failed());
+        assert_eq!(learning.failure_kind, Some(LearningFailureKind::Generic));
+        assert!(learning.is_relaunchable());
+        assert!(
+            learning.handoff.is_none(),
+            "a failed handoff records no reference"
+        );
+        assert!(
+            learning
+                .last_failure
+                .as_deref()
+                .unwrap_or_default()
+                .contains("handoff")
         );
     }
 }
