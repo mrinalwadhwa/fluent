@@ -84,10 +84,12 @@ pub enum WorkAttemptRunOutcome {
     /// The Attempt passed review, but its Learner has not SUCCEEDED, so the
     /// candidate is not ready to land. Carries the same durable reason emitted by
     /// Merge Candidate validation and landing. The candidate is left intact; a
-    /// later run re-runs the Learner.
+    /// later run re-runs the Learner only when the typed failure disposition says
+    /// relaunch is safe. A non-relaunchable evidence failure needs human recovery.
     LearnerNotReady {
         candidate_id: String,
         reason: String,
+        relaunchable: bool,
     },
     PlannedWriteRound {
         task_id: String,
@@ -97,6 +99,15 @@ pub enum WorkAttemptRunOutcome {
     },
     ReviewOnlyComplete,
     ReviewOnlyFailed,
+}
+
+fn learner_relaunchable(item: &WorkItem, attempt_id: &str) -> bool {
+    item.attempts
+        .iter()
+        .find(|attempt| attempt.id == attempt_id)
+        .and_then(|attempt| attempt.learning.as_ref())
+        .map(AttemptLearning::is_relaunchable)
+        .unwrap_or(true)
 }
 
 #[derive(Debug)]
@@ -321,6 +332,7 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                 outcomes.push(WorkAttemptRunOutcome::LearnerNotReady {
                     candidate_id,
                     reason: block.to_string(),
+                    relaunchable: learner_relaunchable(&item, config.attempt_id),
                 });
                 return Ok(WorkAttemptRunResult { outcomes });
             }
@@ -3061,6 +3073,7 @@ fn interpret_reviews(
             return Ok(WorkAttemptRunOutcome::LearnerNotReady {
                 candidate_id,
                 reason: block.to_string(),
+                relaunchable: learner_relaunchable(&item, attempt_id),
             });
         }
     }
@@ -5122,10 +5135,23 @@ mod tests {
         .unwrap();
         // The evidence-pending disposition is non-succeeded, so it blocks readiness
         // rather than advancing to MergeCandidateReady.
-        assert!(
-            matches!(outcome, WorkAttemptRunOutcome::LearnerNotReady { .. }),
-            "a sidecar (evidence-pending) failure blocks readiness; got {outcome:?}"
-        );
+        match outcome {
+            WorkAttemptRunOutcome::LearnerNotReady {
+                relaunchable,
+                reason,
+                ..
+            } => {
+                assert!(
+                    !relaunchable,
+                    "an evidence-pending outcome must forbid relaunch"
+                );
+                assert!(
+                    reason.contains("non-relaunchable"),
+                    "the operator-facing reason must preserve the typed disposition: {reason}"
+                );
+            }
+            other => panic!("a sidecar (evidence-pending) failure blocks readiness; got {other:?}"),
+        }
         assert_eq!(
             calls.load(AtomicOrdering::SeqCst),
             1,
@@ -5463,10 +5489,18 @@ mod tests {
         .unwrap();
 
         match outcome {
-            WorkAttemptRunOutcome::LearnerNotReady { reason, .. } => {
+            WorkAttemptRunOutcome::LearnerNotReady {
+                reason,
+                relaunchable,
+                ..
+            } => {
                 assert!(
                     reason.contains("not succeeded"),
                     "the block carries the durable advancement reason: {reason}"
+                );
+                assert!(
+                    relaunchable,
+                    "a generic Learner failure must remain safe to retry"
                 );
             }
             other => panic!("a non-succeeded Learner must block readiness, not advance: {other:?}"),

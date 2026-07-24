@@ -270,7 +270,21 @@ fn action_label_with_liveness(
             MergeCandidateMergeStatus::Executing => "merging",
             MergeCandidateMergeStatus::Failed => "merge-failed",
             MergeCandidateMergeStatus::Merged => "merged",
-            MergeCandidateMergeStatus::Pending => "merge-ready",
+            MergeCandidateMergeStatus::Pending
+                if item
+                    .attempt_learning_advancement(&candidate.attempt_id)
+                    .is_ok() =>
+            {
+                "merge-ready"
+            }
+            MergeCandidateMergeStatus::Pending
+                if attempt
+                    .and_then(|attempt| attempt.learning.as_ref())
+                    .is_some_and(|learning| !learning.is_relaunchable()) =>
+            {
+                "learner-blocked"
+            }
+            MergeCandidateMergeStatus::Pending => "learner-not-ready",
         };
     }
 
@@ -320,34 +334,11 @@ fn merge_status_label(status: &MergeCandidateMergeStatus) -> &'static str {
 mod tests {
     use super::*;
     use crate::work_model::{
-        MergeCandidateMergeState, TaskOutput, WorkItem, WorkspaceAccess, WorkspaceRef,
+        AttemptLearning, LearningFailureKind, MergeCandidateMergeState, TaskOutput, WorkItem,
+        WorkspaceAccess, WorkspaceRef,
     };
 
-    #[test]
-    fn summarize_planned_work_item_shows_ready_task() {
-        let mut item = WorkItem {
-            id: "work-1".to_string(),
-            title: "Build status view".to_string(),
-            planning_context: None,
-            instructions: None,
-            abandonment: None,
-            post_merge_review_fix_depth: None,
-            attempts: Vec::new(),
-            merge_candidates: Vec::new(),
-            ..Default::default()
-        };
-        item.add_initial_attempt("attempt-1").unwrap();
-
-        let row = summarize_work_item(&item, None);
-
-        assert_eq!(row.attempt, "attempt-1 [planned]");
-        assert_eq!(row.task, "write:attempt-1-write-1 [planned]");
-        assert_eq!(row.review, "-");
-        assert_eq!(row.action, "task-ready");
-    }
-
-    #[test]
-    fn summarize_passed_attempt_shows_merge_ready_candidate() {
+    fn passed_attempt_with_candidate(learning: Option<AttemptLearning>) -> (WorkItem, String) {
         let mut item = WorkItem {
             id: "work-1".to_string(),
             title: "Build status view".to_string(),
@@ -382,13 +373,101 @@ mod tests {
         });
         attempt.status = AttemptStatus::Complete;
         attempt.review_state = Some(AttemptReviewState::Passed);
+        attempt.learning = learning;
         let candidate_id = item.create_or_get_merge_candidate("attempt-1").unwrap();
+        (item, candidate_id)
+    }
+
+    #[test]
+    fn summarize_planned_work_item_shows_ready_task() {
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Build status view".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            post_merge_review_fix_depth: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+
+        let row = summarize_work_item(&item, None);
+
+        assert_eq!(row.attempt, "attempt-1 [planned]");
+        assert_eq!(row.task, "write:attempt-1-write-1 [planned]");
+        assert_eq!(row.review, "-");
+        assert_eq!(row.action, "task-ready");
+    }
+
+    #[test]
+    fn summarize_passed_attempt_shows_merge_ready_candidate() {
+        let learning = AttemptLearning::succeeded(
+            1,
+            crate::follow_up::ArtifactRef {
+                path: "handoff.json".to_string(),
+                digest: "sha256:x".to_string(),
+            },
+        );
+        let (item, candidate_id) = passed_attempt_with_candidate(Some(learning));
 
         let row = summarize_work_item(&item, None);
 
         assert_eq!(row.merge_candidate, candidate_id);
         assert_eq!(row.merge, "pending review:pending");
         assert_eq!(row.action, "merge-ready");
+    }
+
+    #[test]
+    fn summarize_passed_attempt_without_learning_is_not_merge_ready() {
+        let (item, _) = passed_attempt_with_candidate(None);
+
+        let row = summarize_work_item(&item, None);
+
+        assert_eq!(row.action, "learner-not-ready");
+    }
+
+    #[test]
+    fn summarize_passed_attempt_with_running_learning_is_not_merge_ready() {
+        let (item, _) = passed_attempt_with_candidate(Some(AttemptLearning::in_progress(1)));
+
+        let row = summarize_work_item(&item, None);
+
+        assert_eq!(row.action, "learner-not-ready");
+    }
+
+    #[test]
+    fn summarize_passed_attempt_with_handoff_pending_learning_is_not_merge_ready() {
+        let (item, _) = passed_attempt_with_candidate(Some(AttemptLearning::handoff_pending(1)));
+
+        let row = summarize_work_item(&item, None);
+
+        assert_eq!(row.action, "learner-not-ready");
+    }
+
+    #[test]
+    fn summarize_passed_attempt_with_failed_learning_is_not_merge_ready() {
+        let (item, _) =
+            passed_attempt_with_candidate(Some(AttemptLearning::failed(1, "retry learner")));
+
+        let row = summarize_work_item(&item, None);
+
+        assert_eq!(row.action, "learner-not-ready");
+    }
+
+    #[test]
+    fn summarize_passed_attempt_with_non_relaunchable_learning_is_blocked() {
+        let learning = AttemptLearning::failed_with_kind(
+            1,
+            "host evidence needs recovery",
+            LearningFailureKind::EvidencePending,
+        );
+        let (item, _) = passed_attempt_with_candidate(Some(learning));
+
+        let row = summarize_work_item(&item, None);
+
+        assert_eq!(row.action, "learner-blocked");
     }
 
     #[test]

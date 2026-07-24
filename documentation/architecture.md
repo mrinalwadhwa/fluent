@@ -34,20 +34,28 @@ agent reads it and can drive the entire workflow.
 ## Workflow
 
 ```
-Brief → Behaviors → Approach → Plan → Execute → Review → Merge Candidate
+Brief → Behaviors → Approach → Plan → Execute → Review → Learner → Ready Merge Candidate
 (interactive)                         (delegated)
-                                                        ↓
-                                                  Inspect → Land
-                                                     (human)
+                                                                    ↓
+                                                              Inspect → Land
+                                                                 (human)
 ```
 
 Interactive stages happen in the agent's session with the user present.
 The agent follows skills directly.
 
-Delegated execution can run without the user until it produces a pending
-Merge Candidate or pauses at `needs-user`. The Work model is that delegated
-execution path. In the Local Preview, a human inspects and lands every
-candidate.
+After a code-producing Attempt's reviews pass, the Learner captures durable
+project expertise and records possible follow-ups for materialization after
+land. Only a successful Learner run makes the pending Merge Candidate ready. A
+relaunchable Learner failure leaves the candidate non-ready and unlandable;
+`fluent attempt run` retries only the Learner. A failure after the coder ran but
+before its host evidence became durable is non-relaunchable: status reports
+`learner-blocked`, and human evidence recovery is required before advancement.
+
+Delegated execution can run without the user until it produces a ready Merge
+Candidate, stops at a Learner failure, or pauses at `needs-user`. The Work model
+is that delegated execution path. In the Local Preview, a human inspects and
+lands every ready candidate.
 
 ## Core work model
 
@@ -222,9 +230,15 @@ through the Rust storage model and validate stored objects.
 operator surface. They read Work Items through `work_status.rs`, which
 reduces stored Work Items to operator-facing rows. That boundary chooses
 the latest Attempt, the active or waiting Task, the matching Merge
-Candidate, and a short action label. It returns valid rows and per-file
-read errors together so one bad Work Item file does not hide the rest of
-the queue.
+Candidate, and a short action label. A pending candidate is `merge-ready`
+only when its Attempt passes the shared Learning advancement gate. A safely
+relaunchable Learning state is `learner-not-ready`, whose next action reruns
+the Attempt rather than offering land; a non-relaunchable evidence-pending
+state is `learner-blocked`. The originating Attempt prints one inspection hint,
+but later status and show commands emit no next action for that row, avoiding an
+inspection self-loop and allowing other actionable Work to surface. The boundary
+returns valid rows and per-file read errors together so one bad Work Item file
+does not hide the rest of the queue.
 Write Task prompt generation reads `Task.instructions` from durable Work
 state and includes non-empty instructions in the coder prompt. A Task
 receives those instructions from explicit Work Item instructions first,
@@ -453,7 +467,8 @@ Attempts and proposed follow-up Work by default. `fluent work-item authorize`
 authorizes and enqueues proposed Work but does not execute it. A human
 separately runs `fluent scheduler run`; the scheduler may produce a pending
 Merge Candidate but never lands one. Every candidate requires human inspection
-and landing. Post-merge review is off by default and available only as a
+after it becomes ready, and only a ready candidate can land. Post-merge review
+is off by default and available only as a
 positive per-land opt-in. `fluent auto-merge`, automatic scheduler lifecycle,
 automatic landing, and Fargate are outside the Local Preview.
 
@@ -497,37 +512,44 @@ expertise-only result and a clean workspace, and any rejection restores the
 baseline. The transaction first verifies the workspace `HEAD` equals the Learner
 baseline with a clean index and worktree; a dirty entry launches no coder, moves
 no pointer, and settles relaunchable failed Learning. It stays open across the
-initial coder, every bounded schema repair, and final draft validation. Right
-after each coder invocation returns — before its result is inspected, its draft
-published, or another invocation launched — the host pins that return's `HEAD`,
-reachable per-commit paths, and staged, unstaged, and untracked paths into a
-cumulative ledger a later reset cannot erase. At finalization it classifies the
-union of every retained snapshot plus the final pre-normalization state using
-raw NUL-delimited paths, so a newline-bearing name stays one path and a
-non-UTF-8 name is rejected rather than decoded lossily. A snapshot whose `HEAD`
-is not an unambiguous linear descendant of the baseline is unaccountable, and any
-accounted path outside `.fluent/expertise/` — including one a later commit or
-repair reverted or reset away — rejects the whole result. When every accounted
-path is expertise, the host moves `HEAD` and the index back to the baseline while
-retaining the final worktree, stages the complete `.fluent/expertise/` delta
-including deletions, and authors zero or one `Update expertise` commit whose sole
-parent is the baseline; a result with no net expertise delta keeps the baseline
-without an empty commit. The Write output and Merge Candidate pointers move only
-after the canonical result is verified exactly clean, and the handoff is written
-last. Any pre-acceptance failure runs one restoring rollback that hard-resets and
-cleans back to the proven baseline; an obstructed rollback composes a distinct
-restoration diagnostic under the primary without changing its typed kind or
-relaunchability. Every ordinary completed-call rejection settles terminal failed
-Learning and withholds Merge Candidate readiness. If canonical-handoff
-publication fails after a clean successor is verified, that successor is retained
-as both pointers while Learning stays relaunchable `Generic` failed with no
-handoff reference.
+initial coder, every bounded schema repair, and final draft validation.
 
-A Learner run that failed before its candidate landed recovers through
-`fluent attempt run`, which retries only the Learner. When the candidate
-has already merged, that retry runs in handoff-only mode: it serializes
-against land on the land lock, denies expertise writes, and discards any
-commit it makes, so the merged commit and target branch stay unchanged.
+Right after each coder invocation returns — before its result is inspected,
+its draft published, or another invocation launched — the host pins that
+return's `HEAD`, reachable per-commit paths, and staged, unstaged, and
+untracked paths into a cumulative ledger a later reset cannot erase. At
+finalization it classifies the union of every retained snapshot plus the final
+pre-normalization state using raw NUL-delimited paths, so a newline-bearing
+name stays one path and a non-UTF-8 name is rejected rather than decoded
+lossily. A snapshot whose `HEAD` is not an unambiguous linear descendant of the
+baseline is unaccountable, and any accounted path outside
+`.fluent/expertise/` — including one a later commit or repair reverted or reset
+away — rejects the whole result.
+
+When every accounted path is expertise, the host moves `HEAD` and the index back
+to the baseline while retaining the final worktree, stages the complete
+`.fluent/expertise/` delta including deletions, and authors at most one commit
+with subject `Update expertise` whose sole parent is the baseline; a result
+with no net expertise delta keeps the baseline without an empty commit. The
+Write output and Merge Candidate pointers move only after the canonical result
+is verified exactly clean, and the handoff is written last. Any pre-acceptance
+failure runs one restoring rollback that hard-resets and cleans back to the
+proven baseline; an obstructed rollback composes a distinct restoration
+diagnostic under the primary without changing its typed kind or relaunchability.
+Every ordinary completed-call rejection settles terminal failed Learning and
+withholds Merge Candidate readiness. If canonical-handoff publication fails
+after a clean successor is verified, that successor is retained as both
+pointers while Learning stays relaunchable `Generic` failed with no handoff
+reference.
+
+A relaunchable Learner run that failed before its candidate landed recovers
+through `fluent attempt run`, which retries only the Learner. An
+`EvidencePending` failure is different: because its coder already ran, a later
+Attempt run preserves the non-relaunchable record and launches no coder while
+human recovery remains required. When a relaunchable failure's candidate has
+already merged, the retry runs in handoff-only mode: it serializes against land
+on the land lock, denies expertise writes, and discards any commit it makes, so
+the merged commit and target branch stay unchanged.
 The command persists its resolved coder mapping through a fresh field-level
 Work-model mutation under that same lock; it never writes a whole Work Item
 snapshot captured before the serialization boundary.
@@ -597,8 +619,8 @@ corrected draft only when it preserves every prior follow-up id and its
 non-schema content. The prompt keeps the artifact-evidence array empty until the
 handoff transport can publish referenced evidence artifacts.
 
-The pre-land and post-land schema-repair loops remain separate for the
-Local Preview. They share the draft-validation protocol and repair budget,
+The current release keeps the pre-land and post-land schema-repair loops
+separate. They share the draft-validation protocol and repair budget,
 but enforce different Git boundaries. Pre-land must capture every coder
 return in the Learner Git transaction before inspecting the result or
 publishing its draft, and it cannot attach expertise references until the
@@ -1624,10 +1646,13 @@ single Work Item (`fluent auto-merge <id>`) or all Work Items
 (`fluent auto-merge --all`). The watcher polls every 30
 seconds (configurable via `--poll-seconds`).
 
-A candidate is merge-ready when the latest Attempt has
-`status == complete` and `review_state == passed`, the candidate
-has `review_state == passed` and `merge_state.status == pending`,
-and `merge_state.auto_merge_skipped` is not `true`.
+The watcher selects a candidate as merge-ready when the latest Attempt has
+`status == complete`, `review_state == passed`, and Learning in the `Succeeded`
+state, the candidate has `merge_state.status == pending`, and
+`merge_state.auto_merge_skipped` is not `true`. Selection does not require the
+Merge Candidate's merge-time `review_state` to have passed; the land command
+owns pre-merge checks and merge-time review after the watcher selects the
+candidate.
 
 The `auto_merge_skipped` field on `MergeCandidateMergeState` is an
 `Option<bool>` that persists skip state across watcher restarts.

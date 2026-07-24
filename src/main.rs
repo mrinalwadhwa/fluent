@@ -601,7 +601,8 @@ fn cmd_attempt(
                     }
                     WorkAttemptRunOutcome::MergeCandidateReady { candidate_id } => {
                         println!(
-                            "Attempt {attempt_id} reviews passed; Merge Candidate {candidate_id} is ready"
+                            "Attempt {attempt_id} reviews and Learner passed; Merge Candidate \
+                             {candidate_id} is ready"
                         );
                     }
                     WorkAttemptRunOutcome::FollowUpRecoveryPending {
@@ -618,11 +619,18 @@ fn cmd_attempt(
                     WorkAttemptRunOutcome::LearnerNotReady {
                         candidate_id,
                         reason,
+                        relaunchable,
                     } => {
                         println!(
                             "Attempt {attempt_id} reviews passed, but Merge Candidate \
                              {candidate_id} is not ready: {reason}"
                         );
+                        if !relaunchable {
+                            println!(
+                                "The Learner cannot be relaunched safely; its host evidence \
+                                 requires human recovery"
+                            );
+                        }
                     }
                     WorkAttemptRunOutcome::PlannedWriteRound { task_id } => {
                         println!("Planned write Task {task_id}");
@@ -1544,11 +1552,14 @@ The **fluent skill** is the deep reference — invoke it for the full stage proc
 This section is the always-loaded summary and is enough to drive fluent on its own.
 
 - **Lifecycle:** capture a brief → define behaviors → design an approach → plan →
-  delegated execute → review. A passing Attempt stops at a pending Merge Candidate; a
-  human inspects and lands it. The first four stages are a user conversation — work
-  through them one question at a time; don't skip them.
+  delegated execute → review → Learner → ready Merge Candidate. A human inspects and
+  lands it. The first four stages are a user conversation — work through them one
+  question at a time; don't skip them.
 - **Work model:** a Work Item holds the plan; an Attempt runs writer → tester → reviewers
-  in rounds; a passing Attempt yields a Merge Candidate to land.
+  in rounds, then runs the Learner after the reviewers pass. Only a successful Learner
+  run makes the Merge Candidate ready. A relaunchable failure remains non-ready and
+  `fluent attempt run` retries only the Learner; a non-relaunchable evidence failure
+  stays blocked for human recovery and must not rerun or land.
 - **Follow the next-action line:** most fluent commands print a `→ Next:` next-action line
   to stderr naming the command to run next; a state with no actionable step prints none.
   Run `fluent status` at session start and after any gap to see what needs attention, then
@@ -1563,7 +1574,8 @@ This section is the always-loaded summary and is enough to drive fluent on its o
 - **Local Preview:** Attempts run locally in the foreground. Corrective follow-ups become
   proposed Work by default. `fluent work-item authorize` authorizes and queues Work;
   execution starts only while a human runs `fluent scheduler run`. The scheduler stops at a
-  pending Merge Candidate, and every candidate is inspected and landed by a human.
+  ready Merge Candidate after successful Learning, and every ready candidate is inspected
+  and landed by a human.
   Post-merge review is off by default; opt in per land with
   `fluent merge-candidate land --post-merge-review`. `fluent auto-merge`, automatic
   scheduler lifecycle, automatic landing, and Fargate are outside this path. For an

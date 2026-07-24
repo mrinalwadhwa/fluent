@@ -179,7 +179,12 @@ fn draw_work_header(f: &mut ratatui::Frame, area: Rect, app: &App) {
         .filter(|row| {
             matches!(
                 row.action.as_str(),
-                "needs-user" | "merge-ready" | "task-ready" | "merge-failed" | "failed"
+                "needs-user"
+                    | "merge-ready"
+                    | "learner-not-ready"
+                    | "task-ready"
+                    | "merge-failed"
+                    | "failed"
             )
         })
         .count();
@@ -209,11 +214,14 @@ fn draw_work_items(f: &mut ratatui::Frame, area: Rect, status: &WorkStatus) {
     let lines: Vec<Line> = work_status::format_work_dashboard_lines(status)
         .into_iter()
         .map(|line| {
-            let style = if line.contains("[needs-user]") || line.contains("needs-user") {
+            let style = if line.contains("[needs-user]")
+                || line.contains("needs-user")
+                || line.contains("learner-not-ready")
+            {
                 Style::default().fg(Color::Yellow)
             } else if line.contains("[merge-ready]") || line.contains("merge-ready") {
                 Style::default().fg(Color::Green)
-            } else if line.contains("failed") {
+            } else if line.contains("failed") || line.contains("learner-blocked") {
                 Style::default().fg(Color::Red)
             } else if line.starts_with("  ") {
                 Style::default().fg(Color::DarkGray)
@@ -368,6 +376,50 @@ mod tests {
         assert!(text.contains("Errors: 1"));
         assert!(text.contains("Work Item read errors"));
         assert!(text.contains(".fluent/work/items/broken-work.json"));
+    }
+
+    #[test]
+    fn test_work_view_counts_learner_not_ready_as_actionable() {
+        let mut app = make_app(WorkStatus {
+            rows: vec![work_status::WorkItemStatus {
+                id: "work-1".to_string(),
+                title: "Finish learning".to_string(),
+                attempt: "attempt-1 [complete]".to_string(),
+                task: "write:attempt-1-write-1 [complete]".to_string(),
+                review: "passed".to_string(),
+                merge_candidate: "attempt-1-merge-candidate".to_string(),
+                merge: "pending review:pending".to_string(),
+                action: "learner-not-ready".to_string(),
+            }],
+            errors: Vec::new(),
+        });
+
+        let text = render_app_text(&mut app);
+
+        assert!(text.contains("Actionable: 1"));
+        assert!(text.contains("learner-not-ready"));
+    }
+
+    #[test]
+    fn test_work_view_shows_learner_blocked_without_counting_it_as_actionable() {
+        let mut app = make_app(WorkStatus {
+            rows: vec![work_status::WorkItemStatus {
+                id: "work-1".to_string(),
+                title: "Recover learning evidence".to_string(),
+                attempt: "attempt-1 [complete]".to_string(),
+                task: "write:attempt-1-write-1 [complete]".to_string(),
+                review: "passed".to_string(),
+                merge_candidate: "attempt-1-merge-candidate".to_string(),
+                merge: "pending review:pending".to_string(),
+                action: "learner-blocked".to_string(),
+            }],
+            errors: Vec::new(),
+        });
+
+        let text = render_app_text(&mut app);
+
+        assert!(text.contains("Actionable: 0"));
+        assert!(text.contains("learner-blocked"));
     }
 
     #[test]

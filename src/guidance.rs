@@ -99,8 +99,18 @@ pub fn after_attempt_run(
         WorkAttemptRunOutcome::FollowUpRecoveryPending { next_action, .. } => {
             Some(format!("\n→ Next: {next_action}"))
         }
-        WorkAttemptRunOutcome::LearnerNotReady { .. } => Some(
+        WorkAttemptRunOutcome::LearnerNotReady {
+            relaunchable: true,
+            ..
+        } => Some(
             "\n→ Next: fluent attempt run <work-item-id> to re-run the Learner before landing"
+                .to_string(),
+        ),
+        WorkAttemptRunOutcome::LearnerNotReady {
+            relaunchable: false,
+            ..
+        } => Some(
+            "\n→ Next: fluent work-item show <work-item-id> to inspect the non-relaunchable Learner evidence failure; do not re-run the Learner or land the candidate"
                 .to_string(),
         ),
         WorkAttemptRunOutcome::PlannedWriteRound { .. } => Some(
@@ -165,16 +175,26 @@ pub fn next_action_for_action(action: &str, id: &str) -> Option<String> {
         "merge-ready" => Some(format!(
             "\n→ Next: fluent merge-candidate show {id}, then fluent merge-candidate land {id}"
         )),
+        "learner-not-ready" => Some(format!(
+            "\n→ Next: fluent attempt run {id} to run or retry the Learner before landing"
+        )),
         "task-ready" => Some(format!("\n→ Next: fluent attempt run {id}")),
         _ => None,
     }
 }
 
 /// Name the next command for the most-actionable Work Item on a populated board.
-/// Priority follows `work_status`: needs-user > merge-ready > task-ready. Returns
-/// `None` when nothing on the board is actionable.
+/// Priority follows `work_status`: needs-user > merge-ready > learner-not-ready >
+/// task-ready. A `learner-blocked` row remains visible but is not repeatedly
+/// actionable: the originating Attempt already emitted its one-time inspection
+/// hint. Returns `None` when nothing on the board is actionable.
 pub fn status_next_action(status: &WorkStatus) -> Option<String> {
-    const PRIORITY: [&str; 3] = ["needs-user", "merge-ready", "task-ready"];
+    const PRIORITY: [&str; 4] = [
+        "needs-user",
+        "merge-ready",
+        "learner-not-ready",
+        "task-ready",
+    ];
     for action in PRIORITY {
         if let Some(row) = status.rows.iter().find(|row| row.action == action) {
             return next_action_for_action(&row.action, &row.id);
@@ -223,6 +243,33 @@ mod tests {
         };
         let hint = after_attempt_run(&outcome, &AttemptRunContext::default()).unwrap();
         assert!(hint.contains("merge-candidate land work-1 mc-1"));
+    }
+
+    #[test]
+    fn after_attempt_run_relaunchable_learner_failure_names_retry() {
+        let outcome = WorkAttemptRunOutcome::LearnerNotReady {
+            candidate_id: "mc-1".to_string(),
+            reason: "failed".to_string(),
+            relaunchable: true,
+        };
+        let hint = after_attempt_run(&outcome, &AttemptRunContext::default()).unwrap();
+        assert!(hint.contains("fluent attempt run"));
+        assert!(!hint.contains("work-item show"));
+        assert!(!hint.contains("merge-candidate land"));
+    }
+
+    #[test]
+    fn after_attempt_run_non_relaunchable_learner_failure_names_human_inspection() {
+        let outcome = WorkAttemptRunOutcome::LearnerNotReady {
+            candidate_id: "mc-1".to_string(),
+            reason: "failed and non-relaunchable (evidence pending)".to_string(),
+            relaunchable: false,
+        };
+        let hint = after_attempt_run(&outcome, &AttemptRunContext::default()).unwrap();
+        assert!(hint.contains("fluent work-item show"));
+        assert!(hint.contains("non-relaunchable"));
+        assert!(!hint.contains("fluent attempt run"));
+        assert!(!hint.contains("merge-candidate land"));
     }
 
     #[test]
@@ -400,6 +447,19 @@ mod tests {
     }
 
     #[test]
+    fn next_action_for_learner_not_ready_names_attempt_run_without_land() {
+        let hint = next_action_for_action("learner-not-ready", "work-7").unwrap();
+        assert!(hint.contains("fluent attempt run work-7"));
+        assert!(hint.contains("Learner"));
+        assert!(!hint.contains("merge-candidate land"));
+    }
+
+    #[test]
+    fn next_action_for_learner_blocked_is_none_to_avoid_inspection_loop() {
+        assert!(next_action_for_action("learner-blocked", "work-7").is_none());
+    }
+
+    #[test]
     fn next_action_for_needs_user_names_handoff_and_attempt_run() {
         let hint = next_action_for_action("needs-user", "work-7").unwrap();
         assert!(hint.contains("handoff"));
@@ -445,6 +505,45 @@ mod tests {
             hint.contains("fluent merge-candidate land work-b"),
             "got: {hint}"
         );
+    }
+
+    #[test]
+    fn status_next_action_names_learner_retry_over_task_ready() {
+        let status = WorkStatus {
+            rows: vec![
+                status_row("work-a", "task-ready"),
+                status_row("work-b", "learner-not-ready"),
+            ],
+            errors: Vec::new(),
+        };
+        let hint = status_next_action(&status).unwrap();
+        assert!(hint.contains("fluent attempt run work-b"), "got: {hint}");
+        assert!(!hint.contains("merge-candidate land"));
+    }
+
+    #[test]
+    fn status_next_action_ignores_learner_blocked_when_merge_ready_exists() {
+        let status = WorkStatus {
+            rows: vec![
+                status_row("work-a", "merge-ready"),
+                status_row("work-b", "learner-blocked"),
+            ],
+            errors: Vec::new(),
+        };
+        let hint = status_next_action(&status).unwrap();
+        assert!(
+            hint.contains("fluent merge-candidate land work-a"),
+            "got: {hint}"
+        );
+    }
+
+    #[test]
+    fn status_next_action_is_none_for_only_learner_blocked_work() {
+        let status = WorkStatus {
+            rows: vec![status_row("work-a", "learner-blocked")],
+            errors: Vec::new(),
+        };
+        assert!(status_next_action(&status).is_none());
     }
 
     #[test]

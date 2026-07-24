@@ -1,6 +1,6 @@
 ---
 name: fluent
-description: Operate the fluent workflow to build software autonomously over extended periods. Interactive stages (brief, behaviors, approach, plan) run with the user. Autonomous execution loops writer → tester → parallel reviewers. When all reviewers pass, it produces a Merge Candidate. When a decision needs a human, it sets `needs-user` and pauses, then resumes once the user resolves it.
+description: Operate the fluent workflow to build software autonomously over extended periods. Interactive stages (brief, behaviors, approach, plan) run with the user. Autonomous execution loops writer → tester → parallel reviewers → Learner. A Merge Candidate becomes ready only after the Learner succeeds; retryable Learner failures resume with `fluent attempt run`, while non-relaunchable evidence failures stay blocked for human recovery. When a decision needs a human, Fluent sets `needs-user` and pauses, then resumes once the user resolves it.
 fluent-shim: true
 ---
 

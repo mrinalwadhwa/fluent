@@ -1,6 +1,6 @@
 ---
 name: fluent
-description: Operate the fluent workflow to build software autonomously over extended periods. Interactive stages (brief, behaviors, approach, plan) run with the user. Autonomous execution loops writer → tester → parallel reviewers. When all reviewers pass, it produces a Merge Candidate. When a decision needs a human, it sets `needs-user` and pauses, then resumes once the user resolves it.
+description: Operate the fluent workflow to build software autonomously over extended periods. Interactive stages (brief, behaviors, approach, plan) run with the user. Autonomous execution loops writer → tester → parallel reviewers, then runs the Learner after a passing review round. Only a successful Learner run produces a ready Merge Candidate. A retryable Learner failure resumes with `fluent attempt run`; a non-relaunchable evidence failure stays blocked for human recovery. When a decision needs a human, it sets `needs-user` and pauses, then resumes once the user resolves it.
 ---
 
 # Fluent
@@ -11,7 +11,7 @@ Behaviors describe what the system must do; the approach describes how. If execu
 
 ## Work model
 
-The delegated build lifecycle is the Work model: Work Item → Attempt → Task → Workspace → Merge Candidate. Work Items represent planned Fluent work, Attempts carry one execution history, Tasks are schedulable units, Workspaces are the filesystem contexts Tasks read or write, and Merge Candidates are reviewed outputs ready to land.
+The delegated build lifecycle is the Work model: Work Item → Attempt → Task → Workspace → Merge Candidate. Work Items represent planned Fluent work, Attempts carry one execution history, Tasks are schedulable units, and Workspaces are the filesystem contexts Tasks read or write. A Merge Candidate record may exist while the Learner is retryable; it becomes ready to land only after the Learner succeeds.
 
 ## Make sure fluent is installed
 
@@ -38,7 +38,7 @@ command.
 
 Run `fluent status` or `fluent work-item list` to see current Work. If stored Work Items exist, inspect the relevant one with `fluent work-item show <work-item-id>`. Continue the latest non-terminal Attempt when the next action is clear, or present the `needs-user` handoff when an Attempt or Merge Candidate asks for user input.
 
-If `fluent status` shows a pending Merge Candidate, inspect it with
+If `fluent status` shows a `merge-ready` Merge Candidate, inspect it with
 `fluent merge-candidate show <work-item-id> <merge-candidate-id>`. Present it
 to the user for inspection. Run `fluent merge-candidate land <work-item-id>`
 only after the user accepts the candidate. Do not start `fluent auto-merge`;
@@ -68,23 +68,30 @@ For a codebase, module, or area review (not building something new), capture eno
 1. Create an Attempt: `fluent attempt create <work-item-id>`. (An `attempt-N` id is auto-assigned; pass an explicit id for scripted flows.)
 2. Run the Attempt: `fluent attempt run <work-item-id>`. (Defaults to the most recently created Attempt; pass an explicit id to target a specific one.)
 3. Inspect status with `fluent status` or `fluent work-item show <work-item-id>`.
-4. Stop when the Attempt produces a pending Merge Candidate. Present it to the
+4. Stop when the Attempt produces a ready Merge Candidate. Present it to the
    user for inspection with
    `fluent merge-candidate show <work-item-id> <merge-candidate-id>`.
 5. Only after the user explicitly accepts that candidate, run
    `fluent merge-candidate land <work-item-id>`. (Defaults to the most recently
    created Merge Candidate; pass an explicit id to target a specific one.)
 
-Delegated execution runs as a loop until it produces a Merge Candidate or
-pauses at `needs-user`. Each round:
+Delegated execution runs as a loop until it produces a ready Merge Candidate,
+stops at a Learner failure, or pauses at `needs-user`. Each round:
 
 1. The writer produces a candidate commit.
 2. The Tester Task runs the project's tests.
 3. Domain reviewers evaluate in parallel.
+4. After the reviewers pass, the Learner captures durable project expertise
+   and records possible follow-ups for materialization after land.
 
 The round outcome determines what happens next:
 
-- All pass — Attempt creates a Merge Candidate.
+- Reviewers pass and the Learner succeeds — Attempt creates a ready Merge Candidate.
+- Learner fails with a relaunchable disposition — the Merge Candidate remains
+  non-ready and cannot land; `fluent attempt run` retries only the Learner.
+- Learner fails after its coder ran but host evidence remains pending — the
+  candidate is `learner-blocked`; inspect the Work Item and recover the evidence
+  with human intervention. Do not rerun the Learner or land the candidate.
 - Any fail — follow-up write next round, scoped to failed reviewers.
 - Any uncertain, or a round cap reached — Attempt records `needs-user`, pausing the loop.
 
@@ -124,8 +131,9 @@ Fluent's first release is the **Local Preview**: a supervised, local-first path 
 - `fluent work-item authorize <work-item-id>` authorizes and enqueues proposed
   Work. Authorization does not run an Attempt and never authorizes landing.
 - Queued Work starts only while a human explicitly runs `fluent scheduler run`.
-  The scheduler produces a pending Merge Candidate and stops there.
-- **Every Merge Candidate is inspected and landed by a human** with
+  The scheduler never lands a candidate; after successful Learning it stops at
+  a ready Merge Candidate.
+- **Every ready Merge Candidate is inspected and landed by a human** with
   `fluent merge-candidate land <work-item-id>`.
 - Post-merge review is **off by default** and remains a positive per-land
   opt-in with `fluent merge-candidate land --post-merge-review`.
@@ -160,8 +168,8 @@ When `.fluent/` does not exist:
    ```
 
 `execute` authorizes and queues trusted corrective Work. It does not start
-execution. A human must separately run `fluent scheduler run`; the resulting
-Merge Candidate still requires human inspection and landing.
+execution. A human must separately run `fluent scheduler run`; any resulting
+ready Merge Candidate still requires human inspection and landing.
 
 ## Writer testing contract
 

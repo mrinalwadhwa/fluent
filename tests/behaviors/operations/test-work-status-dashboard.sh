@@ -128,6 +128,14 @@ create_planned_work_item() {
 write_mock_claude() {
   cat > "${TEST_DIR}/bin/claude" <<'MOCK_SCRIPT'
 #!/usr/bin/env bash
+if printf '%s' "$*" | grep -q 'follow-up draft as JSON'; then
+  DRAFT_PATH="$(printf '%s' "$*" | grep -oE '/[^[:space:]]*follow-up-draft\.json' | head -1)"
+  if [ -n "$DRAFT_PATH" ]; then
+    mkdir -p "$(dirname "$DRAFT_PATH")"
+    printf '{"learning_summary":"status dashboard learning","follow_ups":[]}\n' > "$DRAFT_PATH"
+  fi
+  exit 0
+fi
 case "$PWD" in
   */work-12-work-visible-attempt-visible|*/work-11-work-action-attempt-action)
     printf 'status dashboard output\n' > status-dashboard-output.txt

@@ -1234,10 +1234,10 @@ fn init_seeds_local_preview_operating_boundary() {
         "proposed Work by default",
         "`fluent work-item authorize` authorizes and queues Work",
         "`fluent scheduler run`",
-        "pending Merge Candidate",
-        "inspected and landed by a human",
+        "ready Merge Candidate after successful Learning",
+        "every ready candidate is inspected and landed by a human",
     ] {
-        let relative = managed[offset..]
+        let relative = normalized[offset..]
             .find(phrase)
             .unwrap_or_else(|| panic!("managed block lacks ordered guidance: {phrase}"));
         offset += relative + phrase.len();
@@ -1335,6 +1335,7 @@ fn craft_section_names_skill_and_lifecycle_stages() {
         "plan",
         "execute",
         "review",
+        "Learner",
         "land",
     ] {
         assert!(
@@ -3226,6 +3227,68 @@ exit 0
     )
 }
 
+/// A role-aware coder for the Local Preview release proof. The origin Learner
+/// leaves one expertise edit for Fluent to canonicalize and one trusted
+/// corrective follow-up; the descendant Learner emits an empty handoff. Both
+/// writers make distinct commits, while every reviewer passes.
+fn local_preview_flywheel_mock_script(origin_draft_json: &str) -> String {
+    format!(
+        r##"#!/bin/bash
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
+done
+if [ -z "$PROMPT" ]; then exit 0; fi
+if [ -n "${{MOCK_PROMPT_LOG:-}}" ]; then
+  printf '%s\n' "$PROMPT" >> "$MOCK_PROMPT_LOG"
+fi
+if printf '%s' "$PROMPT" | grep -q "seeding fluent"; then exit 0; fi
+if printf '%s' "$PROMPT" | grep -q "Rebase the candidate branch"; then
+  TARGET=$(printf '%s' "$PROMPT" | grep -o 'onto `[^`]*`' | sed 's/onto `//;s/`//')
+  git rebase "$TARGET" 2>/dev/null
+  exit $?
+fi
+if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
+  DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
+  if [ -n "$DRAFT" ]; then
+    mkdir -p "$(dirname "$DRAFT")"
+    case "$PWD" in
+      */work-6-work-1-attempt-1)
+        mkdir -p .fluent/expertise/learnings
+        printf '# Local Preview learning\n\nThe release path preserves one canonical expertise delta.\n' \
+          > .fluent/expertise/learnings/local-preview.md
+        cat > "$DRAFT" <<'ORIGINDRAFT'
+{origin_draft_json}
+ORIGINDRAFT
+        ;;
+      *)
+        printf '%s\n' '{{"learning_summary":"descendant complete","follow_ups":[]}}' > "$DRAFT"
+        ;;
+    esac
+  fi
+  exit 0
+fi
+case "$PWD" in
+  */work-*-attempt-1)
+    case "$PWD" in
+      */work-6-work-1-attempt-1) OUTPUT=origin-output.txt ;;
+      *) OUTPUT=descendant-output.txt ;;
+    esac
+    printf 'release proof output\n' > "$OUTPUT"
+    git add "$OUTPUT"
+    git commit -m "Build Local Preview fixture" >/dev/null 2>&1
+    ;;
+  *)
+    printf 'Verdict: pass\n\nLocal Preview review passed.\n' > review.md
+    ;;
+esac
+exit 0
+"##
+    )
+}
+
 /// Land the sole Merge Candidate of `work-1`, driving the rebase with `bin_dir`.
 fn land_work_1(main_dir: &Path, bin_dir: &Path, no_post_merge_review: bool) {
     let mut args = vec![
@@ -4733,6 +4796,403 @@ fn propose_mode_creates_linked_proposed_work_item() {
     assert!(
         !queue_ledger_path(&main_dir, DERIVED_FU1).exists(),
         "propose mode creates no queue entry"
+    );
+}
+
+#[test]
+fn local_preview_walking_skeleton_closes_learning_flywheel() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    commit_authority(&main_dir);
+    let bin_dir = tmp.path().join("bin-local-preview-flywheel");
+    let land_prompt_log = tmp.path().join("local-preview-land-prompts.log");
+    write_mock_claude(
+        &bin_dir,
+        &local_preview_flywheel_mock_script(&learner_draft(&[corrective_follow_up_json("fu-1")])),
+    );
+
+    // The public CLI drives Writer, Tester, all five reviewers, and Learner to
+    // the one release candidate.
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    let origin_ready = read_work_show_json(&main_dir, "work-1");
+    let origin_attempts = origin_ready["attempts"].as_array().unwrap();
+    assert_eq!(origin_attempts.len(), 1);
+    let origin_attempt = &origin_attempts[0];
+    assert_eq!(origin_attempt["status"], "complete");
+    assert_eq!(origin_attempt["review_state"], "passed");
+    assert_eq!(origin_attempt["learning"]["status"], "succeeded");
+    assert!(
+        origin_attempt["learning"]["handoff"].is_object(),
+        "Learner handoff must be durable before candidate-ready"
+    );
+
+    let origin_tasks = origin_attempt["tasks"].as_array().unwrap();
+    assert_eq!(
+        origin_tasks.len(),
+        2 + review::REVIEWERS.len(),
+        "one Writer, one Tester, and every configured reviewer must complete"
+    );
+    assert!(
+        origin_tasks.iter().all(|task| task["status"] == "complete"),
+        "every origin task must be complete: {origin_tasks:?}"
+    );
+    assert_eq!(
+        origin_tasks
+            .iter()
+            .filter(|task| task["kind"] == "write")
+            .count(),
+        1
+    );
+    assert_eq!(
+        origin_tasks
+            .iter()
+            .filter(|task| task["kind"] == "tester")
+            .count(),
+        1
+    );
+    let origin_review_roles: Vec<&str> = origin_tasks
+        .iter()
+        .filter(|task| task["kind"] == "review")
+        .filter_map(|task| task["role"].as_str())
+        .collect();
+    assert_eq!(origin_review_roles.as_slice(), review::REVIEWERS);
+
+    let origin_candidates = origin_ready["merge_candidates"].as_array().unwrap();
+    assert_eq!(origin_candidates.len(), 1);
+    let origin_candidate = &origin_candidates[0];
+    assert_eq!(origin_candidate["merge_state"]["status"], "pending");
+    let origin_candidate_commit = origin_candidate["candidate_commit"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let origin_workspace = main_dir.join(
+        origin_candidate["source_workspace"]["path"]
+            .as_str()
+            .unwrap(),
+    );
+    let origin_write_commit = origin_tasks
+        .iter()
+        .rev()
+        .find(|task| task["kind"] == "write" && task["status"] == "complete")
+        .and_then(|task| task["output"]["commit"].as_str())
+        .unwrap();
+    assert_eq!(origin_write_commit, origin_candidate_commit);
+    assert_eq!(git_head(&origin_workspace), origin_candidate_commit);
+    let origin_status = git::run_stdout(
+        &origin_workspace,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+        "verify clean Local Preview candidate",
+    )
+    .unwrap();
+    assert!(
+        origin_status.is_empty(),
+        "candidate index and worktree must be empty: {origin_status}"
+    );
+    assert_eq!(
+        git::run_stdout(
+            &origin_workspace,
+            &["show", "-s", "--format=%s", "HEAD"],
+            "read Learner commit subject"
+        )
+        .unwrap(),
+        "Update expertise"
+    );
+    let learner_delta = git::run_stdout(
+        &origin_workspace,
+        &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
+        "list canonical Learner delta",
+    )
+    .unwrap();
+    assert!(
+        learner_delta
+            .lines()
+            .all(|path| path.starts_with(".fluent/expertise/")),
+        "the canonical Learner commit may contain only expertise: {learner_delta}"
+    );
+    assert!(
+        learner_delta
+            .lines()
+            .any(|path| path == ".fluent/expertise/learnings/local-preview.md"),
+        "the complete expertise delta must be committed: {learner_delta}"
+    );
+
+    let land_origin = || {
+        fluent_cmd()
+            .current_dir(&main_dir)
+            .args([
+                "merge-candidate",
+                "land",
+                "work-1",
+                "attempt-1-merge-candidate",
+                "--no-sandbox",
+            ])
+            .env("PATH", mock_path(&bin_dir))
+            .env("MOCK_PROMPT_LOG", &land_prompt_log)
+            .output()
+            .unwrap()
+    };
+    let assert_no_post_merge_review = |land_output: &std::process::Output| {
+        let stderr = String::from_utf8_lossy(&land_output.stderr);
+        assert!(
+            !stderr.contains("Spawned post-merge review runner pid"),
+            "default land must not spawn a post-merge review runner: {stderr}"
+        );
+        assert!(
+            !fluent::post_merge_review::daemon_lease_held(&main_dir, "main"),
+            "default land must leave no post-merge review process"
+        );
+        let prompts = fs::read_to_string(&land_prompt_log).unwrap_or_default();
+        assert!(
+            !prompts.contains("Review the codebase at")
+                && !prompts.contains("Post-merge review of"),
+            "default land must launch no post-merge reviewer prompt: {prompts}"
+        );
+        let queue_path = main_dir.join(".fluent/work/post-merge-review-queue.json");
+        if queue_path.exists() {
+            let queue = read_json_path(&queue_path);
+            assert!(
+                queue["entries"]
+                    .as_array()
+                    .map(|entries| entries.is_empty())
+                    .unwrap_or(true),
+                "default land must append no post-merge review queue entry"
+            );
+        }
+        assert!(
+            !main_dir.join(".fluent/work/post-merge-review.log").exists(),
+            "default land must create no post-merge review log"
+        );
+        let review_worktree = tmp.path().join("work-review-main");
+        assert!(
+            !review_worktree.exists(),
+            "default land must create no review-only worktree"
+        );
+        let worktrees = git::run_stdout(
+            &main_dir,
+            &["worktree", "list", "--porcelain"],
+            "list Local Preview worktrees",
+        )
+        .unwrap();
+        assert!(
+            !worktrees.contains("work-review-main"),
+            "default land must register no review-only worktree: {worktrees}"
+        );
+    };
+
+    // Omitting both post-merge options is the supported Local Preview default.
+    let first_land = land_origin();
+    assert!(
+        first_land.status.success(),
+        "default land failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&first_land.stdout),
+        String::from_utf8_lossy(&first_land.stderr)
+    );
+    assert_no_post_merge_review(&first_land);
+
+    let origin_landed = read_work_show_json(&main_dir, "work-1");
+    let origin_merge_state = &origin_landed["merge_candidates"][0]["merge_state"];
+    assert_eq!(origin_merge_state["status"], "merged");
+    let origin_merged_commit = origin_merge_state["merged_commit"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(git_head(&main_dir), origin_merged_commit);
+    assert_eq!(
+        origin_landed["attempts"].as_array().unwrap().len(),
+        1,
+        "landing must add no Attempt to the origin"
+    );
+
+    let observations = open_observation_files(&main_dir);
+    assert_eq!(observations, vec![format!("{OBS_FU1}.md")]);
+    let observation =
+        fs::read_to_string(main_dir.join(".fluent/observations").join(&observations[0])).unwrap();
+    for provenance in [
+        "follow-up-id: fu-1".to_string(),
+        "work-item-id: work-1".to_string(),
+        "attempt-id: attempt-1".to_string(),
+        "merge-candidate-id: attempt-1-merge-candidate".to_string(),
+        format!("merged-commit: {origin_merged_commit}"),
+    ] {
+        assert!(
+            observation.contains(&provenance),
+            "Observation lacks provenance {provenance:?}: {observation}"
+        );
+    }
+
+    let journal_path = main_dir.join(format!(
+        ".fluent/work/follow-ups/{OPERATION_ID}/journal.json"
+    ));
+    let journal_after_land = read_json_path(&journal_path);
+    assert_eq!(journal_after_land["completed"], true);
+    let receipts_after_land = journal_after_land["follow_ups"].as_array().unwrap();
+    assert_eq!(receipts_after_land.len(), 1);
+    let receipt_after_land = &receipts_after_land[0];
+    assert_eq!(receipt_after_land["follow_up_id"], "fu-1");
+    assert_eq!(receipt_after_land["observation_id"], OBS_FU1);
+    assert_eq!(receipt_after_land["derived_work_item_id"], DERIVED_FU1);
+    assert_eq!(receipt_after_land["corrective"], true);
+    assert_eq!(receipt_after_land["resolved_policy"]["mode"], "propose");
+    assert!(
+        !receipt_after_land["queue_expected"]
+            .as_bool()
+            .unwrap_or(false)
+            && !receipt_after_land["queued"].as_bool().unwrap_or(false),
+        "default propose mode must leave the corrective Work unqueued"
+    );
+
+    assert_eq!(
+        work_item_json_count(&main_dir),
+        2,
+        "default land creates only the one corrective Work Item"
+    );
+    let derived_proposed = read_work_show_json(&main_dir, DERIVED_FU1);
+    assert_eq!(derived_proposed["authorization"]["state"], "proposed");
+    assert_eq!(derived_proposed["origin"]["observation_id"], OBS_FU1);
+    assert!(
+        derived_proposed["attempts"].as_array().unwrap().is_empty(),
+        "landing must add no Attempt to proposed Work"
+    );
+    assert!(
+        derived_proposed["merge_candidates"]
+            .as_array()
+            .map(|candidates| candidates.is_empty())
+            .unwrap_or(true)
+    );
+    assert!(
+        !queue_ledger_path(&main_dir, DERIVED_FU1).exists(),
+        "proposed Work must stay off the regular queue"
+    );
+
+    // A human authorizes the exact Work Item. Authorization creates one durable
+    // dispatch, but execution starts only when the explicit scheduler starts.
+    authorize_work_item(&main_dir, DERIVED_FU1);
+    let derived_authorized = read_work_show_json(&main_dir, DERIVED_FU1);
+    assert_eq!(
+        derived_authorized["authorization"]["state"],
+        "execution-ready"
+    );
+    assert_eq!(derived_authorized["authorization"]["authority"], "human");
+    assert_eq!(dispatch_count(&main_dir, DERIVED_FU1), 1);
+    assert_eq!(latest_dispatch_status(&main_dir, DERIVED_FU1), "queued");
+
+    let scheduler = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
+        .current_dir(&main_dir)
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_NO_UPDATE_CHECK", "1")
+        .env_remove("FLUENT_TASK_KIND")
+        .args(["scheduler", "run", "--poll-seconds", "1"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let reached_terminal = poll_until(std::time::Duration::from_secs(60), || {
+        matches!(
+            latest_dispatch_status(&main_dir, DERIVED_FU1).as_str(),
+            "candidate-ready" | "failed" | "needs-user"
+        )
+    });
+    let terminal_status = latest_dispatch_status(&main_dir, DERIVED_FU1);
+    send_signal(scheduler.id(), "TERM");
+    let scheduler_output = scheduler.wait_with_output().unwrap();
+    assert!(
+        reached_terminal,
+        "scheduler did not reach a terminal dispatch within 60 seconds; status={terminal_status}"
+    );
+    assert!(
+        scheduler_output.status.success(),
+        "scheduler did not drain cleanly: stdout={} stderr={}",
+        String::from_utf8_lossy(&scheduler_output.stdout),
+        String::from_utf8_lossy(&scheduler_output.stderr)
+    );
+    assert_eq!(
+        terminal_status,
+        "candidate-ready",
+        "the explicit scheduler must produce a pending Merge Candidate; stderr={}",
+        String::from_utf8_lossy(&scheduler_output.stderr)
+    );
+    assert_eq!(dispatch_count(&main_dir, DERIVED_FU1), 1);
+    let dispatch_ledger = read_json_path(&queue_ledger_path(&main_dir, DERIVED_FU1));
+    let dispatches = dispatch_ledger["dispatches"].as_array().unwrap();
+    assert_eq!(dispatches.len(), 1);
+    assert_eq!(dispatches[0]["status"], "candidate-ready");
+    assert_eq!(dispatches[0]["bound_attempt_id"], "attempt-1");
+
+    let descendant_ready = read_work_show_json(&main_dir, DERIVED_FU1);
+    let descendant_attempts = descendant_ready["attempts"].as_array().unwrap();
+    assert_eq!(descendant_attempts.len(), 1);
+    assert_eq!(descendant_attempts[0]["status"], "complete");
+    assert_eq!(descendant_attempts[0]["review_state"], "passed");
+    assert_eq!(descendant_attempts[0]["learning"]["status"], "succeeded");
+    let descendant_candidates = descendant_ready["merge_candidates"].as_array().unwrap();
+    assert_eq!(descendant_candidates.len(), 1);
+    assert_eq!(
+        descendant_candidates[0]["merge_state"]["status"], "pending",
+        "the scheduler must never land descendant Work"
+    );
+    assert_eq!(
+        git_head(&main_dir),
+        origin_merged_commit,
+        "the scheduler must not advance the target branch"
+    );
+
+    // Re-landing the origin resumes its receipt after human authorization, but
+    // reuses every identity and the already-terminal dispatch.
+    let observations_before_reland = open_observation_files(&main_dir);
+    let dispatch_before_reland = read_json_path(&queue_ledger_path(&main_dir, DERIVED_FU1));
+    let second_land = land_origin();
+    assert!(
+        second_land.status.success(),
+        "idempotent re-land failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&second_land.stdout),
+        String::from_utf8_lossy(&second_land.stderr)
+    );
+    assert_no_post_merge_review(&second_land);
+
+    let origin_after_reland = read_work_show_json(&main_dir, "work-1");
+    assert_eq!(
+        origin_after_reland["merge_candidates"][0]["merge_state"]["merged_commit"],
+        origin_merged_commit
+    );
+    assert_eq!(git_head(&main_dir), origin_merged_commit);
+    assert_eq!(
+        open_observation_files(&main_dir),
+        observations_before_reland
+    );
+    assert_eq!(work_item_json_count(&main_dir), 2);
+    let journal_after_reland = read_json_path(&journal_path);
+    let receipts_after_reland = journal_after_reland["follow_ups"].as_array().unwrap();
+    assert_eq!(receipts_after_reland.len(), 1);
+    assert_eq!(receipts_after_reland[0]["follow_up_id"], "fu-1");
+    assert_eq!(receipts_after_reland[0]["observation_id"], OBS_FU1);
+    assert_eq!(
+        receipts_after_reland[0]["derived_work_item_id"],
+        DERIVED_FU1
+    );
+    assert_eq!(receipts_after_reland[0]["queue_expected"], true);
+    assert_eq!(receipts_after_reland[0]["queued"], true);
+    assert_eq!(
+        read_json_path(&queue_ledger_path(&main_dir, DERIVED_FU1)),
+        dispatch_before_reland,
+        "re-land must reuse the exact dispatch"
+    );
+    assert_eq!(
+        origin_after_reland["attempts"].as_array().unwrap().len(),
+        1,
+        "re-land must add no origin Attempt"
+    );
+    let descendant_after_reland = read_work_show_json(&main_dir, DERIVED_FU1);
+    assert_eq!(
+        descendant_after_reland["attempts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "re-land must add no descendant Attempt"
+    );
+    assert_eq!(
+        descendant_after_reland["merge_candidates"][0]["merge_state"]["status"], "pending",
+        "the descendant remains for human inspection and landing"
     );
 }
 
@@ -8191,7 +8651,8 @@ fn work_attempt_run_drives_write_reviews_and_passes() {
             "Planned 6 review Tasks for Attempt attempt-1",
         ))
         .stdout(predicate::str::contains(
-            "Attempt attempt-1 reviews passed; Merge Candidate attempt-1-merge-candidate is ready",
+            "Attempt attempt-1 reviews and Learner passed; Merge Candidate \
+             attempt-1-merge-candidate is ready",
         ));
 
     let value = read_work_show_json(&main_dir, "work-1");

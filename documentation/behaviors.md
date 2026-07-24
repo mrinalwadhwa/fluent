@@ -1401,8 +1401,8 @@ Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop passes 
 ### B117
 
 IF `fluent attempt run <work-item-id> <attempt-id>` is invoked for
-an Attempt whose reviews already passed and whose Merge Candidate already
-exists,
+an Attempt whose reviews and Learner already passed, whose Merge Candidate
+already exists, and which has no pending landed-follow-up recovery,
 THEN THE SYSTEM SHALL leave Work Item state unchanged and report the
 existing Merge Candidate.
 Test: tests/binary.rs (work_attempt_run_drives_write_reviews_and_passes)
@@ -2506,10 +2506,14 @@ Test: dashboard::tests::test_app_poll_refreshes_work_items, tests/behaviors/oper
 
 ### B4
 
-WHEN Work Items need user input, have pending Merge Candidates, or have
-read errors, THE SYSTEM SHALL show top-level Work view counts for Work
-Items, actionable rows, and errors.
+WHEN Work Items need user input, have pending Merge Candidates, are blocked on
+non-relaunchable Learner evidence, or have read errors,
+THE SYSTEM SHALL show top-level Work view counts for Work Items, actionable
+rows, and errors, while keeping `learner-blocked` rows visible but excluding
+them from the actionable count.
 Test: dashboard::tests::test_work_view_counts_errors,
+dashboard::tests::test_work_view_counts_learner_not_ready_as_actionable,
+dashboard::tests::test_work_view_shows_learner_blocked_without_counting_it_as_actionable,
 tests/behaviors/operations/test-work-status-dashboard.sh (dashboard
 surfaces actionable Work, dashboard reports Work read errors)
 
@@ -2883,9 +2887,14 @@ WHEN `fluent auto-merge <work-item-id>` is invoked,
 THE SYSTEM SHALL poll the named Work Item's state every 30 seconds and fire
 `fluent merge-candidate land <work-item-id> <merge-candidate-id>` on the latest
 Attempt's Merge Candidate WHEN that Attempt is `Complete` with
-`review_state == passed`, the candidate's `merge_state.status == pending`, and
-`merge_state.auto_merge_skipped` is not `true`.
+`review_state == passed` and Learning in the `Succeeded` state, the candidate's
+`merge_state.status == pending`, and `merge_state.auto_merge_skipped` is not
+`true`.
 Test: src/auto_merge.rs (find_ready_candidate_ready_for_real_passed_ordinary_candidate)
+Test: src/auto_merge.rs (find_ready_candidate_returns_none_when_learner_in_progress)
+Test: src/auto_merge.rs (find_ready_candidate_returns_none_when_learner_handoff_pending)
+Test: src/auto_merge.rs (find_ready_candidate_returns_none_when_learner_failed)
+Test: src/auto_merge.rs (find_ready_candidate_returns_none_when_learning_absent)
 Test: tests/binary.rs (auto_merge_exits_clean_on_sigterm)
 
 ### B2
@@ -4542,9 +4551,9 @@ Test: tests/binary.rs (init_updates_craft_section_in_place_idempotently)
 WHEN the craft section is written,
 THE SYSTEM SHALL name the fluent skill as the authoritative source and
 summarize the lifecycle (brief → behaviors → approach → plan → delegated
-execute → review → pending Merge Candidate → human inspection and land),
-capturing learnings as observations, and pausing to `needs-user` when a
-decision needs a human.
+execute → review → Learner → ready Merge Candidate → human inspection and
+land), capturing durable learning and observations, and pausing to
+`needs-user` when a decision needs a human.
 Test: tests/binary.rs (craft_section_names_skill_and_lifecycle_stages)
 
 ### B5
@@ -4607,14 +4616,15 @@ Test: src/content.rs (bundled_fluent_skill_documents_local_preview_boundary)
 ### B7
 
 WHEN Fluent bundles the full fluent skill,
-THE SYSTEM SHALL teach that scheduler execution stops at a pending Merge
-Candidate.
+THE SYSTEM SHALL teach that scheduler execution never lands a candidate and,
+after successful Learning, stops at a ready Merge Candidate.
 Test: src/content.rs (bundled_fluent_skill_documents_local_preview_boundary)
 
 ### B8
 
 WHEN Fluent bundles the full fluent skill,
-THE SYSTEM SHALL teach that a human inspects and lands every Merge Candidate.
+THE SYSTEM SHALL teach that a human inspects and lands every ready Merge
+Candidate.
 Test: src/content.rs (bundled_fluent_skill_documents_local_preview_boundary)
 
 ### B9
@@ -4660,14 +4670,14 @@ Test: tests/binary.rs (init_seeds_local_preview_operating_boundary)
 ### B15
 
 WHEN `fluent init` writes its managed agent-instruction block,
-THE SYSTEM SHALL teach that scheduler execution stops at a pending Merge
-Candidate.
+THE SYSTEM SHALL teach that scheduler execution stops at a ready Merge
+Candidate only after successful Learning.
 Test: tests/binary.rs (init_seeds_local_preview_operating_boundary)
 
 ### B16
 
 WHEN `fluent init` writes its managed agent-instruction block,
-THE SYSTEM SHALL teach that a human inspects and lands the pending Merge
+THE SYSTEM SHALL teach that a human inspects and lands every ready Merge
 Candidate.
 Test: tests/binary.rs (init_seeds_local_preview_operating_boundary)
 
@@ -5124,10 +5134,20 @@ Test: tests/binary.rs (learner_retry_completes_existing_record_idempotently)
 ### B11a
 
 WHEN `fluent attempt run <work-item-id> <attempt-id>` is invoked for an
-otherwise complete code-producing Attempt whose learning record is failed,
+otherwise complete code-producing Attempt whose learning record is failed with
+a relaunchable disposition,
 THE SYSTEM SHALL retry only the Learner and its candidate or handoff
 bookkeeping without rerunning the Writer, Tester, or reviewers.
 Test: tests/binary.rs (attempt_run_retries_only_failed_learner)
+
+### B11b
+
+WHEN a Learner failure has the non-relaunchable `EvidencePending` disposition
+because its coder ran but host evidence persistence failed,
+THE SYSTEM SHALL preserve that failure and its run count on a later Attempt run,
+SHALL NOT relaunch the Learner coder, and SHALL continue withholding Merge
+Candidate readiness for human recovery.
+Test: src/work_attempt_loop.rs (learner_sidecar_failure_recovery_calls_coder_once)
 
 ### B12
 
@@ -5389,10 +5409,13 @@ Test: tests/binary.rs (attempt_create_output_names_attempt_run_next)
 WHEN `fluent attempt run` reaches a terminal outcome,
 THE SYSTEM SHALL print the next action for that specific outcome: a ready Merge Candidate
 names `merge-candidate show`/`land`; a planned follow-up round names `attempt run` again;
-a failed Attempt names the recovery/inspection step; a review-only completion names its
-next step.
+a relaunchable Learner failure names `attempt run`; a non-relaunchable Learner evidence
+failure names Work Item inspection and forbids rerun and land; a failed Attempt names the
+recovery/inspection step; a review-only completion names its next step.
 Test: tests/binary.rs (attempt_run_output_names_next_action_for_merge_candidate_ready)
 Test: tests/binary.rs (attempt_run_output_names_next_action_for_failed)
+Test: src/guidance.rs (after_attempt_run_relaunchable_learner_failure_names_retry)
+Test: src/guidance.rs (after_attempt_run_non_relaunchable_learner_failure_names_human_inspection)
 
 ### B3
 
@@ -5445,11 +5468,16 @@ Test: src/guidance.rs (after_attempt_run_needs_user_generic_names_handoff_file)
 WHEN `fluent status` or `fluent work-item show <id>` runs with at least one actionable
 Work Item on the board,
 THE SYSTEM SHALL print a next-action line naming the `fluent` command for the
-most-actionable Work Item, choosing it by priority needs-user > merge-ready > task-ready,
-and SHALL print no next-action line when no Work Item is actionable.
+most-actionable Work Item, choosing it by priority needs-user > merge-ready >
+learner-not-ready > task-ready, and SHALL print no next-action line when no Work
+Item is actionable. A `learner-blocked` row is visible but not actionable and
+SHALL NOT suppress another Work Item's next action.
 Test: tests/binary.rs (status_names_next_action_for_actionable_state)
 Test: src/guidance.rs (status_next_action_prioritizes_needs_user_over_merge_and_task_ready)
+Test: src/guidance.rs (status_next_action_ignores_learner_blocked_when_merge_ready_exists)
 Test: src/guidance.rs (status_next_action_names_merge_ready_over_task_ready)
+Test: src/guidance.rs (status_next_action_names_learner_retry_over_task_ready)
+Test: src/guidance.rs (status_next_action_is_none_for_only_learner_blocked_work)
 Test: src/guidance.rs (status_next_action_is_none_when_nothing_actionable)
 
 ### B10
@@ -5472,6 +5500,36 @@ fall back to a path-less phrasing when no artifact path is available.
 Test: src/guidance.rs (after_attempt_run_review_only_complete_names_artifact)
 Test: src/guidance.rs (after_attempt_run_review_only_failed_names_artifact)
 Test: src/guidance.rs (after_attempt_run_review_only_complete_names_verdicts)
+
+### B12
+
+WHEN the latest code-producing Attempt has passed review and has a pending Merge
+Candidate but its Learning state is absent, in progress, handoff-pending, or
+failed with a relaunchable disposition,
+THE SYSTEM SHALL label the Work Item `learner-not-ready` rather than
+`merge-ready`, direct the operator to `fluent attempt run` to run or retry the
+Learner, and SHALL NOT direct the operator to land the candidate.
+Test: src/work_status.rs (summarize_passed_attempt_without_learning_is_not_merge_ready)
+Test: src/work_status.rs (summarize_passed_attempt_with_running_learning_is_not_merge_ready)
+Test: src/work_status.rs (summarize_passed_attempt_with_handoff_pending_learning_is_not_merge_ready)
+Test: src/work_status.rs (summarize_passed_attempt_with_failed_learning_is_not_merge_ready)
+Test: src/guidance.rs (next_action_for_learner_not_ready_names_attempt_run_without_land)
+
+### B13
+
+WHEN the latest code-producing Attempt has passed review and has a pending Merge
+Candidate whose Learner failed with the non-relaunchable `EvidencePending`
+disposition,
+THE SYSTEM SHALL label the Work Item `learner-blocked`, print one Work Item
+inspection hint from the originating Attempt outcome, and SHALL NOT direct the
+operator to rerun the Learner or land the candidate. Later status and Work Item
+show commands SHALL emit no next action for that row, so they neither self-loop
+on inspection nor suppress another actionable Work Item.
+Test: src/work_status.rs (summarize_passed_attempt_with_non_relaunchable_learning_is_blocked)
+Test: src/guidance.rs (after_attempt_run_non_relaunchable_learner_failure_names_human_inspection)
+Test: src/guidance.rs (next_action_for_learner_blocked_is_none_to_avoid_inspection_loop)
+Test: src/guidance.rs (status_next_action_ignores_learner_blocked_when_merge_ready_exists)
+Test: src/guidance.rs (status_next_action_is_none_for_only_learner_blocked_work)
 
 ## Fluent state tracking
 

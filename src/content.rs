@@ -832,7 +832,8 @@ Check item {{ITEM_ID}}.
                 "fluent work-item authorize",
                 "authorizes and enqueues",
                 "fluent scheduler run",
-                "pending Merge Candidate",
+                "successful Learning",
+                "ready Merge Candidate",
                 "inspected and landed by a human",
                 "off by default",
             ],
@@ -843,8 +844,10 @@ Check item {{ITEM_ID}}.
             "authorization must not be confused with execution or landing"
         );
         assert!(
-            preview.contains("The scheduler produces a pending Merge Candidate and stops there"),
-            "the scheduler must stop at a pending candidate"
+            preview.contains("The scheduler never lands a candidate")
+                && preview.contains("after successful Learning it stops at")
+                && preview.contains("a ready Merge Candidate"),
+            "the scheduler must stop at a ready candidate only after Learning succeeds"
         );
         assert!(
             preview.contains("--post-merge-review") && preview.contains("positive per-land"),
