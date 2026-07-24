@@ -50,7 +50,10 @@ require_in_file "$SKILL" \
   'fluent merge-candidate show <work-item-id> <merge-candidate-id>' \
   "fluent skill"
 require_in_file "$SKILL" \
-  'Stop when the Attempt produces a pending Merge Candidate' \
+  'Stop when the Attempt produces a ready Merge Candidate' \
+  "fluent skill"
+require_in_file "$SKILL" \
+  'Only a successful Learner run produces a ready Merge Candidate' \
   "fluent skill"
 require_in_file "$SKILL" \
   'Only after the user explicitly accepts that candidate' \
