@@ -31,6 +31,7 @@ pub fn run(
     poll_seconds: u64,
     coder_kind: CoderKind,
     no_sandbox: bool,
+    run_post_merge_review: bool,
 ) -> Result<()> {
     install_signal_handler();
     let store = WorkModelStore::new(project_root);
@@ -68,6 +69,7 @@ pub fn run(
                     &candidate.id,
                     coder_kind,
                     no_sandbox,
+                    run_post_merge_review,
                 );
                 match outcome {
                     MergeOutcome::Succeeded { commit } => {
@@ -137,8 +139,39 @@ fn attempt_merge(
     merge_candidate_id: &str,
     coder_kind: CoderKind,
     no_sandbox: bool,
+    run_post_merge_review: bool,
 ) -> MergeOutcome {
-    let result = work_merge_executor::merge_candidate(WorkMergeConfig {
+    let result = work_merge_executor::merge_candidate(merge_config(
+        project_root,
+        store,
+        resolver,
+        work_item_id,
+        merge_candidate_id,
+        coder_kind,
+        no_sandbox,
+        run_post_merge_review,
+    ));
+
+    classify_merge_outcome(result)
+}
+
+/// Build the merge configuration auto-merge hands to the executor for one land.
+/// Auto-merge never enables the detached post-merge review implicitly: the
+/// policy is exactly the operator's opt-in, so an omitted `--post-merge-review`
+/// lands with review disabled and the positive option enables it for each fresh
+/// land.
+#[allow(clippy::too_many_arguments)]
+fn merge_config<'a>(
+    project_root: &'a Path,
+    store: &'a WorkModelStore,
+    resolver: &'a ContentResolver,
+    work_item_id: &'a str,
+    merge_candidate_id: &'a str,
+    coder_kind: CoderKind,
+    no_sandbox: bool,
+    run_post_merge_review: bool,
+) -> WorkMergeConfig<'a> {
+    WorkMergeConfig {
         project_root,
         store,
         work_item_id,
@@ -147,10 +180,8 @@ fn attempt_merge(
         extra_args: &[],
         coder_kind,
         no_sandbox,
-        skip_post_merge_review: false,
-    });
-
-    classify_merge_outcome(result)
+        run_post_merge_review,
+    }
 }
 
 pub(crate) fn classify_merge_outcome(
@@ -230,6 +261,7 @@ mod tests {
         MergeReviewState, Task, TaskKind, TaskOutput, TaskStatus, WorkItem, WorkspaceAccess,
         WorkspaceRef,
     };
+    use tempfile::TempDir;
 
     fn succeeded_learning() -> AttemptLearning {
         AttemptLearning::succeeded(
@@ -576,5 +608,47 @@ mod tests {
             MergeOutcome::Succeeded { commit } => assert_eq!(commit, "abc123"),
             _ => panic!("expected Succeeded"),
         }
+    }
+
+    #[test]
+    fn auto_merge_post_merge_review_policy_defaults_off() {
+        let tmp = TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let resolver = ContentResolver::new(None);
+        let config = merge_config(
+            tmp.path(),
+            &store,
+            &resolver,
+            "work-1",
+            "attempt-1-merge-candidate",
+            CoderKind::Claude,
+            true,
+            false,
+        );
+        assert!(
+            !config.run_post_merge_review,
+            "auto-merge lands with post-merge review disabled unless the operator opts in"
+        );
+    }
+
+    #[test]
+    fn auto_merge_post_merge_review_policy_honors_opt_in() {
+        let tmp = TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let resolver = ContentResolver::new(None);
+        let config = merge_config(
+            tmp.path(),
+            &store,
+            &resolver,
+            "work-1",
+            "attempt-1-merge-candidate",
+            CoderKind::Claude,
+            true,
+            true,
+        );
+        assert!(
+            config.run_post_merge_review,
+            "auto-merge enables post-merge review for each fresh land when opted in"
+        );
     }
 }

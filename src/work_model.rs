@@ -7544,7 +7544,7 @@ random banner prose that must be ignored
                 &["skills", "tests"],
                 "main",
                 "abc123",
-                None,
+                Some("base123".to_string()),
             )
             .unwrap();
         assert_eq!(task_ids.len(), 3, "1 tester + 2 reviewers");
@@ -7559,12 +7559,24 @@ random banner prose that must be ignored
         let worktree_path = crate::review_only_worktree::review_only_worktree_path("main");
         for task in &item.attempts[0].tasks {
             assert_eq!(task.workspace_access.reads[0].path, worktree_path);
+            assert_eq!(
+                task.review_context
+                    .as_ref()
+                    .and_then(|context| context.base_commit.as_deref()),
+                Some("base123")
+            );
         }
 
         store.create_work_item(&item).unwrap();
         let loaded = store.read_work_item("work-post-merge-review").unwrap();
         assert_eq!(loaded.attempts[0].kind, AttemptKind::PostMergeReview);
         assert_eq!(loaded.attempts[0].tasks.len(), 3);
+        assert!(loaded.attempts[0].tasks.iter().all(|task| {
+            task.review_context
+                .as_ref()
+                .and_then(|context| context.base_commit.as_deref())
+                == Some("base123")
+        }));
     }
 
     #[test]

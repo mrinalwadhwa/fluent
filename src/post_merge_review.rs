@@ -193,8 +193,13 @@ pub fn spawn_detached_runner(
         .stdin(Stdio::null())
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(log_clone));
-    cmd.spawn()
+    let child = cmd
+        .spawn()
         .with_context(|| format!("spawn detached {fluent_bin:?} for post-merge review"))?;
+    eprintln!(
+        "  Spawned post-merge review runner pid {} for {target_branch}",
+        child.id()
+    );
     Ok(())
 }
 

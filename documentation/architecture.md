@@ -34,15 +34,20 @@ agent reads it and can drive the entire workflow.
 ## Workflow
 
 ```
-Brief → Behaviors → Approach → Plan → Execute → Review → Land
-(interactive)                         (autonomous)
+Brief → Behaviors → Approach → Plan → Execute → Review → Merge Candidate
+(interactive)                         (delegated)
+                                                        ↓
+                                                  Inspect → Land
+                                                     (human)
 ```
 
 Interactive stages happen in the agent's session with the user present.
 The agent follows skills directly.
 
-Autonomous stages don't need the user. The Work model is the delegated
-execution path.
+Delegated execution can run without the user until it produces a pending
+Merge Candidate or pauses at `needs-user`. The Work model is that delegated
+execution path. In the Local Preview, a human inspects and lands every
+candidate.
 
 ## Core work model
 
@@ -426,6 +431,39 @@ that boundary reports incomplete recovery, `attempt run` emits a
 `FollowUpRecoveryPending` outcome instead of claiming the merged candidate is
 ready, names the persisted stage and `merge-candidate land` retry action, and
 returns a non-zero command status.
+
+After that landed handoff recovery result is durable — complete or incomplete —
+an ordered post-land coordinator in `merge-candidate land` evaluates the optional
+post-merge review. Ordinary land, and `fluent auto-merge` without its positive
+option, keep it off: the land stops after handoff processing and appends, logs,
+and spawns nothing. Only when the operator passes `--post-merge-review` does the
+coordinator append a post-merge review queue entry and spawn the detached runner,
+under the existing debounce, singleton-lease, and corrective-depth rules, and
+only on a clean fresh land. An idempotent re-land resumes handoff recovery but
+never schedules a new review, and an incomplete handoff result stays retryable
+without suppressing an explicitly requested review. The `--no-post-merge-review`
+spelling remains the compatibility form of the default, and passing both
+spellings is rejected before any durable mutation. A `--runtime fargate` land
+translates only an affirmative request, carrying `FLUENT_POST_MERGE_REVIEW=1` to
+the runner entrypoint, which passes `--post-merge-review` to the inner land;
+Fargate remains compatibility plumbing outside the Local Preview claim.
+
+The Local Preview is Fluent's supervised first-release path: local foreground
+Attempts and proposed follow-up Work by default. `fluent work-item authorize`
+authorizes and enqueues proposed Work but does not execute it. A human
+separately runs `fluent scheduler run`; the scheduler may produce a pending
+Merge Candidate but never lands one. Every candidate requires human inspection
+and landing. Post-merge review is off by default and available only as a
+positive per-land opt-in. `fluent auto-merge`, automatic scheduler lifecycle,
+automatic landing, and Fargate are outside the Local Preview.
+
+For an uninitialized project, the bundled full skill detects the missing
+`.fluent/` directory and offers the built-in `propose` mode or explicit
+`execute` mode before running `fluent init`. `propose` leaves
+`.fluent/config.yaml` unchanged. If the user chooses `execute`, the skill runs
+init and then writes the nested `follow-up: { mode: execute }` mapping.
+Execute mode authorizes and queues corrective Work; it still requires a
+separately started scheduler and human candidate landing.
 
 `fluent cleanup` takes the same land lock as land and post-land recovery, then
 re-reads each candidate before applying its plan. It retains an origin — its

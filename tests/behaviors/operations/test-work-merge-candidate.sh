@@ -246,10 +246,7 @@ EOF
   chmod +x .fluent/hooks/check-pre-merge
 
   RESULT=0
-  # Use a long debounce so the detached post-merge child does not race
-  # the test cleanup.
-  FLUENT_POST_MERGE_DEBOUNCE_SECONDS=3600 \
-    run_merge pass > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
+  run_merge pass > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
   LANDED_COMMIT="$(json_value '.merge_candidates[0].merge_state.merged_commit')"
 
   [ "$(git rev-parse main)" = "$LANDED_COMMIT" ] || RESULT=1
@@ -272,8 +269,76 @@ EOF
     printf '    FAIL: managed candidate workspace remains registered after merge\n'
     RESULT=1
   fi
-  # Verify a post-merge review queue entry was appended.
-  [ -f .fluent/work/post-merge-review-queue.json ] || RESULT=1
+  # An ordinary land stops after Learner handoff processing: it queues, logs,
+  # and spawns no post-merge review.
+  if [ -f .fluent/work/post-merge-review-queue.json ] && \
+     [ "$(jq -r '.entries | length' .fluent/work/post-merge-review-queue.json)" != "0" ]; then
+    printf '    FAIL: ordinary land appended a post-merge review queue entry\n'
+    RESULT=1
+  fi
+  if [ -f .fluent/work/post-merge-review.log ]; then
+    printf '    FAIL: ordinary land spawned a post-merge review runner\n'
+    RESULT=1
+  fi
+  return $RESULT
+}
+
+test_work_merge_explicit_post_merge_review_enqueues() {
+  setup_test_project
+  trap cleanup_test_project RETURN
+  write_mock_claude
+  create_passed_merge_candidate
+
+  RESULT=0
+  # The explicit positive option enqueues the review. Cap the corrective fix
+  # depth at 0 so the detached runner is deferred rather than spawned: the entry
+  # is observable and no child outlives the test.
+  MERGE_MOCK_MODE=pass \
+  CANDIDATE_WORKSPACE="${TEST_DIR}/work-6-work-1-attempt-1" \
+  FLUENT_MAX_POST_MERGE_REVIEW_FIX_DEPTH=0 \
+  PATH="${TEST_DIR}/bin:$PATH" \
+    "$FLUENT_BIN" merge-candidate land --no-sandbox --post-merge-review \
+      work-1 attempt-1-merge-candidate \
+      > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
+
+  [ "$(json_value '.merge_candidates[0].merge_state.status')" = "merged" ] || RESULT=1
+  if [ ! -f .fluent/work/post-merge-review-queue.json ]; then
+    printf '    FAIL: explicit --post-merge-review appended no queue entry\n'
+    RESULT=1
+  elif [ "$(jq -r '.entries | length' .fluent/work/post-merge-review-queue.json)" != "1" ]; then
+    printf '    FAIL: explicit --post-merge-review did not append exactly one entry\n'
+    RESULT=1
+  fi
+  # The fix-depth cap deferred the spawn, so no runner log exists.
+  if [ -f .fluent/work/post-merge-review.log ]; then
+    printf '    FAIL: capped spawn still started a post-merge review runner\n'
+    RESULT=1
+  fi
+  assert_contains "$(cat "$TEST_DIR/stderr")" "Skipping post-merge review spawn" || RESULT=1
+  return $RESULT
+}
+
+test_work_merge_rejects_conflicting_post_merge_review_options() {
+  setup_test_project
+  trap cleanup_test_project RETURN
+  write_mock_claude
+  create_passed_merge_candidate
+
+  MAIN_BEFORE="$(git rev-parse main)"
+
+  RESULT=0
+  # Passing both spellings is contradictory and is rejected before any mutation.
+  if PATH="${TEST_DIR}/bin:$PATH" \
+    "$FLUENT_BIN" merge-candidate land --no-sandbox \
+      --post-merge-review --no-post-merge-review \
+      work-1 attempt-1-merge-candidate \
+      > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr"; then
+    printf '    FAIL: land accepted conflicting post-merge-review options\n'
+    RESULT=1
+  fi
+  assert_contains "$(cat "$TEST_DIR/stderr")" "conflict" || RESULT=1
+  [ "$(git rev-parse main)" = "$MAIN_BEFORE" ] || RESULT=1
+  [ "$(json_value '.merge_candidates[0].merge_state.status')" = "pending" ] || RESULT=1
   return $RESULT
 }
 
@@ -495,6 +560,10 @@ printf 'test-work-merge-candidate\n\n'
 
 run_test "work merge lands after update and checks" \
   test_work_merge_lands_after_update_and_checks
+run_test "work merge explicit post-merge review enqueues" \
+  test_work_merge_explicit_post_merge_review_enqueues
+run_test "work merge rejects conflicting post-merge-review options" \
+  test_work_merge_rejects_conflicting_post_merge_review_options
 run_test "work merge rejects missing Work Item" \
   test_work_merge_rejects_missing_work_item
 run_test "work merge rejects missing Merge Candidate" \

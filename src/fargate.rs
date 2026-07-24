@@ -715,6 +715,15 @@ pub fn pull_work_attempt(project_root: &Path, work_item_id: &str, attempt_id: &s
     pull_worktrees(&config, project_root, &key)
 }
 
+/// The post-merge review task override a Fargate merge launch adds. Fargate
+/// remains outside the Local Preview claim, but its policy direction must stay
+/// coherent: an omitted request carries no override so the inner land uses the
+/// default-off policy, and a positive request carries the affirmative
+/// `FLUENT_POST_MERGE_REVIEW=1` the entrypoint translates to `--post-merge-review`.
+fn post_merge_review_override(run_post_merge_review: bool) -> Option<(String, String)> {
+    run_post_merge_review.then(|| ("FLUENT_POST_MERGE_REVIEW".to_string(), "1".to_string()))
+}
+
 /// Upload the project workspace plus the Merge Candidate's source
 /// worktree to S3 and launch a Fargate task that runs
 /// `fluent work merge`.
@@ -723,7 +732,7 @@ pub fn launch_work_merge(
     work_item_id: &str,
     merge_candidate_id: &str,
     coder: CoderKind,
-    skip_post_merge_review: bool,
+    run_post_merge_review: bool,
 ) -> Result<()> {
     let coder_env = coder_task_overrides(coder)?;
 
@@ -746,9 +755,8 @@ pub fn launch_work_merge(
         serde_json::json!({"name": "FLUENT_S3_BUCKET", "value": config.s3_bucket}),
         serde_json::json!({"name": "FLUENT_REGION", "value": config.region}),
     ];
-    if skip_post_merge_review {
-        env_overrides
-            .push(serde_json::json!({"name": "FLUENT_NO_POST_MERGE_REVIEW", "value": "1"}));
+    if let Some((name, value)) = post_merge_review_override(run_post_merge_review) {
+        env_overrides.push(serde_json::json!({"name": name, "value": value}));
     }
     for (k, v) in &coder_env {
         env_overrides.push(serde_json::json!({"name": k, "value": v}));
@@ -788,6 +796,24 @@ pub fn pull_work_merge(
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn work_merge_overrides_omit_post_merge_review_by_default() {
+        assert_eq!(
+            post_merge_review_override(false),
+            None,
+            "an omitted request carries no positive override, so the inner land defaults off"
+        );
+    }
+
+    #[test]
+    fn work_merge_overrides_include_positive_post_merge_review() {
+        assert_eq!(
+            post_merge_review_override(true),
+            Some(("FLUENT_POST_MERGE_REVIEW".to_string(), "1".to_string())),
+            "a positive request carries the affirmative FLUENT_POST_MERGE_REVIEW=1 override"
+        );
+    }
 
     #[test]
     #[serial]

@@ -25,12 +25,24 @@ pub struct WorkMergeConfig<'a> {
     pub extra_args: &'a [String],
     pub coder_kind: CoderKind,
     pub no_sandbox: bool,
-    pub skip_post_merge_review: bool,
+    /// Affirmative post-merge review policy. Every caller supplies this
+    /// explicitly; an omitted CLI option and the legacy `--no-post-merge-review`
+    /// spelling both resolve to `false`, so a fresh land schedules no detached
+    /// post-merge review unless the operator opts in with `--post-merge-review`.
+    pub run_post_merge_review: bool,
 }
 
 pub struct WorkMergeOutcome {
     pub merge_candidate_id: String,
     pub merged_commit: String,
+}
+
+/// Private execution envelope for a fresh-land attempt. The base commit is
+/// captured before merge side effects and remains available even when the
+/// low-level merge returns an error after durably recording the land.
+struct MergeExecution {
+    result: Result<WorkMergeOutcome>,
+    base_commit: Option<String>,
 }
 
 #[derive(Debug)]
@@ -94,7 +106,9 @@ pub fn merge_candidate(config: WorkMergeConfig<'_>) -> Result<WorkMergeOutcome> 
             merge_candidate_id: candidate.id,
             merged_commit,
         };
-        process_landed_follow_ups(&config, &outcome);
+        if let Err(error) = process_landed_follow_ups(&config, &outcome) {
+            eprintln!("  Warning: failed to update follow-up-processing recovery state: {error}");
+        }
         return Ok(outcome);
     }
 
@@ -116,7 +130,7 @@ pub fn merge_candidate(config: WorkMergeConfig<'_>) -> Result<WorkMergeOutcome> 
 
     set_candidate_executing(config.store, config.work_item_id, &candidate.id)?;
 
-    let result = execute_merge(
+    let execution = execute_merge(
         &config,
         &item,
         &candidate,
@@ -124,12 +138,91 @@ pub fn merge_candidate(config: WorkMergeConfig<'_>) -> Result<WorkMergeOutcome> 
         &target_workspace,
         &artifact_dir,
     );
-    let outcome =
-        recover_landed_candidate_result(config.store, config.work_item_id, &candidate.id, result)?;
-    // The candidate is durably merged. Process its learner handoff in the source
-    // project; a failure here never undoes the successful land.
-    process_landed_follow_ups(&config, &outcome);
+    finish_fresh_land_with(
+        execution,
+        |result| {
+            recover_landed_candidate_result(
+                config.store,
+                config.work_item_id,
+                &candidate.id,
+                result,
+            )
+        },
+        |outcome| process_landed_follow_ups(&config, outcome),
+        |outcome, base_commit| {
+            schedule_post_merge_review(&config, &candidate, outcome, base_commit)
+        },
+        config.run_post_merge_review,
+    )
+}
+
+/// Complete the ordered fresh-land coordinator with injectable boundaries so
+/// its persistence gate and recovered-land data flow can be tested directly.
+fn finish_fresh_land_with(
+    execution: MergeExecution,
+    recover: impl FnOnce(Result<WorkMergeOutcome>) -> Result<WorkMergeOutcome>,
+    process_follow_ups: impl FnOnce(&WorkMergeOutcome) -> Result<bool>,
+    schedule: impl FnOnce(&WorkMergeOutcome, &str),
+    run_post_merge_review: bool,
+) -> Result<WorkMergeOutcome> {
+    let outcome = recover(execution.result)?;
+
+    // Both Ok(true) and Ok(false) mean the complete/incomplete recovery result
+    // is durable. Err means persistence is unknown, so optional review must not
+    // get ahead of the recovery boundary.
+    let follow_up_result = process_follow_ups(&outcome);
+    if let Err(error) = &follow_up_result {
+        eprintln!("  Warning: failed to update follow-up-processing recovery state: {error}");
+    }
+
+    if run_post_merge_review
+        && follow_up_result.is_ok()
+        && let Some(base_commit) = execution.base_commit
+    {
+        schedule(&outcome, &base_commit);
+    }
+
     Ok(outcome)
+}
+
+/// Schedule the optional detached post-merge review for a fresh land, after the
+/// landed Learner handoff recovery result is durable. It runs under the existing
+/// debounce, singleton-lease, and corrective-depth rules; a queue/spawn failure
+/// warns without failing the already-durable land. Reading the Work Item only
+/// resolves the corrective fix depth, so a read failure skips the optional
+/// review rather than discarding the completed merge.
+fn schedule_post_merge_review(
+    config: &WorkMergeConfig<'_>,
+    candidate: &crate::work_model::MergeCandidate,
+    outcome: &WorkMergeOutcome,
+    base_commit: &str,
+) {
+    let fix_depth = match read_work_item_or_not_found(config.store, config.work_item_id) {
+        Ok(item) => crate::post_merge_review::fix_depth_for(&item),
+        Err(error) => {
+            eprintln!(
+                "  Warning: post-merge review scheduling skipped; reading Work Item failed: {error}"
+            );
+            return;
+        }
+    };
+    let entry = crate::post_merge_review::QueueEntry {
+        target_branch: candidate.target_branch.clone(),
+        merged_commit: outcome.merged_commit.clone(),
+        merged_at_unix: crate::post_merge_review::now_unix(),
+        source_work_item_id: config.work_item_id.to_string(),
+        source_merge_candidate_id: candidate.id.clone(),
+        base_commit: base_commit.to_string(),
+        fix_depth,
+    };
+    if let Err(error) = crate::post_merge_review::queue_and_spawn(
+        config.project_root,
+        entry,
+        crate::post_merge_review::debounce_seconds(),
+        fix_depth,
+    ) {
+        eprintln!("  Warning: post-merge review queue/spawn failed: {error}");
+    }
 }
 
 /// Materialize a landed Merge Candidate's learner handoff into the local
@@ -137,16 +230,17 @@ pub fn merge_candidate(config: WorkMergeConfig<'_>) -> Result<WorkMergeOutcome> 
 /// materializes before merge. Any failure is a retryable follow-up-processing
 /// failure that leaves the successful land intact; the persisted operation and
 /// journal let a later `merge-candidate land` resume it.
-fn process_landed_follow_ups(config: &WorkMergeConfig<'_>, outcome: &WorkMergeOutcome) {
-    if let Err(error) = process_landed_follow_ups_at_boundary(
+fn process_landed_follow_ups(
+    config: &WorkMergeConfig<'_>,
+    outcome: &WorkMergeOutcome,
+) -> Result<bool> {
+    process_landed_follow_ups_at_boundary(
         config.project_root,
         config.store,
         config.work_item_id,
         &outcome.merge_candidate_id,
         &outcome.merged_commit,
-    ) {
-        eprintln!("  Warning: failed to update follow-up-processing recovery state: {error}");
-    }
+    )
 }
 
 /// Process one landed handoff through the shared durable recovery boundary used
@@ -372,23 +466,31 @@ fn execute_merge(
     source_workspace: &Path,
     target_workspace: &Path,
     artifact_dir: &Path,
-) -> Result<WorkMergeOutcome> {
-    execute_merge_with_coder(
+) -> MergeExecution {
+    let mut base_commit = None;
+    let result = execute_merge_with_coder(
         config,
         item,
         candidate,
         source_workspace,
         target_workspace,
         artifact_dir,
+        &mut base_commit,
         |sandbox| config.coder_kind.boxed(sandbox),
-    )
+    );
+    MergeExecution {
+        result,
+        base_commit,
+    }
 }
 
 /// Execute a merge with a caller-supplied rebase-coder factory. Production builds
 /// the real coder for the resolved kind; tests inject a fake to drive the rebase
 /// failure route and prove the Task and Merge Candidate settle together. The
-/// factory is consumed only by the rebase step; merge checks and post-merge review
-/// build their own coders unchanged.
+/// factory is consumed only by the rebase step; merge checks build their own
+/// coders unchanged. The caller-provided base slot is populated as soon as the
+/// target head is resolved, before any merge side effect, so a durably landed
+/// merge recovered from a later error still retains its review range.
 fn execute_merge_with_coder(
     config: &WorkMergeConfig<'_>,
     item: &WorkItem,
@@ -396,6 +498,7 @@ fn execute_merge_with_coder(
     source_workspace: &Path,
     target_workspace: &Path,
     artifact_dir: &Path,
+    base_commit: &mut Option<String>,
     make_rebase_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
 ) -> Result<WorkMergeOutcome> {
     ensure_same_git_repository(config.project_root, source_workspace)?;
@@ -409,6 +512,7 @@ fn execute_merge_with_coder(
         &["rev-parse", &candidate.target_branch],
         "resolve target branch",
     )?;
+    *base_commit = Some(target_head_before.clone());
 
     ensure_clean_worktree(source_workspace)?;
     let rebase_outcome = match rebase_candidate_with_coder(
@@ -469,7 +573,7 @@ fn execute_merge_with_coder(
         }
     };
 
-    let outcome = finalize_merge(
+    finalize_merge(
         config,
         candidate,
         source_workspace,
@@ -477,30 +581,7 @@ fn execute_merge_with_coder(
         &target_head_before,
         check_artifacts,
         Vec::new(),
-    )?;
-
-    if !config.skip_post_merge_review {
-        let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
-        let fix_depth = crate::post_merge_review::fix_depth_for(&item);
-        let entry = crate::post_merge_review::QueueEntry {
-            target_branch: candidate.target_branch.clone(),
-            merged_commit: outcome.merged_commit.clone(),
-            merged_at_unix: crate::post_merge_review::now_unix(),
-            source_work_item_id: config.work_item_id.to_string(),
-            source_merge_candidate_id: candidate.id.clone(),
-            base_commit: target_head_before.clone(),
-            fix_depth,
-        };
-        if let Err(error) = crate::post_merge_review::queue_and_spawn(
-            config.project_root,
-            entry,
-            crate::post_merge_review::debounce_seconds(),
-            fix_depth,
-        ) {
-            eprintln!("  Warning: post-merge review queue/spawn failed: {error}");
-        }
-    }
-    Ok(outcome)
+    )
 }
 
 /// Whether the Attempt behind a landed candidate has a retryable (failed) Learner
@@ -1986,7 +2067,7 @@ mod tests {
             extra_args: &[],
             coder_kind: CoderKind::Codex,
             no_sandbox: true,
-            skip_post_merge_review: false,
+            run_post_merge_review: false,
         };
 
         let recorded = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -2116,7 +2197,7 @@ mod tests {
             extra_args: &[],
             coder_kind: CoderKind::Codex,
             no_sandbox: true,
-            skip_post_merge_review: false,
+            run_post_merge_review: false,
         };
 
         // The coder exits 0 with an unconfirmed sweep; the post-coder verification then
@@ -2168,7 +2249,7 @@ mod tests {
             extra_args: &[],
             coder_kind: CoderKind::Codex,
             no_sandbox: true,
-            skip_post_merge_review: false,
+            run_post_merge_review: false,
         };
 
         let error = rebase_candidate_with_coder(
@@ -2276,7 +2357,7 @@ mod tests {
             extra_args: &[],
             coder_kind: CoderKind::Codex,
             no_sandbox: true,
-            skip_post_merge_review: false,
+            run_post_merge_review: false,
         };
 
         let pump_primary = settle_reserved_rebase_failure(
@@ -2413,7 +2494,7 @@ mod tests {
             extra_args: &[],
             coder_kind: CoderKind::Codex,
             no_sandbox: true,
-            skip_post_merge_review: false,
+            run_post_merge_review: false,
         };
 
         // Peer Candidate already Failed + a resumable pump fault → BOTH Failed.
@@ -2524,7 +2605,7 @@ mod tests {
             extra_args: &[],
             coder_kind: CoderKind::Codex,
             no_sandbox: true,
-            skip_post_merge_review: false,
+            run_post_merge_review: false,
         };
         let rebase_status = |work_id: &str| -> TaskStatus {
             store.read_work_item(work_id).unwrap().attempts[0]
@@ -2635,9 +2716,10 @@ mod tests {
             extra_args: &[],
             coder_kind: CoderKind::Codex,
             no_sandbox: true,
-            skip_post_merge_review: true,
+            run_post_merge_review: false,
         };
 
+        let mut base_commit = None;
         let Err(error) = execute_merge_with_coder(
             &config,
             &item,
@@ -2645,6 +2727,7 @@ mod tests {
             &source_workspace,
             &target_workspace,
             &artifact_dir,
+            &mut base_commit,
             |_sandbox| {
                 Box::new(RecordingRebaseCoder {
                     recorded: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -2714,7 +2797,7 @@ mod tests {
             extra_args: &[],
             coder_kind: CoderKind::Codex,
             no_sandbox: true,
-            skip_post_merge_review: false,
+            run_post_merge_review: false,
         }) {
             Ok(_) => panic!("abandoned Work Item should reject merge execution"),
             Err(error) => error,
@@ -2781,6 +2864,108 @@ mod tests {
             candidate_id,
             "abc123".to_string(),
         )
+    }
+
+    #[test]
+    fn fresh_land_records_follow_up_outcome_before_post_merge_review() {
+        let (_tmp, store, work_item_id, candidate_id, merged_commit) = landed_candidate_store();
+        let outcome = finish_fresh_land_with(
+            MergeExecution {
+                result: Ok(WorkMergeOutcome {
+                    merge_candidate_id: candidate_id.clone(),
+                    merged_commit: merged_commit.clone(),
+                }),
+                base_commit: Some("base".to_string()),
+            },
+            |result| result,
+            |_outcome| {
+                record_follow_up_failure(
+                    &store,
+                    &work_item_id,
+                    &candidate_id,
+                    "observation",
+                    "observation materialization failed",
+                    "retry land",
+                )?;
+                Ok(false)
+            },
+            |_outcome, base_commit| {
+                assert_eq!(base_commit, "base");
+                let item = store.read_work_item(&work_item_id).unwrap();
+                let candidate = item
+                    .merge_candidates
+                    .iter()
+                    .find(|candidate| candidate.id == candidate_id)
+                    .unwrap();
+                assert_eq!(
+                    candidate
+                        .merge_state
+                        .follow_up_failure
+                        .as_ref()
+                        .map(|failure| failure.stage.as_str()),
+                    Some("observation"),
+                    "the incomplete follow-up result must be durable at the exact scheduling boundary"
+                );
+            },
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.merged_commit, merged_commit);
+    }
+
+    #[test]
+    fn fresh_land_skips_post_merge_review_when_follow_up_persistence_is_unknown() {
+        let scheduled = std::cell::Cell::new(false);
+        let outcome = finish_fresh_land_with(
+            MergeExecution {
+                result: Ok(WorkMergeOutcome {
+                    merge_candidate_id: "candidate-1".to_string(),
+                    merged_commit: "merged".to_string(),
+                }),
+                base_commit: Some("base".to_string()),
+            },
+            |result| result,
+            |_outcome| Err(anyhow::anyhow!("persist recovery state")),
+            |_outcome, _base_commit| scheduled.set(true),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.merged_commit, "merged");
+        assert!(
+            !scheduled.get(),
+            "unknown recovery persistence must suppress optional review"
+        );
+    }
+
+    #[test]
+    fn recovered_fresh_land_preserves_base_commit_for_post_merge_review() {
+        let (_tmp, store, work_item_id, candidate_id, merged_commit) = landed_candidate_store();
+        let scheduled = std::cell::RefCell::new(Vec::new());
+
+        let outcome = finish_fresh_land_with(
+            MergeExecution {
+                result: Err(anyhow::anyhow!("cleanup failed after durable merge")),
+                base_commit: Some("pre-land-base".to_string()),
+            },
+            |result| recover_landed_candidate_result(&store, &work_item_id, &candidate_id, result),
+            |_outcome| Ok(true),
+            |outcome, base_commit| {
+                scheduled
+                    .borrow_mut()
+                    .push((outcome.merged_commit.clone(), base_commit.to_string()));
+            },
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.merged_commit, merged_commit);
+        assert_eq!(
+            scheduled.into_inner(),
+            vec![(merged_commit, "pre-land-base".to_string())],
+            "a recovered fresh land must schedule once with its real pre-land base"
+        );
     }
 
     #[test]

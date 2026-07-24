@@ -919,34 +919,152 @@ Test: src/work_attempt_loop.rs (cap_enforcement_limits_in_flight_reviewers)
 ### B83
 
 WHEN `fluent merge-candidate land <work-item-id> <merge-candidate-id>` finishes
-the fast-forward and `--no-post-merge-review` was not passed,
-THE SYSTEM SHALL append an entry to the post-merge review queue at
-`.fluent/work/post-merge-review-queue.json` recording the target
-branch, merged commit, timestamp, source Work Item, and source Merge
-Candidate, then spawn a detached `fluent post-merge-review run`
-child that sleeps the debounce window before reviewing. The merge
-command SHALL return immediately after spawning the child; no LLM
-reviewers run inside `fluent merge-candidate land`.
-Untestable: Requires detached process spawn with debounce timing and queue file coordination
-Test: tests/binary.rs (work_merge_candidate_land_default_enqueues_post_merge_review)
+the fast-forward,
+THE SYSTEM SHALL invoke the landed Learner handoff recovery boundary and
+durably record its complete or incomplete result before evaluating optional
+post-merge review.
+Test: src/work_merge_executor.rs (fresh_land_records_follow_up_outcome_before_post_merge_review)
 
 ### B83a
 
-WHERE `--no-post-merge-review` is passed to
-`fluent merge-candidate land`,
-THE SYSTEM SHALL skip appending to the post-merge review queue and
-SHALL NOT spawn a detached post-merge-review child.
-Test: tests/binary.rs (work_merge_candidate_land_no_post_merge_review_skips_queue_entry)
+WHEN `fluent merge-candidate land` is invoked without
+`--post-merge-review`,
+THE SYSTEM SHALL append no post-merge-review queue entry.
+Test: tests/binary.rs (work_merge_candidate_land_default_has_no_post_merge_review_side_effects)
+
+### B83a1
+
+WHEN `fluent merge-candidate land` is invoked without
+`--post-merge-review`,
+THE SYSTEM SHALL spawn no post-merge-review runner process.
+Test: tests/binary.rs (work_merge_candidate_land_default_has_no_post_merge_review_side_effects)
+
+### B83a1a
+
+WHEN `fluent merge-candidate land` is invoked without
+`--post-merge-review`,
+THE SYSTEM SHALL write no post-merge-review runner log.
+Test: tests/binary.rs (work_merge_candidate_land_default_has_no_post_merge_review_side_effects)
+
+### B83a2
+
+WHEN `fluent merge-candidate land` is invoked without
+`--post-merge-review`,
+THE SYSTEM SHALL create no post-merge-review Attempt.
+Test: tests/binary.rs (work_merge_candidate_land_default_has_no_post_merge_review_side_effects)
+
+### B83a3
+
+WHEN `fluent merge-candidate land` is invoked without
+`--post-merge-review`,
+THE SYSTEM SHALL create no post-merge-review worktree.
+Test: tests/binary.rs (work_merge_candidate_land_default_has_no_post_merge_review_side_effects)
+
+### B83a4
+
+WHEN `fluent merge-candidate land` is invoked without
+`--post-merge-review`,
+THE SYSTEM SHALL run no post-merge-review LLM inside the land command.
+Test: tests/binary.rs (work_merge_candidate_land_default_has_no_post_merge_review_side_effects)
 
 ### B83b
 
+WHERE `--post-merge-review` was passed and the landed Learner handoff boundary
+durably returned either complete or incomplete,
+THE SYSTEM SHALL invoke post-merge-review scheduling only after that durable
+result is observable from the Work model store.
+Test: src/work_merge_executor.rs (fresh_land_records_follow_up_outcome_before_post_merge_review)
+Test: tests/binary.rs (explicit_post_merge_review_records_handoff_failure_before_scheduling)
+
+### B83b1
+
+WHERE an affirmative post-merge-review request reaches its scheduling
+boundary,
+THE SYSTEM SHALL append one queue entry containing the target branch, merged
+commit, timestamp, source Work Item, source Merge Candidate, and pre-land base
+commit.
+Test: src/work_merge_executor.rs (recovered_fresh_land_preserves_base_commit_for_post_merge_review)
+Test: tests/binary.rs (explicit_post_merge_review_records_handoff_failure_before_scheduling)
+
+### B83b2
+
+WHERE an affirmative post-merge-review request appends its queue entry,
+THE SYSTEM SHALL spawn a detached post-merge-review runner.
+Test: tests/binary.rs (work_merge_candidate_land_explicit_post_merge_review_enqueues_and_spawns)
+
+### B83c
+
+IF the landed Learner handoff boundary cannot durably persist either a complete
+or incomplete result,
+THEN THE SYSTEM SHALL schedule no post-merge review.
+Test: src/work_merge_executor.rs (fresh_land_skips_post_merge_review_when_follow_up_persistence_is_unknown)
+
+### B83c1
+
+IF the landed Learner handoff boundary cannot durably persist either a complete
+or incomplete result after the merge is durable,
+THEN THE SYSTEM SHALL return the successful landed outcome unchanged.
+Test: src/work_merge_executor.rs (fresh_land_skips_post_merge_review_when_follow_up_persistence_is_unknown)
+
+### B83d
+
+WHERE `--no-post-merge-review` is passed to `fluent merge-candidate land`,
+THE SYSTEM SHALL accept it as the compatibility spelling for omission.
+Test: tests/binary.rs (work_merge_candidate_land_no_post_merge_review_remains_compatible)
+
+### B83d0
+
+WHERE `--no-post-merge-review` is passed to `fluent merge-candidate land`,
+THE SYSTEM SHALL append no post-merge-review queue entry.
+Test: tests/binary.rs (work_merge_candidate_land_no_post_merge_review_remains_compatible)
+
+### B83d1
+
+WHERE `--no-post-merge-review` is passed to `fluent merge-candidate land`,
+THE SYSTEM SHALL still process the landed Learner handoff.
+Test: tests/binary.rs (no_post_merge_review_does_not_skip_learner_handoff)
+
+### B83e
+
+IF both `--post-merge-review` and `--no-post-merge-review` are passed,
+THEN THE SYSTEM SHALL reject the command before changing the target ref, Merge
+Candidate, Learner handoff, or either queue.
+Test: tests/binary.rs (merge_candidate_land_rejects_conflicting_post_merge_review_options_without_mutation)
+
+### B83f
+
+WHEN an idempotent re-land resumes landed Learner handoff recovery,
+THE SYSTEM SHALL NOT schedule post-merge review, including when the positive
+option is passed on the re-land.
+Test: tests/binary.rs (reland_does_not_retroactively_schedule_post_merge_review)
+
+### B83g
+
+WHEN `fluent merge-candidate land` runs with `--runtime fargate` without
+`--post-merge-review`,
+THE SYSTEM SHALL carry no post-merge-review environment override.
+Test: src/fargate.rs (work_merge_overrides_omit_post_merge_review_by_default)
+
+### B83g1
+
+WHEN the Fargate entrypoint receives no post-merge-review environment override,
+THE SYSTEM SHALL invoke the inner land without a post-merge-review option.
+Test: tests/behaviors/operations/test-fargate-entrypoint-post-merge-review.sh (absent request carries no post-merge-review flag)
+
+### B83h
+
 WHEN `fluent merge-candidate land` runs with `--runtime fargate` and
-`--no-post-merge-review`,
-THE SYSTEM SHALL propagate the flag to the Fargate container via the
-`FLUENT_NO_POST_MERGE_REVIEW` environment variable; the container
-entrypoint SHALL pass `--no-post-merge-review` to the inner
+`--post-merge-review`,
+THE SYSTEM SHALL propagate the affirmative request to the Fargate container via
+the `FLUENT_POST_MERGE_REVIEW=1` environment variable.
+Test: src/fargate.rs (work_merge_overrides_include_positive_post_merge_review)
+
+### B83i
+
+WHEN the Fargate entrypoint receives `FLUENT_POST_MERGE_REVIEW=1`,
+THE SYSTEM SHALL pass `--post-merge-review` to the inner
 `fluent merge-candidate land` invocation.
-Untestable: Requires Fargate ECS task launch which cannot run in the sandbox
+Test: tests/behaviors/operations/test-fargate-entrypoint-post-merge-review.sh (positive request reaches inner land)
 
 ### B84
 
@@ -994,17 +1112,30 @@ Test: src/work_model.rs (post_merge_review_attempt_round_trips_through_storage)
 
 ### B88
 
-WHEN a merge lands on a target branch, the merge executor SHALL record
-the target branch's head commit immediately before the merge on the
-post-merge review queue entry as the `base_commit`; when the post-merge
-review runner creates the review-only Attempt from that queue entry, it
-SHALL thread the `base_commit` onto each Task's review context, and the
-review prompt SHALL then include a `git -C <worktree> diff
-<base_commit>..HEAD` review diff command so reviewers can inspect exactly
-the change that landed and triggered the review. Review-only Attempts
-without a `base_commit` (e.g., `fluent review codebase`) SHALL omit
-the review diff command from the prompt.
+WHERE a fresh land has an affirmative post-merge-review request,
+THE SYSTEM SHALL record the target branch's head immediately before the merge
+as the queue entry's `base_commit`.
+Test: src/work_merge_executor.rs (recovered_fresh_land_preserves_base_commit_for_post_merge_review)
+Test: tests/binary.rs (explicit_post_merge_review_records_handoff_failure_before_scheduling)
+
+### B88a
+
+WHEN the post-merge review runner creates a review-only Attempt from a queue
+entry with a `base_commit`,
+THE SYSTEM SHALL copy that `base_commit` onto each Task's review context.
+Test: src/work_model.rs (post_merge_review_attempt_round_trips_through_storage)
+
+### B88b
+
+WHEN a review Task has a `base_commit`,
+THE SYSTEM SHALL include a `git -C <worktree> diff <base_commit>..HEAD` command
+in the review prompt.
 Test: src/work_task_executor.rs (work_review_prompt_populates_diff_command_for_post_merge_when_base_commit_present)
+
+### B88c
+
+WHEN a review-only Task has no `base_commit`,
+THE SYSTEM SHALL omit the review diff command from the prompt.
 Test: src/work_task_executor.rs (work_review_prompt_omits_diff_command_for_review_only_without_base_commit)
 
 ### B89
@@ -2896,6 +3027,18 @@ WHEN `MergeCandidateMergeState` is serialized with
 THE SYSTEM SHALL omit the field from the JSON output.
 Test: src/work_model.rs (merge_state_skips_serializing_auto_merge_skipped_when_none)
 
+### B18
+
+WHEN `fluent auto-merge` is invoked without `--post-merge-review`,
+THE SYSTEM SHALL invoke each fresh land with post-merge review disabled.
+Test: src/auto_merge.rs (auto_merge_post_merge_review_policy_defaults_off)
+
+### B19
+
+WHERE `--post-merge-review` is passed to `fluent auto-merge`,
+THE SYSTEM SHALL invoke each fresh land with post-merge review enabled.
+Test: src/auto_merge.rs (auto_merge_post_merge_review_policy_honors_opt_in)
+
 ## Claude auth token expiry detection
 
 ### B1
@@ -4398,9 +4541,10 @@ Test: tests/binary.rs (init_updates_craft_section_in_place_idempotently)
 
 WHEN the craft section is written,
 THE SYSTEM SHALL name the fluent skill as the authoritative source and
-summarize the lifecycle (brief → behaviors → approach → plan → execute →
-review → land), capturing learnings as observations, and pausing to
-`needs-user` when a decision needs a human.
+summarize the lifecycle (brief → behaviors → approach → plan → delegated
+execute → review → pending Merge Candidate → human inspection and land),
+capturing learnings as observations, and pausing to `needs-user` when a
+decision needs a human.
 Test: tests/binary.rs (craft_section_names_skill_and_lifecycle_stages)
 
 ### B5
@@ -4409,6 +4553,211 @@ IF an agent-instructions file cannot be written,
 THEN THE SYSTEM SHALL print a warning and continue so `fluent init`
 still succeeds.
 Test: tests/binary.rs (init_succeeds_when_craft_section_write_fails)
+
+---
+
+## Local Preview guidance
+
+### B1
+
+WHEN Fluent bundles the full fluent skill,
+THE SYSTEM SHALL teach that Local Preview Attempts run locally in the
+foreground.
+Test: src/content.rs (bundled_fluent_skill_documents_local_preview_boundary)
+
+### B2
+
+WHEN Fluent bundles the full fluent skill,
+THE SYSTEM SHALL teach that corrective follow-up Work is proposed by default.
+Test: src/content.rs (bundled_fluent_skill_documents_local_preview_boundary)
+
+### B3
+
+WHEN Fluent bundles the full fluent skill,
+THE SYSTEM SHALL teach that `fluent work-item authorize` authorizes proposed
+Work.
+Test: src/content.rs (bundled_fluent_skill_documents_local_preview_boundary)
+
+### B3a
+
+WHEN Fluent bundles the full fluent skill,
+THE SYSTEM SHALL teach that `fluent work-item authorize` enqueues proposed
+Work.
+Test: src/content.rs (bundled_fluent_skill_documents_local_preview_boundary)
+
+### B4
+
+WHEN the bundled full skill describes Work authorization,
+THE SYSTEM SHALL state that authorization does not run an Attempt.
+Test: src/content.rs (bundled_fluent_skill_documents_local_preview_boundary)
+
+### B5
+
+WHEN the bundled full skill describes Work authorization,
+THE SYSTEM SHALL state that authorization never authorizes landing.
+Test: src/content.rs (bundled_fluent_skill_documents_local_preview_boundary)
+
+### B6
+
+WHEN Fluent bundles the full fluent skill,
+THE SYSTEM SHALL teach that queued Work starts only while a human explicitly
+runs `fluent scheduler run`.
+Test: src/content.rs (bundled_fluent_skill_documents_local_preview_boundary)
+
+### B7
+
+WHEN Fluent bundles the full fluent skill,
+THE SYSTEM SHALL teach that scheduler execution stops at a pending Merge
+Candidate.
+Test: src/content.rs (bundled_fluent_skill_documents_local_preview_boundary)
+
+### B8
+
+WHEN Fluent bundles the full fluent skill,
+THE SYSTEM SHALL teach that a human inspects and lands every Merge Candidate.
+Test: src/content.rs (bundled_fluent_skill_documents_local_preview_boundary)
+
+### B9
+
+WHEN Fluent bundles the full fluent skill,
+THE SYSTEM SHALL teach that post-merge review is off by default.
+Test: src/content.rs (bundled_fluent_skill_documents_local_preview_boundary)
+
+### B10
+
+WHEN Fluent bundles the full fluent skill,
+THE SYSTEM SHALL teach that `--post-merge-review` is a positive per-land
+opt-in.
+Test: src/content.rs (bundled_fluent_skill_documents_local_preview_boundary)
+
+### B11
+
+WHEN `fluent init` writes its managed agent-instruction block,
+THE SYSTEM SHALL teach that Local Preview Attempts run locally in the
+foreground.
+Test: tests/binary.rs (init_seeds_local_preview_operating_boundary)
+
+### B12
+
+WHEN `fluent init` writes its managed agent-instruction block,
+THE SYSTEM SHALL teach that corrective follow-up Work is proposed by default.
+Test: tests/binary.rs (init_seeds_local_preview_operating_boundary)
+
+### B13
+
+WHEN `fluent init` writes its managed agent-instruction block,
+THE SYSTEM SHALL teach that `fluent work-item authorize` authorizes and queues
+Work.
+Test: tests/binary.rs (init_seeds_local_preview_operating_boundary)
+
+### B14
+
+WHEN `fluent init` writes its managed agent-instruction block,
+THE SYSTEM SHALL teach that queued Work starts only when a human runs
+`fluent scheduler run`.
+Test: tests/binary.rs (init_seeds_local_preview_operating_boundary)
+
+### B15
+
+WHEN `fluent init` writes its managed agent-instruction block,
+THE SYSTEM SHALL teach that scheduler execution stops at a pending Merge
+Candidate.
+Test: tests/binary.rs (init_seeds_local_preview_operating_boundary)
+
+### B16
+
+WHEN `fluent init` writes its managed agent-instruction block,
+THE SYSTEM SHALL teach that a human inspects and lands the pending Merge
+Candidate.
+Test: tests/binary.rs (init_seeds_local_preview_operating_boundary)
+
+### B17
+
+WHEN `fluent init` writes its managed agent-instruction block,
+THE SYSTEM SHALL teach that post-merge review is off by default.
+Test: tests/binary.rs (init_seeds_local_preview_operating_boundary)
+
+### B18
+
+WHEN `fluent init` writes its managed agent-instruction block,
+THE SYSTEM SHALL teach that `--post-merge-review` is the positive per-land
+opt-in.
+Test: tests/binary.rs (init_seeds_local_preview_operating_boundary)
+
+### B19
+
+WHEN either Local Preview teaching surface describes excluded execution modes,
+THE SYSTEM SHALL identify `fluent auto-merge`, automatic scheduler lifecycle,
+automatic landing, and Fargate as outside the Local Preview.
+Test: src/content.rs (bundled_fluent_skill_excludes_automatic_landing)
+Test: tests/binary.rs (init_seeds_local_preview_operating_boundary)
+
+### B20
+
+WHEN either Local Preview teaching surface describes landing,
+THE SYSTEM SHALL require human acceptance rather than autonomous landing
+policy.
+Test: src/content.rs (bundled_fluent_skill_excludes_automatic_landing)
+Test: tests/binary.rs (init_seeds_local_preview_operating_boundary)
+
+### B21
+
+WHEN the full fluent skill detects that `.fluent/` does not exist,
+THE SYSTEM SHALL offer the `propose` or `execute` follow-up-mode choice before
+running `fluent init`.
+Test: src/content.rs (bundled_fluent_skill_orders_first_init_choice)
+
+### B22
+
+WHEN `.fluent/` does not exist and the full fluent skill offers the
+follow-up-mode choice,
+THE SYSTEM SHALL run `fluent init` only after the user chooses.
+Test: src/content.rs (bundled_fluent_skill_orders_first_init_choice)
+
+### B23
+
+WHERE the user chooses `propose` during first-time project setup,
+THE SYSTEM SHALL leave `.fluent/config.yaml` unchanged.
+Test: src/content.rs (bundled_fluent_skill_writes_nested_execute_mode)
+
+### B24
+
+WHERE the user chooses `execute` during first-time project setup,
+THE SYSTEM SHALL write the nested `follow-up: { mode: execute }` mapping after
+init.
+Test: src/content.rs (bundled_fluent_skill_writes_nested_execute_mode)
+
+### B25
+
+WHERE the user chooses `execute` during first-time project setup,
+THE SYSTEM SHALL explain that execute authorizes Work.
+Test: src/content.rs (bundled_fluent_skill_writes_nested_execute_mode)
+
+### B25a
+
+WHERE the user chooses `execute` during first-time project setup,
+THE SYSTEM SHALL explain that execute queues Work.
+Test: src/content.rs (bundled_fluent_skill_writes_nested_execute_mode)
+
+### B25b
+
+WHERE the user chooses `execute` during first-time project setup,
+THE SYSTEM SHALL explain that execute does not start Work.
+Test: src/content.rs (bundled_fluent_skill_writes_nested_execute_mode)
+
+### B26
+
+WHERE the user chooses `execute` during first-time project setup,
+THE SYSTEM SHALL explain that a separately started scheduler executes the
+queued Work.
+Test: src/content.rs (bundled_fluent_skill_writes_nested_execute_mode)
+
+### B27
+
+WHERE the user chooses `execute` during first-time project setup,
+THE SYSTEM SHALL explain that the resulting candidate still requires human
+inspection and landing.
+Test: src/content.rs (bundled_fluent_skill_writes_nested_execute_mode)
 
 ---
 
@@ -4544,10 +4893,10 @@ Test: src/work_model.rs (work_item_fix_depth_round_trips_through_storage)
 ## Post-merge review daemon
 
 A per-target-branch singleton lease bounds the post-merge review daemon
-to one live process. A land still enqueues its review job
-unconditionally; the drain-all-on-wake behavior is unchanged. These
-statements add the singleton guard that stops each land from leaking a
-new sleeping daemon.
+to one live process. Only a fresh land with the affirmative
+`--post-merge-review` option enqueues a review job; omission is the default-off
+path. The drain-all-on-wake behavior is unchanged. These statements add the
+singleton guard that stops opted-in lands from leaking a new sleeping daemon.
 
 ### B1
 

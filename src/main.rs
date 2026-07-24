@@ -145,6 +145,7 @@ fn main() -> Result<()> {
             all,
             no_sandbox,
             coder,
+            post_merge_review,
             poll_seconds,
         }) => {
             cmd_auto_merge(
@@ -153,6 +154,7 @@ fn main() -> Result<()> {
                 all,
                 no_sandbox || cli.no_sandbox,
                 coder.as_deref().or(cli.coder.as_deref()),
+                post_merge_review,
                 poll_seconds,
             )?;
         }
@@ -744,11 +746,22 @@ fn cmd_merge_candidate(
             work_item_id,
             merge_candidate_id,
             no_sandbox,
+            post_merge_review,
             no_post_merge_review,
             coder,
             runtime,
             extra_args,
         } => {
+            // Resolve one affirmative policy before any durable mutation. The
+            // positive option enables the detached post-merge review; omission
+            // and the legacy negative spelling both leave it disabled. Passing
+            // both spellings is contradictory, so reject the command up front —
+            // before touching the target ref, Merge Candidate, Learner handoff,
+            // or either queue.
+            if post_merge_review && no_post_merge_review {
+                bail!("--post-merge-review and --no-post-merge-review conflict; pass at most one");
+            }
+            let run_post_merge_review = post_merge_review;
             let merge_candidate_id = match merge_candidate_id {
                 Some(id) => id,
                 None => {
@@ -777,7 +790,7 @@ fn cmd_merge_candidate(
                         &work_item_id,
                         &merge_candidate_id,
                         coder_kind,
-                        no_post_merge_review,
+                        run_post_merge_review,
                     )?;
                     println!(
                         "Launched merge of {merge_candidate_id} for Work Item {work_item_id} on Fargate"
@@ -796,7 +809,7 @@ fn cmd_merge_candidate(
                 extra_args: &extra_args,
                 coder_kind,
                 no_sandbox: no_sandbox || global_no_sandbox,
-                skip_post_merge_review: no_post_merge_review,
+                run_post_merge_review,
             })?;
             println!(
                 "Merged Merge Candidate {} at {}",
@@ -1147,6 +1160,7 @@ fn cmd_auto_merge(
     all: bool,
     no_sandbox: bool,
     coder: Option<&str>,
+    post_merge_review: bool,
     poll_seconds: Option<u64>,
 ) -> Result<()> {
     let mode = match (work_item_id, all) {
@@ -1163,7 +1177,14 @@ fn cmd_auto_merge(
     };
     let coder_kind = CoderKind::resolve(coder)?;
     let poll = poll_seconds.unwrap_or(30);
-    fluent::auto_merge::run(project_root, mode, poll, coder_kind, no_sandbox)?;
+    fluent::auto_merge::run(
+        project_root,
+        mode,
+        poll,
+        coder_kind,
+        no_sandbox,
+        post_merge_review,
+    )?;
     Ok(())
 }
 
@@ -1522,9 +1543,10 @@ This project uses **fluent** to build changes through a structured, reviewed lif
 The **fluent skill** is the deep reference — invoke it for the full stage procedures.
 This section is the always-loaded summary and is enough to drive fluent on its own.
 
-- **Lifecycle:** capture a brief → define behaviors → design an approach → plan, then
-  autonomous execute → review → land. The first four stages are a user conversation —
-  work through them one question at a time; don't skip them.
+- **Lifecycle:** capture a brief → define behaviors → design an approach → plan →
+  delegated execute → review. A passing Attempt stops at a pending Merge Candidate; a
+  human inspects and lands it. The first four stages are a user conversation — work
+  through them one question at a time; don't skip them.
 - **Work model:** a Work Item holds the plan; an Attempt runs writer → tester → reviewers
   in rounds; a passing Attempt yields a Merge Candidate to land.
 - **Follow the next-action line:** most fluent commands print a `→ Next:` next-action line
@@ -1538,6 +1560,20 @@ This section is the always-loaded summary and is enough to drive fluent on its o
   run` once resolved.
 - **Committed scaffolding:** fluent commits its `.fluent/` notes and test config alongside
   your code changes, so its learned project state persists across runs.
+- **Local Preview:** Attempts run locally in the foreground. Corrective follow-ups become
+  proposed Work by default. `fluent work-item authorize` authorizes and queues Work;
+  execution starts only while a human runs `fluent scheduler run`. The scheduler stops at a
+  pending Merge Candidate, and every candidate is inspected and landed by a human.
+  Post-merge review is off by default; opt in per land with
+  `fluent merge-candidate land --post-merge-review`. `fluent auto-merge`, automatic
+  scheduler lifecycle, automatic landing, and Fargate are outside this path. For an
+  uninitialized project, use the full fluent skill to choose follow-up mode before running
+  `fluent init`. If the user chooses execute, write this after init:
+
+  ```yaml
+  follow-up:
+    mode: execute
+  ```
 
 ### Ask the user easy-to-answer questions
 

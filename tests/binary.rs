@@ -1209,6 +1209,58 @@ fn init_creates_agents_md_with_craft_section_when_none() {
 }
 
 #[test]
+fn init_seeds_local_preview_operating_boundary() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .current_dir(&project)
+        .arg("init")
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(project.join("AGENTS.md")).unwrap();
+    let begin = content.find("<!-- BEGIN fluent -->").unwrap();
+    let end = content[begin..].find("<!-- END fluent -->").unwrap() + begin;
+    let managed = &content[begin..end];
+    let normalized = managed.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    let mut offset = 0;
+    for phrase in [
+        "proposed Work by default",
+        "`fluent work-item authorize` authorizes and queues Work",
+        "`fluent scheduler run`",
+        "pending Merge Candidate",
+        "inspected and landed by a human",
+    ] {
+        let relative = managed[offset..]
+            .find(phrase)
+            .unwrap_or_else(|| panic!("managed block lacks ordered guidance: {phrase}"));
+        offset += relative + phrase.len();
+    }
+
+    assert!(managed.contains("Attempts run locally in the foreground"));
+    assert!(
+        normalized.contains("execution starts only while a human runs `fluent scheduler run`.")
+    );
+    assert!(normalized.contains(
+        "Post-merge review is off by default; opt in per land with \
+         `fluent merge-candidate land --post-merge-review`."
+    ));
+    assert!(managed.contains("`fluent auto-merge`"));
+    assert!(managed.contains("Fargate"));
+    assert!(managed.contains("outside this path"));
+    assert!(managed.contains("before running\n  `fluent init`"));
+    assert!(managed.contains("follow-up:\n    mode: execute"));
+    assert!(!managed.contains("autonomous execute → review → land"));
+    assert!(!managed.contains("policy allows autonomous merging"));
+}
+
+#[test]
 fn init_updates_craft_section_in_place_idempotently() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
@@ -3973,6 +4025,430 @@ fn no_post_merge_review_does_not_skip_learner_handoff() {
         open_observation_files(&main_dir).len(),
         1,
         "--no-post-merge-review still processes the landed learner handoff"
+    );
+}
+
+#[test]
+fn work_merge_candidate_land_no_post_merge_review_remains_compatible() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-land-compat");
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(
+            r#"{"learning_summary":"learned","follow_ups":[{"id":"fu-1","summary":"Follow up","corrective":false}]}"#,
+        ),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    // Existing scripts keep passing --no-post-merge-review; the land accepts it
+    // and produces the same no-post-merge-review result as omission.
+    land_work_1(&main_dir, &bin_dir, true);
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    assert_eq!(
+        value["merge_candidates"][0]["merge_state"]["status"], "merged",
+        "the legacy negative spelling still lands the candidate"
+    );
+    assert!(
+        !main_dir
+            .join(".fluent/work/post-merge-review-queue.json")
+            .exists(),
+        "the compatibility spelling enqueues no post-merge review"
+    );
+    assert!(
+        !main_dir.join(".fluent/work/post-merge-review.log").exists(),
+        "the compatibility spelling spawns no post-merge review runner"
+    );
+}
+
+#[test]
+fn merge_candidate_land_rejects_conflicting_post_merge_review_options_without_mutation() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-land-conflict");
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(
+            r#"{"learning_summary":"learned","follow_ups":[{"id":"fu-1","summary":"Follow up","corrective":false}]}"#,
+        ),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+
+    let main_head_before = git::run_stdout(
+        &main_dir,
+        &["rev-parse", "main"],
+        "read main before conflict",
+    )
+    .unwrap();
+
+    // Passing both spellings is contradictory. The command is rejected before it
+    // changes the target ref, Merge Candidate, Learner handoff, or either queue.
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "merge-candidate",
+            "land",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+            "--post-merge-review",
+            "--no-post-merge-review",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("conflict"));
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    assert_eq!(
+        value["merge_candidates"][0]["merge_state"]["status"], "pending",
+        "a rejected land leaves the Merge Candidate unmerged"
+    );
+    assert!(
+        open_observation_files(&main_dir).is_empty(),
+        "a rejected land materializes no Learner handoff"
+    );
+    assert!(
+        !main_dir
+            .join(".fluent/work/post-merge-review-queue.json")
+            .exists(),
+        "a rejected land touches neither queue"
+    );
+    assert_eq!(
+        git::run_stdout(
+            &main_dir,
+            &["rev-parse", "main"],
+            "read main after conflict"
+        )
+        .unwrap(),
+        main_head_before,
+        "a rejected land does not advance the target ref"
+    );
+}
+
+#[test]
+fn work_merge_candidate_land_explicit_post_merge_review_enqueues_and_spawns() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-explicit-pmr");
+    // Role-aware mock: it drives the land's rebase and Learner, and serves the
+    // reviewer prompts of the detached post-merge review drain.
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(r#"{"learning_summary":"learned","follow_ups":[]}"#),
+    );
+    write_mock_security(&bin_dir, "explicit-pmr-token");
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+
+    // A fresh explicit-positive land appends a queue entry and spawns the
+    // detached runner. Zero debounce drains it immediately instead of leaving a
+    // sleeper for teardown to orphan.
+    let output = fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "merge-candidate",
+            "land",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+            "--post-merge-review",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_POST_MERGE_DEBOUNCE_SECONDS", "0")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "explicit post-merge review land failed: {stderr}"
+    );
+    let runner_pid: u32 = stderr
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("Spawned post-merge review runner pid ")
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|pid| pid.parse().ok())
+        })
+        .unwrap_or_else(|| panic!("land did not report the detached runner pid: {stderr}"));
+
+    let merged = read_work_show_json(&main_dir, "work-1")["merge_candidates"][0]["merge_state"]
+        ["merged_commit"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let short = &merged[..8.min(merged.len())];
+    let review_item = format!("post-merge-main-{short}");
+    let review_item_path = main_dir
+        .join(".fluent/work/items")
+        .join(format!("{review_item}.json"));
+    let queue_path = main_dir.join(".fluent/work/post-merge-review-queue.json");
+    let log_path = main_dir.join(".fluent/work/post-merge-review.log");
+    let review_worktree = main_dir.parent().unwrap().join("work-review-main");
+
+    // Deadline-poll all externally observable completion evidence. A released
+    // lease alone is not process-exit evidence.
+    let drained = poll_until(std::time::Duration::from_secs(60), || {
+        let review_complete = fluent::work_model::WorkModelStore::new(&main_dir)
+            .read_work_item(&review_item)
+            .ok()
+            .and_then(|item| item.attempts.first().map(|attempt| attempt.status.clone()))
+            .is_some_and(|status| status == fluent::work_model::AttemptStatus::Complete);
+        let queue_empty = fs::read_to_string(&queue_path)
+            .ok()
+            .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+            .and_then(|value| value["entries"].as_array().cloned())
+            .is_some_and(|entries| entries.is_empty());
+        let log_complete = fs::read_to_string(&log_path)
+            .is_ok_and(|log| log.contains("Post-merge review: reviewed 1 branch(es), 0 errors"));
+        let process_exited = !std::process::Command::new("/bin/kill")
+            .args(["-0", &runner_pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        review_complete
+            && queue_empty
+            && log_complete
+            && !fluent::post_merge_review::daemon_lease_held(&main_dir, "main")
+            && process_exited
+    });
+    if !drained {
+        let review_state = fs::read_to_string(&review_item_path)
+            .unwrap_or_else(|error| format!("<unreadable: {error}>"));
+        let queue_state = fs::read_to_string(&queue_path)
+            .unwrap_or_else(|error| format!("<unreadable: {error}>"));
+        let log_state =
+            fs::read_to_string(&log_path).unwrap_or_else(|error| format!("<unreadable: {error}>"));
+        let process_alive = std::process::Command::new("/bin/kill")
+            .args(["-0", &runner_pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        panic!(
+            "runner {runner_pid} did not settle: process_alive={process_alive} lease_held={} \
+             review={review_state} queue={queue_state} log={log_state}",
+            fluent::post_merge_review::daemon_lease_held(&main_dir, "main"),
+        );
+    }
+
+    // Exactly one review was scheduled, and it ran to completion.
+    let review_value = read_work_show_json(&main_dir, &review_item);
+    assert_eq!(review_value["attempts"][0]["kind"], "post-merge-review");
+    assert_eq!(review_value["attempts"][0]["status"], "complete");
+
+    // The queue is drained and no runner process remains.
+    if queue_path.exists() {
+        let queue: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&queue_path).unwrap()).unwrap();
+        assert!(
+            queue["entries"]
+                .as_array()
+                .map(|entries| entries.is_empty())
+                .unwrap_or(true),
+            "the drained queue has no residual entries"
+        );
+    }
+    assert!(
+        !fluent::post_merge_review::daemon_lease_held(&main_dir, "main"),
+        "the post-merge review lease is free after the drain"
+    );
+    assert!(
+        review_worktree.exists(),
+        "the real runner must create the canonical review worktree"
+    );
+
+    // Explicitly remove the review worktree and prove both its filesystem path
+    // and Git registration are gone, so the test leaves no detached fixture.
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["cleanup", "--apply", "--prune-all-review-worktrees"])
+        .assert()
+        .success();
+    assert!(
+        !review_worktree.exists(),
+        "cleanup must remove the canonical review worktree"
+    );
+    let worktrees = git::run_stdout(
+        &main_dir,
+        &["worktree", "list", "--porcelain"],
+        "list worktrees after review cleanup",
+    )
+    .unwrap();
+    assert!(
+        !worktrees.contains("work-review-main"),
+        "cleanup must unregister the canonical review worktree: {worktrees}"
+    );
+}
+
+#[test]
+fn explicit_post_merge_review_records_handoff_failure_before_scheduling() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-fault-order");
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(
+            r#"{"learning_summary":"learned","follow_ups":[{"id":"fu-1","summary":"Follow up","corrective":false}]}"#,
+        ),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+    let pre_land_base =
+        git::run_stdout(&main_dir, &["rev-parse", "main"], "read pre-land base").unwrap();
+
+    // Obstruct the observation materialization stage so the landed handoff
+    // recovery settles incomplete. `.fluent/observations` is gitignored, so the
+    // obstruction never dirties the worktree the land must find clean.
+    fs::write(
+        main_dir.join(".fluent/observations"),
+        "block observation directory\n",
+    )
+    .unwrap();
+
+    // Hold the post-merge review daemon lease so the land's spawn defers to this
+    // singleton rather than racing a detached child: the appended queue entry
+    // stays observable and nothing outlives the test.
+    let _lease = fluent::post_merge_review::acquire_daemon_lease(&main_dir, "main")
+        .expect("acquire post-merge review daemon lease");
+
+    let output = fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "merge-candidate",
+            "land",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+            "--post-merge-review",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_POST_MERGE_DEBOUNCE_SECONDS", "0")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "the land still succeeds; the incomplete handoff is retryable"
+    );
+
+    // The landed Learner handoff recovery result is durable and incomplete: the
+    // candidate records the failed observation stage.
+    let value = read_work_show_json(&main_dir, "work-1");
+    assert_eq!(
+        value["merge_candidates"][0]["merge_state"]["status"],
+        "merged"
+    );
+    assert_eq!(
+        value["merge_candidates"][0]["merge_state"]["follow_up_failure"]["stage"], "observation",
+        "the incomplete handoff recovery is durably recorded"
+    );
+
+    // Only after that durable result is the explicit post-merge review scheduled;
+    // the incomplete handoff did not suppress it. The spawn defers to the held
+    // singleton lease, so the appended queue entry remains.
+    let queue_path = main_dir.join(".fluent/work/post-merge-review-queue.json");
+    let queue: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&queue_path).unwrap()).unwrap();
+    let entries = queue["entries"].as_array().expect("queue entries array");
+    assert_eq!(
+        entries.len(),
+        1,
+        "explicit post-merge review is enqueued despite the incomplete handoff"
+    );
+    assert_eq!(entries[0]["source_work_item_id"], "work-1");
+    assert_eq!(
+        entries[0]["source_merge_candidate_id"],
+        "attempt-1-merge-candidate"
+    );
+    assert_eq!(entries[0]["target_branch"], "main");
+    assert_eq!(
+        entries[0]["merged_commit"],
+        value["merge_candidates"][0]["merge_state"]["merged_commit"]
+    );
+    assert_eq!(entries[0]["base_commit"], pre_land_base);
+    assert!(
+        entries[0]["merged_at_unix"]
+            .as_u64()
+            .is_some_and(|timestamp| timestamp > 0),
+        "the queue entry records the land timestamp"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("a live daemon already holds the lease"),
+        "the land reached the spawn path and deferred to the singleton: {stderr}"
+    );
+}
+
+#[test]
+fn reland_does_not_retroactively_schedule_post_merge_review() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-reland-pmr");
+    write_mock_claude(
+        &bin_dir,
+        &learner_land_mock_script(r#"{"learning_summary":"learned","follow_ups":[]}"#),
+    );
+
+    create_and_run_learner_attempt(&main_dir, &bin_dir);
+
+    // Fresh land with no post-merge review.
+    land_work_1(&main_dir, &bin_dir, false);
+    assert_eq!(
+        read_work_show_json(&main_dir, "work-1")["merge_candidates"][0]["merge_state"]["status"],
+        "merged"
+    );
+
+    // Re-land the already-merged candidate, now positively requesting review. A
+    // re-land is idempotent recovery, not a fresh land, so it schedules none.
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "merge-candidate",
+            "land",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+            "--post-merge-review",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_POST_MERGE_DEBOUNCE_SECONDS", "0")
+        .assert()
+        .success();
+
+    let queue_path = main_dir.join(".fluent/work/post-merge-review-queue.json");
+    if queue_path.exists() {
+        let queue: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&queue_path).unwrap()).unwrap();
+        assert!(
+            queue["entries"]
+                .as_array()
+                .map(|entries| entries.is_empty())
+                .unwrap_or(true),
+            "a re-land appends no post-merge review queue entry"
+        );
+    }
+    assert!(
+        !main_dir.join(".fluent/work/post-merge-review.log").exists(),
+        "a re-land spawns no post-merge review runner"
+    );
+    let derived: Vec<String> = fs::read_dir(main_dir.join(".fluent/work/items"))
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            entry
+                .path()
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(String::from)
+        })
+        .collect();
+    assert!(
+        derived.iter().all(|id| !id.starts_with("post-merge-")),
+        "a re-land derives no post-merge review Work Item: {derived:?}"
     );
 }
 
@@ -9090,7 +9566,7 @@ fn work_merge_candidate_land_no_post_merge_review_skips_queue_entry() {
 }
 
 #[test]
-fn work_merge_candidate_land_default_enqueues_post_merge_review() {
+fn work_merge_candidate_land_default_has_no_post_merge_review_side_effects() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     fluent_cmd()
@@ -9105,15 +9581,22 @@ fn work_merge_candidate_land_default_enqueues_post_merge_review() {
         .success();
 
     let bin_dir = tmp.path().join("bin-default-land");
+    let land_prompt_log = tmp.path().join("default-land-prompts.log");
     write_mock_claude(&bin_dir, &rebase_mock_script("pass"));
     fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
+        .env("MOCK_PROMPT_LOG", &land_prompt_log)
         .assert()
         .success();
+    if land_prompt_log.exists() {
+        fs::remove_file(&land_prompt_log).unwrap();
+    }
 
-    fluent_cmd()
+    // A fresh land with neither post-merge-review option lands the candidate and
+    // stops. It must not queue, log, spawn, or materialize any post-merge review.
+    let output = fluent_cmd()
         .current_dir(&main_dir)
         .args([
             "merge-candidate",
@@ -9123,23 +9606,93 @@ fn work_merge_candidate_land_default_enqueues_post_merge_review() {
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&bin_dir))
-        .assert()
-        .success();
+        .env("MOCK_PROMPT_LOG", &land_prompt_log)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "default land failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("Spawned post-merge review runner pid"),
+        "default land must not spawn a post-merge review runner"
+    );
+    assert!(
+        !fluent::post_merge_review::daemon_lease_held(&main_dir, "main"),
+        "default land must leave no post-merge review process holding the daemon lease"
+    );
+    let land_prompts = fs::read_to_string(&land_prompt_log).unwrap_or_else(|_| String::new());
+    assert!(
+        !land_prompts.contains("Review the codebase at")
+            && !land_prompts.contains("Post-merge review of"),
+        "the land phase must launch no post-merge reviewer prompt: {land_prompts}"
+    );
 
     let value = read_work_show_json(&main_dir, "work-1");
     let candidate = &value["merge_candidates"][0];
     assert_eq!(candidate["merge_state"]["status"], "merged");
 
     let queue_path = main_dir.join(".fluent/work/post-merge-review-queue.json");
-    let queue: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&queue_path).unwrap()).unwrap();
-    let entries = queue["entries"].as_array().expect("queue entries array");
-    assert_eq!(
-        entries.len(),
-        1,
-        "default land must append exactly one post-merge review queue entry"
+    if queue_path.exists() {
+        let queue: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&queue_path).unwrap()).unwrap();
+        let entries = queue["entries"].as_array().expect("queue entries array");
+        assert!(
+            entries.is_empty(),
+            "default land must append no post-merge review queue entry"
+        );
+    }
+    assert!(
+        !main_dir.join(".fluent/work/post-merge-review.log").exists(),
+        "default land must spawn no post-merge review runner (no log)"
     );
-    assert_eq!(entries[0]["source_work_item_id"], "work-1");
+
+    // No review-only Work Item is derived and no post-merge review Attempt is
+    // added to the source Work Item.
+    let items_dir = main_dir.join(".fluent/work/items");
+    let item_ids: Vec<String> = fs::read_dir(&items_dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().map(|e| e == "json").unwrap_or(false) {
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .map(|stem| stem.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        item_ids,
+        vec!["work-1".to_string()],
+        "default land derives no post-merge-review-fix Work Item"
+    );
+    for attempt in value["attempts"].as_array().unwrap() {
+        assert_ne!(
+            attempt["kind"], "post-merge-review",
+            "default land adds no post-merge review Attempt"
+        );
+    }
+
+    // No canonical review-only worktree exists or is registered.
+    let review_worktree = main_dir.parent().unwrap().join("work-review-main");
+    assert!(
+        !review_worktree.exists(),
+        "default land creates no canonical review worktree"
+    );
+    let worktrees = git::run_stdout(
+        &main_dir,
+        &["worktree", "list", "--porcelain"],
+        "list worktrees",
+    )
+    .unwrap();
+    assert!(
+        !worktrees.contains("work-review-main"),
+        "default land registers no post-merge review worktree: {worktrees}"
+    );
 }
 
 #[test]
@@ -12613,6 +13166,10 @@ if [ -z "$PROMPT" ]; then
   exit 0
 fi
 
+if [ -n "${{MOCK_PROMPT_LOG:-}}" ]; then
+  printf '%s\n' "$PROMPT" >> "$MOCK_PROMPT_LOG"
+fi
+
 if echo "$PROMPT" | grep -q "Rebase the candidate branch"; then
   # Extract target branch from prompt
   TARGET=$(echo "$PROMPT" | grep -o 'onto `[^`]*`' | sed 's/onto `//;s/`//')
@@ -12975,6 +13532,22 @@ exit 0
 
 fn git_head(repo: &Path) -> String {
     git::run_stdout(repo, &["rev-parse", "HEAD"], "get HEAD").unwrap()
+}
+
+/// Poll `condition` until it returns true or `timeout` elapses. Returns whether
+/// it became true, so callers can assert a deadline-bounded expectation without
+/// an unbounded sleep.
+fn poll_until(timeout: std::time::Duration, mut condition: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if condition() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 fn git_common_dir(repo: &Path) -> PathBuf {

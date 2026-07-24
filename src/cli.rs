@@ -114,6 +114,11 @@ pub enum Commands {
         #[arg(long)]
         coder: Option<String>,
 
+        /// Run the detached post-merge review after each land (opt-in;
+        /// omitted, auto-merge lands with post-merge review disabled)
+        #[arg(long)]
+        post_merge_review: bool,
+
         /// Poll interval in seconds (default 30)
         #[arg(long, hide = true)]
         poll_seconds: Option<u64>,
@@ -472,8 +477,14 @@ pub enum MergeCandidateCommands {
         #[arg(long)]
         no_sandbox: bool,
 
-        /// Skip the post-merge review after landing
+        /// Run the detached post-merge review after landing (opt-in;
+        /// omitted, the land stops after Learner handoff processing)
         #[arg(long)]
+        post_merge_review: bool,
+
+        /// Compatibility spelling for the default; conflicts with
+        /// --post-merge-review
+        #[arg(long, hide = true)]
         no_post_merge_review: bool,
 
         /// Coding agent to launch: claude or codex

@@ -50,7 +50,13 @@ require_in_file "$SKILL" \
   'fluent merge-candidate show <work-item-id> <merge-candidate-id>' \
   "fluent skill"
 require_in_file "$SKILL" \
-  'Land through `fluent merge-candidate land <work-item-id>' \
+  'Stop when the Attempt produces a pending Merge Candidate' \
+  "fluent skill"
+require_in_file "$SKILL" \
+  'Only after the user explicitly accepts that candidate' \
+  "fluent skill"
+require_in_file "$SKILL" \
+  '`fluent auto-merge`, automatic scheduler lifecycle, automatic landing, and' \
   "fluent skill"
 require_in_file "$SKILL" \
   "unrelated work that can proceed in parallel" \
@@ -77,6 +83,12 @@ require_absent_from_file "$ARCHITECTURE" \
 require_absent_from_file "$ARCHITECTURE" \
   '## Legacy run compatibility' \
   "architecture documentation"
+require_absent_from_file "$SKILL" \
+  'policy allows autonomous merging' \
+  "fluent skill"
+require_absent_from_file "$SKILL" \
+  'autonomous execute → review → land' \
+  "fluent skill"
 require_absent_from_file "$AGENT_INSTRUCTIONS" \
   'Use legacy `fluent run` only for' \
   "agent instructions"

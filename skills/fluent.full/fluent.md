@@ -32,9 +32,17 @@ The installer puts `fluent` in `~/.local/bin`. If the second check still fails, 
 
 ## On session start
 
+First check whether `.fluent/` exists. If it does not, complete
+“First-time project setup” below before running `fluent status` or any Work
+command.
+
 Run `fluent status` or `fluent work-item list` to see current Work. If stored Work Items exist, inspect the relevant one with `fluent work-item show <work-item-id>`. Continue the latest non-terminal Attempt when the next action is clear, or present the `needs-user` handoff when an Attempt or Merge Candidate asks for user input.
 
-If `fluent status` shows a pending Merge Candidate, inspect it with `fluent merge-candidate show <work-item-id> <merge-candidate-id>`. Land it with `fluent merge-candidate land <work-item-id>` after the user accepts the candidate or the policy allows autonomous merging.
+If `fluent status` shows a pending Merge Candidate, inspect it with
+`fluent merge-candidate show <work-item-id> <merge-candidate-id>`. Present it
+to the user for inspection. Run `fluent merge-candidate land <work-item-id>`
+only after the user accepts the candidate. Do not start `fluent auto-merge`;
+it is outside the Local Preview.
 
 If nothing needs attention, ask the user what they want to build.
 
@@ -51,19 +59,24 @@ Follow the four stage procedures in order. Each is a reference file in this skil
 - `references/design-approach.md` — decide the technical approach and write `approach.md`.
 - `references/plan-execution.md` — plan the steps and write `plan.md`, then create the Work Item.
 
-For a codebase, module, or area review (not building something new), capture enough context to create a Work Item and use the review-only flow in the autonomous stages below.
+For a codebase, module, or area review (not building something new), capture enough context to create a Work Item and use the review-only flow in the delegated stages below.
 
-## Autonomous stages (user away)
+## Delegated execution
 
 `references/plan-execution.md` has already created the Work Item(s) with the approved planning files. From here, use the Work model for delegated execution:
 
 1. Create an Attempt: `fluent attempt create <work-item-id>`. (An `attempt-N` id is auto-assigned; pass an explicit id for scripted flows.)
 2. Run the Attempt: `fluent attempt run <work-item-id>`. (Defaults to the most recently created Attempt; pass an explicit id to target a specific one.)
 3. Inspect status with `fluent status` or `fluent work-item show <work-item-id>`.
-4. When the Attempt creates a Merge Candidate, inspect it with `fluent merge-candidate show <work-item-id> <merge-candidate-id>`.
-5. Land through `fluent merge-candidate land <work-item-id>`. (Defaults to the most recently created Merge Candidate; pass an explicit id to target a specific one.)
+4. Stop when the Attempt produces a pending Merge Candidate. Present it to the
+   user for inspection with
+   `fluent merge-candidate show <work-item-id> <merge-candidate-id>`.
+5. Only after the user explicitly accepts that candidate, run
+   `fluent merge-candidate land <work-item-id>`. (Defaults to the most recently
+   created Merge Candidate; pass an explicit id to target a specific one.)
 
-Autonomous execution runs as a loop. Each round:
+Delegated execution runs as a loop until it produces a Merge Candidate or
+pauses at `needs-user`. Each round:
 
 1. The writer produces a candidate commit.
 2. The Tester Task runs the project's tests.
@@ -101,6 +114,54 @@ coders:
   behavior-tests:
     coder: claude
 ```
+
+## Local Preview
+
+Fluent's first release is the **Local Preview**: a supervised, local-first path you can try before its background execution, interruption, concurrency, and remote-execution hardening is complete. The default path stays visible and human-controlled:
+
+- Attempts run **locally in the foreground** — you watch each round as it happens.
+- Corrective follow-up findings become **proposed follow-up Work** by default.
+- `fluent work-item authorize <work-item-id>` authorizes and enqueues proposed
+  Work. Authorization does not run an Attempt and never authorizes landing.
+- Queued Work starts only while a human explicitly runs `fluent scheduler run`.
+  The scheduler produces a pending Merge Candidate and stops there.
+- **Every Merge Candidate is inspected and landed by a human** with
+  `fluent merge-candidate land <work-item-id>`.
+- Post-merge review is **off by default** and remains a positive per-land
+  opt-in with `fluent merge-candidate land --post-merge-review`.
+
+`fluent auto-merge`, automatic scheduler lifecycle, automatic landing, and
+Fargate are outside the Local Preview.
+
+## First-time project setup
+
+When `.fluent/` does not exist:
+
+1. Before running `fluent init`, ask:
+
+   ```text
+   Which follow-up mode should this project use?
+
+   (a) propose — corrective findings become proposed Work you authorize
+       (recommended: keeps the Local Preview human-controlled)
+   (b) execute — corrective findings are authorized and queued automatically
+   ```
+
+2. After the user chooses, run `fluent init`.
+
+3. If the user chose `propose`, leave `.fluent/config.yaml` unchanged.
+
+4. If the user chose `execute`, write this nested mapping to
+   `.fluent/config.yaml` after init:
+
+   ```yaml
+   follow-up:
+     mode: execute
+   ```
+
+`execute` authorizes and queues trusted corrective Work. It does not start
+execution. A human must separately run `fluent scheduler run`; the resulting
+Merge Candidate still requires human inspection and landing.
 
 ## Writer testing contract
 

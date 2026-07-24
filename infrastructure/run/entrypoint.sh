@@ -22,8 +22,8 @@
 #   FLUENT_WORK_MERGE_CANDIDATE_ID   Merge Candidate ID (Merge mode)
 #   FLUENT_PROJECT_NAME              basename of the project root
 #                                     (e.g. "main")
-#   FLUENT_NO_POST_MERGE_REVIEW      if "1", pass --no-post-merge-review
-#                                     to merge-candidate land
+#   FLUENT_POST_MERGE_REVIEW         if "1", pass --post-merge-review
+#                                     to merge-candidate land (opt-in)
 
 set -euo pipefail
 
@@ -168,8 +168,8 @@ case "$MODE" in
       "$FLUENT_WORK_ITEM_ID" "$FLUENT_WORK_MERGE_CANDIDATE_ID" "$CODER"
 
     merge_extra_args=()
-    if [ "${FLUENT_NO_POST_MERGE_REVIEW:-}" = "1" ]; then
-      merge_extra_args+=(--no-post-merge-review)
+    if [ "${FLUENT_POST_MERGE_REVIEW:-}" = "1" ]; then
+      merge_extra_args+=(--post-merge-review)
     fi
 
     "$FLUENT_BIN" merge-candidate land \

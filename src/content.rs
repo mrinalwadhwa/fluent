@@ -580,6 +580,16 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn assert_ordered(content: &str, expected: &[&str]) {
+        let mut offset = 0;
+        for needle in expected {
+            let relative = content[offset..]
+                .find(needle)
+                .unwrap_or_else(|| panic!("missing ordered text: {needle:?}"));
+            offset += relative + needle.len();
+        }
+    }
+
     #[test]
     fn test_prompt_section_extract() {
         let content = "\
@@ -799,6 +809,122 @@ Check item {{ITEM_ID}}.
                 .iter()
                 .any(|(p, _)| p.starts_with("fluent/references/")),
             "bundled fluent skill must include references"
+        );
+    }
+
+    #[test]
+    fn bundled_fluent_skill_documents_local_preview_boundary() {
+        let skill = bundled_skill_content("fluent/SKILL.md")
+            .expect("bundled fluent skill must have SKILL.md");
+        let preview = skill
+            .split_once("## Local Preview")
+            .and_then(|(_, rest)| rest.split_once("## First-time project setup"))
+            .map(|(section, _)| section)
+            .expect("the bundled skill must have a bounded Local Preview section");
+        assert!(
+            preview.contains("locally in the foreground"),
+            "must describe local foreground Attempts"
+        );
+        assert_ordered(
+            preview,
+            &[
+                "proposed follow-up Work",
+                "fluent work-item authorize",
+                "authorizes and enqueues",
+                "fluent scheduler run",
+                "pending Merge Candidate",
+                "inspected and landed by a human",
+                "off by default",
+            ],
+        );
+        assert!(
+            preview.contains("Authorization does not run an Attempt")
+                && preview.contains("never authorizes landing"),
+            "authorization must not be confused with execution or landing"
+        );
+        assert!(
+            preview.contains("The scheduler produces a pending Merge Candidate and stops there"),
+            "the scheduler must stop at a pending candidate"
+        );
+        assert!(
+            preview.contains("--post-merge-review") && preview.contains("positive per-land"),
+            "must describe positive per-land post-merge review that is off by default"
+        );
+    }
+
+    #[test]
+    fn bundled_fluent_skill_excludes_automatic_landing() {
+        let skill = bundled_skill_content("fluent/SKILL.md")
+            .expect("bundled fluent skill must have SKILL.md");
+        assert!(
+            skill.contains(
+                "`fluent auto-merge`, automatic scheduler lifecycle, automatic landing, and"
+            ) && skill.contains("Fargate are outside the Local Preview"),
+            "must explicitly exclude auto-merge, automatic landing, and Fargate"
+        );
+        assert!(
+            !skill.contains("policy allows autonomous merging"),
+            "must not permit policy-based autonomous landing"
+        );
+        assert!(
+            !skill.contains("autonomous execute → review → land"),
+            "must not present landing as an autonomous lifecycle stage"
+        );
+        assert!(
+            skill.contains("Only after the user explicitly accepts that candidate"),
+            "must require explicit acceptance before landing"
+        );
+    }
+
+    #[test]
+    fn bundled_fluent_skill_orders_first_init_choice() {
+        let skill = bundled_skill_content("fluent/SKILL.md")
+            .expect("bundled fluent skill must have SKILL.md");
+        let setup = skill
+            .split_once("## First-time project setup")
+            .map(|(_, section)| section)
+            .expect("the bundled skill must have first-time setup guidance");
+        assert_ordered(
+            setup,
+            &[
+                "When `.fluent/` does not exist",
+                "Before running `fluent init`",
+                "(a) propose",
+                "(b) execute",
+                "After the user chooses, run `fluent init`",
+                "If the user chose `propose`",
+                "If the user chose `execute`",
+            ],
+        );
+        assert!(setup.contains("recommended"));
+    }
+
+    #[test]
+    fn bundled_fluent_skill_writes_nested_execute_mode() {
+        let skill = bundled_skill_content("fluent/SKILL.md")
+            .expect("bundled fluent skill must have SKILL.md");
+        let setup = skill
+            .split_once("## First-time project setup")
+            .map(|(_, section)| section)
+            .expect("the bundled skill must have first-time setup guidance");
+        assert!(
+            setup.contains("leave `.fluent/config.yaml` unchanged"),
+            "propose must leave project configuration unchanged"
+        );
+        assert!(
+            setup.contains("follow-up:\n     mode: execute"),
+            "execute must use the exact nested YAML mapping"
+        );
+        assert!(
+            !skill.contains("follow-up.mode: execute"),
+            "the invalid flat execute spelling must be absent"
+        );
+        assert!(
+            setup.contains("authorizes and queues")
+                && setup.contains("does not start")
+                && setup.contains("fluent scheduler run")
+                && setup.contains("human inspection and landing"),
+            "execute must distinguish queue authorization, scheduler execution, and landing"
         );
     }
 
