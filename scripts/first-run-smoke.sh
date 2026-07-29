@@ -1,0 +1,286 @@
+#!/usr/bin/env bash
+#
+# first-run-smoke.sh — operator harness for Fluent's clean-room first-run gate.
+#
+# Exercises Fluent's public first-run journey inside a fresh repository and an
+# isolated home: install or select Fluent, initialize the repository, create a
+# small deterministic Work Item, run its Attempt through the Learner, inspect
+# the ready Merge Candidate, and land it only after an explicit second command.
+#
+# The harness runs in explicit, resumable phases so an operator can inspect
+# evidence at every safety boundary:
+#
+#   first-run-smoke.sh prepare <root> [--installer <url|path>] [--binary <path>]
+#   first-run-smoke.sh run     <root>
+#   first-run-smoke.sh land    <root>
+#
+# All state — an isolated home, the Git repository, the selected binary, phase
+# logs, and evidence — lives beneath <root>. The harness never deletes <root>,
+# on success or failure, so every failure keeps the evidence needed to explain
+# it.
+
+set -euo pipefail
+
+if [[ "${TRACE-0}" == "1" ]]; then set -o xtrace; fi
+
+readonly SCHEMA_VERSION=1
+readonly WORK_ITEM_ID="clean-room-fixture"
+readonly ATTEMPT_ID="attempt-1"
+readonly DEFAULT_INSTALLER="https://fluent.computer/install"
+
+# Absolute path to this script, for the resume commands the harness prints.
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+readonly SELF
+
+# ---------------------------------------------------------------------------
+# Diagnostics
+# ---------------------------------------------------------------------------
+
+# Report an error and exit without ever touching the smoke root.
+die() {
+  printf 'error: %s\n' "$1" >&2
+  exit 1
+}
+
+info() {
+  printf '%s\n' "$1"
+}
+
+# Report a phase failure with its log and the exact resume command, then exit
+# non-zero. The smoke root is preserved untouched.
+fail_phase() {
+  local root="$1" phase="$2" log="$3" resume_phase="$4"
+  printf '\n' >&2
+  printf 'error: smoke phase "%s" failed\n' "$phase" >&2
+  printf '  smoke root preserved: %s\n' "$root" >&2
+  printf '  phase log: %s\n' "$log" >&2
+  printf '  resume with: %s %s %q\n' "$SELF" "$resume_phase" "$root" >&2
+  exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Manifest — a JSON record of durable phase state beneath the smoke root.
+# Never sourced; read and written with jq.
+# ---------------------------------------------------------------------------
+
+manifest_path() {
+  printf '%s/harness/manifest.json' "$1"
+}
+
+# Read one jq field from the manifest.
+manifest_get() {
+  local root="$1" filter="$2"
+  jq -r "$filter" "$(manifest_path "$root")"
+}
+
+# Set one manifest field to a string value (read-modify-write via a temp file).
+manifest_set() {
+  local root="$1" key="$2" value="$3"
+  local path tmp
+  path="$(manifest_path "$root")"
+  tmp="$(mktemp)"
+  jq --arg v "$value" ".${key} = \$v" "$path" > "$tmp"
+  mv "$tmp" "$path"
+}
+
+# ---------------------------------------------------------------------------
+# Shared setup
+# ---------------------------------------------------------------------------
+
+require_tools() {
+  command -v git >/dev/null 2>&1 || die "git not found on PATH"
+  command -v jq >/dev/null 2>&1 || die "jq not found on PATH"
+}
+
+# Resolve <root> to an absolute path without requiring it to exist yet.
+absolute_path() {
+  local path="$1"
+  case "$path" in
+    /*) printf '%s' "$path" ;;
+    *)  printf '%s/%s' "$(pwd -P)" "$path" ;;
+  esac
+}
+
+home_dir()    { printf '%s/home' "$1"; }
+project_dir() { printf '%s/project/main' "$1"; }
+bin_dir()     { printf '%s/bin' "$1"; }
+evidence_dir(){ printf '%s/evidence' "$1"; }
+log_dir()     { printf '%s/harness/logs' "$1"; }
+workitem_dir(){ printf '%s/harness/workitem' "$1"; }
+
+# ---------------------------------------------------------------------------
+# prepare
+# ---------------------------------------------------------------------------
+
+# Seed the deterministic fixture repository. The initial commit deliberately
+# fails the fixture test; the Work Item asks the Writer to make it pass.
+seed_fixture_repo() {
+  local project="$1"
+  mkdir -p "$project"
+  git -C "$project" init -q -b main
+  git -C "$project" config user.email "smoke@fluent.local"
+  git -C "$project" config user.name "Fluent Smoke"
+  git -C "$project" config commit.gpgsign false
+
+  printf 'TODO\n' > "$project/greeting.txt"
+
+  cat > "$project/check.sh" <<'CHECK'
+#!/usr/bin/env sh
+# Fixture test: the greeting must say hello.
+grep -q '^hello$' greeting.txt
+CHECK
+  chmod +x "$project/check.sh"
+
+  mkdir -p "$project/.fluent"
+  cat > "$project/.fluent/tester.yaml" <<'TESTER'
+commands:
+  - command: ./check.sh
+    test_harness: shell-harness
+TESTER
+
+  git -C "$project" add -A
+  git -C "$project" commit -q -m "Seed failing greeting fixture"
+}
+
+# Write the deterministic planning inputs the Work Item carries.
+seed_planning_inputs() {
+  local dir="$1"
+  mkdir -p "$dir"
+
+  cat > "$dir/brief.md" <<'BRIEF'
+# Brief
+
+Change the greeting so the fixture test passes.
+BRIEF
+
+  cat > "$dir/behaviors.md" <<'BEHAVIORS'
+# Behaviors
+
+WHEN the fixture test runs, THE SYSTEM SHALL find "hello" in greeting.txt.
+BEHAVIORS
+
+  cat > "$dir/approach.md" <<'APPROACH'
+# Approach
+
+Replace the placeholder line in greeting.txt with "hello".
+APPROACH
+
+  cat > "$dir/plan.md" <<'PLAN'
+# Plan
+
+1. Write "hello" to greeting.txt so ./check.sh exits zero.
+PLAN
+
+  cat > "$dir/instructions.md" <<'INSTRUCTIONS'
+Set greeting.txt to a single line reading "hello" so ./check.sh passes.
+INSTRUCTIONS
+}
+
+phase_prepare() {
+  local root="" installer="$DEFAULT_INSTALLER" binary=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --installer) installer="${2-}"; shift 2 ;;
+      --binary)    binary="${2-}"; shift 2 ;;
+      --*)         die "unknown prepare option: $1" ;;
+      *)
+        [ -z "$root" ] || die "prepare takes a single smoke root"
+        root="$1"; shift ;;
+    esac
+  done
+  [ -n "$root" ] || die "prepare requires a smoke root path"
+  root="$(absolute_path "$root")"
+
+  # Reject a nonempty root unless it already holds a compatible manifest.
+  if [ -e "$root" ]; then
+    if [ -f "$(manifest_path "$root")" ]; then
+      local existing
+      existing="$(manifest_get "$root" '.schema_version')"
+      [ "$existing" = "$SCHEMA_VERSION" ] \
+        || die "existing smoke root has incompatible schema $existing"
+      info "Reusing existing smoke root: $root"
+      return 0
+    fi
+    if [ -n "$(ls -A -- "$root" 2>/dev/null)" ]; then
+      die "smoke root $root is not empty and has no harness manifest"
+    fi
+  fi
+
+  local install_boundary
+  if [ -n "$binary" ]; then
+    install_boundary="binary:$(absolute_path "$binary")"
+  elif [ "$installer" != "$DEFAULT_INSTALLER" ]; then
+    install_boundary="installer:$installer"
+  else
+    install_boundary="installer:$installer"
+  fi
+
+  mkdir -p \
+    "$(home_dir "$root")" \
+    "$(bin_dir "$root")" \
+    "$(evidence_dir "$root")" \
+    "$(log_dir "$root")" \
+    "$(workitem_dir "$root")" \
+    "$root/harness"
+
+  seed_fixture_repo "$(project_dir "$root")"
+  seed_planning_inputs "$(workitem_dir "$root")"
+
+  # Record the resolved binary path now for a prebuilt override; the installer
+  # path selects the same location during run.
+  local fluent_bin
+  fluent_bin="$(bin_dir "$root")/fluent"
+
+  cat > "$(manifest_path "$root")" <<MANIFEST
+{
+  "schema_version": $SCHEMA_VERSION,
+  "smoke_root": "$root",
+  "safe_phase": "prepared",
+  "install_boundary": "$install_boundary",
+  "fluent_bin": "$fluent_bin",
+  "work_item_id": "$WORK_ITEM_ID",
+  "attempt_id": "$ATTEMPT_ID",
+  "merge_candidate_id": null,
+  "merged_commit": null
+}
+MANIFEST
+
+  info "Prepared clean-room smoke root: $root"
+  info "  isolated home:  $(home_dir "$root")"
+  info "  repository:     $(project_dir "$root")"
+  info "  evidence:       $(evidence_dir "$root")"
+  info "  install source: $install_boundary"
+  info ""
+  info "Next: $SELF run $root"
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+
+usage() {
+  cat >&2 <<USAGE
+usage: first-run-smoke.sh <phase> <root> [options]
+
+phases:
+  prepare <root> [--installer <url|path>] [--binary <path>]
+  run     <root>
+  land    <root>
+USAGE
+  exit 2
+}
+
+main() {
+  require_tools
+  [ $# -ge 1 ] || usage
+  local phase="$1"; shift
+  case "$phase" in
+    prepare) phase_prepare "$@" ;;
+    run)     die "run phase is not available yet" ;;
+    land)    die "land phase is not available yet" ;;
+    -h|--help) usage ;;
+    *) die "unknown phase: $phase" ;;
+  esac
+}
+
+main "$@"
