@@ -89,18 +89,51 @@ manifest_get() {
   jq -r "$filter" "$(manifest_path "$root")"
 }
 
+# Reject a manifest whose recorded smoke_root does not equal the normalized root
+# supplied on this invocation. A prepared root that is copied or moved keeps the
+# original absolute paths inside its manifest — the selected Fluent binary and the
+# install boundary — so reusing it under a new root would run the binary from the
+# old root and split one smoke's durable state across two roots. Binding every
+# phase to its recorded root keeps the clean-room contained in the one selected
+# external root.
+verify_manifest_root() {
+  local root="$1" recorded
+  recorded="$(manifest_get "$root" '.smoke_root')"
+  [ "$recorded" = "$root" ] \
+    || die "manifest smoke_root ($recorded) does not match this root ($root); a copied or moved smoke root is not supported"
+}
+
 # Set one manifest field to a string value (read-modify-write via a temp file).
 # The temporary copy is allocated beside the manifest under the smoke root so the
 # rename is an atomic same-directory replacement — never a cross-filesystem copy —
-# and no durable-state file ever escapes the one-root clean-room boundary. An
-# interrupted update leaves the prior manifest untouched and readable.
+# and no durable-state file ever escapes the one-root clean-room boundary. A jq
+# write that fails leaves the prior manifest untouched and readable, discards the
+# partial temp, and returns non-zero so the caller can route the interrupted
+# checkpoint through the phase-failure contract instead of the rename overwriting
+# the good manifest with a partial document.
 manifest_set() {
   local root="$1" key="$2" value="$3"
   local path tmp
   path="$(manifest_path "$root")"
   tmp="$(mktemp "${path}.XXXXXX")"
-  jq --arg v "$value" ".${key} = \$v" "$path" > "$tmp"
+  if ! jq --arg v "$value" ".${key} = \$v" "$path" > "$tmp"; then
+    printf 'error: manifest checkpoint failed for key %s\n' "$key" >&2
+    rm -f "$tmp"
+    return 1
+  fi
   mv "$tmp" "$path"
+}
+
+# Write a durable manifest checkpoint, routing an interrupted write through the
+# phase-failure contract. A bare `manifest_set` under `set -e` would exit the
+# shell the instant its jq write failed, denying the operator the failed phase,
+# its log, and the exact resume command B5 requires. Capturing the failure here
+# preserves that handoff and keeps the prior manifest as the safe checkpoint the
+# resume continues from.
+checkpoint() {
+  local root="$1" phase="$2" log="$3" key="$4" value="$5"
+  manifest_set "$root" "$key" "$value" >> "$log" 2>&1 \
+    || fail_phase "$root" "$phase" "$log" "$phase"
 }
 
 # ---------------------------------------------------------------------------
@@ -226,6 +259,7 @@ phase_prepare() {
       existing="$(manifest_get "$root" '.schema_version')"
       [ "$existing" = "$SCHEMA_VERSION" ] \
         || die "existing smoke root has incompatible schema $existing"
+      verify_manifest_root "$root"
       info "Reusing existing smoke root: $root"
       return 0
     fi
@@ -424,6 +458,7 @@ phase_run() {
   [ -f "$(manifest_path "$root")" ] || die "no harness manifest under $root"
   [ "$(manifest_get "$root" '.schema_version')" = "$SCHEMA_VERSION" ] \
     || die "smoke root has an incompatible manifest schema"
+  verify_manifest_root "$root"
 
   local safe_phase wi cand
   safe_phase="$(manifest_get "$root" '.safe_phase')"
@@ -449,22 +484,23 @@ phase_run() {
   stage="$(manifest_get "$root" '.run_stage // "none"')"
   done_rank="$(run_stage_rank "$stage")"
 
-  local logs install_log
+  local logs install_log manifest_log
   logs="$(log_dir "$root")"
+  manifest_log="$logs/manifest.log"
 
   if [ "$done_rank" -lt "$(run_stage_rank installed)" ]; then
     install_log="$logs/install.log"
     begin_log "$install_log" "install"
     select_fluent "$(manifest_get "$root" '.install_boundary')" "$RUN_BIN" "$install_log" \
       || fail_phase "$root" "run" "$install_log" "run"
-    manifest_set "$root" "run_stage" "installed"
+    checkpoint "$root" "run" "$manifest_log" "run_stage" "installed"
   fi
 
   # init -> Work Item -> Attempt (public first-run commands), each checkpointed.
   if [ "$done_rank" -lt "$(run_stage_rank init)" ]; then
     run_fluent "$logs/init.log" init \
       || fail_phase "$root" "run" "$logs/init.log" "run"
-    manifest_set "$root" "run_stage" "init"
+    checkpoint "$root" "run" "$manifest_log" "run_stage" "init"
   fi
   if [ "$done_rank" -lt "$(run_stage_rank work-item)" ]; then
     run_fluent "$logs/work-item.log" work-item create "$wi" \
@@ -475,12 +511,12 @@ phase_run() {
       --plan-file "$(workitem_dir "$root")/plan.md" \
       --instructions-file "$(workitem_dir "$root")/instructions.md" \
       || fail_phase "$root" "run" "$logs/work-item.log" "run"
-    manifest_set "$root" "run_stage" "work-item"
+    checkpoint "$root" "run" "$manifest_log" "run_stage" "work-item"
   fi
   if [ "$done_rank" -lt "$(run_stage_rank attempt)" ]; then
     run_fluent "$logs/attempt-create.log" attempt create "$wi" "$ATTEMPT_ID" \
       || fail_phase "$root" "run" "$logs/attempt-create.log" "run"
-    manifest_set "$root" "run_stage" "attempt"
+    checkpoint "$root" "run" "$manifest_log" "run_stage" "attempt"
   fi
 
   # Advance the Attempt until its Learner has succeeded. A Merge Candidate can
@@ -530,8 +566,8 @@ phase_run() {
       ;;
   esac
 
-  manifest_set "$root" "merge_candidate_id" "$cand"
-  manifest_set "$root" "safe_phase" "ran"
+  checkpoint "$root" "run" "$manifest_log" "merge_candidate_id" "$cand"
+  checkpoint "$root" "run" "$manifest_log" "safe_phase" "ran"
   cp "$logs/candidate.json" "$(evidence_dir "$root")/merge-candidate.json"
 
   print_ready_handoff "$root" "$wi" "$cand"
@@ -561,6 +597,7 @@ phase_land() {
   [ -f "$(manifest_path "$root")" ] || die "no harness manifest under $root"
   [ "$(manifest_get "$root" '.schema_version')" = "$SCHEMA_VERSION" ] \
     || die "smoke root has an incompatible manifest schema"
+  verify_manifest_root "$root"
 
   local safe_phase wi cand
   safe_phase="$(manifest_get "$root" '.safe_phase')"
@@ -581,9 +618,10 @@ phase_land() {
   RUN_HOME="$(home_dir "$root")"
   RUN_BIN="$(manifest_get "$root" '.fluent_bin')"
 
-  local logs land_log
+  local logs land_log manifest_log
   logs="$(log_dir "$root")"
   land_log="$logs/land.log"
+  manifest_log="$logs/manifest.log"
   begin_log "$land_log" "land"
 
   # A land resume must never replay a successful, non-idempotent land: the
@@ -628,8 +666,8 @@ phase_land() {
     fail_phase "$root" "land" "$logs/landed-show.log" "land"
   fi
 
-  manifest_set "$root" "merged_commit" "$merged"
-  manifest_set "$root" "safe_phase" "landed"
+  checkpoint "$root" "land" "$manifest_log" "merged_commit" "$merged"
+  checkpoint "$root" "land" "$manifest_log" "safe_phase" "landed"
   cp "$logs/landed-candidate.json" "$(evidence_dir "$root")/merged-candidate.json"
 
   info "Landed Merge Candidate $cand"

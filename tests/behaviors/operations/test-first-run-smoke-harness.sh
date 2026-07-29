@@ -785,6 +785,13 @@ test_interrupted_manifest_update_keeps_prior_manifest() {
     bash "$HARNESS" run "$ROOT" > "$WORK/run.out" 2>&1; then
     printf '    FAIL: run should fail when a manifest update is interrupted\n'; rc=1
   fi
+  local out; out="$(cat "$WORK/run.out")"
+  # The interrupted checkpoint is routed through the phase-failure contract, not a
+  # bare set -e exit: the operator gets the failed phase, its log, and the exact
+  # resume command required by B5.
+  assert_contains "$out" 'phase "run" failed' || rc=1
+  assert_contains "$out" "$ROOT/harness/logs/manifest.log" || rc=1
+  assert_contains "$out" "run $ROOT" || rc=1
   # The prior manifest survives intact and readable: the interrupted write went to
   # a root-local temp and never replaced the manifest, so the rename is atomic.
   if ! jq -e . "$ROOT/harness/manifest.json" > /dev/null 2>&1; then
@@ -792,11 +799,24 @@ test_interrupted_manifest_update_keeps_prior_manifest() {
   fi
   [ "$(cat "$ROOT/harness/manifest.json")" = "$before" ] \
     || { printf '    FAIL: interrupted update corrupted or changed the manifest\n'; rc=1; }
+  # The safe checkpoint is unchanged, so the resume repeats run from the prior
+  # stage rather than skipping ahead.
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "prepared" ] \
+    || { printf '    FAIL: safe_phase advanced past the interrupted checkpoint\n'; rc=1; }
+  [ "$(jq -r '.run_stage' "$ROOT/harness/manifest.json")" = "null" ] \
+    || { printf '    FAIL: run_stage advanced past the interrupted checkpoint\n'; rc=1; }
   # Any residual temp file stayed beside the manifest under the smoke root, not in
   # the system temp directory.
   if ls "${TMPDIR:-/tmp}"/manifest.json.* >/dev/null 2>&1; then
     printf '    FAIL: a manifest temp file escaped to the system temp dir\n'; rc=1
   fi
+
+  # Clear the injected crash and execute the exact printed resume. It repeats run
+  # from the prior safe checkpoint and reaches a ready candidate.
+  run_harness run "$ROOT" > "$WORK/resume.out" 2>&1 \
+    || { printf '    FAIL: run resume did not reach a ready candidate\n'; rc=1; }
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "ran" ] \
+    || { printf '    FAIL: resume did not reach the ready phase\n'; rc=1; }
   return $rc
 }
 
@@ -915,6 +935,52 @@ test_land_replay_safe_after_post_land_failure() {
   return $rc
 }
 
+test_moved_smoke_root_is_rejected() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" > /dev/null 2>&1
+
+  local rc=0
+  # Copy the prepared root elsewhere. Its manifest still records the original
+  # smoke_root and the original absolute binary path under $ROOT.
+  local moved="$WORK/moved-smoke"
+  cp -R "$ROOT" "$moved"
+
+  # run against the copied root must refuse: the manifest is bound to $ROOT, so
+  # advancing it here would run the binary from the old root and split state.
+  if run_harness run "$moved" > "$WORK/run.out" 2>&1; then
+    printf '    FAIL: run accepted a copied smoke root\n'; rc=1
+  fi
+  assert_contains "$(cat "$WORK/run.out")" "does not match this root" || rc=1
+  # No Fluent command ran against the copied root.
+  [ -s "$FAKE_CMD_LOG" ] \
+    && { printf '    FAIL: a Fluent command ran against the copied root\n'; rc=1; }
+  # The copied manifest is left untouched — never advanced from prepared.
+  [ "$(jq -r '.safe_phase' "$moved/harness/manifest.json")" = "prepared" ] \
+    || { printf '    FAIL: copied manifest was advanced\n'; rc=1; }
+
+  # prepare reuse of the copied root is likewise refused.
+  if run_harness prepare "$moved" --binary "$FAKE_FLUENT_SRC" \
+    > "$WORK/prep.out" 2>&1; then
+    printf '    FAIL: prepare reused a copied smoke root\n'; rc=1
+  fi
+  assert_contains "$(cat "$WORK/prep.out")" "does not match this root" || rc=1
+
+  # land against the copied root is refused too.
+  if run_harness land "$moved" > "$WORK/land.out" 2>&1; then
+    printf '    FAIL: land accepted a copied smoke root\n'; rc=1
+  fi
+  assert_contains "$(cat "$WORK/land.out")" "does not match this root" || rc=1
+
+  # The original root still works normally.
+  run_harness run "$ROOT" > /dev/null 2>&1 \
+    || { printf '    FAIL: original root did not reach ready\n'; rc=1; }
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "ran" ] \
+    || { printf '    FAIL: original root did not reach the ready phase\n'; rc=1; }
+  return $rc
+}
+
 test_automated_test_uses_only_local_doubles() {
   new_workspace
   trap cleanup_workspace RETURN
@@ -995,6 +1061,7 @@ run_test "relative installer override is durable" \
   test_relative_installer_override_is_durable
 run_test "land replay safe after post-land failure" \
   test_land_replay_safe_after_post_land_failure
+run_test "moved smoke root is rejected" test_moved_smoke_root_is_rejected
 run_test "automated test uses only local doubles" \
   test_automated_test_uses_only_local_doubles
 
