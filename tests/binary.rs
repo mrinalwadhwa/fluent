@@ -18537,7 +18537,12 @@ fn skills_add_preserves_public_0_1_4_root_symlink() {
         .unwrap();
 
     assert!(output.status.success());
-    assert!(fs::symlink_metadata(&changed).unwrap().file_type().is_symlink());
+    assert!(
+        fs::symlink_metadata(&changed)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
     assert_eq!(complete_skill_snapshot(&target), before);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains(&changed.display().to_string()));

@@ -477,7 +477,8 @@ mod tests {
         let mut entries = Vec::new();
         assert!(collect_migration_entries(&skill_dir, &skill_dir, &mut entries).unwrap());
         entries.sort_by(|left, right| migration_entry_path(left).cmp(migration_entry_path(right)));
-        let digest = digest_migration_entries(&entries, |path| fs::read(skill_dir.join(path))).unwrap();
+        let digest =
+            digest_migration_entries(&entries, |path| fs::read(skill_dir.join(path))).unwrap();
 
         let outcome = install_bundled_skill_with_legacy_digests(
             "fluent",
