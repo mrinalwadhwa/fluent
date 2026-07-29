@@ -21830,10 +21830,15 @@ fn production_binary_ignores_host_sandbox_test_control() {
         .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail")
         .output()
         .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !String::from_utf8_lossy(&output.stderr).contains("test host sandbox preflight failure"),
+        output.status.success() || stderr.contains("sandbox-exec:"),
+        "production binary must reach the pinned launcher: {stderr}"
+    );
+    assert!(
+        !stderr.contains("test host sandbox preflight failure"),
         "production binary must use the pinned launcher rather than the test-only input: {}",
-        String::from_utf8_lossy(&output.stderr)
+        stderr
     );
 }
 
