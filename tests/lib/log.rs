@@ -13,6 +13,14 @@ pub struct LoggedCommand {
 
 impl LoggedCommand {
     pub fn cargo_bin(name: &str) -> Self {
+        if name == "fluent" {
+            if let Some(path) = std::env::var_os("FLUENT_BIN_OVERRIDE") {
+                return Self {
+                    inner: Command::new(path),
+                    cmd_args: vec![name.to_string()],
+                };
+            }
+        }
         Self {
             inner: Command::cargo_bin(name).unwrap(),
             cmd_args: vec![name.to_string()],

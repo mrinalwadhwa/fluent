@@ -8416,6 +8416,7 @@ mod tests {
             Some(LearnerConfig {
                 run_coder: &run_coder,
                 codex_worker: None,
+                no_sandbox: false,
             }),
         )
         .unwrap();
@@ -8468,6 +8469,7 @@ mod tests {
             Some(LearnerConfig {
                 run_coder: &run_coder,
                 codex_worker: None,
+                no_sandbox: false,
             }),
         )
         .unwrap();

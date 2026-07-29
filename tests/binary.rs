@@ -16,7 +16,6 @@ fn fluent_cmd() -> LoggedCommand {
     let mut cmd = LoggedCommand::cargo_bin("fluent");
     cmd.env_remove("FLUENT_TASK_KIND");
     cmd.env("FLUENT_NO_UPDATE_CHECK", "1");
-    cmd.env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass");
     cmd
 }
 
@@ -21629,18 +21628,12 @@ fn learner_host_sandbox_failure_preserves_learning_and_pauses_same_task() {
         .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail")
         .assert()
         .failure();
-    fluent_cmd()
-        .current_dir(&main_dir)
-        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
-        .env("PATH", mock_path(&bin_dir))
-        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail")
-        .assert()
-        .failure();
-
     let item = work_item_value(&main_dir, "work-1");
     let attempt = &item["attempts"][0];
     assert_eq!(attempt["status"], "needs-user");
     assert_eq!(attempt["pause_kind"], "host-sandbox");
+    assert_eq!(attempt["tasks"][0]["id"], "attempt-1-write-1");
+    assert_eq!(attempt["tasks"][0]["status"], "complete");
     assert!(
         attempt["learning"].is_null(),
         "the probe must precede reservation"
