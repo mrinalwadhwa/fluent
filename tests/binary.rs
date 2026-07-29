@@ -4607,6 +4607,9 @@ for arg in "$@"; do
 done
 if [ -z "$PROMPT" ]; then exit 0; fi
 if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
+  if [ -n "${{FLUENT_TEST_CODER_MARKER:-}}" ]; then
+    touch "$FLUENT_TEST_CODER_MARKER"
+  fi
   DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
   if [ -n "$DRAFT" ]; then
     mkdir -p "$(dirname "$DRAFT")"
@@ -21657,14 +21660,19 @@ fn learner_host_sandbox_failure_preserves_learning_and_pauses_same_task() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     let bin_dir = tmp.path().join("bin-learner-host-sandbox-failure");
-    write_mock_claude(&bin_dir, &loop_mock_script("pass"));
+    write_mock_claude(
+        &bin_dir,
+        &learner_mock_script(r#"{"learning_summary":"learned","follow_ups":[]}"#),
+    );
     create_completed_work_attempt(&tmp, &main_dir);
+    let launch_marker = tmp.path().join("learner-launched");
 
     fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1"])
         .env("PATH", mock_path(&bin_dir))
         .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail")
+        .env("FLUENT_TEST_CODER_MARKER", &launch_marker)
         .assert()
         .failure();
     let item = work_item_value(&main_dir, "work-1");
@@ -21676,6 +21684,10 @@ fn learner_host_sandbox_failure_preserves_learning_and_pauses_same_task() {
     assert!(
         attempt["learning"].is_null(),
         "the probe must precede reservation"
+    );
+    assert!(
+        !launch_marker.exists(),
+        "a failed host preflight must not launch the Learner"
     );
 }
 
@@ -21853,7 +21865,6 @@ fn forced_sandbox_learner_preflights_despite_no_sandbox_request() {
         .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail")
         .assert()
         .failure();
-
     let item = work_item_value(&main_dir, "work-1");
     assert!(
         item["attempts"][0]["learning"].is_null(),

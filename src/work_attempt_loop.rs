@@ -1188,7 +1188,17 @@ struct PreparedLearnerRun {
     handoff_dir: PathBuf,
     denied_write_roots: Vec<PathBuf>,
     run_dir: PathBuf,
+    repairs: Vec<PreparedLearnerRepairRun>,
     isolated_workspace: Option<HandoffOnlyWorkspace>,
+}
+
+/// One bounded schema-repair launch prepared alongside the initial Learner run.
+/// Its run surface and sandbox profile remain stable from host preflight through
+/// the repair launch, so a repair cannot introduce a post-reservation probe.
+struct PreparedLearnerRepairRun {
+    sandbox: Option<work_task_executor::PreparedLearnerSandbox>,
+    run_dir: PathBuf,
+    handoff_dir: PathBuf,
 }
 
 /// Prepare and preflight the resolved Learner launch while the Learner lease is
@@ -1300,6 +1310,41 @@ fn prepare_learner_run(
         mode,
         codex_worker,
     )?;
+    let repair_budget = crate::config::resolve_learner_schema_repair_budget(project_root)
+        .unwrap_or(crate::config::DEFAULT_LEARNER_SCHEMA_REPAIR_BUDGET);
+    let mut repairs = Vec::with_capacity(repair_budget as usize);
+    for _ in 0..repair_budget {
+        let run_dir = allocate_learner_run_dir(&real_handoff_dir.join("runs"))?;
+        let repair_handoff_dir = isolated_workspace
+            .as_ref()
+            .map(|isolated| isolated.handoff_dir.clone())
+            .unwrap_or_else(|| run_dir.join("staging"));
+        let sandbox = work_task_executor::prepare_learner_host_sandbox(
+            work_task_executor::LearnerRunInputs {
+                workspace_path: &launch_workspace_path,
+                resolver: &ContentResolver::new(Some(project_root)),
+                extra_args: &[],
+                coder_kind: mapping.coder,
+                no_sandbox,
+                model: None,
+                effort: None,
+                review_artifact_paths: &launch_review_artifact_paths,
+                tester_artifact_paths: &launch_tester_artifact_paths,
+                diff_command: "git diff",
+                handoff_dir: &repair_handoff_dir,
+                denied_write_roots: &denied_write_roots,
+                handoff_only,
+                repair: None,
+            },
+            mode,
+            codex_worker,
+        )?;
+        repairs.push(PreparedLearnerRepairRun {
+            sandbox,
+            run_dir,
+            handoff_dir: repair_handoff_dir,
+        });
+    }
     Ok(PreparedLearnerRun {
         sandbox,
         workspace_path,
@@ -1309,6 +1354,7 @@ fn prepare_learner_run(
         handoff_dir,
         denied_write_roots,
         run_dir,
+        repairs,
         isolated_workspace,
     })
 }
@@ -1942,8 +1988,6 @@ fn try_learn(
     };
     let isolated_workspace = prepared_run.isolated_workspace.as_ref();
     let learner_workspace_path = prepared_run.launch_workspace_path.as_path();
-    let real_handoff_dir =
-        project_root.join(crate::learner::handoff_dir_rel(&work_item_id, &attempt_id));
     // Allocate a collision-safe, host-owned run directory from on-disk state. It
     // holds the transcript and submitted-draft evidence the coder cannot reach;
     // the coder-writable staging directory is a separate sibling beneath it.
@@ -1991,11 +2035,11 @@ fn try_learn(
                 handoff_dir,
                 transcript_path: &transcript_path,
                 run_dir,
-                real_handoff_dir: &real_handoff_dir,
                 coder_kind,
                 model: model.as_deref(),
                 effort: effort.as_deref(),
                 prepared_sandbox: prepared_run.sandbox.as_ref(),
+                repair_runs: &prepared_run.repairs,
             },
         );
         return match result {
@@ -2097,8 +2141,7 @@ fn try_learn(
     // configured budget remains, re-invoke the coder with the rejected draft and
     // exact error as a schema repair — not a fresh audit — and accept a repair
     // only when it preserves every prior follow-up id and its content.
-    let mut repair_budget = crate::config::resolve_learner_schema_repair_budget(project_root)
-        .unwrap_or(crate::config::DEFAULT_LEARNER_SCHEMA_REPAIR_BUDGET);
+    let mut repairs = prepared_run.repairs.iter();
     let mut current_draft = draft;
     let mut current_run_dir = run_dir;
     let handoff = loop {
@@ -2116,20 +2159,15 @@ fn try_learn(
                 // recorded) and its full validation error as immutable run
                 // artifacts before any repair may publish another draft.
                 record_run_rejection(&current_run_dir, &error)?;
-                if repair_budget == 0 {
+                let Some(repair) = repairs.next() else {
                     return Err(error);
-                }
-                repair_budget -= 1;
+                };
 
-                // A fresh run identity keeps the repair's transcript and
-                // submitted-draft evidence immutable and distinct.
-                let repair_run_dir = allocate_learner_run_dir(&real_handoff_dir.join("runs"))?;
+                // The repair identity and sandbox were allocated and preflighted
+                // before this logical Learner reserved its durable run.
+                let repair_run_dir = repair.run_dir.clone();
                 let repair_transcript = repair_run_dir.join("transcript.jsonl");
-                let repair_staging_owned = repair_run_dir.join("staging");
-                let repair_staging = isolated_workspace
-                    .as_ref()
-                    .map(|isolated| isolated.handoff_dir.as_path())
-                    .unwrap_or(repair_staging_owned.as_path());
+                let repair_staging = repair.handoff_dir.as_path();
                 let rejected_draft = serde_json::to_string(&prior)?;
                 let validation_error = format!("{error:#}");
 
@@ -2150,7 +2188,7 @@ fn try_learn(
                         rejected_draft: &rejected_draft,
                         validation_error: &validation_error,
                     }),
-                    prepared_sandbox: None,
+                    prepared_sandbox: repair.sandbox.as_ref(),
                 });
                 // Pin this repair invocation's raw return before its draft is read,
                 // so a no-expertise repair that mutated Git cannot escape accounting
@@ -2212,11 +2250,11 @@ struct PreLandLearnerContext<'a> {
     handoff_dir: &'a Path,
     transcript_path: &'a Path,
     run_dir: PathBuf,
-    real_handoff_dir: &'a Path,
     coder_kind: CoderKind,
     model: Option<&'a str>,
     effort: Option<&'a str>,
     prepared_sandbox: Option<&'a work_task_executor::PreparedLearnerSandbox>,
+    repair_runs: &'a [PreparedLearnerRepairRun],
 }
 
 /// Run the whole pre-land logical Learner: the initial coder, the bounded
@@ -2273,8 +2311,7 @@ fn run_pre_land_learner(
     // references — only the accepted draft survives the loop; the canonical
     // expertise is folded in after accounting and normalization. Each repair coder
     // return is pinned to the transaction before its draft is read.
-    let mut repair_budget = crate::config::resolve_learner_schema_repair_budget(project_root)
-        .unwrap_or(crate::config::DEFAULT_LEARNER_SCHEMA_REPAIR_BUDGET);
+    let mut repairs = ctx.repair_runs.iter();
     let mut current_draft = draft;
     let mut current_run_dir = ctx.run_dir;
     let accepted_draft = loop {
@@ -2289,14 +2326,13 @@ fn run_pre_land_learner(
             Ok(_) => break current_draft,
             Err(error) => {
                 record_run_rejection(&current_run_dir, &error)?;
-                if repair_budget == 0 {
+                let Some(repair) = repairs.next() else {
                     return Err(error);
-                }
-                repair_budget -= 1;
+                };
 
-                let repair_run_dir = allocate_learner_run_dir(&ctx.real_handoff_dir.join("runs"))?;
+                let repair_run_dir = repair.run_dir.clone();
                 let repair_transcript = repair_run_dir.join("transcript.jsonl");
-                let repair_staging = repair_run_dir.join("staging");
+                let repair_staging = repair.handoff_dir.as_path();
                 let rejected_draft = serde_json::to_string(&prior)?;
                 let validation_error = format!("{error:#}");
 
@@ -2305,7 +2341,7 @@ fn run_pre_land_learner(
                     review_artifact_paths: ctx.review_artifact_paths,
                     tester_artifact_paths: ctx.tester_artifact_paths,
                     diff_command: ctx.diff_command,
-                    handoff_dir: &repair_staging,
+                    handoff_dir: repair_staging,
                     transcript_path: &repair_transcript,
                     denied_write_roots: &[],
                     coder_kind: ctx.coder_kind,
@@ -2317,7 +2353,7 @@ fn run_pre_land_learner(
                         rejected_draft: &rejected_draft,
                         validation_error: &validation_error,
                     }),
-                    prepared_sandbox: None,
+                    prepared_sandbox: repair.sandbox.as_ref(),
                 });
                 transaction.capture_return(workspace_path)?;
                 repair_result?;
