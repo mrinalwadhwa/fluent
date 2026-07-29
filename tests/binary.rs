@@ -42,6 +42,36 @@ fn write_json_path(path: &Path, value: &serde_json::Value) {
     fs::write(path, serde_json::to_string_pretty(value).unwrap()).unwrap()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum TreeEntry {
+    Directory(PathBuf),
+    File(PathBuf, Vec<u8>),
+}
+
+fn tree_snapshot(root: &Path) -> Vec<TreeEntry> {
+    fn collect(root: &Path, path: &Path, entries: &mut Vec<TreeEntry>) {
+        let relative = path.strip_prefix(root).unwrap().to_path_buf();
+        let metadata = fs::symlink_metadata(path).unwrap();
+        if metadata.is_dir() {
+            entries.push(TreeEntry::Directory(relative));
+            let mut children = fs::read_dir(path)
+                .unwrap()
+                .map(|entry| entry.unwrap())
+                .collect::<Vec<_>>();
+            children.sort_by_key(|entry| entry.file_name());
+            for child in children {
+                collect(root, &child.path(), entries);
+            }
+        } else {
+            entries.push(TreeEntry::File(relative, fs::read(path).unwrap()));
+        }
+    }
+
+    let mut entries = Vec::new();
+    collect(root, root, &mut entries);
+    entries
+}
+
 fn skill_file_snapshot(skill_dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     fn collect(root: &Path, dir: &Path, files: &mut Vec<(PathBuf, Vec<u8>)>) {
         let mut entries = fs::read_dir(dir)
@@ -1423,6 +1453,56 @@ fn init_outside_git_makes_no_changes() {
     assert!(!descendant.join(".fluent").exists());
     assert!(!home.join(".local/share/fluent").exists());
     assert!(!home.join(".claude/skills").exists());
+}
+
+#[test]
+fn init_outside_git_suggests_nested_main_repository_without_changes() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let main = tmp.path().join("main");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir(&main).unwrap();
+    init_git_repo(&main);
+
+    fs::write(tmp.path().join("outer-sentinel"), "outer\n").unwrap();
+    fs::create_dir_all(tmp.path().join("outer-empty/.hidden-empty")).unwrap();
+    fs::write(main.join("nested-sentinel"), "nested\n").unwrap();
+    fs::create_dir_all(main.join("nested-empty/.hidden-empty")).unwrap();
+    fs::write(home.join("home-sentinel"), "home\n").unwrap();
+    fs::create_dir_all(home.join(".local/share/fluent/empty-data")).unwrap();
+    for agent in [".claude", ".codex"] {
+        let skills = home.join(agent).join("skills");
+        fs::create_dir_all(skills.join("empty-skill")).unwrap();
+        fs::create_dir_all(skills.join("seeded-skill")).unwrap();
+        fs::write(
+            skills.join("seeded-skill/SKILL.md"),
+            format!("{agent} skill\n"),
+        )
+        .unwrap();
+    }
+
+    let outer_before = tree_snapshot(tmp.path());
+    let main_before = tree_snapshot(&main);
+    let home_before = tree_snapshot(&home);
+    let output = fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .current_dir(tmp.path())
+        .arg("init")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(&format!(
+            "cd {} && fluent init",
+            main.canonicalize().unwrap().display()
+        )),
+        "init should print the nested-main recovery command: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(tree_snapshot(tmp.path()), outer_before);
+    assert_eq!(tree_snapshot(&main), main_before);
+    assert_eq!(tree_snapshot(&home), home_before);
 }
 
 #[test]
